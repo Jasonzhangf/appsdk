@@ -107,7 +107,7 @@ collab context --workflow-target 'role:designer' --reset-workflow-template
 `next_actions` 只返回当前任务或本次恢复动作，不复制职责正文。authoring 仍是完整替换、
 reset、replay；调整时提交完整四字段 JSON，不读取旧正文做部分合并，也不新增原始覆盖
 正文的导出入口。
-模板内容由 daemon journal 持久保存，换会话不丢失；重置模板后回到标准身份流程。
+模板内容由当前业务状态持久保存，换会话不丢失；重置模板后回到标准身份流程。
 若实际 context 没有该模板字段，说明当前运行版本尚未提供模板派发；保留原回执并报告
 安装/运行差异，不手工改控制状态、不虚构模板已生效，也不自行管理 daemon 生命周期。
 daemon 已为真实角色和模板变化通知相关 peer，不再要求 master 重复手动通知。
@@ -138,7 +138,7 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 跨项目 | 同一个 `collab send`。调用者必须是源项目当前 master，目标是目标项目当前 master；没有权限时返回 `PERMISSION_DENIED` 并指出当前 master。普通 peer 交给自己的 master |
+| 跨项目 | 同一个 `collab send`。任意两个已注册对象可直接收发，不受 master/peer/CEO 组合限制，不要求 master 代转。保留真实 sender、精确地址和持久回执 |
 
 ### 未注册脚本与固定 Session
 
@@ -161,13 +161,13 @@ CLI 正文是位置参数，不是 `--body`。DSH 若暴露 `collab_send`，它�
 `context` 和 `inbox` 中的身份拒绝首先涉及当前发件人及其项目，不能据此认定
 Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 和错误目录
 （例如 `/Users/…`），先回已注册项目目录，使用同一公开入口；不要重新注册、
-查 journal/route/token，或调用 `register-peer`、`resolve-agent`、`Poll/Ack` 修身份。
+查旧记录、手改 route/token，或调用 `register-peer`、`resolve-agent`、`Poll/Ack` 修身份。
 在正确项目仍失败时，保留原命令、项目、错误和已有消息 ID，报告具体失败边界。
 
 宿主 `list_agents` 只枚举该宿主的子 agent，不是 Collab 项目成员目录。列表里没有
 某个名字（例如 Jenny）不能证明目标 master 不存在或没有通信通道；当前会话未注册、
 缺 master 授权和目标不可达是不同失败，分别以真实 Collab 回执判断。确实要交付资料
-给另一项目时，按上文“确实跨项目”走 master-to-master 通道，不因宿主列表无匹配就
+给另一项目时，使用统一 `collab send` 与目录中的精确地址，不因宿主列表无匹配就
 默认要求用户人工转发，也不自行注册、猜身份或提升 master。
 
 ## 协作请求的执行、回复与接续
@@ -293,7 +293,7 @@ master 与 peer 收到具体执行请求，在接受邀请或开始执行前，�
 遇到 `BOARD_IDENTITY_REQUIRED` 等错误，保留原命令、错误与已有成功回执；若没有新的
 缺失事实或环境变化，不重复相同命令，不从 CLI 换 MCP 或换参数格式碰运气，不让
 master 代写来绕过当前身份失败。只读一次 `collab --version` 可记录版本；无需读源码、
-二进制字符串或 journal 来完成普通角色设置，不编辑身份、route、token 或控制状态文件。
+二进制字符串或旧记录来完成普通角色设置，不编辑身份、route、token 或控制状态文件。
 
 只暂停失败写入及真正依赖它的后续动作。已有明确授权、scope 和有效任务归属且不依赖
 该失败写入的工作可继续；没有任务就报告“角色保存失败，尚未指派具体任务”，不虚构工作。
@@ -329,12 +329,14 @@ master 代写来绕过当前身份失败。只读一次 `collab --version` 可�
 归属”。名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递和任务锚点：
 第一次绑定分配固定名字；后续绑定与恢复可显式继承已有名字；新注册为新会话新增
 名字；旧名字在旧持有者离线或获得用户授权时可顶替。TUI 首次绑定把 tmux session
-改名为角色注册名并读回确认；改名失败不提交身份，持久化失败回滚原名。Codex
+改名为 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>` 并读回确认；只有
+固定位置 1 可升为 Jenny。正常改名由 Collab 负责，布局由共享 manifest 负责。
+改名失败不提交身份，持久化失败回滚原名。Codex
 Desktop 的 agent sessionID 和 DSH 的 gateway sessionID 只是传输载体，不执行 tmux
 改名。tmux session `$N`、pane、socket 和 server PID 仅供探测与投递定位，不是
-身份键、名字占用键或任务 owner。旧版本按名字做一次性迁移重建身份和名字占用；
-迁移后 journal 可作废，不要求 agent 逐条重放或手改 journal、清空 board、重建
-pane 或重启 tmux。
+身份键、名字占用键或任务 owner。身份只读取当前 identity map。旧版本的数据通过
+本次获授权的一次性交接准备，新版不读取旧文件。全部 journal 实现和维护链已移除，不清空 board、
+重建 pane 或重启 tmux。
 
 交接给恢复者时报告当前名字、master/peer 角色、agent sessionID、未完成目标、
 所持资源与需要巡检的事项。名字的当前工作者接续任务；旧执行者不另行处理。
@@ -360,7 +362,7 @@ Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注�
 巡检或 daemon 不可达，都不得触发 tmux server 的重启或停止，也不得关闭、
 终止宿主 pane。现有共享 Collab daemon 继续由用户管理。
 
-默认使用 `collab context`。当前 `cwd` 决定 project，名字承载工作归属，注册报告的 agent sessionID 绑定当前执行载体；历史 pane 绑定到谁都不阻断恢复。当前 project 没有 master 时自动恢复为 peer。用户指定恢复 Jenny 时同时恢复 master；另一个在线工作者占名时，默认不替换，用户要求接管需本次二次确认。确认离线后可正常分配；归属 unknown 时交 Jenny snapshot 裁决。未获 master 授权的普通恢复继续作为 peer。不按任务内容、worktree、旧角色或 master 派单增加身份准入校验，不要求重新注册或通信回环。daemon 不可达时保留身份和任务，返回服务不可用；不启动第二个服务或修改 journal、route、credential 文件。
+默认使用 `collab context`。当前 `cwd` 决定 project，identity map 决定当前身份，agent sessionID 是当前执行载体。用户授权通过当前 map 的名字和角色动作应用；没有旧裁决、incumbent fence 或操作历史门禁。未获 master 授权时保持 peer。实际缺项或服务失败返回原错；不手改身份表、route 或 credential，不启动第二个服务。
 
 明确恢复授权覆盖当前 pane 的历史 peer/master；旧绑定和旧 route 自动失效，不再要求旧身份批准。agent 可以移除当前 pane 自身的 agent 绑定和 route，不关闭宿主。daemon 自动清理失效 route。当前项目 master 可以 reset 本项目的 Collab，移除历史消息、route、任务、资产和负载；只清当前项目，不操作其他项目或全局 daemon 生命周期。实际 I/O 错误保留原错，不用历史身份保护拒绝当前授权，也不伪造成功。
 
@@ -780,16 +782,9 @@ with recovery semantics in
 collab context
 ```
 
-An optional explicit diagnostic may check the restored route through
-`collab context --recover-communication` and a challenge/reply. It is not a
-recovery prerequisite, and ordinary `collab context` does not wait for it.
-When used, the participant reads `COLLAB_REGISTER_CHALLENGE <JSON>` through the
-selected adapter and returns it with
-`collab context --return-challenge '<JSON>'` from its own environment. The
-daemon checks scope, purpose, operation, command, nonce and selected target as
-factual transport-safety checks; they do not establish historical identity or
-authority. Query remains read-only. A failed diagnostic leaves the restored
-identity and current binding intact.
+Ordinary recovery uses the current identity map. The old participant challenge
+and register-reply ledger are removed. DSH communication restoration keeps its
+gateway receive-loop enrollment through the existing current binding.
 
 For tmux, cwd selects the project; the stable name owns the work and the agent
 sessionID is its current carrier. A new pane or tmux session changes placement,
@@ -906,7 +901,7 @@ peers, or bindings. Context never auto-promotes and never infers authority.
 Treat each claim separately:
 
 ```text
-durable=true -> mailbox journal accepted
+durable=true -> current message state persisted
 notification=accepted -> selected transport accepted the operation; it is not consumption
 recv receipt -> peer consumed the message
 task close receipt -> lifecycle ended
@@ -952,11 +947,12 @@ reset. Host maintenance is outside the agent interface.
 
 `.appsdk/` and `.appsdk-control/` are AppSDK-owned and are not removed by
 `collab reset`. The host-wide runtime truth remains `~/.collab/`
-(`server.sock`, `events.jsonl`, `log.txt`, and route state); project-local
-`.agent-collab/` is reducer input and local durable data, not the global truth.
+(`identity-map.json`, `routes.json`, current project/app `state.json`,
+`server.sock`, and diagnostic `log.txt`); project-local `.agent-collab/`
+discovers a project and is not a second persistence source.
 For a new project or an explicitly authorized clean epoch, remove old
 project-local governance only through the owner's canonical reset/migration
-command. Never manually remove `.agent-collab/server/journal.jsonl`, mailbox
+command. Never manually remove current state files, mailbox
 files, identity tokens, task records, or bindings to make status look clean.
 Never start a second daemon or use broad process kills. `collab ack` remains a
 compatibility operation; it is not a substitute for task close or identity
@@ -1097,7 +1093,7 @@ Legacy managed records remain visible only through their existing
 compatibility scope; they receive no new assignment. The public view carries
 task identity, lifecycle status, owner, and the typed delivery/test conditions.
 It never exposes worker tokens, runtime endpoints, role briefs, managed-child
-identity, private assignments, or raw journal events. A published task does not
+identity, private assignments, or internal mutation records. A published task does not
 start execution; an invitation does not transfer ownership.
 
 Read the board without consuming messages or changing lifecycle:
@@ -1317,7 +1313,7 @@ Goal:
 Scope:
   Allowed: <paths/modules you may touch>
   Forbidden: <shared/control paths; daemon lifecycle; ~/.collab and
-  .agent-collab state; routes, journal, mailbox, tokens>
+  current state; identity map, routes, mailbox, tokens>
 
 Delivery iff:
   Complete only when <observable behavior> passes <specific checks>.
@@ -1535,25 +1531,9 @@ master 时先取得本次启动批准。收到真实就绪握手后继续派发�
 
 ### 权限、目标解析与下一步动作
 
-这是一条已存在的项目 master 到项目 master 通道。工作角色（designer、reviewer）
-不授予此权限。普通 peer 把跨项目请求交给本项目当前 master；不得换 cwd 冒充目标
-项目的 agent，不得直接写 mailbox、猜 session ID，或通过另一个宿主通道绕过拒绝。
-全局 CEO 走上一节的独立授权通道，不把 CEO 称呼当作项目 master 授权。
-
-发送者在自己的项目执行 `collab context`，使用返回的当前身份和 master 授权。
-先从已有项目记录或当前上下文取得目标项目的真实根目录；只有无法唯一确定时才向用户确认绝对路径。取得后可以只读查询目标当前 master；这个查询不注册身份：
-
-```sh
-(cd '/目标项目绝对路径' && collab master status)
-```
-
-读取回执的 `master.worker_id` 作为 `--to`，不要按 Jenny 等显示名搜索历史 session。
-查询失败不代表没有 master。已有 master 但未知、不可达或投递失败时，保留原错，
-不创建替代 master。只有真源明确无 master，才向用户说明项目路径、profile 和启动方式，
-经确认后创建新的具名 tmux Codex session 并授权 master。默认 profile 为 `gcm`，
-使用用户已确认的 YOLO 模式；不得关闭现有 tmux server 或 pane。
-
-从发送者自己的项目目录执行下列命令；`--project` 只指定接收项目，不改变发送者身份：
+任何两个已注册对象可直接通信。源项目、目标项目和 master/peer/CEO 级别不限制
+普通发送，也不要求 master 转发。发送者使用自己的当前身份；目标从 `collab list`
+取得精确地址。不得冒充 sender、直接写 mailbox 或猜历史 session。
 
 `collab send` is the single public cross-project command:
 
@@ -1561,36 +1541,29 @@ master 时先取得本次启动批准。收到真实就绪握手后继续派发�
 collab send --to '<project.name>' --subject <short-topic> --content "<original message>"
 ```
 
-It resolves the address from `collab list`. Only the current source-project
-master may send to the current target-project master; non-master peers and
-managed subagents are rejected before any message is persisted, and the error
-names the current master. The lower-level `master send` form remains as a
-compatibility entry:
+It resolves the exact address from `collab list`. Real source credentials and the
+registered target are checked. The lower-level `master send` form remains as a
+compatibility entry and adds no role requirement:
 
 ```sh
-collab master send --project /abs/path/to/target --to <target-master> \
+collab master send --project /abs/path/to/target --to <target-worker> \
   --subject <short-topic> "<original message>"
 ```
 
-`--project` must be the exact target project root with `.agent-collab`, and
-`--to` must be that project's current master grant holder, whose target binding
-and address must be available. The target daemon also verifies the sender's
-current typed grant (holder, scope, approval) before accepting the message.
+`--project` selects the exact target project. It does not change the sender's
+identity. Ordinary messages do not consult master or CEO grants for sender eligibility.
 
-接收 master 读取完整原消息并执行已授权动作。非 DSH 宿主用 `collab recv`；
-DSH 直接处理 gateway 已投递的正文，不再 Poll/ACK。回信仍在自己的项目执行
-`collab master send`，将原消息 `from` 中的源项目用作 `--project`、源 worker ID
-用作 `--to`；当前 CLI 的这条命令尚不支持 `--in-reply-to`，在正文中写明原消息 ID。
-这只提供可读关联，不宣称已清除 daemon 回复标记。持久入队、宿主投递、接收消费和
+接收者读取完整原消息并执行已授权动作。消息本身不产生任务或管理授权。非 DSH 宿主用 `collab recv`；
+DSH 直接处理 gateway 已投递的正文，不再 Poll/ACK。回信仍在自己的项目执行统一
+`collab send --to '<原发送者地址>' --subject '<主题>' --content '<实际结果>' --in-reply-to '<原消息ID>'`。
+原消息参与者和回复义务仍由原 owner 校验。持久入队、宿主投递、接收消费和
 实际回信分别核实，发送成功不能证明对方已经执行。
 
 可直接给 agent 的下一步提示词：
 
-> 先在自己的项目执行 collab context，核对你是当前 master。对用户给定的目标项目
-> 用 `(cd '<目标项目>' && collab master status)` 只读获取 master.worker_id。
-> 回到自己的项目，用 `collab master send --project '<目标项目>' --to '<worker_id>'
-> --subject '<主题>' '<具体action、范围、验收和回信要求>'` 发送。不要搜索历史 Jenny
-> session，不要用 sendmessage 跨项目投递。保存 msg_id，分别报告已入队、已消费和
+> 在自己的项目使用当前真实身份，从 collab list 取得目标精确地址。
+> 用 `collab send --to '<project.name>' --subject '<主题>' --content '<具体action、范围、验收和回信要求>'` 发送。
+> 角色级别不限制发送。保存 msg_id，分别报告已入队、已消费和
 > 已收到实际回信的证据；只获得哪一步就报告哪一步。拒绝或未知状态保留原错。
 
 Task liveness is an obligation, not an ACK ceremony. A worker owns its assigned
@@ -1894,7 +1867,7 @@ Review triggering, reviewer selection, and model routing follow
 Without an available, verified selected transport, initialization fails
 explicitly. AppServer is preferred when its candidate passes the owner
 self-check; a tmux-only binding remains a separate selected transport and is
-never substituted for an AppServer binding. Read-only journal/mailbox queries
+never substituted for an AppServer binding. Read-only mailbox queries
 remain available where their command permits unregistered access. Pane output
 is an observation, never task or control truth.
 
@@ -1958,7 +1931,7 @@ the projections that used to require separate calls, so no agent flow needs to r
 | Master authority must move to this peer | `collab master promote --approval "<user text>"` | promote without explicit user approval |
 | Master authority must be cleared for this project scope | `collab master clear --approval "<user text>"` | clear without explicit user approval; or expect clear to delete tasks, messages, peers, or bindings |
 | Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | manual identity or daemon lifecycle commands |
-| Worker status, board admission, or a mutation reports a stale binding generation or `SESSION_THREAD_BINDING_MISMATCH` | preserve the registered binding and run `collab context` as the only repair entry | manually rebind, edit routes or journals, or infer a binding |
+| Worker status, board admission, or a mutation reports `SESSION_THREAD_BINDING_MISMATCH` | preserve the registered binding and run `collab context` as the only repair entry | manually rebind, edit control files, or infer a binding |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
 | `requires_identity_update` is present | supply only requested real runtime facts; a user-authorized identity/name/role recovery uses the exact intent command in stable-name-recovery; context handles migration internally | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; a non-Git ordinary workspace registers directly with `collab context` (no `--query`), while `--query`, a Git subdirectory, or a playground worktree stays fail-closed without a route or baseline; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
@@ -2035,13 +2008,13 @@ through the existing authority owner.
 由既有 credential/binding/route owner 完成，不另建身份选择路径。
 默认快照的 `role_brief` 只输出一次有效正文；模板卡只含来源和版本；`operations` 与
 `next_actions` 只含当前适用命令及当前任务或恢复动作。终态订阅和调用者无关历史不进入
-默认视图，peer 目录与未结义务保留，持久历史仍由显式查询读取。CEO 后置装饰遵守同一
+默认视图，peer 目录与未结义务保留。CEO 后置装饰遵守同一
 投影，权限仍只来自 host typed grant。
 Binding convergence makes context completion, worker status, and board admission
-read one authoritative project/app/agent binding and endpoint generation. Only
+read the current identity-map binding for the project/app/agent. Only
 context repairs; status and board admission are read-only consumers. Missing,
 ambiguous, stale, or principal-mismatched bindings return a typed
-`SESSION_THREAD_BINDING_MISMATCH` with known expected/observed generations and
+`SESSION_THREAD_BINDING_MISMATCH` with the actual current binding facts and
 `collab context` as the only repair entry.
 The canonical project and app scope bound the lookup; another project's binding
 or a historical pane/native route cannot supply a missing current binding.
@@ -2060,9 +2033,8 @@ snapshot:
 | --- | --- | --- |
 | `state_snapshot` 且 `registered=true` | 注册成功；含 role_brief/operations/next_actions/master/peers/peer_count/scope_digest/summary/master_wake/subagents/inbox/worktrees/tasks/env；默认排除终态订阅和调用者无关历史，保留 peer 目录与未结义务。`scope_digest` 只在 master 视角非空：每条直属 peer 给出 `activity`、`open_tasks`、`blocked`、`patrol.armed`、`goal.armed`；peer 视角为 `[]`（下级 GCM worker 不是 durable manager） | 读 `role_brief` 的有效正文、`scope_digest` 和 `operations` 当前命令；无需再跑 who/status/master status |
 | 历史 pane claim 与当前投递位置不符 | daemon 对齐通信位置；不由 pane 决定名字归属 | 名字续接按稳定名字合同；在线他人占名需确认，unknown 交 Jenny |
-| 名字占用 unknown | 持久 context operation 返回 `pending`；不是注册成功 | 等待同一请求裁决续接；Jenny 自身 unknown 且本次用户明确恢复并确认接管时直接接管 Jenny/master |
+| 当前身份无法定位或缺少事实 | 返回具体缺项或原错；不是注册成功 | 只补本次真实事实；用户授权由当前 map 应用，不等待旧请求裁决 |
 | `identity_update` | daemon 缺少真实运行事实；`registered=false`，`requires_identity_update.required=true` | 按 `required_fields`/`reason`/`action` 只补实际缺项。已授权恢复意图按稳定名字合同提交；重复档案及旧绑定由 context 自行迁移。若仍泄漏裸历史冲突，保留原错作为实现缺陷，不让 agent 选旧身份或维护控制面 |
-| 可选通信诊断 pending | 原身份与当前 route 仍可用；诊断 reply 未完成 | 该诊断不是恢复前提；若显式使用，participant 从所选 adapter 读取 challenge 并从自身环境回传；`--query` 保持只读 |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route/baseline：`--query` 保持 fail-closed；不带 `--query` 的非 Git 普通工作区可直接首次注册；Git 子目录或 playground worktree 必须从规范 checkout 执行 | 保留原错，不自动换 cwd 重试；首次注册失败则独立继续，已注册者报告受影响协作，保留已领任务/claim |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 保留原错，不改主树或删除旧身份；首次注册失败则独立继续，已注册者保留已有职责并报告协作缺口 |
 | 默认订阅已停 | daemon 按当前注册身份自动重武装，不存在显式退订 | 需要再收消息时运行 `collab context` 自动恢复，不由 agent 手工重订阅 |
@@ -2093,8 +2065,8 @@ collab context
 
 The daemon-owned identity context completes the bootstrap. It reconciles
 delivery placement inside this call. Pane history does not select the name;
-same-name continuation, online takeover confirmation, and unknown adjudication
-follow the stable-name contract.
+same-name continuation and user-authorized takeover use the current identity
+map. There is no pending historical adjudication chain.
 `collab init` is not a second agent entry and not a second identity algorithm,
 but it drives the same daemon identity gate and stays the documented entry for
 existing AppSDK init consumers. Neither `collab init` nor AppSDK init creates,
@@ -2119,8 +2091,13 @@ action=restore_master），或由已授权 master 委托。注册前先确认自
 锚点归属规则：一个宿主只有一个锚点；DSH 的锚点是 gateway session 加 gateway
 控制面标识，不是 tmux pane，即使该 DSH 会话在 tmux 里启动，pane 也只定位
 观测、不承载身份。普通身份恢复只读持久身份与绑定，不重新 Register、不回环、
-不要求通信可达；只有显式 `--recover-communication` 才做通信回环验证，那是
-通信诊断、不是恢复前提。同一 session 出现在多个 API 上时，daemon 用 session
+不要求通信可达。显式 `--recover-communication` 先按当前精确绑定的真实投递与接收
+证据分类：健康返回 `not_needed`，未知返回 `unknown`，只有明确不通才通过普通 Send
+向自己发一条 `communication-recovery`。独立接收方实际 recv（DSH 走 canonical Poll）
+并发送关联的普通认证 reply 后，query 才能投影 `recovered`。仅 adaptor 接受仍为
+`pending`；query 不收件、不回信、不重发，重复手动调用复用当前 pending 交换。
+回复本身的普通通知不触发再回复。通信失败不撤销身份、角色或当前任务归属。
+这条通信恢复路径不是身份恢复前提。同一 session 出现在多个 API 上时，daemon 用 session
 加 communication API 联合判定；仅 session 相同会显式冲突失败，不会静默覆盖
 已有身份、角色或工作。DSH 首次注册只需普通 `collab context`，CLI 自动查询真实
 gateway 能力。缺控制声明属于 gateway 集成缺口，应保留明确错误，不让 agent

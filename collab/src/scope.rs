@@ -81,14 +81,6 @@ impl HostPaths {
         self.state_root.join("DOWN")
     }
 
-    pub fn events_path(&self) -> PathBuf {
-        self.state_root.join("events.jsonl")
-    }
-
-    pub fn journal_path(&self) -> PathBuf {
-        self.state_root.join("journal.jsonl")
-    }
-
     pub fn pid_path(&self) -> PathBuf {
         self.state_root.join("server.pid")
     }
@@ -137,9 +129,9 @@ pub(crate) fn encoded_storage_path(base: &Path, value: &str) -> PathBuf {
 
 /// Load the durable project routes used by exact-root recovery commands.
 fn load_route_records(host_paths: &HostPaths) -> anyhow::Result<Vec<CanonicalProjectRoute>> {
-    let route_journal = host_paths.state_root().join("routes.jsonl");
+    let route_file = host_paths.state_root().join("routes.json");
     let mut records = Vec::new();
-    for record in load_host_route_records(&route_journal).map_err(anyhow::Error::msg)? {
+    for record in load_host_route_records(&route_file).map_err(anyhow::Error::msg)? {
         let canonical_root = match std::fs::canonicalize(&record.canonical_root) {
             Ok(root) => root,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -859,7 +851,7 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
   context restores its current binding, route and lease together. A shorter
   explicit lease cannot suppress it.
 - Recovery acceptance includes actual send, receive and reply for both roles.
-- Server state, journal, and mailbox are durable truth; a failed wake cannot
+- Current identity map and business state are durable truth; a failed wake cannot
   roll back state or fabricate success.
 - The runtime is part of the worker identity boundary, not a task preference.
 

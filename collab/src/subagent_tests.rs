@@ -23,14 +23,14 @@ fn notification_failure_keeps_daemon_data_and_partial_action_stage() {
             "durable_msg_id": "message-1",
             "reused": false
         }),
-        follow_up_error: Some("journal append failed".into()),
+        follow_up_error: Some("state replacement failed".into()),
     };
 
     let result = failure_response(anyhow::Error::new(outcome));
     assert!(!result.ok);
     assert_eq!(
             result.error.as_deref(),
-            Some("APPSERVER_NOTIFICATION_REJECTED: route unavailable; follow-up state commit failed: journal append failed")
+            Some("APPSERVER_NOTIFICATION_REJECTED: route unavailable; follow-up state commit failed: state replacement failed")
         );
     assert_eq!(result.data["msg_id"], "message-1");
     assert_eq!(result.data["repair_required"], true);
@@ -42,7 +42,7 @@ fn notification_failure_keeps_daemon_data_and_partial_action_stage() {
     );
     assert_eq!(
         result.data["subagent_action"]["follow_up_error"],
-        "journal append failed"
+        "state replacement failed"
     );
 }
 
@@ -157,7 +157,6 @@ fn cursor_runtime_is_rejected() {
                 runtime: None,
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
             &serde_json::json!({
                 "role": "managed-subagent",
@@ -329,7 +328,6 @@ fn close_reports_named_terminal_outcome_when_archive_is_impossible() {
             runtime: Some("codex".into()),
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         },
     }]);
     server.commit(&[Event::SubagentSnapshotCaptured {
@@ -404,7 +402,6 @@ fn close_reports_archive_failed_when_archiving_returns_an_unclassified_error() {
             runtime: Some("codex".into()),
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         },
     }]);
     server.commit(&[Event::SubagentSnapshotCaptured {
@@ -477,7 +474,6 @@ fn close_keeps_worker_registered() {
             runtime: Some("codex".into()),
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         },
     );
     server.commit(&[Event::SubagentUpdated { subagent: record }]);
@@ -537,7 +533,6 @@ fn no_provenance_record_refuses_send_and_ready() {
             runtime: Some("codex".into()),
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         },
     }]);
     let server = std::sync::Arc::new(server);
@@ -619,7 +614,6 @@ fn missing_rollout_notification_failure_keeps_durable_child_route_binding() {
         runtime: Some("codex".into()),
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     };
 
     let error = crate::client::adapters::AdapterError::Unknown {
@@ -690,7 +684,6 @@ fn other_notification_failure_retires_durable_child_route_binding() {
         runtime: Some("codex".into()),
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     };
 
     let error = crate::client::adapters::AdapterError::Unknown {
@@ -750,7 +743,6 @@ fn failed_subagent_record_with_thread_id_is_not_reused() {
         runtime: Some("codex".into()),
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     };
 
     assert!(!can_reuse_existing(&record));

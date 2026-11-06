@@ -56,13 +56,13 @@ I/O and current endpoint errors remain explicit.
 The installed binary resolves host-wide Collab state under `$HOME/.collab`;
 `COLLAB_STATE_DIR` is for isolated tests. This owner includes identity, routes,
 mailboxes and daemon runtime state. Project-local `.agent-collab/` may provide
-project discovery. Its retired server journals and mailbox files are not imported
-or replayed into the current runtime and remain on disk. Historical identity
-compatibility within the current central store remains context-owned;
-project-local state is not a second host truth. AppSDK `.appsdk/` and `.appsdk-control/`
+project discovery. Identity comes only from the current identity-map.json;
+business state loads directly from current state.json. Journal readers, writers,
+replay and repair have been removed. Migration previews must not replace active
+control state. Project-local state is not a second host truth. AppSDK `.appsdk/` and `.appsdk-control/`
 belong to AppSDK and are outside Collab recovery.
 
-Never manually delete journals, mailbox files, identity tokens or route state.
+Never manually edit current identity, mailbox, token or route state.
 Do not use `collab migrate inspect/plan/apply/verify` as an ordinary identity
 recovery sequence. Those operator storage-migration tools do not transfer
 context's migration responsibility to an agent.
@@ -174,9 +174,9 @@ Collab has one global user-managed daemon. Agents never start, stop, restart or
 kill it, request maintenance credentials, or create a second global runtime.
 User maintenance commands and credentials are outside the agent interface.
 When the service is unavailable, preserve durable state and report that fact.
-Project replay failure must not disable authenticated user maintenance: its
+Project state read failure must not disable authenticated user maintenance: its
 credential check and shutdown path belong to the host, independently of the
-project reducer. Agents report the failure and do not edit journals or acquire
+project state owner. Agents report the failure and do not edit control files or acquire
 maintenance authority to compensate.
 AppSDK/Collab maintenance never requires tmux server lifecycle operations or
 termination of the host pane.

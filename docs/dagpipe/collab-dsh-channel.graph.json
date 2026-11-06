@@ -11,7 +11,7 @@
   "nodes": [
     {
       "id": "build_dsh_candidate",
-      "description": "公开 context 优先保留显式 DSH 事实。无显式报告且当前 project/app/session 无已提交 route 时，CLI 从 gateway 发布的 runtime/dsh/gateway-control.json 读取控制入口，经 resolve-agent 核实真实 session/cwd 并取得当前 runtime。已有 route 不读取该声明，继续由 daemon 按持久绑定恢复。缺声明、拒绝或矛盾返回明确结果，不借用 AppServer namespace。",
+      "description": "公开context保留显式DSH事实。CLI与daemon复用唯一identity-map.json查询；同project/app的gateway sessionID已有active current时复用该绑定。仅真实首次注册才从gateway声明经resolve-agent取得当前runtime/session/cwd。声明与route不选择Collab身份；DSH不要求tmux或profile。缺声明、拒绝和矛盾明确返回。",
       "operator": "appsdk.collab_dsh_channel.build_dsh_candidate",
       "operator_version": "1",
       "inputs": ["dsh_registration_intent"],
@@ -33,7 +33,7 @@
     },
     {
       "id": "bind_and_receipt",
-      "description": "通过既有注册事务提交持久身份和 DSH 绑定，返回真实回执。显式 API 冲突不得经 session-only draft 取回旧凭据。",
+      "description": "既有Register事务先将名字及当前DSH sessionID绑定原子写入identity-map.json并保留必要Register待办，再由原credential和业务owner完成注册。续接与换绑更新同一张表，不能从archive、route或旧runtime反查身份；通信仍用原DSH适配器。真实错误不伪报成功。",
       "operator": "appsdk.collab_dsh_channel.bind_and_receipt",
       "operator_version": "1",
       "inputs": ["admitted_transport"],

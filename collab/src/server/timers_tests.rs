@@ -1,5 +1,6 @@
 use super::{seed_project_patrol_episode, *};
 use crate::proto::SelectedTransport;
+use crate::server::current_state;
 use crate::server::keepalive::Record;
 use crate::server::state::{
     Event, MigrationRecord, NotificationSubscription, State, TaskRec, WaitSpec,
@@ -15,20 +16,16 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
     ));
     let server_dir = root.join(".agent-collab/server");
     std::fs::create_dir_all(&server_dir).unwrap();
-    let journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(server_dir.join("journal.jsonl"))
-        .unwrap();
+    let state_path = server_dir.join("state.json");
+    current_state::save(&state_path, &State::default()).unwrap();
     (
         Arc::new(Server {
             config: crate::config::Config::default(),
             root: root.clone(),
             storage_root: root.clone(),
-            journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            state_path,
             host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
-            journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(SelectedTransport {
                     kind: crate::proto::TransportKind::AppServer,
@@ -142,13 +139,7 @@ fn seed_ledger_owner(server: &Server, worker_id: &str) {
 fn register_master(server: &Server) {
     register(server, "master");
     let now = now_ms();
-    let promoted = crate::server::handle_master_promote(
-        server,
-        "master".into(),
-        "token-master".into(),
-        "user-approved".into(),
-    );
-    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    crate::server::peer_tests::promote_master(server, "master", "user-approved");
     server.commit(&[Event::KeepaliveUpdated {
         worker_id: "master".into(),
         record: Record {
@@ -380,13 +371,7 @@ fn admission_freeze_blocks_deadline_wakeup_without_appserver_probe() {
     let tmux = crate::server::peer_tests::IsolatedTmux::start(&root);
     register_tmux(&server, "master", tmux.endpoints().remove(0));
     let now = now_ms();
-    let promoted = crate::server::handle_master_promote(
-        &server,
-        "master".into(),
-        "token-master".into(),
-        "user-approved".into(),
-    );
-    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    crate::server::peer_tests::promote_master(&server, "master", "user-approved");
     server.commit(&[Event::KeepaliveUpdated {
         worker_id: "master".into(),
         record: Record {
@@ -429,13 +414,7 @@ fn deadline_wakeup_does_not_probe_appserver_readiness() {
     register_tmux(&server, "master", endpoints[0].clone());
     register_tmux(&server, "worker", endpoints[1].clone());
     let now = now_ms();
-    let promoted = crate::server::handle_master_promote(
-        &server,
-        "master".into(),
-        "token-master".into(),
-        "user-approved".into(),
-    );
-    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    crate::server::peer_tests::promote_master(&server, "master", "user-approved");
     server.commit(&[Event::KeepaliveUpdated {
         worker_id: "master".into(),
         record: Record {
@@ -633,19 +612,15 @@ fn restart_does_not_reset_exhausted_direct_message_attempts() {
     }
     drop(server);
 
-    let replayed = super::super::replay(&root).unwrap();
-    let journal = std::fs::OpenOptions::new()
-        .append(true)
-        .open(root.join(".agent-collab/server/journal.jsonl"))
-        .unwrap();
+    let state_path = root.join(".agent-collab/server/state.json");
+    let current = current_state::load(&state_path, false).unwrap();
     let restarted = Server {
         config: crate::config::Config::default(),
         root: root.clone(),
         storage_root: root.clone(),
-        journal_path: root.join(".agent-collab/server/journal.jsonl"),
+        state_path,
         host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
-        state: Mutex::new(replayed),
-        journal: Mutex::new(journal),
+        state: Mutex::new(current),
         appserver_candidate_check: super::super::default_appserver_candidate_check(),
         appserver_notification_sink: super::super::default_appserver_notification_sink(),
         appserver_thread_status: super::super::default_appserver_thread_status(),
@@ -677,12 +652,12 @@ fn restart_does_not_reset_exhausted_direct_message_attempts() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// After a daemon restart the timer replays only undelivered pending mail. A
+/// After a daemon restart the timer attempts only undelivered pending mail. A
 /// pending message inside its retry budget is attempted again; a message that
 /// already reached `delivered` is never re-sent. Their durable states stay
 /// distinguishable so a restart cannot replay consumed work.
 #[test]
-fn restart_replays_only_undelivered_pending() {
+fn restart_attempts_only_undelivered_pending() {
     let (server, root) = test_server();
     register(&server, "owner");
     let subscription_id = subscribe(&server, "owner", "direct-message", None, None);
@@ -695,19 +670,15 @@ fn restart_replays_only_undelivered_pending() {
     }]);
     drop(server);
 
-    let replayed = super::super::replay(&root).unwrap();
-    let journal = std::fs::OpenOptions::new()
-        .append(true)
-        .open(root.join(".agent-collab/server/journal.jsonl"))
-        .unwrap();
+    let state_path = root.join(".agent-collab/server/state.json");
+    let current = current_state::load(&state_path, false).unwrap();
     let restarted = Arc::new(Server {
         config: crate::config::Config::default(),
         root: root.clone(),
         storage_root: root.clone(),
-        journal_path: root.join(".agent-collab/server/journal.jsonl"),
+        state_path,
         host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
-        state: Mutex::new(replayed),
-        journal: Mutex::new(journal),
+        state: Mutex::new(current),
         appserver_candidate_check: super::super::default_appserver_candidate_check(),
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
             Ok(serde_json::json!({"accepted": true}))
@@ -970,7 +941,7 @@ fn ordinary_tick_does_not_persist_unused_binding_classifications() {
 }
 
 #[test]
-fn obsolete_binding_classification_does_not_survive_replay() {
+fn obsolete_binding_classification_is_absent_from_current_state() {
     use crate::identity::{BindingId, OperationId};
     use crate::server::global_state::{RuntimeBindingLedgerRecord, RuntimeBindingLedgerState};
 
@@ -992,7 +963,6 @@ fn obsolete_binding_classification_does_not_survive_replay() {
                 agent_id: binding.agent_id,
                 runtime_id: binding.runtime_id,
                 binding_id: binding.binding_id,
-                endpoint_generation: binding.endpoint_generation,
                 state: RuntimeBindingLedgerState::Live,
                 probe_state: Some(RuntimeBindingLedgerState::Live),
                 reason: None,
@@ -1002,8 +972,8 @@ fn obsolete_binding_classification_does_not_survive_replay() {
             },
         }])
         .unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     drop(server);
-    let replayed = crate::server::replay(&root).unwrap();
     let mut projection = replayed.global.clone();
     projection.current_thread_routes.clear();
     projection.legacy_thread_routes.clear();
@@ -1232,13 +1202,7 @@ fn register_project_patrol_master(server: &Server) {
     .expect("master native thread route must commit");
     crate::server::restore_registered_peer_default_leases(server);
 
-    let promoted = crate::server::handle_master_promote(
-        server,
-        "master".into(),
-        "token-master".into(),
-        "user-approved".into(),
-    );
-    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    crate::server::peer_tests::promote_master(server, "master", "user-approved");
     server.commit(&[Event::KeepaliveUpdated {
         worker_id: "master".into(),
         record: Record {

@@ -16,20 +16,15 @@ fn test_server() -> (Arc<Server>, PathBuf, PathBuf) {
     let server_dir = root.join(".agent-collab").join("server");
     std::fs::create_dir_all(&server_dir).unwrap();
     TEST_PROJECT_ROOT.with(|current| *current.borrow_mut() = Some(root.clone()));
-    let journal_path = server_dir.join("journal.jsonl");
-    let journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&journal_path)
-        .unwrap();
+    let state_path = server_dir.join("state.json");
+    current_state::save(&state_path, &State::default()).unwrap();
     let server = Arc::new(Server {
         config: crate::config::Config::default(),
         root: root.clone(),
         storage_root: root.clone(),
-        journal_path: journal_path.clone(),
+        state_path: state_path.clone(),
         host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
         state: Mutex::new(State::default()),
-        journal: Mutex::new(journal),
         appserver_candidate_check: Arc::new(|candidate| Ok(verified_appserver(candidate))),
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
             Ok(serde_json::json!({"accepted": true}))
@@ -46,7 +41,7 @@ fn test_server() -> (Arc<Server>, PathBuf, PathBuf) {
         appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
         mailbox_notify: Notify::new(),
     });
-    (server, root, journal_path)
+    (server, root, state_path)
 }
 
 fn with_appserver_check(
@@ -87,11 +82,6 @@ fn commit_tmux_typed_fixture(
     endpoint: crate::proto::TmuxEndpoint,
 ) -> RuntimeBinding {
     let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
-    let route_scope = crate::scope::RouteScope {
-        project_scope_id: project_scope.clone(),
-        app_scope_id: app_scope.clone(),
-    };
-    let binding_id = crate::identity::BindingId::new(format!("binding-{worker_id}")).unwrap();
     let transport = SelectedTransport {
         kind: TransportKind::Tmux,
         endpoint: Some(endpoint.socket_path.clone()),
@@ -102,59 +92,42 @@ fn commit_tmux_typed_fixture(
         capabilities: vec!["direct-input".into()],
         self_check: "typed fixture committed pane receipt".into(),
     };
-    let mut binding = RuntimeBinding::new_with_session(
-        project_scope.clone(),
-        app_scope.clone(),
-        crate::identity::AgentId::new(worker_id).unwrap(),
-        crate::identity::RuntimeId::new(format!("runtime-{worker_id}")).unwrap(),
-        binding_id.clone(),
-        1,
-        Some(crate::identity::SessionId::new(transport.session_id.clone().unwrap()).unwrap()),
-        Some(crate::identity::NativeThreadId::new(transport.thread_id.clone().unwrap()).unwrap()),
-    )
-    .unwrap();
-    binding.tmux_endpoint = transport.tmux_endpoint.clone();
-    let registration = crate::server::global_state::ProjectRegistration::with_registered_at(
-        project_scope.clone(),
-        app_scope,
-        crate::server::state::now_ms(),
-    )
-    .unwrap();
-    let worker = WorkerRec {
-        id: worker_id.into(),
-        token: token.into(),
-        cwd: server.root.display().to_string(),
-        registered_ms: crate::server::state::now_ms(),
-        transport: Some(transport),
-    };
-    let envelope = CommandEnvelope::new(
-        crate::identity::CommandId::new(format!("fixture-register-{worker_id}")).unwrap(),
-        crate::identity::OperationId::new(format!("fixture-register-op-{worker_id}")).unwrap(),
-        binding_id,
-        1,
-        route_scope,
-        None,
-        None,
-        None,
-        None,
+    let response = super::peer_tests::seed_committed_owner(
+        server, worker_id, token, &transport, &server.root.to_string_lossy(), Some(app_scope.clone()),
     );
-    let typed = crate::server::state::TypedEnvelope {
-        command: crate::server::state::TypedCommand::RegisterWorker {
-            registration,
-            binding: binding.clone(),
-            worker,
-        },
-        envelope,
-    };
-    server.typed_dispatch(typed).unwrap();
-    // A successful registration also publishes the host route that makes the
-    // pane the current durable address. `typed_dispatch` emits only the project
-    // registration and runtime binding, so publish the same committed route the
-    // production registration leaves behind.
+    assert!(response.ok, "{response:?}");
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+    let binding = control.current_for_worker(&project_scope, &app_scope, worker_id).unwrap()
+        .unwrap().active_binding().unwrap().binding.clone();
+    // The current address projection is a readback precondition, not identity.
     server.commit(&[Event::GlobalCurrentThreadRouteSet {
         binding: binding.clone(),
     }]);
     binding
+}
+
+fn grant_master_fixture(server: &Server, binding: &RuntimeBinding) {
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let source = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())
+        .unwrap().expect("registered fixture has a current map row");
+    store.commit(binding_store::ControlChange::MoveName {
+        target: binding_slot::IdentityBindingKey::new(binding.project_scope.clone(), binding.app_scope_id.clone(), "Jenny"),
+        value: control.slot(source).unwrap().active_binding().unwrap().clone(),
+        source_names: vec![source.name.clone()], expected_generation: None,
+    }).unwrap();
+    let grant = crate::server::global_state::MasterGrant::new(
+        binding.project_scope.clone(),
+        binding.app_scope_id.clone(),
+        binding.agent_id.clone(),
+        "project",
+        "operator",
+        "user approved test fixture",
+        binding.binding_id.clone(),
+        now_ms(),
+    )
+    .unwrap();
+    server.commit(&[Event::GlobalMasterGranted { grant }]);
 }
 
 fn verified_appserver(candidate: &AppServerCandidate) -> SelectedTransport {
@@ -177,6 +150,28 @@ fn verified_appserver(candidate: &AppServerCandidate) -> SelectedTransport {
 fn test_candidates(thread_id: &str) -> Option<TransportCandidates> {
     let root = TEST_PROJECT_ROOT.with(|current| current.borrow().clone()).expect("test project root");
     test_candidates_at(thread_id, &root)
+}
+
+// Scope/storage tests start with a committed native owner. Only native
+// admission is a precondition; route reservation and materialization use
+// the real manager owners before any identity is seeded.
+fn committed_native_scope_fixture(
+    manager: &ProjectRuntimeManager,
+    context: &ProjectContext,
+    worker: &str,
+    token: &str,
+    thread: &str,
+) -> Arc<Server> {
+    let root = Path::new(&context.canonical_root);
+    let storage = manager.storage_root_for_new(root,
+        context.project_scope.as_str(), context.app_scope_id.as_str());
+    manager.reserve_external_route(context, &storage).unwrap();
+    let runtime = manager.select_runtime(context).unwrap();
+    register_native_peer(&runtime, root, worker, token, thread, context.app_scope_id.as_str());
+    commit_current_thread_route_for_runtime(&manager.host, &runtime, worker,
+        &context.canonical_root, Some(&context.app_scope_id)).unwrap();
+    assert!(Arc::ptr_eq(&runtime, &manager.select_runtime(context).unwrap()));
+    runtime
 }
 
 fn test_candidates_at(thread_id: &str, cwd: &Path) -> Option<TransportCandidates> {
@@ -383,26 +378,13 @@ fn runtime_for_registered(
     app_scope: &str,
 ) -> RuntimeIdentity {
     let project_scope = GlobalState::canonical_project_scope(root).unwrap();
-    let route_scope = RouteScope {
-        app_scope_id: AppServerId::new(app_scope).unwrap(),
-        project_scope_id: project_scope,
-    };
-    let binding = server
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_binding_for(
-            &route_scope,
-            &BindingId::new(format!("binding-{worker_id}")).unwrap(),
-        )
-        .cloned()
-        .unwrap();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+    let binding = control.current_for_worker(&project_scope, &AppServerId::new(app_scope).unwrap(), worker_id)
+        .unwrap().unwrap().active_binding().unwrap().binding.clone();
     crate::identity::RuntimeIdentity {
         agent_id: binding.agent_id,
         runtime_id: binding.runtime_id,
         appserver_id: binding.app_scope_id,
-        endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id,
         session_id: binding.session_id,
         native_thread_id: binding.native_thread_id,
@@ -410,7 +392,7 @@ fn runtime_for_registered(
 }
 
 /// Build the caller command envelope a cross-project send must carry. It uses
-/// the registered binding and generation so the server can authenticate the
+/// the current mapped binding so the server can authenticate the
 /// exact execution carrier; the caller never authorizes itself.
 fn cross_project_command(
     server: &Server,
@@ -428,7 +410,6 @@ fn cross_project_command(
         crate::identity::CommandId::new(format!("command-{worker_id}-{command_tag}")).unwrap(),
         crate::identity::OperationId::new(format!("operation-{worker_id}-{command_tag}")).unwrap(),
         runtime.binding_id.clone(),
-        runtime.endpoint_generation,
         route_scope,
         None,
         None,
@@ -506,21 +487,9 @@ fn register_native_peer(
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };
-    let project_scope = GlobalState::canonical_project_scope(root).unwrap();
-    let envelope = server
-        .typed_register_envelope_for_scope(
-            worker_id,
-            token,
-            &transport,
-            project_scope,
-            root.to_str().unwrap(),
-            AppServerId::new(app_scope).unwrap(),
-            false,
-        )
-        .unwrap();
-    server
-        .typed_dispatch(envelope)
-        .expect("native registration must succeed");
+    let registered = crate::server::peer_tests::seed_committed_owner(server, worker_id, token,
+        &transport, root.to_str().unwrap(), Some(AppServerId::new(app_scope).unwrap()));
+    assert!(registered.ok, "native fixture registration: {registered:?}");
 }
 
 #[test]
@@ -619,20 +588,14 @@ fn persisted_tmux_master_status_does_not_relock_state() {
         codex_session_id: Some("session-pane-worker".into()),
         codex_thread_id: Some("thread-pane-worker".into()),
     };
-    commit_tmux_typed_fixture(
+    let binding = commit_tmux_typed_fixture(
         &server,
         "pane-worker",
         "pane-token",
         AppServerId::new("app-a").unwrap(),
         endpoint,
     );
-    let promoted = handle_master_promote(
-        &server,
-        "pane-worker".into(),
-        "pane-token".into(),
-        "fixture user approved pane-worker".into(),
-    );
-    assert!(promoted.ok, "{promoted:?}");
+    grant_master_fixture(&server, &binding);
     let (tx, rx) = std::sync::mpsc::channel();
     let join = std::thread::spawn(move || {
         let status = dispatch(&server, Req::MasterStatus);
@@ -742,7 +705,7 @@ fn tmux_registration_and_identity_do_not_require_a_live_probe() {
 /// read-only query must not retire the identity or drop the grant.
 #[test]
 fn identity_endpoint_projection_keeps_identity_and_never_reports_live() {
-    let (server, root, journal_path) = test_server();
+    let (server, root, state_path) = test_server();
     // A plain file at the socket path makes the tmux probe fail without a
     // server, so reachability is undecided (`null`) rather than missing.
     let socket_path = root.join("probe-error.sock");
@@ -763,13 +726,7 @@ fn identity_endpoint_projection_keeps_identity_and_never_reports_live() {
         AppServerId::new("app-a").unwrap(),
         endpoint,
     );
-    let promoted = handle_master_promote(
-        &server,
-        "pane-worker".into(),
-        "pane-token".into(),
-        "fixture user approved pane-worker".into(),
-    );
-    assert!(promoted.ok, "{promoted:?}");
+    grant_master_fixture(&server, &binding);
 
     // Each projection runs in its own thread so a hung probe is attributed to
     // one call instead of hanging the test.
@@ -783,9 +740,7 @@ fn identity_endpoint_projection_keeps_identity_and_never_reports_live() {
             .unwrap_or_else(|_| panic!("public projection {label} hung"))
     };
 
-    let journal_before = std::fs::metadata(&journal_path)
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let state_before = std::fs::read(&state_path).unwrap();
     let status = projection("master status", Req::MasterStatus);
     assert!(status.ok, "{status:?}");
     let context = projection(
@@ -800,12 +755,10 @@ fn identity_endpoint_projection_keeps_identity_and_never_reports_live() {
     assert!(workers.ok, "{workers:?}");
     let board = projection("board show", Req::BoardShow);
     assert!(board.ok, "{board:?}");
-    let journal_after = std::fs::metadata(&journal_path)
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let state_after = std::fs::read(&state_path).unwrap();
     assert_eq!(
-        journal_after, journal_before,
-        "a read-only projection appended a durable event"
+        state_after, state_before,
+        "a read-only projection changed current state"
     );
 
     let worker = server.state.lock().unwrap().workers["pane-worker"].clone();
@@ -1256,13 +1209,7 @@ fn live_closure_daemon_to_master_rejects_non_master_target() {
         );
         assert!(registered.ok, "{registered:?}");
     }
-    let promoted = handle_master_promote(
-        &server,
-        "master".into(),
-        "token-master".into(),
-        "test approval".into(),
-    );
-    assert!(promoted.ok, "{promoted:?}");
+    super::peer_tests::promote_master(&server, "master", "test approval");
 
     let rejected = handle_live_closure_daemon_send(
         &server,

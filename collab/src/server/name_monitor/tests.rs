@@ -16,20 +16,15 @@ fn server() -> Arc<Server> {
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let journal_path = root.join("journal.jsonl");
-    let journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&journal_path)
-        .unwrap();
+    let state_path = root.join("state.json");
+    crate::server::current_state::save(&state_path, &State::default()).unwrap();
     let server = Arc::new(Server {
         config: Default::default(),
         root: root.clone(),
         storage_root: root.clone(),
-        journal_path,
+        state_path,
         host_paths: HostPaths::for_state_root(root.join("host")).unwrap(),
         state: Mutex::new(State::default()),
-        journal: Mutex::new(journal),
         appserver_candidate_check: Arc::new(|_| unreachable!()),
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| unreachable!()),
         appserver_thread_status: Arc::new(|_, _| unreachable!()),
@@ -114,11 +109,11 @@ fn ordinary_worker_maps_activity_and_deduplicates_facts() {
         assert!(activity.background);
         assert_eq!(activity.observed_ms, index as i64);
         drop(state);
-        let before = std::fs::read(&server.journal_path).unwrap();
+        let before = std::fs::read(&server.state_path).unwrap();
         tick_with_observer(&server, 100, &|_| {
             Ok(observation(AgentPresence::Online, source))
         });
-        assert_eq!(std::fs::read(&server.journal_path).unwrap(), before);
+        assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
     }
     server
         .state
@@ -131,12 +126,12 @@ fn ordinary_worker_maps_activity_and_deduplicates_facts() {
         .as_mut()
         .unwrap()
         .session_id = None;
-    let before = std::fs::read(&server.journal_path).unwrap();
+    let before = std::fs::read(&server.state_path).unwrap();
     tick_with_observer(&server, 101, &|_| {
         Ok(observation(AgentPresence::Online, AgentActivity::Unknown))
     });
     assert_eq!(
-        std::fs::read(&server.journal_path).unwrap(),
+        std::fs::read(&server.state_path).unwrap(),
         before,
         "endpoint codex_session_id must preserve the same agent identity"
     );
@@ -146,7 +141,7 @@ fn ordinary_worker_maps_activity_and_deduplicates_facts() {
 #[test]
 fn idle_interval_restarts_from_the_first_post_restart_observation() {
     let server = server();
-    // A journal written by the previous daemon process records a long idle run
+    // Current state from the previous daemon process records a long idle run
     // for the same binding and session.
     server.commit(&[crate::server::state::Event::AgentActivityObserved {
         activity: AgentActivityRecord {
@@ -244,7 +239,9 @@ fn changed_session_or_endpoint_discards_stale_observation() {
         assert!(state.agent_presence.is_empty());
         assert!(state.agent_activity.is_empty());
         drop(state);
-        assert!(std::fs::read(&server.journal_path).unwrap().is_empty());
+        let current = crate::server::current_state::load(&server.state_path, false).unwrap();
+        assert!(current.agent_presence.is_empty());
+        assert!(current.agent_activity.is_empty());
         std::fs::remove_dir_all(&server.root).unwrap();
     }
 }
@@ -391,19 +388,11 @@ fn idle_interval_requires_current_binding_and_continuity() {
         "a clock rollback must not keep a stale trusted idle start"
     );
 
-    let mut replayed = State::default();
-    for line in std::fs::read_to_string(&server.journal_path)
-        .unwrap()
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        let event: crate::server::state::Event = serde_json::from_str(line).unwrap();
-        replayed.apply(&event);
-    }
+    let current = crate::server::current_state::load(&server.state_path, false).unwrap();
     assert_eq!(
-        replayed.agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        current.agent_activity[&scope(&server)]["worker"].idle_since_ms,
         Some(14_000),
-        "typed activity continuity replays through the shared journal"
+        "typed activity continuity survives current state loading"
     );
     std::fs::remove_dir_all(&server.root).unwrap();
 }

@@ -2,14 +2,6 @@ use super::*;
 
 const CEO_NOTICE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn journal_events(fixture: &AppFixture) -> Vec<Value> {
-    std::fs::read_to_string(fixture.name_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
-}
-
 fn input_has_message(input: &Value, message_id: &str) -> bool {
     input["input"]
         .as_array()
@@ -38,33 +30,26 @@ fn set_native_idle(fixture: &AppFixture) {
 }
 
 fn host_has_prepared_batch(fixture: &AppFixture) -> bool {
-    std::fs::read_to_string(fixture.host_state.join("journal.jsonl"))
-        .expect("host journal exists")
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|event| event["ev"] == "CeoReportBatchPrepared")
+    !fixture.current_state()["ceo_report_state"]["batches"]
+        .as_object()
+        .unwrap()
+        .is_empty()
 }
 
 fn wait_for_ceo_notice(fixture: &AppFixture, worker_id: &str) -> String {
     let deadline = Instant::now() + CEO_NOTICE_TIMEOUT;
     loop {
-        let events = journal_events(fixture);
-        for event in events.iter().filter(|event| {
-            event["ev"] == "Sent"
-                && event["msg"]["subject"] == "ceo-report-due"
-                && event["msg"]["to"] == worker_id
-        }) {
-            let message_id = event["msg"]["id"]
-                .as_str()
-                .expect("CEO notice has a message id");
-            let bound = events
-                .iter()
-                .any(|event| event["ev"] == "WakeBound" && event["message_id"] == message_id);
-            let accepted = events.iter().any(|event| {
-                event["ev"] == "NotificationDeliveryAccepted"
-                    && event["message_id"] == message_id
-                    && event["evidence"].is_object()
-            });
+        let current = fixture.current_state();
+        for message in current["msgs"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|message| message["subject"] == "ceo-report-due" && message["to"] == worker_id)
+        {
+            let message_id = message["id"].as_str().expect("CEO notice has a message id");
+            let bound = current["wake_bindings"][message_id].is_string();
+            let accepted = !current["notification_delivery_accepted"][message_id].is_null()
+                && current["notification_delivery_evidence"][message_id].is_object();
             let native = fixture
                 .state
                 .lock()

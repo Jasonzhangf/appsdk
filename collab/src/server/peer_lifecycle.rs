@@ -110,7 +110,6 @@ fn exact_target(
         project_scope: binding.project_scope.clone(),
         app_scope_id: binding.app_scope_id.clone(),
         binding_id: binding.binding_id.clone(),
-        endpoint_generation: binding.endpoint_generation,
         transport: PeerLifecycleTransport {
             kind: transport.kind.clone(),
             endpoint: transport.endpoint.clone(),
@@ -959,23 +958,6 @@ fn close_phase(close: &PeerLifecycleClose) -> PeerLifecyclePhase {
     }
 }
 
-fn binding_for_authenticated_self(
-    state: &State,
-    context: &ProjectContext,
-    worker_id: &str,
-) -> Option<RuntimeBinding> {
-    state
-        .global
-        .lookup_project(&context.project_scope)?
-        .runtime_bindings
-        .values()
-        .filter(|binding| {
-            binding.app_scope_id == context.app_scope_id && binding.agent_id.as_str() == worker_id
-        })
-        .max_by_key(|binding| binding.endpoint_generation)
-        .cloned()
-}
-
 fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifecycleTarget {
     let selected = state
         .workers
@@ -992,7 +974,6 @@ fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifec
         project_scope: binding.project_scope.clone(),
         app_scope_id: binding.app_scope_id.clone(),
         binding_id: binding.binding_id.clone(),
-        endpoint_generation: binding.endpoint_generation,
         transport: PeerLifecycleTransport {
             kind,
             endpoint: selected
@@ -1025,6 +1006,7 @@ pub(super) fn unregister_self(
     context: Option<&ProjectContext>,
     worker_id: &str,
     token: &str,
+    selected: Option<&RuntimeBinding>,
 ) -> Resp {
     let Some(context) = context else {
         return self_removal_failure("PROJECT_CONTEXT_REQUIRED", PeerLifecycleOutcome::Refused);
@@ -1040,13 +1022,19 @@ pub(super) fn unregister_self(
         if let Err(response) = verify(&state, worker_id, token) {
             return response;
         }
-        let binding = binding_for_authenticated_self(&state, context, worker_id);
+        let binding = selected.cloned();
         let Some(binding) = binding else {
             let mut already_absent =
                 result(PeerLifecycleAction::Close, PeerLifecycleOutcome::Complete);
             already_absent.source = PeerLifecycleSource::CommittedProjection;
             return response(already_absent, None);
         };
+        if binding.agent_id.as_str() != worker_id
+            || binding.project_scope != context.project_scope
+            || binding.app_scope_id != context.app_scope_id
+        {
+            return Resp::err("SELF_BINDING_SCOPE_MISMATCH");
+        }
         let target = target_for_self_binding(&state, &binding);
         let snapshot = state::responsibility_snapshot(&state, binding.agent_id.as_str());
         let snapshot_captured_ms = state
@@ -1139,10 +1127,7 @@ fn retire_control_plane_target(
         let Some(binding) = state
             .global
             .lookup_binding_for(&route_scope, &target.binding_id)
-            .filter(|binding| {
-                binding.agent_id.as_str() == target.worker_id
-                    && binding.endpoint_generation == target.endpoint_generation
-            })
+            .filter(|binding| binding.agent_id.as_str() == target.worker_id)
             .cloned()
         else {
             close.worker_retirement.state = PeerLifecycleStage::Failed;
@@ -1151,19 +1136,7 @@ fn retire_control_plane_target(
             close.subscription_retirement.state = PeerLifecycleStage::Failed;
             return close;
         };
-        let Some(next_generation) = binding.endpoint_generation.checked_add(1) else {
-            // The exact binding generation cannot be advanced, so the control
-            // plane cannot be retired. Host terminal stays verified; the
-            // operation stays cleanup-open with its fence retained.
-            close.worker_retirement.state = PeerLifecycleStage::Failed;
-            close.binding_retirement.state = PeerLifecycleStage::Failed;
-            close.route_retirement.state = PeerLifecycleStage::Failed;
-            close.subscription_retirement.state = PeerLifecycleStage::Failed;
-            close.close_outcome = "cleanup-open: PEER_LIFECYCLE_GENERATION_EXHAUSTED".into();
-            return close;
-        };
         let mut retired = binding.clone();
-        retired.endpoint_generation = next_generation;
         retired.native_thread_id = None;
         retired.tmux_endpoint = None;
         let mut events = Vec::new();
@@ -1202,7 +1175,10 @@ fn retire_control_plane_target(
         }
         (events, binding)
     };
-    if let Err(error) = server.try_commit(&events) {
+    let retirement =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .retire_binding(&route_binding);
+    if let Err(error) = retirement.and_then(|()| server.try_commit(&events)) {
         close.worker_retirement.state = PeerLifecycleStage::Unknown;
         close.binding_retirement.state = PeerLifecycleStage::Unknown;
         close.route_retirement.state = PeerLifecycleStage::Unknown;
@@ -1228,7 +1204,6 @@ fn retire_control_plane_target(
     {
         Some(binding)
             if binding.agent_id.as_str() == target.worker_id
-                && binding.endpoint_generation == target.endpoint_generation.saturating_add(1)
                 && binding.native_thread_id.is_none()
                 && binding.tmux_endpoint.is_none() =>
         {

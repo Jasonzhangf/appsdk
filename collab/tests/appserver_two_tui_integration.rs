@@ -2,13 +2,15 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/communication_receiver.rs"]
+mod communication_receiver;
 #[path = "support/daemon_readiness.rs"]
 mod daemon_readiness;
 
@@ -26,6 +28,8 @@ mod context_minimality;
 mod degraded_user_maintenance;
 #[path = "board/directory_unknown_cli.rs"]
 mod directory_unknown_cli;
+#[path = "board/manual_communication.rs"]
+mod manual_communication;
 #[path = "board/name_adjudication.rs"]
 mod name_adjudication;
 #[path = "board/name_confirmed_takeover.rs"]
@@ -293,11 +297,15 @@ fn name_mailbox_public_handoff_recv_preserves_old_consumed_history() {
     );
     let id = pending["msg_id"].as_str().unwrap();
     assert_eq!(pending["consumed"], false);
-    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
-        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
+    let project = std::fs::canonicalize(&fixture.project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| state["agent_presence"][&project][alice["identity"]["worker_id"].as_str().unwrap()] = json!({
+        "project_scope":project,
         "worker_id":alice["identity"]["worker_id"], "session_id":THREAD_A,
         "presence":"online", "reason":"isolated fixture", "observed_ms":1
-    }})]);
+    }));
     let next = fixture.run_public(&["context", "--approve-grant",
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture confirmed handoff","replace_confirmed":true}"#], THREAD_B);
     let moved = fixture.run_public(&["msg", id], THREAD_B);
@@ -415,7 +423,6 @@ fn context_names_allocate_idempotently_and_restore_jenny_with_authorization() {
     let fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(first["name"], "Alice", "{first}");
-    assert_eq!(first["name_resolution"]["outcome"], "committed");
     let repeat = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(repeat["name"], "Alice");
     assert_eq!(
@@ -437,7 +444,6 @@ fn context_names_allocate_idempotently_and_restore_jenny_with_authorization() {
         master["master"]["worker_id"],
         first["identity"]["worker_id"]
     );
-    assert_eq!(master["name_resolution"]["outcome"], "committed");
 }
 
 #[test]
@@ -447,25 +453,25 @@ fn context_names_explicit_restore_commits_directly_and_query_is_read_only() {
     let bob = fixture.run_public(&["context"], THREAD_B);
     let output = fixture.command_public(&["context", "--op", "names-restore",
         "--approve-grant", r#"{"action":"restore_name","requested_name":"Alice","authorization":"restore my named work"}"#], THREAD_B);
+    assert!(
+        output.status.success(),
+        "authorized name handoff: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     // An explicit authorized name change commits directly even when another
     // carrier holds the target online; there is no second confirmation.
     let restored: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(restored["ok"], true, "{restored}");
-    assert_eq!(
-        restored["result"]["snapshot"]["name_resolution"]["outcome"], "committed",
-        "{restored}"
-    );
     assert_eq!(restored["result"]["snapshot"]["name"], "Alice");
     assert_eq!(
         restored["result"]["snapshot"]["identity"]["worker_id"],
         bob["identity"]["worker_id"]
     );
-    let control = std::fs::read_to_string(fixture.host_state.join("routes.jsonl")).unwrap();
-    let control: Value = control
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|line| line["kind"] == "binding_control")
-        .expect("current bindings are saved");
+    let control: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
     let slots = control["slots"].as_array().unwrap();
     let current = slots
         .iter()
@@ -484,16 +490,23 @@ fn context_names_explicit_restore_commits_directly_and_query_is_read_only() {
         "the same carrier must not retain its previous active name: {slots:?}"
     );
     fixture.restart_daemon();
+    let current_map = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let current_routes = std::fs::read(fixture.host_state.join("routes.json")).unwrap();
+    let current_workers = fixture.current_state()["workers"].clone();
     let query = fixture.command_public(&["context", "--op", "names-restore", "--query"], THREAD_B);
+    assert!(query.status.success());
     let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(query["result"]["outcome"], "completed", "{query}");
+    assert_eq!(query["result"]["snapshot"]["name"], "Alice");
     assert_eq!(
-        query["result"]["queried_operation"]["outcome"], "completed",
-        "{query}"
+        std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        current_map
     );
     assert_eq!(
-        query["result"]["queried_operation"]["operation_id"], "names-restore",
-        "{query}"
+        std::fs::read(fixture.host_state.join("routes.json")).unwrap(),
+        current_routes
     );
+    assert_eq!(fixture.current_state()["workers"], current_workers);
     // The displaced original holder keeps its identity worker; only the name
     // was moved by the explicit change.
     let after = fixture.run_public(&["context"], THREAD_A);
@@ -504,61 +517,79 @@ fn context_names_explicit_restore_commits_directly_and_query_is_read_only() {
 }
 
 #[test]
-fn context_names_changed_session_without_anchor_gets_fresh_name_without_migration() {
+fn context_names_authorized_new_session_continues_named_open_tasks_and_preserves_closed_assignment()
+{
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     let worker = first["identity"]["worker_id"].as_str().unwrap();
-    let mut events = Vec::new();
+    for id in ["open-a", "open-b", "closed"] {
+        fixture.run_public(
+            &["task", "register", id, "--next", "fixture continuation"],
+            THREAD_A,
+        );
+    }
+    fixture.update_current_state(|state| {
     for (id, status) in [
         ("open-a", "working"),
         ("open-b", "accepted"),
         ("closed", "closed"),
     ] {
-        events.push(json!({"ev":"TaskCreated", "task":{
-            "id":id,"owner":worker,"created_by":worker,"status":status,
-            "priority":"p2", "created_ms":1,"updated_ms":1
-        }}));
-        events.push(json!({"ev":"TaskAssignmentUpdated", "assignment":{
+        state["tasks"][id]["status"] = json!(status);
+        state["task_assignments"][id] = json!({
             "task_id":id,"name":"Alice","session_id":THREAD_A,"assignment_revision":1,"updated_ms":1
-        }}));
+        });
     }
-    fixture.append_name_events(&events);
-    fixture
-        .state
-        .lock()
-        .unwrap()
-        .get_mut(THREAD_A)
-        .unwrap()
-        .session_id = Some(THREAD_B.into());
-    let output = fixture.command_public_with_session(&["context"], THREAD_B, THREAD_A);
+    });
+    let closed = fixture.current_state()["task_assignments"]["closed"].clone();
+    let closed_task = fixture.current_state()["tasks"]["closed"].clone();
+    let second = fixture.run_public(&["context"], THREAD_B);
+    assert_ne!(second["identity"]["worker_id"], worker);
+    assert_ne!(second["name"], "Alice");
+    for id in ["open-a", "open-b"] {
+        assert_eq!(fixture.current_state()["tasks"][id]["owner"], worker);
+    }
+    let output = fixture.command_public(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Alice","authorization":"user continues named work in the new session"}"#], THREAD_B);
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["ok"], true, "{result}");
     let snapshot = &result["result"]["snapshot"];
     assert_eq!(
         snapshot["identity"]["worker_id"],
-        first["identity"]["worker_id"]
+        second["identity"]["worker_id"]
     );
-    // The carrier session changed. The recorded name still belongs to this
-    // worker, so the daemon keeps the name and rebinds its open tasks to the
-    // current session; closed task history stays unchanged.
+    // The authorized current name owns open work across different carriers.
     assert_eq!(snapshot["name"], "Alice", "{snapshot}");
     assert_eq!(snapshot["session_id"], THREAD_B, "{snapshot}");
     assert_eq!(snapshot["binding"]["session_id"], THREAD_B);
-    let journal = std::fs::read_to_string(fixture.name_journal()).unwrap();
-    let resolution: Value = journal
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["ev"] == "NameResolutionCommitted")
-        .last()
-        .unwrap();
-    assert_eq!(resolution["occupancy"]["name"], "Alice", "{resolution}");
-    let assignments = resolution["assignments"].as_array().unwrap();
-    assert_eq!(assignments.len(), 2, "{resolution}");
-    for assignment in assignments {
-        assert_ne!(assignment["task_id"], "closed");
+    let state = fixture.current_state();
+    for id in ["open-a", "open-b"] {
+        let assignment = &state["task_assignments"][id];
+        assert_eq!(assignment["name"], "Alice");
         assert_eq!(assignment["session_id"], THREAD_B);
         assert_eq!(assignment["assignment_revision"], 2);
+        assert_eq!(state["tasks"][id]["owner"], second["identity"]["worker_id"]);
     }
+    assert_eq!(state["task_assignments"]["closed"], closed);
+    assert_eq!(state["tasks"]["closed"], closed_task);
+    let displaced = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(displaced["identity"]["worker_id"], worker);
+    assert_ne!(displaced["name"], "Alice");
+    fixture.restart_daemon();
+    let restored = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(restored["name"], "Alice");
+    let after = fixture.current_state();
+    for id in ["open-a", "open-b"] {
+        assert_eq!(after["task_assignments"][id], state["task_assignments"][id]);
+        assert_eq!(after["tasks"][id], state["tasks"][id]);
+    }
+    assert_eq!(after["task_assignments"]["closed"], closed);
+    assert_eq!(after["tasks"]["closed"], closed_task);
 }
 
 #[test]
@@ -566,25 +597,207 @@ fn context_names_online_replacement_approves_directly() {
     let mut fixture = AppFixture::new();
     let alice = fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
-    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
-        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
+    let project = std::fs::canonicalize(&fixture.project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| state["agent_presence"][&project][alice["identity"]["worker_id"].as_str().unwrap()] = json!({
+        "project_scope":project,
         "worker_id":alice["identity"]["worker_id"], "session_id":THREAD_A,
         "presence":"online", "reason":"isolated current agent fact", "observed_ms":1
-    }})]);
+    }));
+    let before = fixture.current_state();
     let output = fixture.command_public(&["context", "--approve-grant",
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"restore my work"}"#], THREAD_B);
+    assert!(
+        output.status.success(),
+        "online name handoff: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let restored: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(restored["ok"], true, "{restored}");
-    assert_eq!(
-        restored["result"]["snapshot"]["name_resolution"]["outcome"], "committed",
-        "{restored}"
-    );
     assert_eq!(restored["result"]["snapshot"]["name"], "Alice");
     let restored = fixture.run_public(&["context"], THREAD_B);
     assert_eq!(restored["name"], "Alice", "{restored}");
-    let events = std::fs::read_to_string(fixture.name_journal()).unwrap();
-    assert!(!events.contains("WorkerClosed"));
-    assert!(!events.contains("GlobalMasterRevoked"));
+    let after = fixture.current_state();
+    let old_worker = alice["identity"]["worker_id"].as_str().unwrap();
+    assert_eq!(after["workers"][old_worker], before["workers"][old_worker]);
+    assert_eq!(after["global"]["projects"], before["global"]["projects"]);
+}
+
+#[test]
+fn context_names_full_pool_reuses_the_released_source_and_refuses_true_exhaustion() {
+    let fixture = AppFixture::new();
+    let mut contexts = Vec::new();
+    for index in 0..20 {
+        let thread = format!("ordinary-pool-{index}");
+        let context = fixture.run_public(&["context"], &thread);
+        contexts.push((thread, context));
+    }
+    let first_worker = contexts[0].1["identity"]["worker_id"].clone();
+    let incoming_worker = contexts[1].1["identity"]["worker_id"].clone();
+    let target = contexts[0].1["name"].as_str().unwrap();
+    let released = contexts[1].1["name"].clone();
+    let approval = json!({"action":"restore_name","requested_name":target,
+        "authorization":"user continues the selected name with the full pool"})
+    .to_string();
+    let restored = fixture.run_public(&["context", "--approve-grant", &approval], &contexts[1].0);
+    assert_eq!(restored["identity"]["worker_id"], incoming_worker);
+    assert_eq!(restored["name"], target);
+    let displaced = fixture.run_public(&["context"], &contexts[0].0);
+    assert_eq!(displaced["identity"]["worker_id"], first_worker);
+    assert_eq!(displaced["name"], released);
+    let map_path = fixture.host_state.join("identity-map.json");
+    let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    assert_eq!(
+        map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|slot| slot["identity_status"] == "active")
+            .count(),
+        20
+    );
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user assigns the pool master",
+        ],
+        &contexts[19].0,
+    );
+    fixture.run_public(&["context"], "ordinary-pool-extra");
+    let before = std::fs::read(&map_path).unwrap();
+    let authority = fixture.run_public(&["master", "status"], &contexts[19].0);
+    let exhausted =
+        fixture.command_public(&["context", "--approve-grant", &approval], &contexts[19].0);
+    assert!(!exhausted.status.success());
+    assert!(String::from_utf8_lossy(&exhausted.stderr).contains("NAME_POOL_FULL"));
+    assert_eq!(std::fs::read(&map_path).unwrap(), before);
+    let after = fixture.run_public(&["master", "status"], &contexts[19].0);
+    for field in [
+        "worker_id",
+        "grant_id",
+        "grant_generation",
+        "binding_id",
+        "assigned_by",
+        "assigned_ms",
+        "approval",
+        "scope",
+    ] {
+        assert_eq!(
+            after["master"][field], authority["master"][field],
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn context_names_primary_effect_failure_keeps_both_identities_and_recovers_named_work_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    let second = fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "target-name-work",
+            "--next",
+            "keep target work",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "source-name-work",
+            "--next",
+            "keep source work",
+        ],
+        THREAD_B,
+    );
+    let state_before = fixture.current_state();
+    let path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let directory = path.parent().unwrap();
+    let permissions = std::fs::metadata(directory).unwrap().permissions();
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let attempted = fixture.command_public(&["context", "--op", "ordinary-name-effects-fail", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Alice","authorization":"user explicitly continues named work"}"#], THREAD_B);
+    std::fs::set_permissions(directory, permissions).unwrap();
+    assert!(!attempted.status.success());
+    assert!(
+        String::from_utf8_lossy(&attempted.stderr).contains("CONTROL_COMMITTED_EFFECTS_PENDING")
+    );
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let active: Vec<_> = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| slot["identity_status"] == "active")
+        .collect();
+    assert_eq!(active.len(), 2);
+    for worker in [
+        &first["identity"]["worker_id"],
+        &second["identity"]["worker_id"],
+    ] {
+        assert_eq!(
+            active
+                .iter()
+                .filter(|slot| &slot["current"]["binding"]["agent_id"] == worker)
+                .count(),
+            1
+        );
+    }
+    let pending: Vec<_> = map["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|effect| effect["operation_id"] == "ordinary-name-effects-fail")
+        .collect();
+    assert_eq!(pending.len(), 2);
+    let state_failed = fixture.current_state();
+    assert_eq!(state_failed["tasks"], state_before["tasks"]);
+    assert_eq!(
+        state_failed["task_assignments"],
+        state_before["task_assignments"]
+    );
+    assert_eq!(
+        state_failed["name_occupancies"],
+        state_before["name_occupancies"]
+    );
+    fixture.restart_daemon();
+    let restored = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(restored["name"], "Alice");
+    let state = fixture.current_state();
+    for id in ["target-name-work", "source-name-work"] {
+        assert_eq!(state["tasks"][id]["owner"], second["identity"]["worker_id"]);
+    }
+    assert_eq!(
+        state["task_assignments"]["target-name-work"]["name"],
+        "Alice"
+    );
+    assert_eq!(
+        state["task_assignments"]["source-name-work"],
+        state_before["task_assignments"]["source-name-work"]
+    );
+    let displaced = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(
+        displaced["identity"]["worker_id"],
+        first["identity"]["worker_id"]
+    );
+    assert_eq!(displaced["name"], "Bob");
+    assert_eq!(fixture.current_state()["tasks"], state["tasks"]);
+    assert_eq!(
+        fixture.current_state()["task_assignments"],
+        state["task_assignments"]
+    );
 }
 
 #[test]
@@ -601,22 +814,12 @@ fn context_names_master_commands_and_peer_restore_keep_jenny_authority_consisten
         ],
         THREAD_A,
     );
-    let attempted = fixture.command_public(
-        &["master", "promote", "--approval", "user requested Jenny"],
-        THREAD_B,
-    );
-    // A free-text promote alone is not a typed takeover of Jenny: it pauses
-    // pending an explicit restore_master confirmation and keeps the incumbent.
-    assert!(!attempted.status.success(), "{:?}", attempted);
     let still_master = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(still_master["name"], "Jenny");
     assert_eq!(
         still_master["master"]["worker_id"],
         alice["identity"]["worker_id"]
     );
-    let legacy = fixture.command_public(&["worker", "name", "Carol"], THREAD_A);
-    assert!(!legacy.status.success(), "{:?}", legacy);
-    assert!(String::from_utf8_lossy(&legacy.stderr).contains("WORKER_NAME_RESTORE_REQUIRED"));
     let peer = fixture.run_public(
         &[
             "context",
@@ -627,7 +830,6 @@ fn context_names_master_commands_and_peer_restore_keep_jenny_authority_consisten
     );
     assert_ne!(peer["name"], "Jenny", "{peer}");
     assert!(peer["master"].is_null(), "{peer}");
-    assert_eq!(peer["name_resolution"]["outcome"], "committed");
     fixture.run_public(
         &["master", "promote", "--approval", "restore project goal"],
         THREAD_A,
@@ -721,28 +923,43 @@ struct AppFixture {
 }
 
 impl AppFixture {
-    fn name_journal(&self) -> PathBuf {
-        let project = std::fs::canonicalize(&self.project).unwrap();
-        let record: Value = std::fs::read_to_string(self.host_state.join("routes.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .find(|record| record["project_scope"] == project.to_string_lossy().as_ref())
-            .unwrap();
-        PathBuf::from(record["storage_root"].as_str().unwrap())
-            .join(".agent-collab/server/journal.jsonl")
+    fn project_state_for(&self, project: &Path, app: &str) -> PathBuf {
+        let project = project.canonicalize().unwrap();
+        let routes: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(self.host_state.join("routes.json")).unwrap())
+                .unwrap();
+        let matches: Vec<_> = routes
+            .iter()
+            .filter(|route| {
+                route["project_scope"].as_str() == project.to_str() && route["app_scope_id"] == app
+            })
+            .collect();
+        assert_eq!(matches.len(), 1, "one exact current project/app route");
+        PathBuf::from(matches[0]["storage_root"].as_str().unwrap())
+            .join(".agent-collab/server/state.json")
     }
 
-    fn append_name_events(&mut self, events: &[Value]) {
+    fn current_state_for(&self, project: &Path, app: &str) -> Value {
+        let document: Value =
+            serde_json::from_slice(&std::fs::read(self.project_state_for(project, app)).unwrap())
+                .unwrap();
+        assert_eq!(document["schema_version"], 1);
+        assert!(document["state"].is_object());
+        document["state"].clone()
+    }
+
+    fn current_state(&self) -> Value {
+        self.current_state_for(&self.project, "appserver-cli")
+    }
+
+    fn update_current_state(&mut self, update: impl FnOnce(&mut Value)) {
         self.stop_daemon();
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(self.name_journal())
-            .unwrap();
-        for event in events {
-            writeln!(file, "{event}").unwrap();
-        }
-        file.sync_all().unwrap();
+        let path = self.project_state_for(&self.project, "appserver-cli");
+        let mut document: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["schema_version"], 1);
+        assert!(document["state"].is_object());
+        update(&mut document["state"]);
+        std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
         self.start_daemon();
     }
 
@@ -1052,7 +1269,9 @@ impl Drop for AppFixture {
 #[derive(Clone, Debug)]
 struct ThreadState {
     inputs: Vec<Value>,
+    receiver: Option<std::sync::mpsc::Sender<Value>>,
     reject_input: bool,
+    reject_as_missing: bool,
     session_id: Option<String>,
     status: String,
     active_turn: Option<String>,
@@ -1066,7 +1285,9 @@ impl ThreadState {
     fn new() -> Self {
         Self {
             inputs: Vec::new(),
+            receiver: None,
             reject_input: false,
+            reject_as_missing: false,
             session_id: None,
             status: "idle".into(),
             active_turn: None,
@@ -1106,9 +1327,21 @@ fn serve_connection(
             continue;
         };
         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-        let response = dispatch(method, params, id, &state, project_root);
+        let response = dispatch(method, params.clone(), id, &state, project_root);
         if write_frame(&mut stream, &response).is_err() {
             break;
+        }
+        if response.get("error").is_none()
+            && matches!(method, "turn/start" | "turn/steer" | "thread/queue/add")
+        {
+            let receiver = state
+                .lock()
+                .unwrap()
+                .get(params["threadId"].as_str().unwrap_or_default())
+                .and_then(|thread| thread.receiver.clone());
+            if let Some(receiver) = receiver {
+                let _ = receiver.send(json!({"method":method,"params":params}));
+            }
         }
     }
 }
@@ -1125,6 +1358,14 @@ fn dispatch(
         "thread/loaded/list" => json!({"id": id, "result": {"data": []}}),
         "thread/resume" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+            if state
+                .lock()
+                .unwrap()
+                .get(&thread_id)
+                .is_some_and(|s| s.reject_as_missing)
+            {
+                return json!({"id":id,"error":{"code":-32000,"message":format!("thread not found: {thread_id}")}});
+            }
             json!({"id": id, "result": {"thread": {"id": thread_id}}})
         }
         "thread/read" => thread_read(params, id, state, project_root),
@@ -1499,31 +1740,24 @@ fn public_default_immediate_recovery_reaches_the_adaptor_exactly_once() {
     assert_eq!(before["state"], "pending");
     assert_eq!(before["wake_attempts"], 0);
 
-    // Restore notifications and replay a historical cancellation of the
-    // default lease. The daemon reconciles the lease and binds the pending
+    // Restore notifications with the current default lease cancelled.
+    // The daemon reconciles the lease and binds the pending
     // immediate report; the automatic attempt owner may submit it only once.
     fixture.stop_daemon();
     std::fs::write(&config_path, "[notifications]\nenabled=true\n").unwrap();
-    fixture.append_name_events(&[json!({
-        "ev": "NotificationSuppressed",
-        "subscription_id": default_id,
-        "status": "cancelled",
-        "reason": "explicit-unsubscribe",
-        "updated_ms": 1
-    })]);
+    fixture.update_current_state(|state| {
+        let lease = &mut state["notification_subscriptions"][&default_id];
+        assert!(lease.is_object());
+        lease["status"] = json!("cancelled");
+        lease["status_reason"] = json!("explicit-unsubscribe");
+        lease["updated_ms"] = json!(1);
+    });
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        let accepted = events.iter().any(|event| {
-            event["ev"] == "NotificationDeliveryAccepted"
-                && event["message_id"] == message_id
-                && event["evidence"].is_object()
-        });
+        let state = fixture.current_state();
+        let accepted = state["notification_delivery_accepted"][&message_id].is_i64()
+            && state["notification_delivery_evidence"][&message_id].is_object();
         let inputs = fixture.state.lock().unwrap();
         let observed = inputs.get(THREAD_B).is_some_and(|state| {
             state
@@ -1544,34 +1778,13 @@ fn public_default_immediate_recovery_reaches_the_adaptor_exactly_once() {
 
     let after = fixture.run_public(&["msg", &message_id], THREAD_A);
     assert_eq!(after["wake_attempts"], 1);
-    let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    let immediate_events = events
-        .iter()
-        .filter(|event| {
-            event["ev"] == "DeliveryMode"
-                && event["msg_id"] == message_id
-                && event["mode"] == "immediate"
-        })
-        .count();
-    let accepted_events = events
-        .iter()
-        .filter(|event| {
-            event["ev"] == "NotificationDeliveryAccepted" && event["message_id"] == message_id
-        })
-        .count();
-    let attempted_events = events
-        .iter()
-        .filter(|event| {
-            event["ev"] == "WakeAttempted"
-                && event["ids"]
-                    .as_array()
-                    .is_some_and(|ids| ids.iter().any(|id| id == &message_id))
-        })
-        .count();
+    let state = fixture.current_state();
+    assert_eq!(state["delivery_modes"][&message_id], "immediate");
+    assert_eq!(state["msgs"][&message_id]["wake_attempt_count"], 1);
+    let accepted_before_restart = state["notification_delivery_accepted"][&message_id].clone();
+    let evidence_before_restart = state["notification_delivery_evidence"][&message_id].clone();
+    assert!(accepted_before_restart.is_i64());
+    assert!(evidence_before_restart.is_object());
     let observed_events = {
         let inputs = fixture.state.lock().unwrap();
         inputs.get(THREAD_B).map_or(0, |state| {
@@ -1583,18 +1796,6 @@ fn public_default_immediate_recovery_reaches_the_adaptor_exactly_once() {
         })
     };
     assert_eq!(
-        immediate_events, 1,
-        "public sendmessage must persist immediate mode"
-    );
-    assert_eq!(
-        attempted_events, 1,
-        "the recovered report must be attempted once"
-    );
-    assert_eq!(
-        accepted_events, 1,
-        "the recovered report must be accepted once"
-    );
-    assert_eq!(
         observed_events, 1,
         "the recovered report must reach native input once"
     );
@@ -1604,17 +1805,16 @@ fn public_default_immediate_recovery_reaches_the_adaptor_exactly_once() {
     fixture.restart_daemon();
     fixture.run_public(&["context"], THREAD_B);
     thread::sleep(Duration::from_millis(1300));
-    let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    let accepted_after_replay = events
-        .iter()
-        .filter(|event| {
-            event["ev"] == "NotificationDeliveryAccepted" && event["message_id"] == message_id
-        })
-        .count();
+    let state = fixture.current_state();
+    assert_eq!(state["msgs"][&message_id]["wake_attempt_count"], 1);
+    assert_eq!(
+        state["notification_delivery_accepted"][&message_id],
+        accepted_before_restart
+    );
+    assert_eq!(
+        state["notification_delivery_evidence"][&message_id],
+        evidence_before_restart
+    );
     let observed_after_replay = {
         let inputs = fixture.state.lock().unwrap();
         inputs.get(THREAD_B).map_or(0, |state| {
@@ -1625,10 +1825,6 @@ fn public_default_immediate_recovery_reaches_the_adaptor_exactly_once() {
                 .count()
         })
     };
-    assert_eq!(
-        accepted_after_replay, 1,
-        "reconciliation must not replay an accepted report"
-    );
     assert_eq!(
         observed_after_replay, 1,
         "replay must not submit the report twice"
@@ -1817,10 +2013,12 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     assert_eq!(promoted_a["scope"]["project_scope"], project_scope);
     assert_eq!(promoted_a["scope"]["app_scope_id"], app_scope_id);
 
-    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
-        "project_scope":project_scope, "worker_id":worker_a, "session_id":THREAD_A,
-        "presence":"online", "reason":"current online holder fixture", "observed_ms":1
-    }})]);
+    fixture.update_current_state(|state| {
+        state["agent_presence"][project_scope.as_str()][worker_a.as_str()] = json!({
+            "project_scope":project_scope, "worker_id":worker_a, "session_id":THREAD_A,
+            "presence":"online", "reason":"current online holder fixture", "observed_ms":1
+        })
+    });
     let promoted_b = fixture.run_public(
         &[
             "context",
@@ -2102,7 +2300,6 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
         registered["identity"]["transport"]["namespace"],
         "codex_tui"
     );
-    let generation = registered["binding"]["endpoint_generation"].clone();
     let binding = registered["binding"].clone();
     assert!(
         registered["subscriptions"]
@@ -2114,18 +2311,16 @@ fn one_full_supplement_establishes_and_then_replays_the_same_identity() {
         "the default direct-message lease must be armed after registration: {registered}"
     );
 
-    // The same real native anchor replayed through the automatic path returns
-    // the same worker and generation, so the supplement is idempotent.
+    // Repeating current facts retains the same worker and binding.
     let replay = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(replay["identity"]["worker_id"], worker);
-    assert_eq!(replay["binding"]["endpoint_generation"], generation);
     assert_eq!(replay["binding"], binding);
 
     drop(fixture);
 }
 
 #[test]
-fn every_context_requires_current_thread_when_environment_omits_it() {
+fn first_context_requires_thread_and_current_map_restores_without_it() {
     let mut fixture = AppFixture::new();
     let missing = fixture.command_without_thread(&["context"], THREAD_A);
     assert!(!missing.status.success());
@@ -2147,12 +2342,16 @@ fn every_context_requires_current_thread_when_environment_omits_it() {
     let registered = registered_response["result"]["snapshot"].clone();
     assert_eq!(registered["registered"], true);
     let missing_again = fixture.command_without_thread(&["context"], THREAD_A);
-    assert!(!missing_again.status.success());
+    assert!(missing_again.status.success());
     let missing_again: Value = serde_json::from_slice(&missing_again.stdout).unwrap();
-    assert_eq!(missing_again["result"]["outcome"], "missing_facts");
+    assert_eq!(missing_again["result"]["outcome"], "completed");
     assert_eq!(
-        missing_again["result"]["requires"]["fields"],
-        json!(["thread_id"])
+        missing_again["result"]["snapshot"]["binding"],
+        registered["binding"]
+    );
+    assert_eq!(
+        missing_again["result"]["snapshot"]["identity"],
+        registered["identity"]
     );
     for args in [
         vec!["context", "--provide", &supplement],
@@ -2214,10 +2413,8 @@ fn session_only_identity_read_is_scoped_pure_and_ignores_historical_credentials(
         .join("identities/historical-reader/identity.json");
     std::fs::create_dir_all(history_path.parent().unwrap()).unwrap();
     std::fs::write(&history_path, serde_json::to_vec(&historical).unwrap()).unwrap();
-    let routes = std::fs::read(fixture.host_state.join("routes.jsonl")).unwrap();
-    let operations = std::fs::read_dir(fixture.host_state.join("context-operations"))
-        .unwrap()
-        .count();
+    let routes = std::fs::read(fixture.host_state.join("routes.json")).unwrap();
+    let mapping = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
     let connections = fixture.appserver_connections.load(Ordering::SeqCst);
     let tasks = fixture.command_without_thread(&["task", "status"], THREAD_A);
     assert!(
@@ -2292,14 +2489,12 @@ fn session_only_identity_read_is_scoped_pure_and_ignores_historical_credentials(
         historical
     );
     assert_eq!(
-        std::fs::read(fixture.host_state.join("routes.jsonl")).unwrap(),
+        std::fs::read(fixture.host_state.join("routes.json")).unwrap(),
         routes
     );
     assert_eq!(
-        std::fs::read_dir(fixture.host_state.join("context-operations"))
-            .unwrap()
-            .count(),
-        operations
+        std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        mapping
     );
     // The explicit wrong-thread requests retain their old verification path;
     // neither session-only reads nor refused addresses contact AppServer.
@@ -2308,19 +2503,64 @@ fn session_only_identity_read_is_scoped_pure_and_ignores_historical_credentials(
         connections
     );
 
-    let mut duplicate: Value = std::fs::read_to_string(fixture.name_journal())
+    fixture.stop_daemon();
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let mut duplicate = map["slots"]
+        .as_array()
         .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["ev"] == "GlobalCurrentThreadRouteSet")
-        .last()
-        .expect("current native route event");
-    duplicate["binding"]["binding_id"] = json!("binding-conflicting-current");
-    duplicate["binding"]["agent_id"] = json!("conflicting-current");
-    duplicate["binding"]["runtime_id"] = json!("runtime-conflicting-current");
-    duplicate["binding"]["native_thread_id"] = json!("conflicting-current-thread");
-    let bound = json!({"ev":"GlobalRuntimeBound","binding":duplicate["binding"]});
-    fixture.append_name_events(&[bound, duplicate]);
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
+        })
+        .unwrap()
+        .clone();
+    duplicate["identity_key"]["name"] = json!("Bob");
+    duplicate["display_slot"] = json!(3);
+    duplicate["current"]["binding"]["binding_id"] = json!("binding-conflicting-current");
+    duplicate["current"]["binding"]["agent_id"] = json!("conflicting-current");
+    duplicate["current"]["binding"]["runtime_id"] = json!("runtime-conflicting-current");
+    duplicate["current"]["binding"]["native_thread_id"] = json!("conflicting-current-thread");
+    duplicate["current"]["transport"]["thread_id"] = json!("conflicting-current-thread");
+    duplicate["previous"] = Value::Null;
+    let binding = duplicate["current"]["binding"].clone();
+    let transport = duplicate["current"]["transport"].clone();
+    map["slots"].as_array_mut().unwrap().push(duplicate);
+    let state_path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    let state = &mut document["state"];
+    let mut duplicate_worker = state["workers"][worker].clone();
+    duplicate_worker["id"] = json!("conflicting-current");
+    duplicate_worker["token"] = json!("conflicting-current-token");
+    duplicate_worker["transport"] = transport.clone();
+    state["workers"]["conflicting-current"] = duplicate_worker;
+    state["global"]["projects"][root.to_str().unwrap()]["runtime_bindings"]
+        ["binding-conflicting-current"] = binding.clone();
+    let mut duplicate_credential: Value = serde_json::from_slice(&credential).unwrap();
+    duplicate_credential["worker_id"] = json!("conflicting-current");
+    duplicate_credential["token"] = json!("conflicting-current-token");
+    duplicate_credential["transport"] = transport;
+    for field in [
+        "agent_id",
+        "runtime_id",
+        "binding_id",
+        "session_id",
+        "native_thread_id",
+    ] {
+        duplicate_credential["runtime"][field] = binding[field].clone();
+    }
+    let duplicate_path = fixture
+        .host_state
+        .join("identities/conflicting-current/identity.json");
+    std::fs::create_dir_all(duplicate_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        duplicate_path,
+        serde_json::to_vec(&duplicate_credential).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(state_path, serde_json::to_vec(&document).unwrap()).unwrap();
+    std::fs::write(map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+    fixture.start_daemon();
     let ambiguous = call(Some(context), THREAD_A, None);
     assert_eq!(ambiguous["ok"], false, "{ambiguous}");
     assert!(

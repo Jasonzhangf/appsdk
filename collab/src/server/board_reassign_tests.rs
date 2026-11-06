@@ -27,7 +27,6 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
         .invitation = Some(crate::board::BoardInvitation {
         peer_id: "current".into(),
         binding_id: binding.binding_id.as_str().into(),
-        endpoint_generation: binding.endpoint_generation,
         message_id: "reassign-invite".into(),
         created_ms: 3,
         original_status: Some(status.into()),
@@ -71,6 +70,23 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
     (server, root, route)
 }
 
+/// Current committed session fixture. Public recovery is covered by the map
+/// consumer tests; this fixture exercises the Board's business handoff owner.
+fn refresh_board_fixture(server: &Server, route: &RouteScope, worker: &str, session: &str) {
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+    let key = control.key_for_worker(&route.project_scope_id, &route.app_scope_id, worker).unwrap().unwrap();
+    let mut transport = control.slot(key).unwrap().active_binding().unwrap().transport.clone();
+    transport.session_id = Some(session.into());
+    if let Some(endpoint) = transport.tmux_endpoint.as_mut() {
+        endpoint.codex_session_id = Some(session.into());
+    }
+    let response = crate::server::peer_tests::seed_committed_owner(
+        server, worker, &format!("token-{worker}"), &transport,
+        &server.root.to_string_lossy(), Some(route.app_scope_id.clone()),
+    );
+    assert!(response.ok, "{response:?}");
+}
+
 #[test]
 fn board_reassign_accept_preserves_status_resources_and_refresh_isolation() {
     for status in [
@@ -92,7 +108,7 @@ fn board_reassign_accept_preserves_status_resources_and_refresh_isolation() {
             None,
         );
         assert!(response.ok, "{status}: {:?}", response.error);
-        let mut state = server.state.lock().unwrap();
+        let state = server.state.lock().unwrap();
         assert_eq!(state.tasks["named-work"].status, status);
         assert_eq!(state.tasks["named-work"].owner, "current");
         assert_eq!(state.task_assignment("named-work").unwrap().name, "Bob");
@@ -117,45 +133,22 @@ fn board_reassign_accept_preserves_status_resources_and_refresh_isolation() {
         assert!(board_resume_gate(&state, "current", "named-work").is_ok());
         assert!(board_resume_gate(&state, "old", "named-work").is_err());
         // A later refresh of the old name must not reclaim this assignment.
-        let mut old = state
-            .name_occupancy(route.project_scope_id.as_str(), "Alice")
-            .unwrap()
-            .clone();
-        old.session_id = "old-refreshed".into();
-        old.occupancy_revision += 1;
-        for event in name_resolution::build_name_resolution_events(
-            &state,
-            route.project_scope_id.as_str(),
-            &old,
-        ) {
-            state.apply_checked(&event).unwrap();
-        }
+        drop(state);
+        refresh_board_fixture(&server, &route, "old", "old-refreshed");
+        let state = server.state.lock().unwrap();
         assert_eq!(
             state.task_assignment("named-work").unwrap().session_id,
             "session-current"
         );
-        let mut new = state
-            .name_occupancy(route.project_scope_id.as_str(), "Bob")
-            .unwrap()
-            .clone();
-        new.session_id = "current-refreshed".into();
-        new.occupancy_revision += 1;
-        for event in name_resolution::build_name_resolution_events(
-            &state,
-            route.project_scope_id.as_str(),
-            &new,
-        ) {
-            state.apply_checked(&event).unwrap();
-        }
+        drop(state);
+        refresh_board_fixture(&server, &route, "current", "current-refreshed");
+        let state = server.state.lock().unwrap();
         assert_eq!(
             state.task_assignment("named-work").unwrap().session_id,
             "current-refreshed"
         );
         assert_eq!(state.tasks["named-work"].status, status);
-        let mut replayed = State::default();
-        for event in state.snapshot_events() {
-            replayed.apply_checked(&event).unwrap();
-        }
+        let replayed: State = serde_json::from_slice(&serde_json::to_vec(&*state).unwrap()).unwrap();
         assert_eq!(
             replayed.task_assignment("named-work"),
             state.task_assignment("named-work")
@@ -177,7 +170,7 @@ fn board_reassign_foreign_resource_fails_without_partial_assignment() {
         .get_mut("resource")
         .unwrap()
         .owner_agent_id = "third-party".into();
-    let before = serde_json::to_value(server.state.lock().unwrap().snapshot_events()).unwrap();
+    let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
     let response = board_respond(
         &server,
         "current".into(),
@@ -193,7 +186,7 @@ fn board_reassign_foreign_resource_fails_without_partial_assignment() {
         .unwrap()
         .contains("BOARD_RESOURCE_OWNER_CONFLICT"));
     assert_eq!(
-        serde_json::to_value(server.state.lock().unwrap().snapshot_events()).unwrap(),
+        serde_json::to_value(&*server.state.lock().unwrap()).unwrap(),
         before
     );
     std::fs::remove_dir_all(root).unwrap();

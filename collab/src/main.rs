@@ -38,9 +38,6 @@ use main_context::*;
 mod main_autostart;
 mod main_maintenance;
 
-#[cfg(feature = "context-cancel-test-hooks")]
-mod context_cancel_test_hooks;
-
 #[derive(Parser)]
 #[command(
     name = "collab",
@@ -146,40 +143,9 @@ fn registered_project_identity_with_provide(
 ) -> anyhow::Result<Identity> {
     let paths = scope::HostPaths::resolve()?;
     let facts = collect_identity_facts(provide)?;
-    let session = facts
-        .session_id
-        .as_deref()
-        .or(facts.dsh_session_id.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current agent session id is required")
-        })?;
-    // Names own work; the agent session identifies the current actor. Pane,
-    // thread and endpoint belong to transport recovery, not credential reads.
-    let route = client::resolve_native_session_route(
-        &scope.sock_path(),
-        session,
-        cli_project_context(&scope.root)?,
-    )?;
-    let root = std::fs::canonicalize(&scope.root)?;
-    if route.project_scope.as_str() != root.to_string_lossy() {
-        anyhow::bail!("BOARD_STALE_IDENTITY: current route belongs to another project");
-    }
-    let identity = identity::load_existing_at(&paths, scope, Some(route.agent_id.to_string()))?
-        .ok_or_else(|| {
-            anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current route has no local credential")
-        })?;
-    let runtime = runtime_for_request(&identity)?;
-    if identity.worker_id != route.agent_id.as_str()
-        || identity.project_scope.as_ref() != Some(&route.project_scope)
-        || runtime.appserver_id != route.app_scope_id
-        || runtime.binding_id != route.binding_id
-        || runtime.endpoint_generation != route.endpoint_generation
-        || runtime.session_id != route.session_id
-        || runtime.native_thread_id != route.native_thread_id
-    {
-        anyhow::bail!("BOARD_STALE_IDENTITY: credential does not match the current route");
-    }
-    Ok(identity)
+    identity::registered_from_map(&paths, scope, &facts)?.ok_or_else(|| {
+        anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current caller has no active identity mapping")
+    })
 }
 
 fn require_cli_mailbox_consumer(identity: &Identity) -> anyhow::Result<()> {
@@ -253,7 +219,7 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         if !file_says_reusable {
             return Ok(false);
         }
-        // The route journal on disk is not the live truth: after a daemon
+        // The route declaration on disk is not the live truth: after a daemon
         // restart or re-registration the running daemon may hold no route for
         // this address even though the file still lists one.  Reuse is only
         // valid when the live daemon resolves the same session/thread.
@@ -637,40 +603,6 @@ fn resolve_send_target(scope: &Scope, requested: &str) -> anyhow::Result<SendTar
 /// Build a host-wide cross-project send while keeping `collab send` as the
 /// only public command. Permission failures name the current project master,
 /// so an unauthorized caller learns exactly who can send.
-fn require_current_master(
-    scope: &Scope,
-    ident: &Identity,
-    action: &str,
-    destination: &str,
-) -> anyhow::Result<Value> {
-    let local: Value = call_project(scope, ident, &Req::MasterStatus)?;
-    let master = local
-        .get("master")
-        .filter(|entry| !entry.is_null())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "PERMISSION_DENIED: {action} requires the current project master; no master is active for this project"
-            )
-        })?;
-    let master_worker = master
-        .get("worker_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if master_worker != ident.worker_id {
-        let master_name = master
-            .get("display_name")
-            .and_then(Value::as_str)
-            .unwrap_or(master_worker);
-        anyhow::bail!(
-            "PERMISSION_DENIED: {action} requires this project's current master; current master is {} ({}). You are not permitted to send to {}",
-            master_name,
-            master_worker,
-            destination
-        );
-    }
-    Ok(master.clone())
-}
-
 fn send_cross_project(
     scope: &Scope,
     ident: &Identity,
@@ -713,7 +645,6 @@ fn send_to_ceo(
     body: String,
     in_reply_to: Option<String>,
 ) -> anyhow::Result<()> {
-    require_current_master(scope, ident, "send to ceo", "ceo")?;
     let command = match in_reply_to {
         Some(original) => crate::ceo::CeoCommand::Reply {
             subject,
@@ -1107,17 +1038,9 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         // reachable. Do not infer success from the earlier
                         // liveness observation alone.
                         true
-                    } else if was_running {
-                        // The daemon was already serving before `up`. Autostart
-                        // is a side capability of `up`; a launchd, plist, or
-                        // permission failure here must not fail the command or
-                        // disturb the running daemon. The result still reports
-                        // `autostart.installed=false`.
-                        false
                     } else {
-                        // A real launchd, plist, or permission failure with no
-                        // daemon serving means activation was what `up` needed,
-                        // so surface the original error and exit non-zero.
+                        // Prior liveness cannot make this reload successful:
+                        // bootout may already have removed the old daemon.
                         return Err(anyhow::anyhow!("{}", message));
                     }
                 }
@@ -1266,7 +1189,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "project_scope": route.project_scope,
                 "agent_id": route.agent_id,
                 "binding_id": route.binding_id,
-                "endpoint_generation": route.endpoint_generation,
                 "session_id": route.session_id,
                 "native_thread_id": route.native_thread_id,
                 "tmux_endpoint": candidate.endpoint,
@@ -1429,20 +1351,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 Scope::resolve()?
             };
             match cmd {
-                WorkerCmd::Name { name, reset: _ } => {
-                    let ident = registered_project_identity(&scope)?;
-                    let value: Value = call_project(
-                        &scope,
-                        &ident,
-                        &Req::WorkerName {
-                            worker_id: ident.worker_id.clone(),
-                            token: ident.token.clone(),
-                            name,
-                        },
-                    )?;
-                    out(&value);
-                    Ok(())
-                }
                 WorkerCmd::Status { id } => {
                     let ident = me(&scope)?;
                     let v: serde_json::Value =
@@ -1894,7 +1802,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             approve_grant,
             provide,
             query,
-            return_challenge,
             recover_communication,
         } => {
             // Validate and parse the workflow mutation before any bootstrap or
@@ -1927,20 +1834,16 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     "CONTEXT_WORKFLOW_MUTATION_INVALID: pass exactly one of --workflow-template or --reset-workflow-template"
                 ),
             };
-            let result = if let Some(challenge) = return_challenge {
-                main_context::return_registration_challenge(&challenge)
-            } else {
-                main_context::context_operation_with_intent(
-                    operation_id,
-                    project.as_deref(),
-                    app_scope.as_deref(),
-                    approve_identity.as_deref(),
-                    approve_grant.as_deref(),
-                    provide.as_deref(),
-                    query,
-                    recover_communication,
-                )
-            };
+            let result = main_context::context_operation_with_intent(
+                operation_id,
+                project.as_deref(),
+                app_scope.as_deref(),
+                approve_identity.as_deref(),
+                approve_grant.as_deref(),
+                provide.as_deref(),
+                query,
+                recover_communication,
+            );
             match result {
                 Ok(value) => {
                     if value.get("ok") == Some(&Value::Bool(false)) {

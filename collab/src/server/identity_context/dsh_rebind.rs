@@ -16,35 +16,7 @@ impl ProjectRuntimeManager {
         runtime: &Arc<Server>,
         kind: &TransportKind,
     ) -> Vec<RuntimeBinding> {
-        let state = runtime.state.lock().unwrap();
-        let candidates = state
-            .global
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-            .filter(|binding| {
-                state
-                    .workers
-                    .get(binding.agent_id.as_str())
-                    .and_then(|worker| worker.transport.as_ref())
-                    .is_some_and(|transport| &transport.kind == kind)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        drop(state);
-        let host = self.host.state.lock().unwrap();
-        candidates
-            .into_iter()
-            .filter(|binding| {
-                binding
-                    .session_id
-                    .as_ref()
-                    .zip(binding.native_thread_id.as_ref())
-                    .is_some_and(|(session, thread)| {
-                        host.global.lookup_current_thread_route(session, thread) == Some(binding)
-                    })
-            })
-            .collect()
+        self.mapped_adapter_bindings(runtime, kind)
     }
 
     pub(super) fn reconcile_dsh_binding(
@@ -73,22 +45,26 @@ impl ProjectRuntimeManager {
         {
             return Ok(());
         }
-        let next_generation = saved
-            .endpoint_generation
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("IDENTITY_ENDPOINT_GENERATION_EXHAUSTED"))?;
         let mut retired = saved.clone();
-        retired.endpoint_generation = next_generation;
         retired.native_thread_id = None;
         retired.tmux_endpoint = None;
         let events = [
             Event::GlobalCurrentThreadRouteRetired {
                 binding: saved.clone(),
             },
-            Event::GlobalRuntimeBound { binding: retired },
+            Event::GlobalRuntimeBound { binding: retired.clone() },
         ];
-        runtime.commit_locked(&mut state, &events)?;
+        runtime.commit_locked(&mut state, &events).map_err(anyhow::Error::msg)?;
+        let transport = state.workers.get(saved.agent_id.as_str()).and_then(|worker| worker.transport.clone())
+            .ok_or_else(|| anyhow::anyhow!("IDENTITY_TRANSPORT_MISSING"))?;
         drop(state);
+        let context = ProjectContext::for_registered_root_with_app(&runtime.root, saved.app_scope_id.clone())?;
+        let key = self.mapped_key_for_worker(&context, saved.agent_id.as_str(), saved).map_err(anyhow::Error::msg)?;
+        self.commit_control_change(crate::server::binding_store::ControlChange::Commit {
+            key,
+            value: crate::server::binding_slot::BindingValue::new(retired, transport),
+            expected_generation: None,
+        }).map_err(anyhow::Error::msg)?;
         if !Arc::ptr_eq(runtime, &self.host) {
             self.host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
                 binding: saved.clone(),
@@ -108,7 +84,6 @@ impl ProjectRuntimeManager {
             runtime_id: saved.runtime_id.clone(),
             appserver_id: saved.app_scope_id.clone(),
             binding_id: saved.binding_id.clone(),
-            endpoint_generation: saved.endpoint_generation,
             session_id: saved.session_id.clone(),
             native_thread_id: saved.native_thread_id.clone(),
         };
@@ -146,7 +121,6 @@ impl ProjectRuntimeManager {
                     runtime_id: binding.runtime_id.as_str(),
                     appserver_id: binding.appserver_id.as_str(),
                     binding_id: binding.binding_id.as_str(),
-                    endpoint_generation: binding.endpoint_generation,
                     session_id: binding.session_id.as_ref().map(|id| id.as_str()),
                     native_thread_id: binding.native_thread_id.as_ref().map(|id| id.as_str()),
                 },

@@ -96,16 +96,6 @@ pub struct WorktreeBinding {
     pub isolation_mode: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CommandReceipt {
-    pub operation_id: String,
-    pub outcome: serde_json::Value,
-    #[serde(default)]
-    pub sequence: u64,
-    #[serde(default)]
-    pub revision: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "cmd")]
 pub enum TypedCommand {
@@ -141,12 +131,6 @@ pub enum GlobalEvent {
     LedgerScanReceiptRecorded {
         receipt: super::global_state::LedgerScanReceipt,
     },
-    MasterGrantReplacementStarted {
-        intent: super::global_state::MasterGrantReplacementIntent,
-    },
-    MasterGrantReplacementCompleted {
-        receipt: super::global_state::MasterGrantReplacementReceipt,
-    },
 }
 
 impl GlobalEvent {
@@ -168,12 +152,6 @@ impl GlobalEvent {
             }
             Self::RuntimeBindingLedgerClassified { .. }
             | Self::LedgerScanReceiptRecorded { .. } => Ok(()),
-            Self::MasterGrantReplacementStarted { intent } => global
-                .record_master_grant_replacement_intent(intent)
-                .map(|_| ()),
-            Self::MasterGrantReplacementCompleted { receipt } => global
-                .record_master_grant_replacement_receipt(receipt)
-                .map(|_| ()),
         }
     }
 }
@@ -329,8 +307,7 @@ pub struct Message {
 pub struct ReplyObligation {
     pub message_id: String,
     pub project: String,
-    /// Set only for a cross-project reply. Old journals decode without it and
-    /// the absent field is omitted from serialized output.
+    /// Set only for a cross-project reply; omitted when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_project: Option<String>,
     /// Authenticated global-role provenance. Only the CEO delivery owner sets
@@ -413,7 +390,7 @@ pub struct ResponsibilitySnapshot {
     pub unread_message_ids: Vec<String>,
 }
 
-/// Durable close-admission fence for one exact peer generation.
+/// Durable close-admission fence for one exact peer binding.
 ///
 /// The snapshot records only responsibility identities. It deliberately does
 /// not carry message bodies, credentials, or host payloads.
@@ -424,7 +401,6 @@ pub struct ResponsibilityFence {
     pub project_scope: String,
     pub app_scope: String,
     pub binding_id: String,
-    pub endpoint_generation: u64,
     pub snapshot: ResponsibilitySnapshot,
     pub state: String,
     pub created_ms: i64,
@@ -444,13 +420,11 @@ impl ResponsibilityFence {
         project_scope: &str,
         app_scope: &str,
         binding_id: &str,
-        endpoint_generation: u64,
     ) -> bool {
         self.worker_id == worker_id
             && self.project_scope == project_scope
             && self.app_scope == app_scope
             && self.binding_id == binding_id
-            && self.endpoint_generation == endpoint_generation
     }
 }
 
@@ -522,7 +496,6 @@ pub fn close_fence_for_operation(
         project_scope: operation.exact_target().project_scope.as_str().to_owned(),
         app_scope: operation.exact_target().app_scope_id.as_str().to_owned(),
         binding_id: operation.exact_target().binding_id.as_str().to_owned(),
-        endpoint_generation: operation.exact_target().endpoint_generation,
         snapshot: snapshot.clone(),
         state: state.to_owned(),
         created_ms: operation.created_ms,
@@ -878,12 +851,11 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         {
             ResponsibilityEffect::Mutates(operation.exact_target().worker_id.as_str())
         }
-        Event::ReducerSnapshot { .. } => ResponsibilityEffect::Safe,
         _ => ResponsibilityEffect::Safe,
     }
 }
 
-/// Batch-level preflight used before any journal bytes are written.
+/// Batch-level preflight used before current state is published.
 ///
 /// The fence is evaluated against the fence set as it stands before the batch
 /// plus any fence set earlier in the same batch, so a close admission
@@ -897,9 +869,6 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
     let mut simulated_wake_bindings = st.wake_bindings.clone();
     for event in evs {
         match event {
-            Event::ReducerSnapshot { .. } => {
-                return Err("reducer snapshot is replay-only".into());
-            }
             Event::ResponsibilityFenceSet { fence } => {
                 fences.insert(fence.operation_id.clone(), fence.clone());
             }
@@ -1218,8 +1187,7 @@ impl TaskRec {
     }
 }
 
-/// Lifecycle evidence is separate from TaskRec so older producers and journal
-/// events remain replayable as the task contract gains new milestones.
+/// Current delivery, review and integration evidence for a task.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskLifecycleRecord {
     #[serde(default)]
@@ -1378,8 +1346,7 @@ pub fn wait_cycle(tasks: &HashMap<String, TaskRec>, task_id: &str, waiting_for: 
     true
 }
 
-/// Journal events. Every mutation is an event: live path applies + appends,
-/// replay applies only. This is what makes restart recovery deterministic.
+/// In-memory mutation batch. Only its resulting current State is persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "ev")]
 pub enum Event {
@@ -1418,10 +1385,6 @@ pub enum Event {
     },
     Registered {
         worker: WorkerRec,
-    },
-    WorkerNamed {
-        worker_id: String,
-        name: Option<String>,
     },
     #[serde(rename = "WorkerRemoved")]
     LegacyWorkerRemoved {
@@ -1497,6 +1460,10 @@ pub enum Event {
         #[serde(default)]
         retry: bool,
     },
+    NotificationDeliverySelected {
+        message_id: String,
+        selected_binding: Option<super::notification_contract::SelectedDeliveryBinding>,
+    },
     NotificationDeliveryFailed {
         message_id: String,
         operation: String,
@@ -1550,8 +1517,7 @@ pub enum Event {
     },
     ReceiveCommitted {
         receipt: ReceiveReceipt,
-        /// Consumption applied by the same event: a journal truncated after
-        /// this row replays a delivered batch, never an unread one.
+        /// Consumption committed in the same current-state batch as the receipt.
         ids: Vec<String>,
     },
     Delivered {
@@ -1590,14 +1556,6 @@ pub enum Event {
     BoardPatrolNoticeBound {
         message_id: String,
     },
-    /// Compacted journal baseline. The payload is the existing snapshot event
-    /// set, and `sequence`/`revision` are the exact pre-compaction counters.
-    /// This record is generated only by the journal rewrite owner.
-    ReducerSnapshot {
-        sequence: u64,
-        revision: u64,
-        events: Vec<Event>,
-    },
     TaskCreated {
         task: TaskRec,
     },
@@ -1631,9 +1589,6 @@ pub enum Event {
     ProjectWorkPolicyUpdated {
         work_kind: String,
         policy: WorkPolicy,
-    },
-    NameRecoveryUpdated {
-        recovery: super::name_state::NameRecoveryPending,
     },
     AgentPresenceObserved {
         presence: super::name_state::AgentPresenceRecord,
@@ -1710,23 +1665,6 @@ pub enum Event {
     CeoReportStateRestored {
         report_state: crate::ceo_report_state::CeoReportState,
     },
-    ReducerCheckpoint {
-        sequence: u64,
-        revision: u64,
-    },
-    CommandStarted {
-        command_id: String,
-        operation_id: String,
-    },
-    CommandRecorded {
-        command_id: String,
-        receipt: CommandReceipt,
-    },
-    CommandCompleted {
-        command_id: String,
-        operation_id: String,
-        receipt: CommandReceipt,
-    },
     #[serde(alias = "RootAssigned")]
     MasterAssigned {
         worker_id: String,
@@ -1779,12 +1717,6 @@ pub enum Event {
     },
     GlobalLedgerScanReceiptRecorded {
         receipt: super::global_state::LedgerScanReceipt,
-    },
-    GlobalMasterGrantReplacementStarted {
-        intent: super::global_state::MasterGrantReplacementIntent,
-    },
-    GlobalMasterGrantReplacementCompleted {
-        receipt: super::global_state::MasterGrantReplacementReceipt,
     },
     /// Durable per-external-conversation default delivery target. Keyed by the
     /// channel-owned conversation key so one QQ conversation's switch never

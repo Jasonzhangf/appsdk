@@ -1,14 +1,15 @@
 mod binding_lifecycle;
-mod binding_slot;
+pub(crate) mod binding_slot;
 #[cfg(test)]
 mod binding_slot_tests;
-mod binding_store;
+pub(crate) mod binding_store;
 #[cfg(test)]
 mod binding_store_tests;
 mod ceo_report_patrol;
 pub(crate) mod channel_delivery;
 pub(crate) mod channel_envelope;
 pub(crate) mod conversation_default;
+pub(crate) mod current_state;
 pub mod global_state;
 mod identity_context;
 pub(crate) mod keepalive;
@@ -19,14 +20,13 @@ pub(crate) mod name_stewardship;
 pub mod notification_contract;
 pub mod notification_state;
 mod observation_epoch;
-pub(crate) mod operation_journal;
 mod peer_lifecycle;
 pub mod presence;
 mod project_reset;
-pub(crate) mod register_reply;
 pub(crate) mod reply_obligation;
 pub mod state;
 pub mod timers;
+pub(crate) mod tm_layout;
 
 pub const EXPLICIT_UNSUBSCRIBE_REASON: &str = "explicit-unsubscribe";
 
@@ -47,9 +47,9 @@ use crate::scope::{HostPaths, ProjectScopeId, RouteScope, Scope};
 use crate::server::presence::{append_log, IdentityPresence};
 use mailbox::{
     batch_notification_text, compose_notification, default_direct_message_id,
-    is_explicit_notification, missing_recipient_projection_messages, notification_text,
-    read_recipient_mailbox, truncate_notification, DEFAULT_DIRECT_MESSAGE_TTL_SECONDS,
-    MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER, MAX_NOTIFICATION_TTL_SECONDS, NOTIFICATION_EVENTS,
+    is_explicit_notification, notification_text, truncate_notification,
+    DEFAULT_DIRECT_MESSAGE_TTL_SECONDS, MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER,
+    MAX_NOTIFICATION_TTL_SECONDS, NOTIFICATION_EVENTS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -69,10 +69,6 @@ use tokio::sync::Notify;
 #[cfg(test)]
 #[path = "notification_batch_tests.rs"]
 mod notification_batch_tests;
-
-#[cfg(test)]
-#[path = "operation_contract_tests.rs"]
-mod operation_contract_tests;
 
 #[cfg(test)]
 #[path = "host_route_registry_tests.rs"]

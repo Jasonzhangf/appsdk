@@ -1,1005 +1,157 @@
 use super::*;
-
-static ENV_LOCK: &std::sync::Mutex<()> = &crate::scope::TEST_ENV_LOCK;
-
-fn test_scope(root: PathBuf) -> Scope {
-    Scope { root }
-}
+use crate::proto::IdentityFacts;
+use crate::server::binding_slot::{BindingControlSet, BindingValue, IdentityBindingKey};
+use crate::server::binding_store::BindingControlStore;
 
 fn test_root(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "{prefix}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), hex(8)))
 }
 
-fn tmux_candidate(
-    codex_session_id: Option<&str>,
-    codex_thread_id: Option<&str>,
-    pane_id: &str,
-) -> crate::proto::TmuxCandidate {
-    crate::proto::TmuxCandidate {
-        endpoint: crate::proto::TmuxEndpoint {
-            socket_path: "/tmp/tmux-test.sock".into(),
-            server_pid: 42,
-            tmux_session_id: "$7".into(),
-            pane_id: pane_id.into(),
-            pane_pid: 99,
-            codex_session_id: codex_session_id.map(str::to_owned),
-            codex_thread_id: codex_thread_id.map(str::to_owned),
-        },
-        cwd: "/tmp/project".into(),
-    }
-}
-
-fn observation(
-    session: Option<&str>,
-    thread: Option<&str>,
-    tmux: Option<crate::proto::TmuxCandidate>,
-) -> AnchorObservation {
-    AnchorObservation {
-        session_id: session.map(str::to_owned),
-        thread_id: thread.map(str::to_owned),
-        tmux_anchor: tmux.as_ref().map(|candidate| crate::proto::TmuxPaneAnchor {
-            socket_path: candidate.endpoint.socket_path.clone(),
-            pane_id: candidate.endpoint.pane_id.clone(),
-        }),
-        tmux,
-        dsh_session_id: None,
-        dsh: None,
-    }
-}
-
-fn facts(
-    session: Option<&str>,
-    thread: Option<&str>,
-    tmux: Option<crate::proto::TmuxCandidate>,
-) -> crate::proto::IdentityFacts {
-    crate::proto::IdentityFacts {
-        dsh: None,
-        desktop_bridge: None,
-        session_id: session.map(str::to_owned),
-        thread_id: thread.map(str::to_owned),
-        endpoint: None,
-        namespace: None,
-        caller_pid: None,
-        pane_hint: None,
-        tmux,
-        tmux_session_name: None,
-        tmux_anchor: None,
-        dsh_session_id: None,
-    }
-}
-
-fn runtime_identity(generation: u64, binding: &str) -> RuntimeIdentity {
+fn runtime_identity(binding: &str) -> RuntimeIdentity {
     RuntimeIdentity {
         agent_id: AgentId::new("agent-1").unwrap(),
         runtime_id: RuntimeId::new("runtime-1").unwrap(),
-        appserver_id: AppServerId::new("appserver-1").unwrap(),
-        endpoint_generation: generation,
+        appserver_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
         binding_id: BindingId::new(binding).unwrap(),
         session_id: Some(SessionId::new("session-1").unwrap()),
         native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
     }
 }
 
-fn saved_identity(
-    host_paths: &HostPaths,
-    scope: &Scope,
-    worker_id: &str,
-    session_id: Option<&str>,
-    thread_id: Option<&str>,
-    tmux_endpoint: Option<crate::proto::TmuxEndpoint>,
-) {
-    let runtime = RuntimeIdentity {
-        agent_id: AgentId::new(worker_id).unwrap(),
-        runtime_id: RuntimeId::new(format!("runtime-{worker_id}")).unwrap(),
-        appserver_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
-        endpoint_generation: 1,
-        binding_id: BindingId::new(format!("binding-{worker_id}")).unwrap(),
-        session_id: session_id.map(|value| SessionId::new(value).unwrap()),
-        native_thread_id: thread_id.map(|value| NativeThreadId::new(value).unwrap()),
-    };
-    let kind = if tmux_endpoint.is_some() {
-        TransportKind::Tmux
-    } else {
-        TransportKind::AppServer
-    };
-    let transport = SelectedTransport {
-        kind,
-        endpoint: Some(tmux_endpoint.as_ref().map_or_else(
-            || "unix:///tmp/codex.sock".to_owned(),
-            |endpoint| endpoint.socket_path.clone(),
-        )),
-        namespace: Some(
-            if tmux_endpoint.is_some() {
-                "$7"
-            } else {
-                "codex_tui"
-            }
-            .into(),
-        ),
-        session_id: tmux_endpoint.as_ref().map_or_else(
-            || Some(session_id.unwrap_or("session-old").to_owned()),
-            |endpoint| endpoint.codex_session_id.clone(),
-        ),
-        thread_id: tmux_endpoint.as_ref().map_or_else(
-            || Some(thread_id.unwrap_or("thread-old").to_owned()),
-            |endpoint| endpoint.codex_thread_id.clone(),
-        ),
-        tmux_endpoint,
-        capabilities: vec![],
-        self_check: "test transport".into(),
-    };
-    let project_scope = scope
-        .route_scope(runtime.appserver_id.clone())
-        .unwrap()
-        .project_scope_id;
-    let identity = Identity {
-        worker_id: worker_id.into(),
-        token: format!("token-{worker_id}"),
-        project_scope: Some(project_scope),
-        runtime: Some(runtime),
-        transport: Some(transport),
-    };
-    write_identity(&identity_path_at(host_paths, worker_id).unwrap(), &identity).unwrap();
-}
-
-/// Persist a dsh identity. Its communication API is the concrete gateway
-/// control socket plus gateway runtime id, and it is part of the compound
-/// anchor the resolver must compare.
-fn saved_dsh_identity(
-    host_paths: &HostPaths,
-    scope: &Scope,
-    worker_id: &str,
-    session_id: &str,
-    endpoint: &str,
-    namespace: &str,
-) {
-    let runtime = RuntimeIdentity {
-        agent_id: AgentId::new(worker_id).unwrap(),
-        runtime_id: RuntimeId::new(format!("runtime-{worker_id}")).unwrap(),
-        appserver_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
-        endpoint_generation: 1,
-        binding_id: BindingId::new(format!("binding-{worker_id}")).unwrap(),
-        session_id: Some(SessionId::new(session_id).unwrap()),
-        native_thread_id: Some(NativeThreadId::new(format!("agent-{worker_id}")).unwrap()),
-    };
-    let transport = SelectedTransport {
-        kind: TransportKind::Dsh,
-        endpoint: Some(endpoint.into()),
-        namespace: Some(namespace.into()),
-        session_id: Some(session_id.into()),
-        thread_id: Some(format!("agent-{worker_id}")),
+fn selected() -> SelectedTransport {
+    SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-1".into()),
+        thread_id: Some("thread-1".into()),
         tmux_endpoint: None,
-        capabilities: vec!["enqueue_wake".into()],
-        self_check: "test dsh transport".into(),
-    };
-    let project_scope = scope
-        .route_scope(runtime.appserver_id.clone())
-        .unwrap()
-        .project_scope_id;
-    let identity = Identity {
-        worker_id: worker_id.into(),
-        token: format!("token-{worker_id}"),
-        project_scope: Some(project_scope),
-        runtime: Some(runtime),
-        transport: Some(transport),
-    };
-    write_identity(&identity_path_at(host_paths, worker_id).unwrap(), &identity).unwrap();
+        capabilities: vec!["send_message".into()],
+        self_check: "verified fixture".into(),
+    }
 }
 
-fn dsh_facts(
-    session_id: &str,
-    endpoint: Option<&str>,
-    namespace: Option<&str>,
-    agent_id: &str,
-) -> crate::proto::IdentityFacts {
-    let mut facts = facts(None, None, None);
-    facts.dsh_session_id = Some(session_id.into());
-    facts.dsh = endpoint
-        .zip(namespace)
-        .map(|(endpoint, namespace)| crate::proto::DshCandidate {
-            endpoint: endpoint.into(),
-            runtime_id: namespace.into(),
-            agent_id: agent_id.into(),
-            session_id: session_id.into(),
-            cwd: "/tmp".into(),
-        });
-    facts
-}
-
-#[test]
-fn resolver_recovers_existing_identity_by_each_unique_anchor() {
-    let root = test_root("ci-resolver-anchor");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-
-    saved_identity(
-        &host_paths,
-        &scope,
-        "session-peer",
-        Some("session-1"),
-        None,
-        None,
-    );
-    let found =
-        resolve_for_daemon_at(&host_paths, &scope, &facts(Some("session-1"), None, None)).unwrap();
-    assert_eq!(found.worker_id, "session-peer");
-    assert_eq!(found.token, "token-session-peer");
-
-    saved_identity(
-        &host_paths,
-        &scope,
-        "thread-peer",
-        None,
-        Some("thread-2"),
-        None,
-    );
-    let found =
-        resolve_for_daemon_at(&host_paths, &scope, &facts(None, Some("thread-2"), None)).unwrap();
-    assert_eq!(found.worker_id, "thread-peer");
-
-    let candidate = tmux_candidate(Some("session-3"), Some("thread-3"), "%3");
-    saved_identity(
-        &host_paths,
-        &scope,
-        "pane-peer",
-        Some("session-3"),
-        Some("thread-3"),
-        Some(candidate.endpoint.clone()),
-    );
-    let found = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(Some("session-3"), Some("thread-3"), Some(candidate)),
+fn credential(paths: &HostPaths, scope: &Scope) -> Identity {
+    let mut identity = draft_identity_with_id(scope, "agent-1").unwrap();
+    persist_current_binding_at(
+        paths,
+        scope,
+        &mut identity,
+        runtime_identity("binding-1"),
+        selected(),
     )
     .unwrap();
-    assert_eq!(found.worker_id, "pane-peer");
-    std::fs::remove_dir_all(root).ok();
+    identity
 }
 
-/// Acceptance 2: a tmux restart reissues pane ids. Only the live server
-/// instance may disambiguate a persisted identity; an archived endpoint that
-/// shares the socket path and pane id is not the current owner.
-#[test]
-fn resolver_disambiguates_a_reissued_pane_by_tmux_server_instance() {
-    let root = test_root("ci-resolver-reissued-pane");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-
-    let stale = tmux_candidate(Some("session-restart"), Some("thread-restart"), "%4");
-    saved_identity(
-        &host_paths,
-        &scope,
-        "codex-pane-stale",
-        Some("session-restart"),
-        Some("thread-restart"),
-        Some(stale.endpoint.clone()),
-    );
-
-    let mut current = stale.clone();
-    current.endpoint.server_pid += 1;
-    current.endpoint.pane_pid += 7;
-    saved_identity(
-        &host_paths,
-        &scope,
-        "codex-pane-current",
-        Some("session-restart"),
-        Some("thread-restart"),
-        Some(current.endpoint.clone()),
-    );
-
-    let resolved = existing_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(
-            Some("session-restart"),
-            Some("thread-restart"),
-            Some(current),
-        ),
-    )
-    .expect("the live tmux server must resolve without identity ambiguity");
-    assert_eq!(
-        resolved.expect("the current identity").worker_id,
-        "codex-pane-current"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_returns_the_exact_stored_token() {
-    let root = test_root("ci-resolver-token");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    saved_identity(
-        &host_paths,
-        &scope,
-        "peer",
-        Some("session-1"),
-        Some("thread-1"),
-        None,
-    );
-    let stored = read_persisted(&host_paths, "peer").unwrap().unwrap();
-    let resolved =
-        resolve_for_daemon_at(&host_paths, &scope, &facts(Some("session-1"), None, None)).unwrap();
-    assert_eq!(resolved.token, stored.token);
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_mints_a_deterministic_draft_without_writing() {
-    let root = test_root("ci-resolver-draft");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let thread_facts = facts(None, Some("thread-new"), None);
-    let first = resolve_for_daemon_at(&host_paths, &scope, &thread_facts).unwrap();
-    let second = resolve_for_daemon_at(&host_paths, &scope, &thread_facts).unwrap();
-    assert_eq!(first.worker_id, second.worker_id);
-    assert_eq!(first.worker_id, "codex-thread-7468726561642d6e6577");
-    assert!(first.runtime.is_none());
-    assert!(first.transport.is_none());
-    assert_ne!(first.token, second.token, "draft tokens are freshly minted");
-    assert!(
-        read_persisted(&host_paths, &first.worker_id)
-            .unwrap()
-            .is_none(),
-        "the resolver never writes a draft before Register"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_does_not_name_a_new_session_by_historical_pane() {
-    let root = test_root("ci-resolver-pane-draft");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let candidate = tmux_candidate(None, None, "%9");
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(candidate)))
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .starts_with("COLLAB_IDENTITY_ANCHOR_MISSING:"),
-        "{error}"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_requires_an_anchor() {
-    let root = test_root("ci-resolver-no-anchor");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, None))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.starts_with("COLLAB_IDENTITY_ANCHOR_MISSING:"),
-        "{error}"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_never_adopts_an_unrelated_same_project_peer() {
-    let root = test_root("ci-resolver-no-unrelated");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    saved_identity(
-        &host_paths,
-        &scope,
-        "cold-peer",
-        Some("session-victim"),
-        Some("thread-victim"),
-        None,
-    );
-    let draft =
-        resolve_for_daemon_at(&host_paths, &scope, &facts(None, Some("thread-new"), None)).unwrap();
-    assert_ne!(draft.worker_id, "cold-peer");
-    assert_eq!(draft.worker_id, "codex-thread-7468726561642d6e6577");
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_rejects_ambiguous_session_without_minting_an_identity() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let root = test_root("ci-resolver-ambiguous");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    saved_identity(
-        &host_paths,
-        &scope,
-        "a-peer",
-        Some("session-dup"),
-        None,
-        None,
-    );
-    saved_identity(
-        &host_paths,
-        &scope,
-        "b-peer",
-        Some("session-dup"),
-        None,
-        None,
-    );
-    let observed = facts(Some("session-dup"), None, None);
-    let before = std::fs::read_dir(host_paths.state_root().join("identities"))
-        .unwrap()
-        .count();
-    let error = match resolve_for_daemon_at(&host_paths, &scope, &observed) {
-        Ok(_) => panic!("ambiguous session must not create a draft"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("IDENTITY_RESTORE_AMBIGUOUS"),
-        "{error}"
-    );
-    assert_eq!(
-        std::fs::read_dir(host_paths.state_root().join("identities"))
-            .unwrap()
-            .count(),
-        before,
-        "an ambiguous session must not create another identity"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_ignores_a_cross_project_historical_anchor() {
-    let root = test_root("ci-resolver-cross-project");
-    let other = root.join("other-project");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let other_scope = test_scope(other.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let pane = tmux_candidate(Some("session-foreign"), Some("thread-foreign"), "%1");
-    saved_identity(
-        &host_paths,
-        &other_scope,
-        "foreign-peer",
-        Some("session-foreign"),
-        Some("thread-foreign"),
-        Some(pane.endpoint.clone()),
-    );
-    let current = tmux_candidate(Some("session-current"), Some("thread-current"), "%2");
-    let resolved = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(
-            Some("session-current"),
-            Some("thread-current"),
-            Some(current),
-        ),
-    )
-    .expect("a foreign historical session must not block the current project");
-    assert_ne!(resolved.worker_id, "foreign-peer");
-    assert_eq!(
-        resolved.project_scope,
-        Some(
-            scope
-                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
-                .unwrap()
-                .project_scope_id
-        )
-    );
-    assert!(resolved.runtime.is_none());
-    assert!(read_persisted(&host_paths, "foreign-peer")
-        .unwrap()
-        .is_some());
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn historical_pane_draft_does_not_claim_current_session() {
-    let root = test_root("ci-resolver-preserve-draft");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let draft_identity = Identity {
-        worker_id: "codex-%5".into(),
-        token: "stored-draft-token".into(),
-        project_scope: Some(
-            scope
-                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
-                .unwrap()
-                .project_scope_id,
-        ),
-        runtime: None,
-        transport: None,
-    };
-    write_identity(
-        &identity_path_at(&host_paths, "codex-%5").unwrap(),
-        &draft_identity,
+fn mapped(paths: &HostPaths, identity: &Identity) {
+    let runtime = identity.runtime.as_ref().unwrap();
+    let project = identity.project_scope.clone().unwrap();
+    let binding = crate::server::global_state::RuntimeBinding::new_with_session(
+        project.clone(),
+        runtime.appserver_id.clone(),
+        runtime.agent_id.clone(),
+        runtime.runtime_id.clone(),
+        runtime.binding_id.clone(),
+        runtime.session_id.clone(),
+        runtime.native_thread_id.clone(),
     )
     .unwrap();
-    let candidate = tmux_candidate(None, None, "%5");
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, Some(candidate)))
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .starts_with("COLLAB_IDENTITY_ANCHOR_MISSING:"),
-        "{error}"
-    );
-    assert!(read_persisted(&host_paths, "codex-%5").unwrap().is_some());
-    std::fs::remove_dir_all(root).ok();
+    let key = IdentityBindingKey::new(project, runtime.appserver_id.clone(), "Alice");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(&key, BindingValue::new(binding, selected()), None)
+        .unwrap();
+    BindingControlStore::new(paths.state_root())
+        .save(&control)
+        .unwrap();
 }
 
 #[test]
-fn resolver_prefers_current_scope_for_a_shared_session() {
-    let root = test_root("ci-resolver-shared-pane-current-scope");
-    let other = root.join("other-project");
+fn registration_persists_exact_scope_and_owner_only_credential() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("identity-credential");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let other_scope = test_scope(other.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let candidate = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%3");
-    saved_identity(
-        &host_paths,
-        &scope,
-        "codex-%3",
-        Some("session-shared"),
-        Some("thread-shared"),
-        Some(candidate.endpoint.clone()),
-    );
-    saved_identity(
-        &host_paths,
-        &other_scope,
-        "foreign-pane-peer",
-        Some("session-foreign"),
-        Some("thread-foreign"),
-        Some(candidate.endpoint.clone()),
-    );
-
-    let facts = crate::proto::IdentityFacts {
-        session_id: Some("session-shared".into()),
-        thread_id: Some("thread-shared".into()),
-        endpoint: None,
-        namespace: None,
-        tmux: Some(candidate),
-        tmux_anchor: None,
-        dsh_session_id: None,
-        ..Default::default()
-    };
-    let found = resolve_for_daemon_at(&host_paths, &scope, &facts).unwrap();
-    assert_eq!(found.worker_id, "codex-%3");
+    let scope = Scope { root: root.clone() };
+    let paths = HostPaths::for_state_root(&root.join("state")).unwrap();
+    let identity = credential(&paths, &scope);
+    let path = identity_path_at(&paths, "agent-1").unwrap();
     assert_eq!(
-        found.project_scope,
-        Some(
-            scope
-                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
-                .unwrap()
-                .project_scope_id
-        )
+        serde_json::to_value(read_identity(&path).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&identity).unwrap()
     );
-    assert!(read_persisted(&host_paths, "foreign-pane-peer")
-        .unwrap()
-        .is_some());
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_rejects_duplicate_archives_without_using_pane_ownership() {
-    let root = test_root("ci-resolver-shared-pane-current-scope-ambiguous");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let candidate = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%4");
-    saved_identity(
-        &host_paths,
-        &scope,
-        "codex-%4",
-        Some("session-shared"),
-        Some("thread-shared"),
-        Some(candidate.endpoint.clone()),
-    );
-    saved_identity(
-        &host_paths,
-        &scope,
-        "same-project-pane-peer",
-        Some("session-other"),
-        Some("thread-other"),
-        Some(candidate.endpoint.clone()),
-    );
-
-    let facts = crate::proto::IdentityFacts {
-        session_id: Some("session-shared".into()),
-        thread_id: Some("thread-shared".into()),
-        endpoint: None,
-        namespace: None,
-        tmux: Some(candidate),
-        tmux_anchor: None,
-        dsh_session_id: None,
-        ..Default::default()
-    };
-    let first_path = identity_path_at(&host_paths, "codex-%4").unwrap();
-    let second_path = identity_path_at(&host_paths, "same-project-pane-peer").unwrap();
-    let first_before = std::fs::read(&first_path).unwrap();
-    let second_before = std::fs::read(&second_path).unwrap();
-    let count_before = std::fs::read_dir(host_paths.state_root().join("identities"))
-        .unwrap()
-        .count();
-    let error = match resolve_for_daemon_at(&host_paths, &scope, &facts) {
-        Ok(_) => panic!("ambiguous identities must not create a draft"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("IDENTITY_RESTORE_AMBIGUOUS"));
     assert_eq!(
-        std::fs::read_dir(host_paths.state_root().join("identities"))
-            .unwrap()
-            .count(),
-        count_before
+        identity.project_scope.unwrap().as_str(),
+        std::fs::canonicalize(&root).unwrap().to_str().unwrap()
     );
-    assert!(std::fs::read(first_path).unwrap() == first_before);
-    assert!(std::fs::read(second_path).unwrap() == second_before);
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn resolver_rejects_duplicate_archives_with_one_matching_pane() {
-    let root = test_root("ci-resolver-shared-anchor-live-binding");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    // One archive names the current pane. Placement and recency are not owner
-    // evidence, so neither archive may be selected.
-    let live = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%6");
-    let stale = tmux_candidate(Some("session-shared"), Some("thread-shared"), "%175");
-    saved_identity(
-        &host_paths,
-        &scope,
-        "codex-%12",
-        Some("session-shared"),
-        Some("thread-shared"),
-        Some(live.endpoint.clone()),
-    );
-    saved_identity(
-        &host_paths,
-        &scope,
-        "codex-%175",
-        Some("session-shared"),
-        Some("thread-shared"),
-        Some(stale.endpoint.clone()),
-    );
-
-    let first_path = identity_path_at(&host_paths, "codex-%12").unwrap();
-    let second_path = identity_path_at(&host_paths, "codex-%175").unwrap();
-    let first_before = std::fs::read(&first_path).unwrap();
-    let second_before = std::fs::read(&second_path).unwrap();
-    let count_before = std::fs::read_dir(host_paths.state_root().join("identities"))
-        .unwrap()
-        .count();
-    let error = match resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(Some("session-shared"), Some("thread-shared"), Some(live)),
-    ) {
-        Ok(_) => panic!("ambiguous identities must not create a draft"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("IDENTITY_RESTORE_AMBIGUOUS"));
     assert_eq!(
-        std::fs::read_dir(host_paths.state_root().join("identities"))
-            .unwrap()
-            .count(),
-        count_before
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
     );
-    assert!(std::fs::read(first_path).unwrap() == first_before);
-    assert!(std::fs::read(second_path).unwrap() == second_before);
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn preserved_draft_token_is_not_reminted() {
-    let root = test_root("ci-resolver-preserve-draft");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let draft_identity = Identity {
-        worker_id: "codex-%5".into(),
-        token: "stored-draft-token".into(),
-        project_scope: Some(
-            scope
-                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
-                .unwrap()
-                .project_scope_id,
-        ),
-        runtime: None,
-        transport: None,
-    };
-    write_identity(
-        &identity_path_at(&host_paths, "codex-%5").unwrap(),
-        &draft_identity,
-    )
-    .unwrap();
-    let candidate = tmux_candidate(Some("session-5"), Some("thread-5"), "%5");
-    let resolved = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(Some("session-5"), Some("thread-5"), Some(candidate)),
-    )
-    .unwrap();
-    assert_ne!(resolved.token, "stored-draft-token");
-    assert_eq!(resolved.worker_id, "codex-session-73657373696f6e2d35");
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn deterministic_name_does_not_adopt_a_registered_identity_with_different_anchors() {
-    let root = test_root("ci-name-collision");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let observed = facts(Some("session-new"), Some("thread-new"), None);
-    let draft = resolve_for_daemon_at(&host_paths, &scope, &observed).unwrap();
-    saved_identity(
-        &host_paths,
-        &scope,
-        &draft.worker_id,
-        Some("session-other"),
-        Some("thread-other"),
-        None,
-    );
-    let error = resolve_for_daemon_at(&host_paths, &scope, &observed).unwrap_err();
-    assert!(error.to_string().starts_with("IDENTITY_RESTORE_CONFLICT:"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Place one identity under a retired generation directory, as the daemon's
-/// Register transaction would. Recovery only reads this path.
-fn archive_identity(host_paths: &HostPaths, worker_id: &str, identity: &Identity) {
-    let path = host_paths
-        .state_root()
-        .join("archives")
-        .join("identities-retired-1")
-        .join(worker_id)
-        .join("identity.json");
-    write_identity(&path, identity).unwrap();
-    std::fs::remove_dir_all(host_paths.state_root().join("identities").join(worker_id)).ok();
-}
-
 #[test]
-fn archived_route_recovery_reads_without_calling_back() {
-    let root = test_root("ci-archive-pane-recovery");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let endpoint = crate::proto::TmuxEndpoint {
-        socket_path: "/tmp/archive-pane.sock".into(),
-        server_pid: 31,
-        tmux_session_id: "$7".into(),
-        pane_id: "%7".into(),
-        pane_pid: 41,
-        codex_session_id: Some("session-old".into()),
-        codex_thread_id: Some("thread-old".into()),
-    };
-    saved_identity(
-        &host_paths,
-        &scope,
-        "pane-worker",
-        Some("session-old"),
-        Some("thread-old"),
-        Some(endpoint.clone()),
-    );
-    let original = read_persisted(&host_paths, "pane-worker").unwrap().unwrap();
-    archive_identity(&host_paths, "pane-worker", &original);
-    let mut current = endpoint;
-    current.codex_session_id = Some("session-new".into());
-    current.codex_thread_id = Some("thread-new".into());
-    let candidate = crate::proto::TmuxCandidate {
-        endpoint: current,
-        cwd: root.display().to_string(),
-    };
-    let route = crate::proto::RouteResolution {
-        app_scope_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
-        project_scope: scope
-            .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
-            .unwrap()
-            .project_scope_id,
-        canonical_root: root.display().to_string(),
-        storage_root: root.display().to_string(),
-        agent_id: AgentId::new("pane-worker").unwrap(),
-        binding_id: BindingId::new("binding-pane-worker").unwrap(),
-        endpoint_generation: 1,
-        session_id: Some(SessionId::new("session-old").unwrap()),
-        native_thread_id: Some(NativeThreadId::new("thread-old").unwrap()),
-    };
-    // No socket exists under the state root, so any daemon-to-self RPC would
-    // fail; the route-aware resolver returns the archived credential directly.
-    let facts = crate::proto::IdentityFacts {
-        dsh: None,
-        session_id: Some("session-new".into()),
-        desktop_bridge: None,
-        thread_id: Some("thread-new".into()),
-        endpoint: None,
-        namespace: None,
-        caller_pid: None,
-        pane_hint: None,
-        tmux: Some(candidate.clone()),
-        tmux_session_name: None,
-        tmux_anchor: None,
-        dsh_session_id: None,
-    };
-    let selected =
-        resolve_for_daemon_with_route_at(&host_paths, &scope, &facts, Some(&route)).unwrap();
-    assert_ne!(
-        selected.token, original.token,
-        "ordinary restore must not inherit archived pane identity"
-    );
-    let mut committed = route.clone();
-    committed.endpoint_generation += 1;
-    committed.session_id = Some(SessionId::new("session-new").unwrap());
-    committed.native_thread_id = Some(NativeThreadId::new("thread-new").unwrap());
-    assert_eq!(
-        recover_archived_pane_at(&host_paths, &scope, &candidate, Some(&committed))
-            .unwrap()
-            .unwrap()
-            .token,
-        original.token,
-    );
-    let mut wrong_generation = route.clone();
-    wrong_generation.endpoint_generation += 2;
-    assert_eq!(
-        recover_archived_pane_at(&host_paths, &scope, &candidate, Some(&wrong_generation))
-            .unwrap()
-            .unwrap()
-            .worker_id,
-        "pane-worker"
-    );
-    let mut wrong_owner = wrong_generation;
-    wrong_owner.binding_id = BindingId::new("binding-another-owner").unwrap();
-    assert!(
-        recover_archived_pane_at(&host_paths, &scope, &candidate, Some(&wrong_owner))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        recover_archived_pane_at(&host_paths, &scope, &candidate, None)
-            .unwrap()
-            .is_none()
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn persisted_registration_records_the_current_project_scope() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let root = test_root("ci-project-scope");
+fn absent_map_never_recovers_a_credential_archive() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("identity-no-map");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let state_root = root.join(".collab-state");
-    std::fs::create_dir_all(&state_root).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-    let mut identity = Identity {
-        worker_id: "agent-1".into(),
-        token: "token-1".into(),
-        project_scope: None,
-        runtime: None,
-        transport: None,
+    let scope = Scope { root: root.clone() };
+    let paths = HostPaths::for_state_root(&root.join("state")).unwrap();
+    let identity = credential(&paths, &scope);
+    let facts = IdentityFacts {
+        session_id: Some("session-1".into()),
+        ..Default::default()
     };
-
-    persist_registration_at(
-        &host_paths,
-        &scope,
-        &mut identity,
-        runtime_identity(7, "binding-7"),
-        SelectedTransport {
-            kind: TransportKind::AppServer,
-            endpoint: Some("unix:///tmp/codex.sock".into()),
-            namespace: Some("codex_tui".into()),
-            session_id: Some("session-1".into()),
-            thread_id: Some("thread-1".into()),
-            tmux_endpoint: None,
-            capabilities: vec!["send_message".into()],
-            self_check: "server verified".into(),
-        },
-    )
-    .unwrap();
-
-    let expected = scope
-        .route_scope(AppServerId::new("appserver-1").unwrap())
+    assert!(registered_from_map(&paths, &scope, &facts)
         .unwrap()
-        .project_scope_id;
-    assert_eq!(identity.project_scope.as_ref(), Some(&expected));
-    let persisted = read_identity(&identity_path_at(&host_paths, "agent-1").unwrap())
+        .is_none());
+    mapped(&paths, &identity);
+    let restored = registered_from_map(&paths, &scope, &facts)
         .unwrap()
         .unwrap();
-    assert_eq!(persisted.project_scope.as_ref(), Some(&expected));
-    std::fs::remove_dir_all(root).ok();
+    assert_eq!(restored.worker_id, identity.worker_id);
+    assert_eq!(restored.token, identity.token);
+    std::fs::remove_file(BindingControlStore::new(paths.state_root()).path()).unwrap();
+    assert!(registered_from_map(&paths, &scope, &facts)
+        .unwrap()
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn identity_files_are_written_owner_only() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let _guard = ENV_LOCK.lock().unwrap();
-    let root = test_root("ci-identity-mode");
+fn mapped_credential_failure_does_not_select_another_worker() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("identity-exact-credential");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let state_root = root.join(".collab-state");
-    std::fs::create_dir_all(&state_root).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-    let mut identity = Identity {
-        worker_id: "agent-mode".into(),
-        token: "secret-token".into(),
-        project_scope: None,
-        runtime: None,
-        transport: None,
+    let scope = Scope { root: root.clone() };
+    let paths = HostPaths::for_state_root(&root.join("state")).unwrap();
+    let identity = credential(&paths, &scope);
+    mapped(&paths, &identity);
+    std::fs::remove_file(identity_path_at(&paths, "agent-1").unwrap()).unwrap();
+    let facts = IdentityFacts {
+        session_id: Some("session-1".into()),
+        ..Default::default()
     };
-    persist_registration_at(
-        &host_paths,
-        &scope,
-        &mut identity,
-        runtime_identity(7, "binding-7"),
-        SelectedTransport {
-            kind: TransportKind::AppServer,
-            endpoint: Some("unix:///tmp/codex.sock".into()),
-            namespace: Some("codex_tui".into()),
-            session_id: Some("session-1".into()),
-            thread_id: Some("thread-1".into()),
-            tmux_endpoint: None,
-            capabilities: vec!["send_message".into()],
-            self_check: "server verified".into(),
-        },
-    )
-    .unwrap();
-    let path = identity_path_at(&host_paths, "agent-mode").unwrap();
-    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(
-        mode, 0o600,
-        "identity file must be owner-only, got {mode:o}"
-    );
-    std::fs::remove_dir_all(root).ok();
+    assert!(registered_from_map(&paths, &scope, &facts)
+        .unwrap_err()
+        .to_string()
+        .contains("IDENTITY_CREDENTIAL_MISSING"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn identity_writes_use_distinct_temporary_paths() {
-    let path = std::path::Path::new("/tmp/collab-identity/identity.json");
-    let first = identity_temp_path(path);
-    let second = identity_temp_path(path);
-    assert_ne!(first, second);
-}
-
-#[test]
-fn binding_validation_rejects_stale_generation_without_mutating_inputs() {
-    let registered = runtime_identity(4, "binding-1");
-    let incoming = runtime_identity(3, "binding-1");
-    let registered_before = registered.clone();
-    let incoming_before = incoming.clone();
-
-    assert!(matches!(
-        validate_binding(&registered, &incoming),
-        Err(BindingValidationError::StaleGeneration {
-            expected: 4,
-            observed: 3
-        })
-    ));
-    assert_eq!(registered, registered_before);
-    assert_eq!(incoming, incoming_before);
+    let path = Path::new("/tmp/collab-identity/identity.json");
+    assert_ne!(identity_temp_path(path), identity_temp_path(path));
 }
 
 #[test]
 fn binding_validation_rejects_wrong_binding_without_mutating_inputs() {
-    let registered = runtime_identity(4, "binding-1");
-    let incoming = runtime_identity(4, "binding-2");
-    let registered_before = registered.clone();
-    let incoming_before = incoming.clone();
-
+    let registered = runtime_identity("binding-1");
+    let incoming = runtime_identity("binding-2");
+    let before = (registered.clone(), incoming.clone());
     assert!(matches!(
         validate_binding(&registered, &incoming),
         Err(BindingValidationError::Mismatch {
@@ -1007,8 +159,7 @@ fn binding_validation_rejects_wrong_binding_without_mutating_inputs() {
             ..
         })
     ));
-    assert_eq!(registered, registered_before);
-    assert_eq!(incoming, incoming_before);
+    assert_eq!((registered, incoming), before);
 }
 
 #[test]
@@ -1016,281 +167,4 @@ fn identifier_validation_rejects_empty_and_control_values() {
     assert!(AgentId::new("").is_err());
     assert!(RuntimeId::new("runtime\n1").is_err());
     assert!(DispatchId::new("d".repeat(MAX_ID_LENGTH + 1)).is_err());
-}
-
-#[test]
-fn observation_anchors_include_tmux_codex_ids() {
-    let candidate = tmux_candidate(Some("session-tmux"), Some("thread-tmux"), "%1");
-    let observed = observation(Some("session-fact"), None, Some(candidate));
-    assert_eq!(
-        observed.session_anchors(),
-        vec!["session-fact", "session-tmux"]
-    );
-    assert_eq!(observed.thread_anchors(), vec!["thread-tmux"]);
-    assert!(observed.has_anchor());
-    assert!(!observation(None, None, None).has_anchor());
-}
-
-/// The dsh anchor is compound: the gateway session id plus the communication
-/// API (gateway control socket and gateway runtime id). A single record must be
-/// matched by that API; the session id alone is not owner proof because another
-/// gateway can reuse it.
-#[test]
-fn resolver_matches_a_dsh_identity_by_its_compound_anchor() {
-    let root = test_root("ci-resolver-dsh-compound-anchor");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-
-    let worker_id = "dsh-gateway-a";
-    let endpoint = "unix:///tmp/gateway-a.sock";
-    let namespace = "runtime-a";
-    saved_dsh_identity(&host_paths, &scope, worker_id, "6162", endpoint, namespace);
-
-    let found = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &dsh_facts(
-            "6162",
-            Some(endpoint),
-            Some(namespace),
-            "agent-dsh-gateway-a",
-        ),
-    )
-    .unwrap();
-    assert_eq!(found.worker_id, worker_id);
-    assert_eq!(found.token, "token-dsh-gateway-a");
-
-    // The same session reported through another gateway must not adopt this
-    // record: the API dimension of the compound anchor disagrees.
-    let other = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &dsh_facts(
-            "6162",
-            Some("unix:///tmp/gateway-b.sock"),
-            Some("runtime-b"),
-            "agent-dsh-gateway-a",
-        ),
-    )
-    .unwrap_err();
-    assert!(other.to_string().starts_with("IDENTITY_RESTORE_CONFLICT:"));
-
-    std::fs::remove_dir_all(root).ok();
-}
-
-/// Two dsh records can share one gateway session id on different communication
-/// APIs. A concrete API observation selects exactly one record; a session-only
-/// observation cannot prove an owner and stays ambiguous.
-#[test]
-fn resolver_disambiguates_same_session_different_gateway() {
-    let root = test_root("ci-resolver-dsh-two-gateways");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-
-    let gateway_a = ("unix:///tmp/gateway-a.sock", "runtime-a");
-    let gateway_b = ("unix:///tmp/gateway-b.sock", "runtime-b");
-    saved_dsh_identity(
-        &host_paths,
-        &scope,
-        "dsh-gateway-a",
-        "6162",
-        gateway_a.0,
-        gateway_a.1,
-    );
-    saved_dsh_identity(
-        &host_paths,
-        &scope,
-        "dsh-gateway-b",
-        "6162",
-        gateway_b.0,
-        gateway_b.1,
-    );
-
-    let from_a = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &dsh_facts(
-            "6162",
-            Some(gateway_a.0),
-            Some(gateway_a.1),
-            "agent-dsh-gateway-a",
-        ),
-    )
-    .unwrap();
-    assert_eq!(from_a.worker_id, "dsh-gateway-a");
-    assert_eq!(from_a.token, "token-dsh-gateway-a");
-
-    let from_b = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &dsh_facts(
-            "6162",
-            Some(gateway_b.0),
-            Some(gateway_b.1),
-            "agent-dsh-gateway-b",
-        ),
-    )
-    .unwrap();
-    assert_eq!(from_b.worker_id, "dsh-gateway-b");
-    assert_eq!(from_b.token, "token-dsh-gateway-b");
-
-    // The session anchor alone cannot choose a gateway.
-    let error = existing_for_daemon_at(&host_paths, &scope, &dsh_facts("6162", None, None, ""))
-        .unwrap_err()
-        .to_string();
-    assert!(error.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"), "{error}");
-
-    std::fs::remove_dir_all(root).ok();
-}
-
-/// A valid but oversized `DSH_SESSION_ID` hex-doubles past `MAX_ID_LENGTH` when
-/// building the worker id. It must fail as a bad anchor, not as a generic
-/// "identifier exceeds 256 bytes", and not silently drop to the codex branch.
-#[test]
-fn resolver_rejects_an_oversized_dsh_session_anchor() {
-    let root = test_root("ci-resolver-dsh-anchor-oversized");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-
-    let oversized = "s".repeat(MAX_ID_LENGTH);
-    let mut facts = facts(None, None, None);
-    facts.dsh_session_id = Some(oversized);
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("COLLAB_IDENTITY_ANCHOR_INVALID"), "{error}");
-    assert!(error.contains("DSH_SESSION_ID"), "{error}");
-    std::fs::remove_dir_all(root).ok();
-}
-
-/// Without any designed anchor the resolver still fails closed, so the new
-/// dsh arm cannot turn an anonymous caller into a peer.
-#[test]
-fn resolver_still_refuses_a_caller_with_no_anchor() {
-    let root = test_root("ci-resolver-no-anchor");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let error = resolve_for_daemon_at(&host_paths, &scope, &facts(None, None, None))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("COLLAB_IDENTITY_ANCHOR_MISSING"), "{error}");
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn different_agent_sessions_in_one_tmux_session_do_not_share_identity() {
-    let root = test_root("ci-resolver-tmux-session");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let first = tmux_candidate(Some("session-a"), Some("thread-a"), "%1");
-    saved_identity(
-        &host_paths,
-        &scope,
-        "pane-peer",
-        Some("session-a"),
-        Some("thread-a"),
-        Some(first.endpoint.clone()),
-    );
-    let second = tmux_candidate(Some("session-b"), Some("thread-b"), "%2");
-    let resolved = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(Some("session-b"), Some("thread-b"), Some(second)),
-    )
-    .expect("a distinct agent session must get its own identity");
-    assert_ne!(resolved.worker_id, "pane-peer");
-    assert!(resolved.runtime.is_none());
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn agent_session_identity_survives_tmux_transport_movement() {
-    let root = test_root("ci-resolver-tmux-moved-session");
-    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
-    let scope = test_scope(root.clone());
-    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
-    let first = tmux_candidate(Some("session-a"), Some("thread-a"), "%1");
-    saved_identity(
-        &host_paths,
-        &scope,
-        "moved-peer",
-        Some("session-a"),
-        Some("thread-a"),
-        Some(first.endpoint.clone()),
-    );
-    let stored = read_persisted(&host_paths, "moved-peer").unwrap().unwrap();
-    let mut moved = tmux_candidate(Some("session-a"), Some("thread-a"), "%9");
-    moved.endpoint.socket_path = "/tmp/tmux-other.sock".into();
-    moved.endpoint.tmux_session_id = "$99".into();
-    moved.endpoint.server_pid += 100;
-    moved.endpoint.pane_pid += 100;
-    let reused = resolve_for_daemon_at(
-        &host_paths,
-        &scope,
-        &facts(Some("session-a"), Some("thread-a"), Some(moved)),
-    )
-    .expect("the agent session survives transport placement changes");
-    assert_eq!(reused.worker_id, "moved-peer");
-    assert_eq!(reused.token, stored.token);
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn tmux_endpoint_serde_round_trips() {
-    let endpoint = crate::proto::TmuxEndpoint {
-        socket_path: "/tmp/sock".into(),
-        server_pid: 1,
-        tmux_session_id: "$1".into(),
-        pane_id: "%1".into(),
-        pane_pid: 2,
-        codex_session_id: None,
-        codex_thread_id: None,
-    };
-    let json = serde_json::to_string(&endpoint).unwrap();
-    let back: crate::proto::TmuxEndpoint = serde_json::from_str(&json).unwrap();
-    assert_eq!(endpoint, back);
-}
-
-#[test]
-fn codex_session_anchor_retains_cross_project_refusal_without_agy_marker() {
-    let root_a = test_root("ci-cross-refusal-a");
-    let root_b = test_root("ci-cross-refusal-b");
-    std::fs::create_dir_all(root_a.join(".agent-collab")).unwrap();
-    std::fs::create_dir_all(root_b.join(".agent-collab")).unwrap();
-    let scope_a = test_scope(root_a.clone());
-    let scope_b = test_scope(root_b.clone());
-    let host_paths = HostPaths::for_state_root(root_b.join("global")).unwrap();
-
-    let foreign_codex_session = "01a1590b-7d1c-78a0-bbb8-25b83f1ad578";
-    let foreign_codex_thread = "01a1590b-7d1c-78a0-bbb8-25b83f1ad578";
-
-    // Project A registers foreign_codex_session
-    saved_identity(
-        &host_paths,
-        &scope_a,
-        "foreign-peer",
-        Some(foreign_codex_session),
-        Some(foreign_codex_thread),
-        None,
-    );
-
-    // Codex caller in Project B with inherited foreign session MUST fail cross-project
-    let codex_facts = facts(
-        Some(foreign_codex_session),
-        Some(foreign_codex_thread),
-        None,
-    );
-    let error = resolve_for_daemon_at(&host_paths, &scope_b, &codex_facts).unwrap_err();
-    assert!(
-        error.to_string().contains("IDENTITY_RESTORE_CROSS_PROJECT"),
-        "pure Codex caller must reject foreign session anchor: {error}"
-    );
-
-    std::fs::remove_dir_all(root_a).ok();
-    std::fs::remove_dir_all(root_b).ok();
 }

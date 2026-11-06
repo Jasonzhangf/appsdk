@@ -3,7 +3,7 @@
 //! This module owns the host-wide typed identity, scope and command projection
 //! used by the resident daemon.  It stays independent of the legacy
 //! project-local [`super::state::State`] data model; the daemon reducer imports
-//! these types without creating a second journal or notification store.
+//! these types without creating a second persistence or notification store.
 
 use super::global_state_helpers::*;
 pub use crate::identity::{
@@ -41,7 +41,6 @@ pub struct RuntimeBindingLedgerRecord {
     pub agent_id: AgentId,
     pub runtime_id: RuntimeId,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     pub state: RuntimeBindingLedgerState,
     pub probe_state: Option<RuntimeBindingLedgerState>,
     pub reason: Option<String>,
@@ -80,11 +79,6 @@ pub enum StateError {
     },
     BindingNotFound(String),
     BindingConflict(String),
-    StaleBinding {
-        binding_id: String,
-        expected_generation: u64,
-        observed_generation: u64,
-    },
     MasterGrantRequiresApproval,
     MasterGrantConflict(String),
     MasterGrantBindingMismatch(String),
@@ -131,14 +125,6 @@ impl fmt::Display for StateError {
             ),
             Self::BindingNotFound(binding_id) => write!(f, "runtime binding not found: {binding_id}"),
             Self::BindingConflict(reason) => write!(f, "runtime binding conflict: {reason}"),
-            Self::StaleBinding {
-                binding_id,
-                expected_generation,
-                observed_generation,
-            } => write!(
-                f,
-                "stale runtime binding {binding_id}: expected generation {expected_generation}, observed {observed_generation}"
-            ),
             Self::MasterGrantRequiresApproval => {
                 f.write_str("master grant requires explicit user approval")
             }
@@ -233,8 +219,6 @@ impl ProjectRegistration {
 }
 
 /// One current runtime endpoint for one registered project/AppServer scope.
-/// `endpoint_generation` is the reconnect fence: commands must use the
-/// current generation exactly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeBinding {
     pub project_scope: ProjectScopeId,
@@ -242,22 +226,12 @@ pub struct RuntimeBinding {
     pub agent_id: AgentId,
     pub runtime_id: RuntimeId,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_thread_id: Option<NativeThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux_endpoint: Option<TmuxEndpoint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CurrentThreadRouteReplayStatus {
-    Installed,
-    Missing,
-    Tombstoned,
-    Ambiguous(RuntimeBinding),
-    Contested,
 }
 
 impl RuntimeBinding {
@@ -268,7 +242,6 @@ impl RuntimeBinding {
         agent_id: AgentId,
         runtime_id: RuntimeId,
         binding_id: BindingId,
-        endpoint_generation: u64,
         native_thread_id: Option<NativeThreadId>,
     ) -> Result<Self, StateError> {
         if native_thread_id.is_some() {
@@ -283,7 +256,6 @@ impl RuntimeBinding {
             agent_id,
             runtime_id,
             binding_id,
-            endpoint_generation,
             None,
             native_thread_id,
         )
@@ -296,7 +268,6 @@ impl RuntimeBinding {
         agent_id: AgentId,
         runtime_id: RuntimeId,
         binding_id: BindingId,
-        endpoint_generation: u64,
         session_id: Option<SessionId>,
         native_thread_id: Option<NativeThreadId>,
     ) -> Result<Self, StateError> {
@@ -306,7 +277,6 @@ impl RuntimeBinding {
             agent_id,
             runtime_id,
             binding_id,
-            endpoint_generation,
             session_id,
             native_thread_id,
             tmux_endpoint: None,
@@ -359,7 +329,6 @@ pub struct RuntimeBindingTombstone {
     pub agent_id: AgentId,
     pub runtime_id: RuntimeId,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     pub session_id: SessionId,
     pub native_thread_id: NativeThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,20 +385,12 @@ impl RuntimeBindingTombstone {
                 "session/thread rebind must change the address".to_owned(),
             ));
         }
-        if rebound_to.endpoint_generation <= old.endpoint_generation {
-            return Err(StateError::StaleBinding {
-                binding_id: old.binding_id.as_str().to_owned(),
-                expected_generation: old.endpoint_generation,
-                observed_generation: rebound_to.endpoint_generation,
-            });
-        }
         Ok(Self {
             project_scope: old.project_scope.clone(),
             app_scope_id: old.app_scope_id.clone(),
             agent_id: old.agent_id.clone(),
             runtime_id: old.runtime_id.clone(),
             binding_id: old.binding_id.clone(),
-            endpoint_generation: old.endpoint_generation,
             session_id: old_session_id,
             native_thread_id: old_native_thread_id,
             tmux_endpoint: old.tmux_endpoint.clone(),
@@ -516,7 +477,6 @@ pub struct MasterGrant {
     #[serde(default)]
     pub grant_generation: u64,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     pub granted_at_ms: i64,
 }
 
@@ -530,7 +490,6 @@ impl MasterGrant {
         granted_by: impl Into<String>,
         approval: impl Into<String>,
         binding_id: BindingId,
-        endpoint_generation: u64,
         granted_at_ms: i64,
     ) -> Result<Self, StateError> {
         let grant = Self {
@@ -543,7 +502,6 @@ impl MasterGrant {
             grant_id: binding_id.as_str().to_owned(),
             grant_generation: 1,
             binding_id,
-            endpoint_generation,
             granted_at_ms,
         };
         grant.validate()?;
@@ -561,7 +519,6 @@ impl MasterGrant {
         grant_id: impl Into<String>,
         grant_generation: u64,
         binding_id: BindingId,
-        endpoint_generation: u64,
         granted_at_ms: i64,
     ) -> Result<Self, StateError> {
         let grant = Self {
@@ -574,7 +531,6 @@ impl MasterGrant {
             grant_id: grant_id.into(),
             grant_generation,
             binding_id,
-            endpoint_generation,
             granted_at_ms,
         };
         grant.validate()?;
@@ -590,11 +546,7 @@ impl MasterGrant {
     }
 
     pub fn resource_generation(&self) -> u64 {
-        if self.grant_generation == 0 {
-            self.endpoint_generation
-        } else {
-            self.grant_generation
-        }
+        self.grant_generation
     }
 
     pub fn validate(&self) -> Result<(), StateError> {
@@ -608,7 +560,7 @@ impl MasterGrant {
                 "must not contain control characters",
             ));
         }
-        if self.grant_generation == 0 && self.endpoint_generation == 0 {
+        if self.grant_generation == 0 {
             return Err(StateError::invalid(
                 "master grant generation",
                 "must be non-zero",
@@ -633,91 +585,6 @@ impl MasterGrant {
 /// runtime bindings and capability grants.  Tasks, messages and legacy
 /// notification records are intentionally absent so this module cannot become
 /// a second copy of `server::state::State`.
-/// One durable, immutable intent for an approved master-grant replacement.
-/// It is written to the existing resident authority journal before the first
-/// grant effect so a started grant owner is provable across restart without
-/// replaying that effect. It carries no token or cancellation capability.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MasterGrantReplacementIntent {
-    pub operation_id: String,
-    pub intent_id: String,
-    pub project_scope: ProjectScopeId,
-    pub app_scope_id: AppServerId,
-    pub target_identity: AgentId,
-    pub incumbent_grant_id: String,
-    pub incumbent_grant_generation: u64,
-    pub binding_id: BindingId,
-    pub endpoint_generation: u64,
-    pub expected_grant_id: String,
-    pub expected_grant_generation: u64,
-    pub approval_digest: String,
-    pub started_at_ms: i64,
-}
-
-impl MasterGrantReplacementIntent {
-    pub fn validate(&self) -> Result<(), StateError> {
-        validate_non_empty_text("grant replacement operation id", &self.operation_id)?;
-        validate_non_empty_text("grant replacement intent id", &self.intent_id)?;
-        validate_project_scope(&self.project_scope)?;
-        validate_app_scope(&self.app_scope_id)?;
-        validate_agent_id(&self.target_identity)?;
-        validate_binding_id(&self.binding_id)?;
-        if self.expected_grant_generation == 0 {
-            return Err(StateError::invalid(
-                "grant replacement expected generation",
-                "must be non-zero",
-            ));
-        }
-        if self.started_at_ms < 0 {
-            return Err(StateError::invalid(
-                "grant replacement started_at_ms",
-                "must be non-negative",
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// One immutable completion receipt for a grant replacement. It requires a
-/// matching durable intent and binds the exact resulting grant resource.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MasterGrantReplacementReceipt {
-    pub operation_id: String,
-    pub intent_id: String,
-    pub project_scope: ProjectScopeId,
-    pub app_scope_id: AppServerId,
-    pub grant_id: String,
-    pub grant_generation: u64,
-    pub binding_id: BindingId,
-    pub endpoint_generation: u64,
-    pub completed_at_ms: i64,
-}
-
-impl MasterGrantReplacementReceipt {
-    pub fn validate(&self) -> Result<(), StateError> {
-        validate_non_empty_text("grant replacement operation id", &self.operation_id)?;
-        validate_non_empty_text("grant replacement intent id", &self.intent_id)?;
-        validate_project_scope(&self.project_scope)?;
-        validate_app_scope(&self.app_scope_id)?;
-        validate_binding_id(&self.binding_id)?;
-        if self.grant_generation == 0 {
-            return Err(StateError::invalid(
-                "grant replacement receipt generation",
-                "must be non-zero",
-            ));
-        }
-        if self.completed_at_ms < 0 {
-            return Err(StateError::invalid(
-                "grant replacement completed_at_ms",
-                "must be non-negative",
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Project-local state owned by this model.  It contains only registrations,
 /// runtime bindings and capability grants.  Tasks, messages and legacy
 /// notification records are intentionally absent so this module cannot become
@@ -816,10 +683,7 @@ impl ProjectState {
                     "master grant {binding_key} has no runtime binding"
                 )));
             };
-            if grant.app_scope_id != binding.app_scope_id
-                || grant.agent_id != binding.agent_id
-                || grant.endpoint_generation != binding.endpoint_generation
-            {
+            if grant.app_scope_id != binding.app_scope_id || grant.agent_id != binding.agent_id {
                 return Err(StateError::Invariant(format!(
                     "master grant {binding_key} is not bound to the current runtime generation"
                 )));
@@ -908,9 +772,8 @@ pub struct MigrationCommitEvidence {
     pub source_snapshot_digest: String,
     /// Digest of the immutable archive that carries the source stream.  The
     /// receipt owns the authoritative value; this copy is only a projection
-    /// input, so a record-only edit cannot satisfy the fence.  `default` keeps
-    /// pre-fence journal records deserializable so the gate can refuse them
-    /// instead of aborting journal replay.
+    /// input, so a record-only edit cannot satisfy the fence. A missing
+    /// digest cannot satisfy the current archive-proof requirement.
     #[serde(default)]
     pub archive_digest: String,
     pub operation_id: OperationId,
@@ -1089,7 +952,6 @@ pub struct MigrationIdentityRebindReceipt {
     pub app_scope_id: AppServerId,
     pub runtime_id: RuntimeId,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     pub operation_id: OperationId,
     pub fencing_token: u64,
     pub committed_revision: u64,
@@ -1108,7 +970,6 @@ impl MigrationIdentityRebindReceipt {
         app_scope_id: AppServerId,
         runtime_id: RuntimeId,
         binding_id: BindingId,
-        endpoint_generation: u64,
         operation_id: OperationId,
         fencing_token: u64,
         committed_revision: u64,
@@ -1124,7 +985,6 @@ impl MigrationIdentityRebindReceipt {
             app_scope_id,
             runtime_id,
             binding_id,
-            endpoint_generation,
             operation_id,
             fencing_token,
             committed_revision,
@@ -1145,7 +1005,6 @@ impl MigrationIdentityRebindReceipt {
             &self.app_scope_id,
             &self.runtime_id,
             &self.binding_id,
-            self.endpoint_generation,
             &self.operation_id,
             self.fencing_token,
             self.committed_revision,
@@ -1169,7 +1028,6 @@ pub struct MigrationRuntimeRebindReceipt {
     pub app_scope_id: AppServerId,
     pub runtime_id: RuntimeId,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1192,7 +1050,6 @@ impl MigrationRuntimeRebindReceipt {
         app_scope_id: AppServerId,
         runtime_id: RuntimeId,
         binding_id: BindingId,
-        endpoint_generation: u64,
         native_thread_id: Option<NativeThreadId>,
         operation_id: OperationId,
         fencing_token: u64,
@@ -1209,7 +1066,6 @@ impl MigrationRuntimeRebindReceipt {
             app_scope_id,
             runtime_id,
             binding_id,
-            endpoint_generation,
             None,
             native_thread_id,
             operation_id,
@@ -1230,7 +1086,6 @@ impl MigrationRuntimeRebindReceipt {
         app_scope_id: AppServerId,
         runtime_id: RuntimeId,
         binding_id: BindingId,
-        endpoint_generation: u64,
         session_id: Option<SessionId>,
         native_thread_id: Option<NativeThreadId>,
         operation_id: OperationId,
@@ -1248,7 +1103,6 @@ impl MigrationRuntimeRebindReceipt {
             app_scope_id,
             runtime_id,
             binding_id,
-            endpoint_generation,
             session_id,
             native_thread_id,
             operation_id,
@@ -1271,7 +1125,6 @@ impl MigrationRuntimeRebindReceipt {
             &self.app_scope_id,
             &self.runtime_id,
             &self.binding_id,
-            self.endpoint_generation,
             &self.operation_id,
             self.fencing_token,
             self.committed_revision,

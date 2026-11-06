@@ -106,17 +106,8 @@ fn obligation_view(server: &Server) -> Vec<serde_json::Value> {
     server.state.lock().unwrap().reply_obligation_view("worker")
 }
 
-fn replayed_state(server: &Server) -> State {
-    let mut state = State::default();
-    for line in std::fs::read_to_string(&server.journal_path)
-        .unwrap()
-        .lines()
-    {
-        state
-            .apply_checked(&serde_json::from_str::<Event>(line).unwrap())
-            .unwrap();
-    }
-    state
+fn reloaded_state(server: &Server) -> State {
+    crate::server::current_state::load(&server.state_path, false).unwrap()
 }
 
 fn idle_episode(server: &Server, now: i64) {
@@ -323,13 +314,13 @@ fn reply_idle_reminder_and_plain_result_add_no_obligation() {
 }
 
 #[test]
-fn reply_idle_replayed_reminder_state_does_not_repeat() {
+fn reply_idle_reloaded_reminder_state_does_not_repeat() {
     let (server, root) = setup();
     seed_obligation(&server, "msg-e", "sender", ReplyPolicy::Required);
     idle_episode(&server, now_ms());
     assert_eq!(reminders(&server).len(), 1);
 
-    *server.state.lock().unwrap() = replayed_state(&server);
+    *server.state.lock().unwrap() = reloaded_state(&server);
     assert_eq!(obligation_view(&server)[0]["reminded_idle_episode"], true);
 
     tick_at(&server, now_ms() + 60_000);

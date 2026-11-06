@@ -1,33 +1,5 @@
 use super::*;
 
-pub(super) fn runtime_journals(root: &std::path::Path) -> Vec<PathBuf> {
-    fn visit(path: &std::path::Path, found: &mut Vec<PathBuf>) {
-        let entries = match std::fs::read_dir(path) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Err(error) => panic!("read {}: {error}", path.display()),
-        };
-        for entry in entries {
-            let path = entry.expect("read directory entry").path();
-            if path.is_dir() {
-                visit(&path, found);
-            } else if path.file_name().is_some_and(|name| name == "journal.jsonl")
-                && path
-                    .parent()
-                    .and_then(std::path::Path::file_name)
-                    .is_some_and(|name| name == "server")
-            {
-                found.push(path);
-            }
-        }
-    }
-
-    let mut found = Vec::new();
-    visit(root, &mut found);
-    found.sort();
-    found
-}
-
 fn find_task<'a>(board: &'a Value, id: &str) -> &'a Value {
     board["tasks"]
         .as_array()
@@ -37,92 +9,33 @@ fn find_task<'a>(board: &'a Value, id: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("board contains task {id}: {board}"))
 }
 
-fn seed_retired_runtime_copy(source: &std::path::Path, destination: &std::path::Path) {
-    fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
-        std::fs::create_dir_all(destination).unwrap();
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            let target = destination.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_tree(&entry.path(), &target);
-            } else {
-                std::fs::copy(entry.path(), target).unwrap();
-            }
-        }
-    }
-    std::fs::create_dir_all(destination).expect("create legacy runtime root");
-    for name in ["server", "mailbox"] {
-        let from = source.join(".agent-collab").join(name);
-        if !from.exists() {
-            continue;
-        }
-        let to = destination.join(".agent-collab").join(name);
-        if to.exists() {
-            std::fs::remove_dir_all(&to).expect("remove destination runtime directory");
-        }
-        copy_tree(&from, &to);
-    }
-    use std::io::Write;
-    writeln!(
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(destination.join(".agent-collab/server/journal.jsonl"))
-            .unwrap(),
-        "incompatible-retired-version"
-    )
-    .unwrap();
-}
-
-fn shared_journal_lines(path: &std::path::Path) -> Vec<(String, Value)> {
-    std::fs::read_to_string(path)
-        .expect("read shared route journal")
-        .lines()
-        .map(|line| {
-            let value: Value = serde_json::from_str(line).expect("parse shared route line");
-            (line.to_owned(), value)
-        })
-        .collect()
-}
-
-fn write_shared_journal(path: &std::path::Path, lines: &[String]) {
-    let mut body = lines.join("\n");
-    if !body.is_empty() {
-        body.push('\n');
-    }
-    std::fs::write(path, body).expect("write shared route journal");
-}
-
-fn is_binding_control(value: &Value) -> bool {
-    value.get("kind").and_then(Value::as_str) == Some("binding_control")
-}
-
 fn point_route_at(fixture: &AppFixture, storage_root: &std::path::Path) {
-    let path = fixture.host_state.join("routes.jsonl");
-    let mut routes = 0usize;
-    let lines = shared_journal_lines(&path)
-        .into_iter()
-        .map(|(line, mut record)| {
-            if is_binding_control(&record) {
-                // The control line is the durable identity/binding owner and
-                // must survive fixture edits byte-for-byte.
-                return line;
-            }
-            record["storage_root"] = Value::String(storage_root.to_string_lossy().into_owned());
-            routes += 1;
-            serde_json::to_string(&record).expect("serialize route record")
+    let path = fixture.host_state.join("routes.json");
+    let mut routes: Vec<Value> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let project = fixture.project.canonicalize().unwrap();
+    let selected: Vec<_> = routes
+        .iter_mut()
+        .filter(|route| {
+            route["project_scope"].as_str() == project.to_str()
+                && route["app_scope_id"] == "appserver-cli"
         })
-        .collect::<Vec<_>>();
-    assert_eq!(routes, 1, "fixture must contain exactly one route record");
-    write_shared_journal(&path, &lines);
+        .collect();
+    assert_eq!(selected.len(), 1);
+    selected.into_iter().next().unwrap()["storage_root"] = json!(storage_root);
+    std::fs::write(path, serde_json::to_vec(&routes).unwrap()).unwrap();
 }
 
 fn remove_host_routes(fixture: &AppFixture) {
-    let path = fixture.host_state.join("routes.jsonl");
-    let lines = shared_journal_lines(&path)
-        .into_iter()
-        .filter_map(|(line, value)| is_binding_control(&value).then_some(line))
-        .collect::<Vec<_>>();
-    write_shared_journal(&path, &lines);
+    let path = fixture.host_state.join("routes.json");
+    let mut routes: Vec<Value> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let project = fixture.project.canonicalize().unwrap();
+    let before = routes.len();
+    routes.retain(|route| {
+        !(route["project_scope"].as_str() == project.to_str()
+            && route["app_scope_id"] == "appserver-cli")
+    });
+    assert_eq!(before - routes.len(), 1);
+    std::fs::write(path, serde_json::to_vec(&routes).unwrap()).unwrap();
 }
 
 fn command_public_in(
@@ -207,38 +120,14 @@ fn retired_local_subscription_history_does_not_override_current_central_runtime(
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     let first_id = first["identity"]["worker_id"].as_str().unwrap().to_owned();
-    let journal = runtime_journals(&fixture.host_state)
-        .into_iter()
-        .next()
-        .unwrap();
-    let central_root = journal
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
     fixture.stop_daemon();
-    seed_retired_runtime_copy(&central_root, &fixture.project);
     let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&legacy_journal)
-        .unwrap();
-    use std::io::Write;
-    writeln!(
-        file,
-        "{}",
-        json!({"ev":"NotificationSubscribed","subscription":{
-            "id":"legacy-pane-sub","worker_id":first_id,"event":"direct-message",
-            "subject":null,"pane":"%1","method":"tmux","trigger_ms":null,
-            "expires_ms":1,"status":"armed","created_ms":0,"updated_ms":0
-        }})
+    std::fs::create_dir_all(legacy_journal.parent().unwrap()).unwrap();
+    std::fs::write(
+        &legacy_journal,
+        b"incompatible-retired-version\nlegacy-pane-sub\n",
     )
     .unwrap();
-    writeln!(file, "{}", json!({"ev":"NotificationStatus","subscription_id":"legacy-pane-sub","status":"pane-lost","updated_ms":1})).unwrap();
-    drop(file);
     let legacy_before = std::fs::read(&legacy_journal).unwrap();
     remove_host_routes(&fixture);
     let project = fixture.project.clone();
@@ -288,7 +177,7 @@ fn central_storage_survives_restart_and_stays_under_private_host() {
             "--description",
             "survive restart",
             "--delivery-condition",
-            "central journal active",
+            "central current state active",
             "--test-condition",
             "public CLI round trip",
             "--priority",
@@ -325,22 +214,17 @@ fn central_storage_survives_restart_and_stays_under_private_host() {
         THREAD_B,
     );
 
-    let host_journals = runtime_journals(&fixture.host_state);
+    let current_path = fixture
+        .project_state_for(&fixture.project, "appserver-cli")
+        .canonicalize()
+        .unwrap();
+    assert!(current_path.starts_with(fixture.host_state.canonicalize().unwrap().join("projects")));
     assert!(
-        !host_journals.is_empty(),
-        "host-central runtime journal is absent under {}",
-        fixture.host_state.display()
-    );
-    assert!(
-        host_journals
-            .iter()
-            .all(|path| path.starts_with(fixture.host_state.join("projects"))),
-        "runtime journals must use the host project namespace: {host_journals:?}"
-    );
-    assert_eq!(
-        runtime_journals(&fixture.project),
-        Vec::<PathBuf>::new(),
-        "the project marker must not own runtime journals"
+        !fixture
+            .project
+            .join(".agent-collab/server/state.json")
+            .exists(),
+        "the project marker must not own current runtime state"
     );
 
     fixture.restart_daemon();
@@ -440,21 +324,16 @@ fn current_central_recovery_without_host_route_ignores_retired_local_journal() {
         THREAD_B,
     );
 
-    let original_journal = runtime_journals(&fixture.host_state)
-        .into_iter()
-        .find(|journal| {
-            std::fs::read_to_string(journal).is_ok_and(|body| body.contains("external-legacy-task"))
-        })
-        .expect("central journal before external migration");
-    let central_root = original_journal
-        .parent()
-        .and_then(std::path::Path::parent)
-        .and_then(std::path::Path::parent)
-        .expect("central storage root")
-        .to_path_buf();
+    let original_state = fixture.project_state_for(&fixture.project, "appserver-cli");
+    assert!(fixture.current_state()["tasks"]["external-legacy-task"].is_object());
     fixture.stop_daemon();
-    seed_retired_runtime_copy(&central_root, &fixture.project);
     let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
+    std::fs::create_dir_all(legacy_journal.parent().unwrap()).unwrap();
+    std::fs::write(
+        &legacy_journal,
+        b"incompatible-retired-version\nopaque-external-local-state\n",
+    )
+    .unwrap();
     let legacy_before = std::fs::read(&legacy_journal).expect("read external legacy journal");
     remove_host_routes(&fixture);
 
@@ -488,15 +367,14 @@ fn current_central_recovery_without_host_route_ignores_retired_local_journal() {
                 && subscription["status"] == "armed"
         }));
 
-    let migrated_journal = runtime_journals(&fixture.host_state)
-        .into_iter()
-        .find(|journal| {
-            std::fs::read_to_string(journal).is_ok_and(|body| body.contains("external-legacy-task"))
-        })
-        .expect("central journal after external migration");
-    assert!(!std::fs::read(&migrated_journal)
-        .expect("read migrated central journal")
-        .starts_with(&legacy_before));
+    // This scenario intentionally has no persisted route. The path captured
+    // before removing it remains the declared current storage owner.
+    let restored: Value = serde_json::from_slice(&std::fs::read(&original_state).unwrap()).unwrap();
+    assert!(restored["state"]["tasks"]["external-legacy-task"].is_object());
+    assert!(original_state
+        .canonicalize()
+        .unwrap()
+        .starts_with(fixture.host_state.canonicalize().unwrap().join("projects")));
     assert_eq!(
         std::fs::read(&legacy_journal).expect("read preserved external legacy journal"),
         legacy_before,
@@ -505,7 +383,7 @@ fn current_central_recovery_without_host_route_ignores_retired_local_journal() {
 }
 
 #[test]
-fn stale_local_storage_reference_rebinds_without_importing_retired_journal() {
+fn stale_local_storage_reference_fails_without_importing_retired_data() {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
     let second = fixture.run_public(&["context"], THREAD_B);
@@ -567,22 +445,64 @@ fn stale_local_storage_reference_rebinds_without_importing_retired_journal() {
         THREAD_B,
     );
 
-    let original_journal = runtime_journals(&fixture.host_state)
-        .into_iter()
-        .next()
-        .expect("central journal before migration");
-    let central_root = original_journal
-        .parent()
-        .and_then(std::path::Path::parent)
-        .and_then(std::path::Path::parent)
-        .expect("central storage root")
-        .to_path_buf();
+    let current_path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let current_before = std::fs::read(&current_path).unwrap();
+    let routes_path = fixture.host_state.join("routes.json");
+    let valid_routes = std::fs::read(&routes_path).unwrap();
+    let map_path = fixture.host_state.join("identity-map.json");
+    let current_map = std::fs::read(&map_path).unwrap();
     fixture.stop_daemon();
-    seed_retired_runtime_copy(&central_root, &fixture.project);
     point_route_at(&fixture, &fixture.project);
     let legacy_journal = fixture.project.join(".agent-collab/server/journal.jsonl");
+    std::fs::create_dir_all(legacy_journal.parent().unwrap()).unwrap();
+    std::fs::write(
+        &legacy_journal,
+        b"incompatible-retired-version\nopaque-local-data\n",
+    )
+    .unwrap();
     let legacy_before = std::fs::read(&legacy_journal).expect("read legacy journal");
-
+    let invalid_routes = std::fs::read(&routes_path).unwrap();
+    let log_path = fixture.root.join("invalid-current-route.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    fixture.daemon = Some(
+        Command::new(binary())
+            .arg("serve")
+            .current_dir(&fixture.project)
+            .env("COLLAB_STATE_DIR", &fixture.host_state)
+            .env("HOME", fixture.root.join("home"))
+            .env("CODEX_HOME", fixture.root.join("home"))
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = fixture.daemon.as_mut().unwrap().try_wait().unwrap() {
+            assert!(!status.success(), "local current storage must fail startup");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "invalid current storage did not fail startup"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(std::fs::read_to_string(log_path)
+        .unwrap()
+        .contains("CURRENT_STATE_MIGRATION_REQUIRED"));
+    assert!(!fixture.host_state.join("server.sock").exists());
+    assert_eq!(std::fs::read(&current_path).unwrap(), current_before);
+    assert_eq!(std::fs::read(&routes_path).unwrap(), invalid_routes);
+    assert_eq!(std::fs::read(&map_path).unwrap(), current_map);
+    assert_eq!(std::fs::read(&legacy_journal).unwrap(), legacy_before);
+    fixture.stop_daemon();
+    std::fs::write(&routes_path, valid_routes).unwrap();
     fixture.start_daemon();
     let restored_first = fixture.run_public(&["context"], THREAD_A);
     let restored_second = fixture.run_public(&["context"], THREAD_B);
@@ -607,33 +527,14 @@ fn stale_local_storage_reference_rebinds_without_importing_retired_journal() {
             subscription["subject"] == "legacy:subscription" && subscription["status"] == "armed"
         }));
 
-    let migrated = runtime_journals(&fixture.host_state)
-        .into_iter()
-        .next()
-        .expect("central journal after migration");
-    assert!(
-        migrated.starts_with(fixture.host_state.join("projects")),
-        "migrated journal is outside the private host: {}",
-        migrated.display()
+    assert_eq!(
+        fixture.project_state_for(&fixture.project, "appserver-cli"),
+        current_path
     );
-    let route = shared_journal_lines(&fixture.host_state.join("routes.jsonl"))
-        .into_iter()
-        .map(|(_, value)| value)
-        .find(|value| !is_binding_control(value) && value.get("op") == Some(&json!("register")))
-        .expect("parse migrated route record");
-    let canonical_host =
-        std::fs::canonicalize(&fixture.host_state).expect("canonicalize private host root");
-    let canonical_route = std::fs::canonicalize(route["storage_root"].as_str().unwrap())
-        .expect("canonicalize migrated route");
-    assert!(
-        canonical_route.starts_with(canonical_host.join("projects")),
-        "migration must activate the central route before writes: {route}"
-    );
-    let migrated_before_writes = std::fs::read(&migrated).expect("read migrated journal");
-    assert!(
-        !migrated_before_writes.starts_with(&legacy_before),
-        "current storage must not import the incompatible retired journal"
-    );
+    assert!(current_path
+        .canonicalize()
+        .unwrap()
+        .starts_with(fixture.host_state.canonicalize().unwrap().join("projects")));
     fixture.run_public(
         &[
             "board",
@@ -663,11 +564,14 @@ fn stale_local_storage_reference_rebinds_without_importing_retired_journal() {
         ],
         THREAD_A,
     );
-    assert_ne!(
-        std::fs::read(&migrated).expect("read migrated journal after writes"),
-        migrated_before_writes,
-        "new writes must reach the central journal"
-    );
+    let current = fixture.current_state();
+    assert!(current["tasks"]["post-migration-task"].is_object());
+    assert!(current["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|message| message["subject"] == "post-migration-message"
+            && message["body"] == "central only"));
     assert_eq!(
         std::fs::read(&legacy_journal).expect("read preserved legacy journal"),
         legacy_before,
@@ -675,14 +579,19 @@ fn stale_local_storage_reference_rebinds_without_importing_retired_journal() {
     );
 
     fixture.run_public(&["reset", "--project"], THREAD_A);
-    let after_reset = std::fs::read_to_string(&migrated).unwrap_or_default();
-    assert!(
-        !after_reset.contains("legacy-task")
-            && !after_reset.contains("legacy-message")
-            && !after_reset.contains("legacy:subscription"),
-        "scoped reset must clear this project's centralized runtime: {}",
-        migrated.display()
-    );
+    match std::fs::read(&current_path) {
+        Ok(bytes) => {
+            let document: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(document["state"]["tasks"].as_object().unwrap().is_empty());
+            assert!(document["state"]["msgs"].as_object().unwrap().is_empty());
+            assert!(document["state"]["notification_subscriptions"]
+                .as_object()
+                .unwrap()
+                .is_empty());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read reset current state: {error}"),
+    }
     assert!(
         fixture.host_state.join("daemon.lock").exists()
             && fixture.host_state.join("server.sock").exists(),

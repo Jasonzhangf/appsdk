@@ -119,21 +119,6 @@ fn cli_rejects_managed_subagent_start_before_resolving_collab_context() {
     );
 }
 
-/// Bind the process environment to one explicit App Server address while
-/// holding the shared env lock.  Registration reuse now compares the
-/// persisted thread/session against the live ones, so a test that builds
-/// a thread-backed fixture must state the address it means instead of
-/// inheriting whatever the developer's shell exported.
-fn set_current_session_thread(thread_id: &str, session_id: &str) {
-    std::env::set_var("CODEX_THREAD_ID", thread_id);
-    std::env::set_var("CODEX_SESSION_ID", session_id);
-}
-
-fn clear_current_session_thread() {
-    std::env::remove_var("CODEX_THREAD_ID");
-    std::env::remove_var("CODEX_SESSION_ID");
-}
-
 #[test]
 fn runtime_for_request_rejects_an_unregistered_identity() {
     let identity = identity_with_runtime(None);
@@ -149,7 +134,6 @@ fn runtime_for_request_accepts_a_persisted_tui_binding() {
         agent_id: identity::AgentId::new("worker-1").unwrap(),
         runtime_id: identity::RuntimeId::new("runtime-tui").unwrap(),
         appserver_id: identity::AppServerId::new("tui-default").unwrap(),
-        endpoint_generation: 3,
         binding_id: identity::BindingId::new("binding-tui").unwrap(),
         session_id: None,
         native_thread_id: None,
@@ -982,9 +966,7 @@ fn context_env_view_skips_a_non_unicode_environment_entry() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
-    let _guard = crate::scope::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let key = "COLLAB_TEST_NON_UTF8";
     let previous = std::env::var_os(key);
     // 0x80 is not a valid UTF-8 byte, and the key is under a selected prefix, so
@@ -1005,11 +987,7 @@ fn context_env_view_skips_a_non_unicode_environment_entry() {
 
 #[test]
 fn context_env_view_selects_only_collab_identity_variables() {
-    // A pre-existing environment-sensitive test can panic while holding this
-    // lock; take the poisoned guard instead of turning that into a new failure.
-    let _guard = crate::scope::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let previous = [
         (
             "COLLAB_TEST_ENV_MARKER",
@@ -1072,9 +1050,7 @@ fn context_env_view_selects_only_collab_identity_variables() {
 
 #[test]
 fn identity_supplement_rejects_unknown_duplicate_and_invalid_fields_before_observation() {
-    let _guard = crate::scope::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     for raw in [
         r#"{"worker_id":"worker-1"}"#,
         r#"{"session_id":"one","session_id":"two"}"#,
@@ -1097,9 +1073,7 @@ fn identity_supplement_rejects_unknown_duplicate_and_invalid_fields_before_obser
 
 #[test]
 fn identity_facts_preserve_explicit_endpoint_when_namespace_is_missing() {
-    let _guard = crate::scope::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let keys = [
         "COLLAB_APPSERVER_SOCKET",
         "CODEX_APP_SERVER_SOCKET",
@@ -1136,9 +1110,7 @@ fn identity_facts_preserve_explicit_endpoint_when_namespace_is_missing() {
 
 #[test]
 fn identity_supplement_conflict_never_overrides_observed_fact() {
-    let _guard = crate::scope::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let previous_session = std::env::var_os("CODEX_SESSION_ID");
     std::env::set_var("CODEX_SESSION_ID", "observed-session");
 
@@ -1403,7 +1375,7 @@ mod qqbot_lifecycle_tests {
     }
 
     #[test]
-    fn conversation_default_and_channel_envelope_survive_snapshot_replay() {
+    fn conversation_default_and_channel_envelope_survive_current_state() {
         use crate::server::channel_envelope::{platform_event_key, ChannelEnvelope};
         let mut state = new_state();
         default_for(&mut state, "qqbot", "u1:session", "project.Bob");
@@ -1422,18 +1394,9 @@ mod qqbot_lifecycle_tests {
                 attachments: Vec::new(),
             },
         });
-        // Compacted journal baselines must restore the typed default and the
-        // platform idempotency index, not just the message rows.
-        let lines: Vec<String> = state
-            .snapshot_events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect();
-        let mut replayed = new_state();
-        for line in lines {
-            let event: Event = serde_json::from_str(&line).unwrap();
-            replayed.apply(&event);
-        }
+        // Current state retains the typed default and platform idempotency index.
+        let replayed: crate::server::state::State =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert_eq!(
             lookup_default(&replayed, "qqbot", "qqbot@host", "u1:session")
                 .unwrap()

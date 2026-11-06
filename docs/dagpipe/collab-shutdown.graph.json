@@ -1,0 +1,22 @@
+{
+  "id": "appsdk-collab-shutdown",
+  "version": "1.0.0",
+  "description": "一次已接收的维护关闭请求。核实授权、完成响应后才请求停服；停服取消回压连接并排空，再清理自有端点。错误与取消传递到同一出口，不把授权响应当作进程已退出。不操作tmux生命周期。",
+  "inputs": [{"id":"shutdown_request","schema":"Object"}],
+  "nodes": [
+    {"id":"核实关闭授权","operator":"appsdk.collab_shutdown.authorize","operator_version":"1","description":"沿现有维护认证核实口令并写DOWN。拒绝或写失败保留原错且不请求停服。owner: part_11.rs::handle_host_shutdown。","inputs":["shutdown_request"],"output":{"id":"authorization_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"完成本次响应","operator":"appsdk.collab_shutdown.respond","operator_version":"1","description":"沿当前连接完成JSON换行响应。写失败或daemon取消则关闭该连接，不重试部分响应，不声明消费，不发送本次停服信号。owner: part_12.rs::conn_task_routed。","inputs":["authorization_result"],"output":{"id":"response_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"请求停止接入","operator":"appsdk.collab_shutdown.request_stop","operator_version":"1","description":"仅授权成功且完整响应写入后请求停服。拒绝或失败保持服务状态，携带真实结果跳过后续副作用。owner: conn_task_routed与run_with_host_paths。","inputs":["response_result"],"output":{"id":"stop_request","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"结束调度并排空连接","operator":"appsdk.collab_shutdown.drain","operator_version":"1","description":"停止接入，沿现有顺序结束调度，发布连接取消并排空连接任务。连接的读取与响应写入均服从同一取消信号；回压不能阻止退出。owner: run_with_host_paths与conn_task_routed。","inputs":["stop_request"],"output":{"id":"drain_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"释放自有服务端点","operator":"appsdk.collab_shutdown.cleanup","operator_version":"1","description":"仅停服路径移除当前自有socket及同inode的PID文件；保留DOWN与持久身份、任务及消息。owner: run_with_host_paths。","inputs":["drain_result"],"output":{"id":"cleanup_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"交回真实关闭结果","operator":"appsdk.collab_shutdown.emit","operator_version":"1","description":"授权拒绝、写失败、连接取消及实际停服完成汇入同一出口。公开验收分别观测响应、进程退出及端点清理，授权成功不等于退出成功。","inputs":["cleanup_result"],"output":{"id":"shutdown_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges": [
+    {"from":"核实关闭授权","to":"完成本次响应","arc_id":"authorization_result"},
+    {"from":"完成本次响应","to":"请求停止接入","arc_id":"response_result"},
+    {"from":"请求停止接入","to":"结束调度并排空连接","arc_id":"stop_request"},
+    {"from":"结束调度并排空连接","to":"释放自有服务端点","arc_id":"drain_result"},
+    {"from":"释放自有服务端点","to":"交回真实关闭结果","arc_id":"cleanup_result"}
+  ],
+  "outputs":["shutdown_result"]
+}

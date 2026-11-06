@@ -65,7 +65,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-one").unwrap(),
             BindingId::new("binding-one").unwrap(),
-            1,
             OperationId::new("identity-op-1").unwrap(),
             7,
             2,
@@ -82,7 +81,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-one").unwrap(),
             BindingId::new("binding-one").unwrap(),
-            1,
             None,
             OperationId::new("runtime-op-1").unwrap(),
             7,
@@ -111,7 +109,6 @@
                 "agent-one",
                 "runtime-one",
                 "binding-one",
-                1,
             ))
             .unwrap();
 
@@ -131,7 +128,6 @@
                 app_scope("app-one"),
                 RuntimeId::new("runtime-one").unwrap(),
                 BindingId::new("binding-one").unwrap(),
-                1,
                 OperationId::new("identity-op-1").unwrap(),
                 7,
                 2,
@@ -150,7 +146,6 @@
                 app_scope("app-one"),
                 RuntimeId::new("runtime-one").unwrap(),
                 BindingId::new("binding-one").unwrap(),
-                1,
                 None,
                 OperationId::new("runtime-op-1").unwrap(),
                 7,
@@ -224,8 +219,8 @@
         ));
         receipts.runtime_rebinds[0].native_thread_id = None;
 
-        receipts.identity_rebinds[0].endpoint_generation = 2;
-        receipts.runtime_rebinds[0].endpoint_generation = 2;
+        receipts.identity_rebinds[0].runtime_id = RuntimeId::new("runtime-replaced").unwrap();
+        receipts.runtime_rebinds[0].runtime_id = RuntimeId::new("runtime-replaced").unwrap();
         assert!(matches!(
             state.validate_migration_receipts(&receipts),
             Err(StateError::Invariant(reason)) if reason.contains("no matching migration receipt")
@@ -260,7 +255,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-one").unwrap(),
             BindingId::new("binding-one").unwrap(),
-            1,
             OperationId::new("identity-op-1").unwrap(),
             7,
             2,
@@ -277,7 +271,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-one").unwrap(),
             BindingId::new("binding-one").unwrap(),
-            1,
             OperationId::new("identity-op-2").unwrap(),
             7,
             3,
@@ -294,7 +287,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-one").unwrap(),
             BindingId::new("binding-one").unwrap(),
-            1,
             None,
             OperationId::new("runtime-op-1").unwrap(),
             7,
@@ -312,7 +304,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-two").unwrap(),
             BindingId::new("binding-two").unwrap(),
-            1,
             None,
             OperationId::new("runtime-op-2").unwrap(),
             7,
@@ -346,7 +337,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-one").unwrap(),
             BindingId::new("binding-one").unwrap(),
-            1,
             OperationId::new("identity-op-1").unwrap(),
             7,
             2,
@@ -363,7 +353,6 @@
             app_scope("app-one"),
             RuntimeId::new("runtime-one").unwrap(),
             BindingId::new("binding-one").unwrap(),
-            1,
             None,
             OperationId::new("runtime-op-1").unwrap(),
             7,

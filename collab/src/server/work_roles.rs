@@ -1,8 +1,8 @@
-// Relationship changes and their advisory mail share the caller's journal
-// transaction. Existing mailbox/wake owners handle delivery and consumption.
+// Relationship changes and advisory mail share the current-state transaction.
 fn relationship_notice_events(
-    state: &State, scope: &str, recipient: &str, subject: &str, body: String,
-) -> Vec<Event> {
+    state: &State, control: &binding_slot::BindingControlSet, route: &RouteScope,
+    recipient: &str, subject: &str, body: String,
+) -> Result<Vec<Event>, String> {
     let now = now_ms();
     let id = format!("relationship-{}", rand::random::<u128>());
     let mut events = vec![Event::Sent { msg: Message {
@@ -13,15 +13,14 @@ fn relationship_notice_events(
     } }, Event::DeliveryMode {
         msg_id: id.clone(), mode: "explicit-notification".into(), source_thread_id: None,
     }];
-    if let Some(holder) = state.name_occupancies.get(scope)
-        .and_then(|names| names.values().find(|holder| holder.worker_id == recipient)) {
+    if let Some(slot) = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)? {
         events.push(Event::MailboxNameAddressed { message_id: id.clone(),
-            address: name_mailbox::MailboxNameAddress { project_scope: scope.into(), name: holder.name.clone() } });
+            address: name_mailbox::MailboxNameAddress { project_scope: route.project_scope_id.as_str().into(), name: slot.identity_key.name.clone() } });
     }
     if let Some(subscription) = state.matching_subscription(recipient, "direct-message", None, now) {
         events.push(Event::WakeBound { message_id: id, subscription_id: subscription.id.clone() });
     }
-    events
+    Ok(events)
 }
 
 fn deliver_relationship_notices(server: &Server, events: &[Event]) -> Vec<serde_json::Value> {
@@ -43,17 +42,10 @@ fn deliver_relationship_notices(server: &Server, events: &[Event]) -> Vec<serde_
     }).collect()
 }
 
-fn worker_work_roles(state: &State, project_scope: &str, worker_id: &str) -> Vec<String> {
-    state
-        .name_occupancies
-        .get(project_scope)
-        .and_then(|names| {
-            names
-                .values()
-                .find(|entry| entry.worker_id == worker_id)
-                .map(|entry| state.name_work_roles(project_scope, &entry.name))
-        })
-        .unwrap_or_default()
+fn worker_work_roles(state: &State, control: &binding_slot::BindingControlSet, route: Option<&RouteScope>, worker_id: &str) -> Result<Vec<String>, String> {
+    let Some(route) = route else { return Ok(Vec::new()); };
+    Ok(control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)?
+        .map(|slot| state.name_work_roles(route.project_scope_id.as_str(), &slot.identity_key.name)).unwrap_or_default())
 }
 
 fn handle_work_roles(
@@ -63,6 +55,9 @@ fn handle_work_roles(
     name: Option<String>,
     roles: Vec<String>,
 ) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &actor, &token) {
         return error;
@@ -72,12 +67,9 @@ fn handle_work_roles(
         _ => return Resp::err("WORK_ROLES_PROJECT_REQUIRED: project route is not ready"),
     };
     let scope = route.project_scope_id.as_str();
-    let own_name = state.name_occupancies.get(scope).and_then(|names| {
-        names
-            .values()
-            .find(|entry| entry.worker_id == actor)
-            .map(|entry| entry.name.clone())
-    });
+    let own_name = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
+        Ok(slot) => slot.map(|slot| slot.identity_key.name.clone()), Err(error) => return Resp::err(error),
+    };
     let Some(name) = name.or_else(|| own_name.clone()) else {
         return Resp::err("WORK_ROLES_NAME_REQUIRED: restore a stable name first");
     };
@@ -88,14 +80,13 @@ fn handle_work_roles(
             Err(error) => return Resp::err(error),
         }
     }
-    let known = state.name_occupancy(scope, &name).is_some()
-        || state
-            .name_occupancy_revisions
-            .get(scope)
-            .is_some_and(|names| names.contains_key(&name));
-    if !known {
+    let current = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, &name) {
+        Ok(current) => current, Err(error) => return Resp::err(error),
+    };
+    let Some(current) = current else {
         return Resp::err("WORK_ROLES_NAME_NOT_FOUND: unknown stable name");
-    }
+    };
+    let name = current.identity_key.name.clone();
     let mut normalized = Vec::new();
     for role in roles {
         let role = role.trim().to_lowercase();
@@ -119,11 +110,13 @@ fn handle_work_roles(
         let recipient = if own_name.as_deref() == Some(name.as_str()) {
             current_master_worker_id(&state, Some(&route))
         } else {
-            state.name_occupancy(scope, &name).map(|holder| holder.worker_id.clone())
+            current.active_binding().map(|current| current.binding.agent_id.as_str().to_owned())
         };
         if let Some(recipient) = recipient.filter(|recipient| recipient != &actor && state.workers.contains_key(recipient)) {
-            notices = relationship_notice_events(&state, scope, &recipient, "work-roles-changed",
-                format!("{name} 的工作专长已变更为 {:?}。读取 collab context / collab board show 获取当前关系。只调整受影响的新任务或交接；已接任务的归属与验收保持。无需仅因角色变化改模板或向用户例行汇报。", normalized));
+            notices = match relationship_notice_events(&state, &control, &route, &recipient, "work-roles-changed",
+                format!("{name} 的工作专长已变更为 {:?}。读取 collab context / collab board show 获取当前关系。只调整受影响的新任务或交接；已接任务的归属与验收保持。无需仅因角色变化改模板或向用户例行汇报。", normalized)) {
+                Ok(events) => events, Err(error) => return Resp::err(error),
+            };
         }
         let mut events = vec![event];
         events.extend(notices.clone());
@@ -181,9 +174,26 @@ mod work_role_state_tests {
     }
 
     #[test]
-    fn specialties_follow_name_session_handoff_and_survive_compaction() {
+    fn specialties_follow_current_map_session_handoff_and_survive_serialization() {
         let mut state = State::default();
+        let mut control = binding_slot::BindingControlSet::default();
+        let route = RouteScope {
+            project_scope_id: ProjectScopeId::new("/project").unwrap(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+        };
         for (worker, session, revision) in [("old", "s1", 1), ("current", "s2", 2)] {
+            let thread = format!("thread-{worker}");
+            let mut transport = peer_tests::test_appserver_transport(&thread);
+            transport.session_id = Some(session.into());
+            let binding = RuntimeBinding::new_with_session(
+                route.project_scope_id.clone(), route.app_scope_id.clone(),
+                AgentId::new(worker).unwrap(), RuntimeId::new(format!("runtime-{worker}")).unwrap(),
+                BindingId::new(format!("binding-{worker}")).unwrap(),
+                Some(crate::identity::SessionId::new(session).unwrap()),
+                Some(NativeThreadId::new(thread).unwrap()),
+            ).unwrap();
+            control.commit(&binding_slot::IdentityBindingKey::new(route.project_scope_id.clone(), route.app_scope_id.clone(), "Alice"),
+                binding_slot::BindingValue::new(binding, transport), None).unwrap();
             state
                 .apply_checked(&Event::NameResolutionCommitted {
                     project_scope: "/project".into(),
@@ -210,21 +220,18 @@ mod work_role_state_tests {
                     .unwrap();
             }
         }
-        assert!(worker_work_roles(&state, "/project", "old").is_empty());
+        assert!(worker_work_roles(&state, &control, Some(&route), "old").unwrap().is_empty());
         assert_eq!(
-            worker_work_roles(&state, "/project", "current"),
+            worker_work_roles(&state, &control, Some(&route), "current").unwrap(),
             ["designer", "reviewer"]
         );
-        let mut replay = State::default();
-        for event in state.snapshot_events() {
-            replay.apply_checked(&event).unwrap();
-        }
+        let mut loaded: State = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
         assert_eq!(
-            worker_work_roles(&replay, "/project", "current"),
+            worker_work_roles(&loaded, &control, Some(&route), "current").unwrap(),
             ["designer", "reviewer"]
         );
-        assert!(replay.name_work_roles("/other-project", "Alice").is_empty());
-        replay
+        assert!(loaded.name_work_roles("/other-project", "Alice").is_empty());
+        loaded
             .apply_checked(&Event::NameWorkRolesUpdated {
                 project_scope: "/project".into(),
                 record: crate::board::NameWorkRoles {
@@ -233,7 +240,8 @@ mod work_role_state_tests {
                 },
             })
             .unwrap();
-        assert!(worker_work_roles(&replay, "/project", "current").is_empty());
-        assert!(worker_work_roles(&state, "/other-project", "current").is_empty());
+        assert!(worker_work_roles(&loaded, &control, Some(&route), "current").unwrap().is_empty());
+        let foreign = RouteScope { project_scope_id: ProjectScopeId::new("/other-project").unwrap(), ..route };
+        assert!(worker_work_roles(&state, &control, Some(&foreign), "current").unwrap().is_empty());
     }
 }

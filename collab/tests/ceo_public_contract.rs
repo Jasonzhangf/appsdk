@@ -25,18 +25,8 @@ fn ceo_wire_request(fixture: &Fixture, request: Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
-fn durable_surfaces(fixture: &Fixture) -> Vec<(String, Vec<u8>)> {
-    let mut surfaces = Vec::new();
-    for (label, path) in [
-        ("host_journal", fixture.host_journal()),
-        ("host_routes", fixture.host_routes()),
-        ("project_journal", fixture.project_journal()),
-    ] {
-        if let Ok(bytes) = std::fs::read(path) {
-            surfaces.push((label.to_owned(), bytes));
-        }
-    }
-    surfaces
+fn durable_surfaces(fixture: &Fixture) -> Value {
+    fixture.current_resources()
 }
 
 fn lock_tmux() -> std::sync::MutexGuard<'static, ()> {
@@ -1314,6 +1304,21 @@ fn ceo_bootstrap_launches_fake_consumer_then_requires_real_master_handshake() {
 
     let target_root = create_external_project(&fixture, "bootstrap-target");
     let target_pane = create_session(&fixture, "bootstrap-target-pane");
+    let current_session = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &ceo_pane.pane_id,
+                "#{session_name}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let session = current_session.trim();
     let fake_log = fixture.root.join("fake-codex.log");
     let bin = install_fake_codex(&fixture, &fake_log);
     set_tmux_environment(&fixture, session, "PATH", &with_fake_codex_path(&bin));
@@ -1620,6 +1625,21 @@ fn ceo_bootstrap_quotes_approval_profile_and_project_without_execution() {
         false,
     );
     let target_root = create_external_project(&fixture, "space target 'quoted");
+    let current_session = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &ceo_pane.pane_id,
+                "#{session_name}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let session = current_session.trim();
     let marker = fixture.root.join("ceo-injection-marker");
     let fake_log = fixture.root.join("fake-codex-quote.log");
     let bin = install_fake_codex(&fixture, &fake_log);

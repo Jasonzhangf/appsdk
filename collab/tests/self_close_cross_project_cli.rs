@@ -168,13 +168,6 @@ fn board_tasks(fixture: &Fixture, project_context: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Durable message retention evidence from the isolated project journal.
-fn message_recorded(fixture: &Fixture, msg_id: &str) -> bool {
-    let journal = fixture.project_journal();
-    let contents = std::fs::read_to_string(&journal).unwrap_or_default();
-    contents.lines().any(|line| line.contains(msg_id))
-}
-
 #[test]
 fn self_close_clears_old_anchors_before_cross_project_context() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
@@ -222,6 +215,29 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         false,
     );
     let msg_id = sent["msg_id"].as_str().expect("sent message id").to_owned();
+    let source_before = fixture.current_state_for(&source_root, &source_app_scope);
+    let task_before = source_before["tasks"]["self-close-open-task"].clone();
+    let message_before = source_before["msgs"][&msg_id].clone();
+    assert!(!task_before.is_null());
+    assert!(!message_before.is_null());
+    assert_eq!(
+        message_before["body"],
+        "business payload must survive self close"
+    );
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|slot| slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == source_id)
+            .count(),
+        1
+    );
 
     let pane_pid_before = tmux(
         &fixture.tmux_socket,
@@ -237,14 +253,13 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         false,
     );
     assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
-    assert_eq!(
-        closed["result"]["close"]["binding_retirement"]["state"], "verified",
-        "{closed}"
-    );
-    assert_eq!(
-        closed["result"]["close"]["route_retirement"]["state"], "verified",
-        "{closed}"
-    );
+    let retired = fixture.current_state_for(&source_root, &source_app_scope);
+    assert!(retired["workers"].get(&source_id).is_none());
+    assert!(!retired["global"]["current_thread_routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|route| route[1]["agent_id"] == source_id));
 
     let pane_pid_after = tmux(
         &fixture.tmux_socket,
@@ -264,9 +279,12 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         tasks_after.iter().any(|id| id == "self-close-open-task"),
         "self close must preserve open business task: {tasks_after:?}"
     );
-    assert!(
-        message_recorded(&fixture, &msg_id),
-        "self close must retain the message record"
+    let source_after = fixture.current_state_for(&source_root, &source_app_scope);
+    assert_eq!(source_after["tasks"]["self-close-open-task"], task_before);
+    assert_eq!(source_after["msgs"][&msg_id], message_before);
+    assert_eq!(
+        source_after["receive_receipts"],
+        source_before["receive_receipts"]
     );
 
     // The public entrance that the fix must unblock: the same pane registers
@@ -283,6 +301,44 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         second["result"]["snapshot"]["binding"]["project_scope"].as_str(),
         target_root.to_str(),
         "{second}"
+    );
+    let target_id = second["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let target_app = second["result"]["snapshot"]["scope"]["app_scope_id"]
+        .as_str()
+        .unwrap();
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let active: Vec<_> = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| slot["identity_status"] == "active")
+        .collect();
+    assert!(
+        !active
+            .iter()
+            .any(|slot| slot["current"]["binding"]["agent_id"] == source_id),
+        "source carrier remains retired"
+    );
+    assert_eq!(
+        active
+            .iter()
+            .filter(|slot| slot["current"]["binding"]["agent_id"] == target_id
+                && slot["identity_key"]["project_scope"] == target_root.to_str().unwrap()
+                && slot["identity_key"]["app_scope_id"] == target_app)
+            .count(),
+        1
+    );
+    let source_final = fixture.current_state_for(&source_root, &source_app_scope);
+    assert_eq!(source_final["tasks"]["self-close-open-task"], task_before);
+    assert_eq!(source_final["msgs"][&msg_id], message_before);
+    assert_eq!(
+        source_final["receive_receipts"],
+        source_before["receive_receipts"]
     );
     drop(fixture);
     std::fs::remove_dir_all(target_root).expect("remove isolated target project");

@@ -12,7 +12,7 @@
 //
 // No product source is touched, no production daemon or data is used, and no
 // consumption or clock is synthesized: every fact comes from the CLI receipts
-// or the owned journal.
+// or current stored message and wake relations.
 
 include!("support/tmux_cli_fixture.rs");
 
@@ -88,38 +88,43 @@ fn collect_deadline_occurrences(
     collected
 }
 
-fn owned_journal(fixture: &Fixture) -> PathBuf {
-    let project = std::fs::canonicalize(&fixture.root).unwrap();
-    let record: Value = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .find(|record| record["project_scope"] == project.to_string_lossy().as_ref())
-        .expect("owned project route record");
-    PathBuf::from(record["storage_root"].as_str().unwrap())
-        .join(".agent-collab/server/journal.jsonl")
-}
-
-/// Count committed wake/send events for this occurrence. Used to prove the
-/// ended occurrence emits nothing further.
-fn count_deadline_events(
+fn current_deadline_relations(
     fixture: &Fixture,
     subscription_id: &str,
     goal_id: &str,
-) -> (usize, usize) {
-    let journal = std::fs::read_to_string(owned_journal(fixture)).unwrap_or_default();
-    let subject = format!("\"subject\":\"{}\"", deadline_subject(goal_id));
-    let wakes = journal
-        .lines()
-        .filter(|line| line.contains("\"ev\":\"WakeBound\""))
-        .filter(|line| line.contains(subscription_id))
-        .count();
-    let sends = journal
-        .lines()
-        .filter(|line| line.contains("\"ev\":\"Sent\""))
-        .filter(|line| line.contains(&subject))
-        .count();
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let state = fixture.current_state_for(&fixture.root, "appserver-cli");
+    let subject = deadline_subject(goal_id);
+    let wakes = state["wake_bindings"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, binding)| **binding == subscription_id)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let sends = state["msgs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, message)| message["subject"] == subject)
+        .map(|(id, _)| id.clone())
+        .collect();
     (wakes, sends)
+}
+
+fn native_deadline_occurrences(fixture: &Fixture, pane: &Pane, goal_id: &str) -> usize {
+    let captured = tmux(
+        &fixture.tmux_socket,
+        &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
+    );
+    let compact: String = String::from_utf8_lossy(&captured.stdout)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact.matches(&deadline_subject(goal_id)).count()
 }
 
 fn find_subscription<'a>(status: &'a Value, subscription_id: &str) -> &'a Value {
@@ -250,15 +255,24 @@ fn explicit_periodic_goal_deadline_consumes_three_restarts_and_stops_on_end() {
     );
 
     // Wait past a full interval and prove the ended occurrence emits nothing.
-    let before = count_deadline_events(&fixture, &subscription_id, goal_id);
+    let before = current_deadline_relations(&fixture, &subscription_id, goal_id);
+    let native_before = native_deadline_occurrences(&fixture, &pane, goal_id);
+    assert!(
+        native_before > 0,
+        "native observer must see the consumed goal occurrences"
+    );
     let crossed = Instant::now() + Duration::from_secs(6);
     while Instant::now() < crossed {
         thread::sleep(Duration::from_millis(100));
     }
-    let after = count_deadline_events(&fixture, &subscription_id, goal_id);
+    let after = current_deadline_relations(&fixture, &subscription_id, goal_id);
     assert_eq!(
         after, before,
         "an ended periodic goal must not emit another wake: before={before:?} after={after:?}"
+    );
+    assert_eq!(
+        native_deadline_occurrences(&fixture, &pane, goal_id),
+        native_before
     );
     let drained = fixture.run_ok(
         &[

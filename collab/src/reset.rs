@@ -105,7 +105,7 @@ impl ResetRequest {
                     anyhow::bail!(
                         "RESET_STORAGE_ROOT_REQUIRED: --host must name the live host index \
                          with --storage-root <path>; the index is \
-                         <storage-root>/.agent-collab/server/journal.jsonl and routes.jsonl \
+                         <storage-root>/.agent-collab/server/state.json and routes.json \
                          does not identify it"
                     );
                 }
@@ -330,20 +330,6 @@ fn slugify(root: &Path) -> String {
     }
 }
 
-fn append_reset_record(host_paths: &HostPaths, record: &serde_json::Value) -> anyhow::Result<()> {
-    use std::io::Write;
-    let path = host_paths.state_root().join("reset.jsonl");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    let mut line = serde_json::to_vec(record)?;
-    line.push(b'\n');
-    file.write_all(&line)?;
-    file.sync_data()?;
-    Ok(())
-}
-
 struct RouteSnapshot {
     path: PathBuf,
     original: Option<Vec<u8>>,
@@ -380,7 +366,7 @@ fn restore_file(snapshot: &RouteSnapshot) -> anyhow::Result<()> {
             use std::io::Write;
             let tmp = snapshot
                 .path
-                .with_file_name(format!("routes.jsonl.reset-restore-{}", std::process::id()));
+                .with_file_name(format!(".reset-restore-{}", std::process::id()));
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -446,7 +432,7 @@ fn rollback_retired_roots(retired: &mut [RetiredRoot]) -> anyhow::Result<()> {
 fn discard_staged_roots(retired: &[RetiredRoot]) -> anyhow::Result<()> {
     for entry in retired {
         if let Some(staged) = &entry.staged {
-            // A retire entry may be a single control file (routes.jsonl) or a
+            // A retire entry may be a single control file (routes.json) or a
             // directory (identities/), so removal must not assume a directory.
             if staged.is_dir() {
                 std::fs::remove_dir_all(staged)?;
@@ -458,7 +444,7 @@ fn discard_staged_roots(retired: &[RetiredRoot]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Rewrite the host route journal without the retired project's records.
+/// Replace the current host route table without the retired project's records.
 ///
 /// The route table is host-wide durable state, so this is an atomic
 /// replacement: a crash leaves either the previous valid table or the complete
@@ -512,33 +498,16 @@ fn rewrite_host_routes<F>(host_paths: &HostPaths, mut classify: F) -> anyhow::Re
 where
     F: FnMut(&serde_json::Value) -> Option<RouteDisposition>,
 {
-    let path = host_paths.state_root().join("routes.jsonl");
+    let path = host_paths.state_root().join("routes.json");
     let content = match std::fs::read(&path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error.into()),
     };
-    if content.is_empty() {
-        return Ok(0);
-    }
-    if !content.ends_with(b"\n") {
-        anyhow::bail!(
-            "HOST_ROUTE_DURABILITY_FAILED: route journal must end with a newline: {}",
-            path.display()
-        );
-    }
+    let records: Vec<serde_json::Value> = serde_json::from_slice(&content)?;
     let mut kept = Vec::new();
     let mut removed = 0usize;
-    for chunk in content.split_inclusive(|byte| *byte == b'\n') {
-        let line = chunk.strip_suffix(b"\n").unwrap_or(chunk);
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
-            anyhow::bail!(
-                "HOST_ROUTE_DURABILITY_FAILED: empty route journal line in {}",
-                path.display()
-            );
-        }
-        let record: serde_json::Value = serde_json::from_slice(line)?;
+    for record in records {
         match classify(&record) {
             Some(RouteDisposition::Retire) => {
                 removed += 1;
@@ -546,18 +515,18 @@ where
             }
             Some(RouteDisposition::Keep) | None => {}
         }
-        kept.extend_from_slice(chunk);
+        kept.push(record);
     }
     if removed == 0 {
         return Ok(0);
     }
     use std::io::Write;
-    let tmp = path.with_file_name(format!("routes.jsonl.reset-{}", std::process::id()));
+    let tmp = path.with_file_name(format!("routes.json.reset-{}", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp)?;
-    file.write_all(&kept)?;
+    file.write_all(&serde_json::to_vec(&kept)?)?;
     file.sync_data()?;
     drop(file);
     std::fs::rename(&tmp, &path)?;
@@ -664,7 +633,7 @@ pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyh
 /// The canonical project root whose `.agent-collab/` is the live route index.
 ///
 /// The host daemon records the root it was started from in `service.json`. That
-/// root's project journal is the index the daemon replays, so the project level
+/// root's current state belongs to the resident daemon, so the project level
 /// must not retire it: the host level is the operation that owns it.
 ///
 /// `None` means only "no descriptor, so no root holds the live index": a fresh
@@ -804,10 +773,8 @@ fn run_project(
         )?;
     }
 
-    let routes_path = host_paths.state_root().join("routes.jsonl");
-    let reset_record_path = host_paths.state_root().join("reset.jsonl");
+    let routes_path = host_paths.state_root().join("routes.json");
     let route_snapshot = snapshot_file(routes_path)?;
-    let reset_record_snapshot = snapshot_file(reset_record_path)?;
     reject_symlinked_guidance(&root)?;
     let docs_dir = root.join("docs");
     let docs_dir_existed = docs_dir.is_dir();
@@ -863,7 +830,6 @@ fn run_project(
             "delivery_verified": false,
             "next": "run collab up, then collab init from this exact project root",
         });
-        append_reset_record(host_paths, &record)?;
         discard_staged_roots(&retired)?;
         Ok(())
     })();
@@ -871,7 +837,6 @@ fn run_project(
     if let Err(error) = transaction {
         let rollback_roots = rollback_retired_roots(&mut retired);
         let rollback_routes = restore_file(&route_snapshot);
-        let rollback_record = restore_file(&reset_record_snapshot);
         let rollback_doc = restore_file(&collab_doc_snapshot);
         let rollback_baseline: anyhow::Result<()> = if baseline_existed {
             Ok(())
@@ -903,23 +868,10 @@ fn run_project(
         };
         if let Err(rollback_error) = rollback_roots
             .and(rollback_routes)
-            .and(rollback_record)
             .and(rollback_doc)
             .and(rollback_baseline)
             .and(rollback_docs_dir)
         {
-            let incomplete = json!({
-                "schema": "collab-reset/v1",
-                "run_id": run_id,
-                "at_ms": now_ms(),
-                "project_root": root,
-                "approval": request.approval,
-                "status": "incomplete",
-                "delivery_verified": false,
-                "error": error.to_string(),
-                "rollback_error": rollback_error.to_string(),
-            });
-            let _ = append_reset_record(host_paths, &incomplete);
             anyhow::bail!("RESET_INCOMPLETE: {error}; rollback also failed: {rollback_error}");
         }
         return Err(error.context("reset rolled back; legacy control plane restored"));
@@ -931,20 +883,18 @@ fn run_project(
 
 /// Resolve and verify the root that owns the live host index.
 ///
-/// `routes.jsonl` does not identify the index root, so the operator must name
-/// it. The journal inside it must exist, and a non-empty journal must hold a
+/// `routes.json` does not identify the index root, so the operator must name
+/// it. The current state inside it must exist, and non-empty state must hold a
 /// record for that root, so a typo cannot retarget the operation at another
 /// project's control plane.
 ///
-/// Returns the canonical storage root, the replay state (`None` when the
-/// journal could not be replayed), and the original replay error text in that
-/// degraded case.
+/// Returns the canonical storage root, the current state when readable, and
+/// the original current-state error when the descriptor proves ownership.
 ///
-/// An unreplayable journal is exactly the state reset exists to repair, so it
-/// does not abort the run unconditionally. The failing replay cannot prove
+/// An unreadable current file does not abort the run unconditionally. It cannot prove
 /// ownership, so the daemon's own `service_scope_root` descriptor must prove
 /// that this root is the index root instead. When the descriptor names a
-/// different root, the original replay error propagates unchanged and nothing
+/// different root, the original state error propagates unchanged and nothing
 /// is retired.
 fn resolve_index_root(
     request: &ResetRequest,
@@ -961,27 +911,23 @@ fn resolve_index_root(
             raw.display()
         )
     })?;
-    let index_journal = storage_root.join(".agent-collab/server/journal.jsonl");
-    if !index_journal.is_file() {
+    let current_file = storage_root.join(".agent-collab/server/state.json");
+    if !current_file.is_file() {
         anyhow::bail!(
             "RESET_STORAGE_ROOT_INVALID: --{level} storage root {} has no \
-             .agent-collab/server/journal.jsonl, so it does not own the live host index",
+             .agent-collab/server/state.json, so it does not own the current host state",
             storage_root.display()
         );
     }
-    let state = match crate::server::replay_host_index(&storage_root) {
+    let state = match crate::server::current_state::load(&current_file, false) {
         Ok(state) => state,
         Err(error) => {
-            // Only the daemon's own descriptor can prove that this root owns
-            // the index when the journal cannot be replayed. A descriptor that
-            // is missing, unreadable, or names another root does not prove it,
-            // so the original replay error stands unchanged.
             let descriptor_owns_index = resident_index_root(host_paths)
                 .ok()
                 .flatten()
                 .is_some_and(|owner| owner == storage_root);
             if !descriptor_owns_index {
-                return Err(error);
+                return Err(anyhow::Error::msg(error));
             }
             return Ok((storage_root, None, Some(error.to_string())));
         }
@@ -998,10 +944,10 @@ fn resolve_index_root(
             .any(|binding| binding.project_scope == expected_scope);
     if has_any_record && !owns_root {
         anyhow::bail!(
-            "RESET_STORAGE_ROOT_INVALID: {} does not own the live host index at {}; the journal \
+            "RESET_STORAGE_ROOT_INVALID: {} does not own the current host state at {}; the state \
              holds no route or project for that root",
             storage_root.display(),
-            index_journal.display()
+            current_file.display()
         );
     }
     Ok((storage_root, Some(state), None))
@@ -1010,8 +956,7 @@ fn resolve_index_root(
 /// The host control-plane entries that level 3 retires.
 ///
 /// Each label is a single path segment: it names the archive directory and it
-/// suffixes the staging path. `reset.jsonl` and `archives/` are the audit trail
-/// and are never listed. The project business payload under
+/// suffixes the staging path. `archives/` is retained. The project business payload under
 /// `<storage_root>/.agent-collab/` belongs to `--project`, not here.
 fn host_control_plane_entries(
     state_root: &Path,
@@ -1020,28 +965,17 @@ fn host_control_plane_entries(
 ) -> Vec<(String, PathBuf)> {
     let server_dir = storage_root.join(".agent-collab/server");
     let mut entries = vec![
+        ("host-routes".to_owned(), state_root.join("routes.json")),
         (
-            "host-routes-jsonl".to_owned(),
-            state_root.join("routes.jsonl"),
-        ),
-        (
-            "host-journal-jsonl".to_owned(),
-            state_root.join("journal.jsonl"),
-        ),
-        (
-            "host-events-jsonl".to_owned(),
-            state_root.join("events.jsonl"),
+            "host-identity-map".to_owned(),
+            state_root.join("identity-map.json"),
         ),
         ("host-log-txt".to_owned(), state_root.join("log.txt")),
         ("host-identities".to_owned(), state_root.join("identities")),
         ("host-projects".to_owned(), state_root.join("projects")),
         (
-            "resident-index-journal-jsonl".to_owned(),
-            server_dir.join("journal.jsonl"),
-        ),
-        (
-            "resident-index-events-jsonl".to_owned(),
-            server_dir.join("events.jsonl"),
+            "resident-current-state".to_owned(),
+            server_dir.join("state.json"),
         ),
         (
             "resident-index-log-txt".to_owned(),
@@ -1056,9 +990,9 @@ fn host_control_plane_entries(
 
 /// Level 3: rebuild the host control plane.
 ///
-/// It retires the host-side control state and the resident project's runtime
-/// journal, which together are the live index. It keeps the audit trail
-/// (`reset.jsonl` and `archives/`), the project business payload under
+/// It retires the host-side control state and the resident project's current
+/// state, which together are the live index. It keeps existing archives and
+/// the project business payload under
 /// `<storage_root>/.agent-collab/`, the external service descriptor, and
 /// `~/.collab/runs/` unless `--include-runs` was given.
 fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
@@ -1117,7 +1051,6 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
         )?;
     }
 
-    let reset_record_snapshot = snapshot_file(state_root.join("reset.jsonl"))?;
     let mut record = json!({
         "schema": "collab-reset/v1",
         "run_id": run_id,
@@ -1144,15 +1077,15 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
         "delivery_verified": false,
         "next": "run collab up; it recreates the host index, identities, and project registry",
     });
-    if let Some(replay_error) = &degraded_replay_error {
+    if let Some(state_error) = &degraded_replay_error {
         record["degraded"] = json!(true);
-        record["index_replay"] = json!("unreadable");
-        record["index_replay_error"] = json!(replay_error);
+        record["current_state"] = json!("unreadable");
+        record["current_state_error"] = json!(state_error);
         record["warning"] = json!(format!(
-            "the resident index journal at {} could not be replayed; reset archived it as \
-             evidence and rebuilt the host control plane without it: {replay_error}",
+            "the resident state at {} could not be read; reset archived it as \
+             evidence and rebuilt the host control plane without it: {state_error}",
             storage_root
-                .join(".agent-collab/server/journal.jsonl")
+                .join(".agent-collab/server/state.json")
                 .display()
         ));
     }
@@ -1161,14 +1094,12 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
         if !already_reset {
             stage_retired_roots(&mut retired, &run_id)?;
         }
-        append_reset_record(host_paths, &record)?;
         discard_staged_roots(&retired)?;
         Ok(())
     })();
     if let Err(error) = transaction {
         let rollback_roots = rollback_retired_roots(&mut retired);
-        let rollback_record = restore_file(&reset_record_snapshot);
-        if let Err(rollback_error) = rollback_roots.and(rollback_record) {
+        if let Err(rollback_error) = rollback_roots {
             anyhow::bail!("RESET_INCOMPLETE: {error}; rollback also failed: {rollback_error}");
         }
         return Err(error.context("reset rolled back; the host control plane is restored"));
@@ -1239,7 +1170,7 @@ fn is_current_empty_baseline(agent_collab: &Path) -> bool {
         };
         if !matches!(
             name,
-            "daemon.lock" | "server.pid" | "DOWN" | "journal.jsonl" | "events.jsonl" | "log.txt"
+            "daemon.lock" | "server.pid" | "DOWN" | "state.json" | "log.txt"
         ) {
             return false;
         }

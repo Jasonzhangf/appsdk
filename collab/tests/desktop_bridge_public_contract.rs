@@ -1,4 +1,6 @@
 include!("support/context_operation_fixture.rs");
+#[path = "support/communication_receiver.rs"]
+mod communication_receiver;
 
 struct DesktopBridgeFixture {
     endpoint: String,
@@ -6,6 +8,7 @@ struct DesktopBridgeFixture {
     received_threads: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     disconnect_send: Arc<AtomicBool>,
+    receiver: Arc<Mutex<Option<std::sync::mpsc::Sender<Value>>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -29,6 +32,8 @@ impl DesktopBridgeFixture {
         let sent = sends.clone();
         let disconnect_send = Arc::new(AtomicBool::new(false));
         let disconnecting = disconnect_send.clone();
+        let receiver = Arc::new(Mutex::new(None::<std::sync::mpsc::Sender<Value>>));
+        let receiving = receiver.clone();
         let cwd = root.canonicalize().unwrap();
         let worker = std::thread::spawn(move || {
             while !stopping.load(Ordering::SeqCst) {
@@ -70,6 +75,11 @@ impl DesktopBridgeFixture {
                             .write_all(&(bytes.len() as u32).to_le_bytes())
                             .unwrap();
                         stream.write_all(&bytes).unwrap();
+                        if request["op"] == "send" {
+                            if let Some(receiver) = receiving.lock().unwrap().as_ref() {
+                                let _ = receiver.send(request);
+                            }
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -84,9 +94,135 @@ impl DesktopBridgeFixture {
             received_threads,
             stop,
             disconnect_send,
+            receiver,
             worker: Some(worker),
         }
     }
+}
+
+#[test]
+fn desktop_manual_recovery_requires_independent_receive_and_reply() {
+    let mut fixture = Fixture::without_tmux("desktop-manual-recovery");
+    let config = fixture.root.join("home/.appsdk");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "[timers]\ntick_interval_ms=60000\n",
+    )
+    .unwrap();
+    fixture.restart_daemon();
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+    let registered = desktop_command(&fixture, &["context"]);
+    assert!(registered.status.success());
+    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    let worker = registered["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let socket = PathBuf::from(bridge.endpoint.strip_prefix("unix://").unwrap());
+    let offline = socket.with_extension("offline");
+    std::fs::rename(&socket, &offline).unwrap();
+    let refused = desktop_command(
+        &fixture,
+        &[
+            "sendmessage",
+            "--to",
+            worker,
+            "--subject",
+            "desktop-known-failure",
+            "retain current failed message",
+        ],
+    );
+    assert!(!refused.status.success());
+    std::fs::rename(offline, socket).unwrap();
+    let (tx, native) = std::sync::mpsc::channel();
+    *bridge.receiver.lock().unwrap() = Some(tx);
+    let configured = fixture.configured_command(&[], None);
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.current_dir(&fixture.root).env_clear();
+    for (key, value) in configured.get_envs() {
+        if let Some(value) = value {
+            command.env(key, value);
+        }
+    }
+    command
+        .env("CODEX_SESSION_ID", "desktop-session")
+        .env("CODEX_THREAD_ID", "desktop-thread")
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop");
+    let mut receiver = communication_receiver::ReceivingProcess::start(command, &fixture.binary);
+    let pending = desktop_command(&fixture, &["context", "--recover-communication"]);
+    let pending: Value = serde_json::from_slice(&pending.stdout).unwrap();
+    let communication = &pending["result"]["owner_readback"]["communication"];
+    assert_eq!(communication["state"], "pending", "{communication}");
+    assert!(communication["receive_id"].is_null());
+    let message_id = communication["message_id"].as_str().unwrap();
+    let input = native.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(input["thread_id"], "desktop-thread");
+    assert!(input["text"].as_str().unwrap().contains(message_id));
+    let held = desktop_command(&fixture, &["context", "--query"]);
+    let held: Value = serde_json::from_slice(&held.stdout).unwrap();
+    assert_eq!(
+        held["result"]["owner_readback"]["communication"]["state"],
+        "pending"
+    );
+    receiver.submit(&input);
+    receiver.event("received");
+    let reply = receiver.event("replied");
+    let query = desktop_command(&fixture, &["context", "--query"]);
+    assert!(query.status.success());
+    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(
+        query["result"]["owner_readback"]["communication"]["state"],
+        "recovered"
+    );
+    assert_eq!(
+        query["result"]["owner_readback"]["communication"]["reply_message_id"],
+        reply["receipt"]["msg_id"]
+    );
+    assert_eq!(
+        bridge.sends.lock().unwrap().len(),
+        2,
+        "one recovery wake and its ordinary reply wake"
+    );
+}
+
+#[test]
+fn desktop_manual_recovery_does_not_repeat_a_lost_native_response() {
+    let fixture = Fixture::without_tmux("desktop-manual-unknown");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+    let identity = desktop_command(&fixture, &["context"]);
+    assert!(identity.status.success());
+    let identity: Value = serde_json::from_slice(&identity.stdout).unwrap();
+    let worker = identity["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    bridge.disconnect_send.store(true, Ordering::SeqCst);
+    let failed = desktop_command(
+        &fixture,
+        &[
+            "sendmessage",
+            "--to",
+            worker,
+            "--subject",
+            "desktop-ambiguous-return",
+            "submitted but response lost",
+        ],
+    );
+    assert!(!failed.status.success());
+    bridge.disconnect_send.store(false, Ordering::SeqCst);
+    assert_eq!(bridge.sends.lock().unwrap().len(), 1);
+    let before = fixture.current_state();
+    let response = desktop_command(&fixture, &["context", "--recover-communication"]);
+    let response: Value = serde_json::from_slice(&response.stdout).unwrap();
+    assert_eq!(
+        response["result"]["owner_readback"]["communication"]["state"],
+        "unknown"
+    );
+    assert_eq!(bridge.sends.lock().unwrap().len(), 1);
+    assert_eq!(fixture.current_state()["msgs"], before["msgs"]);
 }
 
 impl Drop for DesktopBridgeFixture {
@@ -182,6 +318,15 @@ fn desktop_connect_failure_resumes_after_bridge_and_daemon_restart_without_agent
     assert!(!sent.status.success());
     assert!(String::from_utf8_lossy(&sent.stderr).contains("\"durable\":true"));
     assert!(bridge.sends.lock().unwrap().is_empty());
+    let failed = fixture.current_state();
+    assert!(failed["notification_delivery_failures"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|failure| failure["retryable"] == true
+            && failure["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("DESKTOP_BRIDGE_NOT_SUBMITTED:"))));
     fixture.restart_daemon();
     std::fs::rename(&offline, &socket).unwrap();
     assert!(
@@ -199,16 +344,6 @@ fn desktop_connect_failure_resumes_after_bridge_and_daemon_restart_without_agent
         1,
         "accepted recovery is never replayed"
     );
-    let journal = std::fs::read_to_string(fixture.project_journal()).unwrap();
-    let failures: Vec<Value> = journal
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .filter(|e: &Value| e["ev"] == "NotificationDeliveryFailed")
-        .collect();
-    assert!(failures.iter().any(|e| e["retryable"] == true
-        && e["error"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("DESKTOP_BRIDGE_NOT_SUBMITTED:"))));
 }
 
 #[test]
@@ -340,42 +475,6 @@ fn missing_desktop_publication_with_lost_known_capability_requests_only_its_peer
 }
 
 #[test]
-fn unverified_legacy_desktop_capability_does_not_request_peer_update() {
-    let mut fixture = Fixture::without_tmux("desktop-unverified");
-    let runtime = fixture.host_state.join("runtime/desktop");
-    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
-    let declaration = publish_capability(&fixture, &bridge);
-    assert!(desktop_command(&fixture, &["context"]).status.success());
-    fixture.stop_daemon();
-    // Reproduce a supported persisted legacy shape with no capability proof.
-    // This isolated journal is the daemon's public persistence input.
-    let journal = fixture.project_journal();
-    let mut registered = std::fs::read_to_string(&journal)
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["ev"] == "Registered")
-        .last()
-        .unwrap();
-    registered["worker"]["transport"]["capabilities"] = json!([]);
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(journal)
-        .unwrap();
-    writeln!(file, "{registered}").unwrap();
-    std::fs::remove_file(declaration).unwrap();
-    drop(bridge);
-    fixture.restart_daemon();
-    assert!(wait_until(Duration::from_secs(8), || {
-        std::fs::read_to_string(fixture.host_state.join("log.txt"))
-            .unwrap_or_default()
-            .contains("DESKTOP_BRIDGE_CAPABILITY_UNVERIFIED")
-    }));
-    let log = std::fs::read_to_string(fixture.host_state.join("log.txt")).unwrap();
-    assert!(!log.contains("DESKTOP_BRIDGE_CAPABILITY_LOST"), "{log}");
-}
-
-#[test]
 fn desktop_endpoint_replacement_converges_without_agent_context() {
     let fixture = Fixture::without_tmux("desktop-background");
     let runtime = fixture.host_state.join("runtime/desktop");
@@ -391,24 +490,13 @@ fn desktop_endpoint_replacement_converges_without_agent_context() {
     let worker = enrolled["result"]["snapshot"]["identity"]["worker_id"]
         .as_str()
         .unwrap();
-    let generation = enrolled["result"]["snapshot"]["binding"]["endpoint_generation"]
-        .as_u64()
-        .unwrap();
+    let original_worker = fixture.current_state()["workers"][worker].clone();
     drop(first);
     let second = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
     publish_capability(&fixture, &second);
-    let journal = fixture.project_journal();
     assert!(
         wait_until(Duration::from_secs(8), || {
-            std::fs::read_to_string(&journal)
-                .unwrap()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|event| {
-                    event["ev"] == "GlobalRuntimeBound"
-                        && event["binding"]["agent_id"] == worker
-                        && event["binding"]["endpoint_generation"].as_u64() == Some(generation + 1)
-                })
+            fixture.current_state()["workers"][worker]["transport"]["endpoint"] == second.endpoint
         }),
         "replacement endpoint was not synchronized by the daemon"
     );
@@ -435,19 +523,16 @@ fn desktop_endpoint_replacement_converges_without_agent_context() {
         .unwrap()
         .iter()
         .any(|body| body.contains("background-replacement")));
-    let identities: Vec<Value> = std::fs::read_to_string(&journal)
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["ev"] == "Registered")
-        .collect();
-    assert!(identities
-        .iter()
-        .all(|event| event["worker"]["id"] == worker));
+    let current = fixture.current_state();
+    assert_eq!(current["workers"].as_object().unwrap().len(), 1);
+    assert_eq!(current["workers"][worker]["id"], worker);
     assert_eq!(
-        identities.len(),
-        2,
-        "one registration plus one endpoint update"
+        current["workers"][worker]["token"],
+        original_worker["token"]
+    );
+    assert_eq!(
+        current["workers"][worker]["registered_ms"],
+        original_worker["registered_ms"]
     );
 }
 
@@ -466,9 +551,6 @@ fn bare_desktop_context_discovers_current_scope_refreshes_and_preserves_identity
     );
     let a: Value = serde_json::from_slice(&restored.stdout).unwrap();
     let identity = a["result"]["snapshot"]["identity"]["worker_id"].clone();
-    let generation = a["result"]["snapshot"]["binding"]["endpoint_generation"]
-        .as_u64()
-        .unwrap();
     let second = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
     publish_capability(&fixture, &second);
     drop(first);
@@ -490,18 +572,16 @@ fn bare_desktop_context_discovers_current_scope_refreshes_and_preserves_identity
         b["result"]["snapshot"]["binding"]["session_id"],
         "desktop-session"
     );
-    assert!(
-        b["result"]["snapshot"]["binding"]["endpoint_generation"]
-            .as_u64()
-            .unwrap()
-            > generation
+    assert_eq!(
+        b["result"]["snapshot"]["identity"]["transport"]["endpoint"],
+        second.endpoint
     );
     let repeated = desktop_command(&fixture, &["context"]);
     assert!(repeated.status.success());
     let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
     assert_eq!(
-        repeated["result"]["snapshot"]["binding"]["endpoint_generation"],
-        b["result"]["snapshot"]["binding"]["endpoint_generation"]
+        repeated["result"]["snapshot"]["binding"],
+        b["result"]["snapshot"]["binding"]
     );
     let sent = desktop_command(
         &fixture,
@@ -714,10 +794,7 @@ fn desktop_context_and_durable_notification_use_bridge_without_appserver_endpoin
     );
     let again: Value = serde_json::from_slice(&again.stdout).unwrap();
     assert_eq!(again["result"]["snapshot"]["identity"]["worker_id"], id);
-    assert_eq!(
-        again["result"]["snapshot"]["binding"]["endpoint_generation"],
-        snapshot["binding"]["endpoint_generation"]
-    );
+    assert_eq!(again["result"]["snapshot"]["binding"], snapshot["binding"]);
     let mut status = fixture
         .configured_command(&["master", "status"], None)
         .env("CODEX_SESSION_ID", "desktop-session")
@@ -818,11 +895,9 @@ fn desktop_context_and_durable_notification_use_bridge_without_appserver_endpoin
     );
     let renewed: Value = serde_json::from_slice(&renewed.stdout).unwrap();
     assert_eq!(renewed["result"]["snapshot"]["identity"]["worker_id"], id);
-    assert!(
-        renewed["result"]["snapshot"]["binding"]["endpoint_generation"]
-            .as_u64()
-            .unwrap()
-            > snapshot["binding"]["endpoint_generation"].as_u64().unwrap()
+    assert_eq!(
+        renewed["result"]["snapshot"]["identity"]["transport"]["endpoint"],
+        replacement.endpoint
     );
     let sent = desktop_command(
         &fixture,
@@ -918,11 +993,12 @@ fn desktop_candidate_mismatch_is_rejected_and_unknown_send_is_not_replayed() {
         1,
         "unknown outcome must not trigger another host effect"
     );
-    let journal = std::fs::read_to_string(fixture.project_journal()).unwrap();
-    let failure = journal
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|event| event["ev"] == "NotificationDeliveryFailed")
+    let current = fixture.current_state();
+    let failure = current["notification_delivery_failures"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|failure| failure["retryable"] == false)
         .expect("explicit failure receipt");
     assert_eq!(failure["retryable"], false, "{failure}");
     // A later safe connection recovery must not batch-replay the unknown sibling.
@@ -1018,12 +1094,7 @@ fn anonymous_cli_send_to_directory_peer_delivers_precise_thread_to_native_bridge
     let desktop_session = enrolled["result"]["snapshot"]["binding"]["session_id"]
         .as_str()
         .unwrap();
-    let baseline_registrations = std::fs::read_to_string(fixture.project_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["ev"] == "Registered")
-        .count();
+    let registered_workers = fixture.current_state()["workers"].clone();
 
     // 2. External process with no agent facts queries the public directory.
     let dir = anonymous_command(&fixture, &["directory"]);
@@ -1132,20 +1203,17 @@ fn anonymous_cli_send_to_directory_peer_delivers_precise_thread_to_native_bridge
     );
 
     // 5. Durable message persisted with no new sender identity.
-    let journal = std::fs::read_to_string(fixture.project_journal()).unwrap();
-    let sent_event = journal
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|event| event["ev"] == "Sent" && event["msg"]["subject"] == "anon-bridge-subject")
-        .expect("durable Sent event recorded for the anonymous message");
-    assert_eq!(sent_event["msg"]["from"], "unknown", "{sent_event}");
-    let after_registrations = journal
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["ev"] == "Registered")
-        .count();
+    let current = fixture.current_state();
+    let stored_message = current["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|message| message["subject"] == "anon-bridge-subject")
+        .expect("current anonymous message persists after consumption");
+    assert_eq!(stored_message["from"], "unknown");
+    assert_eq!(stored_message["state"], "read");
     assert_eq!(
-        after_registrations, baseline_registrations,
+        current["workers"], registered_workers,
         "anonymous send must not register a new sender identity"
     );
 }

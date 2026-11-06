@@ -20,8 +20,10 @@ master 权限。只有用户要求注册时才初始化；未注册或初始化�
 cwd 确定，名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递与任务锚点；
 sessionID 只承载当前执行。第一次绑定分配固定名字，后续绑定与恢复可显式继承名字，
 新注册为新会话新增名字，旧名字在旧持有者离线或获得用户授权时可顶替。TUI 的固定
-tmux session 名字就是该角色名；tmux session `$N`、pane、thread 和 socket 仅定位
-通信。旧版本按名字一次性迁移后，身份恢复不依赖 operation journal。不得猜身份、
+tmux session 名字为 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
+`appsdk_1_Jenny`；只有固定位置 1 可升 Jenny。布局读取共享 manifest，正常改名由
+Collab 负责。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
+恢复链已删除。tmux `$N`、pane、thread 和 socket 仅定位通信。不得猜身份、
 复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。
 
@@ -58,7 +60,7 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 | 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
 | 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
 | 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
-| 跨项目权限 | 调用者必须是源项目当前 master，目标是目标项目当前 master；无权限时 daemon 返回 `PERMISSION_DENIED` 并指出当前 master 是谁。`master send` 只是兼容入口，不作为日常命令 |
+| 跨项目通信 | 任意两个已注册对象可直接收发，不按 master/peer/CEO 级别限制，也不要求 master 转发。保留真实 sender、精确注册地址与回执。`master send` 只是兼容入口 |
 | 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
 | 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
@@ -111,18 +113,13 @@ manager 核实下级对进度、完成、阻塞和验收的声明，检查相关
 
 ### 跨项目投递与协作边界
 
-注册 peer 默认拒绝不属于自己项目的投递和协作，不以“空闲”“协助”“看起来紧急”或
-泛化的“协调”作为接受理由。只有以下路径可执行：获授权的 CEO -> 项目 master 接单
-管理链；当前项目 master 之间的必要协调；以及有具体共享资源及影响证据的真实资源冲突。
-真实资源冲突必须说明共享的文件、worktree、进程、构建目标或 endpoint，以及受影响范围；
-空泛的跨项目目标不构成例外。
+任意两个已注册对象可通过统一发送入口直接通信。项目和角色级别不限制普通消息，
+不要求同级，也不要求 master 代转。使用自己的真实凭据和目标精确地址。
+接收、消费及回信按真实回执记录，不因来源项目或角色拒收。
 
-普通 peer 收到外项目工作或任务邀请时，应拒绝、保留原消息不消费，退回本项目当前
-master 或合法发起路由，并继续本项目工作。不得换 cwd、猜 session、复制身份或改用
-其他宿主通道绕过拒绝。项目的 master 只接受合法管理链或已证明的资源冲突；daemon 的
-`CrossProjectSend` 权限和 `PERMISSION_DENIED` 回执是发送侧边界，接收侧仍须执行同一
-拒绝规则。拒绝时报告来源项目、原消息或任务、拒绝原因和实际回传路由，不能伪造已接收、
-已消费或已完成。
+消息不授予任务分派、项目管理或 CEO 管理权限。执行具体工作仍核对该动作已有的
+授权、范围和资源 owner。缺少执行授权时保留消息并向原请求者说明具体缺口；
+不伪造已执行，也不借普通发送权限修改他人的 board、汇总或授权。
 
 ## Register the long-horizon goal before dispatch
 
@@ -211,8 +208,8 @@ CEO 按该指引维护用户明确确认的稳定偏好与写作习惯：先读�
 
 按 [稳定名字恢复](references/stable-name-recovery.md) 和
 [名字迁移入口](operations.md#稳定名字与旧版-display-label-迁移)处理用户明确要求的
-身份操作。当前 context 是事实；项目历史名字表只是索引。没有实际名字时不认领历史
-身份、不等待分配。
+身份操作。当前 identity map 是唯一身份源，context 投影当前结果。没有映射时按本次
+真实事实注册，不认领历史身份、不等待分配。tm-iterm 不写 Collab 身份表。
 
 ## 资源和生命周期边界
 

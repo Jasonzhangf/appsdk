@@ -7,10 +7,6 @@ use std::thread;
 #[path = "collab-mcp/board_tools.rs"]
 mod board_tools;
 
-#[cfg(feature = "context-cancel-test-hooks")]
-#[path = "../context_cancel_test_hooks.rs"]
-mod context_cancel_test_hooks;
-
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
@@ -195,11 +191,6 @@ fn tools() -> Value {
         .expect("tool list")
         .extend(board_tools::tools());
     tools.as_array_mut().unwrap().push(tool(
-        "collab_worker_name",
-        "Set the authenticated caller's display name on explicit user request, or reset to its current role/pane default. Master defaults to Jenny. Stable routing and ownership IDs do not change.",
-        json!({"name":{"type":"string"},"reset":{"type":"boolean"}}), &[],
-    ));
-    tools.as_array_mut().unwrap().push(tool(
         "collab_worker_close_self",
         "Remove the current pane's own agent binding and route. Keep its host process, tasks and messages. No target selection, old identity credential or workload clearance is required.",
         json!({}), &[],
@@ -300,23 +291,6 @@ fn spawn_context_call(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(feature = "context-cancel-test-hooks")]
-    {
-        // Keep SIGINT blocked across exec so the CLI installs its context
-        // handler before an early cancellation can reach the child.
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
-                libc::sigemptyset(set.as_mut_ptr());
-                libc::sigaddset(set.as_mut_ptr(), libc::SIGINT);
-                if libc::sigprocmask(libc::SIG_BLOCK, set.as_ptr(), std::ptr::null_mut()) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
     let mut child = command.spawn().map_err(|error| error.to_string())?;
     let pid = child.id();
     let mut stdout = child
@@ -407,22 +381,6 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             argv.extend(["worker".into(), "close".into(), "--self".into()])
         }
         "collab_project_reset" => argv.extend(["reset".into(), "--project".into()]),
-        "collab_worker_name" => {
-            let reset = match args.get("reset") {
-                None => false,
-                Some(value) => value.as_bool().ok_or("reset must be a boolean")?,
-            };
-            let name = args.get("name");
-            if reset == name.is_some() {
-                return Err("provide exactly one of name or reset=true".into());
-            }
-            argv.extend(["worker".into(), "name".into()]);
-            if reset {
-                argv.push("--reset".into());
-            } else {
-                argv.extend(["--".into(), required(args, "name")?]);
-            }
-        }
         "collab_msg" => argv.extend(["msg".into(), required(args, "id")?]),
         "collab_recv" => {
             argv.push("recv".into());

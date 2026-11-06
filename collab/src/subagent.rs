@@ -107,7 +107,7 @@ pub struct Record {
     /// Provenance for a managed child committed by explicit `subagent bind`.
     ///
     /// These pin the retained Create operation and the child's exact binding
-    /// and endpoint generation observed at bind time. They are committed
+    /// observed at bind time. They are committed
     /// durably in the same `SubagentUpdated` record. Records created before
     /// explicit Bind deserialize with absent provenance; they remain
     /// observable, but Send/Ready refuse to mutate them because they never
@@ -116,8 +116,6 @@ pub struct Record {
     pub create_operation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint_generation: Option<u64>,
 }
 
 /// How a managed child was finalized. Archiving is the preferred outcome, but
@@ -434,7 +432,7 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                         record: crate::server::keepalive::Record::default(),
                     }],
                 )
-                .map_err(|error| anyhow::anyhow!("subagent rearm journal failure: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("subagent rearm state commit failure: {error}"))?;
             return Ok(
                 json!({"subagent_id":record.id,"keepalive_rearmed":true,"notification":"none"}),
             );
@@ -545,7 +543,7 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                 server
                     .commit_locked_checked(&mut state, &events)
                     .map_err(|error| {
-                        anyhow::anyhow!("subagent working journal failure: {error}")
+                        anyhow::anyhow!("subagent working state commit failure: {error}")
                     })?;
                 "committed"
             };
@@ -620,7 +618,7 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                             subagent: record.clone(),
                         }],
                     )
-                    .map_err(|error| anyhow::anyhow!("subagent send journal failure: {error}"))?;
+                    .map_err(|error| anyhow::anyhow!("subagent send state commit failure: {error}"))?;
             }
             let pre_notification_state_commit = if stale_working_without_task {
                 "committed"
@@ -652,13 +650,13 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                         current_status = current.status.clone();
                         if current.status == "idle" {
                             current.error = Some(error_text);
-                            if let Err(journal_error) = server.commit_locked_checked(
+                            if let Err(commit_error) = server.commit_locked_checked(
                                 &mut state,
                                 &[Event::SubagentUpdated { subagent: current }],
                             ) {
                                 error_state_commit = "failed";
                                 follow_up_error = Some(format!(
-                                    "subagent send outcome unknown: notification failed and journal commit failed: {journal_error}"
+                                    "subagent send outcome unknown: notification failed and state commit failed: {commit_error}"
                                 ));
                             } else {
                                 error_state_commit = "committed";
@@ -757,7 +755,7 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                         subagent: record.clone(),
                     }],
                 )
-                .map_err(|error| anyhow::anyhow!("subagent close journal failure: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("subagent close state commit failure: {error}"))?;
             drop(state);
             record.status = "closed".into();
             record.error = Some(close_archive_error(
@@ -769,7 +767,7 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
                     subagent: record.clone(),
                 }])
                 .map_err(|error| {
-                    anyhow::anyhow!("subagent close outcome unknown: record-only close journal commit failed: {error}")
+                    anyhow::anyhow!("subagent close outcome unknown: record-only close state commit failed: {error}")
                 })?;
             return close_result(&record, snapshot_captured_ms, CLOSE_OUTCOME_RECORD_ONLY);
         }
@@ -904,9 +902,6 @@ fn bind(
     if target.transport.thread_id.as_deref() != Some(child_thread.as_str()) {
         bail!("BIND_THREAD_MISMATCH: Create target thread does not match the retained thread");
     }
-    if target.endpoint_generation == 0 {
-        bail!("BIND_GENERATION_INVALID: child endpoint generation is zero");
-    }
 
     // The child must still be registered with the exact retained thread.
     let worker = state.workers.get(&child_peer).cloned().ok_or_else(|| {
@@ -930,7 +925,6 @@ fn bind(
         })?;
     if binding.agent_id.as_str() != child_peer
         || binding.app_scope_id != operation.app_scope_id
-        || binding.endpoint_generation != target.endpoint_generation
         || binding
             .native_thread_id
             .as_ref()
@@ -969,7 +963,6 @@ fn bind(
             && existing.thread_id.as_deref() == Some(child_thread.as_str())
             && existing.create_operation_id.as_deref() == Some(create_operation_id)
             && existing.binding_id.as_deref() == Some(target.binding_id.as_str())
-            && existing.endpoint_generation == Some(target.endpoint_generation)
         {
             return Ok(json!({
                 "subagent": existing,
@@ -1008,7 +1001,6 @@ fn bind(
         runtime: Some(server.config.subagent.runtime.clone()),
         create_operation_id: Some(create_operation_id.to_owned()),
         binding_id: Some(target.binding_id.as_str().to_owned()),
-        endpoint_generation: Some(target.endpoint_generation),
     };
     server
         .commit_locked_checked(
@@ -1049,17 +1041,13 @@ fn current_master_grant_for_actor(state: &State, actor: &str) -> Option<MasterGr
 /// binding before a managed mutation. Legacy records carry no provenance and
 /// never gain mutation authority by inference.
 fn record_provenance_matches_current_binding(state: &State, record: &Record) -> bool {
-    let (Some(create_operation_id), Some(binding_id), Some(endpoint_generation)) = (
+    let (Some(create_operation_id), Some(binding_id)) = (
         record.create_operation_id.as_deref(),
         record.binding_id.as_deref(),
-        record.endpoint_generation,
     ) else {
         return false;
     };
-    if create_operation_id.trim().is_empty()
-        || binding_id.trim().is_empty()
-        || endpoint_generation == 0
-    {
+    if create_operation_id.trim().is_empty() || binding_id.trim().is_empty() {
         return false;
     }
     let Ok(binding_id) = BindingId::new(binding_id.to_owned()) else {
@@ -1069,7 +1057,6 @@ fn record_provenance_matches_current_binding(state: &State, record: &Record) -> 
         return false;
     };
     binding.agent_id.as_str() == record.peer
-        && binding.endpoint_generation == endpoint_generation
         && binding
             .native_thread_id
             .as_ref()

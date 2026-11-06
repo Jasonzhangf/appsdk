@@ -1,5 +1,4 @@
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -23,11 +22,8 @@ const FIXTURE_ROOT_PREFIX: &str = "/tmp/v23f";
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub static TMUX_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub const PROJECT_JOURNAL: &str = ".agent-collab/server/journal.jsonl";
-pub const ROUTES_JOURNAL: &str = "routes.jsonl";
-pub const HOST_JOURNAL: &str = "journal.jsonl";
+pub const ROUTES_FILE: &str = "routes.json";
 pub const HOST_LOG: &str = "log.txt";
-pub const HOST_EVENTS: &str = "events.jsonl";
 
 fn pane_cli_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/pane_cli.py")
@@ -80,8 +76,6 @@ pub struct Fixture {
     pub tmux_socket: PathBuf,
     daemon: Option<Child>,
     owned_sessions: std::sync::Mutex<Vec<String>>,
-    hidden_project_journal: Option<PathBuf>,
-    hook_socket: Option<PathBuf>,
 }
 
 /// Owns a public consumer command running in the fixture's selected pane.
@@ -122,8 +116,6 @@ impl Fixture {
             tmux_socket: tmux_socket.clone(),
             daemon: None,
             owned_sessions: std::sync::Mutex::new(Vec::new()),
-            hidden_project_journal: None,
-            hook_socket: None,
         };
         tmux(
             &tmux_socket,
@@ -230,9 +222,6 @@ impl Fixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("PANE_STDOUT", &stdout)
             .env("PANE_STDERR", &stderr);
-        if let Some(hook_socket) = &self.hook_socket {
-            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
-        }
         let output = command.output().expect("send private pane script request");
         assert!(
             output.status.success(),
@@ -321,8 +310,6 @@ impl Fixture {
             tmux_socket: root.join("unused.sock"),
             daemon: None,
             owned_sessions: std::sync::Mutex::new(Vec::new()),
-            hidden_project_journal: None,
-            hook_socket: None,
         };
         fixture.start_daemon();
         fixture
@@ -352,9 +339,6 @@ impl Fixture {
                 command.env(key, value);
             }
         }
-        if let Some(hook_socket) = &self.hook_socket {
-            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
-        }
         command
     }
 
@@ -370,9 +354,6 @@ impl Fixture {
             .env("CODEX_THREAD_ID", &pane.thread_anchor)
             .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
             .env_remove("ANTIGRAVITY_CONVERSATION_ID");
-        if let Some(hook_socket) = &self.hook_socket {
-            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
-        }
         command
     }
 
@@ -408,9 +389,6 @@ impl Fixture {
             .env("CODEX_THREAD_ID", &pane.thread_anchor)
             .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
             .env_remove("ANTIGRAVITY_CONVERSATION_ID");
-        if let Some(hook_socket) = &self.hook_socket {
-            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
-        }
         command
     }
 
@@ -432,9 +410,6 @@ impl Fixture {
             .env("CODEX_THREAD_ID", &pane.thread_anchor)
             .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
             .env_remove("ANTIGRAVITY_CONVERSATION_ID");
-        if let Some(hook_socket) = &self.hook_socket {
-            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
-        }
         command
     }
 
@@ -607,165 +582,87 @@ impl Fixture {
         )
     }
 
-    pub fn project_journal(&self) -> PathBuf {
-        let project_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-        let routes = std::fs::read_to_string(self.host_routes()).unwrap_or_default();
-        let route = routes
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .find(|record| {
-                record["op"] == "register"
-                    && record["project_scope"] == project_root.to_string_lossy().as_ref()
-            });
-        if let Some(route) = route {
-            return PathBuf::from(
-                route["storage_root"]
-                    .as_str()
-                    .expect("central route storage"),
-            )
-            .join(PROJECT_JOURNAL);
-        }
+    pub fn project_state(&self) -> PathBuf {
+        self.project_state_for(&self.root, "appserver-cli")
+    }
 
-        let mut journals = Vec::new();
-        fn visit(path: &Path, journals: &mut Vec<PathBuf>) {
+    pub fn project_state_for(&self, project: &Path, app_scope: &str) -> PathBuf {
+        let root = std::fs::canonicalize(project).unwrap();
+        let routes: Vec<Value> = serde_json::from_slice(&std::fs::read(self.host_routes()).unwrap()).unwrap();
+        let matches: Vec<_> = routes.iter().filter(|route|
+            route["project_scope"] == root.to_string_lossy().as_ref()
+                && route["app_scope_id"] == app_scope).collect();
+        assert_eq!(matches.len(), 1, "one exact current project/app route");
+        PathBuf::from(matches[0]["storage_root"].as_str().unwrap()).join(".agent-collab/server/state.json")
+    }
+
+    pub fn current_state(&self) -> Value {
+        serde_json::from_slice::<Value>(&std::fs::read(self.project_state()).unwrap()).unwrap()["state"].clone()
+    }
+
+    pub fn current_state_for(&self, project: &Path, app_scope: &str) -> Value {
+        serde_json::from_slice::<Value>(&std::fs::read(self.project_state_for(project, app_scope)).unwrap()).unwrap()["state"].clone()
+    }
+
+    /// Compare current control/business resources, including explicit absence.
+    /// Live monitor observations have an independent writer and are excluded;
+    /// identity, ownership, tasks, messages and actual receipts remain complete.
+    pub fn current_resources(&self) -> Value {
+        fn read(path: &Path) -> Value {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+                    if path.file_name().unwrap() == "state.json" {
+                        let state = value["state"].as_object_mut().unwrap();
+                        state.remove("agent_activity");
+                        state.remove("agent_presence");
+                        state.remove("revision");
+                        state.remove("sequence");
+                        let global = state.get_mut("global").unwrap().as_object_mut().unwrap();
+                        global.remove("revision");
+                        global.remove("sequence");
+                    }
+                    value
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+                Err(error) => panic!("read current resource {}: {error}", path.display()),
+            }
+        }
+        fn visit(root: &Path, path: &Path, values: &mut serde_json::Map<String, Value>) {
             let entries = match std::fs::read_dir(path) {
                 Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-                Err(error) => panic!("read central runtime root {}: {error}", path.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    values.insert(path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), Value::Null);
+                    return;
+                }
+                Err(error) => panic!("read current resource directory {}: {error}", path.display()),
             };
             for entry in entries {
-                let path = entry.expect("read central runtime entry").path();
-                if path.is_dir() {
-                    visit(&path, journals);
-                } else if path.ends_with(PROJECT_JOURNAL) {
-                    journals.push(path);
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    visit(root, &path, values);
+                } else if matches!(entry.file_name().to_str(), Some("state.json" | "identity.json")) {
+                    values.insert(path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), read(&path));
                 }
             }
         }
-        visit(&self.host_state.join("projects"), &mut journals);
-        assert_eq!(
-            journals.len(),
-            1,
-            "fixture needs one initial central journal: {journals:?}"
-        );
-        journals.pop().expect("one initial central journal")
-    }
-
-    pub fn host_journal(&self) -> PathBuf {
-        self.host_state.join(HOST_JOURNAL)
+        let mut values = serde_json::Map::new();
+        for name in ["identity-map.json", "routes.json", "state.json"] {
+            values.insert(name.to_owned(), read(&self.host_state.join(name)));
+        }
+        for name in ["projects", "identities", ".agent-collab"] {
+            visit(&self.host_state, &self.host_state.join(name), &mut values);
+        }
+        Value::Object(values)
     }
 
     pub fn host_routes(&self) -> PathBuf {
-        self.host_state.join(ROUTES_JOURNAL)
+        self.host_state.join(ROUTES_FILE)
     }
 
     pub fn host_log(&self) -> PathBuf {
         self.host_state.join(HOST_LOG)
-    }
-
-    pub fn host_events(&self) -> PathBuf {
-        self.host_state.join(HOST_EVENTS)
-    }
-
-    /// Durable daemon activity log that sits beside the project journal. The
-    /// daemon persists one `daemon_start` receipt per start, after replay and
-    /// synchronous recovery finish, so it is the observable startup boundary.
-    pub fn project_events(&self) -> PathBuf {
-        self.project_journal().with_file_name(HOST_EVENTS)
-    }
-
-    pub fn wait_for_daemon_start(&self, timeout: Duration) -> bool {
-        let pid = self.daemon_pid();
-        wait_until(timeout, || {
-            std::fs::read_to_string(self.project_events())
-                .ok()
-                .is_some_and(|events| {
-                    events.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).any(
-                        |row| row["kind"] == "daemon_start" && row["detail"]["pid"] == pid,
-                    )
-                })
-        })
-    }
-
-    pub fn proof_path(&self, operation_id: &str) -> PathBuf {
-        self.host_state
-            .join("context-operations")
-            .join(format!("{operation_id}.json"))
-    }
-
-    pub fn proof(&self, operation_id: &str) -> Value {
-        serde_json::from_slice(
-            &std::fs::read(self.proof_path(operation_id)).expect("read public context proof"),
-        )
-        .expect("context proof is JSON")
-    }
-
-    pub fn set_proof_capability(&self, operation_id: &str, capability: &str) {
-        let path = self.proof_path(operation_id);
-        let mut proof = self.proof(operation_id);
-        proof["query_capability"] = Value::String(capability.to_owned());
-        let bytes = serde_json::to_vec_pretty(&proof).expect("serialize public proof");
-        std::fs::write(&path, bytes).expect("update public proof capability");
-    }
-
-    /// Move the real daemon-written project journal aside so the inner owner is
-    /// genuinely unavailable. The bytes and path are restored on drop.
-    pub fn hide_project_journal(&mut self) {
-        let journal = self.project_journal();
-        assert!(
-            journal.exists(),
-            "B05 requires a project journal produced by public operations"
-        );
-        let hidden = self.host_state.join("journal.hidden.jsonl");
-        std::fs::rename(&journal, &hidden).expect("preserve real project journal");
-        std::fs::create_dir(&journal).expect("make project journal unavailable");
-        self.hidden_project_journal = Some(hidden);
-    }
-
-    /// Stop a fixture daemon whose project replay failed and whose degraded
-    /// server intentionally accepts only operation queries. The PID comes
-    /// from this fixture's private state directory and is rechecked exactly.
-    pub fn stop_degraded_daemon(&mut self) {
-        let pid_path = self.host_state.join("server.pid");
-        let pid = std::fs::read_to_string(&pid_path)
-            .expect("read fixture daemon pid")
-            .trim()
-            .parse::<i32>()
-            .expect("fixture daemon pid is numeric");
-        assert!(pid > 1, "fixture daemon pid is valid");
-        let result = unsafe { libc::kill(pid, libc::SIGTERM) };
-        assert_eq!(result, 0, "terminate only fixture daemon pid {pid}");
-        assert!(
-            wait_until(Duration::from_secs(15), || {
-                !self.host_state.join("server.sock").exists()
-            }),
-            "degraded fixture daemon still owns its socket"
-        );
-        if self
-            .daemon
-            .as_mut()
-            .is_some_and(|child| child.id() as i32 == pid)
-        {
-            self.daemon
-                .take()
-                .unwrap()
-                .wait()
-                .expect("reap owned fixture daemon");
-        }
-    }
-
-    pub fn restore_project_journal(&mut self) {
-        if let Some(hidden) = self.hidden_project_journal.take() {
-            let journal = self.project_journal();
-            if hidden.exists() {
-                if journal.is_dir() {
-                    std::fs::remove_dir_all(&journal).expect("remove unavailable journal marker");
-                } else if journal.exists() {
-                    std::fs::remove_file(&journal).expect("remove replacement project journal");
-                }
-                std::fs::rename(&hidden, &journal).expect("restore real project journal");
-            }
-        }
     }
 
     pub fn stop_daemon(&mut self) {
@@ -849,14 +746,6 @@ impl Fixture {
         self.start_daemon();
     }
 
-    /// Point this fixture's CLI, MCP and daemon processes at the private
-    /// acknowledged-barrier socket. Must be called before the first public
-    /// operation; the isolated daemon reads the same variable at startup.
-    pub fn enable_cancellation_hooks(&mut self, socket: &Path) {
-        self.hook_socket = Some(socket.to_path_buf());
-        self.restart_daemon();
-    }
-
     pub fn restart_daemon_with_file_limit(&mut self, bytes: u64) {
         self.stop_daemon();
         std::fs::remove_file(self.host_state.join("DOWN")).ok();
@@ -879,21 +768,6 @@ impl Fixture {
         self.start_daemon_with(command);
     }
 
-    pub fn snapshot_surfaces(&self) -> Vec<(String, Vec<u8>)> {
-        let mut surfaces = Vec::new();
-        for (label, path) in [
-            ("host_journal", self.host_journal()),
-            ("host_routes", self.host_routes()),
-            ("host_log", self.host_log()),
-            ("host_events", self.host_events()),
-            ("project_journal", self.project_journal()),
-        ] {
-            if let Ok(bytes) = std::fs::read(path) {
-                surfaces.push((label.to_owned(), bytes));
-            }
-        }
-        surfaces
-    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -936,7 +810,6 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.restore_project_journal();
         self.reap_daemon();
         for session in self.owned_sessions.get_mut().unwrap().drain(..) {
             let _ = Command::new("tmux")
@@ -1311,9 +1184,6 @@ impl Mcp {
                 .env_remove("CODEX_SESSION_ID")
                 .env_remove("CODEX_THREAD_ID");
         }
-        if let Some(hook_socket) = &fixture.hook_socket {
-            command.env("COLLAB_CONTEXT_CANCEL_HOOK_SOCKET", hook_socket);
-        }
         let mut child = command.spawn().expect("launch real collab-mcp");
         let stdin = child.stdin.take().expect("MCP stdin");
         let stdout = child.stdout.take().expect("MCP stdout");
@@ -1445,9 +1315,3 @@ impl Barrier {
         let _ = self.release.flush();
     }
 }
-
-/// Private acknowledged-barrier control socket for the `context-cancel-test-hooks`
-/// feature. It accepts only this fixture's exact barrier connections and never
-/// appears in a default or release build.
-
-include!("context_operation_fixture/cancellation.rs");

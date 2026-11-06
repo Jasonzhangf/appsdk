@@ -6,10 +6,12 @@ AppSDK repository. Collab is compiled as the separate `collab` and
 repository. Review, merge, push, install, and daemon restart all use the
 containing AppSDK `main`.
 
-Project-local coordination for independent coding agents. One Rust daemon owns
-the append-only journal, durable mailbox, task/resource state, and migration
-transaction. The server selects the App Server transport. Each subscribed
-wake is a bounded preview; the durable mailbox remains authoritative.
+Coordination for independent coding agents. One Rust daemon maintains current
+identity in `~/.collab/identity-map.json` and current mailbox, Board and resource
+state in each owned `state.json`. Identity recovery reads only the identity map.
+The daemon selects the registered transport for Codex/AGY TUI, Codex Desktop or
+DSH. Each subscribed wake is a bounded preview; the durable mailbox remains
+authoritative for payload and real consumption.
 
 ## Global CEO coordination
 
@@ -422,24 +424,24 @@ Each recipient has at most one batch attempt per 120-second window. The daemon n
 
 ## Existing-project migration
 
-Never delete/rebuild `.agent-collab`, edit task/claim/journal JSON, clear the
-mailbox, copy tokens, start a second daemon, or invent an owner. Use:
+An explicitly authorized one-time handoff prepares the new identity map from
+verified current bindings and preserves compatible current Board/task data.
+The new runtime does not import old identity files or replay historical data.
+Normal registration, role changes, session replacement and recovery share the
+same map owner. Old names, registrations and archives cannot veto a valid new
+authorization. Invalid current files return their actual read/decode error.
 
-```text
-collab migrate inspect
-→ collab migrate plan
-→ collab migrate apply          # admission freeze + deterministic snapshot
-→ scripts/install-global-collab.sh
-→ collab context                # daemon reconciles the current runtime identity
-→ collab migrate verify         # verify and resume
-```
+Do not edit live control files, copy tokens, start a second daemon or invent an
+owner. Global installation needs approval for that installation. The installer
+writes artifacts; the user activates the daemon. After activation, ordinary
+`collab context` restores the current mapped identity.
 
-Any authenticated peer may acquire the single migration transaction lease.
-Another peer cannot replace an active plan/apply operator. Legacy role fields
-and obsolete heartbeat/continuation fields are ignored during replay and
-omitted from new state. Legacy `available` tasks or waits without a real blocker owner require
-explicit operator resolution; the daemon never fabricates ownership. Malformed
-journal lines fail startup, and a snapshot/count mismatch remains frozen.
+Only explicit `collab context --recover-communication` can request a new
+communication loopback. A healthy path needs none; uncertain evidence stays
+unknown. A known broken path sends one ordinary self message. Actual native
+receive and an authenticated correlated reply establish recovery. Adapter
+acceptance alone stays pending. Ordinary Context, queries and restart submit
+no loopback; a pending exchange is reused without an implicit retry.
 
 The active lifecycle contract is
 [docs/collab-v1-lifecycle.manifest.json](docs/collab-v1-lifecycle.manifest.json),
@@ -455,7 +457,8 @@ route and receive lease together. It never requires a maintenance window.
 
 ## Core invariants
 
-- One Server writer; append-only journal; deterministic replay.
+- One identity-map writer; current task/message state is saved by its Server
+  owner. No journal write, read, replay, compaction or repair path exists.
 - The daemon selects the registered adapter; no control truth is inferred
   from terminal text or a gateway connection UUID.
 - No fallback, silent strip, automatic ownership, automatic claim release, or

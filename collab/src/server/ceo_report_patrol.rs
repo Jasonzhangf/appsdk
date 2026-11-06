@@ -134,9 +134,6 @@ impl super::ProjectRuntimeManager {
     /// Read the host grant, gate and pending facts under one reducer lock.
     fn ceo_notice_snapshot(&self) -> Result<Option<CeoNoticeSnapshot>, String> {
         let state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(format!("CEO_REPORT_PATROL_STORE_UNAVAILABLE: {error}"));
-        }
         let Some(grant) = state.ceo_grant.clone() else {
             return Ok(None);
         };
@@ -162,9 +159,6 @@ impl super::ProjectRuntimeManager {
         worker_id: &str,
     ) -> Result<bool, String> {
         let mut state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(format!("CEO_REPORT_PATROL_STORE_UNAVAILABLE: {error}"));
-        }
         if state.ceo_grant.as_ref() != Some(&snapshot.grant)
             || state.ceo_report_state.notice_gate != snapshot.gate
             || state.ceo_report_state.urgent_generation != snapshot.urgent_generation
@@ -189,9 +183,6 @@ impl super::ProjectRuntimeManager {
     /// or unknown target is never caught up later for the same signal.
     fn commit_ceo_notice_skip(&self, snapshot: &CeoNoticeSnapshot, now: u64) -> Result<(), String> {
         let mut state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(format!("CEO_REPORT_PATROL_STORE_UNAVAILABLE: {error}"));
-        }
         if state.ceo_grant.as_ref() != Some(&snapshot.grant)
             || state.ceo_report_state.notice_gate != snapshot.gate
             || state.ceo_report_state.urgent_generation != snapshot.urgent_generation
@@ -220,9 +211,6 @@ impl super::ProjectRuntimeManager {
         now: u64,
     ) -> Result<(), String> {
         let mut state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(format!("CEO_REPORT_PATROL_STORE_UNAVAILABLE: {error}"));
-        }
         if state.ceo_grant.as_ref() != Some(&snapshot.grant)
             || state
                 .ceo_report_state
@@ -250,9 +238,6 @@ impl super::ProjectRuntimeManager {
     /// mailbox already contains the message.
     fn clear_ceo_notice_reservation(&self, message_id: &str) -> Result<(), String> {
         let mut state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(format!("CEO_REPORT_PATROL_STORE_UNAVAILABLE: {error}"));
-        }
         if state
             .ceo_report_state
             .notice_gate
@@ -351,7 +336,7 @@ impl super::ProjectRuntimeManager {
         message_id: &str,
         now: u64,
     ) -> Result<(), String> {
-        // Re-check the host reservation before touching the target journal. The
+        // Re-check the host reservation before touching the target state. The
         // host lock is released before the target lock is acquired.
         let reservation_is_current = {
             let state = self.host.state.lock().unwrap();
@@ -385,9 +370,17 @@ impl super::ProjectRuntimeManager {
                 drop(state);
                 return self.commit_ceo_notice_skip_reserved(snapshot, message_id, now);
             } else {
-                let binding_current = state
-                    .name_occupancy(&target_project, &snapshot.grant.name)
-                    .is_some_and(|occupancy| occupancy.worker_id == holder_id)
+                let control = self.binding_control_store().load()?;
+                let route =
+                    super::server_route_scope(target, &state)?.ok_or("CEO_ROUTE_UNAVAILABLE")?;
+                let binding_current = control
+                    .current_for_name(
+                        &route.project_scope_id,
+                        &route.app_scope_id,
+                        &snapshot.grant.name,
+                    )?
+                    .and_then(|slot| slot.active_binding())
+                    .is_some_and(|current| current.binding.agent_id.as_str() == holder_id)
                     && state
                         .workers
                         .get(holder_id)

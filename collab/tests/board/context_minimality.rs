@@ -96,32 +96,32 @@ fn context_hides_terminal_history_and_keeps_obligations() {
         THREAD_A,
     );
     let now = 1_900_000_000_000_i64;
-    let mut events = Vec::new();
     let terminal = [
         ("hidden-consumed", "consumed"),
         ("hidden-expired", "expired"),
         ("hidden-cancelled", "cancelled"),
         ("hidden-rebound", "rebound"),
     ];
-    for (id, status) in terminal.into_iter().chain([("visible-active", "armed")]) {
-        events.push(json!({"ev":"NotificationSubscribed", "subscription":{
-            "id":id, "worker_id":peer_id, "event":"deadline", "subject":id,
-            "target":THREAD_B, "method":"appserver", "trigger_ms":null,
-            "trigger_times_ms":[], "interval_ms":null, "repeat_count":1,
-            "fired_count":1, "expires_ms":now+600_000, "status":status,
-            "created_ms":now, "updated_ms":now
-        }}));
-    }
-    for (task, owner) in [
-        ("context-current-task", peer_id),
-        ("unrelated-merge-task", master_id),
-    ] {
-        events.push(json!({"ev":"MergeRequested", "request":{
-            "task_id":task, "owner":owner, "requested_by":master_id,
-            "requested_ms":now, "candidate_commit":null
-        }}));
-    }
-    fixture.append_name_events(&events);
+    fixture.update_current_state(|state| {
+        for (id, status) in terminal.into_iter().chain([("visible-active", "armed")]) {
+            state["notification_subscriptions"][id] = json!({
+                "id":id, "worker_id":peer_id, "event":"deadline", "subject":id,
+                "target":THREAD_B, "method":"appserver", "trigger_ms":null,
+                "trigger_times_ms":[], "interval_ms":null, "repeat_count":1,
+                "fired_count":1, "expires_ms":now+600_000, "status":status,
+                "created_ms":now, "updated_ms":now
+            });
+        }
+        for (task, owner) in [
+            ("context-current-task", peer_id),
+            ("unrelated-merge-task", master_id),
+        ] {
+            state["pending_merges"][task] = json!({
+                "task_id":task, "owner":owner, "requested_by":master_id,
+                "requested_ms":now, "candidate_commit":null
+            });
+        }
+    });
     let output = fixture.command_public(&["context"], THREAD_B);
     assert!(
         output.status.success(),
@@ -229,17 +229,16 @@ fn context_pending_merges_keep_requester_relevant_merge_for_peer() {
         THREAD_A,
     );
     let now = 1_900_000_000_000_i64;
-    let events = [
-        json!({"ev":"MergeRequested", "request":{
+    fixture.update_current_state(|state| {
+        state["pending_merges"]["requester-merge-task"] = json!({
             "task_id":"requester-merge-task", "owner":master_id, "requested_by":peer_id,
             "requested_ms":now, "candidate_commit":null
-        }}),
-        json!({"ev":"MergeRequested", "request":{
+        });
+        state["pending_merges"]["unrelated-merge-task"] = json!({
             "task_id":"unrelated-merge-task", "owner":master_id, "requested_by":master_id,
             "requested_ms":now, "candidate_commit":null
-        }}),
-    ];
-    fixture.append_name_events(&events);
+        });
+    });
     let context = fixture.run_public(&["context"], THREAD_B);
     let peer_merge_tasks: Vec<&str> = context["pending_merges"]
         .as_array()
@@ -279,71 +278,65 @@ fn ordinary_peer_context_hides_unrelated_closed_history_and_keeps_obligations() 
     );
 
     let now = 1_900_000_000_000_i64;
-    let mut events: Vec<Value> = vec![
-        // Owned closed code task still needs review and integration.
-        task_event("owned-needs-review", peer_id, "closed"),
-        // Owned closed code task is delivered, reviewed and integrated but its
-        // worktree cleanup has no verified receipt, so a duty still remains.
-        json!({"ev":"TaskCreated", "task":{
+    fixture.update_current_state(|state| {
+        state["tasks"]["owned-needs-review"] = task_record("owned-needs-review", peer_id, "closed");
+        state["tasks"]["owned-cleanup-open"] = json!({
             "id":"owned-cleanup-open", "owner":peer_id, "created_by":peer_id,
             "status":"closed", "priority":"p2", "branch":"task/owned-cleanup-open",
             "created_ms":now, "updated_ms":now
-        }}),
-        // Owned closed code task is fully closed and carries no duty.
-        task_event("owned-closed-clean", peer_id, "closed"),
-        // Another caller's closed history.
-        json!({"ev":"TaskCreated", "task":{
+        });
+        state["tasks"]["owned-closed-clean"] = task_record("owned-closed-clean", peer_id, "closed");
+        state["tasks"]["unrelated-closed-task"] = json!({
             "id":"unrelated-closed-task", "owner":master_id, "created_by":master_id,
             "status":"closed", "priority":"p2", "created_ms":now, "updated_ms":now
-        }}),
-    ];
-    events.extend([
-        json!({"ev":"TaskLifecycleUpdated", "task_id":"owned-needs-review", "record":{
+        });
+        state["task_lifecycle"]["owned-needs-review"] = json!({
             "delivery_kind":"code", "delivery_evidence":"candidate evidence",
             "delivered_ms":now, "delivery_commit":"candidate-needs-review"
-        }}),
+        });
         // Delivery, review and integration are complete; only cleanup is open.
-        json!({"ev":"TaskLifecycleUpdated", "task_id":"owned-cleanup-open", "record":{
+        state["task_lifecycle"]["owned-cleanup-open"] = json!({
             "delivery_kind":"code", "delivery_evidence":"candidate evidence",
             "delivered_ms":now, "delivery_commit":"candidate-cleanup-open",
             "review_evidence":"independent review pass", "reviewer":master_id,
             "reviewed_ms":now, "integration_commit":"main-cleanup-open", "integrated_ms":now
-        }}),
-        json!({"ev":"TaskLifecycleUpdated", "task_id":"owned-closed-clean", "record":{
+        });
+        state["task_lifecycle"]["owned-closed-clean"] = json!({
             "delivery_kind":"code", "delivery_evidence":"candidate evidence",
             "delivered_ms":now, "delivery_commit":"candidate-clean",
             "review_evidence":"independent review pass", "reviewer":master_id,
             "reviewed_ms":now, "integration_commit":"main-clean", "integrated_ms":now
-        }}),
-        json!({"ev":"CleanupVerified", "receipt":{
+        });
+        state["cleanup_receipts"]["owned-closed-clean"] = json!({
             "id":"cleanup-clean", "task_id":"owned-closed-clean", "verification":"verified",
             "verified_ms":now
-        }}),
+        });
         // A peer-owned merge obligation is a real current fact, not history.
-        json!({"ev":"MergeRequested", "request":{
+        state["pending_merges"]["owned-needs-review"] = json!({
             "task_id":"owned-needs-review", "owner":peer_id, "requested_by":peer_id,
             "requested_ms":now, "candidate_commit":null
-        }}),
+        });
         // Caller-as-parent records: the peer orchestrates these managed
         // subagents, so they never change the caller's own identity.
-        subagent_event("hidden-closed-parent", "closed", peer_id, master_id),
-        subagent_event("visible-failed-parent", "failed", peer_id, master_id),
+        state["subagents"]["hidden-closed-parent"] =
+            subagent_record("hidden-closed-parent", "closed", peer_id, master_id);
+        state["subagents"]["visible-failed-parent"] =
+            subagent_record("visible-failed-parent", "failed", peer_id, master_id);
         // Truly foreign records: neither parent nor peer is the caller. A
         // foreign failure never transfers responsibility and stays hidden.
-        subagent_event(
+        state["subagents"]["unrelated-closed-subagent"] = subagent_record(
             "unrelated-closed-subagent",
             "closed",
             master_id,
             "other-parent",
-        ),
-        subagent_event(
+        );
+        state["subagents"]["unrelated-failed-subagent"] = subagent_record(
             "unrelated-failed-subagent",
             "failed",
             master_id,
             "other-parent",
-        ),
-    ]);
-    fixture.append_name_events(&events);
+        );
+    });
 
     // A peer-owned reply obligation is a real current fact.
     let request = fixture.run_public(
@@ -361,22 +354,22 @@ fn ordinary_peer_context_hides_unrelated_closed_history_and_keeps_obligations() 
     // Baseline the peer message counter before the master-only traffic arrives.
     let baseline = fixture.run_public(&["context"], THREAD_B);
     let baseline_messages = baseline["summary"]["messages"].as_u64().unwrap();
-    fixture.append_name_events(&[
+    fixture.update_current_state(|state| {
         // Caller-related message history (peer is sender) still counts.
-        json!({"ev":"Sent", "msg":{
+        state["msgs"]["peer-authored-history"] = json!({
             "id":"peer-authored-history", "from":peer_id, "to":master_id,
             "type":"notify", "subject":"peer history", "body":"history",
             "created_ms":now, "state":"read", "wake_attempt_count":0,
             "last_wake_attempt_ms":0, "retry_attempted":false
-        }}),
+        });
         // Master-only history must not grow the peer message counter or detail.
-        json!({"ev":"Sent", "msg":{
+        state["msgs"]["unrelated-history-message"] = json!({
             "id":"unrelated-history-message", "from":master_id, "to":master_id,
             "type":"notify", "subject":"unrelated history", "body":"history",
             "created_ms":now, "state":"read", "wake_attempt_count":0,
             "last_wake_attempt_ms":0, "retry_attempted":false
-        }}),
-    ]);
+        });
+    });
 
     let context = fixture.run_public(&["context"], THREAD_B);
     let raw = context.to_string();
@@ -604,17 +597,17 @@ fn ordinary_peer_context_hides_unrelated_closed_history_and_keeps_obligations() 
     );
 }
 
-fn task_event(id: &str, owner: &str, status: &str) -> Value {
-    json!({"ev":"TaskCreated", "task":{
+fn task_record(id: &str, owner: &str, status: &str) -> Value {
+    json!({
         "id":id, "owner":owner, "created_by":owner, "status":status,
         "priority":"p2", "created_ms":1_900_000_000_000_i64, "updated_ms":1_900_000_000_001_i64
-    }})
+    })
 }
 
-fn subagent_event(id: &str, status: &str, parent: &str, peer: &str) -> Value {
-    json!({"ev":"SubagentUpdated", "subagent":{
+fn subagent_record(id: &str, status: &str, parent: &str, peer: &str) -> Value {
+    json!({
         "id":id, "parent":parent, "peer":peer, "status":status,
         "thread_id":null, "profile":null, "created_ms":1_900_000_000_100_i64,
         "ready_deadline_ms":1_900_000_001_100_i64, "last_message":null, "error":null
-    }})
+    })
 }

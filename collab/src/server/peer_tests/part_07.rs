@@ -437,9 +437,9 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         "manual close recorded; worktree/branch cleanup remains unverified"
     );
     let task_updated_ms = server.state.lock().unwrap().tasks["orphan"].updated_ms;
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    let journal_after_first = std::fs::read_to_string(&journal_path).unwrap();
-    *server.state.lock().unwrap() = replay(&root).unwrap();
+    let state_path = server.state_path.clone();
+    let state_after_first = std::fs::read(&state_path).unwrap();
+    *server.state.lock().unwrap() = current_state::load(&state_path, false).unwrap();
 
     let second = handle_task_close(
         &server,
@@ -462,8 +462,8 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         task_updated_ms
     );
     assert_eq!(
-        std::fs::read_to_string(&journal_path).unwrap(),
-        journal_after_first
+        std::fs::read(&state_path).unwrap(),
+        state_after_first
     );
     // The same orphan address proof must also authorize the existing cleanup
     // owner. This task declared no filesystem or Git resource to remove.
@@ -471,13 +471,13 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
     assert!(finalized.ok, "{finalized:?}");
     assert_eq!(finalized.data["cleanup"]["result"], "verified");
     let finalized_id = finalized.data["cleanup"]["receipt_id"].clone();
-    let finalized_journal = std::fs::read(&journal_path).unwrap();
-    *server.state.lock().unwrap() = replay(&root).unwrap();
+    let finalized_state = std::fs::read(&state_path).unwrap();
+    *server.state.lock().unwrap() = current_state::load(&state_path, false).unwrap();
     let finalize_again = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into(), None);
     assert!(finalize_again.ok, "{finalize_again:?}");
     assert_eq!(finalize_again.data["idempotent"], true);
     assert_eq!(finalize_again.data["cleanup"]["receipt_id"], finalized_id);
-    assert_eq!(std::fs::read(&journal_path).unwrap(), finalized_journal);
+    assert_eq!(std::fs::read(&state_path).unwrap(), finalized_state);
     let owner = server.state.lock().unwrap().workers["owner"].clone();
     assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(false)));
     std::fs::remove_dir_all(root).ok();
@@ -1207,11 +1207,13 @@ fn authenticated_send_returns_typed_durability_failure_before_wake() {
     let (server, root) = test_server();
     assert!(register(&server, "sender", "%sender").ok);
     assert!(register(&server, "recipient", "%recipient").ok);
-    *server.journal.lock().unwrap() =
-        std::fs::File::open(root.join(".agent-collab/server/journal.jsonl")).unwrap();
+    std::fs::remove_file(&server.state_path).unwrap();
+    std::fs::create_dir(&server.state_path).unwrap();
+    let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+    let server = Arc::new(server);
 
     let response = dispatch(
-        &Arc::new(server),
+        &server,
         authenticated_send(&root, "sender", "recipient", "durability"),
     );
     assert!(!response.ok);
@@ -1219,7 +1221,8 @@ fn authenticated_send_returns_typed_durability_failure_before_wake() {
         .error
         .as_deref()
         .is_some_and(|error| error.starts_with("SEND_DURABILITY_FAILED:")));
-    assert!(response.error.as_deref().unwrap().contains("journal"));
+    assert!(response.error.as_deref().unwrap().contains("directory"), "{response:?}");
+    assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1269,23 +1272,10 @@ pub(crate) fn register_appserver_worker(
     thread_id: &str,
 ) -> WorkerRec {
     let transport = test_appserver_transport(thread_id);
-    let project_scope =
-        crate::server::global_state::GlobalState::canonical_project_scope(root).unwrap();
     let app_scope = crate::identity::AppServerId::new("tui-default").unwrap();
-    let envelope = server
-        .typed_register_envelope_for_scope(
-            id,
-            &format!("token-{id}"),
-            &transport,
-            project_scope,
-            root.to_str().unwrap(),
-            app_scope,
-            false,
-        )
-        .unwrap();
-    server
-        .typed_dispatch(envelope)
-        .expect("appserver registration must succeed");
+    let registered = seed_committed_owner(server, id, &format!("token-{id}"), &transport,
+        root.to_str().unwrap(), Some(app_scope));
+    assert!(registered.ok, "{registered:?}");
     server.state.lock().unwrap().workers[id].clone()
 }
 

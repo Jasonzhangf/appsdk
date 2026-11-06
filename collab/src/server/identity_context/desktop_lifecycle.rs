@@ -35,7 +35,7 @@ impl ProjectRuntimeManager {
                 && binding.session_id.as_ref().map(identity::SessionId::as_str) == Some(session)
                 && binding.native_thread_id.as_ref().map(identity::NativeThreadId::as_str) == Some(thread)
                 && ident.runtime.as_ref().is_some_and(|runtime|
-                    runtime.binding_id == binding.binding_id && runtime.endpoint_generation == binding.endpoint_generation)))
+                    runtime.binding_id == binding.binding_id)))
     }
     /// Reconcile one Desktop bridge binding to its real, host-verified
     /// published endpoint. Discovery is scoped to the committed project scope
@@ -52,7 +52,6 @@ impl ProjectRuntimeManager {
             runtime_id: saved.runtime_id.clone(),
             appserver_id: saved.app_scope_id.clone(),
             binding_id: saved.binding_id.clone(),
-            endpoint_generation: saved.endpoint_generation,
             session_id: saved.session_id.clone(),
             native_thread_id: saved.native_thread_id.clone(),
         };

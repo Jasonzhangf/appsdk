@@ -13,366 +13,24 @@ fn worker_help(action: &str) -> String {
     String::from_utf8(output.stdout).expect("CLI help is UTF-8")
 }
 
-// The background scheduler independently appends ledger-maintenance events on
-// its own tick. Exclude only those known timer-owned records so the snapshot
-// assertion still fails on any command, registration, or snapshot receipt.
-fn journal_excluding_background_maintenance(path: &std::path::Path) -> Vec<String> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| {
-            let record: Value = serde_json::from_str(line).expect("typed project event");
-            let background_adjudication_acceptance = record["ev"] == "NotificationDeliveryAccepted"
-                && record["message_id"]
-                    .as_str()
-                    .is_some_and(|id| id.starts_with("name-adjudication-presence-"));
-            !line.contains("\"GlobalRuntimeBindingLedgerClassified\"")
-                && !line.contains("\"GlobalLedgerScanReceiptRecorded\"")
-                && !background_adjudication_acceptance
-        })
-        .map(str::to_owned)
-        .collect()
-}
-
-fn remove_host_binding_route(path: &std::path::Path, binding_id: &str) {
-    let mut removed = 0;
-    let lines = std::fs::read_to_string(path)
-        .expect("read host journal")
-        .lines()
-        .filter(|line| {
-            let value: Value = serde_json::from_str(line).expect("parse host journal record");
-            let matches = value["ev"] == "GlobalCurrentThreadRouteSet"
-                && value["binding"]["binding_id"] == binding_id;
-            removed += usize::from(matches);
-            !matches
-        })
-        .map(|line| format!("{line}\n"))
-        .collect::<String>();
-    assert_eq!(
-        removed, 1,
-        "fixture must remove exactly one host publication for {binding_id}"
-    );
-    std::fs::write(path, lines).expect("write host journal without target route");
-}
-
-fn pane_after_opening_windows(
-    fixture: &Fixture,
-    label: &str,
-    first: &Pane,
-    target_pane_id: &str,
-) -> Pane {
-    let target_number = target_pane_id
-        .strip_prefix('%')
-        .and_then(|value| value.parse::<u32>().ok())
-        .expect("target pane id uses tmux %N form");
-    let first_number = first
-        .pane_id
-        .strip_prefix('%')
-        .and_then(|value| value.parse::<u32>().ok())
-        .expect("first pane id uses tmux %N form");
-    assert!(
-        first_number < target_number,
-        "fixture must open panes after the initial pane"
-    );
-
-    let mut pane_id = first.pane_id.clone();
-    for number in (first_number + 1)..=target_number {
-        let session = format!("{label}-{number}");
-        let output = tmux(
-            &fixture.tmux_socket,
-            &[
-                "new-session",
-                "-d",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                "-s",
-                &session,
-                "sleep 600",
-            ],
-        );
-        assert!(
-            output.status.success(),
-            "open isolated pane {number}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        fixture.track_tmux_session(session);
-        pane_id = String::from_utf8(output.stdout)
-            .expect("created pane id is utf8")
-            .trim()
-            .to_owned();
-        assert_eq!(pane_id, format!("%{number}"));
-    }
-
-    Pane {
-        server_pid: first.server_pid,
-        pane_id,
-        session_anchor: format!("session-{target_pane_id}"),
-        thread_anchor: format!("thread-{target_pane_id}"),
-    }
-}
-
-fn seed_tombstoned_and_missing_exact_bindings(
-    path: &std::path::Path,
-    source_binding: &Value,
-) -> (Value, Value) {
-    let source_agent_id = source_binding["agent_id"]
-        .as_str()
-        .expect("source binding has an agent id");
-    let source_binding_id = source_binding["binding_id"]
-        .as_str()
-        .expect("source binding has a binding id");
-
-    // Keep the persisted peer's exact binding. The public context owner checks
-    // the saved identity generation, so renaming only its journal records
-    // would create an artificial reconciliation failure.
-    let missing_binding = source_binding.clone();
-
-    let mut tombstoned_binding = source_binding.clone();
-    tombstoned_binding["agent_id"] = Value::String("codex-%10".into());
-    tombstoned_binding["runtime_id"] = Value::String("runtime-tmux-codex-%10".into());
-    tombstoned_binding["binding_id"] = Value::String("binding-codex-%10".into());
-    tombstoned_binding["session_id"] = Value::String("session-%10".into());
-    tombstoned_binding["native_thread_id"] = Value::String("thread-%10".into());
-    let endpoint = tombstoned_binding["tmux_endpoint"]
-        .as_object_mut()
-        .expect("source binding has a tmux endpoint");
-    endpoint.insert("pane_id".into(), Value::String("%10".into()));
-    endpoint.insert("tmux_session_id".into(), Value::String("$10".into()));
-    endpoint.insert(
-        "codex_session_id".into(),
-        Value::String("session-%10".into()),
-    );
-    endpoint.insert("codex_thread_id".into(), Value::String("thread-%10".into()));
-
-    let mut rebound = tombstoned_binding.clone();
-    rebound["endpoint_generation"] = Value::from(
-        tombstoned_binding["endpoint_generation"]
-            .as_u64()
-            .expect("source binding endpoint generation")
-            + 1,
-    );
-    rebound["session_id"] = Value::String("session-%10-rebound".into());
-    rebound["native_thread_id"] = Value::String("thread-%10-rebound".into());
-    rebound["tmux_endpoint"] = Value::Null;
-    let tombstone = json!({
-        "project_scope": tombstoned_binding["project_scope"].clone(),
-        "app_scope_id": tombstoned_binding["app_scope_id"].clone(),
-        "agent_id": tombstoned_binding["agent_id"].clone(),
-        "runtime_id": tombstoned_binding["runtime_id"].clone(),
-        "binding_id": tombstoned_binding["binding_id"].clone(),
-        "endpoint_generation": tombstoned_binding["endpoint_generation"].clone(),
-        "session_id": tombstoned_binding["session_id"].clone(),
-        "native_thread_id": tombstoned_binding["native_thread_id"].clone(),
-        "tmux_endpoint": tombstoned_binding["tmux_endpoint"].clone(),
-        "reboundTo": rebound,
-    });
-
-    let mut records = Vec::new();
-    let mut registered = 0;
-    let mut bound = 0;
-    let mut target_routes = 0;
-    for line in std::fs::read_to_string(path)
-        .expect("read isolated project journal")
-        .lines()
-    {
-        let mut record: Value =
-            serde_json::from_str(line).expect("parse isolated project journal record");
-        match record["ev"].as_str() {
-            Some("GlobalCurrentThreadRouteSet")
-                if record["binding"]["binding_id"] == source_binding_id =>
-            {
-                target_routes += 1;
-                continue;
-            }
-            Some("GlobalRuntimeBound") if record["binding"]["binding_id"] == source_binding_id => {
-                let mut tombstoned = record.clone();
-                tombstoned["binding"] = tombstoned_binding.clone();
-                records.push(tombstoned);
-                record["binding"] = missing_binding.clone();
-                bound += 1;
-            }
-            Some("Registered") if record["worker"]["id"] == source_agent_id => {
-                let mut tombstoned = record.clone();
-                tombstoned["worker"]["id"] = Value::String("codex-%10".into());
-                tombstoned["worker"]["token"] = Value::String("0".repeat(64));
-                tombstoned["worker"]["transport"]["namespace"] = Value::String("$10".into());
-                tombstoned["worker"]["transport"]["session_id"] =
-                    tombstoned_binding["session_id"].clone();
-                tombstoned["worker"]["transport"]["thread_id"] =
-                    tombstoned_binding["native_thread_id"].clone();
-                tombstoned["worker"]["transport"]["tmux_endpoint"] =
-                    tombstoned_binding["tmux_endpoint"].clone();
-                records.push(tombstoned);
-                registered += 1;
-            }
-            _ => {}
-        }
-        records.push(record);
-    }
-    records.push(json!({
-        "ev": "GlobalCurrentThreadRouteTombstoneSet",
-        "tombstone": tombstone,
-    }));
-    assert_eq!(registered, 1, "source journal must have one target worker");
-    assert_eq!(bound, 1, "source journal must have one target binding");
-    assert!(
-        target_routes <= 1,
-        "source journal cannot contain duplicate target route events"
-    );
-
-    let mut unrelated = missing_binding.clone();
-    unrelated["binding_id"] = Value::String("binding-unrelated-route".into());
-    unrelated["agent_id"] = Value::String("unrelated-route-peer".into());
-    unrelated["runtime_id"] = Value::String("runtime-unrelated-route".into());
-    unrelated["endpoint_generation"] = Value::from(1);
-    unrelated["session_id"] = Value::String("unrelated-route-session".into());
-    unrelated["native_thread_id"] = Value::String("unrelated-route-thread".into());
-    unrelated["tmux_endpoint"] = Value::Null;
-    let unrelated = json!({
-        "ev": "GlobalCurrentThreadRouteSet",
-        "binding": unrelated,
-    });
-    records.push(unrelated);
-
-    let body = records
-        .iter()
-        .map(|record| serde_json::to_string(record).expect("serialize isolated journal record"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(path, format!("{body}\n")).expect("write isolated project journal");
-
-    let route_events = std::fs::read_to_string(path)
-        .expect("read seeded isolated project journal")
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|record| record["ev"] == "GlobalCurrentThreadRouteSet")
-        .collect::<Vec<_>>();
-    assert_eq!(route_events.len(), 1, "{route_events:?}");
-    assert_eq!(
-        route_events[0]["binding"]["binding_id"], "binding-unrelated-route",
-        "{route_events:?}"
-    );
-    (tombstoned_binding, missing_binding)
-}
-
-fn project_journal_for_root(fixture: &Fixture, root: &std::path::Path) -> std::path::PathBuf {
-    let project_scope = std::fs::canonicalize(root).expect("canonical project root");
-    let routes = std::fs::read_to_string(fixture.host_routes()).expect("read host route index");
-    if let Some(route) = routes
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|record| {
-            record["op"] == "register"
-                && record["app_scope_id"] == "appserver-cli"
-                && record["project_scope"] == project_scope.to_string_lossy().as_ref()
-        })
-    {
-        return std::path::PathBuf::from(
-            route["storage_root"]
-                .as_str()
-                .expect("project route has a storage root"),
-        )
-        .join(PROJECT_JOURNAL);
-    }
-
-    let mut journals = Vec::new();
-    fn visit(path: &std::path::Path, journals: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(path).expect("read isolated runtime root") {
-            let path = entry.expect("read isolated runtime entry").path();
-            if path.is_dir() {
-                visit(&path, journals);
-            } else if path.ends_with(PROJECT_JOURNAL) {
-                journals.push(path);
-            }
-        }
-    }
-    visit(&fixture.host_state.join("projects"), &mut journals);
-    journals.retain(|path| {
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|record| {
-                record["ev"] == "GlobalProjectRegistered"
-                    && record["registration"]["project_scope"]
-                        == project_scope.to_string_lossy().as_ref()
-            })
+fn remove_current_delivery_route(fixture: &Fixture, project: &Path, binding_id: &str) {
+    let path = fixture.project_state();
+    let project = project.canonicalize().unwrap();
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let routes = file["state"]["global"]["current_thread_routes"]
+        .as_array_mut()
+        .unwrap();
+    let before = routes.len();
+    routes.retain(|route| {
+        !(route[1]["binding_id"] == binding_id
+            && route[1]["project_scope"] == project.to_str().unwrap())
     });
     assert_eq!(
-        journals.len(),
+        before - routes.len(),
         1,
-        "fixture needs one project journal for {}: {journals:?}",
-        project_scope.display()
+        "remove the exact current delivery route"
     );
-    journals.pop().expect("one project journal")
-}
-
-fn project_journal_excluding(fixture: &Fixture, excluded: &std::path::Path) -> std::path::PathBuf {
-    let excluded = std::fs::canonicalize(excluded).expect("canonical excluded project journal");
-    fn visit(
-        path: &std::path::Path,
-        excluded: &std::path::Path,
-        journals: &mut Vec<std::path::PathBuf>,
-    ) {
-        for entry in std::fs::read_dir(path).expect("read isolated runtime root") {
-            let path = entry.expect("read isolated runtime entry").path();
-            if path.is_dir() {
-                visit(&path, excluded, journals);
-            } else if path.ends_with(PROJECT_JOURNAL)
-                && std::fs::canonicalize(&path).ok().as_deref() != Some(excluded)
-            {
-                journals.push(path);
-            }
-        }
-    }
-
-    let mut journals = Vec::new();
-    visit(
-        &fixture.host_state.join("projects"),
-        &excluded,
-        &mut journals,
-    );
-    assert_eq!(
-        journals.len(),
-        1,
-        "fixture needs exactly one remaining project journal: {journals:?}"
-    );
-    journals.pop().expect("one remaining project journal")
-}
-
-fn retain_exact_host_route(
-    path: &std::path::Path,
-    source_binding_id: &str,
-    target_binding: &Value,
-) -> Value {
-    let mut retained = 0;
-    let records = std::fs::read_to_string(path)
-        .expect("read isolated host journal")
-        .lines()
-        .map(|line| {
-            let mut record: Value =
-                serde_json::from_str(line).expect("parse isolated host journal record");
-            if record["ev"] == "GlobalCurrentThreadRouteSet"
-                && record["binding"]["binding_id"] == source_binding_id
-            {
-                record["binding"] = target_binding.clone();
-                retained += 1;
-            }
-            record
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        retained, 1,
-        "host journal must retain one exact target route"
-    );
-    let body = records
-        .iter()
-        .map(|record| serde_json::to_string(record).expect("serialize host journal record"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(path, format!("{body}\n")).expect("write isolated host journal");
-    target_binding.clone()
+    std::fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
 }
 
 fn registered_context_at(
@@ -551,7 +209,7 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let journal_before = journal_excluding_background_maintenance(&fixture.project_journal());
+    let current_before = fixture.current_resources();
 
     let snapshot = fixture.run_ok(
         &["worker", "snapshot", &peer_id, "--lines", "40"],
@@ -571,9 +229,9 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
     assert_eq!(lines.first().copied(), Some("PUB-161"));
     assert_eq!(lines.last().copied(), Some("PUB-200"));
     assert_eq!(
-        journal_excluding_background_maintenance(&fixture.project_journal()),
-        journal_before,
-        "snapshot must not write a durable receipt or journal event"
+        fixture.current_resources(),
+        current_before,
+        "snapshot must preserve current identity, business state and receipts"
     );
 }
 
@@ -715,7 +373,7 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
     let pending = fixture.run_ok(&["msg", &message_id], Some(&peer));
     assert_eq!(pending["consumed_by_recv"], false, "{pending}");
     eprintln!("snapshot target message before read: {pending}");
-    let journal_before = journal_excluding_background_maintenance(&fixture.project_journal());
+    let current_before = fixture.current_resources();
 
     let snapshot = fixture.run_ok(&["snapshot", &master_id, "--lines", "20"], Some(&peer));
     assert_eq!(snapshot["transport"], "tmux", "{snapshot}");
@@ -735,9 +393,9 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
         "snapshot must not submit input or change the target pane"
     );
     assert_eq!(
-        journal_excluding_background_maintenance(&fixture.project_journal()),
-        journal_before,
-        "snapshot must not write a journal record or durable receipt"
+        fixture.current_resources(),
+        current_before,
+        "snapshot must preserve current identity, business state and receipts"
     );
     let receipt = fixture.run_ok(&["msg", &message_id], Some(&master));
     assert_eq!(
@@ -753,97 +411,62 @@ fn settle_snapshot_background_notifications(
     master_id: &str,
     peer_id: &str,
 ) {
-    let records = || {
-        std::fs::read_to_string(fixture.project_journal())
-            .expect("read snapshot fixture journal")
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).expect("typed fixture event"))
-            .collect::<Vec<_>>()
-    };
-    let initial = records();
-    let occupancies = [master_id, peer_id].map(|worker_id| {
-        initial
-            .iter()
-            .rev()
-            .find(|event| {
-                event["ev"] == "NameResolutionCommitted"
-                    && event["occupancy"]["worker_id"] == worker_id
-            })
-            .expect("registered worker has a current typed occupancy")
-            .clone()
-    });
-    let mut deliveries = Vec::new();
     assert!(
         wait_until(Duration::from_secs(15), || {
-            let current = records();
-            deliveries = occupancies
-                .iter()
-                .filter_map(|event| {
-                    let occupancy = &event["occupancy"];
-                    let reference = json!({
-                        "project_scope": event["project_scope"],
-                        "name": occupancy["name"],
-                        "worker_id": occupancy["worker_id"],
-                        "session_id": occupancy["session_id"],
-                        "occupancy_revision": occupancy["occupancy_revision"]
-                    });
-                    let recovery = current.iter().rev().find(|record| {
-                        record["ev"] == "NameRecoveryUpdated"
-                            && record["recovery"]["occupancy_ref"] == reference
-                            && record["recovery"]["request"]["invocation"]
-                                == "presence_adjudication"
-                    })?;
-                    let op = recovery["recovery"]["operation_id"].as_str().unwrap();
-                    let id = format!("name-adjudication-{op}");
-                    let terminal = current.iter().rev().find(|record| {
-                        record["message_id"] == id
-                            && (record["ev"] == "NotificationDeliveryAccepted"
-                                || record["ev"] == "NotificationDeliveryFailed")
-                    })?;
-                    Some((reference, op.to_owned(), id, terminal.clone()))
+            let map: Value = serde_json::from_slice(
+                &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+            )
+            .unwrap();
+            [master_id, peer_id].iter().all(|id| {
+                map["slots"].as_array().unwrap().iter().any(|slot| {
+                    slot["identity_status"] == "active"
+                        && slot["current"]["binding"]["agent_id"] == *id
                 })
-                .collect();
-            deliveries.len() == occupancies.len()
+            }) && !map["effects"].as_array().unwrap().iter().any(|effect| {
+                [master_id, peer_id].contains(&effect["target_worker_id"].as_str().unwrap())
+            })
         }),
-        "both current occupancies need exact adjudication delivery terminals: {occupancies:?}; {deliveries:?}"
+        "current mapped owners must complete their pending handoffs"
     );
-    // The Python runners are controlled simulated agents. Their inconclusive
-    // probes legitimately request adjudication. Finish those independent wakes
-    // before stamping the pure-read baseline; do not disable the monitor.
-    for delivery in &deliveries {
-        assert_eq!(
-            delivery.3["ev"], "NotificationDeliveryAccepted",
-            "{delivery:?}"
-        );
-        let receipt = fixture.run_ok(&["msg", &delivery.2], Some(master));
-        assert_eq!(receipt["consumed_by_recv"], false, "{receipt}");
-        eprintln!("snapshot background delivered: {delivery:?}; receipt={receipt}");
-    }
-    let received = fixture.run_ok(&["recv", "--timeout", "1"], Some(master));
-    for (_, _, id, _) in deliveries {
+    let current = fixture.current_state();
+    let deliveries: Vec<_> = current["msgs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(id, message)| {
+            id.starts_with("name-adjudication-")
+                && message["to"] == master_id
+                && message["state"] != "read"
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    if !deliveries.is_empty() {
         assert!(
-            received["messages"]
+            wait_until(Duration::from_secs(15), || {
+                let state = fixture.current_state();
+                deliveries
+                    .iter()
+                    .all(|id| state["notification_delivery_accepted"].get(id).is_some())
+            }),
+            "background adjudication must have actual delivery acceptance"
+        );
+        let received = fixture.run_ok(&["recv", "--timeout", "1"], Some(master));
+        for id in deliveries {
+            assert!(received["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|msg| msg["id"] == id),
-            "background message {id} must actually be received: {received}"
-        );
-        let receipt = fixture.run_ok(&["msg", &id], Some(master));
-        assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
-        eprintln!("snapshot background consumed: {receipt}");
+                .any(|message| message["id"] == id));
+            let receipt = fixture.run_ok(&["msg", &id], Some(master));
+            assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+        }
     }
-    // Name-adjudication delivery can finish before the first keepalive tick.
-    // Establish both timer-owned baselines before asserting snapshot purity;
-    // keep the journal assertion sensitive to subsequent keepalive writes.
     assert!(
         wait_until(Duration::from_secs(15), || {
-            let current = records();
-            [master_id, peer_id].iter().all(|worker_id| {
-                current.iter().any(|event| {
-                    event["ev"] == "KeepaliveUpdated" && event["worker_id"] == *worker_id
-                })
-            })
+            let state = fixture.current_state();
+            [master_id, peer_id]
+                .iter()
+                .all(|id| state["keepalives"].get(*id).is_some())
         }),
         "both workers must finish their initial keepalive observation before snapshot"
     );
@@ -949,7 +572,6 @@ fn peer_lifecycle_create_cli_and_mcp_round_trip_through_isolated_daemon() {
             "runtime_id": "historical-runtime",
             "appserver_id": "appserver-cli",
             "binding_id": "historical-binding",
-            "endpoint_generation": 1,
             "session_id": "lifecycle-session",
             "native_thread_id": "historical-thread"
         }
@@ -1223,7 +845,6 @@ fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
         .as_str()
         .expect("registered self has a worker id")
         .to_owned();
-    let binding_before = seeded["result"]["snapshot"]["binding"].clone();
 
     let promoted = fixture.run_ok(
         &[
@@ -1259,18 +880,16 @@ fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
     );
     let closed: Value = serde_json::from_slice(&closed.stdout).unwrap();
     assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
-    assert_eq!(
-        closed["result"]["close"]["runtime_archive"]["state"], "not-applicable",
-        "{closed}"
-    );
-    assert_eq!(
-        closed["result"]["close"]["binding_retirement"]["state"], "verified",
-        "{closed}"
-    );
-    assert_eq!(
-        closed["result"]["close"]["route_retirement"]["state"], "verified",
-        "{closed}"
-    );
+    let retired: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(!retired["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|slot| slot["identity_status"] == "active"
+            && slot["current"]["binding"]["agent_id"] == worker_id));
 
     let pane_pid_after = tmux(
         &fixture.tmux_socket,
@@ -1284,7 +903,7 @@ fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
 
     let rebuilt = fixture.context(Some("peer-self-unregister-rebuild"), Some(&pane));
     assert_eq!(rebuilt["result"]["outcome"], "completed", "{rebuilt}");
-    assert_eq!(
+    assert_ne!(
         rebuilt["result"]["snapshot"]["identity"]["worker_id"], worker_id,
         "{rebuilt}"
     );
@@ -1292,21 +911,19 @@ fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
         rebuilt["result"]["snapshot"]["identity"]["role"], "worker",
         "a rebuilt self-unregistered identity must not inherit master authority: {rebuilt}"
     );
-    let binding_after = rebuilt["result"]["snapshot"]["binding"].clone();
-    assert_ne!(
-        binding_after["endpoint_generation"], binding_before["endpoint_generation"],
-        "rebuild must publish a new runtime generation: {rebuilt}"
-    );
     assert_ne!(
         rebuilt["result"]["snapshot"]["master"]["worker_id"], worker_id,
         "the retired master grant must not survive rebuild: {rebuilt}"
     );
 
+    let rebuilt_worker = rebuilt["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
     let sent = fixture.run_ok(
         &[
             "sendmessage",
             "--to",
-            &worker_id,
+            rebuilt_worker,
             "--subject",
             "self-unregister rebuild receipt",
             "--delivery",
@@ -1392,7 +1009,7 @@ fn stale_peer_recovers_missing_host_route_and_self_unregisters() {
     .stdout;
 
     fixture.stop_daemon();
-    remove_host_binding_route(&fixture.project_journal(), &binding_id);
+    remove_current_delivery_route(&fixture, &external_project, &binding_id);
     fixture.restart_after_external_stop();
 
     let recovered = command_at(
@@ -1434,14 +1051,16 @@ fn stale_peer_recovers_missing_host_route_and_self_unregisters() {
     );
     let closed: Value = serde_json::from_slice(&closed.stdout).unwrap();
     assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
-    assert_eq!(
-        closed["result"]["close"]["binding_retirement"]["state"], "verified",
-        "{closed}"
-    );
-    assert_eq!(
-        closed["result"]["close"]["route_retirement"]["state"], "verified",
-        "{closed}"
-    );
+    let retired: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(!retired["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|slot| slot["identity_status"] == "active"
+            && slot["current"]["binding"]["agent_id"] == worker_id));
     let pane_pid_after = tmux(
         &fixture.tmux_socket,
         &[
@@ -1601,7 +1220,6 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
     assert_eq!(bound["subagent"]["peer"], "bind-created-peer");
     assert_eq!(bound["subagent"]["create_operation_id"], "bind-create-op");
     assert!(bound["subagent"]["binding_id"].is_string());
-    assert!(bound["subagent"]["endpoint_generation"].as_u64().is_some());
 
     let mut repeated_bind = fixture.configured_command(&bind_args, None);
     configure_runtime(&mut repeated_bind);
@@ -2219,385 +1837,6 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
 }
 
 #[test]
-fn context_replay_preserves_tombstone_and_backfills_unrelated_exact_route() {
-    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (mut fixture, first_pane) = Fixture::isolated("peer-exact-route-replay");
-    let pane = pane_after_opening_windows(&fixture, "peer-exact-route-replay", &first_pane, "%11");
-    let tombstoned_pane = Pane {
-        server_pid: first_pane.server_pid,
-        pane_id: "%10".into(),
-        session_anchor: "session-%10".into(),
-        thread_anchor: "thread-%10".into(),
-    };
-    let project = fixture.root.join("exact-route-project");
-    std::fs::create_dir_all(project.join(".agent-collab")).expect("create isolated target project");
-    let seeded = registered_context_at(&fixture, &project, "peer-exact-route-seed", &pane);
-    assert_eq!(seeded["result"]["outcome"], "completed", "{seeded}");
-    let source_binding = seeded["result"]["snapshot"]["binding"].clone();
-    let source_binding_id = source_binding["binding_id"]
-        .as_str()
-        .expect("seed has a binding id")
-        .to_owned();
-    let source_agent_id = source_binding["agent_id"]
-        .as_str()
-        .expect("seed has an agent id")
-        .to_owned();
-    assert!(
-        source_binding["endpoint_generation"]
-            .as_u64()
-            .unwrap_or_default()
-            > 0
-    );
-    assert!(source_binding["session_id"].is_string(), "{source_binding}");
-    assert!(
-        source_binding["native_thread_id"].is_string(),
-        "{source_binding}"
-    );
-    assert_eq!(
-        source_binding["tmux_endpoint"]["pane_id"], "%11",
-        "{source_binding}"
-    );
-
-    let host_routes_before = std::fs::read(fixture.host_routes()).expect("read host route index");
-    let project_journal = project_journal_for_root(&fixture, &project);
-    let host_journal = project_journal_excluding(&fixture, &project_journal);
-    fixture.stop_daemon();
-    let (tombstoned_binding, missing_binding) =
-        seed_tombstoned_and_missing_exact_bindings(&project_journal, &source_binding);
-    retain_exact_host_route(&host_journal, &source_binding_id, &missing_binding);
-    let tombstoned_binding_id = tombstoned_binding["binding_id"]
-        .as_str()
-        .expect("seeded tombstoned binding id")
-        .to_owned();
-    let missing_binding_id = missing_binding["binding_id"]
-        .as_str()
-        .expect("seeded missing binding id")
-        .to_owned();
-    assert_eq!(
-        tombstoned_binding["agent_id"], "codex-%10",
-        "{tombstoned_binding}"
-    );
-    assert_eq!(
-        tombstoned_binding["tmux_endpoint"]["pane_id"], "%10",
-        "{tombstoned_binding}"
-    );
-    assert_eq!(
-        missing_binding["agent_id"], source_agent_id,
-        "{missing_binding}"
-    );
-    assert_eq!(
-        missing_binding["tmux_endpoint"]["pane_id"], "%11",
-        "{missing_binding}"
-    );
-    assert_eq!(
-        std::fs::read(fixture.host_routes()).expect("read retained host route index"),
-        host_routes_before,
-        "the exact target host route must remain unchanged"
-    );
-    let journal = std::fs::read_to_string(&project_journal).unwrap();
-    assert!(
-        journal.lines().any(|line| {
-            serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                record["ev"] == "GlobalRuntimeBound"
-                    && record["binding"]["binding_id"] == tombstoned_binding_id
-            })
-        }),
-        "the tombstoned target binding must remain durable"
-    );
-    assert!(
-        journal.lines().any(|line| {
-            serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                record["ev"] == "GlobalRuntimeBound"
-                    && record["binding"]["binding_id"] == missing_binding_id
-            })
-        }),
-        "the unrelated missing binding must remain durable"
-    );
-    assert!(
-        journal.lines().any(|line| {
-            serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                record["ev"] == "GlobalCurrentThreadRouteTombstoneSet"
-                    && record["tombstone"]["binding_id"] == tombstoned_binding_id
-            })
-        }),
-        "the target binding address must be explicitly tombstoned"
-    );
-    assert!(
-        !journal.lines().any(|line| {
-            serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                record["ev"] == "GlobalCurrentThreadRouteSet"
-                    && (record["binding"]["binding_id"] == tombstoned_binding_id
-                        || record["binding"]["binding_id"] == missing_binding_id)
-            })
-        }),
-        "neither target may carry a project route event"
-    );
-    assert_eq!(
-        journal
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|record| {
-                record["ev"] == "GlobalCurrentThreadRouteSet"
-                    && record["binding"]["binding_id"] == "binding-unrelated-route"
-            })
-            .count(),
-        1,
-        "the isolated journal must contain exactly one unrelated route event"
-    );
-    assert!(
-        !journal.lines().any(|line| {
-            serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                record["ev"] == "GlobalCurrentThreadRouteSet"
-                    && record["binding"]["binding_id"] == source_binding_id
-            })
-        }),
-        "the original generated route must not remain after reseeding"
-    );
-    let host_journal_body = std::fs::read_to_string(&host_journal).unwrap();
-    assert_eq!(
-        host_journal_body
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|record| {
-                record["ev"] == "GlobalCurrentThreadRouteSet"
-                    && record["binding"]["binding_id"] == missing_binding_id
-            })
-            .count(),
-        1,
-        "the host journal must retain exactly one route for the unaffected target"
-    );
-    fixture.restart_after_external_stop();
-
-    let context_output = command_at(
-        &fixture,
-        &project,
-        &["context", "--op", "peer-exact-route-recover"],
-        &pane,
-    );
-    let context: Value = serde_json::from_slice(&context_output.stdout).unwrap_or(Value::Null);
-    assert!(
-        context_output.status.success(),
-        "context failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&context_output.stdout),
-        String::from_utf8_lossy(&context_output.stderr)
-    );
-    let status_output = command_at(
-        &fixture,
-        &project,
-        &["worker", "status", source_agent_id.as_str()],
-        &pane,
-    );
-    let status: Value = serde_json::from_slice(&status_output.stdout).unwrap_or(Value::Null);
-    assert!(
-        status_output.status.success(),
-        "worker status failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&status_output.stdout),
-        String::from_utf8_lossy(&status_output.stderr)
-    );
-    let status_row = status["workers"]
-        .as_array()
-        .expect("worker status list")
-        .iter()
-        .find(|worker| worker["id"] == source_agent_id.as_str())
-        .cloned();
-    let read_output = command_at(
-        &fixture,
-        &project,
-        &["worker", "read", source_agent_id.as_str()],
-        &pane,
-    );
-    let read = serde_json::from_slice::<Value>(&read_output.stdout).unwrap_or_else(|_| Value::Null);
-
-    assert_eq!(context["result"]["outcome"], "completed", "{context}");
-    assert_eq!(
-        context["result"]["snapshot"]["identity"]["worker_id"], source_agent_id,
-        "{context}"
-    );
-    assert_eq!(
-        context["result"]["snapshot"]["binding"]["binding_id"], missing_binding_id,
-        "{context}"
-    );
-    assert_eq!(
-        context["result"]["snapshot"]["binding"]["agent_id"], source_agent_id,
-        "{context}"
-    );
-    assert_eq!(
-        context["result"]["snapshot"]["binding"]["tmux_endpoint"]["pane_id"], "%11",
-        "{context}"
-    );
-    assert!(
-        status_row
-            .as_ref()
-            .is_some_and(|row| { row["identity_valid"] == true && row["endpoint_live"] == true }),
-        "worker status={status}; worker read={read}; read stderr={}",
-        String::from_utf8_lossy(&read_output.stderr)
-    );
-    let status_row = status_row.expect("live worker status row");
-    assert_eq!(status_row["identity_valid"], true, "{status}");
-    assert_eq!(status_row["endpoint_live"], true, "{status}");
-    assert!(
-        read_output.status.success(),
-        "worker read failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&read_output.stdout),
-        String::from_utf8_lossy(&read_output.stderr)
-    );
-    // The isolated fixture pane runs an unsupported foreground process, so
-    // presence is honestly unknown instead of inferred. The recovery proof is
-    // the durable identity and live endpoint on the restored worker.
-    assert_eq!(read["result"]["outcome"], "unknown", "{read}");
-    assert!(read["error"].is_null(), "{read}");
-    assert_eq!(
-        read["result"]["projection"]["identity_valid"], true,
-        "{read}"
-    );
-    assert_eq!(
-        read["result"]["projection"]["endpoint_live"], true,
-        "{read}"
-    );
-
-    let tombstoned_status_output = command_at(
-        &fixture,
-        &project,
-        &["worker", "status", "codex-%10"],
-        &pane,
-    );
-    let tombstoned_status: Value =
-        serde_json::from_slice(&tombstoned_status_output.stdout).unwrap_or(Value::Null);
-    assert!(
-        tombstoned_status_output.status.success(),
-        "worker status for tombstoned target failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&tombstoned_status_output.stdout),
-        String::from_utf8_lossy(&tombstoned_status_output.stderr)
-    );
-    let tombstoned_status_row = tombstoned_status["workers"]
-        .as_array()
-        .expect("tombstoned worker status list")
-        .iter()
-        .find(|worker| worker["id"] == "codex-%10")
-        .cloned();
-    assert!(
-        tombstoned_status_row.is_some(),
-        "seeded tombstoned identity must remain auditable: {tombstoned_status}"
-    );
-    let tombstoned_read_output =
-        command_at(&fixture, &project, &["worker", "read", "codex-%10"], &pane);
-    let tombstoned_read: Value =
-        serde_json::from_slice(&tombstoned_read_output.stdout).unwrap_or(Value::Null);
-    assert!(
-        !tombstoned_read_output.status.success(),
-        "tombstoned target became operable: stdout={} stderr={}",
-        String::from_utf8_lossy(&tombstoned_read_output.stdout),
-        String::from_utf8_lossy(&tombstoned_read_output.stderr)
-    );
-    assert_eq!(
-        tombstoned_read["error"],
-        "PEER_LIFECYCLE_UNAUTHORIZED",
-        "{}",
-        String::from_utf8_lossy(&tombstoned_read_output.stderr)
-    );
-
-    let tombstoned_context_output = command_at(
-        &fixture,
-        &project,
-        &["context", "--op", "peer-tombstoned-route-recover"],
-        &tombstoned_pane,
-    );
-    let tombstoned_context: Value =
-        serde_json::from_slice(&tombstoned_context_output.stdout).unwrap_or(Value::Null);
-    assert!(
-        tombstoned_context_output.status.success(),
-        "tombstoned pane did not reactivate its identity: stdout={} stderr={}",
-        String::from_utf8_lossy(&tombstoned_context_output.stdout),
-        String::from_utf8_lossy(&tombstoned_context_output.stderr)
-    );
-    assert_eq!(
-        tombstoned_context["result"]["outcome"], "completed",
-        "{tombstoned_context}"
-    );
-    let reactivated_agent_id = tombstoned_context["result"]["snapshot"]["identity"]["worker_id"]
-        .as_str()
-        .expect("reactivated pane has an agent id");
-    let reactivated_binding = &tombstoned_context["result"]["snapshot"]["binding"];
-    let reactivated_binding_id = reactivated_binding["binding_id"]
-        .as_str()
-        .expect("reactivated pane has a new binding id");
-    assert_eq!(
-        reactivated_agent_id,
-        tombstoned_binding["agent_id"]
-            .as_str()
-            .expect("tombstoned binding has an agent id"),
-        "{tombstoned_context}"
-    );
-    assert_eq!(
-        reactivated_binding_id,
-        tombstoned_binding_id.as_str(),
-        "tombstone rebind preserves the binding identity: {tombstoned_context}"
-    );
-    let tombstoned_generation = tombstoned_binding["endpoint_generation"]
-        .as_u64()
-        .expect("tombstoned binding has a generation");
-    let reactivated_generation = reactivated_binding["endpoint_generation"]
-        .as_u64()
-        .expect("reactivated binding has a generation");
-    assert!(
-        reactivated_generation > tombstoned_generation,
-        "tombstone rebind must advance the generation: {tombstoned_context}"
-    );
-    assert_eq!(
-        reactivated_binding["agent_id"], reactivated_agent_id,
-        "{tombstoned_context}"
-    );
-    assert_eq!(
-        reactivated_binding["tmux_endpoint"]["pane_id"], "%10",
-        "{tombstoned_context}"
-    );
-
-    let replayed_journal =
-        std::fs::read_to_string(&project_journal).expect("read replayed journal");
-    assert_eq!(
-        replayed_journal
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|record| {
-                record["ev"] == "GlobalCurrentThreadRouteTombstoneSet"
-                    && record["tombstone"]["binding_id"] == tombstoned_binding_id
-            })
-            .count(),
-        1,
-        "replay must retain the tombstoned binding record"
-    );
-    assert!(
-        replayed_journal.lines().any(|line| {
-            serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                record["ev"] == "GlobalRuntimeBound"
-                    && record["binding"]["binding_id"] == tombstoned_binding_id
-            })
-        }),
-        "replay must retain the tombstoned runtime binding"
-    );
-    let replayed_host_journal =
-        std::fs::read_to_string(&host_journal).expect("read replayed host route journal");
-    let latest_tombstoned_pane_route = replayed_host_journal
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|record| {
-            record["ev"] == "GlobalCurrentThreadRouteSet"
-                && record["binding"]["tmux_endpoint"]["pane_id"] == "%10"
-        })
-        .next_back()
-        .expect("reactivated pane must publish a current route");
-    assert_eq!(
-        latest_tombstoned_pane_route["binding"]["binding_id"], reactivated_binding_id,
-        "{latest_tombstoned_pane_route}"
-    );
-    assert_eq!(
-        latest_tombstoned_pane_route["binding"]["binding_id"], tombstoned_binding_id,
-        "{latest_tombstoned_pane_route}"
-    );
-}
-
-#[cfg(feature = "context-cancel-test-hooks")]
-#[test]
 fn public_delayed_readback_commit_failure_keeps_marker_and_recovers() {
     let mut fixture = Fixture::without_tmux("public-readback-commit-failure");
     let appserver = TestAppServer::start_with_effect(
@@ -2668,10 +1907,8 @@ fn public_delayed_readback_commit_failure_keeps_marker_and_recovers() {
     let create_marker_path = fixture.root.join(create_marker);
     assert!(create_marker_path.exists());
 
-    fixture.restart_daemon_with_env(
-        "COLLAB_TEST_FAIL_PEER_LIFECYCLE_COMPLETION_APPEND",
-        "public-readback-create",
-    );
+    fixture
+        .restart_daemon_with_file_limit(std::fs::metadata(fixture.project_state()).unwrap().len());
     let mut fail_create_completion = fixture.configured_command(&create_args, None);
     configure_master_runtime(&mut fail_create_completion);
     let failed_create = fail_create_completion
@@ -2756,10 +1993,8 @@ fn public_delayed_readback_commit_failure_keeps_marker_and_recovers() {
     let update_marker_path = fixture.root.join(update_marker);
     assert!(update_marker_path.exists());
 
-    fixture.restart_daemon_with_env(
-        "COLLAB_TEST_FAIL_PEER_LIFECYCLE_COMPLETION_APPEND",
-        update_operation_id.as_str(),
-    );
+    fixture
+        .restart_daemon_with_file_limit(std::fs::metadata(fixture.project_state()).unwrap().len());
     let mut fail_update_completion = fixture.configured_command(&update_retry_args, None);
     configure_master_runtime(&mut fail_update_completion);
     let failed_update = fail_update_completion
@@ -2773,7 +2008,7 @@ fn public_delayed_readback_commit_failure_keeps_marker_and_recovers() {
     let failed_update_response: Value = serde_json::from_slice(&failed_update.stdout)
         .expect("failed Update readback returns structured error JSON");
     assert!(
-        failed_update_text.contains("MIGRATION_ADMISSION_FROZEN"),
+        failed_update_text.contains("PEER_LIFECYCLE_READBACK_COMMIT_FAILED"),
         "{failed_update_text}"
     );
     assert_eq!(
@@ -2783,7 +2018,7 @@ fn public_delayed_readback_commit_failure_keeps_marker_and_recovers() {
     assert!(
         failed_update_response["error"]
             .as_str()
-            .is_some_and(|error| error.starts_with("MIGRATION_ADMISSION_FROZEN:")),
+            .is_some_and(|error| error.starts_with("PEER_LIFECYCLE_READBACK_COMMIT_FAILED:")),
         "{failed_update_response}"
     );
     assert!(

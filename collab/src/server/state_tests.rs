@@ -13,18 +13,18 @@ fn legacy_notification_pane_decodes_without_weakening_required_target() {
     assert!(canonical["subscription"].get("pane").is_none());
     let _: Event = serde_json::from_value(canonical).unwrap();
     let mut missing = legacy;
-    missing["subscription"].as_object_mut().unwrap().remove("pane");
+    missing["subscription"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pane");
     assert!(serde_json::from_value::<Event>(missing).is_err());
 }
 use crate::identity::{AgentId, AppServerId, BindingId, NativeThreadId, RuntimeId, SessionId};
 use crate::scope::ProjectScopeId;
 use crate::server::global_state::{ProjectRegistration, RuntimeBinding};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static REPLAY_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn pending_merge_survives_snapshot_replay_and_resolution_removes_it() {
+fn pending_merge_survives_current_state_and_resolution_removes_it() {
     let mut state = State::default();
     state.apply(&Event::MergeRequested {
         request: PendingMerge {
@@ -51,14 +51,7 @@ fn pending_merge_survives_snapshot_replay_and_resolution_removes_it() {
         at_ms: 30,
     });
 
-    let replayed =
-        state
-            .snapshot_events()
-            .into_iter()
-            .fold(State::default(), |mut replayed, event| {
-                replayed.apply(&event);
-                replayed
-            });
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
 
     assert_eq!(
         replayed.pending_merges.keys().collect::<Vec<_>>(),
@@ -102,16 +95,8 @@ fn dropping_a_message_retires_its_notification_delivery_evidence() {
         .contains_key(message_id));
 }
 
-fn replay_test_root(label: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "collab-route-replay-{label}-{}-{}",
-        std::process::id(),
-        REPLAY_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ))
-}
-
 #[test]
-fn notification_delivery_failure_replays_and_compacts() {
+fn notification_delivery_failure_survives_current_state() {
     let mut state = State::default();
     let event = Event::NotificationDeliveryFailed {
         message_id: "msg-persisted-failure".into(),
@@ -132,27 +117,7 @@ fn notification_delivery_failure_replays_and_compacts() {
         }
     );
 
-    let compacted = state.snapshot_events();
-    assert!(compacted.iter().any(|candidate| {
-        matches!(
-            candidate,
-            Event::NotificationDeliveryFailed {
-                message_id,
-                operation,
-                error,
-                failed_ms,
-                retryable,
-            } if message_id == "msg-persisted-failure"
-                && operation == "notification.emitted"
-                && error == "ADAPTER_ROUTE_UNAVAILABLE: persisted failure"
-                && *failed_ms == 42
-                && *retryable
-        )
-    }));
-    let mut replayed = State::default();
-    for event in compacted {
-        replayed.apply(&event);
-    }
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(
         replayed.notification_delivery_failures,
         state.notification_delivery_failures
@@ -160,7 +125,7 @@ fn notification_delivery_failure_replays_and_compacts() {
 }
 
 #[test]
-fn skipped_busy_master_wake_delivery_state_replays_with_zero_generation() {
+fn skipped_busy_master_wake_current_state_keeps_zero_generation() {
     let mut state = State::default();
     state.master_worker_id = Some("master".into());
     state.apply(&Event::NotificationSubscribed {
@@ -183,7 +148,7 @@ fn skipped_busy_master_wake_delivery_state_replays_with_zero_generation() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::NotificationSkipped {
@@ -195,14 +160,7 @@ fn skipped_busy_master_wake_delivery_state_replays_with_zero_generation() {
     assert_eq!(state.master_wake.generation, 0);
     assert_eq!(state.master_wake.delivery_state, "skipped-busy");
 
-    let replayed =
-        state
-            .snapshot_events()
-            .into_iter()
-            .fold(State::default(), |mut replayed, event| {
-                replayed.apply(&event);
-                replayed
-            });
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(replayed.master_wake.generation, 0);
     assert_eq!(
         replayed.master_wake.delivery_state,
@@ -211,7 +169,7 @@ fn skipped_busy_master_wake_delivery_state_replays_with_zero_generation() {
 }
 
 #[test]
-fn failed_master_wake_delivery_state_replays_with_zero_generation() {
+fn failed_master_wake_current_state_keeps_zero_generation() {
     let mut state = State::default();
     state.master_worker_id = Some("master".into());
     state.apply(&Event::NotificationSubscribed {
@@ -234,7 +192,7 @@ fn failed_master_wake_delivery_state_replays_with_zero_generation() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::Sent {
@@ -267,14 +225,7 @@ fn failed_master_wake_delivery_state_replays_with_zero_generation() {
     assert_eq!(state.master_wake.generation, 0);
     assert_eq!(state.master_wake.delivery_state, "delivery_failed");
 
-    let replayed =
-        state
-            .snapshot_events()
-            .into_iter()
-            .fold(State::default(), |mut replayed, event| {
-                replayed.apply(&event);
-                replayed
-            });
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(replayed.master_wake.generation, 0);
     assert_eq!(
         replayed.master_wake.delivery_state,
@@ -283,7 +234,7 @@ fn failed_master_wake_delivery_state_replays_with_zero_generation() {
 }
 
 #[test]
-fn master_wake_hold_replays_and_survives_compaction() {
+fn master_wake_hold_survives_current_state() {
     use crate::server::notification_state::{MasterWakeAccumulator, WakeHold};
 
     let mut state = State::default();
@@ -303,10 +254,7 @@ fn master_wake_hold_replays_and_survives_compaction() {
         "external gate"
     );
 
-    let mut replayed = State::default();
-    for event in state.snapshot_events() {
-        replayed.apply(&event);
-    }
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(replayed.master_wake.wake_hold, state.master_wake.wake_hold);
 }
 
@@ -338,7 +286,7 @@ fn resource_release_failure_does_not_poison_master_wake_delivery_state() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::Sent {
@@ -399,7 +347,7 @@ fn worker_deadline_failure_does_not_poison_master_wake_delivery_state() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::Sent {
@@ -458,7 +406,7 @@ fn worker_deadline_skip_does_not_poison_master_wake_delivery_state() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::NotificationSkipped {
@@ -487,7 +435,6 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
         agent.clone(),
         RuntimeId::new("runtime-master-wake").unwrap(),
         BindingId::new("binding-master-wake").unwrap(),
-        1,
         Some(SessionId::new("session-thread-master").unwrap()),
         Some(NativeThreadId::new("thread-master").unwrap()),
     )
@@ -500,7 +447,6 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
         "operator",
         "approved",
         binding.binding_id.clone(),
-        1,
         1,
     )
     .unwrap();
@@ -586,7 +532,7 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::WakeBound {
@@ -614,7 +560,7 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     );
     state.apply(&Event::Delivered {
@@ -647,7 +593,6 @@ fn delivered_master_wake_uses_current_typed_grant() {
         agent.clone(),
         RuntimeId::new("runtime-one").unwrap(),
         BindingId::new("binding-master").unwrap(),
-        1,
         Some(SessionId::new("session-thread-master").unwrap()),
         Some(NativeThreadId::new("thread-master").unwrap()),
     )
@@ -660,7 +605,6 @@ fn delivered_master_wake_uses_current_typed_grant() {
         "master",
         "approved",
         binding.binding_id.clone(),
-        1,
         1,
     )
     .unwrap();
@@ -707,7 +651,7 @@ fn delivered_master_wake_uses_current_typed_grant() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::WakeBound {
@@ -715,27 +659,13 @@ fn delivered_master_wake_uses_current_typed_grant() {
         subscription_id: "sub-master".into(),
     });
 
-    let replayed =
-        state
-            .snapshot_events()
-            .into_iter()
-            .fold(State::default(), |mut replayed, event| {
-                replayed.apply(&event);
-                replayed
-            });
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(replayed.master_wake.delivery_state, "pending");
 
     state.apply(&Event::Delivered {
         ids: vec!["master-wake".into()],
     });
-    let replayed =
-        state
-            .snapshot_events()
-            .into_iter()
-            .fold(State::default(), |mut replayed, event| {
-                replayed.apply(&event);
-                replayed
-            });
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
     assert_eq!(
         replayed.master_wake.delivery_state,
@@ -754,7 +684,6 @@ fn delivered_master_wake_is_scoped_to_subscription_route() {
         AgentId::new("first-master").unwrap(),
         RuntimeId::new("runtime-first").unwrap(),
         BindingId::new("binding-first").unwrap(),
-        1,
         Some(SessionId::new("session-thread-first").unwrap()),
         Some(NativeThreadId::new("thread-first").unwrap()),
     )
@@ -765,7 +694,6 @@ fn delivered_master_wake_is_scoped_to_subscription_route() {
         AgentId::new("second-master").unwrap(),
         RuntimeId::new("runtime-second").unwrap(),
         BindingId::new("binding-second").unwrap(),
-        1,
         Some(SessionId::new("session-thread-second").unwrap()),
         Some(NativeThreadId::new("thread-second").unwrap()),
     )
@@ -779,7 +707,6 @@ fn delivered_master_wake_is_scoped_to_subscription_route() {
         "approved",
         first_binding.binding_id.clone(),
         1,
-        1,
     )
     .unwrap();
     let second_grant = crate::server::global_state::MasterGrant::new(
@@ -790,7 +717,6 @@ fn delivered_master_wake_is_scoped_to_subscription_route() {
         "operator",
         "approved",
         second_binding.binding_id.clone(),
-        1,
         1,
     )
     .unwrap();
@@ -842,7 +768,7 @@ fn delivered_master_wake_is_scoped_to_subscription_route() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::WakeBound {
@@ -904,7 +830,7 @@ fn consuming_a_master_goal_deadline_clears_goal_due() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::MasterWakeSignal {
@@ -954,7 +880,7 @@ fn recv_style_ack_clears_master_goal_due() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::MasterWakeSignal {
@@ -1014,7 +940,7 @@ fn delivering_a_master_goal_deadline_clears_goal_due_latch() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::MasterWakeSignal {
@@ -1091,7 +1017,7 @@ fn older_goal_deadline_acceptance_does_not_clear_a_newer_master_goal_due_latch()
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     };
     let send = |id: &str, subscription_id: &str| {
@@ -1188,7 +1114,7 @@ fn master_goal_due_is_kept_while_an_armed_goal_deadline_exists() {
             status_reason: None,
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
-                periodic_declared: false,
+            periodic_declared: false,
         },
     });
     state.apply(&Event::MasterWakeSignal {
@@ -1260,14 +1186,8 @@ fn legacy_wake_attempt_replay_is_clock_independent() {
 }
 
 #[test]
-fn command_receipt_and_worktree_binding_replay_preserve_durable_state() {
+fn current_state_preserves_worktree_binding() {
     let mut state = State::default();
-    let receipt = CommandReceipt {
-        operation_id: "operation-1".into(),
-        outcome: serde_json::json!({"accepted": true}),
-        sequence: 4,
-        revision: 4,
-    };
     let binding = WorktreeBinding {
         worktree_root: "/project/playground/task".into(),
         owning_project_scope: "/project".into(),
@@ -1277,546 +1197,12 @@ fn command_receipt_and_worktree_binding_replay_preserve_durable_state() {
         base_commit: "abc123".into(),
         isolation_mode: None,
     };
-    let events = [
-        Event::CommandRecorded {
-            command_id: "command-1".into(),
-            receipt: receipt.clone(),
-        },
-        Event::WorktreeBound {
+    state.apply(&Event::WorktreeBound {
             binding: binding.clone(),
-        },
-    ];
-    for event in &events {
-        state.apply(event);
-    }
-
-    let replayed = events.iter().fold(State::default(), |mut state, event| {
-        state.apply(event);
-        state
     });
-    assert_eq!(replayed.command_receipts["command-1"], receipt);
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(replayed.worktree_bindings["binding-task-1"], binding);
-    assert_eq!(state.command_receipts, replayed.command_receipts);
     assert_eq!(state.worktree_bindings, replayed.worktree_bindings);
-}
-
-#[test]
-fn runtime_binding_replay_restores_the_unique_current_thread_route() {
-    let root = replay_test_root("unique");
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-    let scope = ProjectScopeId::new("/replay-project").unwrap();
-    let registration =
-        ProjectRegistration::new(scope.clone(), AppServerId::new("appserver-cli").unwrap())
-            .unwrap();
-    let binding = RuntimeBinding::new_with_session(
-        scope,
-        AppServerId::new("appserver-cli").unwrap(),
-        AgentId::new("agent-replay").unwrap(),
-        RuntimeId::new("runtime-replay").unwrap(),
-        BindingId::new("binding-replay").unwrap(),
-        4,
-        Some(crate::identity::SessionId::new("session-replay").unwrap()),
-        Some(NativeThreadId::new("thread-replay").unwrap()),
-    )
-    .unwrap();
-    let events = vec![
-        Event::GlobalProjectRegistered { registration },
-        Event::GlobalRuntimeBound {
-            binding: binding.clone(),
-        },
-    ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&journal, format!("{body}\n")).unwrap();
-    let replayed = crate::server::replay(&root).unwrap();
-    assert_eq!(
-        replayed.global.lookup_current_thread_route(
-            binding.session_id.as_ref().unwrap(),
-            binding.native_thread_id.as_ref().unwrap(),
-        ),
-        Some(&binding)
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn replay_restores_only_a_missing_route_and_preserves_explicit_pane_owner() {
-    let root = replay_test_root("pane-owner");
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-    let scope = ProjectScopeId::new("/replay-pane-owner").unwrap();
-    let app = AppServerId::new("appserver-cli").unwrap();
-    let shared_pane = |session: &str, thread: &str| crate::proto::TmuxEndpoint {
-        socket_path: "/tmp/collab-replay-pane-owner.sock".into(),
-        server_pid: 11,
-        tmux_session_id: "$1".into(),
-        pane_id: "%7".into(),
-        pane_pid: 22,
-        codex_session_id: Some(session.into()),
-        codex_thread_id: Some(thread.into()),
-    };
-    let binding = |agent: &str, binding_id: &str, session: &str, thread: &str, pane: &str| {
-        let mut binding = RuntimeBinding::new_with_session(
-            scope.clone(),
-            app.clone(),
-            AgentId::new(agent).unwrap(),
-            RuntimeId::new(format!("runtime-{binding_id}")).unwrap(),
-            BindingId::new(binding_id).unwrap(),
-            1,
-            Some(SessionId::new(session).unwrap()),
-            Some(NativeThreadId::new(thread).unwrap()),
-        )
-        .unwrap();
-        binding.tmux_endpoint = Some(if pane == "%7" {
-            shared_pane(session, thread)
-        } else {
-            crate::proto::TmuxEndpoint {
-                socket_path: "/tmp/collab-replay-pane-owner.sock".into(),
-                server_pid: 11,
-                tmux_session_id: "$1".into(),
-                pane_id: pane.into(),
-                pane_pid: 33,
-                codex_session_id: Some(session.into()),
-                codex_thread_id: Some(thread.into()),
-            }
-        });
-        binding
-    };
-    let first = binding(
-        "pane-owner-a",
-        "binding-pane-owner-a",
-        "session-pane-owner-a",
-        "thread-1-a",
-        "%7",
-    );
-    let explicit_owner = binding(
-        "pane-owner-b",
-        "binding-pane-owner-b",
-        "session-pane-owner-b",
-        "thread-0-b",
-        "%7",
-    );
-    let missing = binding(
-        "route-backfill",
-        "binding-route-backfill",
-        "session-route-backfill",
-        "thread-2-missing",
-        "%8",
-    );
-    let events = vec![
-        Event::GlobalProjectRegistered {
-            registration: ProjectRegistration::new(scope, app).unwrap(),
-        },
-        Event::GlobalRuntimeBound {
-            binding: first.clone(),
-        },
-        Event::GlobalRuntimeBound {
-            binding: explicit_owner.clone(),
-        },
-        Event::GlobalRuntimeBound {
-            binding: missing.clone(),
-        },
-        // Explicit replay order leaves B as the pane owner. Bindings restore
-        // in thread order, so B sorts before A and the missing route after
-        // both; restoration must skip the occupied pane and backfill only the
-        // missing pane.
-        Event::GlobalCurrentThreadRouteSet {
-            binding: first.clone(),
-        },
-        Event::GlobalCurrentThreadRouteSet {
-            binding: explicit_owner.clone(),
-        },
-    ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&journal, format!("{body}\n")).unwrap();
-
-    let replayed = crate::server::replay(&root).unwrap();
-    let claimants = replayed
-        .global
-        .tmux_pane_route_claimants(explicit_owner.tmux_endpoint.as_ref().unwrap());
-    assert_eq!(
-        claimants
-            .iter()
-            .map(|binding| binding.binding_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["binding-pane-owner-b"],
-        "binding restoration must preserve the pane owner established by replay"
-    );
-    assert_eq!(
-        replayed.global.lookup_current_thread_route(
-            missing.session_id.as_ref().unwrap(),
-            missing.native_thread_id.as_ref().unwrap(),
-        ),
-        Some(&missing),
-        "binding restoration must backfill the uniquely missing route"
-    );
-    replayed.global.validate().unwrap();
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn replay_does_not_revive_a_tombstoned_durable_route() {
-    let root = replay_test_root("tombstoned-route");
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-    let scope = ProjectScopeId::new("/replay-tombstoned-route").unwrap();
-    let app = AppServerId::new("appserver-cli").unwrap();
-    let old = RuntimeBinding::new_with_session(
-        scope.clone(),
-        app.clone(),
-        AgentId::new("agent-tombstoned").unwrap(),
-        RuntimeId::new("runtime-tombstoned").unwrap(),
-        BindingId::new("binding-tombstoned").unwrap(),
-        1,
-        Some(SessionId::new("session-tombstoned-old").unwrap()),
-        Some(NativeThreadId::new("thread-tombstoned-old").unwrap()),
-    )
-    .unwrap();
-    let rebound = RuntimeBinding::new_with_session(
-        scope.clone(),
-        app.clone(),
-        AgentId::new("agent-tombstoned").unwrap(),
-        RuntimeId::new("runtime-tombstoned").unwrap(),
-        BindingId::new("binding-tombstoned").unwrap(),
-        2,
-        Some(SessionId::new("session-tombstoned-new").unwrap()),
-        Some(NativeThreadId::new("thread-tombstoned-new").unwrap()),
-    )
-    .unwrap();
-    let tombstone =
-        crate::server::global_state::RuntimeBindingTombstone::new(&old, &rebound).unwrap();
-    let events = vec![
-        Event::GlobalProjectRegistered {
-            registration: ProjectRegistration::new(scope, app).unwrap(),
-        },
-        Event::GlobalRuntimeBound {
-            binding: old.clone(),
-        },
-        Event::GlobalCurrentThreadRouteTombstoneSet {
-            tombstone: tombstone.clone(),
-        },
-    ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&journal, format!("{body}\n")).unwrap();
-
-    let replayed = crate::server::replay(&root).unwrap();
-    assert_eq!(
-        replayed.global.lookup_current_thread_route(
-            old.session_id.as_ref().unwrap(),
-            old.native_thread_id.as_ref().unwrap(),
-        ),
-        None,
-        "durable binding backfill must not revive a tombstoned route"
-    );
-    assert_eq!(
-        replayed.global.lookup_current_thread_route_tombstone(
-            old.session_id.as_ref().unwrap(),
-            old.native_thread_id.as_ref().unwrap(),
-        ),
-        Some(&tombstone)
-    );
-    replayed.global.validate().unwrap();
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn runtime_binding_replay_rejects_ambiguous_current_thread_routes() {
-    let root = replay_test_root("ambiguous");
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-    let first_scope = ProjectScopeId::new("/replay-project-a").unwrap();
-    let second_scope = ProjectScopeId::new("/replay-project-b").unwrap();
-    let first = RuntimeBinding::new_with_session(
-        first_scope.clone(),
-        AppServerId::new("appserver-cli").unwrap(),
-        AgentId::new("agent-a").unwrap(),
-        RuntimeId::new("runtime-a").unwrap(),
-        BindingId::new("binding-a").unwrap(),
-        1,
-        Some(crate::identity::SessionId::new("session-shared").unwrap()),
-        Some(NativeThreadId::new("thread-shared").unwrap()),
-    )
-    .unwrap();
-    let second = RuntimeBinding::new_with_session(
-        second_scope.clone(),
-        AppServerId::new("appserver-cli").unwrap(),
-        AgentId::new("agent-b").unwrap(),
-        RuntimeId::new("runtime-b").unwrap(),
-        BindingId::new("binding-b").unwrap(),
-        1,
-        Some(crate::identity::SessionId::new("session-shared").unwrap()),
-        Some(NativeThreadId::new("thread-shared").unwrap()),
-    )
-    .unwrap();
-    let events = vec![
-        Event::GlobalProjectRegistered {
-            registration: ProjectRegistration::new(
-                first_scope,
-                AppServerId::new("appserver-cli").unwrap(),
-            )
-            .unwrap(),
-        },
-        Event::GlobalProjectRegistered {
-            registration: ProjectRegistration::new(
-                second_scope,
-                AppServerId::new("appserver-cli").unwrap(),
-            )
-            .unwrap(),
-        },
-        Event::GlobalRuntimeBound { binding: first },
-        Event::GlobalRuntimeBound { binding: second },
-    ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&journal, format!("{body}\n")).unwrap();
-    let error = crate::server::replay(&root)
-        .err()
-        .expect("ambiguous replay must fail")
-        .to_string();
-    assert!(
-        error.contains("ambiguous current thread route thread-shared"),
-        "{error}"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn runtime_binding_replay_keeps_a_legacy_thread_only_binding_resolvable() {
-    let root = replay_test_root("legacy-thread-only");
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-    let scope = ProjectScopeId::new("/replay-project").unwrap();
-    let binding = RuntimeBinding {
-        project_scope: scope.clone(),
-        app_scope_id: AppServerId::new("appserver-cli").unwrap(),
-        agent_id: AgentId::new("agent-legacy").unwrap(),
-        runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
-        binding_id: BindingId::new("binding-legacy").unwrap(),
-        endpoint_generation: 1,
-        session_id: None,
-        native_thread_id: Some(NativeThreadId::new("thread-legacy").unwrap()),
-        tmux_endpoint: None,
-    };
-    let events = vec![
-        Event::GlobalProjectRegistered {
-            registration: ProjectRegistration::new(
-                scope.clone(),
-                AppServerId::new("appserver-cli").unwrap(),
-            )
-            .unwrap(),
-        },
-        Event::GlobalRuntimeBound { binding },
-    ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&journal, format!("{body}\n")).unwrap();
-
-    // The durable record predates the strict dual key. Replay must keep it
-    // resolvable through the read-only compatibility index instead of
-    // aborting the whole host journal, and it must not synthesize a
-    // session id or fabricate a strict current route.
-    let replayed = crate::server::replay(&root).expect("legacy replay must not abort");
-    let thread = NativeThreadId::new("thread-legacy").unwrap();
-    let legacy = replayed
-        .global
-        .legacy_thread_route_matches(&thread)
-        .into_iter()
-        .next()
-        .cloned()
-        .expect("legacy binding must stay resolvable");
-    assert_eq!(legacy.agent_id.as_str(), "agent-legacy");
-    assert_eq!(legacy.binding_id.as_str(), "binding-legacy");
-    assert!(legacy.session_id.is_none());
-    assert!(replayed
-        .global
-        .current_thread_routes
-        .values()
-        .all(|route| route.binding_id.as_str() != "binding-legacy"));
-    replayed.global.validate().unwrap();
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
-    // The live routecodex journal shape: durable thread-only bindings and a
-    // single strict route event.  The strict restoration path owns only dual-key
-    // routes, so the legacy index must be built independently or every
-    // pre-dual-key route becomes unresolvable after a restart.
-    let scope = ProjectScopeId::new("/legacy-mixed").unwrap();
-    let legacy = RuntimeBinding {
-        project_scope: scope.clone(),
-        app_scope_id: AppServerId::new("appserver-cli").unwrap(),
-        agent_id: AgentId::new("agent-legacy").unwrap(),
-        runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
-        binding_id: BindingId::new("binding-legacy").unwrap(),
-        endpoint_generation: 1,
-        session_id: None,
-        native_thread_id: Some(NativeThreadId::new("thread-legacy-mixed").unwrap()),
-        tmux_endpoint: None,
-    };
-    let strict = RuntimeBinding {
-        project_scope: scope.clone(),
-        app_scope_id: AppServerId::new("appserver-cli").unwrap(),
-        agent_id: AgentId::new("agent-strict").unwrap(),
-        runtime_id: RuntimeId::new("runtime-strict").unwrap(),
-        binding_id: BindingId::new("binding-strict").unwrap(),
-        endpoint_generation: 1,
-        session_id: Some(crate::identity::SessionId::new("session-strict-mixed").unwrap()),
-        native_thread_id: Some(NativeThreadId::new("thread-strict-mixed").unwrap()),
-        tmux_endpoint: None,
-    };
-    let mut st = State::default();
-    st.apply(&Event::GlobalProjectRegistered {
-        registration: ProjectRegistration::new(
-            scope.clone(),
-            AppServerId::new("appserver-cli").unwrap(),
-        )
-        .unwrap(),
-    });
-    st.apply(&Event::GlobalRuntimeBound {
-        binding: legacy.clone(),
-    });
-    st.apply(&Event::GlobalRuntimeBound {
-        binding: strict.clone(),
-    });
-    st.apply(&Event::GlobalCurrentThreadRouteSet {
-        binding: strict.clone(),
-    });
-
-    // Precondition: a strict route exists, but the legacy compatibility index
-    // has not yet been projected from durable bindings.
-    assert!(st
-        .global
-        .lookup_current_thread_route(
-            &crate::identity::SessionId::new("session-strict-mixed").unwrap(),
-            &NativeThreadId::new("thread-strict-mixed").unwrap()
-        )
-        .is_some());
-    assert!(st
-        .global
-        .legacy_thread_route_matches(&NativeThreadId::new("thread-legacy-mixed").unwrap())
-        .is_empty());
-
-    st.index_legacy_thread_routes_from_bindings().unwrap();
-
-    assert_eq!(
-        st.global
-            .legacy_thread_route_matches(&NativeThreadId::new("thread-legacy-mixed").unwrap())
-            .len(),
-        1
-    );
-    st.global.validate().unwrap();
-}
-
-#[test]
-fn snapshot_events_keep_legacy_routes_alongside_a_strict_route() {
-    // A compacted journal may hold one strict dual-key route plus a
-    // pre-dual-key thread-only route.  The snapshot itself must carry the
-    // legacy route or restart drops it.
-    let legacy = RuntimeBinding {
-        project_scope: ProjectScopeId::new("/snapshot-legacy").unwrap(),
-        app_scope_id: AppServerId::new("appserver-cli").unwrap(),
-        agent_id: AgentId::new("agent-legacy").unwrap(),
-        runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
-        binding_id: BindingId::new("binding-legacy").unwrap(),
-        endpoint_generation: 1,
-        session_id: None,
-        native_thread_id: Some(NativeThreadId::new("thread-legacy-snapshot").unwrap()),
-        tmux_endpoint: None,
-    };
-    let strict = RuntimeBinding {
-        project_scope: ProjectScopeId::new("/snapshot-strict").unwrap(),
-        app_scope_id: AppServerId::new("appserver-cli").unwrap(),
-        agent_id: AgentId::new("agent-strict").unwrap(),
-        runtime_id: RuntimeId::new("runtime-strict").unwrap(),
-        binding_id: BindingId::new("binding-strict").unwrap(),
-        endpoint_generation: 1,
-        session_id: Some(crate::identity::SessionId::new("session-strict").unwrap()),
-        native_thread_id: Some(NativeThreadId::new("thread-strict").unwrap()),
-        tmux_endpoint: None,
-    };
-
-    let mut st = State::default();
-    st.apply(&Event::GlobalProjectRegistered {
-        registration: ProjectRegistration::new(
-            legacy.project_scope.clone(),
-            AppServerId::new("appserver-cli").unwrap(),
-        )
-        .unwrap(),
-    });
-    st.apply(&Event::GlobalProjectRegistered {
-        registration: ProjectRegistration::new(
-            strict.project_scope.clone(),
-            AppServerId::new("appserver-cli").unwrap(),
-        )
-        .unwrap(),
-    });
-    st.apply(&Event::GlobalRuntimeBound {
-        binding: legacy.clone(),
-    });
-    st.apply(&Event::GlobalRuntimeBound {
-        binding: strict.clone(),
-    });
-    st.apply(&Event::GlobalCurrentThreadRouteSet {
-        binding: strict.clone(),
-    });
-    st.apply(&Event::GlobalCurrentThreadRouteSet {
-        binding: legacy.clone(),
-    });
-
-    let events = st.snapshot_events();
-    let route_events: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::GlobalCurrentThreadRouteSet { binding } => Some(binding.clone()),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        route_events.iter().any(|binding| binding == &legacy),
-        "the snapshot must carry the legacy route"
-    );
-    assert!(route_events.iter().any(|binding| binding == &strict));
-
-    // Feeding the snapshot back through the reducer must preserve both
-    // routes, so a restart cannot lose the legacy candidate.
-    let mut replayed = State::default();
-    for event in &events {
-        replayed.apply(event);
-    }
-    assert_eq!(
-        replayed
-            .global
-            .legacy_thread_route_matches(&NativeThreadId::new("thread-legacy-snapshot").unwrap())
-            .len(),
-        1
-    );
-    assert!(replayed
-        .global
-        .lookup_current_thread_route(
-            &crate::identity::SessionId::new("session-strict").unwrap(),
-            &NativeThreadId::new("thread-strict").unwrap()
-        )
-        .is_some());
-    replayed.global.validate().unwrap();
 }
 
 include!("state_tests_part2.rs");

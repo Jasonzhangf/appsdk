@@ -13,18 +13,18 @@ fn board_external_actor(state: &State, actor: &str) -> String {
 }
 
 #[cfg(test)]
-fn board_task_view(state: &State, task: &TaskRec) -> Option<BoardTaskView> {
-    board_task_view_for(state, task, None)
+fn board_task_view(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec) -> Result<Option<BoardTaskView>, String> {
+    board_task_view_for(state, control, task, None)
 }
 
 #[cfg(test)]
-fn board_task_view_for(state: &State, task: &TaskRec, viewer: Option<&str>) -> Option<BoardTaskView> {
+fn board_task_view_for(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, viewer: Option<&str>) -> Result<Option<BoardTaskView>, String> {
     let master = current_master_worker_id(state, None);
     let route = state.workers.get(&task.owner).and_then(|worker| {
         let project = GlobalState::canonical_project_scope(Path::new(&worker.cwd)).ok()?;
         current_worker_binding(state, &project, None, worker).map(|binding| binding.route_scope())
     });
-    board_task_view_with_master(state, task, viewer, master.as_deref(), route.as_ref())
+    board_task_view_with_master(state, control, task, viewer, master.as_deref(), route.as_ref())
 }
 
 fn board_task_visible(state: &State, task: &TaskRec, viewer: Option<&str>) -> bool {
@@ -43,40 +43,44 @@ fn board_task_visible(state: &State, task: &TaskRec, viewer: Option<&str>) -> bo
 
 // Shared typed availability decision. Views and scheduling must use the same
 // current occupancy, presence and binding facts, never a projected board row.
-fn assignment_unavailability(state: &State, task: &TaskRec, route: Option<&RouteScope>) -> Option<&'static str> {
-    if matches!(task.status.as_str(), "closed" | "cancelled") { return None; }
+fn assignment_unavailability(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, route: Option<&RouteScope>) -> Result<Option<&'static str>, String> {
+    if matches!(task.status.as_str(), "closed" | "cancelled") { return Ok(None); }
     let assignment = state.task_assignment(&task.id);
-    let occupancy = assignment.and_then(|assignment| route.and_then(|route|
-        state.name_occupancy(route.project_scope_id.as_str(), &assignment.name)));
-    if assignment.is_some() && occupancy.is_none() { return Some("name_unoccupied"); }
-    if occupancy.zip(route).is_some_and(|(occupancy, route)| {
-        state.agent_presence(route.project_scope_id.as_str(), &occupancy.worker_id)
-            .is_some_and(|presence| presence.session_id == occupancy.session_id
+    let current = match assignment.zip(route) {
+        Some((assignment, route)) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, &assignment.name)?
+            .and_then(|slot| slot.active_binding()), None => None,
+    };
+    if assignment.is_some() && current.is_none() { return Ok(Some("name_unoccupied")); }
+    if current.zip(route).is_some_and(|(current, route)| {
+        state.agent_presence(route.project_scope_id.as_str(), current.binding.agent_id.as_str())
+            .is_some_and(|presence| current.binding.session_id.as_ref().is_some_and(|session| session.as_str() == presence.session_id)
                 && presence.presence == name_state::AgentPresence::Offline)
-    }) { return Some("owner_offline"); }
-    let owner = occupancy.map_or(task.owner.as_str(), |occupancy| occupancy.worker_id.as_str());
+    }) { return Ok(Some("owner_offline")); }
+    let owner = current.map_or(task.owner.as_str(), |current| current.binding.agent_id.as_str());
     if route.and_then(|route| state.workers.get(owner).and_then(|worker|
         current_worker_binding(state, &route.project_scope_id, Some(&route.app_scope_id), worker))).is_none() {
-        return Some("owner_binding_missing");
+        return Ok(Some("owner_binding_missing"));
     }
-    None
+    Ok(None)
 }
 
-fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&str>, master: Option<&str>, route: Option<&RouteScope>) -> Option<BoardTaskView> {
-    if !board_task_visible(state, task, viewer) { return None; }
-    let details = state.board_details.get(&task.id)?;
+fn board_task_view_with_master(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, viewer: Option<&str>, _master: Option<&str>, route: Option<&RouteScope>) -> Result<Option<BoardTaskView>, String> {
+    if !board_task_visible(state, task, viewer) { return Ok(None); }
+    let details = state.board_details.get(&task.id).expect("visible board details");
     let lifecycle = state.task_lifecycle.get(&task.id);
     let cleanup = state.cleanup_receipts.get(&task.id);
     let policy=state.effective_work_policy(&task.id);
     let (completion_delivery_complete,completion_missing)=state.delivery_completion_projection(&task.id);
     let assignment = state.task_assignment(&task.id);
     let historical = matches!(task.status.as_str(), "closed" | "cancelled");
-    let occupancy = assignment.and_then(|assignment| route.and_then(|route|
-        state.name_occupancy(route.project_scope_id.as_str(), &assignment.name)));
+    let current = match assignment.zip(route) {
+        Some((assignment, route)) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, &assignment.name)?
+            .and_then(|slot| slot.active_binding()), None => None,
+    };
     let current_owner = if historical { Some(task.owner.as_str()) }
-        else if assignment.is_some() { occupancy.map(|occupancy| occupancy.worker_id.as_str()) }
+        else if assignment.is_some() { current.map(|current| current.binding.agent_id.as_str()) }
         else { Some(task.owner.as_str()) };
-    let reassignment_reason = assignment_unavailability(state, task, route).map(str::to_owned);
+    let reassignment_reason = assignment_unavailability(state, control, task, route)?.map(str::to_owned);
     let owner = if reassignment_reason.is_some() {
         String::new()
     } else if details.public_visibility {
@@ -89,7 +93,7 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
     } else {
         task.created_by.clone()
     };
-    Some(BoardTaskView {
+    Ok(Some(BoardTaskView {
         id: task.id.clone(),
         title: details.title.clone(),
         description: details.description.clone(),
@@ -97,16 +101,15 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
         test_condition: details.test_condition.clone(),
         revision: details.revision,
         owner_display_name: if owner.is_empty() { String::new() }
-            else { assignment.filter(|_| current_owner == Some(owner.as_str()))
-                .map(|assignment| assignment.name.clone())
-                .unwrap_or_else(|| worker_display_name(state, &owner, master == Some(owner.as_str()))) },
+            else if let Some(assignment) = assignment.filter(|_| current_owner == Some(owner.as_str())) { assignment.name.clone() }
+            else { worker_display_name(control, route, &owner)? },
         owner_name: assignment.map(|assignment| assignment.name.clone()),
         owner_session_id: if historical { assignment.map(|assignment| assignment.session_id.clone()) }
             else if owner.is_empty() { None }
-            else { occupancy.map(|occupancy| occupancy.session_id.clone()) },
+            else { current.and_then(|current| current.binding.session_id.as_ref().map(ToString::to_string)) },
         needs_reassignment: reassignment_reason.is_some(),
         reassignment_reason,
-        publisher_display_name: worker_display_name(state, &publisher, master == Some(publisher.as_str())),
+        publisher_display_name: worker_display_name(control, route, &publisher)?,
         owner,
         publisher,
         priority: task.priority.clone(),
@@ -138,19 +141,27 @@ fn board_task_view_with_master(state: &State, task: &TaskRec, viewer: Option<&st
             if board_public_task(state, &wait.waiting_for) { wait.waiting_for.clone() }
             else { "内部依赖".into() }
         }),
-    })
+    }))
 }
 
 fn board_task_response(server: &Server, state: &State, task_id: &str, viewer: &str) -> Resp {
     let route = match server_route_scope(server, state) { Ok(route) => route, Err(error) => return Resp::err(error) };
     let master = current_master_worker_id(state, route.as_ref());
-    match state.tasks.get(task_id).and_then(|task| board_task_view_with_master(state, task, Some(viewer), master.as_deref(), route.as_ref())) {
-        Some(task) => Resp::data(json!({ "task": task, "notification": "none" })),
-        None => Resp::err("BOARD_TASK_NOT_PUBLIC: task does not belong to the public task board"),
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let result = state.tasks.get(task_id).map(|task| board_task_view_with_master(state, &control, task, Some(viewer), master.as_deref(), route.as_ref())).transpose();
+    match result {
+        Ok(Some(Some(task))) => Resp::data(json!({ "task": task, "notification": "none" })),
+        Ok(_) => Resp::err("BOARD_TASK_NOT_PUBLIC: task does not belong to the public task board"),
+        Err(error) => Resp::err(error),
     }
 }
 
 fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     // Native observations run outside the reducer lock. They never determine
     // task owner, status, or the persisted invitation reservation.
     let candidates: Vec<_> = {
@@ -192,26 +203,38 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         .as_deref()
         .and_then(|id| observations.get(id))
         .and_then(|(_, endpoint_live)| *endpoint_live);
-    let authority = master_authority_view_with_endpoint(&state, route.as_ref(), endpoint_live);
+    let authority = match master_authority_view_with_endpoint(&state, &control, route.as_ref(), endpoint_live) {
+        Ok(authority) => authority, Err(error) => return Resp::err(error),
+    };
     let master = authority
         .get("worker_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    let mut tasks: Vec<_> = state.tasks.values()
-        .filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled"))
-        .filter_map(|task| board_task_view_with_master(&state, task, viewer, master.as_deref(), route.as_ref())).collect();
+    let mut tasks = Vec::new();
+    for task in state.tasks.values().filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled")) {
+        match board_task_view_with_master(&state, &control, task, viewer, master.as_deref(), route.as_ref()) {
+            Ok(Some(task)) => tasks.push(task), Ok(None) => {}, Err(error) => return Resp::err(error),
+        }
+    }
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut workers: Vec<_> = state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)).map(|worker| {
-        BoardMemberView {
+    let mut workers = Vec::new();
+    for worker in state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)) {
+        let display_name = match worker_display_name(&control, route.as_ref(), &worker.id) {
+            Ok(name) => name, Err(error) => return Resp::err(error),
+        };
+        let work_roles = match worker_work_roles(&state, &control, route.as_ref(), &worker.id) {
+            Ok(roles) => roles, Err(error) => return Resp::err(error),
+        };
+        workers.push(BoardMemberView {
             id: worker.id.clone(),
-            display_name: worker_display_name(&state, &worker.id, master.as_deref() == Some(worker.id.as_str())),
+            display_name,
             role: if master.as_deref() == Some(worker.id.as_str()) { "master" } else { "peer" }.into(),
-            work_roles:worker_work_roles(&state,route.as_ref().map_or("",|route|route.project_scope_id.as_str()),&worker.id),
+            work_roles,
             status: observations.get(&worker.id).map(|(status, _)| *status).unwrap_or("unknown").into(),
             task_ids: tasks.iter().filter(|task| task.owner == worker.id && board_execution_responsibility(&task.status)).map(|task| task.id.clone()).collect(),
             invitation_ids: tasks.iter().filter(|task| task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),
-        }
-    }).collect();
+        });
+    }
     workers.sort_by(|left, right| left.id.cmp(&right.id));
     Resp::data(json!({
         "schema_version": 1,

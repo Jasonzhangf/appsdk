@@ -52,9 +52,8 @@ fn startup_pane_conflict_transport(
     }
 }
 
-/// One isolated project runtime with one committed pane claim. Distinct
-/// projects let two historical claims hold the same pane without the live
-/// registration writer retiring either one.
+/// One isolated project runtime with current delivery facts. Distinct projects
+/// let publication conflicts be tested without live transport admission.
 struct StartupPaneConflictRuntime {
     runtime: Arc<Server>,
     binding: crate::server::global_state::RuntimeBinding,
@@ -105,37 +104,34 @@ fn startup_pane_conflict_runtime(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn startup_pane_conflict_slot(
     host_paths: &HostPaths,
     name: &str,
     binding: crate::server::global_state::RuntimeBinding,
     transport: &crate::proto::SelectedTransport,
 ) {
-    crate::server::binding_store::BindingControlStore::at(
-        &host_paths.state_root().join("routes.jsonl"),
-    )
-    .commit(crate::server::binding_store::ControlChange::Commit {
-        key: crate::server::binding_slot::IdentityBindingKey::new(
-            binding.project_scope.clone(),
-            binding.app_scope_id.clone(),
-            name,
-        ),
-        value: crate::server::binding_slot::BindingValue::new(binding, transport.clone()),
-        expected_generation: None,
-    })
-    .unwrap();
+    crate::server::binding_store::BindingControlStore::new(host_paths.state_root())
+        .commit(crate::server::binding_store::ControlChange::Commit {
+            key: crate::server::binding_slot::IdentityBindingKey::new(
+                binding.project_scope.clone(),
+                binding.app_scope_id.clone(),
+                name,
+            ),
+            value: crate::server::binding_slot::BindingValue::new(binding, transport.clone()),
+            expected_generation: None,
+        })
+        .unwrap();
 }
 
-fn assert_two_historical_pane_slots_do_not_block_startup(reverse_slots: bool) {
+fn assert_current_pane_conflict_does_not_block_startup(reverse_slots: bool, has_claimant: bool) {
     let (host, host_root) = crate::server::peer_tests::test_server();
     let host = Arc::new(host);
     let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
     host_paths.ensure_root().unwrap();
 
-    // Two historical projects each committed a durable pane claim on the same
-    // pane, and a third independent pane must stay usable. The two claimants
-    // live in different projects, so the live registration writer never
-    // retired either one.
+    // Two active current map rows target one pane. An independent healthy
+    // delivery endpoint must remain usable in either insertion order.
     let claimed = startup_pane_conflict_endpoint("%1700", "session-claim-a", "thread-claim-a");
     let mut second = claimed.clone();
     second.codex_session_id = Some("session-claim-b".into());
@@ -145,8 +141,7 @@ fn assert_two_historical_pane_slots_do_not_block_startup(reverse_slots: bool) {
     let claim_b = startup_pane_conflict_runtime("claim-b", &second);
     let healthy_peer = startup_pane_conflict_runtime("healthy-peer", &healthy);
 
-    // The manager starts empty, exactly like `run_with_host_paths` before it
-    // replays durable routes, then receives the materialized project runtimes.
+    // Startup installs current project runtimes before publishing delivery facts.
     let manager = ProjectRuntimeManager::new(host.clone(), &host_paths)
         .expect("an empty host must construct the runtime manager");
     for runtime in [&claim_a, &claim_b, &healthy_peer] {
@@ -160,7 +155,7 @@ fn assert_two_historical_pane_slots_do_not_block_startup(reverse_slots: bool) {
         );
     }
 
-    let mut slots = [("claim-a", &claim_a), ("claim-b", &claim_b)];
+    let mut slots = [("Alice", &claim_a), ("Bob", &claim_b)];
     if reverse_slots {
         slots.swap(0, 1);
     }
@@ -174,40 +169,38 @@ fn assert_two_historical_pane_slots_do_not_block_startup(reverse_slots: bool) {
     }
     startup_pane_conflict_slot(
         &host_paths,
-        "healthy-peer",
+        "Carol",
         healthy_peer.binding.clone(),
         &healthy_peer.transport,
     );
-    let control = crate::server::binding_store::BindingControlStore::at(
-        &host_paths.state_root().join("routes.jsonl"),
-    )
-    .load()
-    .unwrap();
+    let control = crate::server::binding_store::BindingControlStore::new(host_paths.state_root())
+        .load()
+        .unwrap();
 
-    // Correct target: one historical pane claim must not abort the whole
-    // startup publication. `new_with_operation_journal` propagates this exact
-    // call with `?`, so a returned error here is what leaves the daemon
-    // manager/listener not ready. This is the first semantic assertion and it
-    // is the one that fails on the pre-fix baseline.
+    if has_claimant {
+        manager
+            .reconcile_binding_publication(&claim_a.binding)
+            .unwrap();
+    }
     let publication = manager.reconcile_controlled_thread_routes(&control);
     assert!(
         publication.is_ok(),
-        "a single historical pane claim must not abort startup publication: {publication:?}"
+        "a conflicting current map row must not abort startup publication: {publication:?}"
     );
-    manager.reconcile_started_thread_routes(&control).unwrap();
-    manager.reconcile_same_pane_master_routes(&control).unwrap();
-
-    // The conflicting pane must not be silently won by slot order: neither
-    // historical claim may be published into the host address index.
-    assert!(
+    assert_eq!(
         host.state
             .lock()
             .unwrap()
             .global
-            .lookup_unique_tmux_pane_route(&claimed)
-            .is_none(),
-        "a mutually conflicting historical pane claim must stay pending, not win by slot order"
+            .lookup_unique_tmux_pane_route(&claimed).cloned(),
+        has_claimant.then(|| claim_a.binding.clone()),
+        "publication must preserve an existing claimant or leave an unresolved conflict unpublished"
     );
+    if has_claimant {
+        assert!(manager
+            .reconcile_binding_publication(&claim_b.binding)
+            .is_err());
+    }
     // The independent healthy pane must remain addressable.
     let published_healthy = host
         .state
@@ -247,13 +240,16 @@ fn assert_two_historical_pane_slots_do_not_block_startup(reverse_slots: bool) {
 }
 
 #[test]
-fn two_historical_control_slots_claiming_one_pane_do_not_block_startup() {
+fn current_map_pane_conflict_preserves_claimant_and_independent_startup_routes() {
     let _startup_test_lock = startup_test_lock();
-    assert_two_historical_pane_slots_do_not_block_startup(false);
-    assert_two_historical_pane_slots_do_not_block_startup(true);
+    for reverse in [false, true] {
+        for has_claimant in [false, true] {
+            assert_current_pane_conflict_does_not_block_startup(reverse, has_claimant);
+        }
+    }
 }
 
-fn startup_route_fixture(name: &str, binding_control: Option<&str>) -> StartupRouteFixture {
+fn startup_route_fixture(name: &str) -> StartupRouteFixture {
     let root = test_root(name);
     let host_root = root.join("host");
     let project_root = root.join("project");
@@ -262,20 +258,15 @@ fn startup_route_fixture(name: &str, binding_control: Option<&str>) -> StartupRo
 
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
     host_paths.ensure_root().unwrap();
-    let host_journal_path = host_root.join(".agent-collab/server/journal.jsonl");
-    let host_journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&host_journal_path)
-        .unwrap();
+    let state_path = host_root.join(".agent-collab/server/state.json");
+    current_state::save(&state_path, &State::default()).unwrap();
     let host = Arc::new(Server {
         config: crate::config::Config::default(),
         root: host_root.clone(),
         storage_root: host_root,
-        journal_path: host_journal_path,
+        state_path,
         host_paths: host_paths.clone(),
         state: Mutex::new(State::default()),
-        journal: Mutex::new(host_journal),
         appserver_candidate_check: default_appserver_candidate_check(),
         appserver_notification_sink: default_appserver_notification_sink(),
         appserver_thread_status: default_appserver_thread_status(),
@@ -286,22 +277,21 @@ fn startup_route_fixture(name: &str, binding_control: Option<&str>) -> StartupRo
     let project_root = project_root.canonicalize().unwrap();
     let project_scope = project_root.to_string_lossy().into_owned();
     let key = ("fixture-app".to_owned(), project_scope.clone());
+    let storage_root = host_paths.app_storage_root(&key.1, &key.0);
     let record = HostRouteRecord {
-        version: 1,
-        op: "register".into(),
         app_scope_id: key.0.clone(),
         project_scope: project_scope.clone(),
         canonical_root: project_scope.clone(),
-        storage_root: project_scope,
+        storage_root: storage_root.display().to_string(),
         registered_ms: 1,
     };
-    let mut routes = serde_json::to_string(&record).unwrap();
-    if let Some(binding_control) = binding_control {
-        routes.push('\n');
-        routes.push_str(binding_control);
-    }
-    routes.push('\n');
-    std::fs::write(host_paths.state_root().join("routes.jsonl"), routes).unwrap();
+    binding_store::publish_route_records(&host_paths.state_root().join("routes.json"), &[record])
+        .unwrap();
+    assert!(current_state::save(
+        &storage_root.join(".agent-collab/server/state.json"),
+        &State::default()
+    )
+    .unwrap());
 
     let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
     StartupRouteFixture {
@@ -313,8 +303,8 @@ fn startup_route_fixture(name: &str, binding_control: Option<&str>) -> StartupRo
 }
 
 #[test]
-fn old_route_without_binding_control_stays_pending_until_selection() {
-    let fixture = startup_route_fixture("legacy-binding-control", None);
+fn current_route_without_active_map_stays_pending_until_selection() {
+    let fixture = startup_route_fixture("route-without-active-map");
     let pending = fixture
         .manager
         .routes
@@ -324,15 +314,12 @@ fn old_route_without_binding_control_stays_pending_until_selection() {
         .and_then(|route| route.runtime.clone());
     assert!(
         pending.is_none(),
-        "a legacy route must stay pending at startup when no control line exists"
+        "a route without an active map must stay pending until selection"
     );
     assert!(
         fixture.manager.project_locks.lock().unwrap().is_empty(),
-        "startup must not hold a writer-lock descriptor for a pending legacy route"
+        "startup must not hold a writer-lock descriptor for a pending route"
     );
-    let log = std::fs::read_to_string(fixture.host.host_paths.log_path()).unwrap();
-    assert!(log.contains("RUNTIME_MATERIALIZATION_DEFERRED"), "{log}");
-
     let context = crate::proto::ProjectContext::for_registered_root_with_app(
         &fixture.root.join("project"),
         crate::identity::AppServerId::new("fixture-app").unwrap(),
@@ -365,32 +352,20 @@ fn old_route_without_binding_control_stays_pending_until_selection() {
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
-#[test]
-fn binding_control_line_keeps_unbound_initialized_project_deferred() {
-    let fixture = startup_route_fixture(
-        "complete-binding-control",
-        Some(r#"{"kind":"binding_control","slots":[]}"#),
-    );
-    let runtime = fixture
-        .manager
-        .routes
-        .lock()
-        .unwrap()
-        .get(&fixture.key)
-        .and_then(|route| route.runtime.clone());
-    assert!(
-        runtime.is_none(),
-        "a complete control line must gate materialization"
-    );
-    let log = std::fs::read_to_string(fixture.host.host_paths.log_path()).unwrap();
-    assert!(log.contains("RUNTIME_MATERIALIZATION_DEFERRED"), "{log}");
-
-    drop(fixture.manager);
-    drop(fixture.host);
-    std::fs::remove_dir_all(fixture.root).unwrap();
+fn seed_registered_startup_state(root: &Path, host_paths: &HostPaths) {
+    let project = GlobalState::canonical_project_scope(root).unwrap();
+    let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+    let mut state = State::default();
+    state
+        .apply_checked(&Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::new(project.clone(), app.clone()).unwrap(),
+        })
+        .unwrap();
+    let storage = host_paths.app_storage_root(project.as_str(), app.as_str());
+    assert!(current_state::save(&storage.join(".agent-collab/server/state.json"), &state).unwrap());
 }
 
-async fn assert_active_isolated_server(socket: &std::path::Path) {
+async fn assert_active_isolated_server(socket: &std::path::Path, root: &std::path::Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !crate::client::alive(socket) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -418,16 +393,22 @@ async fn assert_active_isolated_server(socket: &std::path::Path) {
         ping["degraded"], true,
         "retired local storage is isolated: {ping}"
     );
-    writer
-        .write_all(b"{\"op\":\"MasterStatus\"}\n")
-        .await
-        .unwrap();
+    let context = crate::proto::ProjectContext::for_registered_root_with_app(
+        root,
+        AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
+    )
+    .unwrap();
+    let request = crate::proto::RequestEnvelope::new(Req::MasterStatus, Some(context));
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await.unwrap();
     line.clear();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
         .await
         .unwrap()
         .unwrap();
-    assert!(!line.contains("PROJECT_RUNTIME_UNAVAILABLE"), "{line}");
+    let status: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(status["ok"], true, "{status}");
 }
 
 #[test]
@@ -524,18 +505,19 @@ async fn reachable_legacy_project_daemon_does_not_block_current_central_runtime(
     host_paths.ensure_root().unwrap();
     let legacy_socket = root.join(".agent-collab/server/server.sock");
     let listener = UnixListener::bind(&legacy_socket).expect("bind legacy socket");
+    seed_registered_startup_state(&root, &host_paths);
 
     let running = tokio::spawn(run_with_host_paths(
         Scope { root: root.clone() },
         host_paths.clone(),
     ));
-    assert_active_isolated_server(&host_paths.socket_path()).await;
+    assert_active_isolated_server(&host_paths.socket_path(), &root).await;
     assert!(legacy_socket.exists());
     let central = host_paths.app_storage_root(
         std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
         crate::identity::CLI_APP_SERVER_ID,
     );
-    assert!(central.join(".agent-collab/server/journal.jsonl").exists());
+    current_state::load(&central.join(".agent-collab/server/state.json"), false).unwrap();
     running.abort();
     let _ = running.await;
 
@@ -559,6 +541,7 @@ async fn held_legacy_project_lock_does_not_block_isolated_central_runtime() {
     use std::os::unix::io::AsRawFd;
     let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     assert_eq!(rc, 0, "test must hold the legacy lock");
+    seed_registered_startup_state(&root, &host_paths);
 
     let journal = root.join(".agent-collab/server/journal.jsonl");
     std::fs::write(&journal, b"").unwrap();
@@ -566,13 +549,13 @@ async fn held_legacy_project_lock_does_not_block_isolated_central_runtime() {
         Scope { root: root.clone() },
         host_paths.clone(),
     ));
-    assert_active_isolated_server(&host_paths.socket_path()).await;
+    assert_active_isolated_server(&host_paths.socket_path(), &root).await;
     assert_eq!(std::fs::read(&journal).unwrap(), b"");
     let central = host_paths.app_storage_root(
         std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
         crate::identity::CLI_APP_SERVER_ID,
     );
-    assert!(central.join(".agent-collab/server/journal.jsonl").exists());
+    current_state::load(&central.join(".agent-collab/server/state.json"), false).unwrap();
     running.abort();
     let _ = running.await;
 
@@ -589,21 +572,18 @@ async fn established_central_store_is_not_blocked_by_a_retired_legacy_lock() {
     let scope = std::fs::canonicalize(&root).unwrap();
     let central =
         host_paths.app_storage_root(scope.to_str().unwrap(), crate::identity::CLI_APP_SERVER_ID);
-    let journal = central.join(".agent-collab/server/journal.jsonl");
-    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-    let original = serde_json::to_vec(&Event::Registered {
-        worker: WorkerRec {
-            id: "central-owner-peer".into(),
-            token: "private-fixture-token".into(),
-            cwd: scope.to_string_lossy().into_owned(),
-            registered_ms: now_ms(),
-            transport: None,
-        },
-    })
-    .unwrap();
-    let mut history = original.clone();
-    history.push(b'\n');
-    std::fs::write(&journal, &history).unwrap();
+    let state_path = central.join(".agent-collab/server/state.json");
+    let worker = WorkerRec {
+        id: "central-owner-peer".into(),
+        token: "private-fixture-token".into(),
+        cwd: scope.to_string_lossy().into_owned(),
+        registered_ms: now_ms(),
+        transport: None,
+    };
+    let original = serde_json::to_value(&worker).unwrap();
+    let mut state = State::default();
+    state.workers.insert(worker.id.clone(), worker);
+    assert!(current_state::save(&state_path, &state).unwrap());
     let legacy = root.join(".agent-collab/server/journal.jsonl");
     std::fs::write(&legacy, b"").unwrap();
     let lock = std::fs::OpenOptions::new()
@@ -637,7 +617,11 @@ async fn established_central_store_is_not_blocked_by_a_retired_legacy_lock() {
         "retired local storage must not veto the established central owner: {ping}"
     );
     assert_eq!(std::fs::read(&legacy).unwrap(), b"");
-    assert!(std::fs::read(&journal).unwrap().starts_with(&history));
+    let loaded = current_state::load(&state_path, false).unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded.workers["central-owner-peer"]).unwrap(),
+        original
+    );
     running.abort();
     let _ = running.await;
     drop(lock);
@@ -650,7 +634,7 @@ async fn running_host_daemon_fences_host_writer_but_does_not_own_retired_project
     let root = test_root("legacy-fence");
     let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
     host_paths.ensure_root().unwrap();
-    let legacy_host_lock = legacy_host_daemon_lock_path(&host_paths);
+    let host_lock = host_paths.lock_path();
     let socket = host_paths.socket_path();
     let running = tokio::spawn(run_with_host_paths(
         Scope { root: root.clone() },
@@ -672,10 +656,10 @@ async fn running_host_daemon_fences_host_writer_but_does_not_own_retired_project
         std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
         crate::identity::CLI_APP_SERVER_ID,
     );
-    let journal = storage.join(".agent-collab/server/journal.jsonl");
-    let journal_before = std::fs::read(&journal).expect("host daemon must open project journal");
+    let state_path = storage.join(".agent-collab/server/state.json");
+    let state_before = std::fs::read(&state_path).expect("host daemon must publish current state");
 
-    let old_host_attempt = acquire_daemon_lock(&legacy_host_lock, &legacy_socket);
+    let old_host_attempt = acquire_daemon_lock(&host_lock, &socket);
     assert!(old_host_attempt
         .expect_err("old writer must not reacquire its host lock")
         .to_string()
@@ -683,7 +667,7 @@ async fn running_host_daemon_fences_host_writer_but_does_not_own_retired_project
     let old_project_attempt = acquire_daemon_lock(&legacy_project_lock, &legacy_socket);
     let old_project_guard =
         old_project_attempt.expect("retired project storage remains independently owned");
-    assert_eq!(journal_before, std::fs::read(&journal).unwrap());
+    assert_eq!(state_before, std::fs::read(&state_path).unwrap());
 
     running.abort();
     let _ = running.await;

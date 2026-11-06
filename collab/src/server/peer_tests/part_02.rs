@@ -427,40 +427,6 @@ fn authenticated_send_rejects_another_workers_binding() {
 }
 
 #[test]
-fn authenticated_send_rejects_stale_generation() {
-    let (server, root) = test_server();
-    register(&server, "sender", "%sender");
-    register(&server, "receiver", "%receiver");
-    let server_arc = Arc::new(server);
-    let mut command = send_command(&root, "sender");
-    command.endpoint_generation = 0;
-    let resp = dispatch(
-        &server_arc,
-        Req::Send {
-            from: "sender".into(),
-            worker_id: Some("sender".into()),
-            token: Some("token-sender".into()),
-            command: Some(command),
-            to: "receiver".into(),
-            mtype: "notify".into(),
-            subject: Some("test".into()),
-            body: "body".into(),
-            in_reply_to: None,
-            reply_policy: None,
-            target_session: None,
-            delivery: "immediate".into(),
-        },
-    );
-    assert!(!resp.ok);
-    let err = resp.error.unwrap_or_default();
-    assert!(
-        err.contains("SEND_BINDING_REJECTED") && err.contains("stale endpoint generation"),
-        "unexpected error: {err}"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
 fn authenticated_send_enforces_request_cooldown() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
@@ -1010,10 +976,10 @@ fn git_ok(root: &Path, args: &[&str]) {
 }
 
 #[test]
-fn failed_journal_cannot_apply_a_keepalive_reservation() {
+fn failed_current_state_save_cannot_apply_a_keepalive_reservation() {
     let (server, root) = test_server();
-    *server.journal.lock().unwrap() =
-        std::fs::File::open(root.join(".agent-collab/server/journal.jsonl")).unwrap();
+    std::fs::remove_file(&server.state_path).unwrap();
+    std::fs::create_dir(&server.state_path).unwrap();
     let mut state = State::default();
     let result = server.commit_locked_checked(
         &mut state,
@@ -1043,6 +1009,7 @@ fn command_retry_returns_original_outcome_without_reapplying_events() {
         )
         .unwrap();
     assert!(!first.replayed);
+    let before_retry = std::fs::read(&server.state_path).unwrap();
     let second = server
         .commit_command(
             "command-1",
@@ -1062,13 +1029,7 @@ fn command_retry_returns_original_outcome_without_reapplying_events() {
         .global
         .command_receipts
         .contains_key("command-1"));
-    assert_eq!(
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .lines()
-            .count(),
-        3
-    );
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before_retry);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1103,16 +1064,11 @@ fn typed_registration_uses_global_binding_and_host_idempotency() {
         .contains_key(first.receipt.command_id.as_str()));
     drop(state);
 
+    let before_retry = std::fs::read(&server.state_path).unwrap();
     let replay = server.typed_dispatch(typed).unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.receipt, first.receipt);
-    assert_eq!(
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .lines()
-            .count(),
-        6
-    );
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before_retry);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1146,107 +1102,17 @@ fn typed_receipt_revision_is_the_next_cas_and_stale_after_another_mutation() {
             record: crate::server::keepalive::Record::default(),
         }])
         .unwrap();
-    let journal_before_stale =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
+    let state_before_stale = std::fs::read(&server.state_path).unwrap();
     let error = server
         .typed_dispatch(stale)
         .expect_err("an intervening reducer mutation must reject the old CAS revision");
     assert!(error
         .to_string()
-        .contains("compare-and-swap revision mismatch"));
+        .contains("CAS_MISMATCH:"), "{error}");
     assert_eq!(
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap(),
-        journal_before_stale,
-        "a stale CAS must not append a journal event"
+        std::fs::read(&server.state_path).unwrap(),
+        state_before_stale,
+        "a stale CAS must not change current state"
     );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn typed_rebinds_survive_journal_rewrite_and_replay_with_one_version_axis() {
-    let (server, root) = test_server();
-    let cwd = root.to_str().unwrap();
-    let mut previous_revision = 0;
-    for _ in 0..3 {
-        let mut typed = server
-            .typed_register_envelope("worker", "token-worker", "%worker", cwd)
-            .unwrap();
-        typed.envelope.expected_revision = Some(previous_revision);
-        let outcome = server.typed_dispatch(typed).unwrap();
-        previous_revision = outcome.receipt.revision;
-    }
-
-    let (version, binding_generation, receipts) = {
-        let state = server.state.lock().unwrap();
-        (
-            (state.sequence, state.revision, state.global.version()),
-            state
-                .global
-                .projects
-                .values()
-                .next()
-                .unwrap()
-                .runtime_bindings["binding-worker"]
-                .endpoint_generation,
-            state.global.command_receipts.clone(),
-        )
-    };
-    let state = server.state.lock().unwrap();
-    state.global.validate().unwrap();
-    server.rewrite_journal_locked(&state).unwrap();
-    drop(state);
-
-    let replayed = super::replay(&root).unwrap();
-    replayed.global.validate().unwrap();
-    assert_eq!(
-        (replayed.sequence, replayed.revision),
-        (version.0, version.1)
-    );
-    assert_eq!(replayed.global.version(), version.2);
-    assert_eq!(
-        replayed
-            .global
-            .projects
-            .values()
-            .next()
-            .unwrap()
-            .runtime_bindings["binding-worker"]
-            .endpoint_generation,
-        binding_generation
-    );
-    assert_eq!(replayed.global.command_receipts, receipts);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_command_record_rewrite_and_replay_preserve_checkpoint_version() {
-    let (server, root) = test_server();
-    let receipt = crate::server::state::CommandReceipt {
-        operation_id: "legacy-operation".into(),
-        outcome: json!({"accepted": true}),
-        sequence: 1,
-        revision: 1,
-    };
-    server
-        .commit_checked(&[Event::CommandRecorded {
-            command_id: "legacy-command".into(),
-            receipt: receipt.clone(),
-        }])
-        .unwrap();
-
-    let state = server.state.lock().unwrap();
-    assert_eq!((state.sequence, state.revision), (1, 1));
-    server.rewrite_journal_locked(&state).unwrap();
-    drop(state);
-
-    let compacted =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
-    assert!(compacted.contains("\"ev\":\"CommandRecorded\""));
-    assert!(!compacted.contains("\"ev\":\"CommandStarted\""));
-    assert!(!compacted.contains("\"ev\":\"CommandCompleted\""));
-    let replayed =
-        super::replay(&root).expect("a compacted legacy CommandRecorded must replay successfully");
-    assert_eq!((replayed.sequence, replayed.revision), (1, 1));
-    assert_eq!(replayed.command_receipts["legacy-command"], receipt);
     std::fs::remove_dir_all(root).unwrap();
 }

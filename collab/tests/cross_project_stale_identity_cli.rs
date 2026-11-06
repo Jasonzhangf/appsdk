@@ -117,7 +117,7 @@ fn public_master_commands_discover_send_consume_and_reply_across_projects() {
         ],
         false,
     );
-    let rejected = command_at(
+    let peer_sent = run_ok_at(
         &fixture,
         &source_root,
         &source_pane,
@@ -129,15 +129,12 @@ fn public_master_commands_discover_send_consume_and_reply_across_projects() {
             "--to",
             &target_id,
             "--subject",
-            "unauthorized",
-            "must not enqueue",
+            "peer-after-clear",
+            "registered peer remains allowed",
         ],
         false,
-    )
-    .output()
-    .unwrap();
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("CROSS_PROJECT_SEND_REJECTED"));
+    );
+    assert_eq!(peer_sent["durable"], true, "{peer_sent}");
     let empty = run_ok_at(
         &fixture,
         &target_root,
@@ -150,8 +147,9 @@ fn public_master_commands_discover_send_consume_and_reply_across_projects() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|message| message["subject"] != "unauthorized"),
-        "rejected sender must not enqueue its message: {empty}"
+            .any(|message| message["id"] == peer_sent["msg_id"]
+                && message["body"] == "registered peer remains allowed"),
+        "clearing a role cannot block the same registered sender: {empty}"
     );
     drop(fixture);
     std::fs::remove_dir_all(target_root).unwrap();
@@ -422,7 +420,7 @@ fn source_credentials(
     SourceCredentials {
         token: persisted["token"].as_str().unwrap().to_owned(),
         command: json!({"command_id":"cross-project-test-command", "operation_id":"cross-project-test-operation",
-            "actor_binding_id":binding["binding_id"], "endpoint_generation":binding["endpoint_generation"],
+            "actor_binding_id":binding["binding_id"],
             "scope":{"app_scope_id":binding["app_scope_id"], "project_scope_id":binding["project_scope"]}}),
     }
 }
@@ -532,7 +530,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     let target_context = project_context(&target_root, &target_app_scope);
 
     let before = message_count(&fixture, &target_context, &target_id);
-    let peer_rejected = wire_request(
+    let peer_sent = wire_request(
         &fixture.host_state.join("server.sock"),
         &cross_project_request(
             &source_id,
@@ -540,18 +538,15 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
             &credentials,
             &target_id,
             &target_context,
-            "Reject target peer",
+            "Target peer",
             "target has not been promoted",
             false,
         ),
     );
-    assert_rejected_without_message(
-        &fixture,
-        &target_context,
-        &target_id,
-        &peer_rejected,
-        "CROSS_PROJECT_SEND_REJECTED",
-        before,
+    assert_eq!(peer_sent["ok"], true, "{peer_sent}");
+    assert_eq!(
+        message_count(&fixture, &target_context, &target_id),
+        before + 1
     );
 
     let promoted = run_ok_at(
@@ -618,7 +613,9 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
 
     let stale_workers = workers_at(&fixture, &target_context);
     let stale_target = worker_row(&stale_workers, &target_id);
-    assert_eq!(stale_target["presence"], "present", "{stale_target}");
+    // The fixture supplies a registered session in a shell pane, not a live
+    // Codex runtime. Activity remains unknown while identity/address stay valid.
+    assert_eq!(stale_target["presence"], "unknown", "{stale_target}");
     assert_eq!(stale_target["identity_valid"], true, "{stale_target}");
     assert_eq!(stale_target["endpoint_live"], true, "{stale_target}");
     assert_eq!(stale_target["role"], "master", "{stale_target}");
@@ -689,13 +686,29 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(promoted["master"], dead_id, "{promoted}");
 
     let before = message_count(&fixture, &dead_context, &dead_id);
+    let dead_physical_name = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &dead_pane.pane_id,
+                "#{session_name}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
     let killed = Command::new("tmux")
         .args([
             "-S",
             fixture.tmux_socket.to_str().unwrap(),
             "kill-session",
             "-t",
-            "dead-pane",
+            &dead_physical_name,
         ])
         .output()
         .expect("close owned dead target session");
@@ -746,7 +759,7 @@ fn address_for(listed: &Value, worker_id: &str) -> String {
 }
 
 #[test]
-fn public_cross_project_peers_send_and_cross_level_requests_have_no_effect() {
+fn public_cross_project_all_role_pairs_send_and_unregistered_source_is_rejected() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, source_master) = Fixture::isolated_with_pane_command("scope-matrix", "sleep 600");
     let source_root = fixture.root.canonicalize().unwrap();
@@ -834,11 +847,11 @@ fn public_cross_project_peers_send_and_cross_level_requests_have_no_effect() {
             .any(|m| m["id"] == sent["msg_id"] && m["body"] == "peer body"),
         "{received}"
     );
-    for (pane, address) in [
-        (&source_peer, &master_address),
-        (&source_master, &peer_address),
+    for (pane, address, receiver) in [
+        (&source_peer, &master_address, &target_master),
+        (&source_master, &peer_address, &target_peer),
     ] {
-        let denied = command_at(
+        let allowed = run_ok_at(
             &fixture,
             &source_root,
             pane,
@@ -847,18 +860,28 @@ fn public_cross_project_peers_send_and_cross_level_requests_have_no_effect() {
                 "--to",
                 address,
                 "--subject",
-                "denied-cross-level",
+                "cross-level-message",
                 "--content",
-                "must not arrive",
+                "cross-level body",
             ],
             false,
-        )
-        .output()
-        .unwrap();
+        );
+        assert_eq!(allowed["durable"], true, "{allowed}");
+        let received = run_ok_at(
+            &fixture,
+            &target_root,
+            receiver,
+            &["recv", "--timeout", "0"],
+            false,
+        );
         assert!(
-            !denied.status.success(),
-            "cross-level request succeeded: {}",
-            String::from_utf8_lossy(&denied.stdout)
+            received["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["id"] == allowed["msg_id"]
+                    && message["body"] == "cross-level body"),
+            "{received}"
         );
     }
     let denied = command_at(
@@ -1249,9 +1272,7 @@ fn unified_send_and_global_list_share_one_address_source() {
         "{peer_inbox}"
     );
 
-    // A non-master peer gets an explicit permission error that names the
-    // current master, and nothing is persisted.
-    let denied = command_at(
+    let peer_sent = run_ok_at(
         &fixture,
         &source_root,
         &peer_pane,
@@ -1260,25 +1281,13 @@ fn unified_send_and_global_list_share_one_address_source() {
             "--to",
             &target_address,
             "--subject",
-            "denied",
+            "peer-to-master",
             "--content",
-            "must not enqueue",
+            "direct peer body",
         ],
         false,
-    )
-    .output()
-    .expect("run unauthorized cross-project send");
-    assert!(
-        !denied.status.success(),
-        "unauthorized send succeeded: {}",
-        String::from_utf8_lossy(&denied.stdout)
     );
-    let stderr = String::from_utf8_lossy(&denied.stderr);
-    assert!(stderr.contains("CROSS_PROJECT_SEND_REJECTED"), "{stderr}");
-    assert!(
-        stderr.contains(&target_id),
-        "permission error must identify the current target master: {stderr}"
-    );
+    assert_eq!(peer_sent["durable"], true, "{peer_sent}");
     let after = run_ok_at(
         &fixture,
         &target_root,
@@ -1287,11 +1296,12 @@ fn unified_send_and_global_list_share_one_address_source() {
         false,
     );
     assert!(
-        !after["messages"]
+        after["messages"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["subject"] == "denied"),
+            .any(|message| message["id"] == peer_sent["msg_id"]
+                && message["body"] == "direct peer body"),
         "{after}"
     );
     drop(fixture);
@@ -1299,10 +1309,9 @@ fn unified_send_and_global_list_share_one_address_source() {
 }
 
 /// `ceo` is a host-wide address from a non-CEO project. An uncorrelated send
-/// must land in the CEO mailbox as a message and a non-master peer must see the
-/// current source master's identity in the denial.
+/// must land in the CEO mailbox for both master and peer callers.
 #[test]
-fn send_to_ceo_delivers_directly_and_names_the_source_master_when_denied() {
+fn send_to_ceo_allows_registered_peers_and_correlated_replies() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, source_pane) = Fixture::isolated_with_pane_command("ceo-direct", "sleep 600");
     let source_root = fixture.root.canonicalize().unwrap();
@@ -1311,8 +1320,8 @@ fn send_to_ceo_delivers_directly_and_names_the_source_master_when_denied() {
     let peer_pane = create_session(&fixture, "ceo-peer");
 
     let source = register_context(&fixture, &source_root, &source_pane, "ceo-source", false);
-    register_context(&fixture, &source_root, &peer_pane, "ceo-source-peer", false);
-    register_context(&fixture, &ceo_root, &ceo_pane, "ceo-target", false);
+    let peer = register_context(&fixture, &source_root, &peer_pane, "ceo-source-peer", false);
+    let ceo = register_context(&fixture, &ceo_root, &ceo_pane, "ceo-target", false);
     let (source_id, _) = identity(&source);
 
     run_ok_at(
@@ -1380,7 +1389,7 @@ fn send_to_ceo_delivers_directly_and_names_the_source_master_when_denied() {
     assert_eq!(message["body"], "direct ceo body", "{message}");
     assert_eq!(message["subject"], "direct", "{message}");
 
-    let denied = command_at(
+    let peer_sent = run_ok_at(
         &fixture,
         &source_root,
         &peer_pane,
@@ -1389,25 +1398,111 @@ fn send_to_ceo_delivers_directly_and_names_the_source_master_when_denied() {
             "--to",
             "ceo",
             "--subject",
-            "denied",
+            "peer-direct",
             "--content",
-            "must not enqueue",
+            "peer direct ceo body",
+        ],
+        false,
+    );
+    assert_eq!(peer_sent["durable"], true, "{peer_sent}");
+    let peer_address = address_for(
+        &run_ok_at(&fixture, &ceo_root, &ceo_pane, &["list"], false),
+        &identity(&peer).0,
+    );
+    let request = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &[
+            "send",
+            "--to",
+            &peer_address,
+            "--subject",
+            "peer-request",
+            "--content",
+            "return a peer result",
+        ],
+        false,
+    );
+    let request_id = request["msg_id"].as_str().unwrap();
+    let consumed = run_ok_at(
+        &fixture,
+        &source_root,
+        &peer_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(
+        consumed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == request_id
+                && message["from"] == format!("{}@{}", identity(&ceo).0, ceo_root.display())),
+        "{consumed}"
+    );
+    let replied = run_ok_at(
+        &fixture,
+        &source_root,
+        &peer_pane,
+        &[
+            "send",
+            "--to",
+            "ceo",
+            "--subject",
+            "peer-result",
+            "--content",
+            "actual peer result",
+            "--in-reply-to",
+            request_id,
+        ],
+        false,
+    );
+    assert_eq!(replied["durable"], true, "{replied}");
+    let bad_reply = command_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "send",
+            "--to",
+            "ceo",
+            "--subject",
+            "foreign-reply",
+            "--content",
+            "cannot answer for another peer",
+            "--in-reply-to",
+            request_id,
         ],
         false,
     )
     .output()
-    .expect("run unauthorized send to ceo");
-    assert!(
-        !denied.status.success(),
-        "unauthorized ceo send succeeded: {}",
-        String::from_utf8_lossy(&denied.stdout)
+    .unwrap();
+    assert!(!bad_reply.status.success());
+    let inbox = run_ok_at(
+        &fixture,
+        &ceo_root,
+        &ceo_pane,
+        &["recv", "--timeout", "0"],
+        false,
     );
-    let stderr = String::from_utf8_lossy(&denied.stderr);
-    assert!(stderr.contains("PERMISSION_DENIED"), "{stderr}");
-    assert!(
-        stderr.contains(&source_id),
-        "permission error must name the current source master: {stderr}"
-    );
+    assert!(inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == peer_sent["msg_id"]));
+    assert!(inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == replied["msg_id"]
+            && message["in_reply_to"] == request_id
+            && message["body"] == "actual peer result"));
+    assert!(inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["subject"] != "foreign-reply"));
 
     drop(fixture);
     std::fs::remove_dir_all(ceo_root).expect("remove isolated ceo project");

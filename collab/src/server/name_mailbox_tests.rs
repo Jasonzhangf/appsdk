@@ -2,292 +2,158 @@ use super::name_state::NameOccupancy;
 use super::*;
 
 fn holder(worker: &str, session: &str, revision: u64) -> NameOccupancy {
-    NameOccupancy {
-        name: "Alice".into(),
-        worker_id: worker.into(),
-        session_id: session.into(),
-        occupancy_revision: revision,
-        updated_ms: revision as i64,
-        pane_anchor: None,
-    }
+    NameOccupancy { name: "Alice".into(), worker_id: worker.into(), session_id: session.into(),
+        occupancy_revision: revision, updated_ms: revision as i64, pane_anchor: None }
 }
 
 fn message(id: &str, status: &str) -> Message {
-    Message {
-        id: id.into(),
-        from: "sender".into(),
-        to: "old".into(),
-        mtype: "notify".into(),
-        subject: Some(id.into()),
-        body: "original body".into(),
-        in_reply_to: None,
-        created_ms: now_ms(),
-        state: status.into(),
-        wake_attempt_count: 9,
-        last_wake_attempt_ms: 1,
-        retry_attempted: true,
-    }
+    Message { id: id.into(), from: "sender".into(), to: "old".into(), mtype: "notify".into(),
+        subject: Some(id.into()), body: "original body".into(), in_reply_to: None, created_ms: now_ms(),
+        state: status.into(), wake_attempt_count: 9, last_wake_attempt_ms: 1, retry_attempted: true }
+}
+
+// Publish the current carrier first, then apply the existing name effects.
+// Previous identity comes from the map even when business occupancy was released.
+fn publish_holder(server: &Server, name: &str, worker: &str) {
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let binding = control.active_values().find(|value| value.binding.agent_id.as_str() == worker).unwrap().clone();
+    let key = binding_slot::IdentityBindingKey::new(binding.binding.project_scope.clone(), binding.binding.app_scope_id.clone(), name);
+    let source = control.key_for_worker(&key.project_scope, &key.app_scope_id, worker).unwrap().unwrap();
+    let previous = control.slot(&key).and_then(|slot| slot.active_binding()).map(|value| {
+        let mut occupancy = holder(value.binding.agent_id.as_str(), value.binding.session_id.as_ref().unwrap().as_str(), 1);
+        occupancy.name = name.into(); occupancy
+    });
+    let mut next = holder(worker, binding.binding.session_id.as_ref().unwrap().as_str(), 2);
+    next.name = name.into();
+    store.commit(binding_store::ControlChange::MoveName {
+        target: key.clone(), value: binding, source_names: vec![source.name.clone()], expected_generation: None,
+    }).unwrap();
+    let mut state = server.state.lock().unwrap();
+    let events = name_resolution::build_name_resolution_events_with_rename_from(&state,
+        key.project_scope.as_str(), &next, &[], previous.as_ref());
+    server.commit_locked_checked(&mut state, &events).unwrap();
 }
 
 fn mailbox_name_selection(release_previous: bool) {
     let (server, root) = peer_tests::test_server();
-    for id in ["sender", "w1", "w2"] {
+    for id in ["alice", "sender", "old", "new"] {
         assert!(peer_tests::register_synthetic_peer(&server, id, id).ok);
     }
-    let scope = server_route_scope(&server, &server.state.lock().unwrap())
-        .unwrap()
-        .unwrap()
-        .project_scope_id
-        .as_str()
-        .to_owned();
-    let occupancy = |name: &str, worker: &str, revision| NameOccupancy {
-        name: name.into(),
-        worker_id: worker.into(),
-        session_id: worker.into(),
-        occupancy_revision: revision,
-        updated_ms: revision as i64,
-        pane_anchor: None,
-    };
+    publish_holder(&server, "Jenny", "old");
+    let scope = GlobalState::canonical_project_scope(&root).unwrap();
     let mut ids = Vec::new();
     for name in ["Jenny", "Alice"] {
-        {
-            let mut state = server.state.lock().unwrap();
-            let events = name_resolution::build_name_resolution_events(
-                &state,
-                &scope,
-                &occupancy(name, "w1", 1),
-            );
-            server.commit_locked_checked(&mut state, &events).unwrap();
-        }
-        let sent = handle_send(
-            &server,
-            "sender".into(),
-            name.into(),
-            "notify".into(),
-            Some("same content for distinct names".into()),
-            "same body".into(),
-            None,
-            "queued".into(),
-        );
-        assert!(sent.ok, "{:?}", sent.error);
+        let sent = handle_send(&server, "sender".into(), name.into(), "notify".into(),
+            Some("same content for distinct names".into()), "same body".into(), None, "queued".into());
+        assert!(sent.ok, "{sent:?}");
         ids.push(sent.data["msg_id"].as_str().unwrap().to_owned());
     }
-    assert_ne!(
-        ids[0], ids[1],
-        "distinct name addresses must not deduplicate"
-    );
-    {
-        let mut state = server.state.lock().unwrap();
-        // Exercise both legacy current-holder and released-occupancy paths.
-        if !release_previous {
-            state
-                .name_occupancies
-                .get_mut(&scope)
-                .unwrap()
-                .insert("Jenny".into(), occupancy("Jenny", "w1", 1));
-        } else {
-            state
-                .name_occupancies
-                .get_mut(&scope)
-                .unwrap()
-                .remove("Jenny");
-        }
-        let events = name_resolution::build_name_resolution_events(
-            &state,
-            &scope,
-            &occupancy("Jenny", "w2", 2),
-        );
-        server.commit_locked_checked(&mut state, &events).unwrap();
-        assert_eq!(
-            state.msgs[&ids[0]].to, "w2",
-            "Jenny message must follow its name"
-        );
-        assert_eq!(
-            state.msgs[&ids[1]].to, "w1",
-            "Alice message must stay with Alice"
-        );
+    assert_ne!(ids[0], ids[1], "distinct name addresses must not deduplicate");
+    if release_previous {
+        server.state.lock().unwrap().name_occupancies.get_mut(scope.as_str()).unwrap().remove("Jenny");
     }
+    publish_holder(&server, "Jenny", "new");
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[&ids[0]].to, "new");
+    assert_eq!(state.msgs[&ids[1]].to, "alice");
+    assert_eq!(state.msgs[&ids[0]].body, "same body");
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn name_mailbox_address_selects_only_requested_name() {
-    mailbox_name_selection(false);
-}
+fn name_mailbox_address_selects_only_requested_name() { mailbox_name_selection(false); }
 
 #[test]
-fn name_mailbox_address_survives_released_occupancy() {
-    mailbox_name_selection(true);
-}
+fn name_mailbox_address_survives_released_occupancy() { mailbox_name_selection(true); }
 
 #[test]
-fn name_mailbox_typed_address_replay_snapshot_reset_and_history() {
+fn name_mailbox_typed_address_current_state_and_reset() {
     let mut state = State::default();
-    let mut journal = Vec::new();
     for (id, name, status, project) in [
-        ("jenny", "Jenny", "pending", "/project"),
-        ("alice", "Alice", "delivered", "/project"),
-        ("read", "Jenny", "read", "/project"),
-        ("superseded", "Jenny", "superseded", "/project"),
+        ("jenny", "Jenny", "pending", "/project"), ("alice", "Alice", "delivered", "/project"),
+        ("read", "Jenny", "read", "/project"), ("superseded", "Jenny", "superseded", "/project"),
         ("foreign", "Jenny", "pending", "/other"),
     ] {
-        journal.push(Event::Sent {
-            msg: message(id, status),
-        });
-        journal.push(Event::MailboxNameAddressed {
-            message_id: id.into(),
-            address: name_mailbox::MailboxNameAddress {
-                project_scope: project.into(),
-                name: name.into(),
-            },
-        });
+        state.apply_checked(&Event::Sent { msg: message(id, status) }).unwrap();
+        state.apply_checked(&Event::MailboxNameAddressed { message_id: id.into(),
+            address: name_mailbox::MailboxNameAddress { project_scope: project.into(), name: name.into() } }).unwrap();
     }
-    // A legacy message has no association, even after journal replay.
-    journal.push(Event::Sent {
-        msg: message("legacy", "pending"),
-    });
-    for event in &journal {
-        state.apply_checked(event).unwrap();
+    let mut next = holder("new", "s2", 2); next.name = "Jenny".into();
+    for event in name_mailbox::handoff_events(&state, "/project", &next, &[], None) {
+        state.apply_checked(&event).unwrap();
     }
-    let mut next = holder("new", "s2", 2);
-    next.name = "Jenny".into();
-    let events = name_resolution::build_name_resolution_events(&state, "/project", &next);
-    journal.extend(events);
-    let mut replay = State::default();
-    for event in &journal {
-        let encoded = serde_json::to_string(event).unwrap();
-        replay
-            .apply_checked(&serde_json::from_str(&encoded).unwrap())
-            .unwrap();
-    }
-    assert_eq!(replay.msgs["jenny"].to, "new");
-    for id in ["alice", "read", "superseded", "foreign", "legacy"] {
-        assert_eq!(replay.msgs[id].to, "old", "{id}");
-    }
-    assert_eq!(replay.msgs["jenny"].body, "original body");
-    assert_eq!(replay.msgs["jenny"].from, "sender");
-    assert_eq!(replay.mailbox_handoffs.len(), 1);
-    let mut snapshot = State::default();
-    for event in replay.snapshot_events() {
-        snapshot.apply_checked(&event).unwrap();
-    }
-    assert_eq!(
-        snapshot.mailbox_name_addresses,
-        replay.mailbox_name_addresses
-    );
-    assert_eq!(
-        serde_json::to_value(&snapshot.msgs).unwrap(),
-        serde_json::to_value(&replay.msgs).unwrap()
-    );
-    // Legacy fallback follows only the current previous holder, and excludes
-    // all explicitly associated other names and projects.
-    let mut newer = next.clone();
-    newer.worker_id = "newer".into();
-    newer.session_id = "s3".into();
-    newer.occupancy_revision = 3;
-    snapshot.msgs.get_mut("legacy").unwrap().to = "new".into();
-    let handoffs = name_mailbox::handoff_events(&snapshot, "/project", &newer, &[]);
-    assert_eq!(handoffs.len(), 2);
-    for event in handoffs {
-        snapshot.apply_checked(&event).unwrap();
-    }
-    assert_eq!(snapshot.msgs["legacy"].to, "newer");
-    assert_eq!(snapshot.msgs["alice"].to, "old");
-    snapshot.drop_message("jenny");
-    assert!(!snapshot.mailbox_name_addresses.contains_key("jenny"));
-    project_reset::clear_project(&mut snapshot, "/project", false, &["old".into()]);
+    assert_eq!(state.msgs["jenny"].to, "new");
+    for id in ["alice", "read", "superseded", "foreign"] { assert_eq!(state.msgs[id].to, "old", "{id}"); }
+    assert_eq!(state.msgs["jenny"].body, "original body");
+    assert_eq!(state.msgs["jenny"].from, "sender");
+    assert!(name_mailbox::handoff_events(&state, "/project", &next, &[], None).is_empty(),
+        "vacancy recovery must not repeat a current carrier's handoff wake");
+    let mut loaded: State = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+    assert_eq!(loaded.mailbox_name_addresses, state.mailbox_name_addresses);
+    assert_eq!(serde_json::to_value(&loaded.msgs).unwrap(), serde_json::to_value(&state.msgs).unwrap());
+    loaded.drop_message("jenny");
+    assert!(!loaded.mailbox_name_addresses.contains_key("jenny"));
+    project_reset::clear_project(&mut loaded, "/project", false, &["old".into()]);
     for id in ["alice", "read", "superseded"] {
-        assert!(!snapshot.msgs.contains_key(id));
-        assert!(!snapshot.mailbox_name_addresses.contains_key(id));
+        assert!(!loaded.msgs.contains_key(id));
+        assert!(!loaded.mailbox_name_addresses.contains_key(id));
     }
-    assert!(snapshot.msgs.contains_key("foreign"));
-    assert!(snapshot.mailbox_name_addresses.contains_key("foreign"));
+    assert!(loaded.msgs.contains_key("foreign"));
+    assert!(loaded.mailbox_name_addresses.contains_key("foreign"));
 }
 
 #[test]
-fn name_mailbox_handoff_preserves_consumption_history_and_replays() {
+fn name_mailbox_handoff_preserves_consumed_messages_and_current_payloads() {
     let mut state = State::default();
-    state
-        .name_occupancies
-        .entry("/project".into())
-        .or_default()
-        .insert("Alice".into(), holder("old", "s1", 1));
-    for (id, status) in [
-        ("pending", "pending"),
-        ("delivered", "delivered"),
-        ("read", "read"),
-        ("superseded", "superseded"),
-    ] {
-        state.apply(&Event::Sent {
-            msg: message(id, status),
-        });
-    }
-    state.apply(&Event::NotificationDeliveryAccepted {
-        message_id: "pending".into(),
-        accepted_ms: 1,
-        evidence: Some(json!({"accepted":true})),
-    });
+    let previous = holder("old", "s1", 1);
     let next = holder("new", "s2", 2);
-    let events = name_resolution::build_name_resolution_events(&state, "/project", &next);
-    for event in &events {
-        state.apply_checked(event).unwrap();
+    for (id, status) in [("pending", "pending"), ("delivered", "delivered"), ("read", "read"), ("superseded", "superseded")] {
+        state.apply_checked(&Event::Sent { msg: message(id, status) }).unwrap();
+    }
+    state.apply_checked(&Event::NotificationDeliveryAccepted { message_id: "pending".into(), accepted_ms: 1,
+        evidence: Some(json!({"accepted":true})) }).unwrap();
+    for event in name_mailbox::handoff_events(&state, "/project", &next, &[], Some(&previous)) {
+        state.apply_checked(&event).unwrap();
     }
     assert!(state.inbox_of("old").is_empty());
     assert_eq!(state.inbox_of("new").len(), 2);
     for id in ["pending", "delivered"] {
-        assert_eq!(state.msgs[id].to, "new");
-        assert_eq!(state.msgs[id].body, "original body");
-        assert_eq!(state.msgs[id].from, "sender");
-        assert_eq!(state.msgs[id].wake_attempt_count, 9);
-        assert_eq!(
-            state.wake_bindings[id],
-            mailbox::default_direct_message_id("new")
-        );
+        assert_eq!(state.msgs[id].to, "new"); assert_eq!(state.msgs[id].body, "original body");
+        assert_eq!(state.msgs[id].from, "sender"); assert_eq!(state.msgs[id].wake_attempt_count, 9);
+        assert_eq!(state.wake_bindings[id], mailbox::default_direct_message_id("new"));
     }
     assert_eq!(state.msgs["read"].to, "old");
     assert_eq!(state.msgs["superseded"].to, "old");
     assert_eq!(state.notification_delivery_accepted["pending"], 1);
-    assert!(name_resolution::build_name_resolution_events(&state, "/project", &next).is_empty());
-    for event in &events {
-        state.apply_checked(event).unwrap();
-    }
-    let mut replay = State::default();
-    for event in state.snapshot_events() {
-        replay.apply_checked(&event).unwrap();
-    }
-    assert_eq!(
-        serde_json::to_value(&replay.msgs).unwrap(),
-        serde_json::to_value(&state.msgs).unwrap()
-    );
-    assert_eq!(replay.wake_bindings, state.wake_bindings);
+    assert!(name_mailbox::handoff_events(&state, "/project", &next, &[], Some(&next)).is_empty());
+    let loaded: State = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&loaded.msgs).unwrap(), serde_json::to_value(&state.msgs).unwrap());
+    assert_eq!(loaded.wake_bindings, state.wake_bindings);
+    assert_eq!(loaded.mailbox_handoff_wakes, state.mailbox_handoff_wakes);
 }
 
 #[test]
 fn name_mailbox_session_change_and_project_isolation() {
-    let mut state = State::default();
-    state
-        .name_occupancies
-        .entry("/other".into())
-        .or_default()
-        .insert("Alice".into(), holder("old", "s1", 1));
-    state.apply(&Event::Sent {
-        msg: message("other", "pending"),
-    });
-    for event in
-        name_resolution::build_name_resolution_events(&state, "/project", &holder("new", "s2", 2))
-    {
-        state.apply_checked(&event).unwrap();
-    }
-    assert_eq!(state.msgs["other"].to, "old");
-    for event in
-        name_resolution::build_name_resolution_events(&state, "/other", &holder("old", "s2", 2))
-    {
-        state.apply_checked(&event).unwrap();
-    }
-    assert_eq!(state.inbox_of("old").len(), 1);
-    assert_eq!(state.msgs["other"].wake_attempt_count, 9);
-    assert_eq!(state.mailbox_handoffs.len(), 1);
-    assert!(state.handoff_wake_pending(&state.msgs["other"]));
+    let (server, root) = peer_tests::test_server();
+    for id in ["old", "new"] { assert!(peer_tests::register_synthetic_peer(&server, id, id).ok); }
+    let scope = GlobalState::canonical_project_scope(&root).unwrap();
+    server.commit_checked(&[Event::Sent { msg: message("local", "pending") },
+        Event::MailboxNameAddressed { message_id: "local".into(), address: name_mailbox::MailboxNameAddress {
+            project_scope: scope.as_str().into(), name: "Alice".into() } },
+        Event::Sent { msg: message("foreign", "pending") },
+        Event::MailboxNameAddressed { message_id: "foreign".into(), address: name_mailbox::MailboxNameAddress {
+            project_scope: "/other".into(), name: "Alice".into() } },
+    ]).unwrap();
+    publish_holder(&server, "Alice", "new");
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["local"].to, "new");
+    assert_eq!(state.msgs["foreign"].to, "old");
+    assert_eq!(state.msgs["local"].wake_attempt_count, 9);
+    assert!(state.handoff_wake_pending(&state.msgs["local"]));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -297,142 +163,70 @@ fn name_mailbox_new_holder_wake_ignores_old_budget_and_consumes_no_old_subscript
     let targets = Arc::new(Mutex::new(Vec::new()));
     let observed = targets.clone();
     server.appserver_notification_sink = Arc::new(move |transport, _, _, _, _, _| {
-        observed.lock().unwrap().push(transport.thread_id.clone());
-        Ok(json!({"accepted": true}))
+        observed.lock().unwrap().push(transport.thread_id.clone()); Ok(json!({"accepted": true}))
     });
     let server = Arc::new(server);
     for id in ["old", "new"] {
-        assert!(peer_tests::register_synthetic_peer(&server, id, id).ok);
+        let transport = SelectedTransport { kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/name-mailbox.sock".into()), namespace: Some("test".into()),
+            session_id: Some(format!("session-{id}")), thread_id: Some(id.into()), tmux_endpoint: None,
+            capabilities: vec!["send_message_to_thread".into()], self_check: "committed fixture".into() };
+        assert!(peer_tests::seed_committed_owner(&server, id, &format!("token-{id}"), &transport,
+            &root.display().to_string(), Some(AppServerId::new("name-mailbox").unwrap())).ok);
     }
-    let scope = server_route_scope(&server, &server.state.lock().unwrap())
-        .unwrap()
-        .unwrap()
-        .project_scope_id
-        .as_str()
-        .to_owned();
-    {
-        let mut state = server.state.lock().unwrap();
-        state
-            .name_occupancies
-            .entry(scope.clone())
-            .or_default()
-            .insert("Alice".into(), holder("old", "s1", 1));
-        let mut old_subscription =
-            state.notification_subscriptions[&mailbox::default_direct_message_id("old")].clone();
-        old_subscription.id = "old-timer".into();
-        old_subscription.event = "deadline".into();
-        old_subscription.trigger_ms = Some(1);
-        old_subscription.status = "cancelled".into();
-        let mut initial = vec![Event::NotificationSubscribed {
-            subscription: old_subscription,
-        }];
-        for id in ["pending", "delivered"] {
-            initial.push(Event::Sent {
-                msg: message(id, id),
-            });
-            initial.push(Event::WakeBound {
-                message_id: id.into(),
-                subscription_id: "old-timer".into(),
-            });
-            initial.push(Event::NotificationDeliveryAccepted {
-                message_id: id.into(),
-                accepted_ms: 1,
-                evidence: None,
-            });
-        }
-        server.commit_locked_checked(&mut state, &initial).unwrap();
-        let events =
-            name_resolution::build_name_resolution_events(&state, &scope, &holder("new", "s2", 2));
-        server.commit_locked_checked(&mut state, &events).unwrap();
+    let mut old_subscription = server.state.lock().unwrap().notification_subscriptions[&mailbox::default_direct_message_id("old")].clone();
+    old_subscription.id = "old-timer".into(); old_subscription.event = "deadline".into();
+    old_subscription.trigger_ms = Some(1); old_subscription.status = "cancelled".into();
+    let mut initial = vec![Event::NotificationSubscribed { subscription: old_subscription }];
+    for id in ["pending", "delivered"] {
+        initial.push(Event::Sent { msg: message(id, id) });
+        initial.push(Event::WakeBound { message_id: id.into(), subscription_id: "old-timer".into() });
+        initial.push(Event::NotificationDeliveryAccepted { message_id: id.into(), accepted_ms: 1, evidence: None });
     }
+    server.commit_checked(&initial).unwrap();
+    publish_holder(&server, "Alice", "new");
     timers::tick_with_idle_at(&server, now_ms(), &|_| true);
     assert_eq!(*targets.lock().unwrap(), vec![Some("new".into())]);
     timers::tick_with_idle_at(&server, now_ms(), &|_| true);
     assert_eq!(targets.lock().unwrap().len(), 1);
-    {
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs["pending"].wake_attempt_count, 10);
-        assert_eq!(state.msgs["delivered"].wake_attempt_count, 10);
-        assert_eq!(state.msgs["delivered"].state, "delivered");
-    }
-    let received =
-        poll_messages_with_context(&server, "new", None, None, Some("new-read")).unwrap();
-    assert!(received.ok);
-    assert_eq!(received.data["count"], 2);
+    let received = poll_messages_with_context(&server, "new", None, None, Some("new-read")).unwrap();
+    assert!(received.ok, "{received:?}"); assert_eq!(received.data["count"], 2);
     let state = server.state.lock().unwrap();
     assert_eq!(state.notification_subscriptions["old-timer"].fired_count, 0);
     assert_eq!(state.receive_receipts["new-read"].worker_id, "new");
-    assert_eq!(state.mailbox_handoffs.len(), 2);
-    assert_eq!(state.mailbox_handoffs[0].accepted_ms, Some(1));
-    assert!(state
-        .msgs
-        .values()
-        .all(|message| !state.handoff_wake_pending(message)));
-    let mut replay = State::default();
-    for line in std::fs::read_to_string(&server.journal_path)
-        .unwrap()
-        .lines()
-    {
-        replay
-            .apply_checked(&serde_json::from_str::<Event>(line).unwrap())
-            .unwrap();
+    for id in ["pending", "delivered"] {
+        assert_eq!(state.msgs[id].wake_attempt_count, 10); assert_eq!(state.msgs[id].state, "read");
+        assert!(!state.handoff_wake_pending(&state.msgs[id]));
     }
-    assert_eq!(
-        serde_json::to_value(&replay.msgs).unwrap(),
-        serde_json::to_value(&state.msgs).unwrap()
-    );
-    assert_eq!(
-        serde_json::to_value(&replay.receive_receipts).unwrap(),
-        serde_json::to_value(&state.receive_receipts).unwrap()
-    );
-    assert_eq!(
-        serde_json::to_value(&replay.mailbox_handoffs).unwrap(),
-        serde_json::to_value(&state.mailbox_handoffs).unwrap()
-    );
+    let loaded = current_state::load(&server.state_path, false).unwrap();
+    assert_eq!(serde_json::to_value(&loaded.msgs).unwrap(), serde_json::to_value(&state.msgs).unwrap());
+    assert_eq!(serde_json::to_value(&loaded.receive_receipts).unwrap(), serde_json::to_value(&state.receive_receipts).unwrap());
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn name_mailbox_rejected_handoff_keeps_journal_name_and_mailbox_unchanged() {
+fn name_mailbox_rejected_handoff_keeps_current_state_and_map_unchanged() {
     let (server, root) = peer_tests::test_server();
-    let before = std::fs::read(&server.journal_path).unwrap();
+    let before = std::fs::read(&server.state_path).unwrap();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let map_before = store.load().unwrap();
     let mut state = server.state.lock().unwrap();
-    state
-        .name_occupancies
-        .entry("/project".into())
-        .or_default()
-        .insert("Alice".into(), holder("old", "s1", 1));
-    state.apply(&Event::Sent {
-        msg: message("pending", "pending"),
+    let previous = holder("old", "s1", 1);
+    state.name_occupancies.entry("/project".into()).or_default().insert("Alice".into(), previous.clone());
+    state.apply(&Event::Sent { msg: message("pending", "pending") });
+    state.responsibility_fences.insert("close-new".into(), state::ResponsibilityFence {
+        operation_id: "close-new".into(), worker_id: "new".into(), project_scope: "/project".into(),
+        app_scope: "app".into(), binding_id: "binding".into(), snapshot: state::ResponsibilitySnapshot::default(),
+        state: "closing".into(), created_ms: 1,
     });
-    state.responsibility_fences.insert(
-        "close-new".into(),
-        state::ResponsibilityFence {
-            operation_id: "close-new".into(),
-            worker_id: "new".into(),
-            project_scope: "/project".into(),
-            app_scope: "app".into(),
-            binding_id: "binding".into(),
-            endpoint_generation: 1,
-            snapshot: state::ResponsibilitySnapshot::default(),
-            state: "closing".into(),
-            created_ms: 1,
-        },
-    );
-    let events =
-        name_resolution::build_name_resolution_events(&state, "/project", &holder("new", "s2", 2));
-    let error = server
-        .commit_locked_checked(&mut state, &events)
-        .unwrap_err();
+    let events = name_resolution::build_name_resolution_events_with_rename_from(&state, "/project", &holder("new", "s2", 2), &[], Some(&previous));
+    let error = server.commit_locked_checked(&mut state, &events).unwrap_err();
     assert!(error.to_string().contains("target_closing"), "{error}");
-    assert_eq!(
-        state.name_occupancy("/project", "Alice").unwrap().worker_id,
-        "old"
-    );
-    assert_eq!(state.msgs["pending"].to, "old");
-    assert!(state.mailbox_handoffs.is_empty());
-    assert_eq!(std::fs::read(&server.journal_path).unwrap(), before);
+    assert_eq!(state.name_occupancy("/project", "Alice").unwrap().worker_id, "old");
+    assert_eq!(state.msgs["pending"].to, "old"); assert!(state.mailbox_handoff_wakes.is_empty());
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
+    assert_eq!(store.load().unwrap(), map_before);
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

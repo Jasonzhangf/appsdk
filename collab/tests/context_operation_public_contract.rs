@@ -109,6 +109,19 @@ fn peer_lifecycle_a6_success_ready_exact_registered_thread_and_replay() {
     )
     .unwrap();
     assert_eq!(identity["runtime"]["native_thread_id"], "created-thread-1");
+    let mapping: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
+    let child = mapping["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == "a6-ordinary"
+        })
+        .expect("a created peer registers through the same identity map writer");
+    assert_eq!(child["current"]["binding"]["session_id"], "created-session");
     assert_eq!(
         identity["runtime"]["appserver_id"],
         master["runtime"]["appserver_id"]
@@ -146,36 +159,31 @@ fn peer_lifecycle_a6_success_ready_exact_registered_thread_and_replay() {
         "refused"
     );
     assert_eq!(host.start_request_count(), 1);
-    let journal = fs::read_to_string(fixture.project_journal()).unwrap();
-    let events: Vec<Value> = journal
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    let records: Vec<&Value> = events
-        .iter()
-        .filter(|event| {
-            event["ev"] == "PeerLifecycleOperationRecorded"
-                && event["operation"]["operation_id"] == "a6-create"
-        })
-        .collect();
-    assert_eq!(records[0]["operation"]["phase"], "intent_persisted");
-    assert_eq!(records[1]["operation"]["phase"], "host_dispatch_claimed");
-    assert!(
-        !journal.contains("commandExecution"),
-        "readiness proof must not depend on a fabricated commandExecution item"
+    let state = fixture.current_state();
+    assert_eq!(
+        state["peer_lifecycle_operations"]["a6-create"]["phase"],
+        "complete"
     );
-    let exact = events
+    assert_eq!(
+        state["peer_lifecycle_operations"]["a6-create"]["create"]["thread_id"],
+        "created-thread-1"
+    );
+    let map: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
+    let slot = map["slots"]
+        .as_array()
+        .unwrap()
         .iter()
-        .position(|event| {
-            event["ev"] == "PeerLifecycleOperationRecorded"
-                && event["operation"]["create"]["thread_id"] == "created-thread-1"
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == "a6-ordinary"
         })
         .unwrap();
-    let register = events
-        .iter()
-        .position(|event| event["ev"] == "Registered" && event["worker"]["id"] == "a6-ordinary")
-        .unwrap();
-    assert!(exact < register, "thread receipt precedes formal Register");
+    assert_eq!(
+        slot["current"]["binding"]["native_thread_id"],
+        "created-thread-1"
+    );
 }
 
 #[test]
@@ -261,20 +269,16 @@ fn peer_lifecycle_a6_claim_only_restart_is_unknown_and_never_resends() {
         "a6-claim-op",
     );
     fixture.stop_daemon();
-    // Crash boundary: retain journal through the real durable claim, before host outcome.
-    let journal = fs::read_to_string(fixture.project_journal()).unwrap();
-    let mut prefix = String::new();
-    for line in journal.lines() {
-        prefix.push_str(line);
-        prefix.push('\n');
-        let event: Value = serde_json::from_str(line).unwrap();
-        if event["operation"]["operation_id"] == "a6-claim-op"
-            && event["operation"]["phase"] == "host_dispatch_claimed"
-        {
-            break;
-        }
-    }
-    fs::write(fixture.project_journal(), prefix).unwrap();
+    // Seed the current unresolved claim, preserving its exact original intent.
+    let path = fixture.project_state();
+    let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let operation = &mut file["state"]["peer_lifecycle_operations"]["a6-claim-op"];
+    operation["phase"] = json!("host_dispatch_claimed");
+    operation["target"] = Value::Null;
+    operation["create"]["thread_id"] = Value::Null;
+    operation["create"]["stages"] = json!(["intent_persisted", "host_dispatch_claimed"]);
+    operation["create"]["readiness"] = json!({"state":"not-attempted"});
+    fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
     fixture.restart_daemon();
     let query = lifecycle_query(&fixture, &master, "a6-claim-op", "a6-capability");
     assert_eq!(query["result"]["outcome"], "unknown", "{query}");
@@ -443,10 +447,10 @@ fn peer_lifecycle_a6_wrong_challenge_correlation_cannot_finalize() {
     }
 }
 
-// A changed binding generation between dispatch and readback cannot finalize
+// A changed native target between dispatch and readback cannot finalize
 // the frozen operation.
 #[test]
-fn peer_lifecycle_a6_changed_generation_cannot_finalize() {
+fn peer_lifecycle_a6_changed_native_target_cannot_finalize() {
     let (mut fixture, host, master) = a6_fixture("a6-generation", "create_ready_delayed");
     let first = a6_create(
         &fixture,
@@ -456,19 +460,53 @@ fn peer_lifecycle_a6_changed_generation_cannot_finalize() {
         "a6-generation-op",
     );
     assert_eq!(first["result"]["outcome"], "partial", "{first}");
-    let mut binding = read_lines(&fixture.project_journal())
-        .into_iter()
-        .rev()
-        .find(|record| {
-            record["ev"] == "GlobalRuntimeBound"
-                && record["binding"]["agent_id"] == "a6-generation-peer"
+    fixture.stop_daemon();
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let slot = map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == "a6-generation-peer"
         })
-        .expect("the created peer's committed runtime binding");
-    let generation = binding["binding"]["endpoint_generation"]
-        .as_u64()
-        .expect("binding generation is numeric");
-    binding["binding"]["endpoint_generation"] = json!(generation + 1);
-    lifecycle_replay_events(&mut fixture, &master, &[binding]);
+        .unwrap();
+    let old_binding = slot["current"]["binding"].clone();
+    slot["current"]["binding"]["native_thread_id"] = json!("different-native-target");
+    slot["current"]["transport"]["thread_id"] = json!("different-native-target");
+    fs::write(map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+    let path = fixture.project_state();
+    let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let project = old_binding["project_scope"].as_str().unwrap();
+    let bindings = file["state"]["global"]["projects"][project]["runtime_bindings"]
+        .as_object_mut()
+        .unwrap();
+    let binding = bindings
+        .values_mut()
+        .find(|binding| **binding == old_binding)
+        .unwrap();
+    binding["native_thread_id"] = json!("different-native-target");
+    for row in file["state"]["global"]["current_thread_routes"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if row[1] == old_binding {
+            row[0][1] = json!("different-native-target");
+            row[1]["native_thread_id"] = json!("different-native-target");
+        }
+    }
+    file["state"]["workers"]["a6-generation-peer"]["transport"]["thread_id"] =
+        json!("different-native-target");
+    fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
+    let path = fixture
+        .host_state
+        .join("identities/a6-generation-peer/identity.json");
+    let mut credential: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    credential["runtime"]["native_thread_id"] = json!("different-native-target");
+    credential["transport"]["thread_id"] = json!("different-native-target");
+    fs::write(path, serde_json::to_vec(&credential).unwrap()).unwrap();
+    fixture.restart_daemon();
 
     let replay = a6_create(
         &fixture,
@@ -584,21 +622,43 @@ fn lifecycle_read(fixture: &Fixture, identity: &Value, target: Option<&str>) -> 
     )
 }
 
-fn lifecycle_surfaces(
-    fixture: &Fixture,
-    identity: &Value,
-) -> (Vec<u8>, Vec<Value>, Vec<u8>, Value) {
+fn lifecycle_surfaces(fixture: &Fixture, identity: &Value) -> (Vec<u8>, Value, Vec<u8>, Value) {
     let leases = lifecycle_wire(
         fixture,
         identity,
         json!({"op": "NotificationStatus", "worker_id": identity["worker_id"], "token": identity["token"]}),
     );
+    let mut state = fixture.current_state();
+    // The independent name monitor records live observations while Read runs.
+    // Keep every identity, task, message, receipt and ownership record in the
+    // purity comparison; only its observations and commit counters vary.
+    let fields = state.as_object_mut().unwrap();
+    fields.remove("agent_activity");
+    fields.remove("agent_presence");
+    fields.remove("revision");
+    fields.remove("sequence");
+    let global = state["global"].as_object_mut().unwrap();
+    global.remove("revision");
+    global.remove("sequence");
     (
-        fs::read(fixture.host_journal()).unwrap_or_default(),
-        without_ledger_scans(&fs::read(fixture.project_journal()).unwrap()),
+        fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        state,
         fs::read(fixture.host_routes()).unwrap(),
         leases,
     )
+}
+
+fn lifecycle_register_task(fixture: &Fixture, identity: &Value, task_id: &str) -> Value {
+    let registered = lifecycle_wire(
+        fixture,
+        identity,
+        json!({
+            "op":"TaskRegister", "worker_id":identity["worker_id"], "token":identity["token"],
+            "task_id":task_id, "priority":"p2"
+        }),
+    );
+    assert_eq!(registered["ok"], true, "{registered}");
+    fixture.current_state()["tasks"][task_id].clone()
 }
 
 fn lifecycle_native_fixture(label: &str) -> (Fixture, TestAppServer, Value) {
@@ -794,25 +854,6 @@ fn peer_lifecycle_r2_unknown_observation_is_pure() {
     assert_eq!(before, lifecycle_surfaces(&fixture, &identity));
 }
 
-// Seed historical reducer events only while the isolated fixture is stopped.
-// Requests and readbacks still cross the real daemon socket; no production
-// hooks or alternate lifecycle implementation are involved.
-fn lifecycle_replay_events(fixture: &mut Fixture, identity: &Value, events: &[Value]) {
-    fixture.stop_daemon();
-    let mut journal = fs::OpenOptions::new()
-        .append(true)
-        .open(fixture.project_journal())
-        .unwrap();
-    for event in events {
-        serde_json::to_writer(&mut journal, event).unwrap();
-        journal.write_all(b"\n").unwrap();
-    }
-    drop(journal);
-    fixture.restart_daemon();
-    let loaded = lifecycle_wire(fixture, identity, json!({"op": "Workers"}));
-    assert_eq!(loaded["ok"], true, "{loaded}");
-}
-
 #[test]
 fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
@@ -832,13 +873,22 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     let seed = fixture.registered_context("peer-r3-child", &child_pane);
     let child = lifecycle_identity(&fixture, &seed);
     let child_id = child["worker_id"].as_str().unwrap();
-    lifecycle_replay_events(
-        &mut fixture,
-        &parent,
-        &[json!({
-            "ev": "WorkerClosed", "worker_id": child_id, "closed_by": parent["worker_id"], "reason": "legacy record-only fixture", "at_ms": 1
-        })],
-    );
+    fixture.stop_daemon();
+    let path = fixture.project_state();
+    let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    file["state"]["worker_closures"][child_id] = json!({
+        "worker_id":child_id, "closed_by":parent["worker_id"], "reason":"record-only fixture", "at_ms":1
+    });
+    file["state"]["workers"]
+        .as_object_mut()
+        .unwrap()
+        .remove(child_id);
+    file["state"]["keepalives"]
+        .as_object_mut()
+        .unwrap()
+        .remove(child_id);
+    fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    fixture.restart_daemon();
     let before = lifecycle_surfaces(&fixture, &parent);
     let read = lifecycle_read(&fixture, &parent, Some(child_id));
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");
@@ -852,13 +902,17 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     );
     assert!(read["result"].get("target").is_none());
     assert_eq!(before, lifecycle_surfaces(&fixture, &parent));
-    let fence = json!({"ev": "ResponsibilityFenceSet", "fence": {
+    let fence = json!({
         "operation_id": "legacy-exact-fence", "worker_id": child_id,
         "project_scope": canonical_root(&fixture), "app_scope": child["runtime"]["appserver_id"],
-        "binding_id": child["runtime"]["binding_id"], "endpoint_generation": child["runtime"]["endpoint_generation"],
+        "binding_id": child["runtime"]["binding_id"],
         "snapshot": {}, "state": "closing", "created_ms": 1
-    }});
-    lifecycle_replay_events(&mut fixture, &parent, &[fence]);
+    });
+    fixture.stop_daemon();
+    let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    file["state"]["responsibility_fences"]["legacy-exact-fence"] = fence;
+    fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    fixture.restart_daemon();
     let before = lifecycle_surfaces(&fixture, &parent);
     let read = lifecycle_read(&fixture, &parent, Some(child_id));
     assert_eq!(read["result"]["outcome"], "cleanup-open", "{read}");
@@ -883,19 +937,16 @@ fn peer_lifecycle_r4_managed_visibility_is_authorized_and_pure() {
         &fixture,
         &fixture.registered_context("peer-r4-other", &other_pane),
     );
-    lifecycle_replay_events(
-        &mut fixture,
-        &parent,
-        &[json!({"ev": "SubagentUpdated", "subagent": {
+    fixture.stop_daemon();
+    let path = fixture.project_state();
+    let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    file["state"]["subagents"]["managed-private"] = json!({
             "id": "managed-private", "parent": parent["worker_id"], "peer": child["worker_id"],
             "status": "ready", "thread_id": child["transport"]["thread_id"], "profile": null,
             "created_ms": 1, "ready_deadline_ms": 0, "last_message": "private-assignment", "error": null
-        }})],
-    );
-    assert!(
-        fixture.wait_for_daemon_start(Duration::from_secs(10)),
-        "the replayed daemon must persist its startup receipt before Read purity"
-    );
+    });
+    fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
+    fixture.restart_daemon();
     let before = lifecycle_surfaces(&fixture, &parent);
     let own = lifecycle_read(&fixture, &other, None);
     assert!(

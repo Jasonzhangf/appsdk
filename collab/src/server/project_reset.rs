@@ -1,4 +1,4 @@
-//! Online project reset. The host journal is never removed.
+//! Online project reset preserves the host's current state and foreign scopes.
 use super::*;
 use std::collections::HashSet;
 use std::io::Write;
@@ -68,7 +68,7 @@ fn dsh_workers_for_scope(state: &State, scope: &str) -> Vec<String> {
 
 /// Remove only this project's projections from the mixed resident reducer.
 /// Project-local reducers have no foreign business records; the same worker
-/// ownership filtering also handles legacy mixed resident journals.
+/// ownership filtering also handles mixed resident state.
 pub(super) fn clear_project(
     state: &mut State,
     scope: &str,
@@ -215,14 +215,10 @@ pub(super) fn clear_project(
     state
         .worktree_bindings
         .retain(|_, b| b.owning_project_scope != scope);
-    state.worker_names.retain(|id, _| !workers.contains(id));
     state.name_occupancies.remove(scope);
     state.name_occupancy_revisions.remove(scope);
     state.name_work_roles.remove(scope);
     state.workflow_templates.remove(scope);
-    state
-        .name_recoveries
-        .retain(|_, recovery| recovery.project_scope != scope);
     state.agent_presence.remove(scope);
     state.agent_activity.remove(scope);
     state.delivery_modes.retain(|id, _| !workers.contains(id));
@@ -263,9 +259,6 @@ pub(super) fn clear_project(
         Some(owner) => owner != scope,
         None => !clear_local,
     };
-    state
-        .command_receipts
-        .retain(|_, receipt| retain_receipt(&receipt.outcome));
     state
         .global
         .command_receipts
@@ -312,24 +305,17 @@ pub(super) fn clear_project(
         .global
         .current_thread_route_tombstones
         .retain(|_, b| b.project_scope.as_str() != scope);
-    state
-        .global
-        .master_grant_replacement_intents
-        .retain(|_, r| r.project_scope.as_str() != scope);
-    state
-        .global
-        .master_grant_replacement_receipts
-        .retain(|_, r| r.project_scope.as_str() != scope);
 }
 
 /// Remove the route and its scope's control slots through the shared owner.
 pub(super) fn delete_route(path: &Path, record: &HostRouteRecord) -> Result<(), String> {
     // Remove the route line and the scope's control slots in one shared
-    // commit. This closes the historical reset gap where the route journal
-    // preserved the binding control line and the retired identity could
-    // resurrect on restart.
-    let store = crate::server::binding_store::BindingControlStore::at(path);
-    let (routes, mut control) = store.load_shared()?;
+    // commit so a retained binding cannot resurrect the retired identity.
+    let store = crate::server::binding_store::BindingControlStore::new(
+        path.parent().ok_or("HOST_ROUTE_PATH_INVALID")?,
+    );
+    let routes = super::load_host_route_records(path)?;
+    let mut control = store.load()?;
     let retained: Vec<HostRouteRecord> = routes
         .into_iter()
         .filter(|retained| {
@@ -338,9 +324,8 @@ pub(super) fn delete_route(path: &Path, record: &HostRouteRecord) -> Result<(), 
         })
         .collect();
     control.remove_scope(record.project_scope.as_str());
-    store
-        .publish_shared(&retained, &control)?
-        .require_confirmed_route()
+    store.save(&control)?.require_confirmed_route()?;
+    crate::server::binding_store::publish_route_records(path, &retained)?.require_confirmed_route()
 }
 
 /// Remove this project's route records while retaining the route records for
@@ -352,8 +337,11 @@ pub(super) fn delete_project_routes_except_dsh(
     scope: &str,
     retained_app_scopes: &HashSet<String>,
 ) -> Result<(), String> {
-    let store = crate::server::binding_store::BindingControlStore::at(path);
-    let (routes, mut control) = store.load_shared()?;
+    let store = crate::server::binding_store::BindingControlStore::new(
+        path.parent().ok_or("HOST_ROUTE_PATH_INVALID")?,
+    );
+    let routes = super::load_host_route_records(path)?;
+    let mut control = store.load()?;
     let retained = routes
         .into_iter()
         .filter(|route| {
@@ -361,13 +349,12 @@ pub(super) fn delete_project_routes_except_dsh(
         })
         .collect::<Vec<_>>();
     control.remove_scope_except_dsh(scope);
-    store
-        .publish_shared(&retained, &control)?
-        .require_confirmed_route()
+    store.save(&control)?.require_confirmed_route()?;
+    crate::server::binding_store::publish_route_records(path, &retained)?.require_confirmed_route()
 }
 
 /// Delete project data, keeping only exact live host resources when the
-/// resident host journal/lock happens to live inside the project tree.
+/// resident host state/lock happens to live inside the project tree.
 pub(super) fn remove_project_tree(path: &Path, preserved: &[PathBuf]) -> Result<(), String> {
     if preserved.iter().any(|keep| keep == path) {
         return Ok(());
@@ -394,8 +381,36 @@ pub(super) fn remove_project_tree(path: &Path, preserved: &[PathBuf]) -> Result<
     Ok(())
 }
 
-pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> Result<(), String> {
-    let project_records = load_host_route_records(route_journal)?
+pub(super) fn finish_reset(host: &Server, route_file: &Path, scope: &str) -> Result<(), String> {
+    let store =
+        crate::server::binding_store::BindingControlStore::new(host.host_paths.state_root());
+    // This also upgrades an interrupted legacy reset before cleanup. The
+    // current map is retired first on normal execution and startup alike.
+    store.begin_reset(scope)?;
+    if !host
+        .state
+        .lock()
+        .unwrap()
+        .pending_project_resets
+        .contains_key(scope)
+    {
+        let worker_ids = host
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .values()
+            .filter(|worker| worker.cwd == scope)
+            .map(|worker| worker.id.clone())
+            .collect();
+        host.commit_checked(&[Event::ProjectResetStarted {
+            project_scope: scope.to_owned(),
+            clear_local: host.root == Path::new(scope),
+            worker_ids,
+        }])
+        .map_err(|error| format!("persist reset cleanup: {error}"))?;
+    }
+    let project_records = load_host_route_records(route_file)?
         .into_iter()
         .filter(|record| record.project_scope == scope)
         .collect::<Vec<_>>();
@@ -427,10 +442,8 @@ pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> 
     };
     remove_host_identities(&host.host_paths, scope, &retained_dsh_workers)?;
     remove_archived_identities(&host.host_paths, scope)?;
-    crate::context_operation::remove_project_proofs(&host.host_paths, scope)
-        .map_err(|e| format!("remove project operation proofs: {e}"))?;
     let preserved = [
-        host.journal_path.clone(),
+        host.state_path.clone(),
         host.host_paths.state_root().to_path_buf(),
         host.root.join(".agent-collab/server/daemon.lock"),
     ]
@@ -452,7 +465,7 @@ pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> 
         // Delete the central app storage for every route record, including
         // retained DSH app scopes. The DSH route, control slot and identity are
         // host-owned recovery facts kept elsewhere; the retained business
-        // journal/mailbox content under central storage must not survive reset.
+        // business state under central storage must not survive reset.
         let central = host
             .host_paths
             .app_storage_root(scope, &record.app_scope_id);
@@ -462,18 +475,12 @@ pub(super) fn finish_reset(host: &Server, route_journal: &Path, scope: &str) -> 
     // Route records are the durable discovery source for app-scoped central
     // storage. Retain the active DSH route/control binding; retire every other
     // route for the scope in one shared transaction.
-    delete_project_routes_except_dsh(route_journal, scope, &retained_app_scopes)?;
-    // The resident journal mixes projects. Compact its cleared reducer under
-    // the writer's state lock, retaining the pending intent until completion.
-    {
-        let state = host.state.lock().unwrap();
-        host.rewrite_journal_locked(&state)
-            .map_err(|e| format!("erase project journal history: {e}"))?;
-    }
+    delete_project_routes_except_dsh(route_file, scope, &retained_app_scopes)?;
     host.commit_checked(&[Event::ProjectResetCompleted {
         project_scope: scope.to_owned(),
     }])
     .map_err(|e| format!("reset completion durability: {e}"))?;
+    store.complete_reset(scope)?;
     Ok(())
 }
 

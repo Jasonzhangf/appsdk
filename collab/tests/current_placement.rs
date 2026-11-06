@@ -221,11 +221,17 @@ fn board_reader_uses_current_route_instead_of_a_historical_session_receipt() {
             .join("identity.json"),
     )
     .unwrap();
-    let operations = std::fs::read(fixture.host_state.join("journal.jsonl")).unwrap();
-    let operation_path = fixture
-        .host_state
-        .join("context-operations/reader-context.json");
-    let operation = std::fs::read(&operation_path).unwrap();
+    let map = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let routes = std::fs::read(fixture.host_state.join("routes.json")).unwrap();
+    let protected = |state: Value| {
+        json!({
+            "tasks": state["tasks"],
+            "task_lifecycle": state["task_lifecycle"],
+            "task_assignments": state["task_assignments"],
+            "projects": state["global"]["projects"],
+        })
+    };
+    let business = protected(fixture.current_state_for(&fixture.root, "appserver-cli"));
     let board = run_in_pane_with_tmux(
         &fixture,
         &pane,
@@ -284,11 +290,18 @@ fn board_reader_uses_current_route_instead_of_a_historical_session_receipt() {
         credential
     );
     assert_eq!(
-        std::fs::read(fixture.host_state.join("journal.jsonl")).unwrap(),
-        operations,
-        "board and denied reset must not register, recover or start a context operation"
+        std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        map,
+        "board and denied reset must not change identity"
     );
-    assert_eq!(std::fs::read(operation_path).unwrap(), operation);
+    assert_eq!(
+        std::fs::read(fixture.host_state.join("routes.json")).unwrap(),
+        routes
+    );
+    assert_eq!(
+        protected(fixture.current_state_for(&fixture.root, "appserver-cli")),
+        business
+    );
 }
 
 struct SecondaryTmux {
@@ -511,16 +524,16 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
         "master",
         "{recovered}"
     );
-    let recovery_replay = run_in_pane_with_tmux(
+    let repeated_recovery = run_in_pane_with_tmux(
         &fixture,
-        &first,
-        "placement-recovery-replay",
+        &moved,
+        "placement-current-recovery-repeat",
         "not-a-tmux-value",
         &recovery_args,
     );
-    assert_eq!(recovery_replay["ok"], true, "{recovery_replay}");
+    assert_eq!(repeated_recovery["ok"], true, "{repeated_recovery}");
     assert_eq!(
-        context_snapshot(&recovery_replay)["identity"]["token"],
+        context_snapshot(&repeated_recovery)["identity"]["token"],
         Value::Null,
         "public readback must not expose the credential"
     );
@@ -528,6 +541,36 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
         persisted_identity(&fixture, &worker_id)["token"],
         token_before
     );
+    let map_before_commands =
+        fixture.current_mapping_for(&fixture.root, "appserver-cli", &worker_id);
+    let credential_before_commands = persisted_identity(&fixture, &worker_id);
+    assert_eq!(
+        map_before_commands["transport"]["tmux_endpoint"]["pane_id"],
+        moved.pane_id
+    );
+    assert_eq!(
+        credential_before_commands["transport"],
+        map_before_commands["transport"]
+    );
+    let assert_placement = || {
+        assert_eq!(
+            fixture.current_mapping_for(&fixture.root, "appserver-cli", &worker_id),
+            map_before_commands
+        );
+        assert_eq!(
+            persisted_identity(&fixture, &worker_id),
+            credential_before_commands
+        );
+    };
+    let status_from_old = run_in_pane_with_tmux(
+        &fixture,
+        &first,
+        "placement-old-status",
+        "invalid",
+        &["notify", "status"],
+    );
+    assert!(status_from_old["subscriptions"].is_array());
+    assert_placement();
 
     let sent = run_in_pane_with_tmux(
         &fixture,
@@ -550,6 +593,7 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
         .or_else(|| sent["message_id"].as_str())
         .expect("send returns a durable message id")
         .to_owned();
+    assert_placement();
     let received = run_in_pane_with_tmux(
         &fixture,
         &moved,
@@ -562,9 +606,11 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["id"] == message_id),
+            .any(|message| message["id"] == message_id
+                && message["body"] == "body after placement move"),
         "{received}"
     );
+    assert_placement();
     let reply = run_in_pane_with_tmux(
         &fixture,
         &first,
@@ -585,6 +631,7 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
         .as_str()
         .or_else(|| reply["message_id"].as_str())
         .expect("reply returns a durable message id");
+    assert_placement();
     let reply_received = run_in_pane_with_tmux(
         &fixture,
         &moved,
@@ -603,9 +650,11 @@ fn current_pane_placement_ignores_tmux_value_and_preserves_session_peer() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["id"] == reply_id),
+            .any(|message| message["id"] == reply_id
+                && message["body"] == "reply from superseded placement"),
         "{reply_received}"
     );
+    assert_placement();
     assert_eq!(
         persisted_identity(&fixture, &worker_id)["transport"]["tmux_endpoint"]["pane_id"],
         moved.pane_id,

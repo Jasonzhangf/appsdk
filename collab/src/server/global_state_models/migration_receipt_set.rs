@@ -147,7 +147,6 @@ impl MigrationReceiptSet {
                     && runtime.agent_id == identity.agent_id
                     && runtime.runtime_id == identity.runtime_id
                     && runtime.binding_id == identity.binding_id
-                    && runtime.endpoint_generation == identity.endpoint_generation
                     && runtime.fencing_token == identity.fencing_token
             });
             if matches.count() != 1 {
@@ -164,7 +163,6 @@ impl MigrationReceiptSet {
                     && identity.agent_id == runtime.agent_id
                     && identity.runtime_id == runtime.runtime_id
                     && identity.binding_id == runtime.binding_id
-                    && identity.endpoint_generation == runtime.endpoint_generation
                     && identity.fencing_token == runtime.fencing_token
             });
             if matches.count() != 1 {
@@ -188,7 +186,7 @@ pub struct GlobalState {
     pub revision: u64,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectState>,
-    #[serde(default)]
+    #[serde(default, with = "crate::server::current_state::rows")]
     pub current_thread_routes: BTreeMap<(String, String), RuntimeBinding>,
     /// Read-only compatibility index for durable bindings that carry a native
     /// App Server thread but no session id.  These records predate the strict
@@ -198,7 +196,7 @@ pub struct GlobalState {
     /// index stores one binding per `(app_scope, thread, binding_id)` and keeps
     /// only the highest generation for each.  The key order is app scope,
     /// native thread, then binding id.
-    #[serde(default)]
+    #[serde(default, with = "crate::server::current_state::rows")]
     pub legacy_thread_routes: BTreeMap<(String, String, String), RuntimeBinding>,
     #[serde(default)]
     pub current_thread_route_tombstones: BTreeMap<String, RuntimeBindingTombstone>,
@@ -206,13 +204,6 @@ pub struct GlobalState {
     pub command_receipts: BTreeMap<String, CommandReceipt>,
     #[serde(default)]
     pub migration_commit_evidence: BTreeMap<String, MigrationCommitEvidence>,
-    /// Durable, immutable grant-replacement intents and completion receipts.
-    /// Keyed by the outer operation id; the intent is written before the first
-    /// grant effect so an unresolved start survives restart without replay.
-    #[serde(default)]
-    pub master_grant_replacement_intents: BTreeMap<String, MasterGrantReplacementIntent>,
-    #[serde(default)]
-    pub master_grant_replacement_receipts: BTreeMap<String, MasterGrantReplacementReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,175 +1,5 @@
 #[test]
-fn replay_rejects_a_checkpoint_that_regresses_real_history() {
-    let (server, root) = test_server();
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let events = [
-        Event::Registered {
-            worker: crate::server::state::WorkerRec {
-                id: "checkpoint-worker".into(),
-                token: "checkpoint-token".into(),
-                cwd: "/tmp".into(),
-                registered_ms: 1,
-                transport: Some(test_appserver_transport("thread-checkpoint-worker")),
-            },
-        },
-        Event::ReducerCheckpoint {
-            sequence: 0,
-            revision: 0,
-        },
-    ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    std::fs::write(&journal, &body).unwrap();
-
-    let error = match super::replay(&root) {
-        Ok(_) => panic!("a real checkpoint rollback must fail closed"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("reducer checkpoint regresses version"),
-        "unexpected error: {error}"
-    );
-    assert_eq!(std::fs::read_to_string(&journal).unwrap(), body);
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn typed_registration_generation_reaches_max_then_fails_before_journaling_overflow() {
-    let (server, root) = test_server();
-    let cwd = root.to_str().unwrap();
-    let mut first = server
-        .typed_register_envelope("worker", "token-worker", "%worker", cwd)
-        .unwrap();
-    let crate::server::state::TypedCommand::RegisterWorker { binding, .. } = &mut first.command;
-    binding.endpoint_generation = u64::MAX - 1;
-    first.envelope.endpoint_generation = u64::MAX - 1;
-    first.envelope.command_id = crate::identity::CommandId::new("register-max-minus-one").unwrap();
-    first.envelope.operation_id =
-        crate::identity::OperationId::new("register-op-max-minus-one").unwrap();
-    let first = server
-        .typed_dispatch(first)
-        .expect("MAX-1 binding generation must be accepted");
-    assert!(!first.replayed);
-
-    let max = server
-        .typed_register_envelope("worker", "token-worker", "%worker", cwd)
-        .unwrap();
-    assert_eq!(max.envelope.endpoint_generation, u64::MAX);
-    let max = server
-        .typed_dispatch(max)
-        .expect("MAX binding generation must be accepted");
-    assert!(!max.replayed);
-    assert_eq!(
-        server
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .projects
-            .values()
-            .next()
-            .unwrap()
-            .runtime_bindings["binding-worker"]
-            .endpoint_generation,
-        u64::MAX
-    );
-
-    let journal_before_overflow =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
-    let receipt_count_before_overflow = server.state.lock().unwrap().global.command_receipts.len();
-    let error = server
-        .typed_register_envelope("worker", "token-worker", "%worker", cwd)
-        .expect_err("MAX binding generation must fail explicitly on increment overflow");
-    assert!(
-        error.contains("endpoint generation overflow"),
-        "unexpected error: {error}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap(),
-        journal_before_overflow,
-        "generation overflow must happen before any journal append"
-    );
-    assert_eq!(
-        server.state.lock().unwrap().global.command_receipts.len(),
-        receipt_count_before_overflow,
-        "generation overflow must not masquerade as a replayed receipt"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn replay_rejects_invalid_command_receipt_without_rewriting_the_journal() {
-    let (server, root) = test_server();
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let event = Event::CommandRecorded {
-        command_id: "invalid-receipt".into(),
-        receipt: crate::server::state::CommandReceipt {
-            operation_id: "invalid-receipt-operation".into(),
-            outcome: json!({"accepted": true}),
-            sequence: 0,
-            revision: 0,
-        },
-    };
-    let body = format!("{}\n", serde_json::to_string(&event).unwrap());
-    std::fs::write(&journal, &body).unwrap();
-
-    let error = match super::replay(&root) {
-        Ok(_) => panic!("replay must apply command receipt validation before exposing state"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("command receipt sequence"));
-    assert_eq!(std::fs::read_to_string(&journal).unwrap(), body);
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn replay_rejects_invalid_command_completion_receipt_without_rewriting_the_journal() {
-    let (server, root) = test_server();
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let events = [
-        Event::CommandStarted {
-            command_id: "invalid-completion".into(),
-            operation_id: "invalid-completion-operation".into(),
-        },
-        Event::CommandCompleted {
-            command_id: "invalid-completion".into(),
-            operation_id: "invalid-completion-operation".into(),
-            receipt: crate::server::state::CommandReceipt {
-                operation_id: "invalid-completion-operation".into(),
-                outcome: json!({"accepted": true}),
-                sequence: 1,
-                revision: 0,
-            },
-        },
-    ];
-    let body = events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    std::fs::write(&journal, &body).unwrap();
-
-    let error = match super::replay(&root) {
-        Ok(_) => panic!("replay must validate a command completion receipt"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("command receipt revision"));
-    assert_eq!(std::fs::read_to_string(&journal).unwrap(), body);
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn typed_dispatch_rejects_stale_revision_without_appending() {
+fn typed_dispatch_rejects_stale_revision_without_mutation() {
     let (server, root) = test_server();
     let cwd = root.to_str().unwrap();
     let first = server
@@ -182,17 +12,12 @@ fn typed_dispatch_rejects_stale_revision_without_appending() {
     stale.envelope.command_id = crate::identity::CommandId::new("register-stale").unwrap();
     stale.envelope.operation_id = crate::identity::OperationId::new("register-stale-op").unwrap();
     stale.envelope.expected_revision = Some(0);
+    let before = std::fs::read(&server.state_path).unwrap();
     let error = server.typed_dispatch(stale).unwrap_err();
     assert!(error
         .to_string()
-        .contains("compare-and-swap revision mismatch"));
-    assert_eq!(
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .lines()
-            .count(),
-        6
-    );
+        .contains("CAS_MISMATCH:"), "{error}");
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -200,6 +25,7 @@ fn typed_dispatch_rejects_stale_revision_without_appending() {
 fn typed_dispatch_rejects_wrong_principal_and_scope() {
     let (server, root) = test_server();
     let cwd = root.to_str().unwrap();
+    let before = std::fs::read(&server.state_path).unwrap();
     let mut wrong_principal = server
         .typed_register_envelope("worker", "token-worker", "%worker", cwd)
         .unwrap();
@@ -222,12 +48,7 @@ fn typed_dispatch_rejects_wrong_principal_and_scope() {
     assert!(scope_error
         .to_string()
         .contains("envelope scope does not match binding route scope"));
-    assert!(
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .trim()
-            .is_empty()
-    );
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -265,8 +86,7 @@ fn typed_token_rotation_rejects_dual_key_session_mismatch() {
     server
         .typed_dispatch(first)
         .expect("initial typed register must succeed");
-    let before_journal =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
+    let before_state = std::fs::read(&server.state_path).unwrap();
     let before_global = server.state.lock().unwrap().global.clone();
 
     let other_session = "session-dual-key-worker-other";
@@ -309,229 +129,14 @@ fn typed_token_rotation_rejects_dual_key_session_mismatch() {
         error_message.contains("worker token does not belong to the registered runtime identity"),
         "unexpected error: {error_message}"
     );
-    let after_journal =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
     assert_eq!(
-        after_journal, before_journal,
-        "a rejected dual-key mismatch must not append a journal event"
+        std::fs::read(&server.state_path).unwrap(), before_state,
+        "a rejected dual-key mismatch must not change current state"
     );
     assert_eq!(
         server.state.lock().unwrap().global,
         before_global,
         "a rejected dual-key mismatch must not mutate the global reducer"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn global_reducer_failure_is_explicit_and_rolls_back_the_unreducible_append() {
-    let (server, root) = test_server();
-    let binding = crate::server::global_state::RuntimeBinding::new(
-        crate::scope::ProjectScopeId::new("/unregistered-project").unwrap(),
-        crate::identity::AppServerId::new("tui-default").unwrap(),
-        crate::identity::AgentId::new("worker").unwrap(),
-        crate::identity::RuntimeId::new("runtime-worker").unwrap(),
-        crate::identity::BindingId::new("binding-worker").unwrap(),
-        1,
-        None,
-    )
-    .unwrap();
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    let before = std::fs::read_to_string(&journal_path).unwrap_or_default();
-
-    // The reducer rejects this event: the project scope is not registered. The
-    // failure must come back as an error. It must not panic while the caller
-    // holds the state guard, because that panic poisons the process-wide mutex
-    // and kills every later request.
-    let error = {
-        let mut state = server.state.lock().unwrap();
-        server
-            .commit_locked(&mut state, &[Event::GlobalRuntimeBound { binding }])
-            .unwrap_err()
-    };
-    assert!(matches!(error, JournalError::Reducer(_)), "{error:?}");
-
-    // The state guard is released and still usable: re-locking must not panic.
-    let poison = {
-        let state = server.state.lock().unwrap();
-        state.journal_poison.clone()
-    };
-    assert!(
-        poison.is_some(),
-        "a reducer rejection must fail the owner closed"
-    );
-
-    // Nothing was reduced, and the unreducible line is not left durable. A
-    // journal that keeps it can never be replayed again.
-    assert_eq!(server.state.lock().unwrap().global.projects.len(), 0);
-    assert_eq!(
-        std::fs::read_to_string(&journal_path).unwrap_or_default(),
-        before
-    );
-    assert!(replay(&root).is_ok());
-
-    // Fail-closed, not crash: the next write is refused with the poison error,
-    // and it still does not panic.
-    let refused = server
-        .commit_checked(&[Event::KeepaliveUpdated {
-            worker_id: "worker".into(),
-            record: crate::server::keepalive::Record::default(),
-        }])
-        .unwrap_err();
-    assert!(refused.to_string().contains("unregistered-project"), "{refused}");
-
-    // The journal stays replayable, so a restart restores a clean owner.
-    assert!(replay(&root).is_ok());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn command_start_append_and_sync_failures_fail_closed_before_business_apply() {
-    for fault in [
-        CommandJournalFault::StartAppend,
-        CommandJournalFault::StartSync,
-    ] {
-        let (server, root) = test_server();
-        inject_command_journal_fault(fault);
-        let result = server.commit_command(
-            "command-start-fault",
-            "operation-start-fault",
-            &[Event::KeepaliveUpdated {
-                worker_id: "worker".into(),
-                record: crate::server::keepalive::Record::default(),
-            }],
-            json!({"accepted": true}),
-        );
-        assert!(result.is_err());
-        assert!(server.state.lock().unwrap().keepalives.is_empty());
-        let replay = super::replay(&root);
-        match fault {
-            CommandJournalFault::StartAppend => {
-                assert!(replay.is_ok(), "failed first append must leave no command");
-            }
-            CommandJournalFault::StartSync => {
-                // A bare start with no durable control pending effect cannot
-                // prove a re-driver, so the project is isolated and the tail
-                // bytes are kept rather than trimmed without evidence.
-                let error = replay.expect_err(
-                    "an unproven incomplete start must isolate the project, not be trimmed",
-                );
-                assert!(
-                    error.to_string().contains("no matching durable control pending effect"),
-                    "unexpected error: {error}"
-                );
-            }
-            _ => unreachable!(),
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
-#[test]
-fn command_completion_append_failure_isolates_unproven_incomplete_tail() {
-    let (server, root) = test_server();
-    inject_command_journal_fault(CommandJournalFault::CompletionAppend);
-    let result = server.commit_command(
-        "command-completion-append",
-        "operation-completion-append",
-        &[Event::KeepaliveUpdated {
-            worker_id: "worker".into(),
-            record: crate::server::keepalive::Record::default(),
-        }],
-        json!({"accepted": true}),
-    );
-    assert!(result.is_err());
-    assert!(server.state.lock().unwrap().keepalives.is_empty());
-    // The completion marker is the commit point, but unrelated business has no
-    // durable control pending effect to prove a reliable re-driver. Keep the
-    // original bytes and isolate the project instead of trimming or archiving.
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let preserved = std::fs::read_to_string(&journal).unwrap();
-    assert!(
-        preserved.contains("operation-completion-append"),
-        "unproven incomplete tail must be kept byte-for-byte: {preserved}"
-    );
-    let error = super::replay(&root)
-        .expect_err("an unproven incomplete completion tail must isolate the project");
-    assert!(
-        error.to_string().contains("no matching durable control pending effect"),
-        "unexpected error: {error}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&journal).unwrap(),
-        preserved,
-        "a failed replay must not rewrite the preserved journal"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn bootstrap_registration_commit_failure_preserves_unused_policy_and_no_grant() {
-    for fault in [
-        CommandJournalFault::StartAppend,
-        CommandJournalFault::CompletionAppend,
-    ] {
-        let (server, root) = test_server();
-        let cwd = root.to_str().unwrap();
-        let prepared = server
-            .typed_register_envelope("first", "token-first", "%first", cwd)
-            .unwrap();
-        let crate::server::state::TypedCommand::RegisterWorker { binding, .. } = &prepared.command;
-        let policy = crate::server::global_state::BootstrapPolicy {
-            project_scope: binding.project_scope.clone(),
-            app_scope_id: binding.app_scope_id.clone(),
-            authorization: "user authorizes first registration".into(),
-            authorized_operation: "authorize-first".into(),
-            consumption: None,
-        };
-        server
-            .commit_command(
-                "authorize-first",
-                "authorize-first",
-                &[Event::GlobalBootstrapPolicySet { policy: policy.clone() }],
-                json!({"authorized":true}),
-            )
-            .unwrap();
-        let prepared = server
-            .typed_register_envelope("first", "token-first", "%first", cwd)
-            .unwrap();
-        inject_command_journal_fault(fault);
-        assert!(server.typed_dispatch(prepared).is_err());
-        let state = server.state.lock().unwrap();
-        let project = state.global.lookup_project(&policy.project_scope).unwrap();
-        assert_eq!(
-            project.bootstrap_policies.get(policy.app_scope_id.as_str()),
-            Some(&policy)
-        );
-        assert!(project.master_grants.is_empty());
-        assert!(project.runtime_bindings.is_empty());
-        assert!(state.workers.is_empty());
-        drop(state);
-        drop(server);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
-#[test]
-fn command_completion_sync_failure_is_explicit_and_replayable_if_marker_was_written() {
-    let (server, root) = test_server();
-    inject_command_journal_fault(CommandJournalFault::CompletionSync);
-    let result = server.commit_command(
-        "command-completion-sync",
-        "operation-completion-sync",
-        &[Event::KeepaliveUpdated {
-            worker_id: "worker".into(),
-            record: crate::server::keepalive::Record::default(),
-        }],
-        json!({"accepted": true}),
-    );
-    assert!(result.is_err());
-    assert!(server.state.lock().unwrap().keepalives.is_empty());
-    let replayed = super::replay(&root).expect("written completion marker must replay");
-    assert!(replayed.keepalives.contains_key("worker"));
-    assert_eq!(
-        replayed.command_receipts["command-completion-sync"].operation_id,
-        "operation-completion-sync"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -552,7 +157,6 @@ fn subagent_record(id: &str, status: &str, peer: &str) -> crate::subagent::Recor
         runtime: Some("codex".into()),
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     }
 }
 
@@ -702,13 +306,13 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
         None, "queued".into());
     assert!(sent.ok, "{sent:?}");
     let message_id = sent.data["msg_id"].as_str().unwrap();
-    let journals_before = std::fs::read(&server.journal_path).unwrap();
+    let state_before = std::fs::read(&server.state_path).unwrap();
     let unread_refusal = dispatch(&server, subagent_req(crate::subagent::Action::Close {
         id: "missing-busy".into(),
     }));
     assert!(!unread_refusal.ok, "{unread_refusal:?}");
     assert!(unread_refusal.error.as_deref().unwrap_or_default().contains("requires a successful snapshot"));
-    assert_eq!(std::fs::read(&server.journal_path).unwrap(), journals_before);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), state_before);
     let state = server.state.lock().unwrap();
     assert_eq!(state.subagents["missing-busy"].status, "idle");
     assert_eq!(state.msgs[message_id].state, "pending");
@@ -760,10 +364,10 @@ fn subagent_close_rechecks_observed_owner_and_actor_but_allows_unrelated_writes(
             subagent: subagent_record("observed-close", "idle", "child"),
         }]);
         let slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<Server>>));
-        let observed_journal = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+        let observed_state = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_slot = slot.clone();
-        let callback_journal = observed_journal.clone();
+        let callback_state = observed_state.clone();
         let callback_fired = fired.clone();
         server.appserver_thread_status = Arc::new(move |_, thread| {
             assert_eq!(thread, "thread-child");
@@ -780,7 +384,7 @@ fn subagent_close_rechecks_observed_owner_and_actor_but_allows_unrelated_writes(
                         &server.root.display().to_string(), Some(AppServerId::new("tui-default").unwrap()));
                     assert!(result.ok, "{result:?}");
                 }
-                *callback_journal.lock().unwrap() = Some(std::fs::read(&server.journal_path).unwrap());
+                *callback_state.lock().unwrap() = Some(std::fs::read(&server.state_path).unwrap());
             }
             Err("APP_SERVER_THREAD_MISSING: controlled observed endpoint absence".into())
         });
@@ -799,9 +403,9 @@ fn subagent_close_rechecks_observed_owner_and_actor_but_allows_unrelated_writes(
             assert!(if changed == "child" { error.contains("SUBAGENT_CLOSE_TARGET_CHANGED") }
                 else { error.contains("authentication failed") }, "{result:?}");
             assert_eq!(server.state.lock().unwrap().subagents["observed-close"].status, "idle");
-            assert_eq!(std::fs::read(&server.journal_path).unwrap(),
-                observed_journal.lock().unwrap().as_ref().unwrap().clone());
-            assert_eq!(replay(&root).unwrap().subagents["observed-close"].status, "idle");
+            assert_eq!(std::fs::read(&server.state_path).unwrap(),
+                observed_state.lock().unwrap().as_ref().unwrap().clone());
+            assert_eq!(current_state::load(&server.state_path, false).unwrap().subagents["observed-close"].status, "idle");
         }
         drop(server);
         std::fs::remove_dir_all(root).unwrap();
@@ -827,544 +431,11 @@ fn subagent_start_fails_explicitly_without_creating_a_codex_thread() {
     );
     let state = server.state.lock().unwrap();
     assert!(state.subagents.is_empty());
-    assert!(state.journal_poison.is_none());
     drop(state);
-    assert!(replay(&root).unwrap().subagents.is_empty());
+    assert!(current_state::load(&server.state_path, false).unwrap().subagents.is_empty());
     drop(server);
     drop(tmux);
     std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn subagent_working_journal_failure_preserves_task_and_subagent_and_poison_rejects_mutation() {
-    use crate::server::SubagentJournalFault::{WorkingAppend, WorkingSync};
-
-    for fault in [WorkingAppend, WorkingSync] {
-        let (server, root) = test_server();
-        register(&server, "parent", "%parent");
-        register(&server, "child", "%child");
-        let now = now_ms();
-        let mut record = subagent_record("working-journal-fault", "assigned", "child");
-        record.last_message = Some("working-journal-fault".into());
-        server.commit(&[
-            Event::SubagentUpdated { subagent: record },
-            Event::TaskCreated {
-                task: TaskRec {
-                    id: "task-working-journal-fault".into(),
-                    owner: "child".into(),
-                    created_by: "parent".into(),
-                    feature_id: None,
-                    worktree_path: None,
-                    branch: None,
-                    base_commit: None,
-                    priority: "p2".into(),
-                    status: "assigned".into(),
-                    next_step: None,
-                    wait: None,
-                    isolation_mode: None,
-                    created_ms: now,
-                    updated_ms: now,
-                },
-            },
-        ]);
-        let server = Arc::new(server);
-        crate::server::inject_subagent_journal_fault(fault);
-        let result = dispatch(
-            &server,
-            Req::Subagent {
-                worker_id: "child".into(),
-                token: "token-child".into(),
-                command: crate::subagent::Action::Working {
-                    id: "working-journal-fault".into(),
-                },
-                launch_env: Default::default(),
-            },
-        );
-        assert!(!result.ok, "{fault:?}: {result:?}");
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.subagents["working-journal-fault"].status, "assigned");
-        assert_eq!(state.tasks["task-working-journal-fault"].status, "assigned");
-        assert!(state.journal_poison.is_some());
-        drop(state);
-        let rejected = dispatch(
-            &server,
-            Req::Subagent {
-                worker_id: "child".into(),
-                token: "token-child".into(),
-                command: crate::subagent::Action::Working {
-                    id: "working-journal-fault".into(),
-                },
-                launch_env: Default::default(),
-            },
-        );
-        assert!(!rejected.ok);
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.subagents["working-journal-fault"].status, "assigned");
-        assert_eq!(state.tasks["task-working-journal-fault"].status, "assigned");
-        drop(state);
-        assert!(replay(&root).is_ok());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
-#[test]
-fn subagent_close_first_journal_failure_does_not_remove_external_manifest() {
-    use crate::server::SubagentJournalFault::{CloseFirstAppend, CloseFirstSync};
-
-    for fault in [CloseFirstAppend, CloseFirstSync] {
-        let (mut server, root) = test_server();
-        register(&server, "parent", "%parent");
-        register(&server, "child", "%child");
-        server.commit(&[Event::SubagentUpdated {
-            subagent: subagent_record("close-first-fault", "idle", "child"),
-        }]);
-        server.commit(&[Event::SubagentSnapshotCaptured {
-            subagent_id: "close-first-fault".into(),
-            thread_id: "thread-child".into(),
-            captured_ms: now_ms(),
-        }]);
-        let manifest = root.join(".agent-collab/server/launch-close-first-fault.json");
-        std::fs::write(&manifest, b"test-only manifest").unwrap();
-        let server = Arc::new(server);
-        crate::server::inject_subagent_journal_fault(fault);
-        let result = dispatch(
-            &server,
-            subagent_req(crate::subagent::Action::Close {
-                id: "close-first-fault".into(),
-            }),
-        );
-        assert!(!result.ok, "{fault:?}: {result:?}");
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.subagents["close-first-fault"].status, "idle");
-        assert!(state.journal_poison.is_some());
-        drop(state);
-        assert!(manifest.exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
-#[test]
-fn subagent_close_final_journal_failure_reports_unknown_and_stays_open() {
-    use crate::server::SubagentJournalFault::{CloseFinalAppend, CloseFinalSync};
-
-    for fault in [CloseFinalAppend, CloseFinalSync] {
-        let (mut server, root) = test_server();
-        register(&server, "parent", "%parent");
-        register(&server, "child", "%child");
-        server.commit(&[Event::SubagentUpdated {
-            subagent: subagent_record("close-final-fault", "idle", "child"),
-        }]);
-        server.commit(&[Event::SubagentSnapshotCaptured {
-            subagent_id: "close-final-fault".into(),
-            thread_id: "thread-child".into(),
-            captured_ms: now_ms(),
-        }]);
-        let server = Arc::new(server);
-        crate::server::inject_subagent_journal_fault(fault);
-        let result = dispatch(
-            &server,
-            subagent_req(crate::subagent::Action::Close {
-                id: "close-final-fault".into(),
-            }),
-        );
-        assert!(!result.ok, "{fault:?}: {result:?}");
-        assert!(result.error.unwrap().contains("outcome unknown"));
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.subagents["close-final-fault"].status, "closing");
-        assert!(state.journal_poison.is_some());
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
-#[test]
-fn replayed_command_is_idempotent_and_operation_conflict_fails_closed() {
-    let (server, root) = test_server();
-    server
-        .commit_command(
-            "command-replay",
-            "operation-replay",
-            &[Event::KeepaliveUpdated {
-                worker_id: "worker".into(),
-                record: crate::server::keepalive::Record::default(),
-            }],
-            json!({"accepted": true}),
-        )
-        .unwrap();
-    let restarted = {
-        let journal = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap();
-        Server {
-            config: crate::config::Config::default(),
-            root: root.clone(),
-            storage_root: root.clone(),
-            journal_path: root.join(".agent-collab/server/journal.jsonl"),
-            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
-            state: Mutex::new(super::replay(&root).unwrap()),
-            journal: Mutex::new(journal),
-            appserver_candidate_check: crate::server::default_appserver_candidate_check(),
-            appserver_notification_sink: crate::server::default_appserver_notification_sink(),
-            appserver_thread_status: crate::server::default_appserver_thread_status(),
-            appserver_thread_archive: crate::server::default_appserver_thread_archive(),
-            mailbox_notify: tokio::sync::Notify::new(),
-        }
-    };
-    let retry = restarted
-        .commit_command(
-            "command-replay",
-            "operation-replay",
-            &[Event::KeepaliveUpdated {
-                worker_id: "duplicate".into(),
-                record: crate::server::keepalive::Record::default(),
-            }],
-            json!({"accepted": false}),
-        )
-        .unwrap();
-    assert!(retry.replayed);
-    assert_eq!(retry.outcome, json!({"accepted": true}));
-    let conflict = restarted.commit_command(
-        "command-other",
-        "operation-replay",
-        &[],
-        json!({"accepted": true}),
-    );
-    assert!(matches!(conflict, Err(JournalError::InvalidCommand(_))));
-    assert!(!restarted
-        .state
-        .lock()
-        .unwrap()
-        .keepalives
-        .contains_key("duplicate"));
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-fn committed_keepalive_events() -> Vec<Event> {
-    vec![
-        Event::CommandStarted {
-            command_id: "committed".into(),
-            operation_id: "operation-committed".into(),
-        },
-        Event::KeepaliveUpdated {
-            worker_id: "committed-worker".into(),
-            record: crate::server::keepalive::Record::default(),
-        },
-        Event::CommandCompleted {
-            command_id: "committed".into(),
-            operation_id: "operation-committed".into(),
-            receipt: crate::server::state::CommandReceipt {
-                operation_id: "operation-committed".into(),
-                outcome: json!({"accepted": true}),
-                sequence: 4,
-                revision: 4,
-            },
-        },
-    ]
-}
-
-fn serialize_events(events: &[Event]) -> String {
-    events
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn write_journal_with_tail(root: &Path, tail: &[Event]) -> (PathBuf, String) {
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let content = format!(
-        "{}\n{}\n",
-        serialize_events(&committed_keepalive_events()),
-        serialize_events(tail)
-    );
-    std::fs::write(&journal, &content).unwrap();
-    (journal, content)
-}
-
-fn incomplete_handover_events() -> Vec<Event> {
-    vec![
-        Event::CommandStarted {
-            command_id: "incomplete-register".into(),
-            operation_id: "operation-incomplete-register".into(),
-        },
-        Event::Registered {
-            worker: crate::server::state::WorkerRec {
-                id: "pending-worker".into(),
-                token: "token-pending-worker".into(),
-                cwd: "/tmp".into(),
-                registered_ms: 1,
-                transport: Some(test_appserver_transport("thread-pending-worker")),
-            },
-        },
-        Event::WorkerNamed {
-            worker_id: "pending-worker".into(),
-            name: Some("pending".into()),
-        },
-    ]
-}
-
-fn uncommitted_side_files(root: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(root.join(".agent-collab/server"))
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.to_string_lossy().contains(".uncommitted."))
-        .collect()
-}
-
-#[test]
-fn replay_rejects_incomplete_unrelated_business_tail_without_trimming() {
-    let (server, root) = test_server();
-    let tail = [
-        Event::CommandStarted {
-            command_id: "incomplete".into(),
-            operation_id: "operation-incomplete".into(),
-        },
-        Event::KeepaliveUpdated {
-            worker_id: "worker".into(),
-            record: crate::server::keepalive::Record::default(),
-        },
-    ];
-    let (journal, original) = write_journal_with_tail(&root, &tail);
-    // Unrelated business has no durable control pending effect to prove a
-    // reliable re-driver. The bytes must be kept and the project isolated.
-    let error = super::replay(&root)
-        .expect_err("unrelated business without a pending effect must isolate the project");
-    assert!(
-        error
-            .to_string()
-            .contains("no matching durable control pending effect"),
-        "unexpected error: {error}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&journal).unwrap(),
-        original,
-        "an unproven business tail must be preserved byte-for-byte"
-    );
-    assert!(
-        uncommitted_side_files(&root).is_empty(),
-        "no no-consumer quarantine history may be written"
-    );
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn replay_rejects_incomplete_identity_events_without_a_matching_pending_effect() {
-    let (server, root) = test_server();
-    let tail = incomplete_handover_events();
-    let (journal, original) = write_journal_with_tail(&root, &tail);
-    // Identity-looking events are not proof by themselves. Without a durable
-    // control pending effect the tail is kept and the project is isolated.
-    let error = super::replay(&root)
-        .expect_err("identity events without a pending effect must isolate the project");
-    assert!(
-        error
-            .to_string()
-            .contains("no matching durable control pending effect"),
-        "unexpected error: {error}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&journal).unwrap(),
-        original,
-        "identity-style tail without a pending effect must be preserved"
-    );
-    assert!(
-        uncommitted_side_files(&root).is_empty(),
-        "identity-style tail without a pending effect must not be archived"
-    );
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn replay_drops_incomplete_handover_with_a_matching_pending_effect() {
-    let (server, root) = test_server();
-    let tail = incomplete_handover_events();
-    let (journal, _) = write_journal_with_tail(&root, &tail);
-    let project_scope = super::GlobalState::canonical_project_scope(&root).unwrap();
-    let app_scope_id =
-        crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
-    let state_root = root.join("host-state");
-    std::fs::create_dir_all(&state_root).unwrap();
-    let effect = crate::server::binding_slot::PendingEffect {
-        kind: crate::server::binding_slot::PendingEffectKind::Register,
-        effect_id: "effect-incomplete-register".into(),
-        operation_id: "operation-incomplete-register".into(),
-        project_scope: project_scope.clone(),
-        app_scope_id: app_scope_id.clone(),
-        name: "pending".into(),
-        previous_worker_id: None,
-        previous_session_id: None,
-        target_worker_id: "pending-worker".into(),
-        target_session_id: "session-pending-worker".into(),
-        occupancy_revision: 1,
-        source_names: Vec::new(),
-        moves_existing_names: false,
-        pane_anchor: None,
-        created_ms: 1,
-    };
-    let binding = super::GlobalState::canonical_project_scope(&root).map(|scope| {
-        crate::server::global_state::RuntimeBinding {
-            project_scope: scope,
-            app_scope_id: app_scope_id.clone(),
-            agent_id: crate::identity::AgentId::new("pending-worker").unwrap(),
-            runtime_id: crate::identity::RuntimeId::new("pending-runtime").unwrap(),
-            binding_id: crate::identity::BindingId::new("pending-binding").unwrap(),
-            endpoint_generation: 1,
-            session_id: Some(crate::identity::SessionId::new("session-pending-worker").unwrap()),
-            native_thread_id: None,
-            tmux_endpoint: None,
-        }
-    }).unwrap();
-    crate::server::binding_store::BindingControlStore::new(&state_root)
-        .commit(crate::server::binding_store::ControlChange::CommitWithEffect {
-            key: crate::server::binding_slot::IdentityBindingKey::new(project_scope.clone(), app_scope_id, "pending"),
-            value: crate::server::binding_slot::BindingValue::new(binding, test_appserver_transport("pending-thread")),
-            expected_generation: None,
-            effect,
-        })
-        .expect("durable control pending effect must publish");
-    let proven = super::proven_pending_operations(
-        &state_root,
-        crate::identity::CLI_APP_SERVER_ID,
-        project_scope.as_str(),
-    )
-    .unwrap();
-    assert_eq!(proven.len(), 1, "exact operation must be proven: {proven:?}");
-    let state = super::replay_from_journal_with_proven(&root, &journal, &proven)
-        .expect("an exact durable pending effect must allow the tail to be trimmed");
-    assert!(
-        state.keepalives.contains_key("committed-worker"),
-        "committed command must be applied"
-    );
-    assert!(
-        !state.workers.contains_key("pending-worker"),
-        "uncommitted register must not be applied to the reducer"
-    );
-    let rewritten = std::fs::read_to_string(&journal).unwrap();
-    assert!(
-        rewritten.contains("committed") && !rewritten.contains("incomplete-register"),
-        "proven handover tail must be trimmed, committed prefix must remain: {rewritten}"
-    );
-    assert!(
-        uncommitted_side_files(&root).is_empty(),
-        "proven handover tail must not be archived"
-    );
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_command_record_without_outcome_is_rejected() {
-    let (server, root) = test_server();
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    std::fs::write(
-        &journal,
-        r#"{"ev":"CommandRecorded","command_id":"legacy","receipt":{"operation_id":"op"}}
-"#,
-    )
-    .unwrap();
-    let error = match super::replay(&root) {
-        Ok(_) => panic!("legacy command record without outcome must be rejected"),
-        Err(error) => error.to_string(),
-    };
-    assert!(error.contains("outcome"), "unexpected error: {error}");
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn try_commit_reports_journal_failure_without_applying_state() {
-    let (server, root) = test_server();
-    *server.journal.lock().unwrap() =
-        std::fs::File::open(root.join(".agent-collab/server/journal.jsonl")).unwrap();
-    let mut state = State::default();
-    let error = server
-        .try_commit_locked(
-            &mut state,
-            &[Event::KeepaliveUpdated {
-                worker_id: "worker".into(),
-                record: crate::server::keepalive::Record::default(),
-            }],
-        )
-        .expect_err("read-only journal must be reported to the caller");
-    assert!(error.contains("journal append"));
-    assert!(state.keepalives.is_empty());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn subagent_close_does_not_report_success_when_transition_cannot_persist() {
-    use crate::subagent::{Action, Record};
-
-    let (server, root) = test_server();
-    register(&server, "parent", "%parent");
-    register(&server, "child", "%child");
-    server.commit(&[Event::SubagentUpdated {
-        subagent: Record {
-            id: "managed-close".into(),
-            parent: "parent".into(),
-            peer: "child".into(),
-            status: "idle".into(),
-            thread_id: Some("thread-child".into()),
-            profile: None,
-            created_ms: now_ms(),
-            ready_deadline_ms: 0,
-            last_message: None,
-            error: None,
-            probe_failures: Vec::new(),
-            runtime: None,
-            create_operation_id: None,
-            binding_id: None,
-            endpoint_generation: None,
-        },
-    }]);
-    server.commit(&[Event::SubagentSnapshotCaptured {
-        subagent_id: "managed-close".into(),
-        thread_id: "thread-child".into(),
-        captured_ms: now_ms(),
-    }]);
-    *server.journal.lock().unwrap() =
-        std::fs::File::open(root.join(".agent-collab/server/journal.jsonl")).unwrap();
-
-    let response = crate::subagent::handle(
-        &server,
-        "parent",
-        "token-parent",
-        Action::Close {
-            id: "managed-close".into(),
-        },
-    );
-    assert!(!response.ok);
-    assert!(response
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("journal append"));
-    assert_eq!(
-        server.state.lock().unwrap().subagents["managed-close"].status,
-        "idle"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn activity_log_never_copies_launch_credentials() {
-    let request = Req::Subagent {
-        worker_id: "parent".into(),
-        token: "token".into(),
-        command: crate::subagent::Action::Start {
-            id: None,
-            runtime: None,
-        },
-        launch_env: std::collections::BTreeMap::from([("SECRET".into(), "do-not-log".into())]),
-    };
-    let log = request_activity(&request, &Resp::data(json!({})));
-    assert!(log["request"].get("launch_env").is_none());
-    assert!(!log.to_string().contains("do-not-log"));
 }
 
 #[test]
@@ -1389,7 +460,6 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
         runtime: None,
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     });
     let event = Event::SubagentUpdated { subagent: record };
     let encoded = serde_json::to_string(&event).unwrap();

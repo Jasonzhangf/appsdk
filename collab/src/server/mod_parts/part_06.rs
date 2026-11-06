@@ -389,10 +389,17 @@ fn handle_notification_subscribe(
 }
 
 fn handle_notification_status(server: &Server, worker_id: String, token: String) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
+    let route = match server_route_scope(server, &state) { Ok(route) => route, Err(error) => return Resp::err(error) };
+    let owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), &worker_id) {
+        Ok(Some(name)) => name, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: patrol owner has no current name"), Err(error) => return Resp::err(error),
+    };
     let mut subscriptions: Vec<&NotificationSubscription> = state
         .notification_subscriptions
         .values()
@@ -407,15 +414,11 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
     let mut project_board_patrol: Vec<(String, String, serde_json::Value)> = Vec::new();
     if is_current_master {
         for current_worker_id in state.workers.keys() {
-            let Some(current_owner_key) =
-                crate::server::state::board_patrol_current_owner_key(&state, current_worker_id)
-            else {
-                continue;
+            let current_owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), current_worker_id) {
+                Ok(Some(name)) => name, Ok(None) => continue, Err(error) => return Resp::err(error),
             };
-            let Some(eligible_task_ids) =
-                crate::server::state::board_patrol_eligible_task_ids(&state, current_worker_id)
-            else {
-                continue;
+            let eligible_task_ids = match state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), current_worker_id) {
+                Ok(Some(tasks)) => tasks, Ok(None) => continue, Err(error) => return Resp::err(error),
             };
             let owned_unclosed = crate::server::state::board_patrol_owned_unclosed_task_ids(
                 &state,
@@ -457,7 +460,6 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
             (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
         });
     }
-    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
     let owned_unclosed =
         crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let mut cancelled_tasks: Vec<String> = state
@@ -515,7 +517,7 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
                 json!({
                 "status": status,
                 "armed": status == "armed",
-                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "owner_key": owner_key,
                 "worker_id": subscription.worker_id,
                 "session_id": state.workers.get(&worker_id)
                     .and_then(|worker| worker.transport.as_ref())
@@ -541,7 +543,7 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
             None => json!({
                 "status": "missing",
                 "armed": false,
-                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "owner_key": owner_key,
                 "worker_id": worker_id,
                 "subscription_id": serde_json::Value::Null,
                 "event": "master-idle",
@@ -577,10 +579,17 @@ fn handle_notification_cancel(
     if event == "master-idle" && !task_ids.is_empty() {
         return Resp::err("--task-id is valid only for --event board-idle");
     }
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
+    let route = match server_route_scope(server, &state) { Ok(route) => route, Err(error) => return Resp::err(error) };
+    let owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), &worker_id) {
+        Ok(Some(name)) => name, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: patrol owner has no current name"), Err(error) => return Resp::err(error),
+    };
     if event == "master-idle" {
         let holder = match current_master_holder(server, &state) {
             Ok(master) => master,
@@ -599,7 +608,7 @@ fn handle_notification_cancel(
             return Resp::data(json!({
                 "event": "master-idle",
                 "subject": PROJECT_PATROL_SUBJECT,
-                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "owner_key": owner_key,
                 "subscription_id": subscription.id,
                 "status": "cancelled",
                 "changed": false,
@@ -663,7 +672,7 @@ fn handle_notification_cancel(
         return Resp::data(json!({
             "event": "master-idle",
             "subject": PROJECT_PATROL_SUBJECT,
-            "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+            "owner_key": owner_key,
             "subscription_id": subscription.id,
             "status": "cancelled",
             "changed": true,
@@ -672,7 +681,6 @@ fn handle_notification_cancel(
             "eligibility": eligibility,
         }));
     }
-    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
     let owned_unclosed =
         crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let mut next = state.cancelled_board_patrol_tasks.clone();
@@ -714,11 +722,17 @@ fn handle_notification_board_rearm(
     token: String,
     task_ids: Vec<String>,
 ) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
-    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
+    let route = match server_route_scope(server, &state) { Ok(route) => route, Err(error) => return Resp::err(error) };
+    let owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), &worker_id) {
+        Ok(Some(name)) => name, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: patrol owner has no current name"), Err(error) => return Resp::err(error),
+    };
     let owned_unclosed =
         crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let requested: Vec<String> = if task_ids.is_empty() {
@@ -840,11 +854,13 @@ fn handle_goal_schedule_reconcile_with_period(
     let Some(route_scope) = route_scope else {
         return Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING");
     };
-    let owns_name = state
-        .name_occupancies
-        .get(route_scope.project_scope_id.as_str())
-        .and_then(|names| names.get(&goal_owner))
-        .is_some_and(|holder| holder.worker_id == worker_id);
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let owns_name = match control.current_for_name(&route_scope.project_scope_id, &route_scope.app_scope_id, &goal_owner) {
+        Ok(slot) => slot.and_then(|slot| slot.active_binding()).is_some_and(|current| current.binding.agent_id.as_str() == worker_id),
+        Err(error) => return Resp::err(error),
+    };
     if !owns_name {
         return Resp::err(format!(
             "GOAL_SCHEDULE_OWNER_MISMATCH: caller does not own stable name {goal_owner}"
@@ -1688,60 +1704,42 @@ fn prepare_register_typed(
     }
 }
 
-/// Consume one prepared Register envelope and project its receipt. It never
-/// regenerates the nested identifiers.
-fn consume_prepared_register_typed(
-    server: &Server,
-    worker_id: &str,
-    transport: &SelectedTransport,
-    prepared: PreparedRegisterEnvelope,
-    approval: Option<&RegisterApprovalProof>,
-) -> Resp {
-    consume_register_typed(server, worker_id, transport, prepared, approval, None)
-}
-
 fn consume_register_typed(
     server: &Server,
     worker_id: &str,
     transport: &SelectedTransport,
     prepared: PreparedRegisterEnvelope,
-    approval: Option<&RegisterApprovalProof>,
     name_tmux_session_name: Option<String>,
+    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
 ) -> Resp {
     let registered_at = match &prepared.typed.command {
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
     };
     let command = prepared.typed.command.clone();
-    let committed = server.consume_prepared_register_with_approval(prepared, approval);
+    let committed = server.consume_register(prepared);
     match committed {
         Ok(outcome) => {
-            // The context owner hands its live-observed pane+cwd here so the
-            // very first name decision anchors on the pane instead of taking a
-            // pool name that the later context resolution would then inherit.
-            let name_resolution = match name_resolution::resolve_registered_name_with_authorization(
-                server,
-                worker_id,
-                outcome.receipt.operation_id.as_str(),
-                "register",
-                None,
-                None,
-                name_tmux_session_name,
-            ) {
-                Ok(resolution) => resolution,
-                Err(error) => {
-                    return Resp::err_data(
-                        error,
-                        json!({
-                            "command_id":outcome.receipt.command_id.as_str(),
-                            "operation_id":outcome.receipt.operation_id.as_str(),
-                            "registration_committed":true,
-                        }),
-                    )
-                }
+            // Map publication already chose the name. Registration never
+            // makes a second name or role decision after the business commit.
+            let name_resolution = (|| -> Result<(serde_json::Value, binding_slot::BindingControlSet), String> {
+                let map = crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
+                let TypedCommand::RegisterWorker { binding, .. } = &command;
+                let key = map.key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)?
+                    .ok_or("IDENTITY_MAP_NOT_FOUND: registration has no published mapping")?;
+                let result = json!({"outcome":"registered", "name":key.name,"session_id":binding.session_id});
+                Ok((result, map))
+            })();
+            let (name_resolution, control) = match name_resolution {
+                Ok(value) => value,
+                Err(error) => return Resp::err_data(error, json!({"registration_committed":true,
+                    "command_id":outcome.receipt.command_id.as_str(),"operation_id":outcome.receipt.operation_id.as_str()})),
             };
             let (role_brief, _) = {
                 let st = server.state.lock().unwrap();
-                (role_brief(server, &st, worker_id), ())
+                let brief = match role_brief(server, &st, &control, worker_id) {
+                    Ok(brief) => brief, Err(error) => return Resp::err_data(error, json!({"registration_committed":true})),
+                };
+                (brief, ())
             };
             Resp::data(json!({
                 "worker_id": worker_id,
@@ -1765,54 +1763,6 @@ fn consume_register_typed(
     }
 }
 
-/// Read the existing scoped Register owner. This never prepares, consumes,
-/// probes, or projects an invented command from a receipt.
-fn committed_register_readback(
-    server: &Server,
-    binding: &RuntimeBinding,
-    worker_id: &str,
-    token: &str,
-) -> Result<(global_state::CommandReceipt, SelectedTransport), String> {
-    let state = server.state.lock().unwrap();
-    if binding.agent_id.as_str() != worker_id
-        || state
-            .global
-            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
-            != Some(binding)
-    {
-        return Err("RECOVERY_RECONCILE_REQUIRED: committed staged binding changed".into());
-    }
-    let worker = state
-        .workers
-        .get(worker_id)
-        .ok_or("RECOVERY_RECONCILE_REQUIRED: committed staged worker missing")?;
-    if worker.token != token {
-        return Err("TOKEN_MISMATCH: staged readback credential does not own worker".into());
-    }
-    let transport = selected_transport_for_worker(worker)
-        .ok_or("RECOVERY_RECONCILE_REQUIRED: committed selected adaptor missing")?;
-    if transport.kind != TransportKind::Tmux || transport.tmux_endpoint != binding.tmux_endpoint {
-        return Err(
-            "RECOVERY_RECONCILE_REQUIRED: committed selected adaptor differs from binding".into(),
-        );
-    }
-    let receipt = state
-        .global
-        .command_receipts
-        .values()
-        .filter(|receipt| register_receipt_names_binding(receipt, binding))
-        .max_by_key(|receipt| (receipt.revision, receipt.sequence))
-        .ok_or("RECOVERY_RECONCILE_REQUIRED: exact committed Register receipt missing")?;
-    if receipt.outcome.get("scope") != Some(&json!(binding.route_scope())) {
-        return Err(
-            "RECOVERY_RECONCILE_REQUIRED: committed Register receipt scope missing or different"
-                .into(),
-        );
-    }
-    Ok((receipt.clone(), transport))
-}
-include!("part_06/register_typed.rs");
-
 /// Prepare then, before consume, hand the exact prepared envelope to
 /// `before_consume`. A hook error aborts the operation without consuming, so a
 /// failed outer durable binding can never dispatch Register.
@@ -1825,8 +1775,8 @@ fn register_typed_observed(
     project_scope: Option<ProjectScopeId>,
     app_scope: Option<AppServerId>,
     reuse_existing: bool,
-    register_approval: Option<&RegisterApprovalProof>,
     name_tmux_session_name: Option<String>,
+    name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
 ) -> Resp {
     let prepared = match prepare_register_typed(
@@ -1855,17 +1805,16 @@ fn register_typed_observed(
             worker_id,
             transport,
             prepared,
-            register_approval,
             name_tmux_session_name,
+            name_pane_anchor,
         );
-    clear_context_cancel_operation();
-    crate::server::clear_context_register_start_binding();
     response
 }
 
 /// Ordinary Create has already reserved an exact peer id. Its execution cwd
 /// may be a linked worktree; registration and route identity remain the main.
 pub(crate) fn register_created_peer(
+    manager: &ProjectRuntimeManager,
     server: &Server,
     worker_id: &str,
     token: &str,
@@ -1888,6 +1837,11 @@ pub(crate) fn register_created_peer(
         return Resp::err("PEER_LIFECYCLE_PEER_RESERVED");
     }
     let main = route.root.to_string_lossy().into_owned();
+    let mut effect_id = None;
+    let mut before_consume = |prepared: &PreparedRegisterEnvelope| {
+        manager.publish_register_control_before_consume(server, prepared, None, None, None)
+            .map(|id| { effect_id = Some(id); })
+    };
     let response = register_typed_observed(
         server,
         worker_id,
@@ -1899,27 +1853,13 @@ pub(crate) fn register_created_peer(
         false,
         None,
         None,
-        None,
+        Some(&mut before_consume),
     );
     if !response.ok {
         return response;
     }
-    if let Err(error) = commit_current_thread_route_for_runtime(
-        server,
-        server,
-        worker_id,
-        &main,
-        Some(&context.app_scope_id),
-    ) {
-        let cleanup = retire_runtime_binding_after_route_failure(
-            server,
-            worker_id,
-            &main,
-            Some(&context.app_scope_id),
-            worker_id,
-            "Create route publication failed",
-        );
-        return Resp::err(format!("{error}; route cleanup: {cleanup:?}"));
+    if let Err(error) = manager.consume_register_effect(effect_id.as_deref()) {
+        return Resp::err_data(format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"), response.data);
     }
     response
 }
@@ -2061,11 +2001,7 @@ pub(crate) fn retire_runtime_binding_after_route_failure(
         .lookup_binding_for(&route_scope, &binding_id)
         .cloned()
         .ok_or_else(|| format!("ROUTE_CLEANUP_INVALID: no binding exists for {worker_id}"))?;
-    let next_generation = binding.endpoint_generation.checked_add(1).ok_or_else(|| {
-        format!("ROUTE_CLEANUP_INVALID: endpoint generation overflow for {worker_id}")
-    })?;
     let mut retired = binding;
-    retired.endpoint_generation = next_generation;
     retired.native_thread_id = None;
     retired.tmux_endpoint = None;
     runtime
@@ -2137,57 +2073,6 @@ fn handle_register_with_app_scope_inner(
     )
 }
 
-/// The daemon-issued approval proof may admit the approved target's Register
-/// even when its credential is stale, but only for the exact target and route
-/// scope the proof names. The proof never substitutes for the real binding the
-/// reducer commits; it only relaxes the ordinary token-ownership check.
-fn approved_register_authorized(
-    proof: Option<&RegisterApprovalProof>,
-    worker_id: &str,
-    project_scope: Option<&ProjectScopeId>,
-    app_scope: Option<&AppServerId>,
-) -> bool {
-    match (proof, project_scope, app_scope) {
-        (Some(proof), Some(project_scope), Some(app_scope)) => {
-            proof.authorizes(worker_id, project_scope.as_str(), app_scope.as_str())
-        }
-        _ => false,
-    }
-}
-
-/// Recheck the exact approved incumbent fence at the Register owner boundary,
-/// immediately before effects. The proof records the committed incumbent the
-/// identity owner validated; if the reducer has since moved to another binding
-/// or generation, the approval is stale and must fail closed with the accepted
-/// typed conflict instead of committing an unapproved replacement.
-fn approved_register_fence_current(
-    state: &State,
-    proof: &RegisterApprovalProof,
-    project_scope: &ProjectScopeId,
-    app_scope: &AppServerId,
-) -> bool {
-    if proof.incumbent_binding_id.is_empty() {
-        return true;
-    }
-    let route_scope = RouteScope {
-        app_scope_id: app_scope.clone(),
-        project_scope_id: project_scope.clone(),
-    };
-    let Ok(binding_id) = BindingId::new(proof.incumbent_binding_id.clone()) else {
-        return false;
-    };
-    state
-        .global
-        .lookup_binding_for(&route_scope, &binding_id)
-        .is_some_and(|binding| {
-            binding.binding_id.as_str() == proof.incumbent_binding_id
-                && binding.endpoint_generation == proof.incumbent_endpoint_generation
-        })
-}
-
-/// Register owner with an optional outer-operation binder. When the binder is
-/// present, the outer `Validating` phase with the exact nested IDs is synced
-/// before the same prepared envelope is consumed.
 fn handle_register_with_app_scope_inner_bound(
     server: &Server,
     worker_id: String,
@@ -2275,53 +2160,11 @@ fn handle_register_with_app_scope_inner_bound(
                         && thread.as_deref() == selected.thread_id.as_deref()
                         && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
                 });
-        let approval = outer_binding.and_then(RegisterOuterBinding::approval);
-        let approved_register = approved_register_authorized(
-            approval,
-            &worker_id,
-            existing_project_scope.as_ref(),
-            app_scope.as_ref(),
-        );
-        if existing.token != token && !approved_register {
-            return Resp::err(format!(
-                "TOKEN_MISMATCH: worker {} is registered by another token",
-                worker_id
-            ));
-        }
-        // The proof only relaxes the token check. It must still name exactly
-        // the committed incumbent, or the approval is stale and the owner
-        // refuses before any prepare/consume.
         if existing.token != token {
-            let Some(proof) = approval else {
-                return Resp::err("APPROVAL_STALE_CONFLICT");
-            };
-            let (Some(project_scope), Some(app_scope)) =
-                (existing_project_scope.as_ref(), app_scope.as_ref())
-            else {
-                return Resp::err("APPROVAL_STALE_CONFLICT");
-            };
-            if !approved_register_fence_current(&st, proof, project_scope, app_scope) {
-                return Resp::err("APPROVAL_STALE_CONFLICT");
-            }
+            return Resp::err(format!("TOKEN_MISMATCH: worker {} is registered by another token", worker_id));
         }
-        let reuse_existing = same_runtime_key && !recover_existing && !approved_register;
+        let reuse_existing = same_runtime_key && !recover_existing;
         drop(st);
-        let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
-            Some(binding) => {
-                binding.bind_validating(prepared)?;
-                binding.arbitrate_owner_start()?;
-                binding.promote_after_start()
-            }
-            None => Ok(()),
-        };
-        let mut control_before = register_control_first;
-        let mut composed_before_consume = |prepared: &PreparedRegisterEnvelope| {
-            before_consume(prepared)?;
-            if let Some(control_before) = control_before.as_mut() {
-                control_before(prepared)?;
-            }
-            Ok(())
-        };
         let mut resp = register_typed_observed(
             server,
             &worker_id,
@@ -2331,10 +2174,10 @@ fn handle_register_with_app_scope_inner_bound(
             existing_project_scope,
             app_scope,
             reuse_existing,
-            outer_binding.and_then(RegisterOuterBinding::approval),
             outer_binding
                 .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
-            Some(&mut composed_before_consume),
+            outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            register_control_first,
         );
         if resp.ok {
             if reuse_existing {
@@ -2346,22 +2189,6 @@ fn handle_register_with_app_scope_inner_bound(
         return resp;
     }
     drop(st);
-    let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
-        Some(binding) => {
-            binding.bind_validating(prepared)?;
-            binding.arbitrate_owner_start()?;
-            binding.promote_after_start()
-        }
-        None => Ok(()),
-    };
-    let mut control_before = register_control_first;
-    let mut composed_before_consume = |prepared: &PreparedRegisterEnvelope| {
-        before_consume(prepared)?;
-        if let Some(control_before) = control_before.as_mut() {
-            control_before(prepared)?;
-        }
-        Ok(())
-    };
     register_typed_observed(
         server,
         &worker_id,
@@ -2371,9 +2198,9 @@ fn handle_register_with_app_scope_inner_bound(
         None,
         app_scope,
         false,
-        outer_binding.and_then(RegisterOuterBinding::approval),
         outer_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
-        Some(&mut composed_before_consume),
+        outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+        register_control_first,
     )
 }
 

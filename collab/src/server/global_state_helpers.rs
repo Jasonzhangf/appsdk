@@ -236,7 +236,6 @@ pub(super) fn validate_migration_receipt_identity(
     app_scope_id: &AppServerId,
     runtime_id: &RuntimeId,
     binding_id: &BindingId,
-    endpoint_generation: u64,
     operation_id: &OperationId,
     fencing_token: u64,
     committed_revision: u64,
@@ -251,12 +250,6 @@ pub(super) fn validate_migration_receipt_identity(
     validate_runtime_id(runtime_id)?;
     validate_binding_id(binding_id)?;
     validate_operation_id(operation_id)?;
-    if endpoint_generation == 0 {
-        return Err(StateError::invalid(
-            "migration endpoint generation",
-            "must be non-zero",
-        ));
-    }
     if fencing_token == 0 {
         return Err(StateError::invalid(
             "migration fencing token",

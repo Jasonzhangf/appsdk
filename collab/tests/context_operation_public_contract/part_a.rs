@@ -298,7 +298,7 @@ fn peer_lifecycle_u4_changed_intent_is_refused() {
     assert_eq!(query["result"]["update"]["intended_cwd"], cwd, "{query}");
 }
 
-// U5: immutable target identity fields cannot be replaced; a forged generation
+// U5: immutable target identity fields cannot be replaced; a forged binding
 // is refused before any host effect and creates no operation.
 #[test]
 fn peer_lifecycle_u5_immutable_target_fields_refuse_without_effect() {
@@ -306,8 +306,7 @@ fn peer_lifecycle_u5_immutable_target_fields_refuse_without_effect() {
     let target = lifecycle_target(&fixture, &identity);
     let cwd = canonical_root(&fixture);
     let mut tampered = target.clone();
-    let generation = tampered["endpoint_generation"].as_u64().unwrap();
-    tampered["endpoint_generation"] = json!(generation + 1);
+    tampered["binding_id"] = json!("forged-binding");
 
     let refused = lifecycle_update(
         &fixture,
@@ -490,22 +489,8 @@ fn peer_lifecycle_u8_cross_main_update_is_refused_without_effect() {
 // names the conflicting responsibility and no host effect occurs.
 #[test]
 fn peer_lifecycle_u8_responsibility_conflict_is_refused_without_effect() {
-    let (mut fixture, host, identity) = lifecycle_native_fixture("peer-u8-resp");
-    let worker_id = identity["worker_id"].as_str().unwrap().to_owned();
-    lifecycle_replay_events(
-        &mut fixture,
-        &identity,
-        &[json!({
-            "ev": "TaskCreated",
-            "task": {
-                "id": "peer-u8-task",
-                "owner": worker_id,
-                "created_by": worker_id,
-                "created_ms": 1,
-                "updated_ms": 1
-            }
-        })],
-    );
+    let (fixture, host, identity) = lifecycle_native_fixture("peer-u8-resp");
+    lifecycle_register_task(&fixture, &identity, "peer-u8-task");
     let target = lifecycle_target(&fixture, &identity);
     let cwd = canonical_root(&fixture);
     let refused = lifecycle_update(
@@ -562,20 +547,6 @@ fn json_stdout(output: &std::process::Output) -> Value {
     })
 }
 
-fn stable_surfaces(
-    fixture: &Fixture,
-    pane: &Pane,
-    operation_id: &str,
-) -> (Vec<Value>, Vec<u8>, [usize; 6], Value) {
-    let notification_state = fixture.run_ok(&["notify", "status"], Some(pane));
-    (
-        operation_records(&fixture.host_journal(), operation_id),
-        fs::read(fixture.host_routes()).unwrap_or_default(),
-        project_register_effect_counts(&fixture.project_journal()),
-        notification_state,
-    )
-}
-
 fn second_pane(fixture: &Fixture, label: &str, server_pid: u32) -> Pane {
     let output = tmux(
         &fixture.tmux_socket,
@@ -608,34 +579,6 @@ fn second_pane(fixture: &Fixture, label: &str, server_pid: u32) -> Pane {
         session_anchor: format!("session-{label}-{pane_id}"),
         thread_anchor: format!("thread-{label}-{pane_id}"),
     }
-}
-
-fn operation_records(path: &Path, operation_id: &str) -> Vec<Value> {
-    journal_operations(path, operation_id)
-}
-
-fn project_register_effect_counts(path: &Path) -> [usize; 6] {
-    let events = read_lines(path);
-    [
-        "CommandStarted",
-        "CommandCompleted",
-        "GlobalProjectRegistered",
-        "GlobalRuntimeBound",
-        "Registered",
-        "GlobalCurrentThreadRouteSet",
-    ]
-    .map(|event| events.iter().filter(|record| record["ev"] == event).count())
-}
-
-fn operation_line_lengths(path: &Path, operation_id: &str) -> Vec<u64> {
-    let bytes = fs::read(path).expect("read host operation journal");
-    bytes
-        .split_inclusive(|byte| *byte == b'\n')
-        .filter_map(|line| {
-            let record: Value = serde_json::from_slice(line).ok()?;
-            (record["operation_id"] == operation_id).then_some(line.len() as u64)
-        })
-        .collect()
 }
 
 fn context_args(
@@ -708,30 +651,6 @@ fn run_context_cli(
     fixture.command(&refs, pane)
 }
 
-fn spawn_context_cli(
-    fixture: &Fixture,
-    pane: Option<&Pane>,
-    operation_id: Option<&str>,
-    project: Option<&Path>,
-    app_scope: Option<&str>,
-    approve_identity: Option<&Value>,
-    approve_grant: Option<&Value>,
-    provide: Option<&Value>,
-    query: bool,
-) -> std::process::Child {
-    let args = context_args(
-        operation_id,
-        project,
-        app_scope,
-        approve_identity,
-        approve_grant,
-        provide,
-        query,
-    );
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    fixture.spawn_command(&refs, pane)
-}
-
 fn success_payload(output: &std::process::Output) -> Value {
     assert!(
         output.status.success(),
@@ -741,12 +660,6 @@ fn success_payload(output: &std::process::Output) -> Value {
     let payload = json_stdout(output);
     assert_eq!(payload["ok"], true, "{payload}");
     assert_eq!(payload["result"]["outcome"], "completed", "{payload}");
-    payload
-}
-
-fn typed_failure(output: &std::process::Output) -> Value {
-    let payload = json_stdout(output);
-    assert_eq!(payload["ok"], false, "{payload}");
     payload
 }
 
@@ -785,29 +698,10 @@ fn tmux_identity_facts(fixture: &Fixture, pane: &Pane) -> Value {
     })
 }
 
-fn approval_digest(approval: &Value, facts: &Value) -> String {
-    let mut approval = approval.clone();
-    if let Some(object) = approval.as_object_mut() {
-        object.remove("intent_digest");
-        object.remove("decided_by");
-        object.remove("approved_at_ms");
-    }
-    // The CLI sends native facts and an invocation PID. Placement is observed
-    // by the daemon after admission; it is not part of the submitted approval.
-    let mut facts = facts.clone();
-    facts.as_object_mut().unwrap().remove("tmux");
-    let normalized = json!({"approval": approval, "facts": facts});
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&normalized).expect("serialize approval digest"))
-    )
-}
-
 #[derive(Clone)]
 struct IdentityFence {
     worker_id: String,
     binding_id: String,
-    endpoint_generation: u64,
     identity_path: PathBuf,
     stale_identity_bytes: Vec<u8>,
 }
@@ -840,9 +734,6 @@ fn seed_stale_identity(
         .as_str()
         .expect("seed snapshot has binding id")
         .to_owned();
-    let endpoint_generation = binding["endpoint_generation"]
-        .as_u64()
-        .expect("seed snapshot has endpoint generation");
     let identity_path = fixture
         .host_state
         .join("identities")
@@ -864,56 +755,9 @@ fn seed_stale_identity(
     IdentityFence {
         worker_id,
         binding_id,
-        endpoint_generation,
         identity_path,
         stale_identity_bytes,
     }
-}
-
-fn identity_approval(fixture: &Fixture, pane: &Pane, fence: &IdentityFence, action: &str) -> Value {
-    let mut approval = json!({
-        "decision": "approved",
-        "decided_by": "user",
-        "target_identity": fence.worker_id,
-        "project_scope": canonical_root(fixture),
-        "app_scope_id": "appserver-cli",
-        "action": action,
-        "expected_incumbent": {
-            "binding_id": fence.binding_id,
-            "endpoint_generation": fence.endpoint_generation
-        },
-        "intent_digest": "sha256:placeholder",
-        "approved_at_ms": 1770000000000_i64
-    });
-    approval["intent_digest"] = json!(approval_digest(
-        &approval,
-        &tmux_identity_facts(fixture, pane)
-    ));
-    approval
-}
-
-fn grant_approval(
-    fixture: &Fixture,
-    pane: &Pane,
-    fence: &IdentityFence,
-    expected_grant: &Value,
-) -> Value {
-    let mut approval = json!({
-        "decision": "approved",
-        "decided_by": "user",
-        "target_identity": fence.worker_id,
-        "project_scope": canonical_root(fixture),
-        "app_scope_id": "appserver-cli",
-        "action": "replace_master_grant",
-        "expected_grant": expected_grant,
-        "intent_digest": "sha256:placeholder",
-        "approved_at_ms": 1770000000000_i64
-    });
-    approval["intent_digest"] = json!(approval_digest(
-        &approval,
-        &tmux_identity_facts(fixture, pane)
-    ));
-    approval
 }
 
 fn master_status(fixture: &Fixture, pane: &Pane) -> Value {
@@ -925,51 +769,4 @@ fn master_status(fixture: &Fixture, pane: &Pane) -> Value {
         object.remove("workspace");
     }
     master
-}
-
-fn binding_event_count(path: &Path, binding_id: &str, endpoint_generation: u64) -> usize {
-    read_lines(path)
-        .into_iter()
-        .filter(|record| {
-            record["ev"] == "GlobalRuntimeBound"
-                && record["binding"]["binding_id"] == binding_id
-                && record["binding"]["endpoint_generation"] == json!(endpoint_generation)
-        })
-        .count()
-}
-
-fn grant_event_count(path: &Path, binding_id: &str) -> usize {
-    read_lines(path)
-        .into_iter()
-        .filter(|record| {
-            record["ev"] == "GlobalMasterGranted" && record["grant"]["binding_id"] == binding_id
-        })
-        .count()
-}
-
-fn grant_replacement_start_count(path: &Path, operation_id: &str) -> usize {
-    read_lines(path)
-        .into_iter()
-        .filter(|record| {
-            record["ev"] == "GlobalMasterGrantReplacementStarted"
-                && record["intent"]["operation_id"] == operation_id
-        })
-        .count()
-}
-
-fn grant_replacement_completed_count(path: &Path, operation_id: &str) -> usize {
-    read_lines(path)
-        .into_iter()
-        .filter(|record| {
-            record["ev"] == "GlobalMasterGrantReplacementCompleted"
-                && record["receipt"]["operation_id"] == operation_id
-        })
-        .count()
-}
-
-fn thread_route_event_count(path: &Path) -> usize {
-    read_lines(path)
-        .into_iter()
-        .filter(|record| record["ev"] == "GlobalCurrentThreadRouteSet")
-        .count()
 }

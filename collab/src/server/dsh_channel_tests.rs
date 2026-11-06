@@ -462,7 +462,6 @@ fn commit_dsh_rebind_fixture(server: &Arc<Server>, gateway: &Gateway) -> Runtime
         AgentId::new(agent_id).unwrap(),
         RuntimeId::new(runtime_id).unwrap(),
         BindingId::new("binding-dsh-rebind").unwrap(),
-        1,
         Some(crate::identity::SessionId::new(session_id).unwrap()),
         Some(NativeThreadId::new(agent_id).unwrap()),
     )
@@ -508,6 +507,17 @@ fn commit_dsh_rebind_fixture(server: &Arc<Server>, gateway: &Gateway) -> Runtime
         },
     ]);
     server.commit_checked(&events).unwrap();
+    let transport = server.state.lock().unwrap().workers[agent_id]
+        .transport
+        .clone()
+        .unwrap();
+    binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .commit(binding_store::ControlChange::Commit {
+            key: binding_slot::IdentityBindingKey::new(project_scope, app_scope, "Alice"),
+            value: binding_slot::BindingValue::new(binding.clone(), transport),
+            expected_generation: None,
+        })
+        .unwrap();
     binding
 }
 
@@ -581,7 +591,7 @@ fn dsh_reconcile_unknown_agent_retires_binding_and_stops_retry() {
         .global
         .lookup_binding_for(&saved.route_scope(), &saved.binding_id)
         .expect("the retired binding remains durable history");
-    assert_eq!(retired.endpoint_generation, saved.endpoint_generation + 1);
+    assert_eq!(retired.agent_id, saved.agent_id);
     assert!(retired.native_thread_id.is_none());
     assert!(retired.tmux_endpoint.is_none());
     assert!(state.workers.contains_key("dsh-rebind-agent"));
@@ -1153,7 +1163,8 @@ fn a_dsh_route_is_reverified_by_a_fresh_challenge_not_a_pane_compare() {
 
 // ------------------------------------------- real registration and wake entry
 
-/// Register a dsh peer through the real registration entry point.
+/// Validate the real gateway candidate, then seed the committed current owner.
+/// Public Context registration is covered by dsh_master_authority_cli.
 fn register_dsh(
     server: &Server,
     worker_id: &str,
@@ -1161,18 +1172,26 @@ fn register_dsh(
     runtime_id: &str,
     agent_id: &str,
 ) -> Resp {
-    handle_register_with_app_scope(
+    let selected = match validate_transport_candidates(
         server,
-        worker_id.into(),
-        format!("token-{worker_id}"),
-        server.root.display().to_string(),
-        Some(crate::identity::AppServerId::new("tui-default").unwrap()),
-        Some(TransportCandidates {
+        &TransportCandidates {
             desktop_bridge: None,
             appserver: None,
             tmux: None,
             dsh: Some(candidate_ids(socket, &server.root, runtime_id, agent_id)),
-        }),
+        },
+        &server.root.display().to_string(),
+    ) {
+        Ok(selected) => selected,
+        Err(error) => return Resp::err(error),
+    };
+    crate::server::peer_tests::seed_committed_owner(
+        server,
+        worker_id,
+        &format!("token-{worker_id}"),
+        &selected,
+        &server.root.display().to_string(),
+        Some(AppServerId::new("tui-default").unwrap()),
     )
 }
 
@@ -1335,13 +1354,7 @@ fn a_dsh_master_reconnect_is_not_fenced_as_a_foreign_promotion() {
     let server = test_server(&root);
     let registered = register_dsh(&server, "dsh-master", &gateway.socket, "rt-1", "ses-1");
     assert!(registered.ok, "{registered:?}");
-    let promoted = handle_master_promote(
-        &server,
-        "dsh-master".into(),
-        "token-dsh-master".into(),
-        "user approved dsh-master".into(),
-    );
-    assert!(promoted.ok, "{promoted:?}");
+    peer_tests::promote_master(&server, "dsh-master", "user approved dsh-master");
 
     let reconnected = register_dsh(&server, "dsh-master", &gateway.socket, "rt-1", "ses-1");
     assert!(
@@ -1517,28 +1530,21 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
         "a dsh peer must re-register at its new address: {moved:?}"
     );
 
-    // The journal is the durable record of what the server believes.
-    let journal = std::fs::read_to_string(server.journal_path.clone()).unwrap();
-    let registered = journal
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| event["ev"] == "Registered" && event["worker"]["id"] == "dsh-moved")
-        .collect::<Vec<_>>();
+    let loaded = current_state::load(&server.state_path, false).unwrap();
+    let current = loaded.workers["dsh-moved"].transport.as_ref().unwrap();
+    assert_eq!(current.namespace.as_deref(), Some("rt-2"));
     assert_eq!(
-        registered.len(),
-        2,
-        "each register must be its own event: {journal}"
+        current.endpoint.as_deref(),
+        Some(format!("unix://{}", new_gateway.socket.display()).as_str())
     );
-    assert_eq!(registered[0]["worker"]["transport"]["namespace"], "rt-1");
-    assert_eq!(
-        registered[1]["worker"]["transport"]["namespace"], "rt-2",
-        "the re-register must replace the dead runtime id"
-    );
-    assert_eq!(
-        registered[1]["worker"]["transport"]["endpoint"],
-        format!("unix://{}", new_gateway.socket.display()),
-        "the re-register must replace the dead control socket"
-    );
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let mapped = control
+        .active_values()
+        .find(|value| value.binding.agent_id.as_str() == "dsh-moved")
+        .unwrap();
+    assert_eq!(&mapped.transport, current);
 
     // The live effect: a wake now reaches the new socket and not the dead one.
     let subscription = handle_notification_subscribe(

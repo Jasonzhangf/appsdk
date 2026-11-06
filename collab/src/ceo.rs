@@ -21,6 +21,10 @@ pub struct CeoBootstrapRecord {
     pub profile: String,
     pub tmux_socket: String,
     pub tmux_session: String,
+    #[serde(default)]
+    pub approved_server_pid: Option<u32>,
+    #[serde(default)]
+    pub approved_session_id: Option<String>,
     pub requested_by: String,
     pub requested_workspace: String,
     pub requested_app_scope: String,

@@ -1,13 +1,10 @@
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct State {
     pub pending_project_resets: std::collections::BTreeMap<String, bool>,
-    /// Monotonic in-memory reducer revision and journal sequence.  These are
-    /// not business payload and are advanced only by the resident writer.
+    /// Current mutation counters, advanced only by the resident writer.
     pub revision: u64,
     pub sequence: u64,
-    /// A failed journal write makes the in-memory reducer unsafe to mutate.
-    /// Keep the exact first failure so admission can fail closed.
-    pub journal_poison: Option<String>,
     pub master_wake: MasterWakeAccumulator,
     pub keepalives: HashMap<String, super::keepalive::Record>,
     pub subagents: HashMap<String, crate::subagent::Record>,
@@ -17,7 +14,6 @@ pub struct State {
     pub responsibility_fences: HashMap<String, ResponsibilityFence>,
     pub peer_lifecycle_operations: HashMap<String, PeerLifecycleOperationRecord>,
     pub workers: HashMap<String, WorkerRec>,
-    pub worker_names: HashMap<String, String>,
     pub name_occupancies:
         HashMap<String, HashMap<String, crate::server::name_state::NameOccupancy>>,
     /// Per-project/name durable high watermark, including released names.
@@ -30,7 +26,6 @@ pub struct State {
         HashMap<String, HashMap<String, crate::board::WorkflowTemplateOverride>>,
     /// Project-level default policy keyed by exact `work_kind`.
     pub project_work_policy: HashMap<String, crate::board::WorkPolicy>,
-    pub name_recoveries: HashMap<String, crate::server::name_state::NameRecoveryPending>,
     pub agent_presence:
         HashMap<String, HashMap<String, crate::server::name_state::AgentPresenceRecord>>,
     pub agent_activity:
@@ -41,7 +36,7 @@ pub struct State {
     /// daemon-owned control record; message bodies never carry it.
     pub reply_obligations: HashMap<String, ReplyObligation>,
     pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
-    pub mailbox_handoffs: Vec<crate::server::name_mailbox::MailboxHandoff>,
+    pub mailbox_handoff_wakes: HashMap<String, u32>,
     /// Per-external-conversation default delivery target, keyed by
     /// `<channel>:<channel-instance>:<conversation>`. Control state only;
     /// never grants identity.
@@ -64,6 +59,8 @@ pub struct State {
     /// Last native attempt accepted for a durable message, if any.
     pub notification_delivery_accepted: HashMap<String, i64>,
     pub notification_delivery_evidence: HashMap<String, serde_json::Value>,
+    pub(crate) notification_delivery_bindings:
+        HashMap<String, super::notification_contract::SelectedDeliveryBinding>,
     pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub board_details: HashMap<String, crate::board::BoardTaskDetails>,
@@ -76,8 +73,7 @@ pub struct State {
     pub board_patrol_notice_ids: std::collections::BTreeSet<String>,
     /// Canonical CEO progress coalescing and report acknowledgement state.
     /// Only the host runtime writes it; authorization, grant eligibility and
-    /// clock ownership belong to the later caller. Initialize with the typed
-    /// default so replay and snapshot restore the exact helper state.
+    /// clock ownership belong to the caller. Persist only the current helper state.
     pub ceo_report_state: crate::ceo_report_state::CeoReportState,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
@@ -96,13 +92,6 @@ pub struct State {
     pub ceo_grant: Option<crate::ceo::CeoGrant>,
     /// Durable master-bootstrap launch intents keyed by operation id.
     pub ceo_bootstraps: HashMap<String, crate::ceo::CeoBootstrapRecord>,
-    /// Legacy journal projection kept for wire/replay compatibility.  Typed
-    /// command idempotency is owned by `global.command_receipts`; this map is
-    /// updated from the same committed event and is never consulted first.
-    pub command_receipts: HashMap<String, CommandReceipt>,
-    /// Keep the legacy event shape when compacting an old journal receipt.
-    /// Modern command transactions retain their Started/Completed framing.
-    legacy_command_ids: HashSet<String>,
     pub global: super::global_state::GlobalState,
     pub master_worker_id: Option<String>,
     pub master_assigned_by: Option<String>,
@@ -129,8 +118,7 @@ fn has_current_master_grant(state: &State, worker_id: &str, target: &str) -> boo
                         &grant.binding_id,
                     )
                     .is_some_and(|binding| {
-                        binding.endpoint_generation == grant.endpoint_generation
-                            && binding.agent_id == grant.agent_id
+                        binding.agent_id == grant.agent_id
                             && binding
                                 .native_thread_id
                                 .as_ref()
@@ -154,9 +142,7 @@ mod state_impl;
 
 pub(crate) use state_impl::board_patrol_current_owner_key;
 pub(crate) use state_impl::board_patrol_eligible_task_ids;
-pub(crate) use state_impl::board_patrol_notice_is_current;
 pub(crate) use state_impl::board_patrol_owned_unclosed_task_ids;
-pub(crate) use state_impl::board_patrol_owner_key;
 
 #[cfg(test)]
 #[path = "../state_tests.rs"]

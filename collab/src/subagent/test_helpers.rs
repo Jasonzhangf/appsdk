@@ -486,9 +486,11 @@ fn launch(
         }
     };
     let prompt = child_prompt(record, &role_brief)?;
-    if let Err(error) =
-        crate::identity::persist_registration(&scope, &mut ident, runtime, transport.clone())
-    {
+    if let Err(error) = crate::scope::HostPaths::resolve().and_then(|paths| {
+        crate::identity::persist_current_binding_at(
+            &paths, &scope, &mut ident, runtime, transport.clone(),
+        )
+    }) {
         record.thread_id = None;
         let archive_result = crate::client::adapters::codex_app_server::archive_thread(
             &parent_transport,

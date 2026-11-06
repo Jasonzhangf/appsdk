@@ -1,370 +1,95 @@
-    #[test]
-    fn an_equal_generation_address_change_is_still_rejected_for_a_live_incumbent() {
-        // "An address change must raise the generation" is the second invariant
-        // C8 must not weaken.  Both owners enforce it: the route tombstone
-        // requires a strictly greater generation, and the runtime ledger
-        // rejects an equal generation as a different runtime at the same
-        // generation.
-        let scope = project_scope();
-        let mut state = GlobalState::default();
-        state
-            .register_project(registration(&scope, "app-one"))
-            .unwrap();
-        let live = route_at(
-            &scope,
-            "app-one",
-            "runtime-eq",
-            "binding-eq",
-            7,
-            "session-eq-old",
-            "thread-eq-old",
-        );
-        state.bind_runtime(live.clone()).unwrap();
-        state.set_current_thread_route(live).unwrap();
+#[test]
+fn an_unregistered_project_incumbent_is_the_declared_non_resident_boundary() {
+    let scope = project_scope();
+    let mut state = GlobalState::default();
+    let incumbent = route_at(&scope, "app-one", "runtime-non-resident", "binding-non-resident",
+        "session-nr-old", "thread-nr-old");
+    state.set_current_thread_route(incumbent).unwrap();
+    let takeover = route_at(&scope, "app-one", "runtime-non-resident-new", "binding-non-resident",
+        "session-nr-new", "thread-nr-new");
+    state.set_current_thread_route(takeover.clone()).unwrap();
+    assert_eq!(state.lookup_current_thread_route(
+        takeover.session_id.as_ref().unwrap(), takeover.native_thread_id.as_ref().unwrap()), Some(&takeover));
+    state.validate().unwrap();
+}
 
-        let equal_route = route_at(
-            &scope,
-            "app-one",
-            "runtime-eq",
-            "binding-eq",
-            7,
-            "session-eq-new",
-            "thread-eq-new",
-        );
-        assert!(matches!(
-            state.set_current_thread_route(equal_route),
-            Err(StateError::StaleBinding {
-                expected_generation: 7,
-                observed_generation: 7,
-                ..
-            })
-        ));
-        assert!(matches!(
-            state.bind_runtime(route_at(
-                &scope,
-                "app-one",
-                "runtime-eq-other",
-                "binding-eq",
-                7,
-                "session-eq-old",
-                "thread-eq-old",
-            )),
-            Err(StateError::BindingConflict(_))
-        ));
-        state.validate().unwrap();
-    }
+#[test]
+fn rebinding_an_address_after_tombstoning_drops_the_stale_tombstone() {
+    let scope = project_scope();
+    let mut state = GlobalState::default();
+    state.register_project(registration(&scope, "app-one")).unwrap();
+    let first = route_at(&scope, "app-one", "runtime-one", "binding-one", "session-first", "thread-first");
+    let second = route_at(&scope, "app-one", "runtime-one", "binding-one", "session-second", "thread-second");
+    state.bind_runtime(first.clone()).unwrap();
+    state.set_current_thread_route(first.clone()).unwrap();
+    state.bind_runtime(second.clone()).unwrap();
+    state.set_current_thread_route(second).unwrap();
+    state.bind_runtime(first.clone()).unwrap();
+    state.set_current_thread_route(first.clone()).unwrap();
+    assert!(state.lookup_current_thread_route_tombstone(
+        first.session_id.as_ref().unwrap(), first.native_thread_id.as_ref().unwrap()).is_none());
+    state.validate().unwrap();
+}
 
-    #[test]
-    fn a_live_incumbent_route_still_tombstones_a_higher_generation_takeover() {
-        // The normal upgrade path keeps its retirement record, so a caller on
-        // the retired address still gets the explicit stale error.
-        let scope = project_scope();
-        let mut state = GlobalState::default();
-        state
-            .register_project(registration(&scope, "app-one"))
-            .unwrap();
-        let live = route_at(
-            &scope,
-            "app-one",
-            "runtime-live",
-            "binding-live",
-            7,
-            "session-upgrade-old",
-            "thread-upgrade-old",
-        );
-        state.bind_runtime(live.clone()).unwrap();
-        state.set_current_thread_route(live).unwrap();
+#[test]
+fn command_receipts_are_host_wide_and_idempotent() {
+    let mut state = GlobalState::default();
+    let first = state.record_command(CommandId::new("command-one").unwrap(),
+        OperationId::new("operation-one").unwrap(), serde_json::json!({"ok":true})).unwrap();
+    let before = state.version();
+    let repeated = state.record_command(CommandId::new("command-one").unwrap(),
+        OperationId::new("operation-one").unwrap(), serde_json::json!({"ok":true})).unwrap();
+    assert_eq!(first, repeated);
+    assert_eq!(state.version(), before);
+    assert!(matches!(state.record_command(CommandId::new("command-one").unwrap(),
+        OperationId::new("operation-two").unwrap(), Value::Null), Err(StateError::CommandIdReuse { .. })));
+    state.validate().unwrap();
+}
 
-        let takeover = route_at(
-            &scope,
-            "app-one",
-            "runtime-live",
-            "binding-live",
-            8,
-            "session-upgrade-new",
-            "thread-upgrade-new",
-        );
-        state.bind_runtime(takeover.clone()).unwrap();
-        state.set_current_thread_route(takeover).unwrap();
+#[test]
+fn stale_pane_from_a_previous_tmux_server_does_not_claim_the_reissued_pane() {
+    let scope = project_scope();
+    let mut state = GlobalState::default();
+    state.register_project(registration(&scope, "app-one")).unwrap();
+    let mut stale = binding(&scope, "app-one", "agent-one", "runtime-stale", "binding-stale");
+    stale.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
+        socket_path: "/tmp/collab-pane-reuse.sock".into(), server_pid: 11,
+        tmux_session_id: "$1".into(), pane_id: "%2".into(), pane_pid: 33,
+        codex_session_id: None, codex_thread_id: None,
+    });
+    state.bind_runtime(stale.clone()).unwrap();
+    state.set_current_thread_route(stale.clone()).unwrap();
+    let observed = crate::proto::TmuxEndpoint {
+        server_pid: 12, tmux_session_id: "$5".into(), pane_pid: 44,
+        ..stale.tmux_endpoint.clone().unwrap()
+    };
+    assert!(state.tmux_pane_route_claimants(&observed).is_empty());
+    assert_eq!(state.lookup_tmux_route(&observed), Some(&stale));
+    state.validate().unwrap();
+}
 
-        let tombstone = state
-            .lookup_current_thread_route_tombstone(
-                &SessionId::new("session-upgrade-old").unwrap(),
-                &NativeThreadId::new("thread-upgrade-old").unwrap(),
-            )
-            .expect("a live incumbent keeps its tombstone");
-        assert_eq!(tombstone.rebound_to.endpoint_generation, 8);
-        state.validate().unwrap();
-    }
-
-    #[test]
-    fn an_unregistered_project_incumbent_is_the_declared_non_resident_boundary() {
-        // The orphan criterion asks THIS reducer's project map.  The host
-        // reducer holds no entry at all for a non-resident project, so it
-        // cannot tell a live incumbent from an orphan there and skips the
-        // tombstone.  This test pins that declared boundary rather than leaving
-        // it to inference.  Generation monotonicity for such a project is owned
-        // by bind_runtime in the owning runtime.
-        let scope = project_scope();
-        let mut state = GlobalState::default();
-        let incumbent = route_at(
-            &scope,
-            "app-one",
-            "runtime-non-resident",
-            "binding-non-resident",
-            7,
-            "session-nr-old",
-            "thread-nr-old",
-        );
-        state.set_current_thread_route(incumbent).unwrap();
-
-        let takeover = route_at(
-            &scope,
-            "app-one",
-            "runtime-non-resident-new",
-            "binding-non-resident",
-            1,
-            "session-nr-new",
-            "thread-nr-new",
-        );
-        state.set_current_thread_route(takeover).unwrap();
-        state.validate().unwrap();
-    }
-
-    #[test]
-    fn bind_runtime_still_rejects_a_lower_generation_over_a_live_binding() {
-        // The generation monotonicity owner is the owning runtime's ledger, not
-        // the route tombstone, so C8 leaves it untouched.
-        let scope = project_scope();
-        let mut state = GlobalState::default();
-        state
-            .register_project(registration(&scope, "app-one"))
-            .unwrap();
-        state
-            .bind_runtime(binding(
-                &scope,
-                "app-one",
-                "agent-one",
-                "runtime-one",
-                "binding-one",
-                7,
-            ))
-            .unwrap();
-        assert!(matches!(
-            state.bind_runtime(binding(
-                &scope,
-                "app-one",
-                "agent-one",
-                "runtime-one",
-                "binding-one",
-                1,
-            )),
-            Err(StateError::StaleBinding {
-                expected_generation: 7,
-                observed_generation: 1,
-                ..
-            })
-        ));
-        state.validate().unwrap();
-    }
-
-    #[test]
-    fn rebinding_an_address_after_tombstoning_drops_the_stale_tombstone() {
-        let scope = project_scope();
-        let mut state = GlobalState::default();
-        state
-            .register_project(registration(&scope, "app-one"))
-            .unwrap();
-        let first_session = SessionId::new("session-first").unwrap();
-        let first_thread = NativeThreadId::new("thread-first").unwrap();
-        let second_session = SessionId::new("session-second").unwrap();
-        let second_thread = NativeThreadId::new("thread-second").unwrap();
-        let first = RuntimeBinding::new_with_session(
-            scope.clone(),
-            app_scope("app-one"),
-            AgentId::new("agent-one").unwrap(),
-            RuntimeId::new("runtime-one").unwrap(),
-            BindingId::new("binding-one").unwrap(),
-            1,
-            Some(first_session.clone()),
-            Some(first_thread.clone()),
-        )
-        .unwrap();
-        let second = RuntimeBinding::new_with_session(
-            scope.clone(),
-            app_scope("app-one"),
-            AgentId::new("agent-one").unwrap(),
-            RuntimeId::new("runtime-one").unwrap(),
-            BindingId::new("binding-one").unwrap(),
-            2,
-            Some(second_session.clone()),
-            Some(second_thread.clone()),
-        )
-        .unwrap();
-        let rebound = RuntimeBinding::new_with_session(
-            scope.clone(),
-            app_scope("app-one"),
-            AgentId::new("agent-one").unwrap(),
-            RuntimeId::new("runtime-one").unwrap(),
-            BindingId::new("binding-one").unwrap(),
-            3,
-            Some(first_session.clone()),
-            Some(first_thread.clone()),
-        )
-        .unwrap();
-
-        state.bind_runtime(first.clone()).unwrap();
-        state.set_current_thread_route(first).unwrap();
-        state.bind_runtime(second.clone()).unwrap();
-        state.set_current_thread_route(second).unwrap();
-        state.bind_runtime(rebound.clone()).unwrap();
-        state.set_current_thread_route(rebound).unwrap();
-
-        assert!(state
-            .lookup_current_thread_route_tombstone(&first_session, &first_thread)
-            .is_none());
-        state.validate().unwrap();
-    }
-
-    #[test]
-    fn command_receipts_are_host_wide_and_idempotent() {
-        let mut state = GlobalState::default();
-        let first = state
-            .record_command(
-                CommandId::new("command-one").unwrap(),
-                OperationId::new("operation-one").unwrap(),
-                serde_json::json!({"ok": true}),
-            )
-            .unwrap();
-        let before = state.version();
-        let replay = state
-            .record_command(
-                CommandId::new("command-one").unwrap(),
-                OperationId::new("operation-one").unwrap(),
-                serde_json::json!({"ok": true}),
-            )
-            .unwrap();
-        assert_eq!(first, replay);
-        assert_eq!(state.version(), before);
-        assert!(matches!(
-            state.record_command(
-                CommandId::new("command-one").unwrap(),
-                OperationId::new("operation-two").unwrap(),
-                Value::Null,
-            ),
-            Err(StateError::CommandIdReuse { .. })
-        ));
-        state.validate().unwrap();
-    }
-
-    #[test]
-    fn stale_pane_from_a_previous_tmux_server_does_not_claim_the_reissued_pane() {
-        let scope = project_scope();
-        let mut state = GlobalState::default();
-        state
-            .register_project(registration(&scope, "app-one"))
-            .unwrap();
-
-        let mut stale = binding(
-            &scope,
-            "app-one",
-            "agent-one",
-            "runtime-stale",
-            "binding-stale",
-            1,
-        );
-        stale.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
-            socket_path: "/tmp/collab-pane-reuse.sock".into(),
-            server_pid: 11,
-            tmux_session_id: "$1".into(),
-            pane_id: "%2".into(),
-            pane_pid: 33,
-            codex_session_id: None,
-            codex_thread_id: None,
-        });
-        state.bind_runtime(stale.clone()).unwrap();
-        state.set_current_thread_route(stale.clone()).unwrap();
-
-        // The tmux server restarted and reissued pane %2 from a new process.
-        let observed = crate::proto::TmuxEndpoint {
-            server_pid: 12,
-            tmux_session_id: "$5".into(),
-            pane_pid: 44,
-            ..stale.tmux_endpoint.clone().unwrap()
-        };
-        assert!(
-            state.tmux_pane_route_claimants(&observed).is_empty(),
-            "a route from the previous tmux server instance must not own the reissued pane"
-        );
-        // The persisted address still resolves; only ownership distinguishes
-        // the server instance.
-        assert_eq!(state.lookup_tmux_route(&observed), Some(&stale));
-        state.validate().unwrap();
-    }
-
-    #[test]
-    fn malformed_retired_pane_binding_is_retired_without_a_tombstone() {
-        let scope = project_scope();
-        let mut state = GlobalState::default();
-        state
-            .register_project(registration(&scope, "app-one"))
-            .unwrap();
-
-        // A pane-only binding predates the native session/thread anchors that a
-        // tombstone needs to describe the retired address.
-        let mut malformed = binding(
-            &scope,
-            "app-one",
-            "agent-one",
-            "runtime-malformed",
-            "binding-malformed",
-            1,
-        );
-        malformed.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
-            socket_path: "/tmp/collab-malformed.sock".into(),
-            server_pid: 11,
-            tmux_session_id: "$1".into(),
-            pane_id: "%1".into(),
-            pane_pid: 22,
-            codex_session_id: None,
-            codex_thread_id: None,
-        });
-        assert!(malformed.session_id.is_none());
-        assert!(malformed.native_thread_id.is_none());
-        state.bind_runtime(malformed.clone()).unwrap();
-        state.set_current_thread_route(malformed.clone()).unwrap();
-
-        let replacement = route_at(
-            &scope,
-            "app-one",
-            "runtime-malformed",
-            "binding-malformed",
-            2,
-            "session-malformed",
-            "thread-malformed",
-        );
-        state.bind_runtime(replacement.clone()).unwrap();
-        state
-            .set_current_thread_route(replacement.clone())
-            .expect("a malformed retired pane binding must not fail the route transition");
-
-        assert!(
-            state
-                .current_thread_routes
-                .values()
-                .all(|live| live != &malformed),
-            "the malformed route must still be retired"
-        );
-        assert!(
-            state.current_thread_route_tombstones.is_empty(),
-            "a binding without session/thread identity cannot supply a valid tombstone"
-        );
-        assert_eq!(
-            state.lookup_current_thread_route(
-                replacement.session_id.as_ref().unwrap(),
-                replacement.native_thread_id.as_ref().unwrap(),
-            ),
-            Some(&replacement)
-        );
-        state.validate().unwrap();
-    }
+#[test]
+fn malformed_retired_pane_binding_is_retired_without_a_tombstone() {
+    let scope = project_scope();
+    let mut state = GlobalState::default();
+    state.register_project(registration(&scope, "app-one")).unwrap();
+    let mut malformed = binding(&scope, "app-one", "agent-one", "runtime-malformed", "binding-malformed");
+    malformed.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
+        socket_path: "/tmp/collab-malformed.sock".into(), server_pid: 11,
+        tmux_session_id: "$1".into(), pane_id: "%1".into(), pane_pid: 22,
+        codex_session_id: None, codex_thread_id: None,
+    });
+    assert!(malformed.session_id.is_none());
+    assert!(malformed.native_thread_id.is_none());
+    state.bind_runtime(malformed.clone()).unwrap();
+    state.set_current_thread_route(malformed.clone()).unwrap();
+    let replacement = route_at(&scope, "app-one", "runtime-malformed", "binding-malformed",
+        "session-malformed", "thread-malformed");
+    state.bind_runtime(replacement.clone()).unwrap();
+    state.set_current_thread_route(replacement.clone()).unwrap();
+    assert!(state.current_thread_routes.values().all(|live| live != &malformed));
+    assert!(state.current_thread_route_tombstones.is_empty());
+    assert_eq!(state.lookup_current_thread_route(
+        replacement.session_id.as_ref().unwrap(), replacement.native_thread_id.as_ref().unwrap()), Some(&replacement));
+    state.validate().unwrap();
+}

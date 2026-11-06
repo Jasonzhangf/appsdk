@@ -296,9 +296,63 @@
         "version": 2
       },
       "version": 11
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "你另外把发送身份的限制取消，任何两个对象发送不需要限制",
+          "role": "user",
+          "source": "Codex chat 01a1ae11-88d4-7d61-915e-aec1d7b348fc: direct correction following peer-to-master send rejection"
+        },
+        "base_version": 5,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-unrestricted-send-20261105",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab 注册由 agent 主动发起并报告真实能力事实，daemon 核实并选择自身可调用的既有 adaptor，报告与 daemon 不一致时以 daemon 事实为准。tmux 是基础注册成功因素：当前 pane 真实存在且基础通信能力通过时，一次 context 必须注册成功，不受未选用 AppServer 字段、旧 peer/token/binding 冲突、重复 probe、二次 challenge 或人工批准阻断。Desktop 复用已独立通过的正式 native 通信能力，但必须证实该能力可由所属 daemon adaptor 合法调用；不能以 agent 代发或 registered 字段代替真实能力。Desktop 唯一能力绑定使用现有 project/app scope 与实际 host/thread，pipe 是连接位置，peer 名称可覆盖。覆盖不得继承旧 master grant，不得丢失旧 task/message/merge/claim 或未结责任，不影响无关 scope 或其他 master。身份及角色、稳定 anchor 和所选 adaptor 绑定持久化；普通身份恢复和 daemon 重启恢复不重新 Register 或验证通信，通信可达性单独呈现。仅通信不通且显式手动恢复时对恢复路径执行回环，失败不撤销持久身份或角色。已认证 peer/master 无未结责任时可自行注销 Collab 身份而不关闭或归档宿主；注销后可重建默认 peer 并真实通信，不复活已退役身份或继承旧 master。未结责任须明确处理并保留。context 返回当前身份与项目全体 peer/master 状态。用户明确要求 master 或 peer 时，用户授权优先，daemon 按现有 owner 覆盖当前角色映射。所有消息先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不选择 transport 或绕过 daemon 点对点直连。入队、adaptor 接受、目标接收、回复和消费按真实回执区分。双方分别作为 master 时均须完成真实收发、回复和消费；独立基础测试不替代组合验收。后台身份恢复、同步、订阅和通知由 daemon 负责。用户未指定的周期、重试、聚合及提醒参数不臆定。行为图须与代码一致，并删除无独立保障的重复节点或步骤。任何两个已注册对象均可直接发送普通消息，同项目和跨项目、master/peer/CEO 的组合不限制发送，不要求同级或由 master 转发。保留真实发送者认证、精确地址、原消息参与者和持久化回执；不得冒充其他对象。发送及关联回信不产生任务分派、项目汇总进度或 CEO 管理权限。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "你另外把发送身份的限制取消，任何两个对象发送不需要限制",
+          "role": "user",
+          "source": "Codex chat 01a1ae11-88d4-7d61-915e-aec1d7b348fc: direct correction following peer-to-master send rejection"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab 注册由 agent 主动发起并报告真实能力事实，daemon 核实并选择自身可调用的既有 adaptor，报告与 daemon 不一致时以 daemon 事实为准。tmux 是基础注册成功因素：当前 pane 真实存在且基础通信能力通过时，一次 context 必须注册成功，不受未选用 AppServer 字段、旧 peer/token/binding 冲突、重复 probe、二次 challenge 或人工批准阻断。Desktop 复用已独立通过的正式 native 通信能力，但必须证实该能力可由所属 daemon adaptor 合法调用；不能以 agent 代发或 registered 字段代替真实能力。Desktop 唯一能力绑定使用现有 project/app scope 与实际 host/thread，pipe 是连接位置，peer 名称可覆盖。覆盖不得继承旧 master grant，不得丢失旧 task/message/merge/claim 或未结责任，不影响无关 scope 或其他 master。身份及角色、稳定 anchor 和所选 adaptor 绑定持久化；普通身份恢复和 daemon 重启恢复不重新 Register 或验证通信，通信可达性单独呈现。仅通信不通且显式手动恢复时对恢复路径执行回环，失败不撤销持久身份或角色。已认证 peer/master 无未结责任时可自行注销 Collab 身份而不关闭或归档宿主；注销后可重建默认 peer 并真实通信，不复活已退役身份或继承旧 master。未结责任须明确处理并保留。context 返回当前身份与项目全体 peer/master 状态。用户明确要求 master 或 peer 时，用户授权优先，daemon 按现有 owner 覆盖当前角色映射。所有消息先由 daemon 中心接收、持久化和派发；agent 只指定收件人，不选择 transport 或绕过 daemon 点对点直连。入队、adaptor 接受、目标接收、回复和消费按真实回执区分。双方分别作为 master 时均须完成真实收发、回复和消费；独立基础测试不替代组合验收。后台身份恢复、同步、订阅和通知由 daemon 负责。用户未指定的周期、重试、聚合及提醒参数不臆定。行为图须与代码一致，并删除无独立保障的重复节点或步骤。任何两个已注册对象均可直接发送普通消息，同项目和跨项目、master/peer/CEO 的组合不限制发送，不要求同级或由 master 转发。保留真实发送者认证、精确地址、原消息参与者和持久化回执；不得冒充其他对象。发送及关联回信不产生任务分派、项目汇总进度或 CEO 管理权限。",
+        "version": 6
+      },
+      "version": 12
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "整个 journal 全部移除掉 所有跟它相关的维护逻辑全部都移除掉 不是退役 是直接移除 知道吗。对 原来这部分非常复杂 所以我建议全部移除 缺的地方我们再补 相关的测试也全部移除。以前维护 journal 的所有入口 现在都更新维护这个 identity。Colab 就有一个 identity 文件维护它的身份；demon 做一些基础的关系管理和消息投递管理。",
+          "role": "user",
+          "source": "Codex chat 01a1ae11-88d4-7d61-915e-aec1d7b348fc: latest explicit correction during current identity-map implementation"
+        },
+        "base_version": 1,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-remove-all-journals-20261105",
+        "requirement_id": "req-collab-identity",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和注销使用同一个 map owner，维护最新映射；历史不能阻碍新的有效授权或恢复。Codex TUI、AGY TUI、Codex Desktop 和 DSH 共用这张表，只有 transport 绑定不同。共享 tm-iterm 布局 manifest 维护固定位置，Collab 维护身份并正常改名；固定位置不移动，只有位置 1 可升为 Jenny。身份必须持久化，daemon 重启后自动恢复，不因重启让客户端身份失效。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除；不保留旧路径，不用改名后的日志、事件历史或兼容重放替代。一次迁移只基于旧版当前绑定和可核实的当前事实生成新表，新版本正常运行不读取旧身份文件或历史。daemon 提供基础的当前关系管理和消息投递管理。必需的当前消息、投递和消费状态按实际需要维护，不以历史重放恢复身份，不通过本次移除伪造发送、接收或消费成功。保留真实调用者认证及仍有独立消费者的真实资源版本。订阅和唤醒按真实能力边界由 daemon 后台维护，不让 agent 猜测。先移除旧实现和相关测试，再按实际缺口补齐最小必需功能，不保留多条实现路径。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "整个 journal 全部移除掉 所有跟它相关的维护逻辑全部都移除掉 不是退役 是直接移除 知道吗。对 原来这部分非常复杂 所以我建议全部移除 缺的地方我们再补 相关的测试也全部移除。以前维护 journal 的所有入口 现在都更新维护这个 identity。Colab 就有一个 identity 文件维护它的身份；demon 做一些基础的关系管理和消息投递管理。",
+          "role": "user",
+          "source": "Codex chat 01a1ae11-88d4-7d61-915e-aec1d7b348fc: latest explicit correction during current identity-map implementation"
+        },
+        "requirement_id": "req-collab-identity",
+        "status": "active",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和注销使用同一个 map owner，维护最新映射；历史不能阻碍新的有效授权或恢复。Codex TUI、AGY TUI、Codex Desktop 和 DSH 共用这张表，只有 transport 绑定不同。共享 tm-iterm 布局 manifest 维护固定位置，Collab 维护身份并正常改名；固定位置不移动，只有位置 1 可升为 Jenny。身份必须持久化，daemon 重启后自动恢复，不因重启让客户端身份失效。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除；不保留旧路径，不用改名后的日志、事件历史或兼容重放替代。一次迁移只基于旧版当前绑定和可核实的当前事实生成新表，新版本正常运行不读取旧身份文件或历史。daemon 提供基础的当前关系管理和消息投递管理。必需的当前消息、投递和消费状态按实际需要维护，不以历史重放恢复身份，不通过本次移除伪造发送、接收或消费成功。保留真实调用者认证及仍有独立消费者的真实资源版本。订阅和唤醒按真实能力边界由 daemon 后台维护，不让 agent 猜测。先移除旧实现和相关测试，再按实际缺口补齐最小必需功能，不保留多条实现路径。",
+        "version": 2
+      },
+      "version": 13
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 11
+  "version": 13
 }

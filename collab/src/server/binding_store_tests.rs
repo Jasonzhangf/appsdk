@@ -9,10 +9,15 @@ use crate::scope::ProjectScopeId;
 use crate::server::global_state::RuntimeBinding;
 
 fn key() -> IdentityBindingKey {
-    key_in("/tmp/collab-binding-store", "alice")
+    key_in("/tmp/collab-binding-store", "Alice")
 }
 
 fn key_in(project: &str, name: &str) -> IdentityBindingKey {
+    let name = match name {
+        "alice" => "Alice",
+        "bob" => "Bob",
+        name => name,
+    };
     IdentityBindingKey::new(
         ProjectScopeId::new(project).unwrap(),
         AppServerId::new("appserver-cli").unwrap(),
@@ -21,10 +26,6 @@ fn key_in(project: &str, name: &str) -> IdentityBindingKey {
 }
 
 fn value(key: &IdentityBindingKey, agent: &str, runtime: &str) -> BindingValue {
-    value_at(key, agent, runtime, 1)
-}
-
-fn value_at(key: &IdentityBindingKey, agent: &str, runtime: &str, generation: u64) -> BindingValue {
     let session_id = SessionId::new(format!("{runtime}-session")).unwrap();
     let thread_id = NativeThreadId::new(format!("{runtime}-thread")).unwrap();
     let binding = RuntimeBinding::new_with_session(
@@ -33,7 +34,6 @@ fn value_at(key: &IdentityBindingKey, agent: &str, runtime: &str, generation: u6
         AgentId::new(agent).unwrap(),
         RuntimeId::new(runtime).unwrap(),
         BindingId::new(format!("binding-{runtime}")).unwrap(),
-        generation,
         Some(session_id.clone()),
         Some(thread_id.clone()),
     )
@@ -62,7 +62,7 @@ fn missing_file_loads_an_empty_set() {
 }
 
 #[test]
-fn save_then_load_round_trips_without_a_journal() {
+fn save_then_load_round_trips_current_map() {
     let root = temp_root("roundtrip");
     let store = BindingControlStore::new(&root);
     let key = key();
@@ -82,7 +82,10 @@ fn save_then_load_round_trips_without_a_journal() {
     assert!(slot.reference_previous().is_none());
 
     let content = std::fs::read_to_string(store.path()).unwrap();
-    assert_eq!(content.lines().count(), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&content).unwrap()["schema_version"],
+        1
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -92,7 +95,7 @@ fn corrupt_file_fails_closed_instead_of_returning_empty() {
     let store = BindingControlStore::new(&root);
     std::fs::write(store.path(), b"{\"slots\": not-json").unwrap();
     let error = store.load().unwrap_err();
-    assert!(error.contains("BINDING_CONTROL_DECODE_FAILED"), "{error}");
+    assert!(error.contains("IDENTITY_MAP_DECODE_FAILED"), "{error}");
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -104,17 +107,17 @@ fn invalid_duplicate_set_fails_closed() {
     std::fs::write(
         store.path(),
         serde_json::to_vec(&serde_json::json!({
-            "kind": "binding_control",
+            "schema_version": 1,
             "slots": [
-                {"identity_key": key, "identity_status": "unregistered", "generation": 0, "current": null, "previous": null},
-                {"identity_key": key, "identity_status": "unregistered", "generation": 0, "current": null, "previous": null}
+                {"identity_key": key, "display_slot":2,"identity_status": "unregistered", "generation": 0, "current": null, "previous": null},
+                {"identity_key": key, "display_slot":2,"identity_status": "unregistered", "generation": 0, "current": null, "previous": null}
             ]
         }))
         .unwrap(),
     )
     .unwrap();
     let error = store.load().unwrap_err();
-    assert!(error.contains("BINDING_CONTROL_INVALID"), "{error}");
+    assert!(error.contains("IDENTITY_MAP_INVALID"), "{error}");
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -130,7 +133,7 @@ fn publish_failure_is_returned_and_leaves_no_temporary_file() {
         .unwrap();
     store.save(&set).unwrap();
 
-    // Make the journal directory unwritable so the temp file cannot be
+    // Make the map directory unwritable so the temp file cannot be
     // created; the read still succeeds, so this exercises the publish path.
     let original = std::fs::metadata(&root).unwrap().permissions();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
@@ -148,7 +151,7 @@ fn publish_failure_is_returned_and_leaves_no_temporary_file() {
 }
 
 #[test]
-fn startup_loads_bindings_directly_without_scanning_project_journals() {
+fn startup_loads_bindings_directly_from_current_map() {
     let root = temp_root("startup-direct");
     let store = BindingControlStore::new(&root);
     let key = key();
@@ -168,23 +171,19 @@ fn startup_loads_bindings_directly_without_scanning_project_journals() {
 }
 
 #[test]
-fn binding_control_is_one_line_in_the_shared_route_file() {
+fn identity_map_is_one_json_resource_and_does_not_rewrite_routes() {
     let root = temp_root("shared-route-file");
     let store = BindingControlStore::new(&root);
     let route = serde_json::json!({
-        "version": 1,
-        "op": "register",
         "app_scope_id": "appserver-cli",
         "project_scope": "/tmp/project",
         "canonical_root": "/tmp/project",
         "storage_root": "/tmp/project",
         "registered_ms": 1
     });
-    std::fs::write(
-        store.path(),
-        format!("{}\n", serde_json::to_string(&route).unwrap()),
-    )
-    .unwrap();
+    let route_path = root.join("routes.json");
+    let route_bytes = serde_json::to_string(&vec![route]).unwrap();
+    std::fs::write(&route_path, &route_bytes).unwrap();
 
     let key = key();
     let mut set = BindingControlSet::new();
@@ -194,13 +193,11 @@ fn binding_control_is_one_line_in_the_shared_route_file() {
 
     let content = std::fs::read_to_string(store.path()).unwrap();
     assert_eq!(
-        content
-            .lines()
-            .filter(|line| line.contains("\"kind\":\"binding_control\""))
-            .count(),
+        serde_json::from_str::<serde_json::Value>(&content).unwrap()["schema_version"],
         1
     );
-    assert!(content.contains("\"op\":\"register\""));
+    assert!(!content.contains("binding_control"));
+    assert_eq!(std::fs::read_to_string(route_path).unwrap(), route_bytes);
     assert_eq!(store.load().unwrap(), set);
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -244,7 +241,7 @@ fn store_commit_is_one_entry_point_for_stable_name_handoff() {
     let second = store
         .commit(ControlChange::Commit {
             key: key.clone(),
-            value: value_at(&key, "alice-s2", "runtime-b", 2),
+            value: value(&key, "alice-s2", "runtime-b"),
             expected_generation: Some(1),
         })
         .unwrap();
@@ -289,8 +286,8 @@ fn move_name_commit_publishes_one_target_slot_and_retires_the_source() {
     let moved = store
         .commit(ControlChange::MoveName {
             target: alice.clone(),
-            value: value_at(&alice, "bob-s2", "runtime-c", 2),
-            source_names: vec!["bob".to_owned()],
+            value: value(&alice, "bob-s2", "runtime-c"),
+            source_names: vec![bob.name.clone()],
             expected_generation: Some(1),
         })
         .unwrap();
@@ -403,6 +400,48 @@ fn clear_effect_keeps_the_slot_and_is_idempotent() {
 }
 
 #[test]
+fn name_move_publishes_the_displaced_holder_after_releasing_the_source() {
+    let root = temp_root("name-companion-source");
+    let store = BindingControlStore::new(&root);
+    let alice = key();
+    let bob = key_in(alice.project_scope.as_str(), "Bob");
+    let first = value(&alice, "first", "runtime-first");
+    let second = value(&bob, "second", "runtime-second");
+    let mut control = BindingControlSet::new();
+    control.commit(&alice, first.clone(), None).unwrap();
+    control.commit(&bob, second.clone(), None).unwrap();
+    store.save(&control).unwrap();
+    let mut primary = effect_for(&alice, "name:swap", "runtime-second-session");
+    primary.target_worker_id = "second".into();
+    primary.source_names = vec!["Bob".into()];
+    primary.moves_existing_names = true;
+    let mut outgoing = effect_for(&bob, "name:swap:outgoing", "runtime-first-session");
+    outgoing.target_worker_id = "first".into();
+    outgoing.previous_worker_id = None;
+    outgoing.previous_session_id = None;
+    store
+        .commit(ControlChange::MoveNameWithEffect {
+            target: alice.clone(),
+            value: second.clone(),
+            source_names: vec!["Bob".into()],
+            expected_generation: None,
+            effect: primary,
+            companion: Some((bob.clone(), first.clone(), outgoing)),
+        })
+        .unwrap();
+    let current = store.load().unwrap();
+    assert_eq!(
+        current.slot(&alice).unwrap().active_binding(),
+        Some(&second)
+    );
+    assert_eq!(current.slot(&bob).unwrap().active_binding(), Some(&first));
+    assert_eq!(current.active_values().count(), 2);
+    assert!(current.pending_effect("name:swap").is_some());
+    assert!(current.pending_effect("name:swap:outgoing").is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn effect_only_control_line_round_trips_until_cleared() {
     let root = temp_root("effect-only");
     let store = BindingControlStore::new(&root);
@@ -473,22 +512,24 @@ fn post_rename_parent_sync_failure_reports_unknown_and_keeps_published_file() {
 fn project_reset_preserves_current_dsh_binding() {
     let root = temp_root("reset-dsh");
     let store = BindingControlStore::new(&root);
-    let dsh = key_in("/tmp/collab-binding-reset-dsh", "worker");
+    let dsh = key_in("/tmp/collab-binding-reset-dsh", "Alice");
     let mut binding = value(&dsh, "dsh-worker", "dsh-runtime");
     binding.transport.kind = TransportKind::Dsh;
     binding.transport.endpoint = Some("http://127.0.0.1:12700".into());
     let mut set = BindingControlSet::new();
     set.commit(&dsh, binding.clone(), Some(0)).unwrap();
     store.save(&set).unwrap();
-    let mut routes = vec![route_record(&dsh)];
-    store.publish_shared(&routes, &set).unwrap();
+    let routes = vec![route_record(&dsh)];
+    let route_path = root.join("routes.json");
+    super::binding_store::publish_route_records(&route_path, &routes).unwrap();
     super::project_reset::delete_project_routes_except_dsh(
-        store.path(),
+        &route_path,
         dsh.project_scope.as_str(),
         &std::collections::HashSet::from([dsh.app_scope_id.as_str().to_owned()]),
     )
     .unwrap();
-    let (loaded_routes, loaded) = store.load_shared().unwrap();
+    let loaded_routes = super::load_host_route_records(&route_path).unwrap();
+    let loaded = store.load().unwrap();
     assert_eq!(
         loaded.slot(&dsh).and_then(|slot| slot.active_binding()),
         Some(&binding)
@@ -518,7 +559,7 @@ fn project_reset_delete_route_drops_only_its_scope_slots() {
         .unwrap();
     store.save(&set).unwrap();
 
-    delete_route(store.path(), &route_record(&alice)).unwrap();
+    delete_route(&root.join("routes.json"), &route_record(&alice)).unwrap();
 
     let loaded = BindingControlStore::new(&root).load().unwrap();
     assert!(
@@ -544,11 +585,11 @@ fn project_reset_delete_route_drops_only_its_scope_slots() {
 fn project_reset_delete_project_routes_keeps_only_retained_dsh_app_scope() {
     let root = temp_root("reset-route-scope");
     let store = BindingControlStore::new(&root);
-    let dsh = key_in("/tmp/collab-binding-reset-routes", "dsh");
+    let dsh = key_in("/tmp/collab-binding-reset-routes", "Alice");
     let other = IdentityBindingKey::new(
         ProjectScopeId::new("/tmp/collab-binding-reset-routes").unwrap(),
         AppServerId::new("appserver-other").unwrap(),
-        "other",
+        "Bob",
     );
     let mut dsh_value = value(&dsh, "dsh-worker", "dsh-runtime");
     dsh_value.transport.kind = TransportKind::Dsh;
@@ -564,16 +605,19 @@ fn project_reset_delete_project_routes_keeps_only_retained_dsh_app_scope() {
     other_route.canonical_root = "/tmp/collab-binding-reset-routes-other".into();
     other_route.storage_root = "/tmp/collab-binding-reset-routes-other".into();
     let routes = vec![route_record(&dsh), other_route];
-    store.publish_shared(&routes, &set).unwrap();
+    store.save(&set).unwrap();
+    let route_path = root.join("routes.json");
+    super::binding_store::publish_route_records(&route_path, &routes).unwrap();
 
     super::project_reset::delete_project_routes_except_dsh(
-        store.path(),
+        &route_path,
         dsh.project_scope.as_str(),
         &std::collections::HashSet::from([dsh.app_scope_id.as_str().to_owned()]),
     )
     .unwrap();
 
-    let (loaded_routes, loaded) = store.load_shared().unwrap();
+    let loaded_routes = super::load_host_route_records(&route_path).unwrap();
+    let loaded = store.load().unwrap();
     assert_eq!(loaded_routes.len(), 1);
     assert_eq!(loaded_routes[0].app_scope_id, dsh.app_scope_id.as_str());
     assert!(loaded.slot(&dsh).is_some(), "active DSH slot must survive");
@@ -623,8 +667,6 @@ fn identical_retry_confirms_directory_sync_instead_of_inventing_durability() {
 
 fn route_record(key: &IdentityBindingKey) -> HostRouteRecord {
     HostRouteRecord {
-        version: 1,
-        op: "register".into(),
         app_scope_id: key.app_scope_id.as_str().to_owned(),
         project_scope: key.project_scope.as_str().to_owned(),
         canonical_root: key.project_scope.as_str().to_owned(),
@@ -635,6 +677,7 @@ fn route_record(key: &IdentityBindingKey) -> HostRouteRecord {
 
 fn effect_for(key: &IdentityBindingKey, effect_id: &str, target_session_id: &str) -> PendingEffect {
     PendingEffect {
+        role: None,
         kind: if effect_id.starts_with("register") {
             PendingEffectKind::Register
         } else {
@@ -663,11 +706,6 @@ fn route_writers_surface_unknown_publication_append() {
 }
 
 #[test]
-fn route_writers_surface_unknown_publication_central() {
-    check_route_writer_unknown("central");
-}
-
-#[test]
 fn route_writers_surface_unknown_publication_delete() {
     check_route_writer_unknown("delete");
 }
@@ -686,14 +724,16 @@ fn check_route_writer_unknown(writer: &str) {
     } else {
         vec![]
     };
-    store.publish_shared(&initial, &control).unwrap();
-    store.fail_parent_sync_on_next_publish();
+    store.save(&control).unwrap();
+    let route_path = root.join("routes.json");
+    super::binding_store::publish_route_records(&route_path, &initial).unwrap();
+    BindingControlStore::at(&route_path).fail_parent_sync_on_next_publish();
     let result = match writer {
-        "append" => super::append_host_route_record(store.path(), &record),
-        "central" => super::publish_central_route_record(store.path(), record.clone()),
-        _ => delete_route(store.path(), &record),
+        "append" => super::append_host_route_record(&route_path, &record),
+        _ => delete_route(&route_path, &record),
     };
-    let (routes, visible_control) = store.load_shared().unwrap();
+    let routes = super::load_host_route_records(&route_path).unwrap();
+    let visible_control = store.load().unwrap();
     assert_eq!(routes.len(), usize::from(writer != "delete"));
     assert_eq!(visible_control.slot(&key).is_some(), writer != "delete");
     let error = result.expect_err("published but unconfirmed must not report success");
@@ -704,12 +744,10 @@ fn check_route_writer_unknown(writer: &str) {
     assert!(error.contains("published=true"), "{writer}: {error}");
     // A confirmed publication still succeeds through each real caller.
     if writer == "append" {
-        delete_route(store.path(), &record).unwrap();
-        super::append_host_route_record(store.path(), &record).unwrap();
-    } else if writer == "central" {
-        super::publish_central_route_record(store.path(), record).unwrap();
+        delete_route(&route_path, &record).unwrap();
+        super::append_host_route_record(&route_path, &record).unwrap();
     } else {
-        delete_route(store.path(), &record).unwrap();
+        delete_route(&route_path, &record).unwrap();
     }
     std::fs::remove_dir_all(root).unwrap();
 }

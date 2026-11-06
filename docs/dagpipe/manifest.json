@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "graphs": [
+    {"id":"appsdk-collab-activation","path":"docs/dagpipe/collab-activation.graph.json"},
+    {"id":"appsdk-collab-shutdown","path":"docs/dagpipe/collab-shutdown.graph.json"},
     {
       "id": "collab-reply-obligation",
       "path": "docs/dagpipe/collab-reply-obligation.graph.json"

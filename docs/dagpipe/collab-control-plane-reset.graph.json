@@ -6,7 +6,7 @@
   "nodes": [
     {
       "id": "authorize_reset",
-      "description": "CLI 只读取当前项目已注册身份，不先执行 context 注册、名字恢复或任务同步。daemon 再验证当前 master；拒绝时不产生本次请求的名字、任务、授权或 reset 写入。",
+      "description": "CLI只从identity-map.json读取当前项目active身份引用，再读精确credential；不从route、archive或reducer反查身份，不执行context注册或名字恢复。daemon按原grant owner验证当前master；拒绝时不产生名字、任务、授权或reset写入。",
       "operator": "appsdk.collab_control_plane.authorize_reset",
       "operator_version": "1",
       "inputs": ["reset_request"],
@@ -17,7 +17,7 @@
     },
     {
       "id": "提交 scoped reset 控制变更",
-      "description": "当前 master 认证后，在既有锁序内提交 scoped reset 控制变更。保留当前 DSH 绑定、对应路由及恢复凭据；清理本项目其余需退役的控制和业务归属，且不复活旧任务、消息或授权。真实提交失败明确报告，其他项目不变。",
+      "description": "当前master认证后，在既有锁序内由唯一BindingControlStore原子更新identity-map.json。保留当前live DSH的表内绑定、对应路由和精确凭据，退役本项目其余映射与业务归属。route文件仅由route owner写入通信/存储记录，不再包含控制集。已提交待办保证中断可见；错误不伪报成功，其他项目不变。",
       "operator": "appsdk.collab_control_plane.commit_reset_control",
       "operator_version": "1",
       "inputs": ["authorized_reset_request"],

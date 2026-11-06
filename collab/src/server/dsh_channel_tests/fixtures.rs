@@ -245,22 +245,19 @@ fn wake_reply(message_id: &str) -> Option<String> {
 }
 
 fn test_server(root: &Path) -> Arc<Server> {
+    let canonical_root = std::fs::canonicalize(root).unwrap();
+    let root = canonical_root.as_path();
     let server_dir = root.join(".agent-collab").join("server");
     std::fs::create_dir_all(&server_dir).unwrap();
-    let journal_path = server_dir.join("journal.jsonl");
-    let journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&journal_path)
-        .unwrap();
+    let state_path = server_dir.join("state.json");
+    current_state::save(&state_path, &State::default()).unwrap();
     Arc::new(Server {
         config: crate::config::Config::default(),
         root: root.to_path_buf(),
         storage_root: root.to_path_buf(),
-        journal_path,
+        state_path,
         host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
         state: Mutex::new(State::default()),
-        journal: Mutex::new(journal),
         // dsh validation must never consult the App Server candidate check.
         appserver_candidate_check: Arc::new(|_| {
             Err("APPSERVER_CHECK_REACHED: dsh validation must not consult it".into())

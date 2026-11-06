@@ -34,26 +34,20 @@ struct Fixture {
 // must wait for the first exact current-session observation.
 fn wait_for_agent_observations(registered: &Value) {
     let worker_id = registered["identity"]["worker_id"].as_str().unwrap();
-    let journal = PathBuf::from(registered["daemon"]["storage_root"].as_str().unwrap())
-        .join(".agent-collab/server/journal.jsonl");
+    let state_path = PathBuf::from(registered["daemon"]["storage_root"].as_str().unwrap())
+        .join(".agent-collab/server/state.json");
+    let project = registered["scope"]["project_scope"].as_str().unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let records = std::fs::read_to_string(&journal).unwrap();
-        let events: Vec<Value> = records
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        let observed = |event: &str, field: &str| {
-            events.iter().any(|record| {
-                record["ev"] == event
-                    && record[field]["worker_id"] == worker_id
-                    && record[field]["session_id"] == registered["session_id"]
-                    && record[field]["project_scope"] == registered["scope"]["project_scope"]
-            })
+        let document: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(document["schema_version"], 1);
+        let observed = |field: &str| {
+            let fact = &document["state"][field][project][worker_id];
+            fact["worker_id"] == worker_id
+                && fact["session_id"] == registered["session_id"]
+                && fact["project_scope"] == project
         };
-        if observed("AgentPresenceObserved", "presence")
-            && observed("AgentActivityObserved", "activity")
-        {
+        if observed("agent_presence") && observed("agent_activity") {
             return;
         }
         assert!(
@@ -65,11 +59,56 @@ fn wait_for_agent_observations(registered: &Value) {
 }
 
 impl Fixture {
+    fn current_mapping_for(&self, project: &Path, app: &str, worker: &str) -> Value {
+        let project = project.canonicalize().unwrap();
+        let map: Value = serde_json::from_slice(
+            &std::fs::read(self.host_state.join("identity-map.json")).unwrap(),
+        ).unwrap();
+        let matches: Vec<_> = map["slots"].as_array().unwrap().iter().filter(|slot| {
+            slot["identity_status"] == "active"
+                && slot["identity_key"]["project_scope"].as_str() == project.to_str()
+                && slot["identity_key"]["app_scope_id"] == app
+                && slot["current"]["binding"]["agent_id"] == worker
+        }).collect();
+        assert_eq!(matches.len(), 1, "one current mapped worker in exact project/app");
+        matches[0]["current"].clone()
+    }
+
+    fn project_state_for(&self, project: &Path, app: &str) -> PathBuf {
+        let project = project.canonicalize().unwrap();
+        let routes: Value = serde_json::from_slice(
+            &std::fs::read(self.host_state.join("routes.json")).unwrap(),
+        ).unwrap();
+        let matches: Vec<_> = routes.as_array().unwrap().iter().filter(|route| {
+            route["project_scope"].as_str() == project.to_str()
+                && route["app_scope_id"] == app
+        }).collect();
+        assert_eq!(matches.len(), 1, "exact current project/app route: {routes}");
+        PathBuf::from(matches[0]["storage_root"].as_str().unwrap())
+            .join(".agent-collab/server/state.json")
+    }
+
+    fn current_state_for(&self, project: &Path, app: &str) -> Value {
+        let document: Value = serde_json::from_slice(
+            &std::fs::read(self.project_state_for(project, app)).unwrap(),
+        ).unwrap();
+        assert_eq!(document["schema_version"], 1);
+        assert!(document["state"].is_object());
+        document["state"].clone()
+    }
+
     fn start_daemon(&mut self) {
         self.start_daemon_with_path(None);
     }
 
     fn start_daemon_with_path(&mut self, path: Option<&Path>) {
+        for session in &mut self.owned_sessions {
+            if !session.starts_with('$') {
+                let observed = tmux(&self.tmux_socket,
+                    &["display-message", "-p", "-t", session, "#{session_id}"]);
+                *session = String::from_utf8(observed.stdout).unwrap().trim().to_owned();
+            }
+        }
         std::fs::create_dir_all(&self.host_state).unwrap();
         std::fs::write(
             self.host_state.join("tmux-endpoints.json"),
@@ -379,11 +418,11 @@ fn single_pane_fixture(label: &str) -> (Fixture, Pane) {
         daemon: None,
     };
     fixture.start_daemon();
-    tmux(
+    let created = tmux(
         &tmux_socket,
-        &["new-session", "-d", "-s", label, "sleep 600"],
+        &["new-session", "-d", "-P", "-F", "#{session_id}", "-s", label, "sleep 600"],
     );
-    fixture.owned_sessions.push(label.to_owned());
+    fixture.owned_sessions.push(String::from_utf8(created.stdout).unwrap().trim().to_owned());
     let server_pid =
         String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
             .expect("tmux server pid is utf8")

@@ -1,7 +1,6 @@
 //! Persistence tests for host-owned CEO coordination facts in the shared reducer.
 //!
-//! These exercise the reducer contract only: the real journal owner still
-//! commits the same typed events, and replay uses `snapshot_events`.
+//! These exercise current State serialization without reconstructing history.
 
 use crate::ceo::{CeoBootstrapRecord, CeoGrant};
 use crate::proto::{ReplyPolicy, Resp};
@@ -9,16 +8,11 @@ use crate::server::state::{
     responsibility_preflight, Event, ReplyObligation, ResponsibilityFence, ResponsibilitySnapshot,
     State,
 };
+use crate::server::{peer_tests, ProjectRuntimeManager};
 use serde_json::json;
 
-fn replay(state: &State) -> State {
-    state
-        .snapshot_events()
-        .into_iter()
-        .fold(State::default(), |mut replayed, event| {
-            replayed.apply(&event);
-            replayed
-        })
+fn current_state_round_trip(state: &State) -> State {
+    serde_json::from_slice(&serde_json::to_vec(state).unwrap()).unwrap()
 }
 
 fn grant(workspace: &str, granted_ms: i64) -> CeoGrant {
@@ -40,6 +34,8 @@ fn bootstrap(operation_id: &str, phase: &str) -> CeoBootstrapRecord {
         profile: "gcm".into(),
         tmux_socket: "/tmp/target.sock".into(),
         tmux_session: "target".into(),
+        approved_server_pid: Some(42),
+        approved_session_id: Some("$1".into()),
         requested_by: "ceo".into(),
         requested_workspace: "/workspace".into(),
         requested_app_scope: "appserver-cli".into(),
@@ -50,6 +46,46 @@ fn bootstrap(operation_id: &str, phase: &str) -> CeoBootstrapRecord {
         cancellation_approval: None,
         updated_ms: 1,
     }
+}
+
+#[test]
+fn bootstrap_endpoint_proof_requires_the_approved_server_and_session() {
+    let (_, root) = peer_tests::test_server();
+    let tmux = peer_tests::IsolatedTmux::start_single(&root);
+    let endpoint = tmux.endpoints().remove(0);
+    let mut record = bootstrap("stable-endpoint", "prepared");
+    record.tmux_socket = endpoint.socket_path;
+    record.approved_server_pid = Some(endpoint.server_pid);
+    record.approved_session_id = Some(endpoint.tmux_session_id);
+    assert!(ProjectRuntimeManager::verify_bootstrap_pane(&record, &endpoint.pane_id).is_ok());
+    let mut wrong = record.clone();
+    wrong.approved_server_pid = Some(endpoint.server_pid + 1);
+    assert_eq!(
+        ProjectRuntimeManager::verify_bootstrap_pane(&wrong, &endpoint.pane_id)
+            .unwrap_err()
+            .error
+            .as_deref(),
+        Some("CEO_BOOTSTRAP_LAUNCHED_ENDPOINT_NOT_CURRENT")
+    );
+    wrong = record.clone();
+    wrong.approved_session_id = Some("$999999".into());
+    assert_eq!(
+        ProjectRuntimeManager::verify_bootstrap_pane(&wrong, &endpoint.pane_id)
+            .unwrap_err()
+            .error
+            .as_deref(),
+        Some("CEO_BOOTSTRAP_LAUNCHED_ENDPOINT_NOT_CURRENT")
+    );
+    record.approved_session_id = None;
+    assert_eq!(
+        ProjectRuntimeManager::verify_bootstrap_pane(&record, &endpoint.pane_id)
+            .unwrap_err()
+            .error
+            .as_deref(),
+        Some("CEO_BOOTSTRAP_STABLE_ENDPOINT_REQUIRED")
+    );
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn cross_project_obligation() -> ReplyObligation {
@@ -69,7 +105,7 @@ fn cross_project_obligation() -> ReplyObligation {
 }
 
 #[test]
-fn ceo_grant_set_replace_clear_survives_snapshot_replay() {
+fn ceo_grant_set_replace_clear_survives_current_state_round_trip() {
     let mut state = State::default();
     state.apply(&Event::CeoGrantSet {
         grant: Some(grant("/tmp/ws-a", 10)),
@@ -78,7 +114,7 @@ fn ceo_grant_set_replace_clear_survives_snapshot_replay() {
         record: bootstrap("op-1", "prepared"),
     });
 
-    let replayed = replay(&state);
+    let replayed = current_state_round_trip(&state);
     assert_eq!(
         replayed
             .ceo_grant
@@ -92,7 +128,7 @@ fn ceo_grant_set_replace_clear_survives_snapshot_replay() {
     replaced.apply(&Event::CeoGrantSet {
         grant: Some(grant("/tmp/ws-b", 20)),
     });
-    let replayed = replay(&replaced);
+    let replayed = current_state_round_trip(&replaced);
     assert_eq!(
         replayed
             .ceo_grant
@@ -104,7 +140,7 @@ fn ceo_grant_set_replace_clear_survives_snapshot_replay() {
     let mut cleared = replayed;
     cleared.apply(&Event::CeoGrantSet { grant: None });
     assert!(cleared.ceo_grant.is_none());
-    let replayed = replay(&cleared);
+    let replayed = current_state_round_trip(&cleared);
     assert!(replayed.ceo_grant.is_none());
     assert_eq!(
         replayed.ceo_bootstraps.len(),
@@ -114,7 +150,7 @@ fn ceo_grant_set_replace_clear_survives_snapshot_replay() {
 }
 
 #[test]
-fn ceo_bootstrap_phase_and_cross_project_reply_survive_snapshot_replay() {
+fn ceo_bootstrap_phase_and_cross_project_reply_survive_current_state_round_trip() {
     let mut state = State::default();
     state.apply(&Event::CeoBootstrapSet {
         record: bootstrap("op-1", "prepared"),
@@ -131,7 +167,7 @@ fn ceo_bootstrap_phase_and_cross_project_reply_survive_snapshot_replay() {
         obligation: cross_project_obligation(),
     });
 
-    let replayed = replay(&state);
+    let replayed = current_state_round_trip(&state);
     let record = replayed.ceo_bootstraps.get("op-1").unwrap();
     assert_eq!(record.phase, "launched");
     assert_eq!(record.pane_id.as_deref(), Some("%7"));
@@ -174,7 +210,6 @@ fn ceo_events_do_not_change_business_task_responsibility() {
             project_scope: "/tmp/target-project".into(),
             app_scope: "tui-default".into(),
             binding_id: "binding-closing-peer".into(),
-            endpoint_generation: 1,
             snapshot: ResponsibilitySnapshot::default(),
             state: "closing".into(),
             created_ms: 1,
@@ -343,7 +378,8 @@ fn ceo_handler_batch_ack_is_urgent_only_during_ordinary_suppression() {
 #[test]
 fn ceo_handler_durable_reply_keeps_receipt_when_progress_record_fails() {
     let (server, manager) = ceo_handler_fixture();
-    server.state.lock().unwrap().journal_poison = Some("synthetic journal failure".into());
+    std::fs::remove_file(&server.state_path).unwrap();
+    std::fs::create_dir(&server.state_path).unwrap();
 
     let delivered = Ok(Resp::data(json!({"msg_id":"m-reply","durable":true})));
     let response = manager
@@ -542,13 +578,7 @@ fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
     super::commit_current_thread_route_for_runtime(&server, &server, "master", &cwd, Some(&app))
         .expect("master native thread route must commit");
     super::restore_registered_peer_default_leases(&server);
-    let promoted = super::handle_master_promote(
-        &server,
-        "master".into(),
-        "token-master".into(),
-        "user-approved".into(),
-    );
-    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    super::peer_tests::promote_master(&server, "master", "user-approved");
 
     let scope =
         super::GlobalState::canonical_project_scope(&server.root).expect("canonical project scope");
@@ -620,14 +650,8 @@ fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
 #[test]
 fn ceo_progress_reports_master_patrol_armed_state() {
     let (server, root) = super::peer_tests::test_server();
-    super::peer_tests::register_synthetic_peer(&server, "master", "%master");
-    let promoted = super::handle_master_promote(
-        &server,
-        "master".into(),
-        "token-master".into(),
-        "user-approved".into(),
-    );
-    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    super::peer_tests::register(&server, "master", "%master");
+    super::peer_tests::promote_master(&server, "master", "user-approved");
 
     let scope =
         super::GlobalState::canonical_project_scope(&server.root).expect("canonical project scope");

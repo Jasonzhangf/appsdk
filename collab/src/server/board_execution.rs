@@ -46,9 +46,14 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     let binding = match board_execution_gate(server, &state, &actor, &id) {
         Ok(binding) => binding, Err(error) => return error,
     };
-    let name_session = state.name_occupancies.get(binding.project_scope.as_str())
-        .and_then(|names| names.values().find(|occupancy| occupancy.worker_id == actor))
-        .map(|occupancy| (occupancy.name.clone(), occupancy.session_id.clone()));
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let name_session = match control.current_for_worker(&binding.project_scope, &binding.app_scope_id, &actor) {
+        Ok(slot) => slot.and_then(|slot| slot.active_binding().and_then(|current|
+            current.binding.session_id.as_ref().map(|session| (slot.identity_key.name.clone(), session.to_string())))),
+        Err(error) => return Resp::err(error),
+    };
     task.owner = actor.clone();
     task.status = "working".into();
     task.updated_ms = now_ms();

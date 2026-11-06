@@ -21,15 +21,16 @@ pub(crate) fn scope_view(route_scope: Option<&RouteScope>) -> serde_json::Value 
 /// or `null` when the probe could not decide).
 pub(crate) fn master_authority_view_with_endpoint(
     state: &State,
+    control: &binding_slot::BindingControlSet,
     route_scope: Option<&RouteScope>,
     endpoint_live: Option<bool>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     let Some(grant) = current_master_grant(state, route_scope) else {
-        return serde_json::Value::Null;
+        return Ok(serde_json::Value::Null);
     };
-    json!({
+    Ok(json!({
         "worker_id": grant.agent_id.as_str(),
-        "display_name": worker_display_name(state, grant.agent_id.as_str(), true),
+        "display_name": worker_display_name(control, route_scope, grant.agent_id.as_str())?,
         "scope": scope_view(route_scope),
         "endpoint_live": endpoint_live,
         "grant_id": grant.resource_id(),
@@ -38,10 +39,9 @@ pub(crate) fn master_authority_view_with_endpoint(
         "approval": grant.approval,
         "assigned_ms": grant.granted_at_ms,
         "binding_id": grant.binding_id,
-        "endpoint_generation": grant.endpoint_generation,
         "boundary": grant.boundary,
         "master_wake": state.master_wake,
-    })
+    }))
 }
 
 /// The single read-only workspace-idle projection shared by `master status`
@@ -195,8 +195,12 @@ fn handle_master_status(server: &Server) -> Resp {
         holder.as_ref().map(|worker| worker.id.as_str()),
         now_ms(),
     );
-    let mut master =
-        master_authority_view_with_endpoint(&state, route_scope.as_ref(), endpoint_live);
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let mut master = match master_authority_view_with_endpoint(&state, &control, route_scope.as_ref(), endpoint_live) {
+        Ok(master) => master, Err(error) => return Resp::err(error),
+    };
     if let Some(master_object) = master.as_object_mut() {
         master_object.insert("workspace".into(), workspace);
     }
@@ -234,9 +238,6 @@ pub(crate) fn handle_send(
     )
 }
 
-#[cfg(test)]
-#[path = "../name_address_tests.rs"]
-mod name_address_tests;
 
 #[cfg(test)]
 #[path = "../workspace_idle_tests.rs"]
@@ -245,26 +246,26 @@ mod workspace_idle_tests;
 fn resolve_send_name_address(
     server: &Server,
     state: &State,
+    control: &binding_slot::BindingControlSet,
     target: String,
 ) -> Result<(String, Option<name_mailbox::MailboxNameAddress>), String> {
     let route = server_route_scope(server, state)?.ok_or_else(|| {
         "NAME_ADDRESS_SCOPE_MISSING: current project route is unavailable".to_string()
     })?;
-    let project_scope = route.project_scope_id.as_str();
     let current_key = canonical_project_key(&server.root).ok_or_else(|| {
         "NAME_ADDRESS_SCOPE_MISSING: current project key is unavailable".to_string()
     })?;
     // `sendmessage`, `default` and channel-inbound routing share one address
     // owner. It resolves `ceo`/bare project keys through the typed grant and
     // rejects case-folded ambiguity instead of selecting the first holder.
-    match resolve_named_target(state, project_scope, &current_key, &target)? {
+    match resolve_named_target(state, control, &route, &current_key, &target)? {
         Some(resolved) => {
             authoritative_send_binding(state, &route, &resolved.worker_id)
                 .map_err(str::to_owned)?;
             Ok((
                 resolved.worker_id,
                 Some(name_mailbox::MailboxNameAddress {
-                    project_scope: project_scope.into(),
+                    project_scope: route.project_scope_id.as_str().into(),
                     name: resolved.name,
                 }),
             ))
@@ -283,15 +284,6 @@ fn canonical_project_key(root: &std::path::Path) -> Option<String> {
         .ok()?
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-}
-
-/// Stable name currently occupied by a worker in this project, if any.
-fn stable_name_for_worker(state: &State, project_scope: &str, worker_id: &str) -> Option<String> {
-    state
-        .name_occupancies
-        .get(project_scope)
-        .and_then(|names| names.values().find(|holder| holder.worker_id == worker_id))
-        .map(|holder| holder.name.clone())
 }
 
 fn authoritative_send_binding<'a>(
@@ -336,20 +328,15 @@ fn validate_channel_envelope_for_inbound(
 
 /// A QQ reply is legal only for the original recipient. Stable-name handoff
 /// keeps the right to answer when the same name moves to a new session.
-fn channel_reply_authorized(state: &State, original: &Message, from: &str) -> bool {
+fn channel_reply_authorized(state: &State, control: &binding_slot::BindingControlSet,
+    route: &RouteScope, original: &Message, from: &str) -> Result<bool, String> {
     if original.to == from {
-        return true;
+        return Ok(true);
     }
-    state
-        .mailbox_name_addresses
-        .get(&original.id)
-        .and_then(|address| {
-            state
-                .name_occupancies
-                .get(address.project_scope.as_str())
-                .and_then(|names| names.get(address.name.as_str()))
-        })
-        .is_some_and(|holder| holder.worker_id == from)
+    let Some(address) = state.mailbox_name_addresses.get(&original.id) else { return Ok(false); };
+    let project = ProjectScopeId::new(&address.project_scope).map_err(|error| error.to_string())?;
+    Ok(control.current_for_name(&project, &route.app_scope_id, &address.name)?
+        .and_then(|slot| slot.active_binding()).is_some_and(|current| current.binding.agent_id.as_str() == from))
 }
 
 /// Commit one typed channel-inbound message and its envelope in the same
@@ -422,7 +409,6 @@ pub(crate) fn channel_inbound_commit_with_state(
         }
         Err(error) => return Resp::err(error.to_owned()),
     };
-    let project_scope = route.project_scope_id.as_str();
     let project_key = match canonical_project_key(&server.root) {
         Some(key) => key,
         None => {
@@ -431,8 +417,11 @@ pub(crate) fn channel_inbound_commit_with_state(
             )
         }
     };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let (worker_id, recipient_address, body_after_address) = if let Some(grant) = ceo_grant {
-        let worker_id = match resolve_ceo_holder_from_grant(target_state, project_scope, grant) {
+        let worker_id = match resolve_ceo_holder_from_grant(target_state, &control, &route, grant) {
             Ok(worker_id) => worker_id,
             Err(error) => return Resp::err(error),
         };
@@ -444,7 +433,7 @@ pub(crate) fn channel_inbound_commit_with_state(
         let worker_id = if intent.explicit_to && target_state.workers.contains_key(&intent.address) {
             intent.address.clone()
         } else {
-            match resolve_address(target_state, &route, &project_key, &intent.address) {
+            match resolve_address(target_state, &control, &route, &project_key, &intent.address) {
                 Ok(worker_id) => worker_id,
                 Err(error) => return Resp::err(error),
             }
@@ -667,7 +656,6 @@ fn handle_authenticated_send_with_app_scope(
                 agent_id: binding.agent_id.clone(),
                 runtime_id: binding.runtime_id.clone(),
                 appserver_id: binding.app_scope_id.clone(),
-                endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
                 session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
@@ -698,12 +686,6 @@ fn handle_authenticated_send_with_app_scope(
                     binding.binding_id, command.actor_binding_id
                 ));
             }
-            if command.endpoint_generation != binding.endpoint_generation {
-                return Resp::err(format!(
-                    "SEND_BINDING_REJECTED: stale endpoint generation: expected {}, observed {}",
-                    binding.endpoint_generation, command.endpoint_generation
-                ));
-            }
             if command.scope != registered_scope {
                 return Resp::err(
                     "SEND_BINDING_REJECTED: envelope scope does not match authoritative route scope",
@@ -713,7 +695,6 @@ fn handle_authenticated_send_with_app_scope(
                 agent_id: binding.agent_id.clone(),
                 runtime_id: binding.runtime_id.clone(),
                 appserver_id: binding.app_scope_id.clone(),
-                endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
                 session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
@@ -810,7 +791,14 @@ fn handle_send_with_task_policy(
             mtype, MSG_TYPES
         ));
     }
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let mut st = server.state.lock().unwrap();
+    let route = match server_route_scope(server, &st) {
+        Ok(Some(route)) => route, Ok(None) => return Resp::err("SEND_BINDING_REJECTED: project route is missing"),
+        Err(error) => return Resp::err(error),
+    };
     if let Some(envelope) = channel_envelope.as_ref() {
         if let Err(error) = validate_channel_envelope_for_inbound(envelope) {
             return Resp::err(error);
@@ -839,7 +827,10 @@ fn handle_send_with_task_policy(
         };
         match st.channel_envelopes.get(rid).cloned() {
             Some(envelope) => {
-                if !channel_reply_authorized(&st, &original, &from) {
+                let authorized = match channel_reply_authorized(&st, &control, &route, &original, &from) {
+                    Ok(authorized) => authorized, Err(error) => return Resp::err(error),
+                };
+                if !authorized {
                     return Resp::err(
                         "CHANNEL_REPLY_FORBIDDEN: only the original recipient may reply through the original channel route",
                     );
@@ -859,7 +850,7 @@ fn handle_send_with_task_policy(
                     );
                 }
             }
-            None => match resolve_send_name_address(server, &st, to) {
+            None => match resolve_send_name_address(server, &st, &control, to) {
                 Ok(resolved) => resolved,
                 Err(error) => return Resp::err(error),
             },
@@ -867,7 +858,7 @@ fn handle_send_with_task_policy(
     } else if to.trim().is_empty() {
         return Resp::err("SEND_TARGET_REQUIRED: sendmessage requires --to or a positional address");
     } else {
-        match resolve_send_name_address(server, &st, to) {
+        match resolve_send_name_address(server, &st, &control, to) {
             Ok(resolved) => resolved,
             Err(error) => return Resp::err(error),
         }
@@ -942,7 +933,7 @@ fn handle_send_with_task_policy(
             if body.trim().is_empty() {
                 return Resp::err("REPLY_BODY_REQUIRED: an obligated reply requires a nonempty answer");
             }
-            if let Err(error) = reply_obligation::validate_reply(&st, obligation, &from, &to) {
+            if let Err(error) = reply_obligation::validate_reply(&control, &route.app_scope_id, obligation, &from, &to) {
                 return Resp::err(error);
             }
             clear_obligation_id = Some(rid.clone());
@@ -1107,12 +1098,17 @@ fn handle_send_with_task_policy(
                 "SEND_BINDING_REJECTED: reply obligation project scope is unavailable",
             );
         };
-        let recipient_name = name_address
-            .as_ref()
-            .map(|address| address.name.clone())
-            .or_else(|| reply_obligation::stable_name(&st, &to));
+        let recipient_name = match name_address.as_ref() {
+            Some(address) => Some(address.name.clone()),
+            None => match reply_obligation::stable_name(&control, &route.project_scope_id, &route.app_scope_id, &to) {
+                Ok(name) => name, Err(error) => return Resp::err(error),
+            },
+        };
+        let from_name = match reply_obligation::stable_name(&control, &route.project_scope_id, &route.app_scope_id, &from) {
+            Ok(name) => name, Err(error) => return Resp::err(error),
+        };
         let obligation = reply_obligation::build_obligation(
-            &st,
+            from_name,
             mid.clone(),
             project,
             from.clone(),
@@ -1297,74 +1293,20 @@ fn handle_live_closure_daemon_send(
     )
 }
 
-/// Cross-project role resolved from server-side control state only. The caller
-/// never supplies this; a worker named "CEO" or a stale master grant cannot
-/// manufacture authority. Priority order matches the user ruling: CEO covers
-/// the whole project, then same-level master/master and peer/peer are allowed,
-/// then peer->foreign master and master->foreign peer are denied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CrossProjectRole {
-    Ceo,
-    Master,
-    Peer,
-}
-
-fn cross_project_role(
-    server: &Server,
-    state: &State,
-    ceo_grant: Option<&crate::ceo::CeoGrant>,
-    worker_id: &str,
-) -> Result<CrossProjectRole, String> {
-    let route_scope = server_route_scope(server, state)
-        .map_err(|error| format!("CROSS_PROJECT_ROLE_RESOLVE_FAILED: {error}"))?;
-    // CEO authority is host-wide; a worker is the CEO only when it currently
-    // occupies the grant's stable name inside the grant's workspace and app
-    // scope. A same-named worker elsewhere grants nothing.
-    if let Some(grant) = ceo_grant {
-        let root_matches = grant.workspace == server.root.to_string_lossy().as_ref();
-        let app_matches = route_scope
-            .as_ref()
-            .is_some_and(|scope| scope.app_scope_id.as_str() == grant.app_scope_id);
-        if root_matches
-            && app_matches
-            && state
-                .name_occupancy(&grant.workspace, &grant.name)
-                .is_some_and(|holder| holder.worker_id == worker_id)
-        {
-            return Ok(CrossProjectRole::Ceo);
-        }
-    }
-    if let Some(grant) = current_master_grant(state, route_scope.as_ref()) {
-        if grant.agent_id.as_str() == worker_id {
-            return Ok(CrossProjectRole::Master);
-        }
-    }
-    if state.workers.contains_key(worker_id) {
-        return Ok(CrossProjectRole::Peer);
-    }
-    Err(format!("worker {worker_id} not registered"))
-}
-
-/// Server-side-only cross-project authorization. The caller is already
-/// authenticated by the runtime dispatch; here we judge the sender role, the
-/// target registration, and the role matrix, then commit the durable message
-/// under the target state lock. No client master evidence is consulted.
+/// A message committed for an authenticated source and an exact target.
 #[derive(Debug)]
 pub(crate) struct CrossProjectCommitted {
     pub(crate) msg_id: String,
     pub(crate) subscription: Option<crate::server::state::NotificationSubscription>,
 }
 
-/// Authorization and durable commit happen under a single target state guard.
-/// `sender_role` is resolved by the caller from current server-side state and
-/// is never read from the request. This function never re-locks `server`.
+/// Source authentication precedes this target-side durable commit. Registered
+/// callers can send across every role pair. This function never re-locks server.
 fn commit_cross_project_message(
     server: &Server,
     st: &mut State,
     sender_worker_id: &str,
     source_project: &str,
-    sender_role: CrossProjectRole,
-    ceo_grant: Option<&crate::ceo::CeoGrant>,
     source_thread_id: Option<String>,
     to: &str,
     subject: &str,
@@ -1375,28 +1317,6 @@ fn commit_cross_project_message(
         return Err(Resp::err(
             "MESSAGE_SUBJECT_REQUIRED: cross-project send requires --subject",
         ));
-    }
-    let target_role = cross_project_role(server, st, ceo_grant, to).map_err(Resp::err)?;
-    let allowed = match (sender_role, target_role) {
-        (CrossProjectRole::Ceo, _) => true,
-        (CrossProjectRole::Master, CrossProjectRole::Master) => true,
-        (CrossProjectRole::Peer, CrossProjectRole::Peer) => true,
-        _ => false,
-    };
-    if !allowed {
-        let project_scope = GlobalState::canonical_project_scope(&server.root)
-            .ok()
-            .map(|scope| scope.as_str().to_owned())
-            .unwrap_or_default();
-        let target_label = stable_name_for_worker(st, &project_scope, to)
-            .unwrap_or_else(|| to.to_owned());
-        return Err(Resp::err(format!(
-            "CROSS_PROJECT_SEND_REJECTED: a {} cannot send to a {}; the current target is {} ({})",
-            role_label(sender_role),
-            role_label(target_role),
-            target_label,
-            to,
-        )));
     }
     if !st.workers.contains_key(to) {
         return Err(Resp::err(format!("recipient {} not registered", to)));
@@ -1479,15 +1399,13 @@ fn notify_cross_project_committed(
     )
 }
 
-/// Target-side handler kept for direct reducer tests. It resolves the target
-/// role, checks endpoint reachability outside the state lock, and commits the
+/// Target-side handler kept for direct reducer tests. It checks endpoint
+/// reachability outside the state lock and commits the
 /// message under one target guard.
 fn handle_cross_project_send(
     server: &Server,
     sender_worker_id: &str,
     source_project: String,
-    sender_role: CrossProjectRole,
-    ceo_grant: Option<crate::ceo::CeoGrant>,
     source_thread_id: Option<String>,
     to: &str,
     subject: &str,
@@ -1518,8 +1436,6 @@ fn handle_cross_project_send(
         &mut st,
         sender_worker_id,
         &source_project,
-        sender_role,
-        ceo_grant.as_ref(),
         source_thread_id,
         to,
         subject,
@@ -1531,14 +1447,6 @@ fn handle_cross_project_send(
     };
     drop(st);
     notify_cross_project_committed(server, committed, sender_worker_id, to)
-}
-
-fn role_label(role: CrossProjectRole) -> &'static str {
-    match role {
-        CrossProjectRole::Ceo => "CEO",
-        CrossProjectRole::Master => "master",
-        CrossProjectRole::Peer => "peer",
-    }
 }
 
 #[cfg(test)]
@@ -2337,8 +2245,14 @@ fn handle_task_deliver_with_intent(
             Ok(Some(route)) => route,
             _ => return Resp::err("required reviewer project route is not ready"),
         };
-        if let Some(recipient) = st.name_occupancy(route.project_scope_id.as_str(), name)
-            .map(|entry| entry.worker_id.clone()).filter(|id| st.workers.contains_key(id))
+        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control, Err(error) => return Resp::err(error),
+        };
+        let recipient = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
+            Ok(slot) => slot.and_then(|slot| slot.active_binding()).map(|current| current.binding.agent_id.as_str().to_owned()),
+            Err(error) => return Resp::err(error),
+        };
+        if let Some(recipient) = recipient.filter(|id| st.workers.contains_key(id))
         {
             let message_id = gen_msg_id();
             events.push(Event::Sent { msg: Message {

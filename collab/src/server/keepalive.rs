@@ -671,7 +671,7 @@ fn board_patrol_subscription(
 
 fn board_patrol_body(tasks: &[String]) -> String {
     format!(
-        "Board idle patrol: you are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`, then continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
+        "You are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`, then continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
         tasks.join(", ")
     )
 }
@@ -2107,6 +2107,11 @@ mod tests {
             assert_eq!(message.to, "alice");
             assert_eq!(message.mtype, "notify");
             assert_eq!(message.subject.as_deref(), Some("board-idle-patrol"));
+            assert!(
+                !message.body.contains("Board idle patrol"),
+                "board wake body must not repeat the envelope subject: {}",
+                message.body
+            );
             assert!(message.body.contains("collab board show"));
             assert!(message.body.contains("collab notify cancel --task-id"));
             assert!(message

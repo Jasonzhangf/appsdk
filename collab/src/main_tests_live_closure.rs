@@ -26,7 +26,7 @@ fn live_closure_expected_inputs_match_single_and_batch_notification_payloads() {
         expected.exact[0]
     );
     assert!(expected.exact[1].starts_with("COLLAB_NOTIFY message-1 [notification-batch]"));
-    assert!(expected.exact[1].contains("message_ids=message-1"));
+    assert!(expected.exact[1].contains("entries=message-1:"));
     assert_eq!(
         expected.exact[1].matches("collab recv").count(),
         1,
@@ -82,7 +82,7 @@ fn live_closure_expected_inputs_accept_daemon_notification_message_type() {
     assert_eq!(expected.exact.len(), 2);
     assert!(expected.exact[0].starts_with("COLLAB_NOTIFY message-daemon ["));
     assert!(expected.exact[0].contains(challenge));
-    assert!(expected.exact[1].contains("message_ids=message-daemon"));
+    assert!(expected.exact[1].contains("entries=message-daemon:"));
 }
 
 #[test]
@@ -142,13 +142,9 @@ fn live_closure_item_correlation_accepts_multi_message_batch_entry() {
         challenge,
     )
     .unwrap();
-    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later last=later entries=message-other:other=other;message-target:appsdk-collab-live:closure-1:peer_to_peer=appsdk-collab-live:closure-1:peer_to_peer;message-later:later=later. older_messages=2 | P1 ACTION: do the in-scope action the message asks for. Read it once with `collab recv`; that consumes this durable message.";
+    let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: entries=message-other:other=other;message-target:appsdk-collab-live:closure-1:peer_to_peer=appsdk-collab-live:closure-1:peer_to_peer;message-later:later=later. older_messages=2 | P1 ACTION: do the in-scope action the message asks for. Read it once with `collab recv`; that consumes this durable message.";
 
     let last_entry = batch_input
-        .replace(
-            "message_ids=message-other,message-target,message-later",
-            "message_ids=message-target",
-        )
         .replace(
             "entries=message-other:other=other;message-target:appsdk-collab-live:closure-1:peer_to_peer=appsdk-collab-live:closure-1:peer_to_peer;message-later:later=later.",
             "entries=message-target:appsdk-collab-live:closure-1:peer_to_peer=appsdk-collab-live:closure-1:peer_to_peer.",

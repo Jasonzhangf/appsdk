@@ -312,11 +312,8 @@ pub(crate) fn live_closure_batch_input_contains_message(
     } else {
         expected_title.to_owned()
     };
-    let Some((_, body)) = observed.split_once(" [notification-batch] Batch wake: message_ids=")
+    let Some((_, entries)) = observed.split_once(" [notification-batch] Batch wake: entries=")
     else {
-        return false;
-    };
-    let Some((_, entries)) = body.split_once(" entries=") else {
         return false;
     };
     let entries = entries.split_once(" | ").map_or(entries, |(body, _)| body);

@@ -645,6 +645,11 @@ use super::*;
         );
         assert!(delivered[0].1.contains("deadline:goal:idle-master"));
         assert!(
+            !delivered[0].1.contains("subject="),
+            "deadline wake must not repeat the envelope subject: {}",
+            delivered[0].1
+        );
+        assert!(
             !delivered[0].1.contains("MASTER_IDLE_WAKE"),
             "deadline timer and idle notification paths must stay distinct"
         );
@@ -1331,6 +1336,11 @@ use super::*;
             .unwrap();
         assert_eq!(state.msgs[message_id].to, "master");
         assert!(state.msgs[message_id].body.contains("MASTER_IDLE_WAKE"));
+        assert!(
+            !state.msgs[message_id].body.contains("subject="),
+            "finite master-idle body must not repeat the envelope subject: {}",
+            state.msgs[message_id].body
+        );
         assert!(state.msgs[message_id]
             .body
             .contains("Do not rearm this finite master-idle schedule"));
@@ -2123,7 +2133,7 @@ use super::*;
         assert!(text.contains("msg-batch-2"));
         assert!(text.contains("msg-batch-3"));
         assert!(text.contains("msg-batch-4"));
-        assert!(text.contains("message_ids="));
+        assert!(!text.contains("message_ids="), "{text}");
         assert!(text.contains("entries=msg-batch-2:"));
         assert!(text.contains("msg-batch-3:"));
         assert!(text.contains("msg-batch-4:"));

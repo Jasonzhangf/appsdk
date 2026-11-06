@@ -34,7 +34,7 @@ fn wake_text_keeps_location_action_and_one_read_action_only() {
 }
 
 #[test]
-fn batch_wake_keeps_ids_categories_and_one_read_action_only() {
+fn batch_wake_keeps_entries_and_one_read_action_only() {
     let entries = vec![
         (
             0_i64,
@@ -54,9 +54,17 @@ fn batch_wake_keeps_ids_categories_and_one_read_action_only() {
     let batch = batch_notification_text(&entries, 2);
     assert!(
         batch.starts_with(
-            "Batch wake: message_ids=msg-a,msg-b last=user-question entries=msg-a:worker-idle:a=body a;"
+            "Batch wake: entries=msg-a:worker-idle:a=body a;msg-b:user-question=用户问了一个需要区分的具体问题."
         ),
         "{batch}"
+    );
+    assert!(
+        !batch.contains("message_ids="),
+        "a batch wake must not re-list ids that each entry already carries: {batch}"
+    );
+    assert!(
+        !batch.contains(" last="),
+        "a batch wake must not repeat the last entry title: {batch}"
     );
     assert!(
         batch.contains("msg-b:user-question=用户问了一个需要区分的具体问题"),

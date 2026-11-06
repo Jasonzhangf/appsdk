@@ -854,7 +854,11 @@ fn batch_excludes_messages_after_first_window_and_never_replays() {
     ));
     assert_eq!(calls.borrow().len(), 1);
     assert!(calls.borrow()[0].contains(&first));
-    assert!(calls.borrow()[0].contains("message_ids=message-owner"));
+    assert!(
+        !calls.borrow()[0].contains("message_ids="),
+        "{}",
+        calls.borrow()[0]
+    );
     assert!(!calls.borrow()[0].contains("second"));
     assert!(
         calls.borrow()[0].contains("entries=message-owner:"),
@@ -1478,6 +1482,11 @@ fn project_patrol_prompt_uses_ceo_reply_when_configured() {
 
     let bodies = project_patrol_bodies(&server, &subscription_id);
     assert_eq!(bodies.len(), 1);
+    assert!(
+        !bodies[0].contains("subject="),
+        "project-patrol body must not repeat the envelope subject: {}",
+        bodies[0]
+    );
     for phrase in [
         "collab ceo status",
         "CEO_NOT_CONFIGURED",

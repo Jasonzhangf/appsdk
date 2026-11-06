@@ -179,11 +179,6 @@ pub fn batch_notification_text(
     batch: &[(i64, String, String, String, String)],
     remaining: usize,
 ) -> String {
-    let message_ids = batch
-        .iter()
-        .map(|(_, id, _, _, _)| id.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
     let entries = batch
         .iter()
         .map(|(_, id, _, _, text)| {
@@ -197,15 +192,6 @@ pub fn batch_notification_text(
         })
         .collect::<Vec<_>>()
         .join(";");
-    let last = batch
-        .last()
-        .map(|(_, _, _, _, text)| {
-            text.split_once('[')
-                .and_then(|(_, rest)| rest.split_once(']'))
-                .map(|(subject, _)| subject)
-                .unwrap_or("notification")
-        })
-        .unwrap_or("notification");
     let older = (remaining > 0)
         .then(|| format!(" older_messages={remaining}"))
         .unwrap_or_default();
@@ -213,7 +199,11 @@ pub fn batch_notification_text(
     // preview text; the durable inbox remains the source for task details.
     // Identity, relevance and overflow only: the composed notification owns
     // the single read action, and the Collab Skill owns the execution protocol.
-    format!("Batch wake: message_ids={message_ids} last={last} entries={entries}.{older}")
+    // Each entry already carries its own id, title and a faithful preview, so
+    // the per-batch `message_ids` re-listing and `last` title repeat were
+    // ablated as redundant content; ids/titles/previews remain recoverable
+    // from `entries`, and the durable inbox remains the source for details.
+    format!("Batch wake: entries={entries}.{older}")
 }
 
 fn compose_notification_with_mtype(

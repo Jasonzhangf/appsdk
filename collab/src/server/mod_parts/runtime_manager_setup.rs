@@ -1,3 +1,19 @@
+#[derive(Debug)]
+enum BindingPublicationError {
+    AddressConflict(String),
+    Persistence(String),
+}
+
+impl std::fmt::Display for BindingPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AddressConflict(message) | Self::Persistence(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
 fn pending_same_pane_master_bindings_in(state: &State) -> Vec<RuntimeBinding> {
     state
         .global
@@ -30,8 +46,9 @@ fn pending_same_pane_master_bindings_in(state: &State) -> Vec<RuntimeBinding> {
         .collect()
 }
 
-/// Whether the confirmed control set owns this reducer binding's principal
-/// with a different current fact, or has retired that principal entirely.
+/// Whether the control publisher owns this startup binding or has replaced
+/// or retired its principal. Reducer-only passes must not repeat publication
+/// of an exact current control value, including an unresolved address.
 ///
 /// A lagging reducer/journal must not republish an older binding when the
 /// durable control owner has already replaced or retired it. A control slot
@@ -42,7 +59,7 @@ fn pending_same_pane_master_bindings_in(state: &State) -> Vec<RuntimeBinding> {
 /// (for example, a leftover from a completed handoff) and must not suppress
 /// the reducer's committed current identity from startup routing. Peers and
 /// unrelated principals are never dropped by this guard.
-fn reducer_binding_superseded_by_control(
+fn control_owns_replayed_binding(
     controlled: &crate::server::binding_slot::BindingControlSet,
     binding: &RuntimeBinding,
 ) -> bool {
@@ -61,7 +78,10 @@ fn reducer_binding_superseded_by_control(
         };
 
         if control_value.binding == *binding {
-            return false;
+            // The control publisher already handled this exact value. A
+            // deferred address conflict must not be retried by a reducer-only
+            // startup pass, which would select a claimant by traversal order.
+            return true;
         }
 
         // If the active control value now belongs to a different principal, the
@@ -432,6 +452,7 @@ impl ProjectRuntimeManager {
                 &format!("PENDING_EFFECT_RECOVERY_DEFERRED: {error}"),
             );
         }
+        let binding_control = manager.binding_control_store().load()?;
         // The confirmed control set wins over a lagging reducer/journal index.
         // Publish its exact current bindings first, then let the reducer-only
         // reconciler fill addresses that control does not own.
@@ -501,14 +522,7 @@ impl ProjectRuntimeManager {
                 continue;
             }
             for binding in self.pending_same_pane_master_bindings(&runtime) {
-                if reducer_binding_superseded_by_control(controlled, &binding) {
-                    append_log(
-                        &self.host.log_path(),
-                        &format!(
-                            "RECOVERY_RECONCILE_SKIPPED_CONTROL_SUPERSEDED: reducer binding {} for {} is superseded by the control slot",
-                            binding.binding_id, binding.agent_id
-                        ),
-                    );
+                if control_owns_replayed_binding(controlled, &binding) {
                     continue;
                 }
                 let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
@@ -566,13 +580,17 @@ impl ProjectRuntimeManager {
     ///
     /// Recovery must not fail because another project has an unrelated stale
     /// route. The same pane and native-address conflicts still fail closed.
-    fn reconcile_binding_publication(&self, binding: &RuntimeBinding) -> Result<(), String> {
-        self.prune_stale_routes()?;
+    fn reconcile_binding_publication(
+        &self,
+        binding: &RuntimeBinding,
+    ) -> Result<(), BindingPublicationError> {
+        self.prune_stale_routes()
+            .map_err(BindingPublicationError::Persistence)?;
         if let Some(owner) = self.pane_owner_other_than(binding) {
-            return Err(format!(
+            return Err(BindingPublicationError::AddressConflict(format!(
                 "RECOVERY_RECONCILE_REQUIRED: pane for {} belongs to {} binding {}",
                 binding.binding_id, owner.agent_id, owner.binding_id
-            ));
+            )));
         }
 
         let host = self.host.state.lock().unwrap();
@@ -588,10 +606,10 @@ impl ProjectRuntimeManager {
                     && current.app_scope_id == binding.app_scope_id;
                 if !same_durable_route || current.endpoint_generation >= binding.endpoint_generation
                 {
-                    return Err(format!(
+                    return Err(BindingPublicationError::AddressConflict(format!(
                         "RECOVERY_RECONCILE_REQUIRED: host pane route for {} is at generation {}",
                         binding.binding_id, current.endpoint_generation
-                    ));
+                    )));
                 }
             }
         }
@@ -615,10 +633,10 @@ impl ProjectRuntimeManager {
                     && current.native_thread_id == binding.native_thread_id;
                 if !same_durable_route || current.endpoint_generation >= binding.endpoint_generation
                 {
-                    return Err(format!(
+                    return Err(BindingPublicationError::AddressConflict(format!(
                         "RECOVERY_RECONCILE_REQUIRED: current thread route for {} belongs to {}",
                         native_thread_id, current.binding_id
-                    ));
+                    )));
                 }
             }
         }
@@ -627,7 +645,11 @@ impl ProjectRuntimeManager {
             .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
                 binding: binding.clone(),
             }])
-            .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
+            .map_err(|error| {
+                BindingPublicationError::Persistence(format!(
+                    "RECOVERY_RECONCILE_REQUIRED: {error}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -653,14 +675,7 @@ impl ProjectRuntimeManager {
                 .flat_map(|project| project.runtime_bindings.values().cloned())
                 .collect::<Vec<_>>();
             for binding in bindings {
-                if reducer_binding_superseded_by_control(controlled, &binding) {
-                    append_log(
-                        &self.host.log_path(),
-                        &format!(
-                            "RECOVERY_RECONCILE_SKIPPED_CONTROL_SUPERSEDED: reducer binding {} for {} is superseded by the control slot",
-                            binding.binding_id, binding.agent_id
-                        ),
-                    );
+                if control_owns_replayed_binding(controlled, &binding) {
                     continue;
                 }
                 if binding.session_id.is_none() || binding.native_thread_id.is_none() {

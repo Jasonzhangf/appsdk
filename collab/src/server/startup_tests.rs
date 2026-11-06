@@ -21,6 +21,238 @@ struct StartupRouteFixture {
     key: RouteKey,
 }
 
+fn startup_pane_conflict_endpoint(
+    pane: &str,
+    session: &str,
+    thread: &str,
+) -> crate::proto::TmuxEndpoint {
+    crate::proto::TmuxEndpoint {
+        socket_path: "/tmp/collab-startup-pane-conflict.sock".into(),
+        server_pid: 49,
+        tmux_session_id: "$1700".into(),
+        pane_id: pane.into(),
+        pane_pid: 50,
+        codex_session_id: Some(session.into()),
+        codex_thread_id: Some(thread.into()),
+    }
+}
+
+fn startup_pane_conflict_transport(
+    endpoint: &crate::proto::TmuxEndpoint,
+) -> crate::proto::SelectedTransport {
+    crate::proto::SelectedTransport {
+        kind: crate::proto::TransportKind::Tmux,
+        endpoint: Some(endpoint.socket_path.clone()),
+        namespace: Some(endpoint.tmux_session_id.clone()),
+        session_id: endpoint.codex_session_id.clone(),
+        thread_id: endpoint.codex_thread_id.clone(),
+        tmux_endpoint: Some(endpoint.clone()),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "startup pane conflict fixture".into(),
+    }
+}
+
+/// One isolated project runtime with one committed pane claim. Distinct
+/// projects let two historical claims hold the same pane without the live
+/// registration writer retiring either one.
+struct StartupPaneConflictRuntime {
+    runtime: Arc<Server>,
+    binding: crate::server::global_state::RuntimeBinding,
+    transport: crate::proto::SelectedTransport,
+    root: PathBuf,
+}
+
+fn startup_pane_conflict_runtime(
+    worker: &str,
+    endpoint: &crate::proto::TmuxEndpoint,
+) -> StartupPaneConflictRuntime {
+    let (server, root) = crate::server::peer_tests::test_server();
+    let runtime = Arc::new(server);
+    let app = crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+    let transport = startup_pane_conflict_transport(endpoint);
+    let registered = crate::server::peer_tests::seed_committed_owner(
+        &runtime,
+        worker,
+        &format!("token-{worker}"),
+        &transport,
+        &root.to_string_lossy(),
+        Some(app.clone()),
+    );
+    assert!(registered.ok, "seed {worker} failed: {registered:?}");
+    let route_scope = crate::scope::RouteScope {
+        app_scope_id: app.clone(),
+        project_scope_id: GlobalState::canonical_project_scope(&root).unwrap(),
+    };
+    let binding = runtime
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_project_for_route(&route_scope)
+        .and_then(|project| {
+            project
+                .runtime_bindings
+                .values()
+                .find(|binding| binding.agent_id.as_str() == worker)
+                .cloned()
+        })
+        .unwrap_or_else(|| panic!("seeded owner {worker} must be committed"));
+    StartupPaneConflictRuntime {
+        runtime,
+        binding,
+        transport,
+        root,
+    }
+}
+
+fn startup_pane_conflict_slot(
+    host_paths: &HostPaths,
+    name: &str,
+    binding: crate::server::global_state::RuntimeBinding,
+    transport: &crate::proto::SelectedTransport,
+) {
+    crate::server::binding_store::BindingControlStore::at(
+        &host_paths.state_root().join("routes.jsonl"),
+    )
+    .commit(crate::server::binding_store::ControlChange::Commit {
+        key: crate::server::binding_slot::IdentityBindingKey::new(
+            binding.project_scope.clone(),
+            binding.app_scope_id.clone(),
+            name,
+        ),
+        value: crate::server::binding_slot::BindingValue::new(binding, transport.clone()),
+        expected_generation: None,
+    })
+    .unwrap();
+}
+
+fn assert_two_historical_pane_slots_do_not_block_startup(reverse_slots: bool) {
+    let (host, host_root) = crate::server::peer_tests::test_server();
+    let host = Arc::new(host);
+    let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+
+    // Two historical projects each committed a durable pane claim on the same
+    // pane, and a third independent pane must stay usable. The two claimants
+    // live in different projects, so the live registration writer never
+    // retired either one.
+    let claimed = startup_pane_conflict_endpoint("%1700", "session-claim-a", "thread-claim-a");
+    let mut second = claimed.clone();
+    second.codex_session_id = Some("session-claim-b".into());
+    second.codex_thread_id = Some("thread-claim-b".into());
+    let healthy = startup_pane_conflict_endpoint("%2000", "session-healthy", "thread-healthy");
+    let claim_a = startup_pane_conflict_runtime("claim-a", &claimed);
+    let claim_b = startup_pane_conflict_runtime("claim-b", &second);
+    let healthy_peer = startup_pane_conflict_runtime("healthy-peer", &healthy);
+
+    // The manager starts empty, exactly like `run_with_host_paths` before it
+    // replays durable routes, then receives the materialized project runtimes.
+    let manager = ProjectRuntimeManager::new(host.clone(), &host_paths)
+        .expect("an empty host must construct the runtime manager");
+    for runtime in [&claim_a, &claim_b, &healthy_peer] {
+        manager.install_runtime(
+            &(
+                runtime.binding.app_scope_id.as_str().to_owned(),
+                runtime.binding.project_scope.as_str().to_owned(),
+            ),
+            runtime.runtime.clone(),
+            None,
+        );
+    }
+
+    let mut slots = [("claim-a", &claim_a), ("claim-b", &claim_b)];
+    if reverse_slots {
+        slots.swap(0, 1);
+    }
+    for (name, runtime) in slots {
+        startup_pane_conflict_slot(
+            &host_paths,
+            name,
+            runtime.binding.clone(),
+            &runtime.transport,
+        );
+    }
+    startup_pane_conflict_slot(
+        &host_paths,
+        "healthy-peer",
+        healthy_peer.binding.clone(),
+        &healthy_peer.transport,
+    );
+    let control = crate::server::binding_store::BindingControlStore::at(
+        &host_paths.state_root().join("routes.jsonl"),
+    )
+    .load()
+    .unwrap();
+
+    // Correct target: one historical pane claim must not abort the whole
+    // startup publication. `new_with_operation_journal` propagates this exact
+    // call with `?`, so a returned error here is what leaves the daemon
+    // manager/listener not ready. This is the first semantic assertion and it
+    // is the one that fails on the pre-fix baseline.
+    let publication = manager.reconcile_controlled_thread_routes(&control);
+    assert!(
+        publication.is_ok(),
+        "a single historical pane claim must not abort startup publication: {publication:?}"
+    );
+    manager.reconcile_started_thread_routes(&control).unwrap();
+    manager.reconcile_same_pane_master_routes(&control).unwrap();
+
+    // The conflicting pane must not be silently won by slot order: neither
+    // historical claim may be published into the host address index.
+    assert!(
+        host.state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_unique_tmux_pane_route(&claimed)
+            .is_none(),
+        "a mutually conflicting historical pane claim must stay pending, not win by slot order"
+    );
+    // The independent healthy pane must remain addressable.
+    let published_healthy = host
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_unique_tmux_pane_route(&healthy)
+        .cloned();
+    assert_eq!(
+        published_healthy.map(|binding| binding.agent_id.as_str().to_owned()),
+        Some("healthy-peer".to_owned()),
+        "startup must keep publishing independent healthy routes"
+    );
+    // Startup must not retire either claimant while the conflict is resolved
+    // by the authorized request path instead of by iteration order.
+    for runtime in [&claim_a, &claim_b] {
+        assert!(
+            runtime
+                .runtime
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_binding_for(&runtime.binding.route_scope(), &runtime.binding.binding_id)
+                .is_some(),
+            "startup must not retire pane claimant {} by slot order",
+            runtime.binding.agent_id
+        );
+    }
+
+    drop(manager);
+    drop(host);
+    std::fs::remove_dir_all(host_root).unwrap();
+    for runtime in [claim_a, claim_b, healthy_peer] {
+        std::fs::remove_dir_all(runtime.root).unwrap();
+    }
+}
+
+#[test]
+fn two_historical_control_slots_claiming_one_pane_do_not_block_startup() {
+    let _startup_test_lock = startup_test_lock();
+    assert_two_historical_pane_slots_do_not_block_startup(false);
+    assert_two_historical_pane_slots_do_not_block_startup(true);
+}
+
 fn startup_route_fixture(name: &str, binding_control: Option<&str>) -> StartupRouteFixture {
     let root = test_root(name);
     let host_root = root.join("host");

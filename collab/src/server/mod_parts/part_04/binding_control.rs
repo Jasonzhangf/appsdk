@@ -192,10 +192,7 @@ impl ProjectRuntimeManager {
             .map(|holder| holder.occupancy_revision)
             .unwrap_or_else(|| {
                 state
-                    .name_occupancy_revision(
-                        context.project_scope.as_str(),
-                        target_name,
-                    )
+                    .name_occupancy_revision(context.project_scope.as_str(), target_name)
                     .checked_add(1)
                     .unwrap_or(0)
             });
@@ -355,13 +352,11 @@ impl ProjectRuntimeManager {
                 )
                 .map(|commit| commit.durability),
             None => self
-                .commit_control_change_locked(
-                    crate::server::binding_store::ControlChange::Commit {
-                        key,
-                        value,
-                        expected_generation: None,
-                    },
-                )
+                .commit_control_change_locked(crate::server::binding_store::ControlChange::Commit {
+                    key,
+                    value,
+                    expected_generation: None,
+                })
                 .map(|commit| commit.durability),
         }
     }
@@ -417,9 +412,7 @@ impl ProjectRuntimeManager {
         let target_session_id = binding
             .session_id
             .as_ref()
-            .ok_or(
-                "BINDING_CONTROL_REGISTER_REJECTED: candidate binding has no agent session",
-            )?
+            .ok_or("BINDING_CONTROL_REGISTER_REJECTED: candidate binding has no agent session")?
             .as_str()
             .to_owned();
         let effect_id = format!("register-{}", prepared.nested_operation_id);
@@ -763,10 +756,9 @@ impl ProjectRuntimeManager {
         state: &State,
         effect: &crate::server::binding_slot::PendingEffect,
     ) -> bool {
-        let Some(holder) = state.name_occupancy(
-            effect.project_scope.as_str(),
-            effect.name.as_str(),
-        ) else {
+        let Some(holder) =
+            state.name_occupancy(effect.project_scope.as_str(), effect.name.as_str())
+        else {
             return false;
         };
         if holder.worker_id != effect.target_worker_id
@@ -833,14 +825,8 @@ impl ProjectRuntimeManager {
         // no name yet. Registration keeps its exact user contract: same session
         // keeps the name, otherwise the pane anchor or fixed pool decides.
         let name = name_resolution::ensure_worker_control_name(runtime, worker_id)?;
-        self.commit_control_binding_named(
-            context,
-            &name,
-            binding,
-            transport,
-            None,
-        )
-        .map(|commit| commit.durability)
+        self.commit_control_binding_named(context, &name, binding, transport, None)
+            .map(|commit| commit.durability)
     }
 
     /// Commit an explicit ordinary name move to the binding-control resource
@@ -975,6 +961,7 @@ impl ProjectRuntimeManager {
         &self,
         controlled: &crate::server::binding_slot::BindingControlSet,
     ) -> Result<(), String> {
+        let mut bindings = Vec::new();
         for value in controlled.active_values() {
             let key = (
                 value.binding.app_scope_id.as_str().to_owned(),
@@ -1013,7 +1000,38 @@ impl ProjectRuntimeManager {
                 );
                 continue;
             }
-            self.reconcile_binding_publication(&value.binding)?;
+            bindings.push(value.binding.clone());
+        }
+        for binding in &bindings {
+            let unresolved_pane = binding.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                let conflicting_control = bindings.iter().any(|other| {
+                    let same_claim =
+                        other.binding_id == binding.binding_id && other.same_principal(binding);
+                    !same_claim
+                        && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
+                            crate::client::adapters::tmux::same_owned_pane(endpoint, other_endpoint)
+                        })
+                });
+                conflicting_control
+                    && self
+                        .host
+                        .state
+                        .lock()
+                        .unwrap()
+                        .global
+                        .lookup_unique_tmux_pane_route(endpoint)
+                        .is_none()
+            });
+            if unresolved_pane {
+                // No current host owner resolves these conflicting historical
+                // values. Keep them unpublished until a real context request
+                // supplies the current facts and authority; do not pick one.
+                continue;
+            }
+            match self.reconcile_binding_publication(binding) {
+                Ok(()) | Err(BindingPublicationError::AddressConflict(_)) => {}
+                Err(BindingPublicationError::Persistence(error)) => return Err(error),
+            }
         }
         Ok(())
     }

@@ -13,6 +13,208 @@ async fn public_cli_context_recovers_authenticated_staged_split() {
     split_journal_context_recovery(true, true).await;
 }
 
+#[tokio::test]
+async fn startup_control_conflict_preserves_owner_and_publishes_healthy_routes() {
+    let (host, host_root, _) = test_server();
+    let (runtime, project_root, _) = runtime_fixture_for_host(&host);
+    let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+    let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+    let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+    let scope = crate::server::global_state::RouteScope {
+        app_scope_id: app.clone(),
+        project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+    };
+    manager.install_runtime(
+        &(
+            app.as_str().to_owned(),
+            scope.project_scope_id.as_str().to_owned(),
+        ),
+        runtime.clone(),
+        None,
+    );
+    let seed = |worker: &str, candidates| {
+        let response = seed_committed_registration_fixture(
+            &runtime,
+            worker.into(),
+            format!("token-{worker}"),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates),
+        );
+        assert!(response.ok, "{response:?}");
+    };
+    let binding_for = |worker: &str| {
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &scope,
+                &BindingId::new(format!("binding-{worker}")).unwrap(),
+            )
+            .unwrap()
+            .clone()
+    };
+    let old_candidates = test_candidates("startup-history-old").unwrap();
+    seed("startup-history-old", old_candidates.clone());
+    let mut current_candidates = old_candidates;
+    let endpoint = &mut current_candidates.tmux.as_mut().unwrap().endpoint;
+    endpoint.codex_session_id = Some("session-startup-history-current".into());
+    endpoint.codex_thread_id = Some("thread-startup-history-current".into());
+    seed("startup-history-current", current_candidates);
+    let current_binding = binding_for("startup-history-current");
+    let mut old_binding = binding_for("startup-history-old");
+    let mut old_endpoint = current_binding.tmux_endpoint.clone().unwrap();
+    old_endpoint.codex_session_id = old_binding
+        .session_id
+        .as_ref()
+        .map(|s| s.as_str().to_owned());
+    old_endpoint.codex_thread_id = old_binding
+        .native_thread_id
+        .as_ref()
+        .map(|t| t.as_str().to_owned());
+    old_binding.tmux_endpoint = Some(old_endpoint);
+    old_binding.endpoint_generation += 2;
+    runtime
+        .commit_checked(&[Event::GlobalRuntimeBound {
+            binding: old_binding.clone(),
+        }])
+        .unwrap();
+    host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+        binding: old_binding.clone(),
+    }])
+    .unwrap();
+    seed(
+        "startup-history-healthy",
+        test_candidates("startup-history-healthy").unwrap(),
+    );
+    let healthy_binding = binding_for("startup-history-healthy");
+    assert!(crate::client::adapters::tmux::same_owned_pane(
+        old_binding.tmux_endpoint.as_ref().unwrap(),
+        current_binding.tmux_endpoint.as_ref().unwrap(),
+    ));
+    assert!(!crate::client::adapters::tmux::same_owned_pane(
+        old_binding.tmux_endpoint.as_ref().unwrap(),
+        healthy_binding.tmux_endpoint.as_ref().unwrap(),
+    ));
+    let mut control = crate::server::binding_slot::BindingControlSet::new();
+    for (name, binding) in [
+        ("Alice", &old_binding),
+        ("Bob", &current_binding),
+        ("Carol", &healthy_binding),
+    ] {
+        let endpoint = binding.tmux_endpoint.as_ref().unwrap();
+        let transport = crate::proto::SelectedTransport {
+            kind: crate::proto::TransportKind::Tmux,
+            endpoint: Some(endpoint.socket_path.clone()),
+            namespace: Some(endpoint.tmux_session_id.clone()),
+            session_id: binding.session_id.as_ref().map(|id| id.as_str().to_owned()),
+            thread_id: binding
+                .native_thread_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+            tmux_endpoint: Some(endpoint.clone()),
+            capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+            self_check: "replayed durable registration".into(),
+        };
+        control
+            .commit(
+                &crate::server::binding_slot::IdentityBindingKey::new(
+                    binding.project_scope.clone(),
+                    binding.app_scope_id.clone(),
+                    name,
+                ),
+                crate::server::binding_slot::BindingValue::new(binding.clone(), transport),
+                None,
+            )
+            .unwrap();
+    }
+    assert_eq!(control.active_values().count(), 3);
+    manager
+        .reconcile_controlled_thread_routes(&control)
+        .expect("a conflicting publication must not abort startup or skip a healthy route");
+    manager.reconcile_started_thread_routes(&control).unwrap();
+    manager.reconcile_same_pane_master_routes(&control).unwrap();
+    let state = host.state.lock().unwrap();
+    assert_eq!(
+        state
+            .global
+            .lookup_unique_tmux_pane_route(current_binding.tmux_endpoint.as_ref().unwrap()),
+        Some(&old_binding),
+        "startup must not replace the existing claimant without a current authorized request",
+    );
+    assert_eq!(
+        state
+            .global
+            .lookup_unique_tmux_pane_route(healthy_binding.tmux_endpoint.as_ref().unwrap()),
+        Some(&healthy_binding),
+    );
+    drop(state);
+    assert!(
+        manager
+            .reconcile_binding_publication(&current_binding)
+            .is_err(),
+        "an ordinary republisher must still expose the actual conflict"
+    );
+
+    // Exercise the actual CLI against the same manager after startup
+    // publication, so a live listener and an independent project consumer are
+    // required in addition to the internal route assertions above.
+    host_paths.ensure_root().unwrap();
+    let listener = tokio::net::UnixListener::bind(host_paths.socket_path()).unwrap();
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let serving_manager = manager.clone();
+    let serving = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(super::conn_task_routed(
+                serving_manager.clone(),
+                stream,
+                receiver.clone(),
+                None,
+            ));
+        }
+    });
+    let binary = std::env::var_os("COLLAB_TEST_BINARY")
+        .expect("parent must supply freshly built COLLAB_TEST_BINARY for public CLI fixture");
+    let state_root = host_paths.state_root().to_path_buf();
+    let cli_root = project_root.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(binary)
+            .arg("directory")
+            .current_dir(cli_root)
+            .env("COLLAB_STATE_DIR", state_root)
+            .env_remove("COLLAB_SOCKET_PATH")
+            .env_remove("COLLAB_HOST_SOCKET")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    shutdown.send(true).unwrap();
+    serving.abort();
+    let _ = serving.await;
+    assert!(
+        output.status.success(),
+        "public CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let directory: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        directory["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|target| {
+                target["worker_id"].as_str() == Some(healthy_binding.agent_id.as_str())
+            }),
+        "the public CLI must still see the independent healthy worker: {directory}"
+    );
+    std::fs::remove_dir_all(host_root).unwrap();
+    std::fs::remove_dir_all(project_root).unwrap();
+}
+
 async fn split_journal_context_recovery(native: bool, public_cli: bool) {
     let (host, host_root, _) = test_server();
     let (runtime, project_root, _) = runtime_fixture_for_host(&host);
@@ -415,17 +617,30 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
                     current.binding_id.clone(),
                     current.endpoint_generation,
                     current.route_scope(),
-                    None, None, None, None,
+                    None,
+                    None,
+                    None,
+                    None,
                 );
                 (context, token, command)
             };
-            let (_, sent) = mutation_manager.dispatch_sync(Some(mutation_context), Req::Send {
-                from: mutation_worker.clone(), worker_id: Some(mutation_worker.clone()),
-                token: Some(mutation_token), command: Some(mutation_command), to: mutation_worker,
-                mtype: "notify".into(), subject: Some("current-context-readback".into()),
-                body: "A message committed after the original context completed.".into(),
-                in_reply_to: None, reply_policy: None, target_session: None, delivery: "queued".into(),
-            });
+            let (_, sent) = mutation_manager.dispatch_sync(
+                Some(mutation_context),
+                Req::Send {
+                    from: mutation_worker.clone(),
+                    worker_id: Some(mutation_worker.clone()),
+                    token: Some(mutation_token),
+                    command: Some(mutation_command),
+                    to: mutation_worker,
+                    mtype: "notify".into(),
+                    subject: Some("current-context-readback".into()),
+                    body: "A message committed after the original context completed.".into(),
+                    in_reply_to: None,
+                    reply_policy: None,
+                    target_session: None,
+                    delivery: "queued".into(),
+                },
+            );
             assert!(sent.ok, "{sent:?}");
             assert_eq!(sent.data["durable"], true);
             let message_id = sent.data["msg_id"].as_str().unwrap();
@@ -435,20 +650,47 @@ async fn split_journal_context_recovery(native: bool, public_cli: bool) {
             assert_eq!(repeated.0, 0, "{}", String::from_utf8_lossy(&repeated.2));
             let again: serde_json::Value = serde_json::from_slice(&repeated.1).unwrap();
             assert_eq!(again["result"]["outcome"], "completed");
-            assert_eq!(again["result"]["operation_id"], initial["result"]["operation_id"]);
+            assert_eq!(
+                again["result"]["operation_id"],
+                initial["result"]["operation_id"]
+            );
             assert_eq!(again["result"]["phase"], initial["result"]["phase"]);
-            assert_eq!(again["result"]["committed_phases"], initial["result"]["committed_phases"]);
-            assert_eq!(again["result"]["snapshot"]["binding"], initial["result"]["snapshot"]["binding"]);
-            assert_eq!(again["result"]["snapshot"]["identity"], initial["result"]["snapshot"]["identity"]);
-            assert_eq!(again["result"]["snapshot"]["peers"], initial["result"]["snapshot"]["peers"]);
-            for field in ["worker_id", "scope", "grant_id", "grant_generation", "binding_id", "endpoint_generation"] {
-                assert_eq!(again["result"]["snapshot"]["master"][field],
-                    initial["result"]["snapshot"]["master"][field]);
+            assert_eq!(
+                again["result"]["committed_phases"],
+                initial["result"]["committed_phases"]
+            );
+            assert_eq!(
+                again["result"]["snapshot"]["binding"],
+                initial["result"]["snapshot"]["binding"]
+            );
+            assert_eq!(
+                again["result"]["snapshot"]["identity"],
+                initial["result"]["snapshot"]["identity"]
+            );
+            assert_eq!(
+                again["result"]["snapshot"]["peers"],
+                initial["result"]["snapshot"]["peers"]
+            );
+            for field in [
+                "worker_id",
+                "scope",
+                "grant_id",
+                "grant_generation",
+                "binding_id",
+                "endpoint_generation",
+            ] {
+                assert_eq!(
+                    again["result"]["snapshot"]["master"][field],
+                    initial["result"]["snapshot"]["master"][field]
+                );
             }
             assert_eq!(again["bootstrap"]["identity"], "daemon-owned");
             assert_eq!(again["bootstrap"]["registered"], true);
             assert_eq!(again["result"]["snapshot"]["inbox"]["unread"], 1);
-            assert_eq!(again["result"]["snapshot"]["inbox"]["messages"][0]["id"], message_id);
+            assert_eq!(
+                again["result"]["snapshot"]["inbox"]["messages"][0]["id"],
+                message_id
+            );
             assert_eq!(std::fs::read(&host_journal).unwrap(), host_before);
             assert_eq!(std::fs::read(&project_journal).unwrap(), project_before);
             first
@@ -626,9 +868,7 @@ async fn startup_reconciles_a_lagged_same_pane_master_route() {
         None,
     );
     manager
-        .reconcile_same_pane_master_routes(
-            &crate::server::binding_slot::BindingControlSet::new(),
-        )
+        .reconcile_same_pane_master_routes(&crate::server::binding_slot::BindingControlSet::new())
         .unwrap();
     let endpoint = binding
         .tmux_endpoint
@@ -746,9 +986,7 @@ async fn superseded_same_pane_master_does_not_fence_project_route() {
     // reconciler must not resurrect it.
     assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
     manager
-        .reconcile_same_pane_master_routes(
-            &crate::server::binding_slot::BindingControlSet::new(),
-        )
+        .reconcile_same_pane_master_routes(&crate::server::binding_slot::BindingControlSet::new())
         .unwrap();
     assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
     {

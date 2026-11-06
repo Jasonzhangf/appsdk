@@ -955,6 +955,15 @@ fn peer_goal_deadline_is_delivered_consumed_and_cancelled_without_master_proxy()
         .expect("peer must receive its own goal deadline");
     assert_eq!(message["to"], peer_id);
     assert_eq!(message["id"], native_id);
+    let deadline_body = message["body"].as_str().expect("deadline body");
+    assert!(
+        deadline_body.contains("DEADLINE_REACHED"),
+        "deadline body must keep its typed marker: {message}"
+    );
+    assert!(
+        !deadline_body.contains("subject=goal:peer-owned"),
+        "deadline body must not repeat the envelope subject: {message}"
+    );
     let status = fixture.run_public(&["notify", "status"], THREAD_B);
     let subscription = status["subscriptions"]
         .as_array()

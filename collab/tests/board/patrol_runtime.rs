@@ -279,6 +279,16 @@ fn board_idle_patrol_runtime_idle_carrier_receives_new_cue() {
         Some(worker_id.as_str())
     );
     assert!(native_input_for(&fixture, THREAD_A, &message_id));
+    let cue = fixture.run_public(&["msg", &message_id], THREAD_A);
+    let cue_body = cue["body"].as_str().expect("board patrol body");
+    assert!(
+        cue_body.contains("You are idle while still owning open board work"),
+        "board patrol body must keep its actionable content: {cue}"
+    );
+    assert!(
+        !cue_body.contains("Board idle patrol"),
+        "board patrol body must not repeat the envelope subject: {cue}"
+    );
 
     let gate = latest_gate_after(&fixture, &worker_id, gate_start)
         .expect("idle patrol persists the wake gate");

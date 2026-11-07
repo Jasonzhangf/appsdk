@@ -1,5 +1,5 @@
 #[test]
-fn pending_merge_requires_the_delivered_candidate_on_main() {
+fn pending_merge_requires_master_and_main_reachable_commit() {
     let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -13,9 +13,9 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
     let candidate = current_head(&root);
     git_ok(&root, &["checkout", "-q", "main"]);
     let main_before_merge = current_head(&root);
-    // The candidate must be delivered from a real worktree checked out on the
-    // registered branch; a branch ref alone is not proof of the delivered
-    // commit under the fail-closed binding rule.
+    // Register a real worktree so registration, delivery, and integration run
+    // through their normal entry points. Delivery no longer captures a
+    // candidate commit.
     let worktree_dir = configured_test_worktree(&mut server, &root, "candidate");
     git_ok(
         &root,
@@ -70,13 +70,6 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
         )
         .ok
     );
-    assert_eq!(
-        server.state.lock().unwrap().task_lifecycle["task"]
-            .delivery_commit
-            .as_deref(),
-        Some(candidate.as_str()),
-        "deliver must bind the obligation to the exact candidate commit"
-    );
     assert!(
         handle_task_review(
             &server,
@@ -90,23 +83,43 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
         .ok
     );
 
-    // An unrelated pre-existing main commit must not satisfy the obligation.
-    let unrelated = handle_task_integrated(
+    // The pending merge must stay master-owned; the task owner cannot resolve it.
+    let owner_attempt = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        main_before_merge.clone(),
+        "owner bypass attempt".into(),
+    );
+    assert!(!owner_attempt.ok, "{owner_attempt:?}");
+    assert_eq!(owner_attempt.error.as_deref(), Some("TASK_MERGE_PENDING"));
+    assert!(
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation must survive a non-master integration attempt"
+    );
+
+    // The supplied commit itself must already be reachable from refs/heads/main.
+    let off_main = handle_task_integrated(
         &server,
         "master".into(),
         "token-master".into(),
         "task".into(),
-        main_before_merge.clone(),
-        "unrelated main sha".into(),
+        candidate.clone(),
+        "feature branch sha before it lands on main".into(),
     );
-    assert!(!unrelated.ok, "{unrelated:?}");
-    assert_eq!(unrelated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+    assert!(!off_main.ok, "{off_main:?}");
+    assert_eq!(
+        off_main.error.as_deref(),
+        Some("TASK_INTEGRATION_COMMIT_MISMATCH")
+    );
     assert!(
         server.state.lock().unwrap().pending_merges.contains_key("task"),
-        "the obligation must survive an unrelated-main integration attempt"
+        "the obligation must survive an off-main integration attempt"
     );
 
-    // Only after the candidate itself lands on main may the master record it.
+    // Once the supplied commit is reachable from main, the current master may
+    // record it and resolve the durable merge obligation.
     git_ok(&root, &["merge", "--no-ff", "-q", "codex/candidate", "-m", "merge candidate"]);
     let merged = handle_task_integrated(
         &server,
@@ -123,7 +136,7 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
 }
 
 #[test]
-fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
+fn stale_registered_branch_does_not_block_delivery() {
     let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -131,8 +144,9 @@ fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
     initialize_main(&root);
 
     // The worktree HEAD is the delivered commit. The registered branch ref is
-    // main, deliberately stale relative to the delivered worktree HEAD, so the
-    // binding must fail closed instead of trusting the branch ref.
+    // main, deliberately stale relative to the delivered worktree HEAD, so a
+    // candidate-binding implementation would reject this delivery. Ordinary
+    // delivery must still accept it without binding a candidate.
     let worktree_dir = configured_test_worktree(&mut server, &root, "candidate-relative");
     git_ok(
         &root,
@@ -183,24 +197,24 @@ fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
             .ok
         );
     }
-    assert!(
-        handle_task_deliver(
-            &server,
-            "owner".into(),
-            "token-owner".into(),
-            "task".into(),
-            Some("candidate delivered".into()),
-            Some(registered_worktree),
-        )
-        .ok
+    let delivered = handle_task_deliver(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        Some("candidate delivered".into()),
+        Some(registered_worktree),
     );
+    assert!(delivered.ok, "{}", delivered.error.unwrap_or_default());
+    let state = server.state.lock().unwrap();
+    let lifecycle = &state.task_lifecycle["task"];
+    assert_eq!(lifecycle.delivery_evidence.as_deref(), Some("candidate delivered"));
+    assert!(lifecycle.delivered_ms.is_some());
     assert_eq!(
-        server.state.lock().unwrap().task_lifecycle["task"]
-            .delivery_commit
-            .as_deref(),
-        None,
-        "a stale branch ref must fail closed rather than bind the branch ref"
+        lifecycle.delivery_kind,
+        crate::server::state::TaskDeliveryKind::Code
     );
+    drop(state);
     std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }

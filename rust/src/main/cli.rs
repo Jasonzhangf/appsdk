@@ -79,7 +79,7 @@ pub(super) fn print_cli_help(command: Option<&str>) {
             "Usage: appsdk setup-deps [--check]"
         }
         Some("goal") => {
-            "Usage: appsdk goal <subscribe|status|cancel|prompt> [options]\n       appsdk goal subscribe --goal <path.md> [--interval <duration>]\n       appsdk goal prompt --goal <path.md>"
+            "Usage: appsdk goal <subscribe|status|cancel|prompt> [options]\n       appsdk goal subscribe --goal <path.md> [--interval <duration>] [--repeat <1..100>] [--ttl <seconds>]\n       appsdk goal prompt --goal <path.md>"
         }
         Some("task") => {
             "Usage: appsdk task <block|register|relocate|update|wait|deliver|close|status> [options]\n       appsdk task block <id> [--reason <text>]"

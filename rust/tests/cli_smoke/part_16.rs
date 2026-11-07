@@ -1106,6 +1106,105 @@ esac
 }
 
 #[test]
+fn goal_subscribe_explicit_repeat_is_periodic() {
+    let root = temp_root("goal-explicit-repeat");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}'
+    ;;
+  "master status")
+    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
+    ;;
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","role":"master","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
+    ;;
+  "notify subscribe")
+    printf '%s\n' '{"subscription":{"id":"patrol-sub-1","status":"armed","event":"deadline","subject":"project:patrol"}}'
+    ;;
+  "goal reconcile")
+    printf '%s\n' "$*" > reconcile-args
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) goal_owner="$2"; shift ;;
+        --every-ms) every_ms="$2"; shift ;;
+        --repeat) repeat_count="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ -n "$every_ms" ] && [ -n "$repeat_count" ]; then
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"goal-periodic-1\",\"status\":\"armed\",\"periodic_declared\":true,\"repeat_count\":$repeat_count,\"requested_repeat_count\":$repeat_count}}"
+    else
+      printf '%s\n' 'periodic goal deadline is invalid' >&2; exit 43
+    fi
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    install_goal_test_context(&fake_collab, &root);
+    let valid_goal = root.join("long-task.md");
+    fs::write(
+        &valid_goal,
+        "# Sample Long-Horizon Goal\nDeliver feature X.\n",
+    )
+    .unwrap();
+
+    let sub_res = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+            "--repeat",
+            "3",
+            "--ttl",
+            "120",
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        sub_res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sub_res.stderr)
+    );
+    let sub_json: Value = serde_json::from_slice(&sub_res.stdout).unwrap();
+    assert_eq!(sub_json["schedule"], "periodic");
+    assert_eq!(sub_json["local_schedule"], "daemon-periodic");
+    assert_eq!(sub_json["periodic_declared"], true);
+    assert_eq!(sub_json["repeat_count"], 3);
+    assert_eq!(sub_json["requested_repeat_count"], 3);
+    assert_eq!(sub_json["every_ms"], 300000);
+    assert_eq!(sub_json["ttl_seconds"], 120);
+    assert_eq!(sub_json["active"], true);
+
+    let reconcile_args = fs::read_to_string(root.join("reconcile-args")).unwrap();
+    assert!(reconcile_args.contains("--every-ms 300000"));
+    assert!(reconcile_args.contains("--repeat 3"));
+    assert!(reconcile_args.contains("--ttl-seconds 120"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_owner_gate_does_not_require_master_or_tmux() {
     let root = temp_root("goal-owner-gate-mismatch");
     fs::create_dir_all(&root).unwrap();

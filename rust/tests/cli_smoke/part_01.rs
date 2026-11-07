@@ -330,6 +330,7 @@ fn project_commands_default_to_cwd_and_help_never_resolves_a_project() {
         &["--help"][..],
         &["verify", "--help"],
         &["compile", "--help"],
+        &["goal", "help"],
     ] {
         let help = run_in(&root, args);
         assert!(
@@ -340,6 +341,13 @@ fn project_commands_default_to_cwd_and_help_never_resolves_a_project() {
         assert!(String::from_utf8_lossy(&help.stdout).contains("Usage:"));
         assert!(!String::from_utf8_lossy(&help.stderr).contains("PROJECT_ROOT_MISSING"));
     }
+
+    let goal_help = run_in(&root, &["goal", "help"]);
+    let goal_help_text = String::from_utf8_lossy(&goal_help.stdout);
+    assert!(goal_help_text.contains("appsdk goal subscribe"));
+    assert!(goal_help_text.contains("[--interval <duration>]"));
+    assert!(goal_help_text.contains("[--repeat <1..100>]"));
+    assert!(goal_help_text.contains("[--ttl <seconds>]"));
 
     assert!(run(&["new", root.to_str().unwrap()]).status.success());
     assert!(run_in(&root, &["verify"]).status.success());

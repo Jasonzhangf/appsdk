@@ -461,7 +461,7 @@ where
             }
 
             let raw_goal = goal_file.unwrap_or_else(|| {
-                fail("USAGE: appsdk goal subscribe --goal <path.md> [--interval <duration>]")
+                fail("USAGE: appsdk goal subscribe --goal <path.md> [--interval <duration>] [--repeat <1..100>] [--ttl <seconds>]")
             });
             if !(1..=100).contains(&repeat_count) {
                 fail("GOAL_REPEAT_COUNT_INVALID: --repeat must be from 1 through 100");

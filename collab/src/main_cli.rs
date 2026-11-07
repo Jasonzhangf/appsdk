@@ -123,6 +123,13 @@ pub(crate) enum TaskCmd {
         status: Option<String>,
         #[arg(long)]
         next: Option<String>,
+        /// `approve` or `reject` one pending business block application.
+        /// Only the task's current supervisor, or the current CEO for a
+        /// master-owned task, may decide. The requester cannot self-approve.
+        #[arg(long, conflicts_with = "status")]
+        blocker_action: Option<String>,
+        #[arg(long)]
+        decision_reason: Option<String>,
     },
     /// Accept a board invitation (with revision), or a legacy assigned task
     Accept {
@@ -511,18 +518,6 @@ pub(crate) enum WorkerCmd {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum MigrateCmd {
-    /// Inspect current durable state and migration blockers
-    Inspect,
-    /// Create a migration plan; does not freeze admission
-    Plan,
-    /// Freeze task admission and persist a deterministic snapshot
-    Apply,
-    /// Verify replayed state and resume task admission
-    Verify,
-}
-
-#[derive(Subcommand)]
 pub(crate) enum Cmd {
     /// Managed persistent agent peers (current project only)
     Subagent {
@@ -784,11 +779,6 @@ pub(crate) enum Cmd {
     Task {
         #[command(subcommand)]
         cmd: TaskCmd,
-    },
-    /// Inspect, plan, apply, and verify an existing-project migration
-    Migrate {
-        #[command(subcommand)]
-        cmd: MigrateCmd,
     },
     /// Install the embedded collab skill bundle into a global skills
     /// directory. Default target is `~/.agents/skills/collab`; pass

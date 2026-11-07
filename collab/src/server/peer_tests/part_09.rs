@@ -37,6 +37,8 @@ fn removed_role_and_dispatch_commands_fail_fast() {
 fn lifecycle_cannot_bypass_delivery_or_review() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");
+    register(&server, "supervisor", "%supervisor");
+    promote_master(&server, "supervisor", "isolated lifecycle block approval");
     assert!(create_task(&server, "peer", "task", "feature").ok);
     assert!(create_task(&server, "peer", "blocked-task", "blocked-feature").ok);
     assert!(create_task(&server, "peer", "working-task", "working-feature").ok);
@@ -90,6 +92,18 @@ fn lifecycle_cannot_bypass_delivery_or_review() {
         )
         .ok
     );
+    assert_eq!(server.state.lock().unwrap().tasks["blocked-task"].status, "working");
+    let approval = handle_task_update_full(
+        &server,
+        "supervisor".into(),
+        "token-supervisor".into(),
+        "blocked-task".into(),
+        None,
+        None,
+        Some("approve".into()),
+        Some("confirmed isolated lifecycle blocker".into()),
+    );
+    assert!(approval.ok, "{approval:?}");
     let blocked_delivery = handle_task_deliver(
         &server,
         "peer".into(),

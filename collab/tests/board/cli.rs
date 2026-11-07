@@ -953,6 +953,21 @@ fn blocked_task_keeps_responsibility_but_does_not_block_next_work_or_resume() {
         ],
         THREAD_B,
     );
+    // A member block is a pending application. The master confirms the
+    // external gate in the same request; approval commits the blocked state
+    // and advances the board revision exactly as the direct transition used to.
+    fixture.run_public(
+        &[
+            "task",
+            "update",
+            "blocked-first",
+            "--blocker-action",
+            "approve",
+            "--decision-reason",
+            "confirmed external input gate",
+        ],
+        THREAD_A,
+    );
     let queued = fixture.run_public(
         &[
             "board",

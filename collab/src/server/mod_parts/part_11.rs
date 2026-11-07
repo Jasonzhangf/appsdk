@@ -18,9 +18,9 @@ fn dispatch_with_route_context_bound(
         &mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>,
     >,
 ) -> Resp {
-    if mutation_blocked_during_migration(&req) && server.state.lock().unwrap().admission_frozen() {
+    if mutation_blocked_during_project_reset(&req) && server.state.lock().unwrap().admission_frozen() {
         return Resp::err(
-            "MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed",
+            "PROJECT_RESET_PENDING: this scope is completing an already committed project reset",
         );
     }
     let unaccepted_resource_task = match &req {
@@ -460,7 +460,18 @@ fn dispatch_with_route_context_bound(
             task_id,
             status,
             next_step,
-        } => handle_task_update(server, worker_id, token, task_id, status, next_step),
+            blocker_action,
+            decision_reason,
+        } => handle_task_update_full(
+            server,
+            worker_id,
+            token,
+            task_id,
+            status,
+            next_step,
+            blocker_action,
+            decision_reason,
+        ),
         Req::TaskAccept {
             worker_id,
             token,
@@ -562,16 +573,6 @@ fn dispatch_with_route_context_bound(
             feature_id,
             worktree_path,
         } => task_conflicts(server, feature_id, worktree_path),
-        Req::MigrationInspect { worker_id, token } => {
-            handle_migration_inspect(server, worker_id, token)
-        }
-        Req::MigrationPlan { worker_id, token } => handle_migration_plan(server, worker_id, token),
-        Req::MigrationApply { worker_id, token } => {
-            handle_migration_apply(server, worker_id, token)
-        }
-        Req::MigrationVerify { worker_id, token } => {
-            handle_migration_verify(server, worker_id, token)
-        }
         Req::MasterWakeHold {
             worker_id,
             token,
@@ -716,12 +717,6 @@ fn dispatch_with_route_context_bound(
             token: _,
             target_id: _,
         } => Resp::err("master transfer is deprecated; authority is task-scoped"),
-        Req::RemoveWorker {
-            worker_id: _,
-            token: _,
-            target_id: _,
-            force: _,
-        } => Resp::err("remove-worker is deprecated; use task-owner cleanup and migration verify"),
         Req::ResetBindings { confirm: _ } => Resp::err(
             "binding reset is deprecated; preserve current work/messages and use collab context",
         ),
@@ -1076,18 +1071,13 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::TaskClose { worker_id, .. }
         | Req::TaskFinalizeCleanup { worker_id, .. }
         | Req::TaskDispatch { worker_id, .. }
-        | Req::MigrationInspect { worker_id, .. }
-        | Req::MigrationPlan { worker_id, .. }
-        | Req::MigrationApply { worker_id, .. }
-        | Req::MigrationVerify { worker_id, .. }
         | Req::MasterPromote { worker_id, .. }
         | Req::MasterClear { worker_id, .. }
         | Req::MasterDelegate { worker_id, .. }
         | Req::WorkerClose { worker_id, .. }
         | Req::WorkerSnapshot { worker_id, .. }
         | Req::MasterRecover { worker_id, .. }
-        | Req::TransferMaster { worker_id, .. }
-        | Req::RemoveWorker { worker_id, .. } => {
+        | Req::TransferMaster { worker_id, .. } => {
             Ok(vec![WireRoutePrincipal::Authenticated { worker_id }])
         }
         Req::Send {

@@ -1794,9 +1794,39 @@ fn handle_task_update(
     status: Option<String>,
     next_step: Option<String>,
 ) -> Resp {
+    handle_task_update_full(
+        server,
+        worker_id,
+        token,
+        task_id,
+        status,
+        next_step,
+        None,
+        None,
+    )
+}
+
+fn handle_task_update_full(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    status: Option<String>,
+    next_step: Option<String>,
+    blocker_action: Option<String>,
+    decision_reason: Option<String>,
+) -> Resp {
     let mut st = server.state.lock().unwrap();
     task_update_locked(
-        server, &mut st, worker_id, token, task_id, status, next_step,
+        server,
+        &mut st,
+        worker_id,
+        token,
+        task_id,
+        status,
+        next_step,
+        blocker_action,
+        decision_reason,
     )
 }
 
@@ -1808,6 +1838,8 @@ fn task_update_locked(
     task_id: String,
     status: Option<String>,
     next_step: Option<String>,
+    blocker_action: Option<String>,
+    decision_reason: Option<String>,
 ) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
@@ -1818,6 +1850,23 @@ fn task_update_locked(
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
     };
+    if let Some(action) = blocker_action {
+        if status.is_some() {
+            return Resp::err(
+                "blocker_action cannot be combined with a status update; decide the pending block separately",
+            );
+        }
+        // The supervisor deciding a block request is not necessarily the task
+        // owner, so this routes before the owner-only lifecycle guard.
+        return task_block_decide_locked(
+            server,
+            st,
+            worker_id,
+            task_id,
+            action,
+            decision_reason,
+        );
+    }
     if task.owner != worker_id {
         return Resp::err("only the task owner may update its lifecycle");
     }
@@ -1872,6 +1921,12 @@ fn task_update_locked(
         if task.status == "blocked" && new_status == "working" {
             if let Err(error) = board_resume_gate(&st, &worker_id, &task.id) { return error; }
         }
+        if new_status == "blocked" {
+            // A member business block is an application, never an approved
+            // blocker. Keep the task status and record one typed pending
+            // request for the authorized supervisor or CEO to decide.
+            return task_block_apply_locked(server, st, &task, next_step.clone());
+        }
         task.status = new_status.clone();
         if new_status != "waiting" {
             task.wait = None;
@@ -1920,6 +1975,194 @@ fn task_update_locked(
     }))
 }
 
+/// Record a member's business block application without changing the task
+/// status. A repeat application from the same owner refreshes the one pending
+/// request instead of stacking a second one.
+fn task_block_apply_locked(
+    server: &Server,
+    st: &mut State,
+    task: &TaskRec,
+    reason: Option<String>,
+) -> Resp {
+    let revision = st
+        .board_details
+        .get(&task.id)
+        .map(|details| details.revision)
+        .unwrap_or(0);
+    let now = now_ms();
+    let request = match st.task_block_requests.get(&task.id).cloned() {
+        Some(existing)
+            if existing.state == TaskBlockRequestState::Pending
+                && existing.requester == task.owner =>
+        {
+            let mut existing = existing;
+            existing.reason = reason;
+            existing.task_revision = revision;
+            existing
+        }
+        _ => TaskBlockRequest {
+            task_id: task.id.clone(),
+            requester: task.owner.clone(),
+            reason,
+            requested_at_ms: now,
+            task_revision: revision,
+            state: TaskBlockRequestState::Pending,
+            decided_by: None,
+            decided_at_ms: None,
+            decision_reason: None,
+        },
+    };
+    if let Err(error) = server.commit_locked_checked(
+        st,
+        &[Event::TaskBlockRequestUpdated {
+            request: request.clone(),
+        }],
+    ) {
+        return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
+    }
+    Resp::data(json!({
+        "task": task.id,
+        "status": task.status,
+        "owner": task.owner,
+        "block_request": request,
+        "notification": "none",
+        "next_action": "business block pending supervisor decision",
+    }))
+}
+
+/// Decide one pending business block application under the caller-held daemon
+/// state lock. Authorization, staleness and atomic state commit all happen
+/// here. A decision never grants authority beyond this one request, and the
+/// requester cannot decide its own application.
+fn task_block_decide_locked(
+    server: &Server,
+    st: &mut State,
+    worker_id: String,
+    task_id: String,
+    decision: String,
+    reason: Option<String>,
+) -> Resp {
+    if !matches!(decision.as_str(), "approve" | "reject") {
+        return Resp::err("invalid decision; expected approve or reject");
+    }
+    let Some(task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {task_id} not found"));
+    };
+    let Some(mut request) = st.task_block_requests.get(&task_id).cloned() else {
+        return Resp::err_data(
+            "TASK_BLOCK_REQUEST_NOT_FOUND",
+            json!({"task_id": task_id}),
+        );
+    };
+    if request.requester == worker_id {
+        return Resp::err_data(
+            "TASK_BLOCK_SELF_DECISION_DENIED",
+            json!({"task_id": task_id, "requester": request.requester, "decider": worker_id}),
+        );
+    }
+    let route_scope = server_route_scope(server, &st).ok().flatten();
+    let master = current_master_worker_id(&st, route_scope.as_ref());
+    let requester_is_master = master.as_deref() == Some(request.requester.as_str());
+    let authorized = if requester_is_master {
+        // A master-owned block application goes to the current CEO; without a
+        // current CEO it stays pending instead of granting self-approval.
+        is_current_ceo_holder(&st, &worker_id)
+    } else {
+        master.as_deref() == Some(worker_id.as_str())
+    };
+    if !authorized {
+        return Resp::err_data(
+            "TASK_BLOCK_DECISION_UNAUTHORIZED",
+            json!({
+                "task_id": task_id,
+                "decider": worker_id,
+                "requester": request.requester,
+                "requester_is_master": requester_is_master,
+            }),
+        );
+    }
+    let requested_state = if decision == "approve" {
+        TaskBlockRequestState::Approved
+    } else {
+        TaskBlockRequestState::Rejected
+    };
+    if request.state != TaskBlockRequestState::Pending {
+        if request.state == requested_state
+            && request.decided_by.as_deref() == Some(worker_id.as_str())
+        {
+            return Resp::data(json!({
+                "task": task.id,
+                "status": task.status,
+                "owner": task.owner,
+                "block_request": request,
+                "notification": "none",
+                "idempotent": true,
+            }));
+        }
+        return Resp::err_data(
+            "TASK_BLOCK_ALREADY_DECIDED",
+            json!({"task_id": task_id, "state": request.state}),
+        );
+    }
+    let current_revision = st
+        .board_details
+        .get(&task_id)
+        .map(|details| details.revision)
+        .unwrap_or(0);
+    if current_revision != request.task_revision {
+        return Resp::err_data(
+            "BOARD_STALE_REVISION",
+            json!({
+                "task_id": task_id,
+                "expected_revision": request.task_revision,
+                "current_revision": current_revision,
+            }),
+        );
+    }
+    let now = now_ms();
+    request.state = requested_state;
+    request.decided_by = Some(worker_id.clone());
+    request.decided_at_ms = Some(now);
+    request.decision_reason = reason;
+    let mut updated_task = task.clone();
+    let mut events = vec![Event::TaskBlockRequestUpdated {
+        request: request.clone(),
+    }];
+    if decision == "approve" {
+        updated_task.status = "blocked".into();
+        updated_task.wait = None;
+        updated_task.updated_ms = now;
+        events.push(Event::TaskUpdated {
+            task: updated_task.clone(),
+        });
+    }
+    if let Err(error) = server.commit_locked_checked(st, &events) {
+        return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
+    }
+    Resp::data(json!({
+        "task": updated_task.id,
+        "status": updated_task.status,
+        "owner": updated_task.owner,
+        "block_request": request,
+        "notification": "none",
+        "next_action": if decision == "approve" {
+            "task is blocked; resume only after the blocker is resolved"
+        } else {
+            "block request rejected; continue work or send a new application"
+        },
+    }))
+}
+
+/// Whether the caller is the worker currently holding the durable CEO grant.
+/// Mirrors the holder resolution the CEO owner uses, without inventing a
+/// second authority source.
+fn is_current_ceo_holder(st: &State, worker_id: &str) -> bool {
+    st.ceo_grant.as_ref().is_some_and(|grant| {
+        st.name_occupancy(&grant.workspace, &grant.name)
+            .is_some_and(|occupancy| occupancy.worker_id == worker_id)
+    })
+}
+
 fn stale_worker_views(
     st: &State,
     presence: &dyn Fn(&WorkerRec) -> IdentityPresence,
@@ -1940,7 +2183,7 @@ fn stale_worker_views(
                 "worker": worker.id,
                 "transport_kind": worker.transport.as_ref().map(|transport| transport.kind.as_str()),
                 "active_tasks": active_tasks,
-                "action": "peer owns cleanup; daemon operator may inspect during migration"
+                "action": "peer owns cleanup; inspect the current task and cleanup evidence"
             })
         })
         .collect()
@@ -2174,6 +2417,19 @@ fn handle_task_deliver_with_intent(
             "task {} must be owned and working, verifying, reviewed, or rework before delivery (current: {})",
             task_id, task.status
         ));
+    }
+    // A pending business block application is an unresolved claim on this
+    // task. Delivery must not silently erase it; the supervisor has to decide
+    // the exact request first.
+    if st
+        .task_block_requests
+        .get(&task_id)
+        .is_some_and(|request| request.state == TaskBlockRequestState::Pending)
+    {
+        return Resp::err_data(
+            "TASK_BLOCK_PENDING_APPROVAL",
+            json!({"task_id": task_id}),
+        );
     }
     if let Err(error)=work_executor_gate(server,&st,&task_id,&worker_id) {return error;}
 

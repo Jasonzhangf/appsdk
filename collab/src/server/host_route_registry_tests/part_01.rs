@@ -599,21 +599,20 @@ fn persisted_tmux_master_status_does_not_relock_state() {
     let (tx, rx) = std::sync::mpsc::channel();
     let join = std::thread::spawn(move || {
         let status = dispatch(&server, Req::MasterStatus);
-        let (worker, issues, presence, retired_presence) = {
+        let (worker, presence, retired_presence) = {
             let state = server.state.lock().unwrap();
             let worker = state.workers["pane-worker"].clone();
-            let issues = migration_issues(&server, &state);
             let presence = worker_presence_in_state(&server, &state, &worker);
             let mut retired = worker.clone();
             retired.token = "retired-token".into();
             let retired_presence = worker_presence_in_state(&server, &state, &retired);
-            (worker, issues, presence, retired_presence)
+            (worker, presence, retired_presence)
         };
         let observed = worker_identity_and_endpoint(&server, &worker).1;
-        tx.send((status, issues, presence, observed, retired_presence))
+        tx.send((status, presence, observed, retired_presence))
             .unwrap();
     });
-    let (status, issues, presence, observed, retired) = rx
+    let (status, presence, observed, retired) = rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .expect("persisted pane callbacks recursively locked server.state");
     join.join().unwrap();
@@ -624,7 +623,6 @@ fn persisted_tmux_master_status_does_not_relock_state() {
         status.data["master"]["endpoint_live"],
         serde_json::json!(observed)
     );
-    assert!(issues.is_empty(), "{issues:?}");
     assert_eq!(presence, IdentityPresence::Present);
     assert_eq!(retired, IdentityPresence::Missing);
     std::fs::remove_dir_all(root).unwrap();

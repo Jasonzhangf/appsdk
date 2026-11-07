@@ -532,3 +532,74 @@ fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn internal_safety_blocked_writes_never_create_business_approval_records() {
+    let (server, root) = test_server();
+    let mut state = server.state.lock().unwrap();
+    register_worker(&mut state, "owner");
+    register_worker(&mut state, "dep");
+    // Resource-conflict creation (part_08) emits `TaskCreated` directly in the
+    // blocked state for safety isolation.
+    let mut conflict = task("resource-conflict", "owner");
+    conflict.status = "blocked".into();
+    conflict.next_step = Some("RESOURCE_CONFLICT=base".into());
+    state
+        .apply_checked(&Event::TaskCreated { task: conflict })
+        .unwrap();
+    // Dependency release (part_09) rewrites a waiting dependent directly to
+    // blocked; it must stay a safety state, not an approved business blocker.
+    let mut base = task("base", "owner");
+    base.status = "closed".into();
+    state
+        .apply_checked(&Event::TaskCreated { task: base })
+        .unwrap();
+    let mut waiter = task("waiter", "dep");
+    waiter.status = "waiting".into();
+    waiter.wait = Some(WaitSpec {
+        waiter: "dep".into(),
+        waiting_for: "base".into(),
+        responsible_actor: "base".into(),
+        reason: "resource depends on base".into(),
+        deadline_ms: now_ms() + 60_000,
+        resume_on: Vec::new(),
+        escalation: "master".into(),
+    });
+    state
+        .apply_checked(&Event::TaskCreated { task: waiter })
+        .unwrap();
+    release_dependents_of_closed_task(&server, &mut state, "base");
+    assert_eq!(state.tasks["waiter"].status, "blocked");
+    assert_eq!(state.tasks["resource-conflict"].status, "blocked");
+    assert!(
+        state.task_block_requests.is_empty(),
+        "internal resource/safety isolation must never fabricate an approved business block"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn pending_block_request_survives_current_state_round_trip() {
+    let request = TaskBlockRequest {
+        task_id: "task-block".into(),
+        requester: "owner".into(),
+        reason: Some("external dependency".into()),
+        requested_at_ms: 10,
+        task_revision: 4,
+        state: TaskBlockRequestState::Pending,
+        decided_by: None,
+        decided_at_ms: None,
+        decision_reason: None,
+    };
+    let mut state = State::default();
+    state
+        .apply_checked(&Event::TaskBlockRequestUpdated {
+            request: request.clone(),
+        })
+        .unwrap();
+
+    let restored: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+
+    assert_eq!(restored.task_block_requests["task-block"], request);
+}

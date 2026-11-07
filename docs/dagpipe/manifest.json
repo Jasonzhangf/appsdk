@@ -154,6 +154,10 @@
     {
       "id": "appsdk-collab-identity-anchor",
       "path": "docs/dagpipe/collab-identity-anchor.graph.json"
+    },
+    {
+      "id": "appsdk-collab-task-block-approval",
+      "path": "docs/dagpipe/collab-task-block-approval.graph.json"
     }
   ]
 }

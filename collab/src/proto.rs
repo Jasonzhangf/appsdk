@@ -833,6 +833,15 @@ pub enum Req {
         task_id: String,
         status: Option<String>,
         next_step: Option<String>,
+        /// `approve` or `reject` one pending business block application. Only
+        /// the task's current supervisor (project master), or the current CEO
+        /// for a master-owned task, may decide; the requester may never decide
+        /// its own request. Reuses the task update surface so the member
+        /// application and the supervisor decision stay one command family.
+        #[serde(default)]
+        blocker_action: Option<String>,
+        #[serde(default)]
+        decision_reason: Option<String>,
     },
     TaskAccept {
         worker_id: String,
@@ -898,22 +907,6 @@ pub enum Req {
     TaskConflicts {
         feature_id: Option<String>,
         worktree_path: Option<String>,
-    },
-    MigrationInspect {
-        worker_id: String,
-        token: String,
-    },
-    MigrationPlan {
-        worker_id: String,
-        token: String,
-    },
-    MigrationApply {
-        worker_id: String,
-        token: String,
-    },
-    MigrationVerify {
-        worker_id: String,
-        token: String,
     },
     #[serde(alias = "RootPromote")]
     MasterPromote {
@@ -1016,13 +1009,6 @@ pub enum Req {
         worker_id: String,
         token: String,
         target_id: String,
-    },
-    RemoveWorker {
-        worker_id: String,
-        token: String,
-        target_id: String,
-        #[serde(default)]
-        force: bool,
     },
     ResetBindings {
         confirm: bool,
@@ -1185,6 +1171,27 @@ pub const IDENTITY_CONTEXT_CWD_PROTOCOL: &str = "identity-context-cwd-v1";
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removed_maintenance_requests_are_unknown_wire_variants() {
+        let current: Req = serde_json::from_value(serde_json::json!({"op":"Ping"})).unwrap();
+        assert!(matches!(current, Req::Ping));
+        for operation in [
+            "MigrationInspect",
+            "MigrationPlan",
+            "MigrationApply",
+            "MigrationVerify",
+            "RemoveWorker",
+        ] {
+            let error = serde_json::from_value::<Req>(serde_json::json!({
+                "op":operation, "worker_id":"actor", "token":"test-token", "target_id":"target"
+            }))
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("unknown variant"),
+                "{operation}: {error}"
+            );
+        }
+    }
     use crate::identity::{
         AgentId, AppServerId, BindingId, BindingValidationError, CommandId, NativeThreadId,
         OperationId, RuntimeId,

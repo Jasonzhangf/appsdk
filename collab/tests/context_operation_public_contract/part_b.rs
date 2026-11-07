@@ -619,7 +619,12 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
     assert!(!saved.contains("superseded-board-progress"));
     drop(native);
 
-    fixture.restart_daemon();
+    fixture.stop_daemon();
+    let mut obsolete_fields: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    obsolete_fields["state"]["migration"] = json!({"phase":"applied", "admission_frozen":true});
+    obsolete_fields["state"]["global"]["migration_commit_evidence"] = json!({"unused":"not a current proof"});
+    fs::write(&state_path, serde_json::to_vec(&obsolete_fields).unwrap()).unwrap();
+    fixture.start_daemon();
     let restored = fixture.context_provide(
         "current-child-restore",
         &json!({
@@ -678,6 +683,19 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
     assert_eq!(task["description"], "latest-board-description");
     assert_eq!(task["next_step"], "latest-board-progress");
     assert_eq!(task["revision"], revision);
+    let updated = lifecycle_wire(
+        &fixture,
+        &current_identity,
+        json!({"op":"TaskUpdate", "worker_id":recipient, "token":current_identity["token"],
+            "task_id":"open-current-task", "status":"verifying", "next_step":"current mutation after restart"}),
+    );
+    assert_eq!(updated["ok"], true, "obsolete inner fields must not freeze current admission: {updated}");
+    let saved: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert!(saved["state"].get("migration").is_none());
+    assert!(saved["state"]["global"].get("migration_commit_evidence").is_none());
+    assert_eq!(saved["state"]["tasks"]["open-current-task"]["status"], "verifying");
+    assert_eq!(saved["state"]["msgs"][first_id]["state"], "read");
+    assert_ne!(saved["state"]["msgs"][second_id]["state"], "read");
 }
 
 #[test]

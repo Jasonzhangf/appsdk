@@ -1832,6 +1832,10 @@ use super::*;
         let (message_id, message) = {
             let state = server.state.lock().unwrap();
             assert_eq!(state.tasks["task"].status, "blocked");
+            assert!(
+                state.task_block_requests.is_empty(),
+                "a resource wait timeout is safety isolation, not an approved business block"
+            );
             assert_eq!(
                 state.tasks["task"].next_step.as_deref(),
                 Some(

@@ -28,7 +28,7 @@
     },
     {
       "id": "删除项目业务与历史状态",
-      "description": "由现有 writer owner 持共享 journal 锁压缩并物理删除本项目历史消息、任务、订阅、操作 proof、资产与负载；保留其他项目。resident route 恢复同样先 materialization 再 publication，避免跨项目锁反转。route-only legacy 条目不物化、不扫描业务 journal 发现绑定。未完成 reset 待办在启动路由恢复前继续本节点；部分失败保留待办并返回 RESET_INCOMPLETE，不宣称成功。",
+      "description": "由现有 current-state writer 在既有锁序内清除目标 scope 的当前消息、任务、订阅、资产与负载；保留其他项目、live DSH 绑定及精确凭据。resident route 恢复先 materialization 再 publication，避免跨项目锁反转；身份仅由当前 map 选择。已提交 reset 待办在启动路由恢复前继续本节点，并在完成前阻止该 scope 重建；部分失败保留待办并返回 RESET_INCOMPLETE，不宣称成功。",
       "operator": "appsdk.collab_control_plane.online_project_reset",
       "operator_version": "1",
       "inputs": ["reset_control_result"],

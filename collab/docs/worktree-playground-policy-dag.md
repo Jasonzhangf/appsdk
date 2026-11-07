@@ -4,13 +4,13 @@ Status: review candidate, not implementation.
 
 ## Objective
 
-Move new project worktree creation out of project main trees into a configured external base, while preserving existing task records and migration inputs that still use the legacy `<project-main>/playground/<task-slug>` shape.
+Move new project worktree creation out of project main trees into a configured external base, while preserving existing task records that still use the legacy `<project-main>/playground/<task-slug>` shape.
 
 Required behavior:
 
 1. New worktrees are created only under the configured external playground base.
 2. Project isolation is explicit and per-project.
-3. Existing legacy records continue to pass migration and lifecycle checks during the transition.
+3. Existing current records continue to pass applicable lifecycle checks.
 4. Path policy is owned by config, not by code-literal disk locations.
 5. Collab validation, CLI docs, embedded skills, tests, runtime delivery, and cleanup all close through one DAG.
 
@@ -21,7 +21,7 @@ Required behavior:
 - Server route owner: canonical project root from Collab route/scope, not cwd alone.
 - Worktree validation owner: one policy resolver in Collab server code.
 - Skill/source text owner: repository skill sources under `collab/skills/collab/`, installed by `collab install-skills`.
-- Migration owner: legacy records remain valid; new configured paths are accepted without changing already-imported records.
+- Current task owner: existing records remain valid; new configured paths do not rewrite stored task paths.
 
 ## Configuration Contract
 
@@ -59,7 +59,6 @@ Legacy accepted during transition:
 
 - `<project-root>/playground/<task-slug>`
 - relative spellings equivalent to `./playground/<task-slug>` and `playground/<task-slug>`
-- existing migration records with legacy relative worktree paths
 
 New configured accepted:
 
@@ -72,10 +71,10 @@ Rejected:
 - ambiguous relative paths that could resolve to both legacy and configured interpretations.
 - project main tree worktree creation for new work when configured base exists.
 
-Migration rule:
+Current-record rule:
 
 - Do not rewrite existing legacy records automatically.
-- Preserve original stored `worktree_path` bytes unless a documented future migration explicitly owns rewriting.
+- Preserve original stored `worktree_path` bytes unless an explicit current task relocation owns the change.
 - Accept records when they match either legacy policy or current configured policy.
 
 ## Unique Validation Path
@@ -93,7 +92,6 @@ Required callers:
 - task relocate `validate_worktree_path`
 - cleanup `cleanup_worktree_path`
 - handoff reference resolution
-- migration worktree matching
 - any CLI/MCP text that documents accepted paths
 
 Do not add a fallback inside validation. If config is missing and the path is not a legacy record, fail closed with a typed error.
@@ -115,11 +113,6 @@ Do not add a fallback inside validation. If config is missing and the path is no
    - Task relocate uses resolver.
    - Deliver and close continue comparing against the registered stored path.
    - Close cleanup accepts both policy versions because cleanup must not strand existing tasks.
-
-4. Migration node
-   - `worktree_matches_project` accepts legacy project playground and current configured path.
-   - Existing migration tests remain semantically valid for legacy records.
-   - Add tests for configured path acceptance and outside-base rejection.
 
 5. MCP/CLI text node
    - Remove absolute claims that `--worktree-path` must be `<project-main>/playground/<short-slug>`.
@@ -154,7 +147,6 @@ Targeted lifecycle tests:
 - relocate accepts configured path and rejects outside-base path.
 - close cleanup accepts both legacy and configured stored worktrees.
 - handoff reference accepts configured registered worktree.
-- migration accepts legacy and configured records.
 
 Runtime/E2E tests:
 
@@ -174,9 +166,9 @@ entry: approved policy + latest origin/main
   -> D1 inspect current config/schema/docs/tests
   -> D2 add typed worktree config contract
   -> D3 add unique worktree policy resolver
-  -> D4 wire resolver into Collab lifecycle and migration validation
+  -> D4 wire resolver into current Collab lifecycle validation
   -> D5 update CLI/MCP/Skill text from configured-policy language
-  -> D6 add focused unit tests for config, resolver, migration, lifecycle
+  -> D6 add focused unit tests for config, resolver and lifecycle
   -> D7 run focused tests in candidate worktree
   -> D8 build release candidate through official Collab flow
   -> D9 install candidate and verify digest/version

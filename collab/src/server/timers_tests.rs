@@ -2,9 +2,7 @@ use super::{seed_project_patrol_episode, *};
 use crate::proto::SelectedTransport;
 use crate::server::current_state;
 use crate::server::keepalive::Record;
-use crate::server::state::{
-    Event, MigrationRecord, NotificationSubscription, State, TaskRec, WaitSpec,
-};
+use crate::server::state::{Event, NotificationSubscription, State, TaskRec, WaitSpec};
 use std::sync::Mutex;
 
 fn test_server() -> (Arc<Server>, std::path::PathBuf) {
@@ -263,24 +261,12 @@ fn subscription_target(server: &Server, worker_id: &str) -> (String, String) {
 }
 
 fn freeze_admission(server: &Server) {
-    let now = now_ms();
-    server.commit(&[Event::MigrationUpdated {
-        migration: MigrationRecord {
-            id: "migration".into(),
-            from_version: "v1".into(),
-            to_version: "v1".into(),
-            phase: "applied".into(),
-            admission_frozen: true,
-            snapshot_hash: None,
-            worker_count: 1,
-            task_count: 0,
-            message_count: 0,
-            operator: "test".into(),
-            issues: Vec::new(),
-            created_ms: now,
-            updated_ms: now,
-        },
-    }]);
+    // Seed the pending boundary without clearing the armed timer under test.
+    let mut state = server.state.lock().unwrap();
+    state
+        .pending_project_resets
+        .insert(server.root.display().to_string(), true);
+    current_state::save(&server.state_path, &state).unwrap();
 }
 
 fn bind_message(server: &Server, worker_id: &str, subscription_id: &str) -> String {

@@ -1,8 +1,7 @@
 //! Authorized retirement of a legacy project-local Collab control plane.
 //!
-//! This is the single offline reset owner. It is deliberately separate from
-//! `collab migrate`, which preserves history, and it never claims any delivery,
-//! review, install, or communication evidence. The operation is only reachable
+//! This is the single offline reset owner. It never claims delivery, review,
+//! install, or communication evidence. The operation is only reachable
 //! with an explicit operator approval string, requires the host daemon to be
 //! down, archives the retired bytes, removes the project-local control plane
 //! plus its stale host route record, and rebuilds the current empty baseline.
@@ -612,10 +611,7 @@ fn archive_retired(
 /// Only the inventory and the retire set differ.
 pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyhow::Result<()> {
     if !request.discard_legacy {
-        anyhow::bail!(
-            "RESET_AUTHORIZATION_REQUIRED: collab reset requires --discard-legacy; \
-             use `collab migrate` to preserve history"
-        );
+        anyhow::bail!("RESET_AUTHORIZATION_REQUIRED: collab reset requires --discard-legacy");
     }
     if request.approval.trim().is_empty() {
         anyhow::bail!(

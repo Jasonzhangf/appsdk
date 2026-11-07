@@ -462,7 +462,7 @@ route and receive lease together. It never requires a maintenance window.
 - The daemon selects the registered adapter; no control truth is inferred
   from terminal text or a gateway connection UUID.
 - No fallback, silent strip, automatic ownership, automatic claim release, or
-  success projection from failed wake/cleanup/migration.
+  success projection from failed wake/cleanup/current-state publication.
 - No uncommitted product edits in main as an intermediate test step.
-- One task owner, one declared worktree, one resource holder, and one migration
-  transaction operator at a time.
+- One task owner, one declared worktree, one resource holder and one current
+  state writer for each scope.

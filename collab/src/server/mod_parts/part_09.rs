@@ -1631,6 +1631,58 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             .cloned()
             .collect()
     };
+    // Authorized management scope exposed inside the same context snapshot so
+    // one interaction covers the caller's own work and the scope it may
+    // supervise, without a second state tree. Unknown activity stays unknown
+    // and is never reported as idle; projection does not consume messages,
+    // claim tasks, or mutate revisions.
+    let manages_project = role == "master" || is_current_ceo_holder(&st, &worker_id);
+    let management_scope: String = if manages_project {
+        "project".to_string()
+    } else {
+        "self".to_string()
+    };
+    let management_tasks: Vec<serde_json::Value> = if manages_project {
+        let master_id = current_master_worker_id(&st, route_scope.as_ref());
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for task in st.tasks.values().filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled")) {
+            match board_task_view_with_master(
+                &st,
+                &control,
+                task,
+                Some(&worker_id),
+                master_id.as_deref(),
+                route_scope.as_ref(),
+            ) {
+                Ok(Some(view)) => rows.push(json!(view)),
+                Ok(None) => {},
+                Err(error) => return Resp::err(error),
+            }
+        }
+        rows.sort_by(|left, right| {
+            left["id"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(right["id"].as_str().unwrap_or_default())
+        });
+        rows
+    } else {
+        Vec::new()
+    };
+    let mut block_request_views: Vec<serde_json::Value> = st
+        .task_block_requests
+        .values()
+        .filter(|request| manages_project || request.requester == worker_id)
+        .cloned()
+        .map(|request| serde_json::to_value(request).unwrap_or(serde_json::Value::Null))
+        .collect();
+    block_request_views.sort_by(|left, right| {
+        left["task_id"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["task_id"].as_str().unwrap_or_default())
+    });
+
     // `collab context` is the single agent bootstrap read, so the projections
     // that `collab status --all` and `collab who` expose belong to the same
     // snapshot instead of a second call. They are captured here because `st` is
@@ -1725,6 +1777,19 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             let peer_presence = worker_presence(server, &peer);
             let (_, peer_endpoint_live) = worker_identity_and_endpoint(server, &peer);
             endpoint_live_by_worker.insert(peer.id.clone(), peer_endpoint_live);
+            let activity_str = peer_activities
+                .get(&peer.id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
+            let availability = if matches!(activity_str.as_str(), "busy" | "waiting_user") {
+                "busy"
+            } else if activity_str == "idle" {
+                "idle"
+            } else if peer_endpoint_live == Some(false) {
+                "offline"
+            } else {
+                "unknown"
+            };
             json!({
                 "worker_id": peer.id,
                 "display_name": display_name,
@@ -1738,7 +1803,8 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                     IdentityPresence::Unknown => "unknown",
                 },
                 "endpoint_live": peer_endpoint_live,
-                "activity": peer_activities.get(&peer.id).cloned().unwrap_or_else(|| "unknown".into()),
+                "activity": activity_str,
+                "availability": availability,
             })
         })
         .collect();
@@ -1889,6 +1955,11 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         "peers": peers,
         "peer_count": peer_count,
         "scope_digest": scope_digest,
+        "management": {
+            "scope": management_scope,
+            "tasks": management_tasks,
+            "block_requests": block_request_views,
+        },
         "master_wake": master_wake,
         "subagents": subagents,
         "summary": {

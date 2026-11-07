@@ -223,7 +223,7 @@ Route escalation by role:
   temporarily decline a master collaboration invite to protect their own task.
   If no current master exists, report to the collaborator that initiated the
   task. Legacy managed records grant no new execution authority.
-- Master authority follows [migration-daemon](migration-daemon.md#master-and-deprecated-interfaces).
+- Master authority follows the [current identity boundary](migration-daemon.md#master-and-deprecated-interfaces).
   Goal routing and patrol responsibilities follow the [main Skill](../SKILL.md#task-routing-and-role-responsibilities).
   An unanswered internal request does not become a human approval gate.
   Ask humans only for exclusive facts, uncovered authority or user-constraint changes.

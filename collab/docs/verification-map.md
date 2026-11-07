@@ -5,6 +5,15 @@ It does not assert that a candidate is installed, activated or accepted live.
 Execution results belong in the task run. Graph validation proves topology and
 operator bindings; it does not prove runtime behavior.
 
+The old CLI `migrate`, MCP `collab_migrate` and Migration/RemoveWorker wire
+variants are absent. `removed_migration_surface` checks real CLI/MCP rejection
+without state creation; the Req decoder's removed-maintenance test pairs unknown
+variants with a valid Ping. The current-state public restart case injects unused
+old inner migration fields and proves they neither freeze admission nor survive
+the next ordinary save. The strict outer reader is unchanged. Scoped reset,
+startup, reset intent, retention/timer boundaries and current block approval
+retain their dedicated gates. No snapshot/replay maintenance owner remains.
+
 ## Current identity and storage
 
 `identity-map.json` is the only identity-selection resource. Current tasks,
@@ -37,6 +46,7 @@ and `collab-work-role-registration` under `docs/dagpipe/`.
 | First peer registration notice | AppServer integration `work_roles_cli::minimal_registration_*` | Publish eligible worker registration, default subscription and advisory message in the same current-state business transaction. No self/master/backfill notice; repeat Context/Register/restart stays silent. A rejected native wake retains durable mail. |
 | Roles, templates and work policy | AppServer integration `work_roles_cli`, `workflow_templates`; work assignment and required-review units | Role changes and template changes notify only affected counterparts. Pinned executor/reviewer and accepted-task obligations retain their existing semantics. |
 | Board lifecycle and capacity | AppServer integration `board_cli`; `server::board_state_tests`; `server::board_reassign_tests`; `server::scheduler_admission_tests` | Claim/invite/respond, delivery, review, integration and cleanup use current persisted state. Closed tasks disappear from open views. Ordinary peers require Board admission for task dispatch; ordinary messages have no role-pair restriction. |
+| Business block approval | AppServer integration `block_approval`; `server::board_state_tests::pending_block_request_survives_current_state_round_trip` | An owner's request remains pending with the task running until the current supervisor approves. Self/foreign/stale decisions fail. Preserve exact pending and approved records through real state.json restart; internal resource isolation does not fabricate approval. |
 | Cross-project ordinary messaging | `cross_project_stale_identity_cli` | Any registered role pair, including peer/CEO, can send directly. Preserve project isolation, exact address resolution, authenticated source and correlated reply routing. |
 | Delivery versus consumption | `appserver_two_tui_integration`; `desktop_bridge_public_contract`; `dsh_master_authority_cli`; notification batch units | Durable enqueue, native acceptance, actual receive receipt and reply are separate facts. Context/inbox/status do not consume. Unknown native outcomes do not trigger blind resubmission or transport switching. |
 | Subscription and patrol persistence | AppServer integration `patrol_runtime`, `patrol_subscriptions`, `project_patrol_subscribe`, `ceo_patrol_runtime`; `goal_periodic_blackbox`; timer units | Preserve the current subscription and finite schedule. Explicit periodic declaration controls repetition; ordinary Context invents no schedule. Cancelled patrols do not remove direct-message reception. |

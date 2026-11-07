@@ -661,7 +661,7 @@ fn handle_default_show(
 
 // ---------- dispatch ----------
 
-fn mutation_blocked_during_migration(req: &Req) -> bool {
+fn mutation_blocked_during_project_reset(req: &Req) -> bool {
     match req {
         Req::Ceo { command, .. } => !matches!(command, crate::ceo::CeoCommand::Status | crate::ceo::CeoCommand::Progress { .. }),
         Req::UnregisterSelf { .. } | Req::ProjectReset { .. } => false,
@@ -695,15 +695,12 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::TaskClose { .. }
         | Req::TaskFinalizeCleanup { .. }
         | Req::TaskDispatch { .. }
-        | Req::MigrationPlan { .. }
-        | Req::MigrationApply { .. }
         | Req::MasterPromote { .. }
         | Req::MasterClear { .. }
         | Req::MasterDelegate { .. }
         | Req::MasterWakeHold { .. }
         | Req::MasterWakeRelease { .. }
         | Req::TransferMaster { .. }
-        | Req::RemoveWorker { .. }
         | Req::WorkerSnapshot { .. }
         | Req::WorkerClose { .. }
         | Req::WorkRolesSet { .. }
@@ -721,8 +718,6 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::MsgStatus { .. }
         | Req::TaskStatus { .. }
         | Req::TaskConflicts { .. }
-        | Req::MigrationInspect { .. }
-        | Req::MigrationVerify { .. }
         | Req::MasterStatus
         | Req::Role { .. }
         | Req::Workers
@@ -830,9 +825,6 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id, token, ..
         }
         | Req::TaskDispatch { worker_id, token }
-        | Req::MigrationPlan { worker_id, token }
-        | Req::MigrationApply { worker_id, token }
-        | Req::MigrationVerify { worker_id, token }
         | Req::MasterPromote {
             worker_id, token, ..
         }
@@ -849,9 +841,6 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id, token, ..
         }
         | Req::TransferMaster {
-            worker_id, token, ..
-        }
-        | Req::RemoveWorker {
             worker_id, token, ..
         }
         | Req::WorkerClose {

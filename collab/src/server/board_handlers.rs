@@ -357,9 +357,14 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
             if let Err(error) = board_check_revision(&state, &id, expected_revision) { return error; }
             if status.is_none() && next.is_none() { return Resp::err("provide --status or --next"); }
-            let result = task_update_locked(server, &mut state, actor.clone(), token, id.clone(), status, next);
+            let result = task_update_locked(server, &mut state, actor.clone(), token, id.clone(), status, next, None, None);
             if !result.ok { return result; }
-            board_task_response(server, &state, &id, &actor)
+            let block_request = result.data.get("block_request").cloned();
+            let mut response = board_task_response(server, &state, &id, &actor);
+            if let (Some(request), Some(object)) = (block_request, response.data.as_object_mut()) {
+                object.insert("block_request".into(), request);
+            }
+            response
         },
         BoardCommand::Describe { id, expected_revision, title, description, delivery_condition, test_condition } => {
             let mut state = server.state.lock().unwrap();

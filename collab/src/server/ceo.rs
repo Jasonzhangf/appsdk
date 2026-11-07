@@ -288,7 +288,7 @@ impl ProjectRuntimeManager {
         if !matches!(command, CeoCommand::Progress { .. })
             && source.state.lock().unwrap().admission_frozen()
         {
-            return Err(Resp::err("MIGRATION_ADMISSION_FROZEN"));
+            return Err(Resp::err("PROJECT_RESET_PENDING"));
         }
         match command {
             CeoCommand::Promote {
@@ -619,7 +619,7 @@ impl ProjectRuntimeManager {
         let (mid, subscription, task_id, deduplicated) = {
             let mut state = target.state.lock().unwrap();
             if state.admission_frozen() {
-                return Err(Resp::err("MIGRATION_ADMISSION_FROZEN"));
+                return Err(Resp::err("PROJECT_RESET_PENDING"));
             }
             let control = self.binding_control_store().load().map_err(Resp::err)?;
             let route = server_route_scope(target, &state).map_err(Resp::err)?

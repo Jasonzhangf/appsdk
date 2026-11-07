@@ -506,11 +506,6 @@ impl Server {
                     project_scope,
                     binding_id,
                 }),
-                GlobalEvent::MigrationCommitEvidence { .. } => {
-                    return Err(notification_contract::MutationError::InvalidCommand(
-                        "migration commit evidence is not part of worker registration".into(),
-                    ))
-                }
                 GlobalEvent::RuntimeBindingLedgerClassified { record } => {
                     events.push(Event::GlobalRuntimeBindingLedgerClassified { record })
                 }

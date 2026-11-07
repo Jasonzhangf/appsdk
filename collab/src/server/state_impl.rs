@@ -1172,6 +1172,10 @@ impl State {
                 }
                 self.task_lifecycle.insert(task_id.clone(), record.clone());
             }
+            Event::TaskBlockRequestUpdated { request } => {
+                self.task_block_requests
+                    .insert(request.task_id.clone(), request.clone());
+            }
             Event::MergeRequested { request } => {
                 self.pending_merges
                     .insert(request.task_id.clone(), request.clone());
@@ -1185,9 +1189,6 @@ impl State {
                 }
                 self.cleanup_receipts
                     .insert(receipt.task_id.clone(), receipt.clone());
-            }
-            Event::MigrationUpdated { migration } => {
-                self.migration = Some(migration.clone());
             }
             Event::CeoGrantSet { grant } => {
                 self.ceo_grant = grant.clone();
@@ -1377,11 +1378,6 @@ impl State {
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;
             }
-            Event::GlobalMigrationCommitEvidence { evidence } => {
-                self.apply_global_event(&GlobalEvent::MigrationCommitEvidence {
-                    evidence: evidence.clone(),
-                })?;
-            }
             Event::GlobalRuntimeBindingLedgerClassified { .. }
             | Event::GlobalLedgerScanReceiptRecorded { .. } => {}
         }
@@ -1530,10 +1526,6 @@ impl State {
         self.pending_project_resets
             .values()
             .any(|clear_local| *clear_local)
-            || self
-                .migration
-                .as_ref()
-                .is_some_and(|migration| migration.admission_frozen)
     }
 
     /// Unread (not yet acked) inbox of a worker, oldest first.

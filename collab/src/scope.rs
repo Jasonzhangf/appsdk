@@ -839,10 +839,11 @@ real facts once with `collab context --provide '<JSON>'`. The daemon completes
 the binding and lease; do not choose a worker or run another recovery command.
 If the service is unavailable, preserve the identity and report that boundary.
 User maintenance commands and credentials are outside the agent interface.
-Existing projects migrate through `collab migrate inspect`, `plan`, `apply`,
-daemon identity reconciliation through `collab context`, and `verify`;
-deleting `.agent-collab`, editing JSON state, clearing mailboxes, copying
-tokens, mixed runtime writes, and guessing thread identity are deprecated.
+Identity recovery uses only the current `identity-map.json`; tasks and messages
+load directly from current `state.json`. There is no migration-maintenance
+command or historical replay. An explicit project reset discards only its
+authorized scope. Do not edit state, clear mailboxes, copy tokens, mix runtime
+writers or guess a thread identity to recover current work.
 
 ## Runtime boundary
 

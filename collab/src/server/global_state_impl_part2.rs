@@ -317,46 +317,6 @@ impl GlobalState {
         Ok(())
     }
 
-    /// Install one migration commit evidence record already committed by the
-    /// current business owner. The outer reducer owns the mutation and version
-    /// ordering, so this projection deliberately does not bump or validate
-    /// the independent global counters until the caller synchronizes them.
-    pub fn record_migration_commit_evidence(
-        &mut self,
-        evidence: MigrationCommitEvidence,
-    ) -> Result<(), StateError> {
-        evidence.validate()?;
-        if evidence.target_epoch != self.epoch {
-            return Err(StateError::Invariant(format!(
-                "migration commit evidence {} belongs to target epoch {}, expected {}",
-                evidence.operation_id, evidence.target_epoch, self.epoch
-            )));
-        }
-        let operation_key = evidence.operation_id.as_str().to_owned();
-        if let Some(existing) = self.migration_commit_evidence.get(&operation_key) {
-            if existing == &evidence {
-                return Ok(());
-            }
-            return Err(StateError::ReceiptConflict(format!(
-                "migration operation {} was already projected with different commit evidence",
-                evidence.operation_id
-            )));
-        }
-        if let Some(existing) = self
-            .command_receipts
-            .values()
-            .find(|current| current.operation_id == evidence.operation_id)
-        {
-            return Err(StateError::OperationIdReuse {
-                operation_id: evidence.operation_id.as_str().to_owned(),
-                existing_command: existing.command_id.as_str().to_owned(),
-            });
-        }
-        self.migration_commit_evidence
-            .insert(operation_key, evidence);
-        Ok(())
-    }
-
     /// A new registration advances the host version exactly once.  Repeating
     /// the same registration is idempotent; a conflicting registration is
     /// rejected so one AppServer cannot silently replace another identity.

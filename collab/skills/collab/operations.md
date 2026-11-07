@@ -462,7 +462,7 @@ closure is a long-horizon goal.
   integrate assigned work, close owned resources, and report to the sender. It
   does not inherit master authority.
 - A managed-subagent record is legacy compatibility state. It preserves
-  historical facts for diagnosis or migration and grants no new production
+  existing facts for diagnosis and grants no new production
   execution authority.
 
 ### Register the long-horizon goal before dispatch
@@ -641,7 +641,7 @@ or implementation details.
 
 A legacy managed-subagent record creates no new patrol task, subscription,
 dispatch, or execution authority. Its parent or master preserves it only for
-diagnosis or migration.
+diagnosis.
 
 ## 稳定名字与旧版 display-label 迁移
 
@@ -951,7 +951,7 @@ reset. Host maintenance is outside the agent interface.
 `server.sock`, and diagnostic `log.txt`); project-local `.agent-collab/`
 discovers a project and is not a second persistence source.
 For a new project or an explicitly authorized clean epoch, remove old
-project-local governance only through the owner's canonical reset/migration
+project-local governance only through the owner's canonical reset
 command. Never manually remove current state files, mailbox
 files, identity tokens, task records, or bindings to make status look clean.
 Never start a second daemon or use broad process kills. `collab ack` remains a
@@ -959,10 +959,10 @@ compatibility operation; it is not a substitute for task close or identity
 recovery.
 
 An AppSDK `reset-governance` or `appsdk init --fresh --discard-legacy` is not
-Collab reset/migration and must not remove `.agent-collab/`. AppSDK's reset owner
+Collab reset and must not remove `.agent-collab/`. AppSDK's reset owner
 explicitly treats `.agent-collab/` as a reserved root. If the project also
 needs to move or retire Collab state, follow
-[Migration and User-Managed Daemon Boundary](references/migration-daemon.md); the two
+[Current Identity and User-Managed Daemon Boundary](references/migration-daemon.md); the two
 operations have separate transactions and separate completion evidence.
 
 ### 4. Regression recognition
@@ -1221,7 +1221,7 @@ response:` line before retrying: a durable outcome is not a retryable failure.
 ### Continue the queue and recheck blockers
 
 Use this sequence for master and peer work. Master also checks the public queue
-and its coordination tasks. Legacy managed records are inspection or migration
+and its coordination tasks. Legacy managed records are inspection
 inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
@@ -1277,7 +1277,7 @@ Legacy managed-subagent records grant no new production execution authority.
 Registered peer status and thread state use the owning AppServer RPC. Use peers
 for long-horizon goals. Use independent `codex exec --profile gcm` workers for
 bounded execution or observation. Legacy records may be inspected only for
-diagnosis or migration.
+diagnosis.
 For registered participants, `collab-mcp` and the `collab` CLI expose the same
 collaboration protocol. Listed `collab_*` tools alone do not prove registration.
 If MCP is missing, unsupported, aborted, or unknown, run the same
@@ -1933,7 +1933,7 @@ the projections that used to require separate calls, so no agent flow needs to r
 | Thread/session changed, or after daemon restart | `collab context` (daemon reconciles identity in place) | manual identity or daemon lifecycle commands |
 | Worker status, board admission, or a mutation reports `SESSION_THREAD_BINDING_MISMATCH` | preserve the registered binding and run `collab context` as the only repair entry | manually rebind, edit control files, or infer a binding |
 | Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
-| `requires_identity_update` is present | supply only requested real runtime facts; a user-authorized identity/name/role recovery uses the exact intent command in stable-name-recovery; context handles migration internally | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
+| `requires_identity_update` is present | supply only requested real runtime facts; authorized identity/name/role recovery uses the exact intent command in stable-name-recovery and the current map | guess archived workers, inspect routes/tokens, hand-edit state, invent approval or treat historical ambiguity as insufficient user authority |
 | `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error; a non-Git ordinary workspace registers directly with `collab context` (no `--query`), while `--query`, a Git subdirectory, or a playground worktree stays fail-closed without a route or baseline; failed initial registration continues independently; existing registered participants report the affected coordination without clearing owned tasks/claims | automatically retry from another cwd; edit routes/token state, copy identity, reset the project |
 | Default lease looks stopped | `collab context` re-arms it from the registered identity | probe sockets, call a transport directly |
 | Notification arrived | DSH: act on the native full body and reply with `collab sendmessage`; other transports: run `collab recv` once, then act | DSH running `recv`/`ack` or recovery before replying; treating submission as consumption |
@@ -2043,9 +2043,8 @@ snapshot:
 permission to select a worker. The supplement has exactly the four scalar fields
 `session_id`, `thread_id`, `endpoint`, and `namespace`. A value that conflicts
 with an automatically observed fact is `IDENTITY_FACT_CONFLICT`, not an override.
-Historical duplicate identities and retired carriers are context-owned migration
-inputs, not conflicts for the agent to resolve. Current user-approved recovery
-is evaluated before those records. Real input conflicts, token rejection, route failure, runtime-binding failure, and
+Historical identities and retired carriers are not recovery inputs. Current
+user-approved recovery is applied through the identity map. Real input conflicts, token rejection, route failure, runtime-binding failure, and
 transport failure keep their original error and non-zero exit; unapproved
 automatic resolution cannot bypass them. A communication diagnostic can await
 a participant return; ordinary identity restoration does not.
@@ -2261,7 +2260,7 @@ claim an independent goal or infer master authority.
   [references/task-worktree-lifecycle.md](references/task-worktree-lifecycle.md)
 - Resource conflicts and bounded waits:
   [references/resource-waits.md](references/resource-waits.md)
-- Migration, user-managed daemon boundary, deprecated commands:
+- Current identity, user-managed daemon boundary, removed commands:
   [references/migration-daemon.md](references/migration-daemon.md)
 - Source/release/install/live verification:
   [references/verification.md](references/verification.md)

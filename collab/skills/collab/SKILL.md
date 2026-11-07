@@ -232,7 +232,7 @@ v2 实验状态。
 |---|---|
 | 修改角色或工作流程模板 | [角色分工](operations.md#工作角色与用户指定分工)、[流程模板](operations.md#唯一-skill-与当前工作流程) |
 | 任务板发布、认领、交付及队列接续 | [任务板与 dashboard](operations.md#public-task-board-and-read-only-dashboard) |
-| 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[迁移边界](references/migration-daemon.md) |
+| 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[当前身份与用户维护边界](references/migration-daemon.md) |
 | CEO、跨项目 master 操作 | [CEO](operations.md#全局-ceo-与项目-master)、[跨项目通信](operations.md#cross-project-master-communication) |
 | board idle 巡检、取消与 CEO 回报 | [board idle 巡检](references/board-idle-patrol.md) |
 | 宿主注册、AppServer 或 thread 路由 | [宿主注册](operations.md#三种宿主的注册方式与锚点dsh--codex-tui--codex-desktop)、[AppServer](operations.md#appserver-runtime-registration) |

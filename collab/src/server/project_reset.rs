@@ -246,7 +246,6 @@ pub(super) fn clear_project(
     if clear_local {
         state.project_work_policy.clear();
         state.master_wake = Default::default();
-        state.migration = None;
     }
     // Registration receipts already carry their typed command.binding scope.
     // Unscoped legacy receipts belong to this reducer's local project.

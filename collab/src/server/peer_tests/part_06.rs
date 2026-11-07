@@ -295,23 +295,12 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
             retry_attempted: false,
         },
     }]);
-    server.commit(&[Event::MigrationUpdated {
-        migration: MigrationRecord {
-            id: "migration".into(),
-            from_version: "v1".into(),
-            to_version: "v1".into(),
-            phase: "applied".into(),
-            admission_frozen: true,
-            snapshot_hash: None,
-            worker_count: 1,
-            task_count: 0,
-            message_count: 2,
-            operator: "peer".into(),
-            issues: Vec::new(),
-            created_ms: now,
-            updated_ms: now,
-        },
-    }]);
+    // Keep the retained messages while seeding an already-pending reset.
+    {
+        let mut state = server.state.lock().unwrap();
+        state.pending_project_resets.insert(root.display().to_string(), true);
+        current_state::save(&server.state_path, &state).unwrap();
+    }
     assert_eq!(purge_expired_storage(&server, now), 0);
     assert!(server
         .state
@@ -319,6 +308,7 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
         .unwrap()
         .msgs
         .contains_key("m-old-frozen"));
+    assert!(current_state::load(&server.state_path, false).unwrap().msgs.contains_key("m-old-frozen"));
     std::fs::remove_dir_all(root).ok();
 }
 

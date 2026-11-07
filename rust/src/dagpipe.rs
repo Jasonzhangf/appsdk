@@ -300,11 +300,15 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 40] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 41] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
             include_str!("../../docs/dagpipe/collab-activation.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-task-block-approval.graph.json",
+            include_str!("../../docs/dagpipe/collab-task-block-approval.graph.json"),
         ),
         (
             "docs/dagpipe/collab-shutdown.graph.json",
@@ -465,9 +469,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 40] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 38] {
+fn design_graph_ids() -> [&'static str; 39] {
     [
         "appsdk-collab-activation",
+        "appsdk-collab-task-block-approval",
         "appsdk-collab-shutdown",
         "appsdk-collab-identity-anchor",
         "collab-send-message",
@@ -508,13 +513,18 @@ fn design_graph_ids() -> [&'static str; 38] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 214] {
+fn design_graph_operator_names() -> [&'static str; 219] {
     [
         "appsdk.collab_activation.authorize",
         "appsdk.collab_activation.prepare",
         "appsdk.collab_activation.reload",
         "appsdk.collab_activation.readiness",
         "appsdk.collab_activation.emit",
+        "appsdk.collab_task_block_approval.receive_request",
+        "appsdk.collab_task_block_approval.admit_decision",
+        "appsdk.collab_task_block_approval.classify_request",
+        "appsdk.collab_task_block_approval.commit_decision",
+        "appsdk.collab_task_block_approval.emit_result",
         "appsdk.collab_shutdown.authorize",
         "appsdk.collab_shutdown.respond",
         "appsdk.collab_shutdown.request_stop",

@@ -46,23 +46,6 @@ pub struct WaitSpec {
     pub escalation: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MigrationRecord {
-    pub id: String,
-    pub from_version: String,
-    pub to_version: String,
-    pub phase: String,
-    pub admission_frozen: bool,
-    pub snapshot_hash: Option<String>,
-    pub worker_count: usize,
-    pub task_count: usize,
-    pub message_count: usize,
-    pub operator: String,
-    pub issues: Vec<String>,
-    pub created_ms: i64,
-    pub updated_ms: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerRec {
     pub id: String,
@@ -122,9 +105,6 @@ pub enum GlobalEvent {
         project_scope: crate::scope::ProjectScopeId,
         binding_id: crate::identity::BindingId,
     },
-    MigrationCommitEvidence {
-        evidence: super::global_state::MigrationCommitEvidence,
-    },
     RuntimeBindingLedgerClassified {
         record: super::global_state::RuntimeBindingLedgerRecord,
     },
@@ -147,9 +127,6 @@ impl GlobalEvent {
             } => global
                 .revoke_master(&project_scope, &binding_id)
                 .map(|_| ()),
-            Self::MigrationCommitEvidence { evidence } => {
-                global.record_migration_commit_evidence(evidence)
-            }
             Self::RuntimeBindingLedgerClassified { .. }
             | Self::LedgerScanReceiptRecorded { .. } => Ok(()),
         }
@@ -717,6 +694,15 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
                 ResponsibilityEffect::Mutates(task.owner.as_str())
             }
         }
+        // A pending business block application is a daemon obligation owned by
+        // the requester; a close must not silently drop it.
+        Event::TaskBlockRequestUpdated { request } => {
+            if request.state == TaskBlockRequestState::Pending {
+                ResponsibilityEffect::Mutates(request.requester.as_str())
+            } else {
+                ResponsibilityEffect::Safe
+            }
+        }
         Event::SchedulerAdmission { admission } => {
             if matches!(admission.status.as_str(), "pending" | "notifying") {
                 ResponsibilityEffect::Mutates(admission.worker_id.as_str())
@@ -1227,6 +1213,39 @@ pub struct TaskLifecycleRecord {
     pub reviewer_name: Option<String>,
 }
 
+/// Daemon-owned business block application state. A member's `blocked`
+/// transition first becomes a typed pending request; only the authorized
+/// supervisor or CEO may commit the terminal state in the same checked batch
+/// that updates the task. Internal resource/safety isolation never creates one
+/// of these records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskBlockRequestState {
+    Pending,
+    Approved,
+    Rejected,
+    Superseded,
+}
+
+/// Current business block application for one task, keyed by task id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskBlockRequest {
+    pub task_id: String,
+    pub requester: String,
+    pub reason: Option<String>,
+    pub requested_at_ms: i64,
+    /// Board revision observed when the request was made. A decision that sees
+    /// a different revision is stale and must not cover a new task contract.
+    pub task_revision: u64,
+    pub state: TaskBlockRequestState,
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    #[serde(default)]
+    pub decided_at_ms: Option<i64>,
+    #[serde(default)]
+    pub decision_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskDeliveryKind {
@@ -1612,6 +1631,11 @@ pub enum Event {
         task_id: String,
         record: TaskLifecycleRecord,
     },
+    /// Daemon-owned business block application or decision. The same request
+    /// record and, on approval, the updated task must commit in one batch.
+    TaskBlockRequestUpdated {
+        request: TaskBlockRequest,
+    },
     MergeRequested {
         request: PendingMerge,
     },
@@ -1624,9 +1648,6 @@ pub enum Event {
     },
     CleanupVerified {
         receipt: CleanupReceipt,
-    },
-    MigrationUpdated {
-        migration: MigrationRecord,
     },
     /// Durable CEO grant/revoke. `None` clears the grant; bootstrap history is
     /// retained in `ceo_bootstraps`.
@@ -1708,9 +1729,6 @@ pub enum Event {
     },
     GlobalCurrentThreadRouteTombstoneSet {
         tombstone: super::global_state::RuntimeBindingTombstone,
-    },
-    GlobalMigrationCommitEvidence {
-        evidence: super::global_state::MigrationCommitEvidence,
     },
     GlobalRuntimeBindingLedgerClassified {
         record: super::global_state::RuntimeBindingLedgerRecord,

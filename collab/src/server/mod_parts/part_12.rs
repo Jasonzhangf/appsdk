@@ -61,7 +61,7 @@ async fn dispatch_wire(
                 if let Err(error) = verify(&check, &worker_id, &token) {
                     Some(error)
                 } else if check.admission_frozen() {
-                    Some(Resp::err("MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed"))
+                    Some(Resp::err("PROJECT_RESET_PENDING: this scope is completing an already committed project reset"))
                 } else {
                     None
                 }
@@ -82,7 +82,7 @@ async fn dispatch_wire(
             }
         }
         req => tokio::task::spawn_blocking(move || {
-            let route_gate = if mutation_blocked_during_migration(&req)
+            let route_gate = if mutation_blocked_during_project_reset(&req)
                 || wire_mutation_principal(&req).is_some()
             {
                 Some(wire_route_mutation_gate(&server))
@@ -203,7 +203,7 @@ async fn dispatch_wire_routed(
                 if let Err(error) = verify(&check, &worker_id, &token) {
                     Some(error)
                 } else if check.admission_frozen() {
-                    Some(Resp::err("MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed"))
+                    Some(Resp::err("PROJECT_RESET_PENDING: this scope is completing an already committed project reset"))
                 } else {
                     None
                 }
@@ -229,7 +229,7 @@ async fn dispatch_wire_routed(
             (server, response)
         }
         req => {
-            let gate_effects = mutation_blocked_during_migration(&req)
+            let gate_effects = mutation_blocked_during_project_reset(&req)
                 && !matches!(&req, Req::Register { .. } | Req::IdentityContext { .. });
             let result = tokio::task::spawn_blocking({
                 let manager = manager.clone();
@@ -442,7 +442,7 @@ fn acquire_legacy_writer_lock(
         Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK
     ) {
         anyhow::bail!(
-            "DAEMON_MIGRATION_REQUIRED: legacy {description} lock is held at {}; stop or migrate the legacy writer before starting the host daemon",
+            "DAEMON_MIGRATION_REQUIRED: legacy {description} lock is held at {}; the user must resolve the existing writer through formal maintenance before starting the host daemon",
             lock_path.display()
         );
     }
@@ -498,7 +498,7 @@ fn ensure_legacy_socket_absent(scope: &Scope, host_paths: &HostPaths) -> anyhow:
     let legacy_socket = project_server_dir.join("server.sock");
     if legacy_socket != host_paths.socket_path() && probe_legacy_socket(&legacy_socket)? {
         anyhow::bail!(
-            "DAEMON_MIGRATION_REQUIRED: legacy project daemon is reachable at {}; stop or migrate it before starting the host daemon",
+            "DAEMON_MIGRATION_REQUIRED: legacy project daemon is reachable at {}; the user must resolve the existing writer through formal maintenance before starting the host daemon",
             legacy_socket.display()
         );
     }

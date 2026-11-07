@@ -1083,21 +1083,28 @@ pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Va
         }
     }
     if let Some(expected_enum) = canonical.get("enum") {
-        let Some(actual_enum) = declared.get("enum") else {
-            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
-        };
         let Some(expected_values) = expected_enum.as_array() else {
             fail(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path));
         };
-        let Some(actual_values) = actual_enum.as_array() else {
+        let declared_const = declared.get("const");
+        let declared_enum = declared.get("enum");
+        if declared_const.is_none() && declared_enum.is_none() {
             fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
-        };
-        if actual_values.is_empty()
-            || actual_values
-                .iter()
-                .any(|value| !expected_values.iter().any(|entry| entry == value))
-        {
+        }
+        if declared_const.is_some_and(|value| !expected_values.contains(value)) {
             fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        }
+        if let Some(actual_enum) = declared_enum {
+            let Some(actual_values) = actual_enum.as_array() else {
+                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            };
+            if actual_values.is_empty()
+                || actual_values
+                    .iter()
+                    .any(|value| !expected_values.iter().any(|entry| entry == value))
+            {
+                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            }
         }
     }
     if let Some(expected_items) = canonical.get("items") {

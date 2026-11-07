@@ -64,6 +64,10 @@ pub struct State {
     pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub board_details: HashMap<String, crate::board::BoardTaskDetails>,
+    /// Current business block application per task, owned by the daemon.
+    /// Internal resource/safety isolation writes tasks directly and never
+    /// fabricates one of these approval records.
+    pub task_block_requests: HashMap<String, TaskBlockRequest>,
     pub cancelled_board_patrol_tasks:
         std::collections::BTreeMap<String, crate::board_patrol_policy::TaskPatrolCancelRecord>,
     pub board_patrol_gates:
@@ -86,7 +90,6 @@ pub struct State {
     pub delivery_source_threads: HashMap<String, String>,
     pub notification_subscriptions: HashMap<String, NotificationSubscription>,
     pub wake_bindings: HashMap<String, String>,
-    pub migration: Option<MigrationRecord>,
     /// Project-mirrored global CEO grant. `CeoGrantSet` is the only writer;
     /// `None` revokes the grant and never touches bootstrap history.
     pub ceo_grant: Option<crate::ceo::CeoGrant>,

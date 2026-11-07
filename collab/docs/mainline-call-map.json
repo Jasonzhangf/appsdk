@@ -42,7 +42,6 @@
     {"from": "approved-current-identity", "to": "master-authority", "caller": "dispatch_sync_with_register_binding", "callee": "change_mapped_role", "path": "src/server/identity_context/mapped_context.rs"},
     {"from":"mapped-context","to":"current-communication-result","caller":"mapped_context","callee":"mapped_communication","path":"src/server/identity_context/communication.rs"},
     {"from":"manual-broken-communication","to":"ordinary-authenticated-self-send","caller":"mapped_communication","callee":"dispatch_with_route_context","path":"src/server/identity_context/communication.rs"},
-    {"from":"current-selected-notification","to":"latest-message-delivery-binding","caller":"attempt_tmux_notification_with_retry","callee":"commit_locked_checked","path":"src/server/mod_parts/part_05.rs"},
-    {"from": "peer-register", "to": "migration-freeze-verify", "caller": "dispatch", "callee": "handle_migration_verify", "path": "src/server/mod.rs"}
+    {"from":"current-selected-notification","to":"latest-message-delivery-binding","caller":"attempt_tmux_notification_with_retry","callee":"commit_locked_checked","path":"src/server/mod_parts/part_05.rs"}
   ]
 }

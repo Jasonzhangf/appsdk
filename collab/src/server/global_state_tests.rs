@@ -2,8 +2,6 @@ use super::*;
 use serde_json::Value;
 use std::path::Path;
 
-include!("global_state_tests_part2.rs");
-
 fn project_scope() -> ProjectScopeId {
     GlobalState::canonical_project_scope(Path::new(env!("CARGO_MANIFEST_DIR")))
         .expect("repository root is canonical")

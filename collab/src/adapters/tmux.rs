@@ -936,7 +936,7 @@ pub(crate) mod tests {
     struct IsolatedTmux {
         socket: PathBuf,
         root: PathBuf,
-        session: String,
+        session_id: String,
     }
 
     impl IsolatedTmux {
@@ -955,12 +955,12 @@ pub(crate) mod tests {
             ));
             std::fs::create_dir_all(&root).unwrap();
             let socket = root.join("tmux.sock");
-            let session = "collab-test".to_owned();
+            let session_name = "collab-test".to_owned();
             let mut command = Command::new("tmux");
             command
                 .arg("-S")
                 .arg(&socket)
-                .args(["new-session", "-d", "-s", &session]);
+                .args(["new-session", "-d", "-s", &session_name]);
             if let Some(pane_command) = pane_command {
                 command.arg(pane_command);
             }
@@ -970,6 +970,28 @@ pub(crate) mod tests {
                 "start isolated tmux: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            let queried = Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &session_name,
+                    "#{session_id}",
+                ])
+                .output()
+                .expect("query isolated tmux session id");
+            assert!(
+                queried.status.success(),
+                "query isolated tmux session id: {}",
+                String::from_utf8_lossy(&queried.stderr)
+            );
+            let session_id = String::from_utf8(queried.stdout)
+                .unwrap()
+                .trim_end()
+                .to_owned();
+            assert!(session_id.starts_with('$'), "invalid tmux session id");
             let split = Command::new("tmux")
                 .arg("-S")
                 .arg(&socket)
@@ -984,7 +1006,7 @@ pub(crate) mod tests {
             Self {
                 socket,
                 root,
-                session,
+                session_id,
             }
         }
 
@@ -1025,7 +1047,7 @@ pub(crate) mod tests {
             let _ = Command::new("tmux")
                 .arg("-S")
                 .arg(&self.socket)
-                .args(["kill-session", "-t", &self.session])
+                .args(["kill-session", "-t", &self.session_id])
                 .output();
             let _ = std::fs::remove_dir_all(&self.root);
         }
@@ -1591,6 +1613,34 @@ pub(crate) mod tests {
         // success; callers must not treat a repeated context as a rename error.
         rename_session(&endpoint, "Jenny").unwrap();
         assert_eq!(observe_session_name(&endpoint).unwrap(), "Jenny");
+    }
+
+    #[test]
+    fn drop_cleans_up_isolated_server_after_session_rename() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let (socket, root, server_pid);
+        {
+            let tmux = IsolatedTmux::start();
+            let endpoint = tmux.endpoint();
+            server_pid = endpoint.server_pid;
+            socket = tmux.socket.clone();
+            root = tmux.root.clone();
+            rename_session(&endpoint, "Jenny").unwrap();
+        }
+        // Drop has run. The socket must be gone, and the tmux server must have
+        // exited instead of surviving as an unreachable orphan.
+        assert!(!socket.exists(), "socket root must be removed");
+        assert!(!root.exists(), "temp root must be removed");
+        let alive = Command::new("ps")
+            .arg("-p")
+            .arg(server_pid.to_string())
+            .output()
+            .expect("query tmux server pid");
+        assert!(
+            !alive.status.success(),
+            "tmux server {} leaked after session rename",
+            server_pid
+        );
     }
 
     #[test]

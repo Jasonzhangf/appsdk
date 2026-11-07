@@ -1182,11 +1182,6 @@ pub struct TaskLifecycleRecord {
     pub delivery_evidence: Option<String>,
     #[serde(default)]
     pub delivered_ms: Option<i64>,
-    /// The exact candidate commit recorded at deliver time (branch head or
-    /// worktree HEAD when resolvable). PendingMerge.candidate_commit is copied
-    /// from this so integration can prove the candidate itself was merged.
-    #[serde(default)]
-    pub delivery_commit: Option<String>,
     #[serde(default)]
     pub review_evidence: Option<String>,
     #[serde(default)]
@@ -1274,7 +1269,9 @@ pub struct PendingMerge {
     pub owner: String,
     pub requested_by: String,
     pub requested_ms: i64,
-    #[serde(default)]
+    /// Legacy state input. Delivery no longer binds or consumes a candidate.
+    /// Accept old records for compatibility, but do not emit this field again.
+    #[serde(default, skip_serializing)]
     pub candidate_commit: Option<String>,
 }
 

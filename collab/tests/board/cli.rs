@@ -43,6 +43,641 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
     )
 }
 
+fn delivery_without_candidate_probe(mode: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct ReleaseProbe(PathBuf);
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"release");
+        }
+    }
+
+    let fixture = AppFixture::new();
+    let other = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let project = fixture.project.canonicalize().unwrap();
+    let git_output = Command::new("which").arg("git").output().unwrap();
+    assert!(git_output.status.success());
+    let real_git = String::from_utf8(git_output.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    for arguments in [
+        vec!["init", "-q", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "initial fixture",
+        ],
+    ] {
+        assert!(Command::new(&real_git)
+            .current_dir(&project)
+            .args(arguments)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let worktree = fixture.root.join("delivery-worktree");
+    assert!(Command::new(&real_git)
+        .current_dir(&project)
+        .args(["worktree", "add", "-q", "-b", "delivery-liveness"])
+        .arg(&worktree)
+        .arg("main")
+        .status()
+        .unwrap()
+        .success());
+    let worktree = worktree.canonicalize().unwrap();
+    fixture.run_public(&["task", "register", "delivery-liveness"], THREAD_B);
+
+    let entered = fixture.root.join("candidate-entered");
+    let release = fixture.root.join("candidate-release");
+    let wrapper = fixture.path_prepend.join("git");
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+release = Path({release})
+if sys.argv[1:] == ["--hold-candidate-output"]:
+    while not release.exists():
+        time.sleep(0.01)
+    sys.exit(0)
+if os.getcwd() == {worktree} and sys.argv[1:] == ["rev-parse", "--verify", "HEAD^{{commit}}"]:
+    Path({entered}).write_text({mode})
+    if {mode} == "inherited-output":
+        subprocess.Popen([sys.executable, __file__, "--hold-candidate-output"])
+    else:
+        while not release.exists():
+            time.sleep(0.01)
+os.execv({real_git}, ["git"] + sys.argv[1:])
+"#,
+        release = serde_json::to_string(&release).unwrap(),
+        worktree = serde_json::to_string(&worktree).unwrap(),
+        entered = serde_json::to_string(&entered).unwrap(),
+        mode = serde_json::to_string(mode).unwrap(),
+        real_git = serde_json::to_string(&real_git).unwrap(),
+    );
+    std::fs::write(&wrapper, script).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (completed_before_release, before_release, results) = std::thread::scope(|scope| {
+        // Drop this before scoped threads are joined, even if an assertion fails.
+        let _release = ReleaseProbe(release.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let delivered = tx.clone();
+        let fixture_ref = &fixture;
+        let delivery_worktree = worktree.clone();
+        scope.spawn(move || {
+            let deliver_arguments = [
+                "task",
+                "deliver",
+                "delivery-liveness",
+                "--worktree",
+                delivery_worktree.to_str().unwrap(),
+                "--evidence",
+                "real delivery evidence",
+            ];
+            let output = fixture_ref.command_public(&deliver_arguments, THREAD_B);
+            delivered
+                .send(("delivery", json_from_output(output)))
+                .unwrap();
+        });
+        let mut results = HashMap::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !entered.exists() && results.is_empty() && Instant::now() < deadline {
+            if let Ok((name, output)) = rx.recv_timeout(Duration::from_millis(20)) {
+                results.insert(name, output);
+            }
+        }
+        for (name, arguments) in [("ping", vec!["status"]), ("context", vec!["context"])] {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                tx.send((
+                    name,
+                    json_from_output(fixture_ref.command_public(&arguments, THREAD_A)),
+                ))
+                .unwrap();
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while results.len() < 3 && Instant::now() < deadline {
+            if let Ok((name, output)) = rx.recv_timeout(Duration::from_millis(20)) {
+                results.insert(name, output);
+            }
+        }
+        let completed_before_release = results.len() == 3;
+        let before_release = results.keys().copied().collect::<Vec<_>>();
+        std::fs::write(&release, b"release").unwrap();
+        while results.len() < 3 {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok((name, output)) => {
+                    results.insert(name, output);
+                }
+                Err(_) => break,
+            }
+        }
+        (completed_before_release, before_release, results)
+    });
+    assert!(
+        completed_before_release,
+        "{mode}: delivery-path requests did not complete before release; probe_entered={}, completed={before_release:?}, results={results:?}",
+        entered.exists()
+    );
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert!(
+        results["delivery"].is_object()
+            && results["ping"].is_object()
+            && results["context"].is_object(),
+        "{results:?}"
+    );
+    assert!(
+        !entered.exists(),
+        "delivery still queried an automatic candidate"
+    );
+    let delivered = &results["delivery"];
+    assert_eq!(delivered["delivery_kind"], "code");
+    assert_eq!(delivered["status"], "delivered");
+    assert_eq!(delivered["evidence"], "real delivery evidence");
+    assert_eq!(delivered["delivery_complete"], false);
+    let context = &results["context"];
+    assert_eq!(
+        context["identity"]["worker_id"],
+        other["identity"]["worker_id"]
+    );
+    let status = fixture.run_public(&["task", "status", "delivery-liveness"], THREAD_B);
+    assert_eq!(status["status"], "delivered");
+}
+
+fn json_from_output(output: std::process::Output) -> Value {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON");
+    value
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .cloned()
+        .unwrap_or(value)
+}
+
+struct HeldGitIntegration {
+    fixture: AppFixture,
+    entered: PathBuf,
+    release: PathBuf,
+    child_pid: PathBuf,
+    commit: String,
+}
+
+impl HeldGitIntegration {
+    fn release_and_wait(&self) {
+        let _ = std::fs::write(&self.release, b"release");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.child_pid.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for HeldGitIntegration {
+    fn drop(&mut self) {
+        self.release_and_wait();
+    }
+}
+
+fn prepare_held_git_integration() -> HeldGitIntegration {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated integration liveness fixture",
+        ],
+        THREAD_A,
+    );
+
+    let project = fixture.project.canonicalize().unwrap();
+    let git_output = Command::new("which").arg("git").output().unwrap();
+    assert!(git_output.status.success());
+    let real_git = String::from_utf8(git_output.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    for arguments in [
+        vec!["init", "-q", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "integration fixture",
+        ],
+    ] {
+        assert!(Command::new(&real_git)
+            .current_dir(&project)
+            .args(arguments)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let commit_output = Command::new(&real_git)
+        .current_dir(&project)
+        .args(["rev-parse", "--verify", "refs/heads/main^{commit}"])
+        .output()
+        .unwrap();
+    assert!(commit_output.status.success());
+    let commit = String::from_utf8(commit_output.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let worktree = fixture.project.join("integration-worktree");
+    assert!(Command::new(&real_git)
+        .current_dir(&project)
+        .args(["worktree", "add", "-q", "-b", "integration-liveness"])
+        .arg(&worktree)
+        .arg("main")
+        .status()
+        .unwrap()
+        .success());
+    let worktree = worktree.canonicalize().unwrap();
+
+    fixture.run_public(&["task", "register", "integration-liveness"], THREAD_B);
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "integration-liveness",
+            "--worktree",
+            worktree.to_str().unwrap(),
+            "--evidence",
+            "delivered for integration liveness",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(delivered["delivery_kind"], "code");
+    let reviewed = fixture.run_public(
+        &[
+            "task",
+            "review",
+            "integration-liveness",
+            "--accept",
+            "--evidence",
+            "integration liveness review accepted",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(reviewed["merge_pending"], json!(true));
+
+    let entered = fixture.root.join("integration-git-entered");
+    let release = fixture.root.join("integration-git-release");
+    let child_pid = fixture.root.join("integration-git-child.pid");
+    let wrapper = fixture.path_prepend.join("git");
+    let expected_args = serde_json::to_string(&vec![
+        "merge-base",
+        "--is-ancestor",
+        commit.as_str(),
+        "refs/heads/main",
+    ])
+    .unwrap();
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+release = Path({release})
+entered = Path({entered})
+child_pid = Path({child_pid})
+expected_cwd = {project}
+expected_args = {expected_args}
+real_git = {real_git}
+
+if sys.argv[1:] == ["--hold-integration-git"]:
+    while not release.exists():
+        time.sleep(0.01)
+    try:
+        child_pid.unlink()
+    except FileNotFoundError:
+        pass
+    sys.exit(0)
+if os.getcwd() == expected_cwd and sys.argv[1:] == expected_args:
+    entered.write_text("entered")
+    child = subprocess.Popen([sys.executable, __file__, "--hold-integration-git"])
+    child_pid.write_text(str(child.pid))
+    sys.exit(0)
+os.execv(real_git, ["git"] + sys.argv[1:])
+"#,
+        release = serde_json::to_string(&release).unwrap(),
+        entered = serde_json::to_string(&entered).unwrap(),
+        child_pid = serde_json::to_string(&child_pid).unwrap(),
+        project = serde_json::to_string(&project).unwrap(),
+        expected_args = expected_args,
+        real_git = serde_json::to_string(&real_git).unwrap(),
+    );
+    std::fs::write(&wrapper, script).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    HeldGitIntegration {
+        fixture,
+        entered,
+        release,
+        child_pid,
+        commit,
+    }
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "timed out waiting for {}", path.display());
+}
+
+fn parse_public_response(output: std::process::Output) -> (bool, Value) {
+    let success = output.status.success();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let response = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("collab response: "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "collab CLI did not emit JSON; stdout={} stderr={stderr}",
+                    String::from_utf8_lossy(&output.stdout),
+                )
+            });
+        serde_json::from_str(response).unwrap_or_else(|error| {
+            panic!("collab CLI error response is not JSON: {error}; response={response}")
+        })
+    });
+    let value = value
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .cloned()
+        .unwrap_or(value);
+    (success, value)
+}
+
+fn run_held_git_integration(
+    probe: &HeldGitIntegration,
+    during: impl FnOnce(&AppFixture),
+) -> std::process::Output {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let fixture = &probe.fixture;
+        let commit = probe.commit.clone();
+        scope.spawn(move || {
+            let args = vec![
+                "task".to_owned(),
+                "integrated".to_owned(),
+                "integration-liveness".to_owned(),
+                "--commit".to_owned(),
+                commit,
+                "--evidence".to_owned(),
+                "held integration proof".to_owned(),
+            ];
+            let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let output = fixture.command_public(&refs, THREAD_A);
+            tx.send(output).unwrap();
+        });
+        wait_for_path(&probe.entered, Duration::from_secs(5));
+        during(&probe.fixture);
+        probe.release_and_wait();
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("held integration request must complete after release")
+    })
+}
+
+#[test]
+fn task_integration_held_git_cannot_freeze_context() {
+    let probe = prepare_held_git_integration();
+    let other = probe.fixture.run_public(&["context"], THREAD_B);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut results = HashMap::new();
+    std::thread::scope(|scope| {
+        let fixture = &probe.fixture;
+        let commit = probe.commit.clone();
+        let tx_integration = tx.clone();
+        scope.spawn(move || {
+            let args = vec![
+                "task".to_owned(),
+                "integrated".to_owned(),
+                "integration-liveness".to_owned(),
+                "--commit".to_owned(),
+                commit,
+                "--evidence".to_owned(),
+                "held integration proof".to_owned(),
+            ];
+            let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let output = fixture.command_public(&refs, THREAD_A);
+            tx_integration
+                .send(("integration", json_from_output(output)))
+                .unwrap();
+        });
+        wait_for_path(&probe.entered, Duration::from_secs(5));
+        for (name, args) in [
+            ("ping", vec!["status".to_owned()]),
+            ("context", vec!["context".to_owned()]),
+        ] {
+            let fixture = &probe.fixture;
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+                let output = fixture.command_public(&refs, THREAD_B);
+                tx.send((name, json_from_output(output))).unwrap();
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while results.len() < 2 && Instant::now() < deadline {
+            if let Ok((name, output)) = rx.recv_timeout(Duration::from_millis(20)) {
+                results.insert(name, output);
+            }
+        }
+        assert_eq!(results.len(), 2, "{results:?}");
+        assert!(
+            !results.contains_key("integration"),
+            "integration request completed before the held Git proof was released"
+        );
+        let status = fixture.run_public(&["task", "status", "integration-liveness"], THREAD_B);
+        assert_eq!(status["status"], "accepted");
+        probe.release_and_wait();
+        while results.len() < 3 {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok((name, output)) => {
+                    results.insert(name, output);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert_eq!(
+        results["context"]["identity"]["worker_id"],
+        other["identity"]["worker_id"]
+    );
+    assert_eq!(results["integration"]["status"], "merged");
+    assert_eq!(results["integration"]["commit"], probe.commit);
+    let status = probe
+        .fixture
+        .run_public(&["task", "status", "integration-liveness"], THREAD_B);
+    assert_eq!(status["status"], "merged");
+}
+
+#[test]
+fn task_integration_held_git_rechecks_current_master_authority() {
+    let probe = prepare_held_git_integration();
+    let output = run_held_git_integration(&probe, |fixture| {
+        fixture.run_public(
+            &[
+                "master",
+                "clear",
+                "--approval",
+                "old master releases during held integration proof",
+            ],
+            THREAD_A,
+        );
+        fixture.run_public(
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "new master takes over during held integration proof",
+            ],
+            THREAD_B,
+        );
+    });
+    let (success, result) = parse_public_response(output);
+    assert!(!success, "{result}");
+    assert_eq!(
+        result["error"],
+        "task integrated requires task owner or live master authority"
+    );
+    let state = probe.fixture.current_state();
+    assert_eq!(state["tasks"]["integration-liveness"]["status"], "accepted");
+    assert!(
+        state["pending_merges"]["integration-liveness"].is_object(),
+        "the pending merge must survive the stale old-master request"
+    );
+}
+
+#[test]
+fn task_integration_held_git_rejects_changed_review_subject() {
+    let probe = prepare_held_git_integration();
+    let output = run_held_git_integration(&probe, |fixture| {
+        fixture.run_public(
+            &[
+                "task",
+                "update",
+                "integration-liveness",
+                "--status",
+                "rework",
+                "--next",
+                "address review findings",
+            ],
+            THREAD_B,
+        );
+        for status in ["working", "verifying", "reviewed"] {
+            fixture.run_public(
+                &["task", "update", "integration-liveness", "--status", status],
+                THREAD_B,
+            );
+        }
+        let worktree = fixture.project.join("integration-worktree");
+        fixture.run_public(
+            &[
+                "task",
+                "deliver",
+                "integration-liveness",
+                "--worktree",
+                worktree.to_str().unwrap(),
+                "--evidence",
+                "redelivered after held integration proof started",
+            ],
+            THREAD_B,
+        );
+        let reviewed = fixture.run_public(
+            &[
+                "task",
+                "review",
+                "integration-liveness",
+                "--accept",
+                "--evidence",
+                "reaccepted changed review subject",
+            ],
+            THREAD_A,
+        );
+        assert_eq!(reviewed["merge_pending"], json!(true));
+    });
+    let (success, result) = parse_public_response(output);
+    assert!(!success, "{result}");
+    assert_eq!(result["error"], "TASK_INTEGRATION_SUBJECT_CHANGED");
+    let state = probe.fixture.current_state();
+    assert_eq!(state["tasks"]["integration-liveness"]["status"], "accepted");
+    assert_eq!(
+        state["task_lifecycle"]["integration-liveness"]["delivery_evidence"],
+        "redelivered after held integration proof started"
+    );
+    assert_eq!(
+        state["task_lifecycle"]["integration-liveness"]["review_evidence"],
+        "reaccepted changed review subject"
+    );
+    assert!(
+        state["pending_merges"]["integration-liveness"].is_object(),
+        "the new review must leave its pending merge intact"
+    );
+}
+
+#[test]
+fn task_integration_held_git_ignores_unrelated_state_update() {
+    let probe = prepare_held_git_integration();
+    let output = run_held_git_integration(&probe, |fixture| {
+        fixture.run_public(
+            &["task", "register", "unrelated-integration-state"],
+            THREAD_B,
+        );
+    });
+    let (success, result) = parse_public_response(output);
+    assert!(success, "{result}");
+    assert_eq!(result["status"], "merged");
+    let state = probe.fixture.current_state();
+    assert_eq!(state["tasks"]["integration-liveness"]["status"], "merged");
+    assert!(state["tasks"]["unrelated-integration-state"].is_object());
+}
+
+#[test]
+fn task_delivery_candidate_delay_cannot_freeze_context() {
+    delivery_without_candidate_probe("delayed-command");
+}
+
+#[test]
+fn task_delivery_inherited_output_cannot_freeze_context() {
+    delivery_without_candidate_probe("inherited-output");
+}
+
 #[test]
 fn layerfs_task_register_status_and_close_use_the_generic_layerfs_entry_only() {
     use std::os::unix::fs::PermissionsExt;
@@ -253,15 +888,15 @@ printf '{"code":"StoreUnavailable","message":"layerfs store unavailable"}\n'
     }
 
     {
+        // Registration still validates the LayerFS workspace.
         let mut fixture = AppFixture::new();
         fixture.run_public(&["context"], THREAD_B);
         write_layerfs(
             &fixture,
             r#"#!/bin/sh
-printf '%s\n' "layerfs $*" >&2
 case "$*" in
   *"project list_branches"*) printf '{"items":[{"name":"task-1"}]}\n' ;;
-  *"branch list_commits task-1"*) printf '{"code":"StoreUnavailable","message":"layerfs store unavailable"}\n' ;;
+  *"branch list_commits task-1"*) printf '{"items":[{"id":"layerfs-commit-1"}]}\n' ;;
   *) printf '{"code":"UnknownCommand","message":"stub"}\n' ;;
 esac
 "#,
@@ -280,7 +915,19 @@ esac
             ],
             THREAD_B,
         );
-        let output = fixture.command_public(
+        // Ordinary delivery no longer resolves a candidate through LayerFS, so
+        // an unavailable store must not block it.
+        write_layerfs(
+            &fixture,
+            r#"#!/bin/sh
+case "$*" in
+  *"project list_branches"*) printf '{"code":"StoreUnavailable","message":"layerfs store unavailable"}\n' ;;
+  *"branch list_commits task-1"*) printf '{"items":[{"id":"layerfs-commit-1"}]}\n' ;;
+  *) printf '{"code":"UnknownCommand","message":"stub"}\n' ;;
+esac
+"#,
+        );
+        let delivered = fixture.run_public(
             &[
                 "task",
                 "deliver",
@@ -288,15 +935,16 @@ esac
                 "--worktree",
                 "layerfs:demo/task-1",
                 "--evidence",
-                "LayerFS delivery must fail closed",
+                "ordinary code delivery",
             ],
             THREAD_B,
         );
-        assert!(!output.status.success(), "delivery must fail closed");
+        assert_eq!(delivered["status"], "delivered");
+        // Status continues to validate the LayerFS workspace and fails closed.
+        let output = fixture.command_public(&["task", "status", "layerfs-task"], THREAD_B);
+        assert!(!output.status.success(), "status must fail closed");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("StoreUnavailable"), "{stderr}");
-        let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
-        assert_eq!(status["status"], "working");
     }
 
     {
@@ -363,6 +1011,8 @@ esac
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("StoreUnavailable"), "{stderr}");
 
+        // Review no longer rechecks a LayerFS candidate. A missing branch head
+        // must not block an otherwise valid accept.
         write_layerfs(
             &fixture,
             r#"#!/bin/sh
@@ -373,23 +1023,23 @@ case "$*" in
 esac
 "#,
         );
-        let output = fixture.command_public(
+        let reviewed = fixture.run_public(
             &[
                 "task",
                 "review",
                 "layerfs-task",
                 "--accept",
                 "--evidence",
-                "LayerFS review must fail closed",
+                "LayerFS review no longer needs a candidate",
             ],
             THREAD_C,
         );
-        assert!(!output.status.success(), "review must fail closed");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("StoreUnavailable"), "{stderr}");
+        assert_eq!(reviewed["status"], "accepted");
         let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
-        assert_eq!(status["status"], "delivered");
+        assert_eq!(status["status"], "accepted");
 
+        // A changed branch head also no longer blocks, because review does not
+        // bind or re-verify the LayerFS candidate.
         write_layerfs(
             &fixture,
             r#"#!/bin/sh
@@ -400,28 +1050,8 @@ case "$*" in
 esac
 "#,
         );
-        let output = fixture.command_public(
-            &[
-                "task",
-                "review",
-                "layerfs-task",
-                "--accept",
-                "--evidence",
-                "LayerFS candidate must remain current",
-            ],
-            THREAD_C,
-        );
-        assert!(
-            !output.status.success(),
-            "changed candidate must fail review"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("candidate changed or is unavailable"),
-            "{stderr}"
-        );
         let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
-        assert_eq!(status["status"], "delivered");
+        assert_eq!(status["status"], "accepted");
     }
 }
 

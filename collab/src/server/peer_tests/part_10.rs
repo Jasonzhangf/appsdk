@@ -874,7 +874,6 @@ fn squash_merged_holder(
                     delivery_kind: crate::server::state::TaskDeliveryKind::Code,
                     delivery_evidence: Some("candidate delivered".into()),
                     delivered_ms: Some(updated_ms),
-                    delivery_commit: Some(feature_tip.clone()),
                     review_evidence: Some("review pass".into()),
                     reviewer: Some("master".into()),
                     reviewed_ms: Some(updated_ms),

@@ -1,4 +1,3 @@
-
 pub(crate) struct IsolatedTmux {
     socket: PathBuf,
     owner_root: PathBuf,
@@ -69,7 +68,10 @@ impl IsolatedTmux {
             socket,
             owner_root: root.to_path_buf(),
             pane_command: pane_command.into(),
-            sessions: RefCell::new(vec![String::from_utf8(output.stdout).unwrap().trim().to_owned()]),
+            sessions: RefCell::new(vec![String::from_utf8(output.stdout)
+                .unwrap()
+                .trim()
+                .to_owned()]),
         }
     }
 
@@ -243,13 +245,26 @@ pub(super) fn register_tmux(
         kind: TransportKind::Tmux,
         endpoint: Some(endpoint.socket_path.clone()),
         namespace: Some(endpoint.tmux_session_id.clone()),
-        session_id: endpoint.codex_session_id.clone().or_else(|| Some(endpoint.tmux_session_id.clone())),
-        thread_id: endpoint.codex_thread_id.clone().or_else(|| Some(endpoint.pane_id.clone())),
+        session_id: endpoint
+            .codex_session_id
+            .clone()
+            .or_else(|| Some(endpoint.tmux_session_id.clone())),
+        thread_id: endpoint
+            .codex_thread_id
+            .clone()
+            .or_else(|| Some(endpoint.pane_id.clone())),
         tmux_endpoint: Some(endpoint),
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "prior committed peer fixture".into(),
     };
-    let response = seed_committed_owner(server, id, &format!("token-{id}"), &transport, &cwd, Some(app.clone()));
+    let response = seed_committed_owner(
+        server,
+        id,
+        &format!("token-{id}"),
+        &transport,
+        &cwd,
+        Some(app.clone()),
+    );
     if response.ok {
         commit_current_thread_route_for_runtime(server, server, id, &cwd, Some(&app)).unwrap();
         restore_registered_peer_default_leases(server);
@@ -268,34 +283,62 @@ pub(super) fn seed_committed_owner(
     app_scope: Option<AppServerId>,
 ) -> Resp {
     let prepared = prepare_register_typed(
-        server, worker_id, token, transport, cwd,
-        Some(GlobalState::canonical_project_scope(&server.root).unwrap()), app_scope, false,
-    ).unwrap();
+        server,
+        worker_id,
+        token,
+        transport,
+        cwd,
+        Some(GlobalState::canonical_project_scope(&server.root).unwrap()),
+        app_scope,
+        false,
+    )
+    .unwrap();
     let TypedCommand::RegisterWorker { binding, .. } = &prepared.typed.command;
     let project = binding.project_scope.as_str().to_owned();
     let session = binding.session_id.as_ref().unwrap().to_string();
     let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
     let control = store.load().unwrap();
-    let name = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)
-        .unwrap().map(|key| key.name.clone())
-        .unwrap_or_else(|| control.ordinary_name(&binding.project_scope, &binding.app_scope_id, worker_id).unwrap());
-    store.commit(binding_store::ControlChange::Commit {
-        key: binding_slot::IdentityBindingKey::new(binding.project_scope.clone(), binding.app_scope_id.clone(), name.clone()),
-        value: binding_slot::BindingValue::new(binding.clone(), transport.clone()),
-        expected_generation: None,
-    }).unwrap();
+    let name = control
+        .key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)
+        .unwrap()
+        .map(|key| key.name.clone())
+        .unwrap_or_else(|| {
+            control
+                .ordinary_name(&binding.project_scope, &binding.app_scope_id, worker_id)
+                .unwrap()
+        });
+    store
+        .commit(binding_store::ControlChange::Commit {
+            key: binding_slot::IdentityBindingKey::new(
+                binding.project_scope.clone(),
+                binding.app_scope_id.clone(),
+                name.clone(),
+            ),
+            value: binding_slot::BindingValue::new(binding.clone(), transport.clone()),
+            expected_generation: None,
+        })
+        .unwrap();
     let response = consume_register_typed(server, worker_id, transport, prepared, None, None);
     assert!(response.ok, "committed registration fixture: {response:?}");
     let mut state = server.state.lock().unwrap();
     let previous = state.name_occupancy(&project, &name);
-    let occupancy = previous.filter(|old| old.worker_id == worker_id && old.session_id == session)
-        .cloned().unwrap_or_else(|| name_state::NameOccupancy {
-            name, worker_id: worker_id.into(), session_id: session,
+    let occupancy = previous
+        .filter(|old| old.worker_id == worker_id && old.session_id == session)
+        .cloned()
+        .unwrap_or_else(|| name_state::NameOccupancy {
+            name,
+            worker_id: worker_id.into(),
+            session_id: session,
             occupancy_revision: previous.map_or(1, |old| old.occupancy_revision + 1),
-            updated_ms: now_ms(), pane_anchor: None,
+            updated_ms: now_ms(),
+            pane_anchor: None,
         });
     let events = name_resolution::build_name_resolution_events_with_rename_from(
-        &state, &project, &occupancy, &[], previous,
+        &state,
+        &project,
+        &occupancy,
+        &[],
+        previous,
     );
     server.commit_locked_checked(&mut state, &events).unwrap();
     response
@@ -337,8 +380,10 @@ pub(super) fn kill_registered_worker_pane(server: &Server, worker_id: &str) {
             .0
             .kill_pane(&endpoint.pane_id)
     });
-    eprintln!("owned killed pane worker={worker_id} endpoint_probe={:?}",
-        crate::client::adapters::tmux::probe(&endpoint));
+    eprintln!(
+        "owned killed pane worker={worker_id} endpoint_probe={:?}",
+        crate::client::adapters::tmux::probe(&endpoint)
+    );
 }
 
 fn stop_registered_test_tmux_server() {
@@ -736,7 +781,10 @@ fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::Tmux
         let mut fixture = fixture.borrow_mut();
         // A test can create multiple owned roots. The participant script and
         // pane cwd belong to one root and must not outlive its fixture.
-        if fixture.as_ref().is_some_and(|(tmux, _)| tmux.owner_root != server.root) {
+        if fixture
+            .as_ref()
+            .is_some_and(|(tmux, _)| tmux.owner_root != server.root)
+        {
             *fixture = None;
         }
         let (tmux, endpoint_index) =
@@ -782,27 +830,57 @@ pub(crate) fn register_synthetic_peer(server: &Server, id: &str, thread_id: &str
 
 fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
     let app = AppServerId::new("tui-default").unwrap();
-    let prior = server.state.lock().unwrap().global.projects.values()
+    let prior = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .projects
+        .values()
         .flat_map(|project| project.runtime_bindings.values())
-        .find(|binding| binding.agent_id.as_str() == id && binding.app_scope_id == app).cloned();
-    let mut endpoint = prior.as_ref().and_then(|binding| binding.tmux_endpoint.clone())
+        .find(|binding| binding.agent_id.as_str() == id && binding.app_scope_id == app)
+        .cloned();
+    let mut endpoint = prior
+        .as_ref()
+        .and_then(|binding| binding.tmux_endpoint.clone())
         .unwrap_or_else(|| fixture_peer_endpoint(server, thread_id));
     endpoint.codex_session_id = Some(format!("session-{thread_id}"));
     endpoint.codex_thread_id = Some(thread_id.into());
     let context = match prior {
-        Some(binding) => ProjectContext::for_registered_route(&server.root, &crate::identity::RuntimeIdentity {
-            agent_id: binding.agent_id, runtime_id: binding.runtime_id, appserver_id: binding.app_scope_id,
-            binding_id: binding.binding_id,
-            session_id: binding.session_id, native_thread_id: binding.native_thread_id,
-        }).unwrap(),
+        Some(binding) => ProjectContext::for_registered_route(
+            &server.root,
+            &crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id,
+                runtime_id: binding.runtime_id,
+                appserver_id: binding.app_scope_id,
+                binding_id: binding.binding_id,
+                session_id: binding.session_id,
+                native_thread_id: binding.native_thread_id,
+            },
+        )
+        .unwrap(),
         None => ProjectContext::for_registered_root_with_app(&server.root, app).unwrap(),
     };
     let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
-    super::host_route_registry_tests::register_host_fixture(&manager, Some(context),
-        Req::register(id.into(), format!("token-{id}"), server.root.display().to_string(),
-            Some(TransportCandidates { desktop_bridge: None, appserver: None, dsh: None,
-                tmux: Some(crate::proto::TmuxCandidate { endpoint, cwd: server.root.display().to_string() }) })),
-    ).1
+    super::host_route_registry_tests::register_host_fixture(
+        &manager,
+        Some(context),
+        Req::register(
+            id.into(),
+            format!("token-{id}"),
+            server.root.display().to_string(),
+            Some(TransportCandidates {
+                desktop_bridge: None,
+                appserver: None,
+                dsh: None,
+                tmux: Some(crate::proto::TmuxCandidate {
+                    endpoint,
+                    cwd: server.root.display().to_string(),
+                }),
+            }),
+        ),
+    )
+    .1
 }
 
 /// Model the provenance committed by an explicit managed-child Bind after
@@ -819,7 +897,10 @@ pub(crate) fn bind_test_subagent_record(
         .flat_map(|project| project.runtime_bindings.values())
         .find(|binding| {
             binding.agent_id.as_str() == record.peer
-                && binding.native_thread_id.as_ref().map(|thread| thread.as_str())
+                && binding
+                    .native_thread_id
+                    .as_ref()
+                    .map(|thread| thread.as_str())
                     == record.thread_id.as_deref()
         })
         .unwrap_or_else(|| panic!("registered child binding missing for {}", record.peer));
@@ -832,31 +913,59 @@ pub(crate) fn promote_master(server: &Server, worker_id: &str, approval: &str) {
     let binding = registered_binding(server, worker_id);
     let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
     let control = store.load().unwrap();
-    let source = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)
-        .unwrap().expect("registered fixture has a current name");
-    let value = control.slot(source).unwrap().active_binding().unwrap().clone();
-    store.commit(binding_store::ControlChange::MoveName {
-        target: binding_slot::IdentityBindingKey::new(binding.project_scope.clone(), binding.app_scope_id.clone(), "Jenny"),
-        value,
-        source_names: vec![source.name.clone()],
-        expected_generation: None,
-    }).unwrap();
+    let source = control
+        .key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)
+        .unwrap()
+        .expect("registered fixture has a current name");
+    let value = control
+        .slot(source)
+        .unwrap()
+        .active_binding()
+        .unwrap()
+        .clone();
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: binding_slot::IdentityBindingKey::new(
+                binding.project_scope.clone(),
+                binding.app_scope_id.clone(),
+                "Jenny",
+            ),
+            value,
+            source_names: vec![source.name.clone()],
+            expected_generation: None,
+        })
+        .unwrap();
     let grant = global_state::MasterGrant::new(
-        binding.project_scope.clone(), binding.app_scope_id, binding.agent_id,
-        "project", "user", approval, binding.binding_id, now_ms(),
-    ).unwrap();
+        binding.project_scope.clone(),
+        binding.app_scope_id,
+        binding.agent_id,
+        "project",
+        "user",
+        approval,
+        binding.binding_id,
+        now_ms(),
+    )
+    .unwrap();
     let mut state = server.state.lock().unwrap();
     let previous = state.name_occupancy(binding.project_scope.as_str(), "Jenny");
     let occupancy = name_state::NameOccupancy {
-        name: "Jenny".into(), worker_id: worker_id.into(),
+        name: "Jenny".into(),
+        worker_id: worker_id.into(),
         session_id: binding.session_id.as_ref().unwrap().to_string(),
         occupancy_revision: previous.map_or(1, |old| old.occupancy_revision + 1),
-        updated_ms: now_ms(), pane_anchor: None,
+        updated_ms: now_ms(),
+        pane_anchor: None,
     };
     let mut events = vec![Event::GlobalMasterGranted { grant }];
-    events.extend(name_resolution::build_name_resolution_events_with_rename_from(
-        &state, binding.project_scope.as_str(), &occupancy, &[source.name.clone()], previous,
-    ));
+    events.extend(
+        name_resolution::build_name_resolution_events_with_rename_from(
+            &state,
+            binding.project_scope.as_str(),
+            &occupancy,
+            &[source.name.clone()],
+            previous,
+        ),
+    );
     server.commit_locked_checked(&mut state, &events).unwrap();
 }
 
@@ -958,7 +1067,11 @@ fn review_accept_registers_daemon_owned_pending_merge_with_master_notification()
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
-    promote_master(&server, "master", "user approved master merge registration test");
+    promote_master(
+        &server,
+        "master",
+        "user approved master merge registration test",
+    );
     assert!(create_task(&server, "owner", "task", "feature").ok);
 
     accept_task(&server, "owner", "task");
@@ -1003,7 +1116,11 @@ fn review_accept_without_master_direct_message_subscription_surfaces_repair() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
-    promote_master(&server, "master", "user approved master merge registration test");
+    promote_master(
+        &server,
+        "master",
+        "user approved master merge registration test",
+    );
     assert!(create_task(&server, "owner", "task", "feature").ok);
 
     // Simulate the master losing its default direct-message lease: the pending
@@ -1063,24 +1180,31 @@ fn review_accept_without_master_direct_message_subscription_surfaces_repair() {
         serde_json::json!("mailbox-only-no-subscription")
     );
     assert_eq!(response.data["repair_required"], serde_json::json!(true));
+    assert!(response.data["failure"]
+        .as_str()
+        .is_some_and(|f| f == "notification_subscription_missing"));
     assert!(
-        response.data["failure"]
-            .as_str()
-            .is_some_and(|f| f == "notification_subscription_missing")
-    );
-    assert!(
-        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        server
+            .state
+            .lock()
+            .unwrap()
+            .pending_merges
+            .contains_key("task"),
         "the obligation must remain durable even without a wake subscription"
     );
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
+fn pending_merge_without_candidate_integrates_a_main_reachable_commit() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
-    promote_master(&server, "master", "user approved unbound candidate test");
+    promote_master(
+        &server,
+        "master",
+        "user approved candidate-free integration test",
+    );
     initialize_main(&root);
     assert!(create_task(&server, "owner", "task", "feature").ok);
     for status in ["verifying", "reviewed"] {
@@ -1096,8 +1220,9 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
             .ok
         );
     }
-    // Deliver with a worktree that does not resolve to a git commit, so the
-    // accepted candidate is unbound (None) while the pending merge exists.
+    // Delivery no longer binds an automatic candidate. The supplied integration
+    // commit must still be reachable from refs/heads/main, but the absence of a
+    // delivery candidate is not a refusal.
     assert!(
         handle_task_deliver(
             &server,
@@ -1129,51 +1254,35 @@ fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
         assert!(state.pending_merges.contains_key("task"));
         assert!(
             state.pending_merges["task"].candidate_commit.is_none(),
-            "this test deliberately leaves the delivered candidate unbound"
+            "new deliveries do not emit the retired candidate field"
         );
         assert_eq!(state.tasks["task"].status, "accepted");
     }
 
-    // A main-reachable SHA must not satisfy an unbound code delivery; the
-    // unresolved candidate is the stronger typed failure, never read-only.
+    // The current main head is already reachable, so the current master may
+    // record the integration and resolve the durable merge obligation.
     let head = current_head(&root);
     let integrated = handle_task_integrated(
         &server,
         "master".into(),
         "token-master".into(),
         "task".into(),
-        head,
-        "unrelated main sha".into(),
+        head.clone(),
+        "main head integration recorded".into(),
     );
-    assert!(!integrated.ok, "{integrated:?}");
-    assert_eq!(
-        integrated.error.as_deref(),
-        Some("TASK_DELIVERY_CANDIDATE_UNRESOLVED")
-    );
-    assert!(
-        integrated.data["candidate_commit"].is_null(),
-        "the fail-closed response must expose the unbound candidate"
-    );
+    assert!(integrated.ok, "{}", integrated.error.unwrap_or_default());
     {
         let state = server.state.lock().unwrap();
-        assert!(state.pending_merges.contains_key("task"));
-        assert_eq!(state.tasks["task"].status, "accepted");
+        assert!(
+            !state.pending_merges.contains_key("task"),
+            "a valid integration resolves the pending merge"
+        );
+        assert_eq!(state.tasks["task"].status, "merged");
+        assert_eq!(
+            state.task_lifecycle["task"].integration_commit.as_deref(),
+            Some(head.as_str())
+        );
     }
-
-    // Rework is the explicit recovery path: it resolves the unprovable
-    // obligation so the owner can re-deliver with a resolvable candidate.
-    assert!(
-        handle_task_update(
-            &server,
-            "owner".into(),
-            "token-owner".into(),
-            "task".into(),
-            Some("rework".into()),
-            Some("candidate must be bound before re-accept".into()),
-        )
-        .ok
-    );
-    assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1220,7 +1329,12 @@ fn review_accept_merge_pending_field_reflects_registered_obligation() {
     );
     assert!(response.ok, "{}", response.error.unwrap_or_default());
     assert_eq!(response.data["merge_pending"], serde_json::json!(false));
-    assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
+    assert!(!server
+        .state
+        .lock()
+        .unwrap()
+        .pending_merges
+        .contains_key("task"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1254,8 +1368,14 @@ fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
         current_head(&root),
         "owner bypass attempt".into(),
     );
-    assert!(!owner_integrated.ok, "owner could not bypass the master merge obligation");
-    assert_eq!(owner_integrated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+    assert!(
+        !owner_integrated.ok,
+        "owner could not bypass the master merge obligation"
+    );
+    assert_eq!(
+        owner_integrated.error.as_deref(),
+        Some("TASK_MERGE_PENDING")
+    );
 
     let head = current_head(&root);
     assert!(

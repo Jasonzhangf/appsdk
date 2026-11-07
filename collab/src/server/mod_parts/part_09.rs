@@ -27,51 +27,33 @@ fn handle_task_review(
             task_id, task.status
         ));
     }
-    if accept {
-        let lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
-        if lifecycle.delivery_kind == state::TaskDeliveryKind::Code {
-            if let Some(workspace) = task
-                .worktree_path
-                .as_deref()
-                .filter(|value| is_layerfs_workspace(value))
-            {
-                let parsed = match parse_layerfs_workspace(workspace) {
-                    Ok(parsed) => parsed,
-                    Err(error) => return Resp::err(error),
-                };
-                let current_head =
-                    match layerfs_branch_head(&parsed.project, &parsed.branch) {
-                        Ok(head) => head,
-                        Err(error) => return Resp::err(error),
-                    };
-                if lifecycle.delivery_commit.as_deref() != Some(current_head.as_str()) {
-                    return Resp::err(format!(
-                        "task {} LayerFS candidate changed or is unavailable; rework and re-deliver before review",
-                        task_id
-                    ));
-                }
-            }
-        }
-    }
     let required_reviewer = required_work_reviewer(&st, &task_id);
     let route = match server_route_scope(server, &st) {
-        Ok(Some(route)) => route, Ok(None) => return Resp::err("reviewer project route is not ready"),
+        Ok(Some(route)) => route,
+        Ok(None) => return Resp::err("reviewer project route is not ready"),
         Err(error) => return Resp::err(error),
     };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
-    let reviewer_name = if let Some(name) = required_reviewer.as_deref() {
-        let holder = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
-            Ok(holder) => holder, Err(error) => return Resp::err(error),
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
         };
-        if holder.and_then(|slot| slot.active_binding())
+    let reviewer_name = if let Some(name) = required_reviewer.as_deref() {
+        let holder =
+            match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
+                Ok(holder) => holder,
+                Err(error) => return Resp::err(error),
+            };
+        if holder
+            .and_then(|slot| slot.active_binding())
             .is_none_or(|current| current.binding.agent_id.as_str() != worker_id)
-        { return Resp::err("TASK_REQUIRED_REVIEWER: only the named reviewer's current holder may review this task"); }
+        {
+            return Resp::err("TASK_REQUIRED_REVIEWER: only the named reviewer's current holder may review this task");
+        }
         Some(name.to_owned())
     } else {
         if !task_integration_authorized(server, &st, &task, &worker_id) {
-        return Resp::err("task review requires task owner or live master authority");
+            return Resp::err("task review requires task owner or live master authority");
         }
         match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker_id) {
             Ok(slot) => slot.map(|slot| slot.identity_key.name.clone()),
@@ -85,8 +67,7 @@ fn handle_task_review(
     reviewed.status = if accept { "accepted" } else { "rework" }.into();
     reviewed.next_step = Some(if accept {
         if read_only {
-            "reviewed read-only delivery requires no merge; clean owned resources and close"
-                .into()
+            "reviewed read-only delivery requires no merge; clean owned resources and close".into()
         } else {
             "integrate the accepted candidate on refs/heads/main, then record collab task integrated"
                 .into()
@@ -101,7 +82,6 @@ fn handle_task_review(
     lifecycle.required_reviewer_name = required_reviewer;
     lifecycle.reviewer_name = reviewer_name;
     lifecycle.reviewed_subject_revision = accept.then_some(lifecycle.review_subject_revision);
-    let delivery_commit = lifecycle.delivery_commit.clone();
     let mut events = vec![
         Event::TaskUpdated {
             task: reviewed.clone(),
@@ -111,8 +91,12 @@ fn handle_task_review(
             record: lifecycle,
         },
     ];
-    let review_notices=work_review_notice_ids(&st,&task_id);
-    if !review_notices.is_empty() {events.push(Event::Superseded {ids:review_notices});}
+    let review_notices = work_review_notice_ids(&st, &task_id);
+    if !review_notices.is_empty() {
+        events.push(Event::Superseded {
+            ids: review_notices,
+        });
+    }
     let mut pending_notification = None;
     let mut notification_missing = false;
     let mut merge_pending_registered = false;
@@ -127,13 +111,12 @@ fn handle_task_review(
             Err(error) => return Resp::err(error),
         };
         if let Some(master_id) = master_id {
-            let candidate_commit = delivery_commit;
             let request = state::PendingMerge {
                 task_id: task_id.clone(),
                 owner: reviewed.owner.clone(),
                 requested_by: worker_id.clone(),
                 requested_ms: now,
-                candidate_commit,
+                candidate_commit: None,
             };
             events.push(Event::MergeRequested { request });
             merge_pending_registered = true;
@@ -193,7 +176,9 @@ fn handle_task_review(
         // Surface any non-accepted wake attempt as an explicit repair terminal;
         // pending_merges stays durable regardless.
         match attempt_notification_detailed_with_at(server, &message_id, &subscription_id, now) {
-            NotificationAttempt::Accepted | NotificationAttempt::Consumed | NotificationAttempt::Deferred => {}
+            NotificationAttempt::Accepted
+            | NotificationAttempt::Consumed
+            | NotificationAttempt::Deferred => {}
             NotificationAttempt::Rejected(error) => {
                 notification_attempt_failure = Some(error);
             }
@@ -232,6 +217,86 @@ fn handle_task_review(
     Resp::data(review_data)
 }
 
+struct ValidatedTaskIntegration {
+    task: TaskRec,
+    lifecycle: state::TaskLifecycleRecord,
+    review_subject_revision: u64,
+}
+
+fn validate_task_integration(
+    server: &Server,
+    state: &State,
+    worker_id: &str,
+    token: &str,
+    task_id: &str,
+    commit: &str,
+    evidence: &str,
+) -> Result<ValidatedTaskIntegration, Resp> {
+    if let Err(error) = verify(state, worker_id, token) {
+        return Err(error);
+    }
+    if commit.is_empty() || evidence.is_empty() {
+        return Err(Resp::err(
+            "task integrated requires non-empty --commit and --evidence",
+        ));
+    }
+    let Some(task) = state.tasks.get(task_id).cloned() else {
+        return Err(Resp::err(format!("task {} not found", task_id)));
+    };
+    if task.status != "accepted" {
+        return Err(Resp::err(format!(
+            "task {} must be accepted before integration (current: {})",
+            task_id, task.status
+        )));
+    }
+    if !task_integration_authorized(server, state, &task, worker_id) {
+        return Err(Resp::err(
+            "task integrated requires task owner or live master authority",
+        ));
+    }
+    if let Err(error) = work_review_gate(state, task_id) {
+        return Err(error);
+    }
+    let lifecycle = state
+        .task_lifecycle
+        .get(task_id)
+        .cloned()
+        .unwrap_or_default();
+    if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+        return Err(Resp::err_data(
+            "TASK_NO_MERGE_REQUIRED",
+            json!({
+                "task_id": task_id,
+                "status": task.status,
+                "delivery_kind": lifecycle.delivery_kind,
+                "rule": "this accepted delivery is explicitly read-only; clean owned resources and close without recording integration",
+            }),
+        ));
+    }
+    if state.pending_merges.contains_key(task_id) {
+        let is_master_holder = current_master_holder(server, state)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(worker_id);
+        if !is_master_holder {
+            return Err(Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "rule": "an accepted task with a daemon pending merge must be integrated by the current master after the merge lands on refs/heads/main; the owner records evidence after that and closes only after master integrated",
+                }),
+            ));
+        }
+    }
+    Ok(ValidatedTaskIntegration {
+        task,
+        review_subject_revision: lifecycle.review_subject_revision,
+        lifecycle,
+    })
+}
+
 fn handle_task_integrated(
     server: &Server,
     worker_id: String,
@@ -240,80 +305,17 @@ fn handle_task_integrated(
     commit: String,
     evidence: String,
 ) -> Resp {
-    let mut st = server.state.lock().unwrap();
-    if let Err(error) = verify(&st, &worker_id, &token) {
-        return error;
-    }
     let commit = commit.trim();
     let evidence = evidence.trim();
-    if commit.is_empty() || evidence.is_empty() {
-        return Resp::err("task integrated requires non-empty --commit and --evidence");
-    }
-    let Some(task) = st.tasks.get(&task_id).cloned() else {
-        return Resp::err(format!("task {} not found", task_id));
+    let first_review_subject_revision = {
+        let st = server.state.lock().unwrap();
+        match validate_task_integration(server, &st, &worker_id, &token, &task_id, commit, evidence)
+        {
+            Ok(validated) => validated.review_subject_revision,
+            Err(error) => return error,
+        }
     };
-    if task.status != "accepted" {
-        return Resp::err(format!(
-            "task {} must be accepted before integration (current: {})",
-            task_id, task.status
-        ));
-    }
-    if !task_integration_authorized(server, &st, &task, &worker_id) {
-        return Resp::err("task integrated requires task owner or live master authority");
-    }
-    if let Err(error) = work_review_gate(&st,&task_id) { return error; }
-    let lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
-    if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
-        return Resp::err_data(
-            "TASK_NO_MERGE_REQUIRED",
-            json!({
-                "task_id": task_id,
-                "status": task.status,
-                "delivery_kind": lifecycle.delivery_kind,
-                "rule": "this accepted delivery is explicitly read-only; clean owned resources and close without recording integration",
-            }),
-        );
-    }
-    if lifecycle.delivered_ms.is_some() && lifecycle.delivery_commit.is_none() {
-        return Resp::err_data(
-            "TASK_DELIVERY_CANDIDATE_UNRESOLVED",
-            json!({
-                "task_id": task_id,
-                "status": task.status,
-                "delivery_kind": lifecycle.delivery_kind,
-                "rule": "code delivery must resolve the exact delivered candidate before integration; rework and re-deliver rather than treating this as read-only",
-            }),
-        );
-    }
-    if st.pending_merges.contains_key(&task_id) {
-        let request = st.pending_merges.get(&task_id).cloned().unwrap();
-        // A pending merge binds the obligation to the exact delivered commit.
-        // If that candidate was never resolved, the obligation is unprovable
-        // and must fail closed until it is re-bound (rework + re-deliver).
-        if request.candidate_commit.is_none() {
-            return Resp::err_data(
-                "TASK_MERGE_PENDING",
-                json!({
-                    "task_id": task_id,
-                    "status": task.status,
-                    "candidate_commit": None::<String>,
-                    "rule": "this pending merge has no bound candidate commit; rework the task and re-deliver with a resolvable worktree/branch so the accepted candidate can be proven on refs/heads/main before integration",
-                }),
-            );
-        }
-        let is_master_holder = current_master_holder(server, &st).ok().flatten().as_deref()
-            == Some(worker_id.as_str());
-        if !is_master_holder {
-            return Resp::err_data(
-                "TASK_MERGE_PENDING",
-                json!({
-                    "task_id": task_id,
-                    "status": task.status,
-                    "rule": "an accepted task with a daemon pending merge must be integrated by the current master after the merge lands on refs/heads/main; the owner records evidence after that and closes only after master integrated",
-                }),
-            );
-        }
-    }
+
     let head = match resolve_authoritative_main_head(&server.root) {
         Ok(head) => head,
         Err(error) => return error,
@@ -334,80 +336,38 @@ fn handle_task_integrated(
             }),
         );
     }
-    // The delivered lifecycle record owns the exact candidate. A pending merge
-    // can add master ownership, but it cannot weaken this candidate proof.
-    let candidate = lifecycle.delivery_commit.as_deref().or_else(|| {
-        st.pending_merges
-            .get(&task_id)
-            .and_then(|request| request.candidate_commit.as_deref())
-    });
-    if let Some(candidate) = candidate {
-        if task.worktree_path.as_deref().is_some_and(is_layerfs_workspace) {
-            // A LayerFS task candidate is the LayerFS task branch head, not a
-            // Git sha, so Git reachability cannot prove it. Prove the exact
-            // delivered branch head is still current through the LayerFS entry
-            // instead; the Git owner separately records the captured Git
-            // commit, which the checks above already require to be reachable
-            // from refs/heads/main.
-            let current_head = task
-                .worktree_path
-                .as_deref()
-                .and_then(|value| parse_layerfs_workspace(value).ok())
-                .and_then(|workspace| {
-                    layerfs_branch_head(&workspace.project, &workspace.branch).ok()
-                });
-            if current_head.as_deref() != Some(candidate) {
-                let code = if st.pending_merges.contains_key(&task_id) {
-                    "TASK_MERGE_PENDING"
-                } else {
-                    "TASK_INTEGRATION_LAYERFS_CANDIDATE_MISMATCH"
-                };
-                return Resp::err_data(
-                    code,
-                    json!({
-                        "task_id": task_id,
-                        "candidate_commit": candidate,
-                        "current_layerfs_head": current_head,
-                        "provided": commit,
-                        "rule": "the exact delivered LayerFS task branch head must still be current before Git integration can be recorded",
-                    }),
-                );
-            }
-        } else {
-            match commit_is_integrated_in_main(&server.root, candidate) {
-                Ok(true) => {}
-                Ok(false) => {
-                    let code = if st.pending_merges.contains_key(&task_id) {
-                        "TASK_MERGE_PENDING"
-                    } else {
-                        "TASK_INTEGRATION_CANDIDATE_MISMATCH"
-                    };
-                    return Resp::err_data(
-                        code,
-                        json!({
-                            "task_id": task_id,
-                            "candidate_commit": candidate,
-                            "provided": commit,
-                            "rule": "the exact delivered candidate must be reachable from refs/heads/main before integration can be recorded",
-                        }),
-                    );
-                }
-                Err(error) => return error,
-            }
-        }
+
+    let mut st = server.state.lock().unwrap();
+    let current = match validate_task_integration(
+        server, &st, &worker_id, &token, &task_id, commit, evidence,
+    ) {
+        Ok(validated) => validated,
+        Err(error) => return error,
+    };
+    if current.review_subject_revision != first_review_subject_revision {
+        return Resp::err_data(
+            "TASK_INTEGRATION_SUBJECT_CHANGED",
+            json!({
+                "task_id": task_id,
+                "expected_review_subject_revision": first_review_subject_revision,
+                "current_review_subject_revision": current.review_subject_revision,
+                "rule": "the reviewed delivery changed while the supplied commit was being proved; rework and re-deliver before applying this integration request",
+            }),
+        );
     }
+
     let now = now_ms();
-    let mut integrated = task;
-    integrated.status = "merged".into();
-    integrated.next_step = Some("owner cleans the worktree/branch and closes the task".into());
-    integrated.updated_ms = now;
-    let mut lifecycle = lifecycle;
+    let mut integrated_task = current.task;
+    integrated_task.status = "merged".into();
+    integrated_task.next_step = Some("owner cleans the worktree/branch and closes the task".into());
+    integrated_task.updated_ms = now;
+    let mut lifecycle = current.lifecycle;
     lifecycle.integration_commit = Some(commit.to_owned());
     lifecycle.integration_evidence = Some(evidence.to_owned());
     lifecycle.integrated_ms = Some(now);
     let mut events = vec![
         Event::TaskUpdated {
-            task: integrated.clone(),
+            task: integrated_task.clone(),
         },
         Event::TaskLifecycleUpdated {
             task_id: task_id.clone(),
@@ -432,10 +392,10 @@ fn handle_task_integrated(
     }
     Resp::data(json!({
         "task": task_id,
-        "status": integrated.status,
+        "status": integrated_task.status,
         "commit": commit,
         "evidence": evidence,
-        "next_action": integrated.next_step,
+        "next_action": integrated_task.next_step,
     }))
 }
 
@@ -641,15 +601,10 @@ fn handle_task_close(
             .is_some_and(|value| !value.trim().is_empty())
         && lifecycle.reviewer.is_some()
         && lifecycle.reviewed_ms.is_some();
-    if let Err(error) = work_review_gate(&st,&task_id) { return error; }
+    if let Err(error) = work_review_gate(&st, &task_id) {
+        return error;
+    }
     if task.status != "merged" && !read_only_accepted {
-        if task.status == "accepted"
-            && lifecycle.delivery_kind == state::TaskDeliveryKind::Code
-            && lifecycle.delivered_ms.is_some()
-            && lifecycle.delivery_commit.is_none()
-        {
-            return Resp::err("TASK_DELIVERY_CANDIDATE_UNRESOLVED");
-        }
         if let Some(request) = st.pending_merges.get(&task_id) {
             return Resp::err_data(
                 "TASK_MERGE_PENDING",
@@ -724,11 +679,13 @@ fn handle_task_close(
     let mut closed = task;
     closed.status = "closed".to_string();
     closed.wait = None;
-    closed.next_step = Some(if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
-        "closed after reviewed read-only delivery and owner cleanup".to_string()
-    } else {
-        "closed after owner merge and cleanup".to_string()
-    });
+    closed.next_step = Some(
+        if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+            "closed after reviewed read-only delivery and owner cleanup".to_string()
+        } else {
+            "closed after owner merge and cleanup".to_string()
+        },
+    );
     closed.updated_ms = now_ms();
     let receipt = CleanupReceipt {
         id: format!("cleanup-{}-{}", closed.id, closed.updated_ms),
@@ -784,7 +741,7 @@ fn handle_task_close(
     }
 
     let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
-    let (delivery_complete,completion_missing)=st.delivery_completion_projection(&closed.id);
+    let (delivery_complete, completion_missing) = st.delivery_completion_projection(&closed.id);
 
     let stale_workers =
         stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
@@ -976,7 +933,9 @@ fn handle_task_finalize_cleanup(
         || close_endpoint_target(&st, &task.owner) != observed_owner
         || st.tasks.get(&task_id).map(|task| json!(task)) != Some(observed_task)
     {
-        return Resp::err("CLEANUP_FINALIZE_TARGET_CHANGED: observed owner, task or binding changed");
+        return Resp::err(
+            "CLEANUP_FINALIZE_TARGET_CHANGED: observed owner, task or binding changed",
+        );
     }
     let master_holder = match current_master_holder(server, &st) {
         Ok(master) => master,
@@ -1049,7 +1008,7 @@ fn handle_task_finalize_cleanup(
             .map(|waiter| waiter.id)
             .collect::<Vec<_>>();
         let notifications = resume_cleanup_release(server, &mut st, &task.id);
-        let (delivery_complete,completion_missing) = st.delivery_completion_projection(&task.id);
+        let (delivery_complete, completion_missing) = st.delivery_completion_projection(&task.id);
         drop(st);
         for (message_id, subscription_id) in notifications {
             attempt_notification(server, &message_id, &subscription_id);
@@ -1137,7 +1096,7 @@ fn handle_task_finalize_cleanup(
         .map(|waiter| waiter.id)
         .collect::<Vec<_>>();
     let notifications = resume_cleanup_release(server, &mut st, &task.id);
-    let (delivery_complete,completion_missing) = st.delivery_completion_projection(&task.id);
+    let (delivery_complete, completion_missing) = st.delivery_completion_projection(&task.id);
     let stale_workers =
         stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
     drop(st);
@@ -1172,7 +1131,7 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
     // delivered shows no delivery/review/integration block instead of a page of
     // nulls, while every field the next action needs keeps its own key.
     let mut sections = serde_json::Map::new();
-    let (delivery_complete,completion_missing) = state.delivery_completion_projection(&task.id);
+    let (delivery_complete, completion_missing) = state.delivery_completion_projection(&task.id);
     let policy = state.effective_work_policy(&task.id);
     if let Some(record) = lifecycle {
         let disposition = match (task.status.as_str(), record.delivery_kind) {
@@ -1201,18 +1160,27 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         if let Some(reviewed_ms) = record.reviewed_ms {
             review.insert("at".into(), json!(iso(reviewed_ms)));
         }
-        if let Some(required_reviewer_name) = required_work_reviewer(state,&task.id) {
-            review.insert("required_reviewer_name".into(), json!(required_reviewer_name));
+        if let Some(required_reviewer_name) = required_work_reviewer(state, &task.id) {
+            review.insert(
+                "required_reviewer_name".into(),
+                json!(required_reviewer_name),
+            );
         }
         if let Some(reviewer_name) = &record.reviewer_name {
             review.insert("reviewer_name".into(), json!(reviewer_name));
         }
-        review.insert("valid".into(), json!(work_review_valid(state,&task.id)));
+        review.insert("valid".into(), json!(work_review_valid(state, &task.id)));
         if record.review_subject_revision > 0 {
-            review.insert("subject_revision".into(), json!(record.review_subject_revision));
+            review.insert(
+                "subject_revision".into(),
+                json!(record.review_subject_revision),
+            );
         }
         if let Some(reviewed_subject_revision) = record.reviewed_subject_revision {
-            review.insert("reviewed_subject_revision".into(), json!(reviewed_subject_revision));
+            review.insert(
+                "reviewed_subject_revision".into(),
+                json!(reviewed_subject_revision),
+            );
         }
         let mut integration = serde_json::Map::new();
         if let Some(commit) = &record.integration_commit {
@@ -1232,7 +1200,7 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         if !integration.is_empty() {
             sections.insert("integration".into(), json!(integration));
         }
-    } else if let Some(required_reviewer_name) = required_work_reviewer(state,&task.id) {
+    } else if let Some(required_reviewer_name) = required_work_reviewer(state, &task.id) {
         // A pinned reviewer is a next-step fact before any delivery exists.
         sections.insert(
             "review".into(),
@@ -1240,29 +1208,35 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         );
     }
     if let Some(request) = state.pending_merges.get(&task.id) {
-        sections.insert("merge".into(), json!({
-            "pending": true,
-            "requested_by": request.requested_by,
-            "requested_at": iso(request.requested_ms),
-            "owner": request.owner,
-        }));
+        sections.insert(
+            "merge".into(),
+            json!({
+                "pending": true,
+                "requested_by": request.requested_by,
+                "requested_at": iso(request.requested_ms),
+                "owner": request.owner,
+            }),
+        );
     }
     if cleanup_required || cleanup_receipt.is_some() {
-        sections.insert("cleanup".into(), json!({
-            "required": cleanup_required,
-            "status": if !cleanup_required {
-                "not_required"
-            } else if cleanup_receipt.is_some_and(|receipt| {
-                receipt.verification == CleanupVerification::Verified
-            }) {
-                "verified"
-            } else if cleanup_receipt.is_some() {
-                "unverified"
-            } else {
-                "pending"
-            },
-            "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
-        }));
+        sections.insert(
+            "cleanup".into(),
+            json!({
+                "required": cleanup_required,
+                "status": if !cleanup_required {
+                    "not_required"
+                } else if cleanup_receipt.is_some_and(|receipt| {
+                    receipt.verification == CleanupVerification::Verified
+                }) {
+                    "verified"
+                } else if cleanup_receipt.is_some() {
+                    "unverified"
+                } else {
+                    "pending"
+                },
+                "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
+            }),
+        );
     }
     sections.insert("updated_at".into(), json!(iso(task.updated_ms)));
     let mut view = json!({
@@ -1363,7 +1337,9 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     if let Some(transport) = selected_transport_for_worker(&worker) {
         let now = now_ms();
         let mut events = retarget_owned_notification_events(&st, &worker_id, &transport, now);
-        events.extend(default_direct_message_events(&st, &worker_id, &transport, now));
+        events.extend(default_direct_message_events(
+            &st, &worker_id, &transport, now,
+        ));
         if !events.is_empty() {
             if let Err(error) = server.try_commit_locked(&mut st, &events) {
                 return Resp::err(format!("notification rearm failed: {error}"));
@@ -1377,9 +1353,11 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
 
 /// The current Context serializer without lease rearm or presence-edge writes.
 fn context_projection(server: &Server, worker_id: String, token: String) -> Resp {
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     let st = server.state.lock().unwrap();
     if let Err(error) = verify(&st, &worker_id, &token) {
         return error;
@@ -1406,7 +1384,8 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .collect();
     tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     let current_role_brief = match role_brief(server, &st, &control, &worker_id) {
-        Ok(brief) => brief, Err(error) => return Resp::err(error),
+        Ok(brief) => brief,
+        Err(error) => return Resp::err(error),
     };
     let role = current_role_brief
         .get("role")
@@ -1447,8 +1426,13 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         },
     };
     let mapped = match route_scope.as_ref() {
-        Some(route) => match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker_id) {
-            Ok(Some(slot)) => slot, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: worker has no current name"),
+        Some(route) => match control.current_for_worker(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &worker_id,
+        ) {
+            Ok(Some(slot)) => slot,
+            Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: worker has no current name"),
             Err(error) => return Resp::err(error),
         },
         None => return Resp::err("IDENTITY_MAP_SCOPE_MISSING: worker has no project/app route"),
@@ -1512,7 +1496,8 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         })
         .collect::<Result<Vec<_>, String>>();
     let mut peer_snapshots = match peer_snapshots {
-        Ok(peers) => peers, Err(error) => return Resp::err(error),
+        Ok(peers) => peers,
+        Err(error) => return Resp::err(error),
     };
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
     // Manager scope digest. A manager's default context read must answer, in
@@ -1542,8 +1527,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 .tasks
                 .values()
                 .filter(|task| {
-                    task.owner == peer.id
-                        && !matches!(task.status.as_str(), "closed" | "cancelled")
+                    task.owner == peer.id && !matches!(task.status.as_str(), "closed" | "cancelled")
                 })
                 .map(|task| task.id.as_str())
                 .collect();
@@ -1552,8 +1536,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 .tasks
                 .values()
                 .filter(|task| {
-                    task.owner == peer.id
-                        && !matches!(task.status.as_str(), "closed" | "cancelled")
+                    task.owner == peer.id && !matches!(task.status.as_str(), "closed" | "cancelled")
                 })
                 .filter_map(|task| {
                     task.wait.as_ref().map(|wait| {
@@ -1574,9 +1557,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             let patrol = st
                 .notification_subscriptions
                 .values()
-                .find(|subscription| {
-                    armed(subscription) && subscription.event == "board-idle"
-                });
+                .find(|subscription| armed(subscription) && subscription.event == "board-idle");
             let goal = st.notification_subscriptions.values().find(|subscription| {
                 armed(subscription)
                     && subscription.event == "deadline"
@@ -1645,7 +1626,11 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     let management_tasks: Vec<serde_json::Value> = if manages_project {
         let master_id = current_master_worker_id(&st, route_scope.as_ref());
         let mut rows: Vec<serde_json::Value> = Vec::new();
-        for task in st.tasks.values().filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled")) {
+        for task in st
+            .tasks
+            .values()
+            .filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled"))
+        {
             match board_task_view_with_master(
                 &st,
                 &control,
@@ -1655,7 +1640,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 route_scope.as_ref(),
             ) {
                 Ok(Some(view)) => rows.push(json!(view)),
-                Ok(None) => {},
+                Ok(None) => {}
                 Err(error) => return Resp::err(error),
             }
         }
@@ -1713,15 +1698,22 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .collect();
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
     let display_name = match worker_display_name(&control, route_scope.as_ref(), &worker.id) {
-        Ok(name) => name, Err(error) => return Resp::err(error),
+        Ok(name) => name,
+        Err(error) => return Resp::err(error),
     };
-    let work_roles_by_worker = st.workers.keys()
-        .map(|id| worker_work_roles(&st, &control, route_scope.as_ref(), id).map(|roles| (id.clone(), roles)))
+    let work_roles_by_worker = st
+        .workers
+        .keys()
+        .map(|id| {
+            worker_work_roles(&st, &control, route_scope.as_ref(), id)
+                .map(|roles| (id.clone(), roles))
+        })
         .collect::<Result<std::collections::HashMap<_, _>, String>>();
     let work_roles_by_worker = match work_roles_by_worker {
-        Ok(roles) => roles, Err(error) => return Resp::err(error),
+        Ok(roles) => roles,
+        Err(error) => return Resp::err(error),
     };
-    let work_policies=st.project_work_policy.clone();
+    let work_policies = st.project_work_policy.clone();
     let pending_reply_obligations = st.reply_obligation_view(&worker_id);
     drop(st);
 
@@ -1837,8 +1829,14 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 .copied()
                 .flatten()
         });
-        match master_authority_view_with_endpoint(&st, &control, route_scope.as_ref(), endpoint_live) {
-            Ok(master) => master, Err(error) => return Resp::err(error),
+        match master_authority_view_with_endpoint(
+            &st,
+            &control,
+            route_scope.as_ref(),
+            endpoint_live,
+        ) {
+            Ok(master) => master,
+            Err(error) => return Resp::err(error),
         }
     };
     let recorded_unusable = serde_json::Value::Null;

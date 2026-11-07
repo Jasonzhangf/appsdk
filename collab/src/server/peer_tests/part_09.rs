@@ -691,7 +691,6 @@ fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
             lifecycle.delivery_kind,
             crate::server::state::TaskDeliveryKind::ReadOnly
         );
-        assert_eq!(lifecycle.delivery_commit, None);
     }
 
     let reviewed = dispatch(
@@ -742,7 +741,7 @@ fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
 }
 
 #[test]
-fn task_lifecycle_public_masterless_code_integration_requires_exact_candidate() {
+fn task_lifecycle_public_masterless_code_integration_requires_main_reachable_commit() {
     let (server, root) = test_server();
     assert!(register_synthetic_peer(&server, "owner", "thread-code").ok);
     assert!(create_task(&server, "owner", "code-task", "feature").ok);
@@ -782,36 +781,57 @@ fn task_lifecycle_public_masterless_code_integration_requires_exact_candidate() 
     );
     assert!(reviewed.ok, "{reviewed:?}");
     git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
-    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "unrelated main"]);
-    let unrelated_main = current_head(&root);
-    assert_ne!(candidate, unrelated_main);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "later main"]);
+    let main_head = current_head(&root);
+    assert_ne!(candidate, main_head);
     let server = Arc::new(server);
 
+    // A supplied commit that is not reachable from refs/heads/main is refused,
+    // because the record must describe an actual integration.
     let rejected = dispatch(
         &server,
         Req::TaskIntegrated {
             worker_id: "owner".into(),
             token: "token-owner".into(),
             task_id: "code-task".into(),
-            commit: unrelated_main,
-            evidence: "main moved without the delivered candidate".into(),
+            commit: candidate.clone(),
+            evidence: "feature branch sha before it lands on main".into(),
         },
     );
     assert!(!rejected.ok, "{rejected:?}");
     assert_eq!(
         rejected.error.as_deref(),
-        Some("TASK_INTEGRATION_CANDIDATE_MISMATCH")
+        Some("TASK_INTEGRATION_COMMIT_MISMATCH")
     );
-    assert_eq!(rejected.data["candidate_commit"], candidate);
     assert_eq!(
         server.state.lock().unwrap().tasks["code-task"].status,
         "accepted"
+    );
+
+    // A supplied commit already reachable from refs/heads/main is accepted.
+    let integrated = dispatch(
+        &server,
+        Req::TaskIntegrated {
+            worker_id: "owner".into(),
+            token: "token-owner".into(),
+            task_id: "code-task".into(),
+            commit: main_head.clone(),
+            evidence: "main head integration recorded".into(),
+        },
+    );
+    assert!(integrated.ok, "{integrated:?}");
+    assert_eq!(integrated.data["status"], "merged");
+    assert_eq!(
+        server.state.lock().unwrap().task_lifecycle["code-task"]
+            .integration_evidence
+            .as_deref(),
+        Some("main head integration recorded")
     );
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn task_lifecycle_public_unresolved_code_delivery_is_not_read_only() {
+fn task_lifecycle_public_code_delivery_requires_integration_before_close() {
     let (server, root) = test_server();
     assert!(register_synthetic_peer(&server, "owner", "thread-unresolved").ok);
     assert!(create_task(&server, "owner", "unresolved-task", "feature").ok);
@@ -836,7 +856,6 @@ fn task_lifecycle_public_unresolved_code_delivery_is_not_read_only() {
             lifecycle.delivery_kind,
             crate::server::state::TaskDeliveryKind::Code
         );
-        assert_eq!(lifecycle.delivery_commit, None);
     }
 
     let reviewed = dispatch(
@@ -862,13 +881,150 @@ fn task_lifecycle_public_unresolved_code_delivery_is_not_read_only() {
             reason: None,
         },
     );
+    // An accepted code task with no pending merge still cannot close before
+    // integration; it is never treated as read-only.
     assert!(!closed.ok, "{closed:?}");
-    assert_eq!(
-        closed.error.as_deref(),
-        Some("TASK_DELIVERY_CANDIDATE_UNRESOLVED")
+    assert!(
+        closed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("must be merged by its owner before close")),
+        "{closed:?}"
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Old current-state files can still carry the retired `delivery_commit` and
+/// `pending_merges.*.candidate_commit` fields. Loading must ignore the retired
+/// delivery candidate but keep every other task, lifecycle, pending-merge,
+/// resource and message fact intact.
+#[test]
+fn old_format_candidate_fields_load_without_losing_business_state() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved legacy candidate state test");
+    initialize_main(&root);
+    let worktree = root.join("legacy-wt").display().to_string();
+    server.commit(&[Event::TaskCreated {
+        task: TaskRec {
+            id: "legacy-task".into(),
+            owner: "owner".into(),
+            created_by: "owner".into(),
+            feature_id: None,
+            worktree_path: Some(worktree.clone()),
+            branch: Some("feature".into()),
+            base_commit: None,
+            priority: default_priority(),
+            status: "working".into(),
+            next_step: None,
+            wait: None,
+            isolation_mode: None,
+            created_ms: now_ms(),
+            updated_ms: now_ms(),
+        },
+    }]);
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "legacy-task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    let delivered = handle_task_deliver(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "legacy-task".into(),
+        Some("legacy code delivery".into()),
+        Some(worktree.clone()),
+    );
+    assert!(delivered.ok, "{delivered:?}");
+    let reviewed = handle_task_review(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "legacy-task".into(),
+        true,
+        false,
+        "legacy review accepted".into(),
+    );
+    assert!(reviewed.ok, "{reviewed:?}");
+    assert_eq!(reviewed.data["merge_pending"], json!(true));
+    server.commit(&[Event::Sent {
+        msg: Message {
+            id: "legacy-msg".into(),
+            from: "owner".into(),
+            to: "master".into(),
+            mtype: "notify".into(),
+            subject: Some("legacy fact".into()),
+            body: "legacy message body".into(),
+            in_reply_to: None,
+            created_ms: now_ms(),
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        },
+    }]);
+
+    // Inject the retired candidate fields exactly as an old writer emitted
+    // them, then reload the document through the current loader.
+    let path = server.state_path.clone();
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    document["state"]["task_lifecycle"]["legacy-task"]["delivery_commit"] =
+        json!("legacy-candidate");
+    document["state"]["pending_merges"]["legacy-task"]["candidate_commit"] =
+        json!("legacy-candidate");
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    let replayed = current_state::load(&path, false).unwrap();
+
+    // The retired lifecycle candidate field is ignored by the current type.
+    assert_eq!(
+        replayed.pending_merges["legacy-task"].candidate_commit,
+        Some("legacy-candidate".to_string())
+    );
+
+    // Business facts must be preserved.
+    assert_eq!(replayed.tasks["legacy-task"].status, "accepted");
+    assert_eq!(
+        replayed.tasks["legacy-task"].worktree_path.as_deref(),
+        Some(worktree.as_str())
+    );
+    assert_eq!(
+        replayed.tasks["legacy-task"].branch.as_deref(),
+        Some("feature")
+    );
+    let lifecycle = &replayed.task_lifecycle["legacy-task"];
+    assert_eq!(
+        lifecycle.delivery_kind,
+        crate::server::state::TaskDeliveryKind::Code
+    );
+    assert_eq!(
+        lifecycle.delivery_evidence.as_deref(),
+        Some("legacy code delivery")
+    );
+    assert!(lifecycle.delivered_ms.is_some());
+    assert_eq!(lifecycle.reviewer.as_deref(), Some("master"));
+    assert_eq!(
+        lifecycle.review_evidence.as_deref(),
+        Some("legacy review accepted")
+    );
+    let request = &replayed.pending_merges["legacy-task"];
+    assert_eq!(request.owner, "owner");
+    assert_eq!(request.requested_by, "master");
+    assert!(request.requested_ms > 0);
+    assert_eq!(replayed.msgs["legacy-msg"].body, "legacy message body");
+    assert_eq!(replayed.msgs["legacy-msg"].state, "pending");
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// A publisher-owned pending task with no bound worktree can be cancelled
 /// through the owner-local update path. The `pending -> cancelled` edge is the
 /// only legal unaccepted cancellation and must persist in current state.

@@ -90,14 +90,14 @@ fn notification_message_id(native: &Value) -> String {
         assert_eq!(parts.next().unwrap().len(), 16);
         return parts.next().expect("gateway mailbox identity").into();
     }
+    // Batch wake bodies now anchor on `entries=<id>:<title>=<preview>` and no
+    // longer re-list `message_ids=`. The composed notification still carries
+    // the real mailbox id in its head, `COLLAB_NOTIFY <id> [...]`, for both a
+    // single wake and a batch seed, so read the identity from there.
     let text = native["text"].as_str().expect("Desktop native send text");
-    let ids = text
-        .split_once("message_ids=")
-        .expect("native batch identity list")
-        .1;
-    ids.split(|c: char| c.is_whitespace() || c == ',')
-        .next()
-        .unwrap()
+    text.strip_prefix("COLLAB_NOTIFY ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("native notification identity")
         .into()
 }
 

@@ -817,6 +817,12 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
             text.contains("appsdk goal status --json") && text.contains("goal_path"),
             "{role}: role_brief must explain the goal document entry without running it: {text}"
         );
+        assert!(
+            contains_ci(&text, "Markdown log")
+                && contains_ci(&text, "long-horizon task")
+                && contains_ci(&text, "same log"),
+            "{role}: role_brief must require a Markdown log for every patrol and long-horizon task: {text}"
+        );
     }
 
     let last = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_A);
@@ -853,6 +859,11 @@ fn explicit_worker_peer_executes_directly_without_ordinary_peer_orchestration() 
             "split the accepted goal into non-overlapping bounded scopes"
         ),
         "ordinary peer must keep the delegated-goal dispatch duty: {ordinary_text}"
+    );
+    assert!(
+        contains_ci(&ordinary_text, "markdown log")
+            && contains_ci(&ordinary_text, "long-horizon task"),
+        "ordinary peer must carry the long-horizon Markdown log duty: {ordinary_text}"
     );
 
     // The same peer with an explicit worker specialty performs the bounded work

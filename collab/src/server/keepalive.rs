@@ -88,7 +88,13 @@ pub fn tick(server: &Server) {
 /// notification attempt. The keepalive coordinator owns only the durable
 /// worker-idle transition; it does not infer agent state from terminal text.
 pub(crate) fn tick_at(server: &Server, now: i64) {
-    if !server.config.keepalive.enabled || !server.config.timers.enabled {
+    if !server.config.timers.enabled {
+        return;
+    }
+    // The dispatch-gap reminder has its own 600000ms idempotence window and is
+    // independent of the keepalive-idle batch owner.
+    dispatch_gap_check_at(server, now);
+    if !server.config.keepalive.enabled {
         return;
     }
     let workers: Vec<_> = {
@@ -827,6 +833,209 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         accumulator: state.master_wake.clone(),
     });
     server.commit_locked_reporting(&mut state, &events);
+}
+
+/// Dispatch-gap reminder idempotence window, from the accepted design. The
+/// same task+peer condition may produce at most one reminder per window, and
+/// only a durable reminder commit advances it.
+pub(crate) const DISPATCH_GAP_IDEMPOTENCE_MS: i64 = 600_000;
+
+/// One durable reminder to the current project master while its own board
+/// still has a pending, undispatched public task and a direct, typed-idle peer
+/// can take it. Runs on the periodic tick with its own idempotence window; it
+/// never dispatches work, changes task owner/status, or treats
+/// unknown/cold/offline/waiting_user and managed children as idle capacity.
+pub(crate) fn dispatch_gap_check_at(server: &Server, now: i64) {
+    if !server.config.notifications.enabled {
+        return;
+    }
+    // Keep the condition snapshot and durable reminder commit under one state
+    // lock so task, peer, or master changes cannot leave a stale notice.
+    let mut state = server.state.lock().unwrap();
+    if state.admission_frozen() {
+        return;
+    }
+    let Some(master_id) = super::current_master_holder(server, &state).ok().flatten() else {
+        return;
+    };
+    let task_ids = dispatch_gap_pending_task_ids(&state, &master_id);
+    let idle_peer_ids = if task_ids.is_empty() {
+        Vec::new()
+    } else {
+        dispatch_gap_idle_peer_ids(server, &state, &master_id, &task_ids)
+    };
+    if task_ids.is_empty() || idle_peer_ids.is_empty() {
+        if crate::server::notification_state::clear_dispatch_gap_condition(&mut state.master_wake) {
+            let accumulator = state.master_wake.clone();
+            server.commit_locked_reporting(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
+        }
+        return;
+    }
+    let condition_key = dispatch_gap_condition_key(&master_id, &task_ids, &idle_peer_ids);
+    let window_open = state.master_wake.last_dispatch_gap_notice_key.as_deref()
+        == Some(condition_key.as_str())
+        && now.saturating_sub(state.master_wake.last_dispatch_gap_notice_ms)
+            < DISPATCH_GAP_IDEMPOTENCE_MS;
+    if window_open {
+        return;
+    }
+    let Some(subscription) = state
+        .matching_subscription(&master_id, "direct-message", None, now)
+        .cloned()
+    else {
+        return;
+    };
+    let message = Message {
+        id: super::gen_msg_id(),
+        from: "collab-server".into(),
+        to: master_id.clone(),
+        mtype: "notify".into(),
+        subject: Some("master-dispatch-gap".into()),
+        body: dispatch_gap_body(&task_ids, &idle_peer_ids),
+        in_reply_to: None,
+        created_ms: now,
+        state: "pending".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+        retry_attempted: false,
+    };
+    let message_id = message.id.clone();
+    let mut accumulator = state.master_wake.clone();
+    crate::server::notification_state::record_dispatch_gap_condition(
+        &mut accumulator,
+        task_ids.clone(),
+        idle_peer_ids.clone(),
+    );
+    crate::server::notification_state::mark_dispatch_gap_notice_delivered(
+        &mut accumulator,
+        condition_key,
+        now,
+    );
+    let events = vec![
+        Event::Sent { msg: message },
+        Event::WakeBound {
+            message_id: message_id.clone(),
+            subscription_id: subscription.id.clone(),
+        },
+        Event::MasterWakeUpdated {
+            accumulator: accumulator.clone(),
+        },
+    ];
+    if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+        // A reminder that was not durably committed must not open the
+        // idempotence window. Record only the condition and the failure.
+        let mut failed = state.master_wake.clone();
+        crate::server::notification_state::record_dispatch_gap_condition(
+            &mut failed,
+            task_ids,
+            idle_peer_ids,
+        );
+        crate::server::notification_state::mark_dispatch_gap_delivery_failed(&mut failed);
+        let update = Event::MasterWakeUpdated {
+            accumulator: failed,
+        };
+        let _ = server.commit_locked_checked(&mut state, &[update]);
+        super::presence::append_log(
+            &server.log_path(),
+            &format!("DISPATCH_GAP_DELIVERY_FAILED: {error}"),
+        );
+    } else {
+        drop(state);
+        let _ = super::attempt_notification_with_at(server, &message_id, &subscription.id, now);
+    }
+}
+
+/// Pending, undispatched public board tasks still held by the publisher or the
+/// current master and carrying no active invitation.
+fn dispatch_gap_pending_task_ids(state: &State, master_id: &str) -> Vec<String> {
+    let mut task_ids: Vec<String> = state
+        .tasks
+        .values()
+        .filter(|task| task.status == "pending")
+        .filter(|task| task.owner == master_id || task.created_by == master_id)
+        .filter(|task| {
+            state
+                .board_details
+                .get(&task.id)
+                .is_some_and(|details| details.public_visibility && details.invitation.is_none())
+        })
+        .map(|task| task.id.clone())
+        .collect();
+    task_ids.sort();
+    task_ids.dedup();
+    task_ids
+}
+
+/// Direct one-layer peers able to take work, reusing the board dispatch
+/// stable-name/binding/managed-child/transport rules plus positive typed idle
+/// activity. Eligibility is evaluated per pending task so an executor pin
+/// cannot be satisfied by an unrelated idle peer.
+fn dispatch_gap_idle_peer_ids(
+    server: &Server,
+    state: &State,
+    master_id: &str,
+    task_ids: &[String],
+) -> Vec<String> {
+    use super::name_state::{AgentActivity, AgentPresence};
+    let Ok(Some(route)) = super::server_route_scope(server, state) else {
+        return Vec::new();
+    };
+    let Ok(control) =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+    else {
+        return Vec::new();
+    };
+    let mut peers: Vec<String> = state
+        .board_details
+        .iter()
+        .filter(|(task_id, _)| task_ids.contains(task_id))
+        .flat_map(|(_, details)| {
+            super::dispatch_eligible_worker_ids(
+                state,
+                &route,
+                &control,
+                master_id,
+                &details.work_policy,
+            )
+            .unwrap_or_default()
+        })
+        .filter(|worker_id| {
+            state.workers.get(worker_id).is_some_and(|worker| {
+                let (presence, activity) = super::worker_agent_facts(server, state, worker);
+                presence.is_some_and(|fact| fact.presence == AgentPresence::Online)
+                    && activity.is_some_and(|fact| fact.activity == AgentActivity::Idle)
+            })
+        })
+        .collect();
+    peers.sort();
+    peers.dedup();
+    peers
+}
+
+/// Sorted condition key. A change in task set, idle peer set or master
+/// identity opens a new reminder window; gap resolution clears it.
+fn dispatch_gap_condition_key(
+    master_id: &str,
+    task_ids: &[String],
+    idle_peer_ids: &[String],
+) -> String {
+    format!(
+        "master={master_id}|tasks={}|idle_peers={}",
+        task_ids.join(","),
+        idle_peer_ids.join(",")
+    )
+}
+
+fn dispatch_gap_body(task_ids: &[String], idle_peer_ids: &[String]) -> String {
+    format!(
+        "Dispatch gap: {} public board task(s) are pending undispatched while {} direct peer(s) are typed idle. tasks={}; idle_peers={}. Use the existing board dispatch/invite entry to assign suitable work. This reminder does not dispatch, change owners, or change task status, and the same condition stays silent for {}ms.",
+        task_ids.len(),
+        idle_peer_ids.len(),
+        task_ids.join(", "),
+        idle_peer_ids.join(", "),
+        DISPATCH_GAP_IDEMPOTENCE_MS
+    )
 }
 
 /// Read one worker's current activity for board-patrol wake decisions.
@@ -2895,6 +3104,287 @@ mod tests {
         drop(state);
         drop(old);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn seed_pending_public_task(server: &Server, task_id: &str, master_id: &str, public: bool) {
+        let mut state = server.state.lock().unwrap();
+        let now = super::super::state::now_ms();
+        state
+            .tasks
+            .insert(task_id.to_owned(), task(task_id, master_id, "pending", now));
+        state.board_details.insert(
+            task_id.to_owned(),
+            crate::board::BoardTaskDetails::legacy(task_id, public),
+        );
+    }
+
+    fn dispatch_gap_notice_count(server: &Server) -> usize {
+        server
+            .state
+            .lock()
+            .unwrap()
+            .msgs
+            .values()
+            .filter(|message| message.subject.as_deref() == Some("master-dispatch-gap"))
+            .count()
+    }
+
+    fn seed_idle_peer(
+        server: &Server,
+        id: &str,
+        presence: super::super::name_state::AgentPresence,
+        activity: super::super::name_state::AgentActivity,
+    ) {
+        super::super::peer_tests::register_synthetic_peer(server, id, &format!("thread-{id}"));
+        observe_agent(
+            server,
+            id,
+            presence,
+            activity,
+            &format!("session-thread-{id}"),
+        );
+    }
+
+    fn seed_master(server: &Server) {
+        super::super::peer_tests::register_synthetic_peer(server, "master", "thread-master");
+        super::super::peer_tests::promote_master(server, "master", "user approved master");
+    }
+
+    #[test]
+    fn dispatch_gap_pending_task_and_idle_peer_delivers_one_durable_reminder() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        seed_pending_public_task(&server, "T1", "master", true);
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        {
+            let state = server.state.lock().unwrap();
+            let notices: Vec<_> = state
+                .msgs
+                .values()
+                .filter(|message| message.subject.as_deref() == Some("master-dispatch-gap"))
+                .collect();
+            assert_eq!(notices.len(), 1, "exactly one dispatch-gap reminder");
+            assert_eq!(notices[0].from, "collab-server");
+            assert_eq!(notices[0].to, "master");
+            assert_eq!(notices[0].state, "pending");
+            assert_eq!(state.master_wake.dispatch_gap_task_ids, vec!["T1"]);
+            assert_eq!(state.master_wake.dispatch_gap_idle_peer_ids, vec!["peer"]);
+            assert_eq!(state.master_wake.last_dispatch_gap_notice_ms, now);
+            assert!(state.master_wake.last_dispatch_gap_notice_key.is_some());
+            assert_eq!(state.master_wake.dispatch_gap_delivery_state, "delivered");
+            // The reminder must not auto-dispatch or mutate task ownership.
+            assert_eq!(state.tasks["T1"].owner, "master");
+            assert_eq!(state.tasks["T1"].status, "pending");
+        }
+        super::dispatch_gap_check_at(&server, now + 1);
+        super::dispatch_gap_check_at(&server, now + super::DISPATCH_GAP_IDEMPOTENCE_MS - 1);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+
+        super::dispatch_gap_check_at(&server, now + super::DISPATCH_GAP_IDEMPOTENCE_MS);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            2,
+            "exactly 600000ms with the same condition may remind again"
+        );
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.master_wake.last_dispatch_gap_notice_ms,
+            now + super::DISPATCH_GAP_IDEMPOTENCE_MS
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_requires_pending_undispatched_public_task() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(dispatch_gap_notice_count(&server), 0);
+
+        // A non-public task is not dispatchable board work.
+        seed_pending_public_task(&server, "private", "master", false);
+        super::dispatch_gap_check_at(&server, now + 1);
+        assert_eq!(dispatch_gap_notice_count(&server), 0);
+
+        // A task already carrying an active invitation is no longer undispatched.
+        seed_pending_public_task(&server, "invited", "master", true);
+        let mut state = server.state.lock().unwrap();
+        state.board_details.get_mut("invited").unwrap().invitation =
+            Some(crate::board::BoardInvitation {
+                peer_id: "peer".into(),
+                binding_id: "binding-peer".into(),
+                message_id: "invite-message".into(),
+                created_ms: 1,
+                original_status: None,
+                original_owner: None,
+            });
+        drop(state);
+        super::dispatch_gap_check_at(&server, now + 2);
+        assert_eq!(dispatch_gap_notice_count(&server), 0);
+
+        seed_pending_public_task(&server, "T1", "master", true);
+        super::dispatch_gap_check_at(&server, now + 3);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_ignores_busy_waiting_unknown_and_offline_peers() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Busy);
+        seed_pending_public_task(&server, "T1", "master", true);
+        let now = super::super::state::now_ms();
+        for (index, (presence, activity)) in [
+            (AgentPresence::Online, AgentActivity::Busy),
+            (AgentPresence::Online, AgentActivity::WaitingUser),
+            (AgentPresence::Online, AgentActivity::Unknown),
+            (AgentPresence::Offline, AgentActivity::Idle),
+            (AgentPresence::Unknown, AgentActivity::Idle),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            observe_agent(&server, "peer", presence, activity, "session-thread-peer");
+            super::dispatch_gap_check_at(&server, now + index as i64);
+            assert_eq!(
+                dispatch_gap_notice_count(&server),
+                0,
+                "{presence:?}/{activity:?} must not count as idle capacity"
+            );
+        }
+        observe_agent(
+            &server,
+            "peer",
+            AgentPresence::Online,
+            AgentActivity::Idle,
+            "session-thread-peer",
+        );
+        super::dispatch_gap_check_at(&server, now + 10);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_excludes_managed_children() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "child", AgentPresence::Online, AgentActivity::Idle);
+        {
+            let mut state = server.state.lock().unwrap();
+            state.subagents.insert(
+                "child-record".into(),
+                managed("child-record", "master", "child", "status", 1),
+            );
+        }
+        seed_pending_public_task(&server, "T1", "master", true);
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            0,
+            "a managed child is not a one-layer direct peer"
+        );
+
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        super::dispatch_gap_check_at(&server, now + 1);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.master_wake.dispatch_gap_idle_peer_ids, vec!["peer"]);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_condition_change_reopens_before_window_closes() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        seed_pending_public_task(&server, "T1", "master", true);
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+
+        seed_pending_public_task(&server, "T2", "master", true);
+        super::dispatch_gap_check_at(&server, now + 1);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            2,
+            "a new task set is a new condition key"
+        );
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.master_wake.dispatch_gap_task_ids, vec!["T1", "T2"]);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_resolution_clears_key_and_new_gap_notifies() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        seed_pending_public_task(&server, "T1", "master", true);
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+
+        // Closing the task resolves the gap and clears the condition key.
+        {
+            let mut state = server.state.lock().unwrap();
+            state.tasks.get_mut("T1").unwrap().status = "closed".into();
+        }
+        super::dispatch_gap_check_at(&server, now + 1);
+        let state = server.state.lock().unwrap();
+        assert!(state.master_wake.dispatch_gap_task_ids.is_empty());
+        assert!(state.master_wake.dispatch_gap_idle_peer_ids.is_empty());
+        assert!(state.master_wake.last_dispatch_gap_notice_key.is_none());
+        drop(state);
+
+        seed_pending_public_task(&server, "T2", "master", true);
+        super::dispatch_gap_check_at(&server, now + 2);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            2,
+            "a resolved gap does not hold the old window"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_failed_delivery_does_not_advance_window() {
+        use crate::server::notification_state::{
+            mark_dispatch_gap_delivery_failed, mark_dispatch_gap_notice_delivered,
+            MasterWakeAccumulator,
+        };
+        let mut accumulator = MasterWakeAccumulator::default();
+        super::super::notification_state::record_dispatch_gap_condition(
+            &mut accumulator,
+            vec!["T1".into()],
+            vec!["peer".into()],
+        );
+        mark_dispatch_gap_delivery_failed(&mut accumulator);
+        assert_eq!(accumulator.last_dispatch_gap_notice_ms, 0);
+        assert!(accumulator.last_dispatch_gap_notice_key.is_none());
+        assert_eq!(accumulator.dispatch_gap_delivery_state, "delivery_failed");
+
+        mark_dispatch_gap_notice_delivered(&mut accumulator, "key".into(), 42);
+        assert_eq!(accumulator.last_dispatch_gap_notice_ms, 42);
+        assert_eq!(
+            accumulator.last_dispatch_gap_notice_key.as_deref(),
+            Some("key")
+        );
+        assert_eq!(accumulator.dispatch_gap_delivery_state, "delivered");
     }
 }
 

@@ -281,51 +281,60 @@ fn board_dispatch_work(
     let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
         Ok(control) => control, Err(error) => return Resp::err(error),
     };
-    let available = |worker: &WorkerRec| {
-        worker.id != actor
-            && !is_managed_subagent(&state, &worker.id)
-            && authoritative_send_binding(&state, &route, &worker.id).is_ok()
-            && !state
-                .agent_presence(route.project_scope_id.as_str(), &worker.id)
-                .is_some_and(|presence| presence.presence == name_state::AgentPresence::Offline)
+    let eligible_ids = match dispatch_eligible_worker_ids(
+        &state,
+        &route,
+        &control,
+        actor.as_str(),
+        &policy,
+    ) {
+        Ok(ids) => ids,
+        Err(error) => return error,
     };
     let selected = if let Some(name) = policy.executor_name.as_deref() {
-        let current = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
-            Ok(current) => current, Err(error) => return Resp::err(error),
-        };
-        current.and_then(|slot| slot.active_binding())
-            .and_then(|current| state.workers.get(current.binding.agent_id.as_str()))
-            .filter(|worker| available(worker))
-            .map(|worker| {
+        eligible_ids
+            .first()
+            .map(|worker_id| {
                 (
                     name.to_owned(),
-                    worker.id.clone(),
+                    worker_id.clone(),
                     "explicit executor".to_owned(),
                 )
             })
     } else {
         let mut candidates = Vec::new();
-        for worker in state.workers.values().filter(|worker| available(worker)) {
-                let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id) {
-                    Ok(Some(slot)) => slot, Ok(None) => continue, Err(error) => return Resp::err(error),
-                };
-                let name = slot.identity_key.name.clone();
-                let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
-                let matched = policy
-                    .preferred_roles
-                    .as_ref()
-                    .is_some_and(|preferred| preferred.iter().any(|role| roles.contains(role)));
-                let unassigned = !state.tasks.values().any(|task| {
-                    !matches!(task.status.as_str(), "closed" | "cancelled")
-                        && (task.owner == worker.id
-                            || state.board_details.get(&task.id)
-                                .and_then(|details| details.invitation.as_ref())
-                                .is_some_and(|invite| invite.peer_id == worker.id))
-                });
-                candidates.push((matched, unassigned, name, worker.id.clone()));
+        for worker_id in &eligible_ids {
+            let slot = match control.current_for_worker(
+                &route.project_scope_id,
+                &route.app_scope_id,
+                worker_id,
+            ) {
+                Ok(Some(slot)) => slot,
+                Ok(None) => continue,
+                Err(error) => return Resp::err(error),
+            };
+            let name = slot.identity_key.name.clone();
+            let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
+            let matched = policy
+                .preferred_roles
+                .as_ref()
+                .is_some_and(|preferred| preferred.iter().any(|role| roles.contains(role)));
+            let unassigned = !state.tasks.values().any(|task| {
+                !matches!(task.status.as_str(), "closed" | "cancelled")
+                    && (task.owner == *worker_id
+                        || state.board_details.get(&task.id)
+                            .and_then(|details| details.invitation.as_ref())
+                            .is_some_and(|invite| invite.peer_id == *worker_id))
+            });
+            candidates.push((matched, unassigned, name, worker_id.clone()));
         }
-        candidates.sort_by(|left, right| right.0.cmp(&left.0)
-            .then(right.1.cmp(&left.1)).then(left.2.cmp(&right.2)));
+        candidates.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then(right.1.cmp(&left.1))
+                .then(left.2.cmp(&right.2))
+        });
         candidates.first().map(|(matched, unassigned, name, id)| {
             let reason = if *matched {
                 "matched preferred work role"
@@ -375,6 +384,49 @@ fn board_dispatch_work(
         expected_revision,
         Some((name, reason)),
     )
+}
+
+/// The board dispatch/invite eligibility owner. Reminder observers must call
+/// this helper instead of duplicating its stable-name, binding, managed-child
+/// or activity reservation rules.
+pub(super) fn dispatch_eligible_worker_ids(
+    state: &State,
+    route: &RouteScope,
+    control: &binding_slot::BindingControlSet,
+    actor: &str,
+    policy: &crate::board::WorkPolicy,
+) -> Result<Vec<String>, Resp> {
+    let available = |worker: &WorkerRec| {
+        worker.id != actor
+            && !is_managed_subagent(state, &worker.id)
+            && authoritative_send_binding(state, route, &worker.id).is_ok()
+            && !state
+                .agent_presence(route.project_scope_id.as_str(), &worker.id)
+                .is_some_and(|presence| presence.presence == name_state::AgentPresence::Offline)
+    };
+    if let Some(name) = policy.executor_name.as_deref() {
+        let current = control
+            .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
+            .map_err(Resp::err)?;
+        return Ok(current
+            .and_then(|slot| slot.active_binding())
+            .and_then(|current| state.workers.get(current.binding.agent_id.as_str()))
+            .filter(|worker| available(worker))
+            .map(|worker| worker.id.clone())
+            .into_iter()
+            .collect());
+    }
+    let mut eligible = Vec::new();
+    for worker in state.workers.values().filter(|worker| available(worker)) {
+        let current = control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
+            .map_err(Resp::err)?;
+        if current.is_some() {
+            eligible.push(worker.id.clone());
+        }
+    }
+    eligible.sort();
+    Ok(eligible)
 }
 
 #[cfg(test)]

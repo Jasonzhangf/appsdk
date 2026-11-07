@@ -216,11 +216,18 @@ pub fn mark_idle_batch_delivered(accumulator: &mut MasterWakeAccumulator) {
 /// and delivery-failure lifecycle, so unrelated `notify` traffic such as
 /// `reply-pending` stays outside.
 pub fn is_master_wake_notice(mtype: &str, subject: Option<&str>) -> bool {
-    mtype == "notification"
-        || matches!(
-            subject,
-            Some("worker-idle" | "master-wake-batch" | "subagent-status")
-        )
+    mtype == "notification" || is_idle_batch_notice(mtype, subject)
+}
+
+/// Idle batch notices are selected purely by batch subject, regardless of the
+/// carrying mtype. This keeps unrelated typed `notification` traffic such as
+/// `goal:plan.md` out of idle-batch idempotency while preserving typed notice
+/// gating in state_impl.
+pub fn is_idle_batch_notice(_mtype: &str, subject: Option<&str>) -> bool {
+    matches!(
+        subject,
+        Some("worker-idle" | "master-wake-batch" | "subagent-status")
+    )
 }
 
 pub fn retain_live_idle_workers(

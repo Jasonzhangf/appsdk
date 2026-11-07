@@ -1703,7 +1703,7 @@ fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
         ],
         THREAD_B,
     );
-    assert_eq!(promoted["master"], worker_b);
+    assert_eq!(promoted["master"]["worker_id"], worker_b);
     let project = std::fs::canonicalize(&app_fixture.project)
         .unwrap()
         .to_string_lossy()

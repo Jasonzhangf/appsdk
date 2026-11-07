@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::ops::Deref;
@@ -88,10 +89,54 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn assert_sha256_digest(value: &Value) {
+    let digest = value.as_str().unwrap();
+    assert_eq!(digest.len(), 71, "{digest}");
+    assert!(digest.starts_with("sha256:"), "{digest}");
+    assert!(digest[7..].chars().all(|value| value.is_ascii_hexdigit()));
+}
+
+fn assert_schema1_record_matches_files(root: &Path) -> Value {
+    let record = read_json(&root.join(".appsdk/sdk-resources.json"));
+    assert_eq!(record["schema_version"], json!(1));
+    assert_eq!(record["sdk"], json!("appsdk"));
+    assert_eq!(record["version"], json!(env!("APPSDK_VERSION")));
+    assert!(record.get("resource_version").is_none());
+    assert_sha256_digest(&record["bundle_digest"]);
+    assert_sha256_digest(&record["manifest_digest"]);
+    let entries = record["resources"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    for entry in entries {
+        let digest = entry["digest"].as_str().unwrap();
+        let target = root.join(entry["path"].as_str().unwrap());
+        assert_eq!(digest, sha256_bytes(&fs::read(target).unwrap()));
+    }
+    record
+}
+
 fn write_file(root: &Path, relative: &str, content: &str) {
     let path = root.join(relative);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
+}
+
+fn new_project(name: &str) -> TestRoot {
+    let root = temp_root(name);
+    fs::create_dir_all(&root).unwrap();
+    let created = run_for(&root, &["new", root.to_str().unwrap()]);
+    assert!(
+        created.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+    TestRoot { path: root }
 }
 
 fn create_project(name: &str, core_version: &str) -> TestRoot {
@@ -394,8 +439,9 @@ fn assert_preserved_truth(root: &Path, project: &[u8], lock: &[u8], contract: &[
 }
 
 #[test]
-fn resource_refresh_updates_selected_resources_and_schema2_record_is_readable() {
-    let root = create_project("normal", "0.1.7");
+fn resource_refresh_writes_schema1_record_with_content_digests() {
+    // Catches the old writer publishing schema 2 without non-contract digests.
+    let root = create_project("normal", env!("APPSDK_VERSION"));
     let project_before = fs::read(root.join(".appsdk/project.json")).unwrap();
     let lock_before = fs::read(root.join(".appsdk/sdk.lock")).unwrap();
     let contract_before = b"opaque historical contract bytes\n".to_vec();
@@ -415,20 +461,56 @@ fn resource_refresh_updates_selected_resources_and_schema2_record_is_readable() 
     assert_refreshed_resources(&root);
     assert_preserved_truth(&root, &project_before, &lock_before, &contract_before);
     let record = read_json(&root.join(".appsdk/sdk-resources.json"));
-    assert_eq!(record["schema_version"], json!(2));
-    assert_eq!(record["version"], json!("0.1.7"));
-    assert_eq!(record["resource_version"], json!(env!("APPSDK_VERSION")));
+    assert_eq!(record["schema_version"], json!(1));
+    assert_eq!(record["version"], json!(env!("APPSDK_VERSION")));
+    assert!(record.get("resource_version").is_none());
+    assert_sha256_digest(&record["bundle_digest"]);
+    assert_sha256_digest(&record["manifest_digest"]);
     assert_eq!(
         record["resources"][0]["digest"],
         json!("opaque historical contract identity")
     );
-    assert!(record["resources"]
+    for entry in record["resources"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|entry| entry["class"] != "contracts")
-        .all(|entry| entry.get("digest").is_none()));
+    {
+        let digest = entry["digest"].as_str().unwrap();
+        let target = root.join(entry["path"].as_str().unwrap());
+        assert_eq!(digest, sha256_bytes(&fs::read(target).unwrap()));
+    }
+}
 
+#[test]
+fn resource_refresh_then_public_verify_uses_one_schema1_contract() {
+    // Catches the RED path where refresh succeeds with schema 2 and verify rejects it.
+    let root = new_project("refresh-verify");
+    let initial = read_json(&root.join(".appsdk/sdk-resources.json"));
+    let initial_bundle_digest = initial["bundle_digest"].clone();
+    let manifest_digest =
+        sha256_bytes(&fs::read(root.join(".appsdk/contracts/sdk-bundle.manifest.json")).unwrap());
+
+    let refreshed = refresh(&root);
+    assert!(
+        refreshed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&refreshed.stdout),
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    let record = assert_schema1_record_matches_files(&root);
+    assert_eq!(record["bundle_digest"], initial_bundle_digest);
+    assert_eq!(record["manifest_digest"], json!(manifest_digest));
+
+    let verified = run_for(&root, &["verify", root.to_str().unwrap()]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+
+    let record_before = fs::read(root.join(".appsdk/sdk-resources.json")).unwrap();
     let repeated = refresh(&root);
     assert!(
         repeated.status.success(),
@@ -436,14 +518,143 @@ fn resource_refresh_updates_selected_resources_and_schema2_record_is_readable() 
         String::from_utf8_lossy(&repeated.stdout),
         String::from_utf8_lossy(&repeated.stderr)
     );
-    assert_refreshed_resources(&root);
-    assert_preserved_truth(&root, &project_before, &lock_before, &contract_before);
-    assert_eq!(read_json(&root.join(".appsdk/sdk-resources.json")), record);
+    assert_eq!(
+        fs::read(root.join(".appsdk/sdk-resources.json")).unwrap(),
+        record_before
+    );
+    let verified_again = run_for(&root, &["verify", root.to_str().unwrap()]);
+    assert!(
+        verified_again.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified_again.stdout),
+        String::from_utf8_lossy(&verified_again.stderr)
+    );
 }
 
 #[test]
-fn resource_refresh_uses_structure_not_core_version_and_preserves_legacy_contract() {
-    let root = create_project("legacy", "0.1.7");
+fn resource_refresh_rejects_old_core_pin_before_writing() {
+    let root = new_project("old-core-pin");
+    let project_path = root.join(".appsdk/project.json");
+    let manifest_path = root.join(".appsdk/contracts/sdk-bundle.manifest.json");
+    let record_path = root.join(".appsdk/sdk-resources.json");
+
+    let mut project = read_json(&project_path);
+    project["sdk"]["version"] = json!("0.1.0006");
+    write_json(&project_path, &project);
+    let mut manifest = read_json(&manifest_path);
+    manifest["version"] = json!("0.1.0006");
+    write_json(&manifest_path, &manifest);
+    let mut record = read_json(&record_path);
+    record["version"] = json!("0.1.0006");
+    write_json(&record_path, &record);
+
+    let record_before = fs::read(&record_path).unwrap();
+    let mut target_before = Vec::new();
+    for entry in record["resources"].as_array().unwrap() {
+        if entry["class"] != "contracts" {
+            let target = root.join(entry["path"].as_str().unwrap());
+            target_before.push(fs::read(&target).unwrap());
+        }
+    }
+
+    let rejected = refresh(&root);
+    assert!(
+        !rejected.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("PROJECT_SDK_VERSION_PIN_MISMATCH:0.1.0006:required_binary=appsdk-0.1.0006"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(fs::read(&record_path).unwrap(), record_before);
+    let mut target_after = Vec::new();
+    for entry in record["resources"].as_array().unwrap() {
+        if entry["class"] != "contracts" {
+            let target = root.join(entry["path"].as_str().unwrap());
+            target_after.push(fs::read(&target).unwrap());
+        }
+    }
+    assert_eq!(target_after, target_before);
+
+    let verified = run_for(&root, &["verify", root.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&verified.stderr)
+            .contains("PROJECT_SDK_VERSION_PIN_MISMATCH:0.1.0006:required_binary=appsdk-0.1.0006"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+}
+
+#[test]
+fn verify_rejects_tampered_non_contract_resource_after_refresh() {
+    // Catches a schema 1 record that lacks a content digest for refreshed skills/docs.
+    let root = new_project("tampered-refresh");
+    assert!(refresh(&root).status.success());
+    let record = read_json(&root.join(".appsdk/sdk-resources.json"));
+    let entry = record["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["class"] == "docs")
+        .unwrap();
+    let relative = entry["path"].as_str().unwrap();
+    let target = root.join(relative);
+    let mut content = fs::read(&target).unwrap();
+    content.extend_from_slice(b"\ntampered\n");
+    fs::write(&target, content).unwrap();
+
+    let verified = run_for(&root, &["verify", root.to_str().unwrap()]);
+    assert!(!verified.status.success());
+    assert!(
+        String::from_utf8_lossy(&verified.stderr).contains("SDK_RESOURCE_MISMATCH:"),
+        "stderr={}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+}
+
+#[test]
+fn refresh_migrates_legacy_schema2_input_to_schema1_and_verify_accepts_it() {
+    // Catches a migration that only changes schema_version without restoring digest coverage.
+    let root = new_project("schema2-migration");
+    let record_path = root.join(".appsdk/sdk-resources.json");
+    let mut legacy = read_json(&record_path);
+    legacy["schema_version"] = json!(2);
+    legacy["resource_version"] = json!(env!("APPSDK_VERSION"));
+    legacy.as_object_mut().unwrap().remove("bundle_digest");
+    legacy.as_object_mut().unwrap().remove("manifest_digest");
+    for entry in legacy["resources"].as_array_mut().unwrap() {
+        if entry["class"] != "contracts" {
+            entry.as_object_mut().unwrap().remove("digest");
+        }
+    }
+    write_json(&record_path, &legacy);
+
+    let refreshed = refresh(&root);
+    assert!(
+        refreshed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&refreshed.stdout),
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    assert_schema1_record_matches_files(&root);
+    let verified = run_for(&root, &["verify", root.to_str().unwrap()]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+}
+
+#[test]
+fn resource_refresh_preserves_legacy_contract_for_current_core_pin() {
+    let root = create_project("legacy", env!("APPSDK_VERSION"));
     let project_before = fs::read(root.join(".appsdk/project.json")).unwrap();
     let lock_before = fs::read(root.join(".appsdk/sdk.lock")).unwrap();
     let contract_before =
@@ -459,29 +670,16 @@ fn resource_refresh_uses_structure_not_core_version_and_preserves_legacy_contrac
     assert_refreshed_resources(&root);
     assert_preserved_truth(&root, &project_before, &lock_before, &contract_before);
     let record = read_json(&root.join(".appsdk/sdk-resources.json"));
-    assert_eq!(record["version"], json!("0.1.7"));
+    assert_eq!(record["version"], json!(env!("APPSDK_VERSION")));
     assert!(record["resources"].as_array().unwrap().iter().any(|entry| {
         entry["source"] == "contracts/records/evidence-record.schema.json"
             && entry["digest"] == "opaque historical contract identity"
     }));
-
-    let other = create_project("other-version", "0.1.8");
-    let other_refreshed = refresh(&other);
-    assert!(
-        other_refreshed.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&other_refreshed.stdout),
-        String::from_utf8_lossy(&other_refreshed.stderr)
-    );
-    assert_eq!(
-        read_json(&other.join(".appsdk/sdk-resources.json"))["version"],
-        json!("0.1.8")
-    );
 }
 
 #[test]
 fn resource_refresh_preflights_every_target_and_rejects_invalid_baseline() {
-    let root = create_project("preflight", "0.1.7");
+    let root = create_project("preflight", env!("APPSDK_VERSION"));
     let first_target = root.join(".appsdk/docs/design/appsdk-project-integration.md");
     let first_before = fs::read(&first_target).unwrap();
     let record_before = fs::read(root.join(".appsdk/sdk-resources.json")).unwrap();
@@ -523,7 +721,7 @@ fn resource_refresh_preflights_every_target_and_rejects_invalid_baseline() {
 
 #[test]
 fn resource_refresh_preserves_project_guidance_for_existing_consumers() {
-    let root = create_project("guidance", "0.1.7");
+    let root = create_project("guidance", env!("APPSDK_VERSION"));
     let contract_before = fs::read(root.join(".appsdk/guidance/project-guidance.json")).unwrap();
     let refreshed = refresh(&root);
     assert!(
@@ -587,7 +785,7 @@ fn resource_refresh_reports_partial_write_and_does_not_publish_record() {
         return;
     }
 
-    let root = create_project("write-failure", "0.1.7");
+    let root = create_project("write-failure", env!("APPSDK_VERSION"));
     let record_path = root.join(".appsdk/sdk-resources.json");
     let record_before = fs::read(&record_path).unwrap();
     let blocked_directory = root.join(".appsdk/skills/project-memory");
@@ -621,5 +819,5 @@ fn resource_refresh_reports_partial_write_and_does_not_publish_record() {
         String::from_utf8_lossy(&retried.stderr)
     );
     assert_refreshed_resources(&root);
-    assert_eq!(read_json(&record_path)["schema_version"], json!(2));
+    assert_eq!(read_json(&record_path)["schema_version"], json!(1));
 }

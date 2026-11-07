@@ -65,6 +65,7 @@ fn refresh_project_resources(root: &Path) {
     }
     let record_target = preflight_target(root, record_path, "sdk_resource_refresh_record", true);
 
+    let mut refreshed_entries = Vec::with_capacity(refresh_resources.len());
     for resource in &refresh_resources {
         let target = root.join(&resource.path);
         if let Some(parent) = target.parent() {
@@ -80,22 +81,23 @@ fn refresh_project_resources(root: &Path) {
             resource.content.as_bytes(),
             "SDK_RESOURCE_WRITE_FAILED",
         );
+        refreshed_entries.push(serde_json::json!({
+            "source": resource.source,
+            "class": resource.class,
+            "path": resource.path,
+            "digest": file_sha256(&target, "sdk_resource_refresh_target")
+        }));
         println!("refreshed {}", resource.path);
     }
 
     let mut resources = contracts;
-    resources.extend(refresh_resources.iter().map(|resource| {
-        serde_json::json!({
-            "source": resource.source,
-            "class": resource.class,
-            "path": resource.path
-        })
-    }));
+    resources.extend(refreshed_entries);
     let refreshed_record = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "sdk": "appsdk",
         "version": core_version,
-        "resource_version": SDK_VERSION,
+        "bundle_digest": sdk_bundle_digest(),
+        "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
         "resources": resources
     });
     atomic_write_json(
@@ -104,10 +106,9 @@ fn refresh_project_resources(root: &Path) {
         "SDK_RESOURCE_RECORD_WRITE_FAILED",
     );
     println!(
-        "resource refresh complete: {} resources, core {}, resource {}",
+        "resource refresh complete: {} resources, core {}",
         refresh_resources.len(),
-        core_version,
-        SDK_VERSION
+        core_version
     );
 }
 
@@ -136,6 +137,12 @@ fn validate_project_declaration(project: &Value) -> &str {
         != Some(".appsdk/sdk-resources.json")
     {
         fail("INVALID_SDK_CONTRACT:/sdk/resource_record");
+    }
+    if core_version != SDK_VERSION {
+        fail(format!(
+            "PROJECT_SDK_VERSION_PIN_MISMATCH:{}:required_binary=appsdk-{}",
+            core_version, core_version
+        ));
     }
     core_version
 }

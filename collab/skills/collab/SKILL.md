@@ -137,6 +137,12 @@ manager 核实下级对进度、完成、阻塞和验收的声明，检查相关
 [goal 登记与关闭](operations.md#register-the-long-horizon-goal-before-dispatch)。
 master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体缺口，不提升身份
 绕过。
+正式巡检 goal 默认一次登记 100 次，入口保持
+`appsdk goal subscribe --goal <已有文档> --interval <既有周期> --repeat 100`；
+用户明确指定其他次数时，使用指定次数。
+批次仍有效且有剩余次数时复用同一订阅；context、恢复、单次交付或新增轮次都不重复登记、
+不重置计数、不并排新建。批次耗尽后，只有原职责仍有效并获授权继续时，由原 owner 整批
+续订；显式指定其他次数或普通非巡检 one-shot/deadline 保持原语义。
 
 每个角色维护自己的目标文档。文档先写长期目标、范围、硬约束、交付和验收，再写当前
 增量及实现细节。更新细节前回看长期目标；重大细节变化同时修改长期目标。每个巡检任务
@@ -150,7 +156,9 @@ master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体
 项目 Jenny/master 默认承担本项目 worker 巡检。初始化或恢复本人 longhorizon 后，
 须确保本人常驻项目巡检已 armed；它是一条 `master-idle` 订阅，subject
 `project-patrol`、目标 interval `1500000` 毫秒（20-30 分钟窗口，默认 25 分钟），
-ensure/renew 复用同一订阅而不并排新建。`900000` 只兼容已存在的旧订阅；
+ensure/renew 复用同一订阅而不并排新建。该订阅默认登记 100 次；批次有剩余时
+继续复用，不逐轮续订或在 context/恢复后重置计数。批次耗尽后由原 owner 在职责仍有效
+且获授权继续时整批续订。`900000` 只兼容已存在的旧订阅；
 `collab notify status` 的 `project_patrol.cadence_runtime_gap` 返回
 `PATROL_CADENCE_RUNTIME_GAP` 时，必须如实报告运行节奏未达到目标，不能声称已对齐。
 有限 goal/task 定时器按生命周期关闭，但单个 goal 结束不关闭这条常驻巡检义务。

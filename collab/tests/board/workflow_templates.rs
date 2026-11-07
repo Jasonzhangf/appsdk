@@ -823,6 +823,12 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
                 && contains_ci(&text, "same log"),
             "{role}: role_brief must require a Markdown log for every patrol and long-horizon task: {text}"
         );
+        assert!(
+            contains_ci(&text, "default patrol batch is 100 deliveries")
+                && contains_ci(&text, "reuse a valid patrol batch")
+                && contains_ci(&text, "do not re-register"),
+            "{role}: role_brief must carry the default 100-delivery patrol batch without per-round re-registration: {text}"
+        );
     }
 
     let last = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_A);
@@ -836,6 +842,79 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
         vec![("architect".to_owned(), "builtin_default".to_owned())],
         "repeated context must keep the same built-in specialty card: {repeated}"
     );
+}
+
+#[test]
+fn patrol_batch_reuse_replaces_unconditional_one_shot_rearm() {
+    let fixture = master_fixture();
+
+    let master = fixture.run_public(&["context"], THREAD_A);
+    let master_text = role_projection_text(&master);
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let peer_text = role_projection_text(&peer);
+
+    for (label, text) in [("master", &master_text), ("peer", &peer_text)] {
+        // 巡检批次不得再在每轮结束时无条件续 arm 消耗的一射 goal/deadline 唤醒
+        assert!(
+            !contains_ci(text, "before a patrol cycle ends"),
+            "{label}: role_brief must not tie one-shot re-arm to patrol cycle end: {text}"
+        );
+        assert!(
+            !contains_ci(
+                text,
+                "re-arm a consumed one-shot goal or deadline wake when continued scheduling is required"
+            ),
+            "{label}: role_brief must not carry unconditional per-cycle one-shot re-arm: {text}"
+        );
+        // 替换为批次语义：批次有效且有剩余时复用；耗尽且职责授权继续才整批续订
+        assert!(
+            contains_ci(text, "reuse a valid patrol batch")
+                && contains_ci(text, "remaining deliveries")
+                && contains_ci(text, "renew the applicable complete patrol batch"),
+            "{label}: role_brief must carry patrol batch reuse and whole-batch renewal: {text}"
+        );
+        // 非巡检单次 deadline 的合法续订保留：一射 goal 生命周期语句仍在 role_brief 中
+        assert!(
+            contains_ci(text, "rearm and cancel"),
+            "{label}: role_brief must retain ordinary one-shot rearm lifecycle: {text}"
+        );
+    }
+}
+
+#[test]
+fn patrol_default_batch_preserves_explicit_user_count() {
+    let fixture = AppFixture::new();
+
+    let cases = [
+        ("master", fixture.run_public(&["context"], THREAD_A)),
+        ("ordinary peer", fixture.run_public(&["context"], THREAD_B)),
+        (
+            "patrol specialty",
+            fixture.run_public(&["context", "--work-roles", "patrol"], THREAD_B),
+        ),
+    ];
+
+    for (label, snapshot) in cases {
+        let text = role_projection_text(&snapshot);
+        assert!(
+            contains_ci(&text, "default patrol batch is 100 deliveries")
+                && contains_ci(&text, "explicitly specifies a delivery count")
+                && contains_ci(&text, "that count takes priority"),
+            "{label}: role_brief must let an explicit user count override the default 100-delivery patrol batch: {text}"
+        );
+        assert!(
+            contains_ci(&text, "reuse a valid patrol batch")
+                && contains_ci(&text, "existing legal period")
+                && contains_ci(&text, "applicable complete patrol batch")
+                && contains_ci(&text, "standing duty remains authorized"),
+            "{label}: role_brief must preserve batch reuse and authorized whole-batch renewal: {text}"
+        );
+        assert!(
+            contains_ci(&text, "ordinary non-patrol one-shot")
+                && contains_ci(&text, "keeps its own lifecycle"),
+            "{label}: role_brief must not convert non-patrol one-shot schedules to 100 deliveries: {text}"
+        );
+    }
 }
 
 #[test]

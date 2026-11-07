@@ -724,16 +724,28 @@ impl State {
                 retryable,
             } => {
                 let failed_master_wake = self.msgs.get(message_id).is_some_and(|message| {
-                    message.from == "collab-server" && message.mtype == "notification"
-                }) && self
-                    .wake_bindings
-                    .get(message_id)
-                    .and_then(|subscription_id| {
-                        self.notification_subscriptions.get(subscription_id)
-                    })
-                    .is_some_and(|subscription| {
-                        subscription_affects_master_wake(self, subscription)
-                    });
+                    if message.from != "collab-server"
+                        || !crate::server::notification_state::is_master_wake_notice(
+                            &message.mtype,
+                            message.subject.as_deref(),
+                        )
+                    {
+                        return false;
+                    }
+                    // Idle-batch subjects are generated only for the current
+                    // master; they do not need a timer/master-idle binding.
+                    if message.mtype != "notification" {
+                        return true;
+                    }
+                    self.wake_bindings
+                        .get(message_id)
+                        .and_then(|subscription_id| {
+                            self.notification_subscriptions.get(subscription_id)
+                        })
+                        .is_some_and(|subscription| {
+                            subscription_affects_master_wake(self, subscription)
+                        })
+                });
                 if failed_master_wake {
                     crate::server::notification_state::mark_master_wake_delivery_failed(
                         &mut self.master_wake,

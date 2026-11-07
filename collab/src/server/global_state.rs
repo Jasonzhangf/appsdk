@@ -8,7 +8,6 @@ mod global_state_impl_part2;
 mod global_state_models;
 
 pub use global_state_helpers::*;
-pub use global_state_impl::*;
 pub use global_state_models::*;
 
 #[cfg(test)]

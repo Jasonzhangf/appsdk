@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
 
 /// A project scope is the canonical, registered project root.  The alias
 /// keeps the storage key and the route identity visibly distinct from an

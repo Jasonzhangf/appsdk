@@ -24,9 +24,6 @@ impl GlobalState {
             legacy_thread_routes: BTreeMap::new(),
             current_thread_route_tombstones: BTreeMap::new(),
             command_receipts: BTreeMap::new(),
-            migration_commit_evidence: BTreeMap::new(),
-            master_grant_replacement_intents: BTreeMap::new(),
-            master_grant_replacement_receipts: BTreeMap::new(),
         })
     }
 
@@ -34,7 +31,7 @@ impl GlobalState {
         StateVersion::from_state(self)
     }
 
-    /// The daemon journal owns the host version when this projection is
+    /// The current business owner controls the host version when this projection is
     /// nested in `server::state::State`.  Keep these counters synchronized
     /// after the resident reducer commits an event; standalone callers still
     /// advance them through the typed mutation methods below.
@@ -133,278 +130,6 @@ impl GlobalState {
                 return Err(StateError::Invariant(format!(
                     "operation {} is recorded more than once",
                     receipt.operation_id
-                )));
-            }
-        }
-        for (operation_key, evidence) in &self.migration_commit_evidence {
-            evidence.validate()?;
-            if operation_key != evidence.operation_id.as_str() {
-                return Err(StateError::Invariant(format!(
-                    "migration commit evidence key {operation_key} does not match operation {}",
-                    evidence.operation_id
-                )));
-            }
-            if evidence.target_epoch != self.epoch {
-                return Err(StateError::Invariant(format!(
-                    "migration commit evidence {} belongs to target epoch {}, expected {}",
-                    evidence.operation_id, evidence.target_epoch, self.epoch
-                )));
-            }
-            if evidence.committed_revision > self.revision {
-                return Err(StateError::Invariant(format!(
-                    "migration commit evidence {} revision {} exceeds global revision {}",
-                    evidence.operation_id, evidence.committed_revision, self.revision
-                )));
-            }
-            if !operations.insert(evidence.operation_id.as_str().to_owned()) {
-                return Err(StateError::Invariant(format!(
-                    "operation {} is recorded more than once",
-                    evidence.operation_id
-                )));
-            }
-        }
-        for (operation_key, intent) in &self.master_grant_replacement_intents {
-            intent.validate()?;
-            if operation_key != &intent.operation_id {
-                return Err(StateError::Invariant(format!(
-                    "grant replacement intent key {operation_key} does not match operation {}",
-                    intent.operation_id
-                )));
-            }
-        }
-        for (operation_key, receipt) in &self.master_grant_replacement_receipts {
-            receipt.validate()?;
-            if operation_key != &receipt.operation_id {
-                return Err(StateError::Invariant(format!(
-                    "grant replacement receipt key {operation_key} does not match operation {}",
-                    receipt.operation_id
-                )));
-            }
-            match self.master_grant_replacement_intents.get(operation_key) {
-                Some(intent) if intent.intent_id == receipt.intent_id => {}
-                _ => {
-                    return Err(StateError::Invariant(format!(
-                        "grant replacement receipt {operation_key} has no matching intent"
-                    )))
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Validate the target-side receipt graph against this projected global
-    /// state.  This is intentionally read-only: epoch allocation and runtime
-    /// rebind operations remain owned by the resident journal writer.
-    pub fn validate_migration_receipts(
-        &self,
-        receipts: &MigrationReceiptSet,
-    ) -> Result<(), StateError> {
-        self.validate()?;
-        let writer = receipts
-            .writer
-            .as_ref()
-            .ok_or_else(|| StateError::invalid("migration writer receipt", "is required"))?;
-        receipts.validate_for(
-            &writer.migration_id,
-            &writer.source_project_id,
-            &writer.source_snapshot_digest,
-            self.epoch,
-        )?;
-
-        let mut receipt_operation_ids = BTreeSet::new();
-        self.validate_migration_commit_evidence(
-            "writer",
-            &writer.migration_id,
-            &writer.source_project_id,
-            &writer.source_snapshot_digest,
-            &writer.archive_digest,
-            writer.target_epoch,
-            &writer.operation_id,
-            None,
-            writer.fencing_token,
-            writer.committed_revision,
-        )?;
-        receipt_operation_ids.insert(writer.operation_id.as_str().to_owned());
-
-        for receipt in &receipts.identity_rebinds {
-            self.validate_migration_commit_evidence(
-                "identity rebind",
-                &receipt.migration_id,
-                &receipt.source_project_id,
-                &receipt.source_snapshot_digest,
-                &writer.archive_digest,
-                receipt.target_epoch,
-                &receipt.operation_id,
-                Some(&receipt.binding_id),
-                receipt.fencing_token,
-                receipt.committed_revision,
-            )?;
-            receipt_operation_ids.insert(receipt.operation_id.as_str().to_owned());
-        }
-        for receipt in &receipts.runtime_rebinds {
-            self.validate_migration_commit_evidence(
-                "runtime rebind",
-                &receipt.migration_id,
-                &receipt.source_project_id,
-                &receipt.source_snapshot_digest,
-                &writer.archive_digest,
-                receipt.target_epoch,
-                &receipt.operation_id,
-                Some(&receipt.binding_id),
-                receipt.fencing_token,
-                receipt.committed_revision,
-            )?;
-            receipt_operation_ids.insert(receipt.operation_id.as_str().to_owned());
-        }
-
-        for evidence in self.migration_commit_evidence.values() {
-            if evidence.migration_id == writer.migration_id
-                && evidence.source_project_id == writer.source_project_id
-                && evidence.source_snapshot_digest == writer.source_snapshot_digest
-                && evidence.target_epoch == writer.target_epoch
-                && !receipt_operation_ids.contains(evidence.operation_id.as_str())
-            {
-                return Err(StateError::Invariant(format!(
-                    "migration commit evidence {} is not paired with a receipt",
-                    evidence.operation_id
-                )));
-            }
-        }
-        let expected_bindings: Vec<&RuntimeBinding> = self
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-            .collect();
-        if expected_bindings.len() != receipts.runtime_rebinds.len() {
-            return Err(StateError::Invariant(format!(
-                "runtime rebind receipt count {} does not match target binding count {}",
-                receipts.runtime_rebinds.len(),
-                expected_bindings.len()
-            )));
-        }
-
-        for binding in expected_bindings {
-            let Some(receipt) = receipts.runtime_rebinds.iter().find(|receipt| {
-                receipt.project_scope == binding.project_scope
-                    && receipt.app_scope_id == binding.app_scope_id
-                    && receipt.agent_id == binding.agent_id
-                    && receipt.runtime_id == binding.runtime_id
-                    && receipt.binding_id == binding.binding_id
-                    && receipt.endpoint_generation == binding.endpoint_generation
-                    && receipt.native_thread_id == binding.native_thread_id
-            }) else {
-                return Err(StateError::Invariant(format!(
-                    "target runtime binding {} has no matching migration receipt",
-                    binding.binding_id
-                )));
-            };
-
-            let route_scope = binding.route_scope();
-            if self
-                .lookup_binding_for(&route_scope, &receipt.binding_id)
-                .is_none()
-            {
-                return Err(StateError::Invariant(format!(
-                    "migration receipt {} is not bound to a registered route",
-                    receipt.operation_id
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_migration_commit_evidence(
-        &self,
-        kind: &str,
-        migration_id: &str,
-        source_project_id: &str,
-        source_snapshot_digest: &str,
-        receipt_archive_digest: &str,
-        target_epoch: u64,
-        operation_id: &OperationId,
-        binding_id: Option<&BindingId>,
-        fencing_token: u64,
-        committed_revision: u64,
-    ) -> Result<(), StateError> {
-        let Some(evidence) = self.migration_commit_evidence.get(operation_id.as_str()) else {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} has no authoritative migration commit evidence",
-                operation_id
-            )));
-        };
-
-        // The receipt owns the archive truth; evidence only projects it.  A
-        // record-only edit therefore cannot satisfy this binding, and a
-        // pre-fence receipt (empty digest, deserialized via `default`) is
-        // refused explicitly instead of silently accepted.
-        if receipt_archive_digest.trim().is_empty() {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} carries no authoritative archive digest",
-                operation_id
-            )));
-        }
-        if evidence.archive_digest != receipt_archive_digest {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} evidence archive digest {} does not match the receipt archive digest {}",
-                operation_id, evidence.archive_digest, receipt_archive_digest
-            )));
-        }
-
-        if evidence.migration_id != migration_id {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} evidence belongs to migration {}, expected {}",
-                operation_id, evidence.migration_id, migration_id
-            )));
-        }
-        if evidence.source_project_id != source_project_id {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} evidence belongs to source project {}, expected {}",
-                operation_id, evidence.source_project_id, source_project_id
-            )));
-        }
-        if evidence.source_snapshot_digest != source_snapshot_digest {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} evidence belongs to source digest {}, expected {}",
-                operation_id, evidence.source_snapshot_digest, source_snapshot_digest
-            )));
-        }
-        if evidence.target_epoch != target_epoch {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} evidence belongs to target epoch {}, expected {}",
-                operation_id, evidence.target_epoch, target_epoch
-            )));
-        }
-        if evidence.fencing_token != fencing_token {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} evidence uses fencing token {}, expected {}",
-                operation_id, evidence.fencing_token, fencing_token
-            )));
-        }
-        if evidence.committed_revision != committed_revision {
-            return Err(StateError::Invariant(format!(
-                "{kind} receipt {} evidence uses committed revision {}, expected {}",
-                operation_id, evidence.committed_revision, committed_revision
-            )));
-        }
-        match (evidence.binding_id.as_ref(), binding_id) {
-            (None, None) => {}
-            (Some(observed), Some(expected)) if observed == expected => {}
-            (None, Some(expected)) => {
-                return Err(StateError::Invariant(format!(
-                    "{kind} receipt {} evidence has no binding, expected {}",
-                    operation_id, expected
-                )));
-            }
-            (Some(observed), None) => {
-                return Err(StateError::Invariant(format!(
-                    "{kind} receipt {} evidence is bound to {}, writer evidence must be unbound",
-                    operation_id, observed
-                )));
-            }
-            (Some(observed), Some(expected)) => {
-                return Err(StateError::Invariant(format!(
-                    "{kind} receipt {} evidence is bound to {}, expected {}",
-                    operation_id, observed, expected
                 )));
             }
         }
@@ -553,54 +278,6 @@ impl GlobalState {
             .collect()
     }
 
-    pub(crate) fn current_thread_route_replay_status(
-        &self,
-        binding: &RuntimeBinding,
-    ) -> CurrentThreadRouteReplayStatus {
-        let Some(address) = installed_route_address_key(binding) else {
-            return CurrentThreadRouteReplayStatus::Missing;
-        };
-        if self.current_thread_route_tombstones.contains_key(&address) {
-            return CurrentThreadRouteReplayStatus::Tombstoned;
-        }
-        let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
-            let Some((session, thread)) = binding
-                .session_id
-                .as_ref()
-                .zip(binding.native_thread_id.as_ref())
-            else {
-                return CurrentThreadRouteReplayStatus::Missing;
-            };
-            return match self.lookup_current_thread_route(session, thread) {
-                None => CurrentThreadRouteReplayStatus::Missing,
-                Some(existing) if existing == binding => CurrentThreadRouteReplayStatus::Installed,
-                Some(existing)
-                    if existing.binding_id == binding.binding_id
-                        && existing.same_principal(binding)
-                        && existing.endpoint_generation <= binding.endpoint_generation =>
-                {
-                    CurrentThreadRouteReplayStatus::Installed
-                }
-                Some(existing) => CurrentThreadRouteReplayStatus::Ambiguous(existing.clone()),
-            };
-        };
-
-        let mut claimants = self.tmux_pane_route_claimants(endpoint);
-        claimants.retain(|existing| *existing != binding);
-        match claimants.as_slice() {
-            [] => CurrentThreadRouteReplayStatus::Missing,
-            [existing]
-                if existing.binding_id == binding.binding_id
-                    && existing.same_principal(binding)
-                    && existing.endpoint_generation <= binding.endpoint_generation =>
-            {
-                CurrentThreadRouteReplayStatus::Installed
-            }
-            [existing] => CurrentThreadRouteReplayStatus::Ambiguous((*existing).clone()),
-            _ => CurrentThreadRouteReplayStatus::Contested,
-        }
-    }
-
     /// The live route that claims this binding's pane as a *different* claim.
     ///
     /// One pane owns exactly one binding host-wide. Two claimants on the same
@@ -618,9 +295,8 @@ impl GlobalState {
         self.tmux_pane_route_claimants(endpoint)
             .into_iter()
             .find(|other| {
-                let same_claim = other.binding_id == binding.binding_id
-                    && other.same_principal(binding)
-                    && other.endpoint_generation <= binding.endpoint_generation;
+                let same_claim =
+                    other.binding_id == binding.binding_id && other.same_principal(binding);
                 !same_claim
             })
     }

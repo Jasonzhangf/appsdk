@@ -25,21 +25,16 @@ fn native_deadline(
 ) -> Result<String, String> {
     let until = Instant::now() + timeout;
     while Instant::now() < until {
-        let events: Vec<Value> = std::fs::read_to_string(f.name_journal())
+        let current = f.current_state();
+        if let Some(id) = current["wake_bindings"]
+            .as_object()
             .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        if let Some(id) = events
             .iter()
-            .find(|e| e["ev"] == "WakeBound" && e["subscription_id"] == subscription)
-            .and_then(|e| e["message_id"].as_str())
+            .find(|(_, bound)| *bound == subscription)
+            .map(|(id, _)| id.as_str())
         {
-            let accepted = events.iter().any(|e| {
-                e["ev"] == "NotificationDeliveryAccepted"
-                    && e["message_id"] == id
-                    && e["evidence"].is_object()
-            });
+            let accepted = !current["notification_delivery_accepted"][id].is_null()
+                && current["notification_delivery_evidence"][id].is_object();
             let inputs = f.state.lock().unwrap();
             if accepted
                 && inputs.get(thread).is_some_and(|s| {
@@ -253,8 +248,9 @@ fn appsdk_retained_historical_basename_subject_cancels_and_rearms_without_duplic
     historical["expires_ms"] = json!(now + 86_400_000);
     historical["status"] = json!("armed");
     historical["status_reason"] = Value::Null;
-    fixture
-        .append_name_events(&[json!({"ev": "NotificationSubscribed", "subscription": historical})]);
+    fixture.update_current_state(|state| {
+        state["notification_subscriptions"][historical_id] = historical.clone()
+    });
 
     record["subject"] = json!(historical_subject);
     record["subscription_id"] = json!(historical_id);
@@ -315,7 +311,7 @@ fn appsdk_retained_historical_basename_subject_cancels_and_rearms_without_duplic
     due["trigger_ms"] = json!(now - 1);
     due["status"] = json!("armed");
     due["status_reason"] = json!("deadline-master-busy-skipped");
-    fixture.append_name_events(&[json!({"ev": "NotificationSubscribed", "subscription": due})]);
+    fixture.update_current_state(|state| state["notification_subscriptions"][due_id] = due);
 
     record["subject"] = json!(historical_subject);
     record["subscription_id"] = json!(due_id);
@@ -474,11 +470,20 @@ fn appsdk_master_and_peer_goals_use_real_daemon_and_native_delivery() {
     assert_ne!(master["subscription_id"], owned["subscription_id"]);
     let peer_view = goal(THREAD_B, &["longhorizon", "show", "--json"]);
     assert_eq!(peer_view["goal"]["owner"], owned["owner"], "{peer_view}");
-    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
-        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
-        "worker_id":peer["identity"]["worker_id"], "session_id":THREAD_B,
-        "presence":"online", "reason":"fixture current carrier", "observed_ms":1
-    }})]);
+    let project = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let peer_id = peer["identity"]["worker_id"].as_str().unwrap();
+    fixture.update_current_state(|state| {
+        state["agent_presence"][&project][peer_id] = json!({
+            "project_scope":project,
+            "worker_id":peer["identity"]["worker_id"], "session_id":THREAD_B,
+            "presence":"online", "reason":"fixture current carrier", "observed_ms":1
+        })
+    });
     let goal = |thread: &str, args: &[&str]| appsdk_goal(&fixture, &fixture.project, thread, args);
     let intent = json!({"action":"restore_name", "requested_name":owned["owner"], "authorization":"fixture same-name continuation", "replace_confirmed":true}).to_string();
     let next_peer = fixture.run_public(&["context", "--approve-grant", &intent], NEXT_CARRIER);
@@ -621,7 +626,7 @@ fn appsdk_goals_arm_only_master_project_patrol() {
     )
     .unwrap();
     let goal = |thread: &str, args: &[&str]| appsdk_goal(&fixture, &fixture.project, thread, args);
-    // Only the standing master-idle/project-patrol/-900000 record counts; the
+    // Only the standing master-idle/project-patrol/1500000 record counts; the
     // caller's own goal deadline and the daemon direct-message lease do not.
     let project_patrols = |status: &Value| -> Vec<Value> {
         status["subscriptions"]
@@ -631,7 +636,7 @@ fn appsdk_goals_arm_only_master_project_patrol() {
             .filter(|subscription| {
                 subscription["event"] == "master-idle"
                     && subscription["subject"] == "project-patrol"
-                    && subscription["interval_ms"] == 900_000
+                    && subscription["interval_ms"] == 1_500_000
             })
             .cloned()
             .collect()
@@ -1190,20 +1195,15 @@ fn accepted_master_goal_deadline_clears_goal_due_before_recv() {
     let later_sub = later["subscription"]["id"].as_str().unwrap();
     let until = Instant::now() + Duration::from_secs(10);
     let later_message = loop {
-        let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
+        let current = fixture.current_state();
+        let bound = current["wake_bindings"]
+            .as_object()
             .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        let bound = events
             .iter()
-            .find(|e| e["ev"] == "WakeBound" && e["subscription_id"] == later_sub)
-            .and_then(|e| e["message_id"].as_str());
+            .find(|(_, subscription)| *subscription == later_sub)
+            .map(|(id, _)| id.as_str());
         if let Some(message_id) = bound {
-            if events
-                .iter()
-                .any(|e| e["ev"] == "NotificationDeliveryFailed" && e["message_id"] == message_id)
-            {
+            if !current["notification_delivery_failures"][message_id].is_null() {
                 break message_id.to_owned();
             }
         }
@@ -1213,15 +1213,8 @@ fn accepted_master_goal_deadline_clears_goal_due_before_recv() {
         );
         thread::sleep(Duration::from_millis(50));
     };
-    let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
     assert!(
-        !events.iter().any(|e| {
-            e["ev"] == "NotificationDeliveryAccepted" && e["message_id"] == later_message
-        }),
+        fixture.current_state()["notification_delivery_accepted"][&later_message].is_null(),
         "a rejected delivery must not record adaptor acceptance"
     );
     let context = fixture.run_public(&["context"], THREAD_A);
@@ -1411,19 +1404,17 @@ fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
     let bob = fixture.run_public(&["context"], THREAD_B);
     let alice_name = alice["name"].as_str().unwrap().to_owned();
     let bob_name = bob["name"].as_str().unwrap().to_owned();
+    fixture.run_public(&["context", "--approve-grant",
+        r#"{"action":"restore_master","authorization":"fixture independent master routes real task transfer"}"#], NEXT_CARRIER);
     fixture.run_public(&["task", "register", "T1"], THREAD_A);
     fixture.run_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
 
-    fixture.append_name_events(&[json!({
-        "ev": "TaskAssignmentUpdated",
-        "assignment": {
-            "task_id": "T1",
-            "name": alice_name,
-            "session_id": THREAD_B,
-            "assignment_revision": 1,
-            "updated_ms": 1
-        }
-    })]);
+    fixture.update_current_state(|state| {
+        state["task_assignments"]["T1"] = json!({
+            "task_id":"T1","name":alice_name,"session_id":THREAD_B,
+            "assignment_revision":1,"updated_ms":1
+        });
+    });
     let same_name = fixture.run_public(&["notify", "status"], THREAD_A);
     assert_eq!(
         same_name["board_patrol"]["cancelled_tasks"],
@@ -1431,28 +1422,55 @@ fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
         "same stable name with a new session carrier must retain cancellation: {same_name}"
     );
 
-    fixture.append_name_events(&[
-        json!({
-            "ev": "TaskAssignmentUpdated",
-            "assignment": {
-                "task_id": "T1",
-                "name": bob_name,
-                "session_id": THREAD_B,
-                "assignment_revision": 2,
-                "updated_ms": 2
-            }
-        }),
-        json!({
-            "ev": "TaskAssignmentUpdated",
-            "assignment": {
-                "task_id": "T1",
-                "name": alice_name,
-                "session_id": THREAD_B,
-                "assignment_revision": 3,
-                "updated_ms": 3
-            }
-        }),
-    ]);
+    for (name, thread) in [
+        (bob_name.as_str(), THREAD_B),
+        (alice_name.as_str(), THREAD_A),
+    ] {
+        let board = fixture.run_public(&["board", "show"], NEXT_CARRIER);
+        let revision = board["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == "T1")
+            .unwrap()["revision"]
+            .as_u64()
+            .unwrap()
+            .to_string();
+        let invited = fixture.run_public(
+            &[
+                "board",
+                "invite",
+                "T1",
+                "--to",
+                name,
+                "--expected-revision",
+                &revision,
+            ],
+            NEXT_CARRIER,
+        );
+        let revision = invited["task"]["revision"].as_u64().unwrap().to_string();
+        let accepted = fixture.run_public(
+            &[
+                "board",
+                "respond",
+                "T1",
+                "--accept",
+                "--expected-revision",
+                &revision,
+            ],
+            thread,
+        );
+        let expected_worker = if thread == THREAD_B {
+            &bob["identity"]["worker_id"]
+        } else {
+            &alice["identity"]["worker_id"]
+        };
+        assert_eq!(&accepted["task"]["owner"], expected_worker);
+        assert_eq!(
+            fixture.current_state()["task_assignments"]["T1"]["name"],
+            name
+        );
+    }
     let transferred_back = fixture.run_public(&["notify", "status"], THREAD_A);
     assert!(
         board_patrol_ids(&transferred_back, "cancelled_tasks").is_empty(),

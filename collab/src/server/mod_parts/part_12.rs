@@ -61,7 +61,7 @@ async fn dispatch_wire(
                 if let Err(error) = verify(&check, &worker_id, &token) {
                     Some(error)
                 } else if check.admission_frozen() {
-                    Some(Resp::err("MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed"))
+                    Some(Resp::err("PROJECT_RESET_PENDING: this scope is completing an already committed project reset"))
                 } else {
                     None
                 }
@@ -82,7 +82,7 @@ async fn dispatch_wire(
             }
         }
         req => tokio::task::spawn_blocking(move || {
-            let route_gate = if mutation_blocked_during_migration(&req)
+            let route_gate = if mutation_blocked_during_project_reset(&req)
                 || wire_mutation_principal(&req).is_some()
             {
                 Some(wire_route_mutation_gate(&server))
@@ -103,7 +103,7 @@ async fn dispatch_wire(
 /// Route a host-daemon connection to the reducer that owns its exact
 /// `(app_scope_id, project_scope_id)` pair.  Registration is handled inside a
 /// blocking transaction so the route table is published only after the target
-/// journal has committed the identity binding.
+/// owner has committed the current identity binding.
 async fn dispatch_wire_routed(
     manager: Arc<ProjectRuntimeManager>,
     project_context: Option<ProjectContext>,
@@ -138,23 +138,6 @@ async fn dispatch_wire_routed(
                 },
                 Err(error) => Resp::err(error),
             };
-            (manager.host.clone(), response)
-        }
-        Req::RouteResolvePaneRecovery {
-            tmux_endpoint,
-            worker_id,
-            token,
-        } => {
-            let response =
-                match manager.resolve_staged_pane_recovery(&tmux_endpoint, &worker_id, &token) {
-                    Ok(route) => match serde_json::to_value(route) {
-                        Ok(value) => Resp::data(value),
-                        Err(error) => {
-                            Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
-                        }
-                    },
-                    Err(error) => Resp::err(error),
-                };
             (manager.host.clone(), response)
         }
         Req::RouteResolveNative {
@@ -220,7 +203,7 @@ async fn dispatch_wire_routed(
                 if let Err(error) = verify(&check, &worker_id, &token) {
                     Some(error)
                 } else if check.admission_frozen() {
-                    Some(Resp::err("MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed"))
+                    Some(Resp::err("PROJECT_RESET_PENDING: this scope is completing an already committed project reset"))
                 } else {
                     None
                 }
@@ -246,7 +229,7 @@ async fn dispatch_wire_routed(
             (server, response)
         }
         req => {
-            let gate_effects = mutation_blocked_during_migration(&req)
+            let gate_effects = mutation_blocked_during_project_reset(&req)
                 && !matches!(&req, Req::Register { .. } | Req::IdentityContext { .. });
             let result = tokio::task::spawn_blocking({
                 let manager = manager.clone();
@@ -283,22 +266,11 @@ async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {
         }
         let resp = match parse_wire_request(&line) {
             Ok((project_context, req)) => {
-                let activity_req = req.clone();
                 let resp = dispatch_wire(server.clone(), project_context, req).await;
-                let _ = record_activity(
-                    &server.storage_root,
-                    "request",
-                    request_activity(&activity_req, &resp),
-                );
                 resp
             }
             Err(error) => {
                 let resp = Resp::err(error);
-                let _ = record_activity(
-                    &server.storage_root,
-                    "protocol_error",
-                    json!({"error": resp.error}),
-                );
                 resp
             }
         };
@@ -333,35 +305,29 @@ async fn conn_task_routed(
         let mut close_daemon = false;
         let resp = match parse_wire_request(&line) {
             Ok((project_context, req)) => {
-                let query_activity = is_identity_query_intent(&req);
                 let maintenance = matches!(&req, Req::Shutdown { .. });
-                let activity_req = req.clone();
-                let (runtime, resp) =
+                let (_, resp) =
                     dispatch_wire_routed(manager.clone(), project_context, req, shutdown.clone())
                         .await;
                 close_daemon = maintenance && resp.ok;
-                if !query_activity && !maintenance {
-                    let _ = record_activity(
-                        &runtime.storage_root,
-                        "request",
-                        request_activity(&activity_req, &resp),
-                    );
-                }
                 resp
             }
             Err(error) => {
                 let resp = Resp::err(error);
-                let _ = record_activity(
-                    &manager.host.storage_root,
-                    "protocol_error",
-                    json!({"error": resp.error}),
-                );
                 resp
             }
         };
         let mut out = serde_json::to_string(&resp).expect("serialize resp");
         out.push('\n');
-        if writer.write_all(out.as_bytes()).await.is_err() {
+        if *shutdown.borrow() {
+            break;
+        }
+        let written = tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            written = writer.write_all(out.as_bytes()) => written,
+        };
+        if written.is_err() {
             break;
         }
         if close_daemon {
@@ -391,647 +357,6 @@ fn is_valid_identity_query_shape(request: &IdentityContextRequest) -> bool {
     request.query && request.invocation == "query" && request.action == "query"
 }
 
-async fn conn_task_degraded(
-    operation_journal: Arc<crate::server::operation_journal::OperationJournal>,
-    project_replay_failure: Arc<str>,
-    stream: tokio::net::UnixStream,
-    host_paths: HostPaths,
-    maintenance_password: Option<String>,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-    user_shutdown: tokio::sync::mpsc::Sender<()>,
-) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    loop {
-        let line = tokio::select! {
-            _ = shutdown.changed() => break,
-            line = lines.next_line() => match line {
-                Ok(Some(line)) => line,
-                _ => break,
-            },
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut close_daemon = false;
-        let resp = match parse_wire_request(&line) {
-            Ok((_, Req::Ping)) => Resp::data(json!({
-                "degraded": true,
-                "now": iso(now_ms()),
-            })),
-            Ok((_, Req::Shutdown { password })) => {
-                let response = handle_host_shutdown(
-                    &host_paths,
-                    maintenance_password.as_deref(),
-                    password.as_ref(),
-                );
-                close_daemon = response.ok;
-                response
-            }
-            Ok((
-                Some(project_context),
-                Req::IdentityContext {
-                    facts,
-                    identity_context,
-                },
-            )) => {
-                let request =
-                    identity_context.unwrap_or_else(|| IdentityContextRequest::legacy(facts));
-                if is_identity_query_request(&request) {
-                    if !is_valid_identity_query_shape(&request) {
-                        Resp::err("IDENTITY_OPERATION_QUERY_SHAPE_INVALID")
-                    } else {
-                        match operation_journal.query(
-                            &request,
-                            project_context.project_scope.as_str(),
-                            project_context.app_scope_id.as_str(),
-                        ) {
-                            Ok(result) => {
-                                let mut result =
-                                    serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
-                                if let Some(projection) = result
-                                    .get_mut("result")
-                                    .and_then(|value| value.as_object_mut())
-                                {
-                                    if projection.contains_key("nested_command_id")
-                                        || projection.contains_key("nested_operation_id")
-                                    {
-                                        projection.insert(
-                                            "nested_receipt".into(),
-                                            json!({
-                                                "state": "unavailable",
-                                                "error": format!(
-                                                    "PROJECT_OWNER_READBACK_UNAVAILABLE: {project_replay_failure}"
-                                                ),
-                                            }),
-                                        );
-                                    }
-                                }
-                                Resp::data(result)
-                            }
-                            Err(error) => Resp::err(error),
-                        }
-                    }
-                } else {
-                    Resp::err("PROJECT_RUNTIME_UNAVAILABLE: project replay failed")
-                }
-            }
-            Ok(_) => Resp::err("PROJECT_RUNTIME_UNAVAILABLE: project replay failed"),
-            Err(error) => Resp::err(error),
-        };
-        let mut out = serde_json::to_string(&resp).expect("serialize resp");
-        out.push('\n');
-        let written = tokio::select! {
-            _ = shutdown.changed() => break,
-            result = writer.write_all(out.as_bytes()) => result,
-        };
-        if written.is_err() {
-            break;
-        }
-        if close_daemon {
-            let _ = user_shutdown.try_send(());
-            break;
-        }
-    }
-}
-
-fn apply_replayed_event(st: &mut State, event: &Event, line: usize) -> anyhow::Result<()> {
-    st.apply_checked(event)
-        .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}"))?;
-    match event {
-        Event::ReducerCheckpoint { sequence, revision } => st
-            .set_checkpoint_version(*sequence, *revision)
-            .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}"))
-            .and_then(|_| {
-                st.global.validate().map_err(|error| {
-                    anyhow::anyhow!(
-                        "journal replay failed at line {line}: global state validation: {error}"
-                    )
-                })
-            }),
-        _ => st
-            .advance_version()
-            .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}")),
-    }
-}
-
-fn apply_replayed_snapshot_event(st: &mut State, event: &Event, line: usize) -> anyhow::Result<()> {
-    match event {
-        Event::ReducerSnapshot { .. } | Event::ReducerCheckpoint { .. } => {
-            anyhow::bail!(
-                "journal replay failed at line {line}: reducer snapshot contains metadata record"
-            );
-        }
-        _ => st
-            .apply_checked(event)
-            .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}")),
-    }
-}
-
-fn validate_snapshot_command_frames(
-    events: &[Event],
-    line: usize,
-    seen_command_ids: &mut std::collections::HashSet<String>,
-    seen_operation_ids: &mut std::collections::HashMap<String, String>,
-) -> anyhow::Result<()> {
-    let mut pending_command: Option<(String, String)> = None;
-    for event in events {
-        if let Event::CommandStarted {
-            command_id,
-            operation_id,
-        } = event
-        {
-            if !seen_command_ids.insert(command_id.clone()) {
-                anyhow::bail!(
-                    "journal replay failed at line {line}: duplicate command {command_id}"
-                );
-            }
-            if let Some(existing_command_id) =
-                seen_operation_ids.insert(operation_id.clone(), command_id.clone())
-            {
-                anyhow::bail!(
-                    "journal replay failed at line {line}: operation {operation_id} already belongs to command {existing_command_id}"
-                );
-            }
-            if pending_command.is_some() {
-                anyhow::bail!("journal replay failed at line {line}: nested command {command_id}");
-            }
-            pending_command = Some((command_id.clone(), operation_id.clone()));
-            continue;
-        }
-        if let Some((command_id, operation_id)) = pending_command.as_ref() {
-            if let Event::CommandCompleted {
-                command_id: completed_id,
-                operation_id: completed_operation,
-                receipt,
-            } = event
-            {
-                if completed_id != command_id || completed_operation != operation_id {
-                    anyhow::bail!(
-                        "journal replay failed at line {line}: command completion does not match start"
-                    );
-                }
-                if receipt.operation_id != *operation_id {
-                    anyhow::bail!(
-                        "journal replay failed at line {line}: command receipt operation does not match start"
-                    );
-                }
-                pending_command = None;
-            }
-            continue;
-        }
-        if matches!(event, Event::CommandCompleted { .. }) {
-            anyhow::bail!("journal replay failed at line {line}: command completion without start");
-        }
-    }
-    if let Some((command_id, _)) = pending_command {
-        anyhow::bail!(
-            "journal replay failed: incomplete command {command_id}; completion marker missing"
-        );
-    }
-    Ok(())
-}
-
-fn track_legacy_master_authority(
-    event: &Event,
-    legacy_master_is_current: &mut bool,
-    saw_typed_master_authority: &mut bool,
-) {
-    match event {
-        Event::MasterAssigned { .. } => {
-            *legacy_master_is_current = !*saw_typed_master_authority;
-        }
-        Event::GlobalRuntimeBound { .. } => {
-            *legacy_master_is_current = false;
-        }
-        Event::GlobalMasterGranted { .. } | Event::GlobalMasterRevoked { .. } => {
-            *legacy_master_is_current = false;
-            *saw_typed_master_authority = true;
-        }
-        _ => {}
-    }
-}
-
-fn replay(root: &Path) -> anyhow::Result<State> {
-    replay_from_journal(root, &root.join(".agent-collab/server/journal.jsonl"))
-}
-
-/// Replay the host index exactly as the daemon does.
-///
-/// The offline reset owner must use this reader and not a private one. The
-/// claim it retires has to be the same binding the reducer compares against on
-/// the next start, and only this reader performs the same current-thread
-/// restore and legacy indexing steps.
-pub fn replay_host_index(storage_root: &Path) -> anyhow::Result<State> {
-    let storage_root = std::fs::canonicalize(storage_root)?;
-    replay_from_journal(
-        &storage_root,
-        &storage_root.join(".agent-collab/server/journal.jsonl"),
-    )
-}
-
-/// Replay a project reducer from the journal selected by its runtime owner.
-/// The project root remains the semantic scope used by worktree and identity
-/// validation; the journal path may be an appserver-specific runtime store.
-fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
-    replay_from_journal_mode(root, journal, true, &std::collections::HashSet::new())
-}
-
-/// Replay a project reducer, treating only the given operation ids as proven
-/// safe to trim from an uncommitted tail. The caller builds this set from the
-/// durable control store, so an incomplete command is trimmed only when a real
-/// pending effect for the exact operation is still recorded.
-fn replay_from_journal_with_proven(
-    root: &Path,
-    journal: &Path,
-    proven_pending_operations: &std::collections::HashSet<String>,
-) -> anyhow::Result<State> {
-    replay_from_journal_mode(root, journal, true, proven_pending_operations)
-}
-
-/// Read-only replay for startup discovery. It parses the same committed state
-/// but never rewrites a legacy journal; any rewrite requires the writer lock
-/// that normal materialization takes before opening the route.
-fn replay_from_journal_read_only(root: &Path, journal: &Path) -> anyhow::Result<State> {
-    replay_from_journal_mode(root, journal, false, &std::collections::HashSet::new())
-}
-
-/// Collect the operation ids that the durable binding-control store still
-/// records as a pending effect for this exact route. A pending effect is the
-/// only proof that an uncommitted trailing command has a reliable re-driver:
-/// `recover_pending_effects` (or a retried outer register) replays the exact
-/// handoff recorded here. The completion marker is the commit point, and the
-/// binding promotion that can run before it is that recorded effect, so no
-/// unrecorded external side effect survives the trim. An empty set means no
-/// tail may be trimmed automatically. A corrupt control store fails explicitly
-/// instead of being treated as "no effect".
-pub(crate) fn proven_pending_operations(
-    state_root: &Path,
-    app_scope_id: &str,
-    project_scope: &str,
-) -> anyhow::Result<std::collections::HashSet<String>> {
-    let control = crate::server::binding_store::BindingControlStore::new(state_root)
-        .load()
-        .map_err(anyhow::Error::msg)?;
-    Ok(control
-        .pending_effects()
-        .filter(|effect| {
-            effect.app_scope_id.as_str() == app_scope_id
-                && effect.project_scope.as_str() == project_scope
-                && control
-                    .slot(&crate::server::binding_slot::IdentityBindingKey::new(
-                        effect.project_scope.clone(),
-                        effect.app_scope_id.clone(),
-                        effect.name.clone(),
-                    ))
-                    .and_then(|slot| slot.active_binding())
-                    .is_some_and(|current| {
-                        current.binding.agent_id.as_str() == effect.target_worker_id
-                            && current.binding.session_id.as_ref().map(|id| id.as_str())
-                                == Some(effect.target_session_id.as_str())
-                    })
-        })
-        .map(|effect| effect.operation_id.clone())
-        .collect())
-}
-
-fn replay_from_journal_mode(
-    root: &Path,
-    journal: &Path,
-    allow_journal_rewrite: bool,
-    proven_pending_operations: &std::collections::HashSet<String>,
-) -> anyhow::Result<State> {
-    let mut st = State::default();
-    if !journal.exists() {
-        return Ok(st);
-    }
-    let content = std::fs::read_to_string(&journal)?;
-    let mut events = Vec::new();
-    let mut pending_command: Option<(String, String, Vec<Event>)> = None;
-    let mut seen_command_ids = std::collections::HashSet::new();
-    let mut seen_operation_ids = std::collections::HashMap::new();
-    let mut convert_root = false;
-    let mut saw_current_thread_route = false;
-    let mut legacy_master_is_current = false;
-    let mut saw_typed_master_authority = false;
-    let mut saw_snapshot_baseline = false;
-    let mut saw_real_event = false;
-    let mut line_start_offset = 0usize;
-    let mut incomplete_command_offset: Option<usize> = None;
-    for (index, line) in content.lines().enumerate() {
-        let offset = line_start_offset;
-        line_start_offset = line_start_offset
-            .saturating_add(line.len())
-            .saturating_add(1);
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let line_events = decode_journal_line(trimmed).map_err(|error| {
-            anyhow::anyhow!(
-                "journal replay failed at line {}: {}; manual journal edits are unsupported",
-                index + 1,
-                error
-            )
-        })?;
-        if line_events.len() > 1
-            && !line_events
-                .iter()
-                .any(|event| matches!(event, Event::ReducerCheckpoint { .. }))
-        {
-            convert_root = true;
-        }
-        for event in line_events {
-            if let Event::ReducerSnapshot {
-                sequence,
-                revision,
-                events: snapshot_events,
-            } = &event
-            {
-                if saw_snapshot_baseline {
-                    anyhow::bail!(
-                        "journal replay failed at line {}: duplicate reducer snapshot",
-                        index + 1
-                    );
-                }
-                if saw_real_event || saw_current_thread_route {
-                    anyhow::bail!(
-                        "journal replay failed at line {}: reducer snapshot is not the initial baseline",
-                        index + 1
-                    );
-                }
-                if pending_command.is_some() {
-                    anyhow::bail!(
-                        "journal replay failed at line {}: reducer snapshot nested in command",
-                        index + 1
-                    );
-                }
-                saw_snapshot_baseline = true;
-                validate_snapshot_command_frames(
-                    snapshot_events,
-                    index + 1,
-                    &mut seen_command_ids,
-                    &mut seen_operation_ids,
-                )?;
-                for nested in snapshot_events {
-                    if matches!(nested, Event::ReducerSnapshot { .. })
-                        || matches!(nested, Event::ReducerCheckpoint { .. })
-                    {
-                        anyhow::bail!(
-                            "journal replay failed at line {}: reducer snapshot contains metadata record",
-                            index + 1
-                        );
-                    }
-                    if matches!(nested, Event::GlobalCurrentThreadRouteSet { .. }) {
-                        saw_current_thread_route = true;
-                    }
-                    apply_replayed_snapshot_event(&mut st, nested, index + 1)?;
-                    track_legacy_master_authority(
-                        nested,
-                        &mut legacy_master_is_current,
-                        &mut saw_typed_master_authority,
-                    );
-                    events.push(nested.clone());
-                }
-                st.set_checkpoint_version(*sequence, *revision)
-                    .map_err(|error| {
-                        anyhow::anyhow!("journal replay failed at line {}: {error}", index + 1)
-                    })?;
-                continue;
-            }
-            saw_real_event = true;
-            if matches!(event, Event::GlobalCurrentThreadRouteSet { .. }) {
-                saw_current_thread_route = true;
-            }
-            if let Event::CommandStarted {
-                command_id,
-                operation_id,
-            } = &event
-            {
-                if !seen_command_ids.insert(command_id.clone()) {
-                    anyhow::bail!(
-                        "journal replay failed at line {}: duplicate command {}",
-                        index + 1,
-                        command_id
-                    );
-                }
-                if let Some(existing_command_id) =
-                    seen_operation_ids.insert(operation_id.clone(), command_id.clone())
-                {
-                    anyhow::bail!(
-                        "journal replay failed at line {}: operation {} already belongs to command {}",
-                        index + 1,
-                        operation_id,
-                        existing_command_id
-                    );
-                }
-                if pending_command.is_some() {
-                    anyhow::bail!(
-                        "journal replay failed at line {}: nested command {}",
-                        index + 1,
-                        command_id
-                    );
-                }
-                pending_command = Some((
-                    command_id.clone(),
-                    operation_id.clone(),
-                    vec![event.clone()],
-                ));
-                incomplete_command_offset = Some(offset);
-                continue;
-            }
-            if let Some((command_id, operation_id, pending)) = pending_command.as_mut() {
-                match &event {
-                    Event::CommandCompleted {
-                        command_id: completed_id,
-                        operation_id: completed_operation,
-                        receipt,
-                    } => {
-                        if completed_id != command_id || completed_operation != operation_id {
-                            anyhow::bail!(
-                                "journal replay failed at line {}: command completion does not match start",
-                                index + 1
-                            );
-                        }
-                        if receipt.operation_id != *operation_id {
-                            anyhow::bail!(
-                                "journal replay failed at line {}: command receipt operation does not match start",
-                                index + 1
-                            );
-                        }
-                        pending.push(event.clone());
-                        let committed = std::mem::take(pending);
-                        pending_command = None;
-                        incomplete_command_offset = None;
-                        for event in committed {
-                            apply_replayed_event(&mut st, &event, index + 1)?;
-                            track_legacy_master_authority(
-                                &event,
-                                &mut legacy_master_is_current,
-                                &mut saw_typed_master_authority,
-                            );
-                            events.push(event);
-                        }
-                    }
-                    Event::CommandStarted { .. } => unreachable!(),
-                    _ => pending.push(event.clone()),
-                }
-                continue;
-            }
-            if matches!(event, Event::CommandCompleted { .. }) {
-                anyhow::bail!(
-                    "journal replay failed at line {}: command completion without start",
-                    index + 1
-                );
-            }
-            if matches!(event, Event::MasterAssigned { .. })
-                && (line.contains("\"ev\":\"RootAssigned\"")
-                    || line.contains("\"ev\": \"RootAssigned\""))
-            {
-                convert_root = true;
-            }
-            apply_replayed_event(&mut st, &event, index + 1)?;
-            track_legacy_master_authority(
-                &event,
-                &mut legacy_master_is_current,
-                &mut saw_typed_master_authority,
-            );
-            events.push(event);
-        }
-    }
-    if let Some((command_id, operation_id, _pending_events)) = &pending_command {
-        if !allow_journal_rewrite {
-            anyhow::bail!(
-                "journal replay failed: incomplete command {command_id}; completion marker missing"
-            );
-        }
-        let offset = incomplete_command_offset.ok_or_else(|| {
-            anyhow::anyhow!(
-                "journal replay failed: incomplete command {command_id}; completion marker missing"
-            )
-        })?;
-        if proven_pending_operations.contains(operation_id) {
-            // A durable control pending effect for this exact operation is the
-            // reliable re-driver. The interrupted command never reached the
-            // reducer, and the binding promotion that could have run is the
-            // recorded effect consumed by `recover_pending_effects` or the
-            // retried outer register; nothing else can run before Completion.
-            let file = std::fs::OpenOptions::new().write(true).open(journal)?;
-            file.set_len(offset as u64)?;
-            file.sync_all()?;
-            append_log(
-                &journal.with_file_name("log.txt"),
-                &format!(
-                    "JOURNAL_TAIL_DROPPED_PROVEN_EFFECT: incomplete command {command_id} (operation {operation_id}) matched a durable control pending effect and was trimmed from the uncommitted tail"
-                ),
-            );
-        } else {
-            // No durable control pending effect proves a re-driver. Keep the
-            // original bytes untouched and fail this project's replay so the
-            // affected reducer is isolated instead of silently losing a
-            // possible side effect. Other projects replay independently.
-            anyhow::bail!(
-                "journal replay failed: incomplete command {command_id} (operation {operation_id}) has no matching durable control pending effect; uncommitted tail preserved at byte {offset} and project isolated"
-            );
-        }
-    }
-    // Route events are an incomplete index. A journal can contain an
-    // unrelated route event while an exact durable binding has no project
-    // route event yet. Backfill only addresses with no replay-established
-    // owner; the reducer preserves ambiguity, tombstone, and generation rules.
-    st.restore_unique_current_thread_routes_from_bindings()
-        .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
-    // Always index durable thread-only bindings, whether or not this journal
-    // carried a strict route event.  A journal whose route events are all
-    // thread-only (the live host journal) must still expose them after a
-    // restart.
-    st.index_legacy_thread_routes_from_bindings()
-        .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
-    if legacy_master_is_current {
-        let Some(worker_id) = st.master_worker_id.clone() else {
-            unreachable!("legacy master event must leave a legacy master projection");
-        };
-        if let Some(route_scope) = route_scope_for_root(root, &st)
-            .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?
-        {
-            let has_typed_grant = st
-                .global
-                .lookup_project_for_route(&route_scope)
-                .is_some_and(|project| {
-                    project.master_grants.values().any(|grant| {
-                        grant.project_scope == route_scope.project_scope_id
-                            && grant.app_scope_id == route_scope.app_scope_id
-                            && grant.agent_id.as_str() == worker_id
-                    })
-                });
-            if !has_typed_grant {
-                let grant = master_grant_for_worker(
-                    &st,
-                    &route_scope,
-                    &worker_id,
-                    st.master_assigned_by.as_deref().unwrap_or(&worker_id),
-                    st.master_approval
-                        .as_deref()
-                        .unwrap_or("legacy master assignment imported"),
-                )
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "journal replay failed: legacy master assignment for {worker_id} cannot be migrated: {error}"
-                    )
-                })?;
-                st.global
-                    .grant_master(grant)
-                    .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
-            }
-            st.master_worker_id = None;
-            st.master_assigned_by = None;
-            st.master_approval = None;
-            st.master_assigned_ms = None;
-        }
-    } else {
-        st.master_worker_id = None;
-        st.master_assigned_by = None;
-        st.master_approval = None;
-        st.master_assigned_ms = None;
-    }
-    st.global.validate().map_err(|error| {
-        anyhow::anyhow!("journal replay failed: global state validation: {error}")
-    })?;
-    if convert_root && allow_journal_rewrite {
-        let mut body = String::new();
-        for event in events {
-            body.push_str(&serde_json::to_string(&event)?);
-            body.push('\n');
-        }
-        let tmp = journal.with_file_name("journal.jsonl.tmp");
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(&tmp, &journal)?;
-    }
-    Ok(st)
-}
-
-fn decode_journal_line(line: &str) -> Result<Vec<Event>, notification_contract::JournalError> {
-    let mut events = Vec::new();
-    let mut stream = serde_json::Deserializer::from_str(line).into_iter::<Event>();
-    while let Some(item) = stream.next() {
-        events.push(
-            item.map_err(|error| notification_contract::JournalError::Replay(error.to_string()))?,
-        );
-    }
-    let offset = stream.byte_offset();
-    if offset < line.len() && !line[offset..].trim().is_empty() {
-        return Err(notification_contract::JournalError::Replay(
-            "trailing characters".into(),
-        ));
-    }
-    if events.is_empty() {
-        return Err(notification_contract::JournalError::Replay(
-            "empty event".into(),
-        ));
-    }
-    Ok(events)
-}
 
 fn acquire_daemon_lock(lock_path: &Path, socket_path: &Path) -> anyhow::Result<std::fs::File> {
     let file = std::fs::OpenOptions::new()
@@ -1117,7 +442,7 @@ fn acquire_legacy_writer_lock(
         Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK
     ) {
         anyhow::bail!(
-            "DAEMON_MIGRATION_REQUIRED: legacy {description} lock is held at {}; stop or migrate the legacy writer before starting the host daemon",
+            "DAEMON_MIGRATION_REQUIRED: legacy {description} lock is held at {}; the user must resolve the existing writer through formal maintenance before starting the host daemon",
             lock_path.display()
         );
     }
@@ -1158,7 +483,7 @@ fn probe_legacy_socket(socket_path: &Path) -> anyhow::Result<bool> {
 pub(crate) struct LegacyWriterFence {
     // These guards intentionally stay alive for the complete daemon lifetime.
     // The legacy binary does not know the new host lock, so a one-shot probe is
-    // insufficient to prevent it from opening the same journal after startup.
+    // insufficient to prevent it from writing the same storage after startup.
     _host_lock: Option<std::fs::File>,
     _project_lock: Option<std::fs::File>,
     project_error: Option<String>,
@@ -1173,7 +498,7 @@ fn ensure_legacy_socket_absent(scope: &Scope, host_paths: &HostPaths) -> anyhow:
     let legacy_socket = project_server_dir.join("server.sock");
     if legacy_socket != host_paths.socket_path() && probe_legacy_socket(&legacy_socket)? {
         anyhow::bail!(
-            "DAEMON_MIGRATION_REQUIRED: legacy project daemon is reachable at {}; stop or migrate it before starting the host daemon",
+            "DAEMON_MIGRATION_REQUIRED: legacy project daemon is reachable at {}; the user must resolve the existing writer through formal maintenance before starting the host daemon",
             legacy_socket.display()
         );
     }
@@ -1181,36 +506,14 @@ fn ensure_legacy_socket_absent(scope: &Scope, host_paths: &HostPaths) -> anyhow:
 }
 
 /// Hold every lock understood by the pre-host-endpoint daemon until the new
-/// daemon exits.  Acquiring these locks before replay/journal open closes the
+/// daemon exits. Acquiring these locks before current-state loading closes the
 /// check-to-open race: an old writer can neither start after the check nor
-/// acquire the same project lock while this process owns the journal.
+/// acquire the same project lock while this process owns the state.
 pub(crate) fn acquire_legacy_writer_fence(
     scope: &Scope,
     host_paths: &HostPaths,
 ) -> anyhow::Result<LegacyWriterFence> {
     acquire_legacy_writer_fence_mode(scope, host_paths, true)
-}
-
-fn acquire_daemon_legacy_writer_fence(
-    _scope: &Scope,
-    host_paths: &HostPaths,
-) -> anyhow::Result<LegacyWriterFence> {
-    // The operation journal still shares the host writer fence. Retired
-    // project-local journals have separate ownership and are never opened.
-    let legacy_host_lock = legacy_host_daemon_lock_path(host_paths);
-    let host_lock = if legacy_host_lock != host_paths.lock_path() {
-        Some(acquire_legacy_writer_lock(
-            &legacy_host_lock,
-            "host daemon",
-        )?)
-    } else {
-        None
-    };
-    Ok(LegacyWriterFence {
-        _host_lock: host_lock,
-        _project_lock: None,
-        project_error: None,
-    })
 }
 
 fn acquire_legacy_writer_fence_mode(
@@ -1368,148 +671,25 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     };
     host_paths.ensure_root()?;
     let sock_path = host_paths.socket_path();
-    let runtime_storage_root = host_paths.app_storage_root(
-        &scope.root.to_string_lossy(),
-        crate::identity::CLI_APP_SERVER_ID,
-    );
-    let project_server_dir = runtime_storage_root.join(".agent-collab").join("server");
-    std::fs::create_dir_all(&project_server_dir)?;
-
-    // The host lock is the only writable daemon admission gate.  Project
-    // roots still select their own journal/reducer storage, but never another
-    // socket or a second host writer.
+    // The host lock is the daemon writer admission gate.
     let _lock_file = acquire_daemon_lock(&host_paths.lock_path(), &sock_path)?;
 
-    // Keep every legacy writer lock through the journal writer lifetime. If
-    // the compatibility fixture uses the legacy path as its host path, the
-    // normal duplicate-daemon error remains authoritative; a real host-path
-    // migration reaches this persistent fence because its locks are distinct.
-    let _legacy_writer_fence = acquire_daemon_legacy_writer_fence(&scope, &host_paths)?;
     let project_scope = GlobalState::canonical_project_scope(&scope.root)
         .map_err(|error| anyhow::anyhow!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
     let resident_key = (
         crate::identity::CLI_APP_SERVER_ID.to_owned(),
         project_scope.as_str().to_owned(),
     );
-    let route_journal = host_paths.state_root().join("routes.jsonl");
-    select_central_runtime_storage(&host_paths, &route_journal, &resident_key, None)
+    let route_file = host_paths.state_root().join("routes.json");
+    let runtime_storage_root = select_central_runtime_storage(&host_paths, &route_file, &resident_key, None)
         .map_err(anyhow::Error::msg)?;
+    let project_server_dir = runtime_storage_root.join(".agent-collab").join("server");
 
     prepare_socket_path(&sock_path)?;
 
-    // The durable operation journal opens only when a pending reset or the
-    // first identity operation needs it. Ping and unrelated services stay
-    // available when the journal is malformed and no reset is pending.
-    let operation_journal = Arc::new(
-        crate::server::operation_journal::OperationJournal::deferred(host_paths.journal_path()),
-    );
-    let journal_path = project_server_dir.join("journal.jsonl");
-    let proven_pending = proven_pending_operations(
-        host_paths.state_root(),
-        resident_key.0.as_str(),
-        resident_key.1.as_str(),
-    )?;
-    let replayed = replay_from_journal_with_proven(&scope.root, &journal_path, &proven_pending);
-    let state = match replayed {
-        Ok(state) => state,
-        Err(error) => {
-            let project_replay_failure = format!("{error:#}");
-            let maintenance_password: Option<String> = crate::config::maintenance_password_opt()?;
-            append_log(
-                &host_paths.log_path(),
-                &format!(
-                    "project replay failed; entering query-only degraded mode: {project_replay_failure}"
-                ),
-            );
-            let listener = UnixListener::bind(&sock_path)?;
-            let socket_metadata = std::fs::symlink_metadata(&sock_path)?;
-            use std::os::unix::fs::PermissionsExt;
-            if let Err(error) =
-                std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))
-            {
-                let cleanup = remove_listener_socket(&sock_path, &socket_metadata);
-                return match cleanup {
-                    Ok(()) => Err(error.into()),
-                    Err(cleanup_error) => Err(anyhow::Error::new(error).context(format!(
-                        "failed to clean up startup socket: {cleanup_error}"
-                    ))),
-                };
-            }
-            let pid_path = host_paths.pid_path();
-            std::fs::write(&pid_path, std::process::id().to_string()).map_err(|error| {
-                match remove_listener_socket(&sock_path, &socket_metadata) {
-                    Ok(()) => anyhow::Error::new(error),
-                    Err(cleanup_error) => anyhow::Error::new(error).context(format!(
-                        "failed to clean up startup socket: {cleanup_error}"
-                    )),
-                }
-            })?;
-            let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
-            let state_root_metadata = std::fs::symlink_metadata(host_paths.state_root())?;
-            let (connection_shutdown, connection_shutdown_rx) = tokio::sync::watch::channel(false);
-            let (user_shutdown_tx, mut user_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
-            let mut interrupt = Box::pin(tokio::signal::ctrl_c());
-            let mut terminate = Box::pin(async {
-                let mut signal =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-                signal.recv().await;
-                Ok::<(), std::io::Error>(())
-            });
-            let mut state_root_removed = Box::pin(async {
-                let mut interval = tokio::time::interval(Duration::from_millis(250));
-                interval.tick().await;
-                loop {
-                    interval.tick().await;
-                    if !std::fs::symlink_metadata(host_paths.state_root())
-                        .is_ok_and(|current| same_inode(&state_root_metadata, &current))
-                    {
-                        return;
-                    }
-                }
-            });
-            let mut connection_tasks = tokio::task::JoinSet::new();
-            tokio::select! {
-                _ = user_shutdown_rx.recv() => {}
-                _ = interrupt.as_mut() => {}
-                _ = terminate.as_mut() => {}
-                _ = state_root_removed.as_mut() => {}
-                result = async {
-                    loop {
-                        match listener.accept().await {
-                            Ok((stream, _)) => {
-                                connection_tasks.spawn(conn_task_degraded(
-                                    operation_journal.clone(),
-                                    Arc::from(project_replay_failure.as_str()),
-                                    stream,
-                                    host_paths.clone(),
-                                    maintenance_password.clone(),
-                                    connection_shutdown_rx.clone(),
-                                    user_shutdown_tx.clone(),
-                                ));
-                            }
-                            Err(error) => append_log(
-                                &host_paths.log_path(),
-                                &format!("accept error: {}", error),
-                            ),
-                        }
-                    }
-                } => result,
-            }
-            connection_shutdown.send_replace(true);
-            while connection_tasks.join_next().await.is_some() {}
-            let _ = remove_listener_socket(&sock_path, &socket_metadata);
-            if std::fs::symlink_metadata(&pid_path)
-                .is_ok_and(|current| same_inode(&pid_metadata, &current))
-            {
-                let _ = std::fs::remove_file(&pid_path);
-            }
-            return Ok(());
-        }
-    };
-    let journal_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&journal_path)?;
+    let state_path = project_server_dir.join("state.json");
+    let state = current_state::load(&state_path, false).map_err(anyhow::Error::msg)?;
+
 
     append_log(&host_paths.log_path(), "server starting");
 
@@ -1517,10 +697,9 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         config: crate::config::load(&scope.root)?,
         root: scope.root.clone(),
         storage_root: runtime_storage_root,
-        journal_path,
+        state_path,
         host_paths: host_paths.clone(),
         state: Mutex::new(state),
-        journal: Mutex::new(journal_file),
         appserver_candidate_check: default_appserver_candidate_check(),
         appserver_notification_sink: default_appserver_notification_sink(),
         appserver_thread_status: default_appserver_thread_status(),
@@ -1532,11 +711,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     restore_registered_peer_default_leases(&server);
     reconcile_master_goal_due(&server);
     purge_expired_storage(&server, now_ms());
-    let runtime_manager = ProjectRuntimeManager::new_with_operation_journal(
-        server.clone(),
-        &host_paths,
-        operation_journal,
-    )
+    let runtime_manager = ProjectRuntimeManager::new(server.clone(), &host_paths)
     .map_err(|error| anyhow::anyhow!(error))?;
     // Startup convergence is background work: a slow or unreachable gateway
     // must not delay the listener or the first request.
@@ -1565,11 +740,6 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     })?;
     let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
     let state_root_metadata = std::fs::symlink_metadata(host_paths.state_root())?;
-    let _ = record_activity(
-        &server.storage_root,
-        "daemon_start",
-        json!({"pid": std::process::id()}),
-    );
 
     let mut interrupt = Box::pin(tokio::signal::ctrl_c());
     let mut terminate = Box::pin(async {

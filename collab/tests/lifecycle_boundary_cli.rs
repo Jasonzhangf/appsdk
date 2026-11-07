@@ -108,7 +108,16 @@ impl IsolatedDaemon {
         let output = Command::new("tmux")
             .arg("-S")
             .arg(&socket)
-            .args(["new-session", "-d", "-s", &session, "sh -i"])
+            .args([
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{session_id}",
+                "-s",
+                &session,
+                "sh -i",
+            ])
             .output()
             .expect("start owned tmux session");
         assert!(
@@ -116,7 +125,9 @@ impl IsolatedDaemon {
             "tmux failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        self.tmux = Some((socket.clone(), session.clone()));
+        let session_id = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        assert!(session_id.starts_with('$'));
+        self.tmux = Some((socket.clone(), session_id));
         std::fs::write(
             self.host.join("tmux-endpoints.json"),
             serde_json::to_vec(&json!({"endpoints": [socket]})).unwrap(),
@@ -205,18 +216,28 @@ impl IsolatedDaemon {
         }
     }
 
-    fn runtime_journal(&self, project: &Path) -> PathBuf {
+    fn runtime_state_path(&self, project: &Path) -> PathBuf {
         let canonical = std::fs::canonicalize(project).unwrap();
-        std::fs::read_to_string(self.host.join("routes.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .find(|record| record["project_scope"] == canonical.to_string_lossy().as_ref())
-            .map(|record| {
-                PathBuf::from(record["storage_root"].as_str().unwrap())
-                    .join(".agent-collab/server/journal.jsonl")
+        let routes: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(self.host.join("routes.json")).unwrap()).unwrap();
+        let matched: Vec<_> = routes
+            .iter()
+            .filter(|record| {
+                record["project_scope"].as_str() == canonical.to_str()
+                    && record["app_scope_id"] == "appserver-cli"
             })
-            .expect("registered project has a centralized runtime journal")
+            .collect();
+        assert_eq!(matched.len(), 1, "one exact current project/app route");
+        PathBuf::from(matched[0]["storage_root"].as_str().unwrap())
+            .join(".agent-collab/server/state.json")
+    }
+
+    fn runtime_state(&self, project: &Path) -> Value {
+        let document: Value =
+            serde_json::from_slice(&std::fs::read(self.runtime_state_path(project)).unwrap())
+                .unwrap();
+        assert_eq!(document["schema_version"], 1);
+        document["state"].clone()
     }
 
     fn wait_until_alive(&mut self) {
@@ -607,6 +628,119 @@ fn noninteractive_up_and_down_have_no_side_effects() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(target_os = "macos")]
+fn activation_public_up(fail_bootstrap: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = IsolatedDaemon::start(None);
+    let bin = fixture.root.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = fixture.root.join("activation.log");
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let bootout = if fail_bootstrap {
+        format!("kill -TERM {}", fixture.child.as_ref().unwrap().id())
+    } else {
+        ":".into()
+    };
+    let bootstrap = if fail_bootstrap {
+        "echo 'fake bootstrap failure' >&2; exit 7"
+    } else {
+        ":"
+    };
+    let launchctl = bin.join("launchctl");
+    std::fs::write(&launchctl, format!(
+        "#!/bin/sh\necho \"$*\" >> {log}\ncase \"$1\" in\nlist) echo '\"PID\" = 123;' ;;\nbootout) {bootout} ;;\nprint) echo \"Could not find service \\\"${{2##*/}}\\\" in domain for user gui: 501\" >&2; exit 113 ;;\nbootstrap) {bootstrap} ;;\nesac\n",
+        log = quote(&log.to_string_lossy())
+    )).unwrap();
+    let tmux = bin.join("tmux");
+    std::fs::write(
+        &tmux,
+        format!(
+            "#!/bin/sh\necho unexpected-tmux >> {}\nexit 1\n",
+            quote(&log.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    for path in [&launchctl, &tmux] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let script = fixture.root.join("up.sh");
+    let status = fixture.root.join("up.exit");
+    std::fs::write(
+        &script,
+        format!(
+            "{} up\nprintf '%s' \"$?\" > {}\n",
+            quote(&fixture.binary.to_string_lossy()),
+            quote(&status.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let output = Command::new("/usr/bin/script")
+        .arg("-q")
+        .arg("/dev/null")
+        .arg("/bin/sh")
+        .arg(&script)
+        .current_dir(&fixture.root)
+        .env_clear()
+        .env("HOME", &fixture.home)
+        .env("CODEX_HOME", &fixture.home)
+        .env("COLLAB_STATE_DIR", &fixture.host)
+        .env(
+            "COLLAB_AUTOSTART_LABEL",
+            format!("com.appsdk.collab.e2e.activation.{}", std::process::id()),
+        )
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let code: i32 = std::fs::read_to_string(status).unwrap().parse().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if fail_bootstrap {
+        assert_ne!(
+            code, 0,
+            "failed reload must not use prior liveness as success: {text}"
+        );
+        assert!(text.contains("fake bootstrap failure"), "{text}");
+        assert!(!text.contains("\"ok\": true"), "{text}");
+    } else {
+        assert_eq!(code, 0, "{text}");
+        assert!(text.contains("\"supervised\": true"), "{text}");
+        fixture.wait_until_alive();
+    }
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("unexpected-tmux"), "{calls}");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("bootstrap "))
+            .count(),
+        1,
+        "{calls}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn activation_public_up_does_not_report_success_after_losing_old_daemon() {
+    activation_public_up(true);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn activation_public_up_requires_current_daemon_after_reload() {
+    activation_public_up(false);
+}
+
 #[test]
 fn context_down_marker_fails_without_startup_or_maintenance_hint() {
     let root = unique_root("context-down");
@@ -714,8 +848,7 @@ fn unauthenticated_shutdown_is_allowed_when_no_password_is_configured() {
 #[test]
 fn shutdown_with_wrong_password_is_rejected_when_a_password_is_configured() {
     let mut fixture = IsolatedDaemon::start(Some("lifecycle-secret"));
-    let event_path = fixture.host.join("events.jsonl");
-    let before_events = std::fs::read(&event_path).unwrap_or_default();
+    let pid = std::fs::read(fixture.host.join("server.pid")).unwrap();
     for request in [
         json!({"op":"Shutdown"}),
         json!({"op":"Shutdown","password":"wrong-password"}),
@@ -723,10 +856,7 @@ fn shutdown_with_wrong_password_is_rejected_when_a_password_is_configured() {
         let response = wire_request(&fixture.socket(), &fixture.root, request.clone());
         assert_eq!(response["ok"], false, "{request} -> {response}");
         assert!(!fixture.host.join("DOWN").exists());
-        assert_eq!(
-            std::fs::read(&event_path).unwrap_or_default(),
-            before_events
-        );
+        assert_eq!(std::fs::read(fixture.host.join("server.pid")).unwrap(), pid);
         ping(&fixture.socket()).expect("daemon remains alive after rejected shutdown");
     }
     let response = wire_request(
@@ -755,9 +885,6 @@ fn pty_password_rejects_default_for_custom_config_and_never_echoes_it() {
     assert_no_text(&correct, &[CUSTOM]);
     fixture.wait_for_exit();
     assert!(fixture.host.join("DOWN").is_file());
-    assert!(!std::fs::read_to_string(fixture.host.join("events.jsonl"))
-        .unwrap_or_default()
-        .contains(CUSTOM));
     assert!(!fixture.log_text().contains(CUSTOM));
 }
 
@@ -780,13 +907,13 @@ fn pty_eof_and_cancel_do_not_stop_or_mutate_the_daemon() {
         // A configured password makes `down` prompt, so EOF / Ctrl-C cancels.
         // With no password there is no prompt and nothing to cancel.
         let fixture = IsolatedDaemon::start(Some("admin"));
-        let before_events = std::fs::read(fixture.host.join("events.jsonl")).unwrap_or_default();
+        let before_pid = std::fs::read(fixture.host.join("server.pid")).unwrap();
         let output = run_pty(&fixture, &input);
         assert!(!output.status.success(), "{}", output_text(&output));
         assert!(!fixture.host.join("DOWN").exists());
         assert_eq!(
-            std::fs::read(fixture.host.join("events.jsonl")).unwrap_or_default(),
-            before_events
+            std::fs::read(fixture.host.join("server.pid")).unwrap(),
+            before_pid
         );
         ping(&fixture.socket()).expect("EOF or cancel must not stop the daemon");
     }
@@ -810,8 +937,15 @@ fn available_context_restores_identity_without_register_or_pid_change() {
         .unwrap()
         .to_owned();
     let binding = first["result"]["snapshot"]["binding"].clone();
-    let journal = fixture.runtime_journal(&fixture.root);
-    let before_journal = std::fs::read(&journal).unwrap_or_default();
+    let before_state = fixture.runtime_state(&fixture.root);
+    let before_map = std::fs::read(fixture.host.join("identity-map.json")).unwrap();
+    let before_routes = std::fs::read(fixture.host.join("routes.json")).unwrap();
+    let credential_path = fixture
+        .host
+        .join("identities")
+        .join(&worker)
+        .join("identity.json");
+    let credential = std::fs::read(&credential_path).unwrap();
     let before_pid = std::fs::read_to_string(fixture.host.join("server.pid")).unwrap();
 
     let second = fixture.context_with_pane(&pane);
@@ -833,31 +967,18 @@ fn available_context_restores_identity_without_register_or_pid_change() {
         before_pid
     );
     assert_eq!(
-        registration_events(&std::fs::read(&journal).unwrap_or_default()),
-        registration_events(&before_journal),
-        "ordinary restore must not write a Register event"
+        std::fs::read(fixture.host.join("identity-map.json")).unwrap(),
+        before_map
     );
-}
-
-// Presence and ledger timers may append observations while context is read.
-// Compare the registration owner events that this test promises not to repeat.
-fn registration_events(bytes: &[u8]) -> Vec<Value> {
-    std::str::from_utf8(bytes)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|event| {
-            !matches!(
-                event["ev"].as_str(),
-                Some(
-                    "AgentPresenceObserved"
-                        | "AgentActivityObserved"
-                        | "GlobalRuntimeBindingLedgerClassified"
-                        | "GlobalLedgerScanReceiptRecorded"
-                )
-            )
-        })
-        .collect()
+    assert_eq!(
+        std::fs::read(fixture.host.join("routes.json")).unwrap(),
+        before_routes
+    );
+    assert_eq!(std::fs::read(credential_path).unwrap(), credential);
+    assert_eq!(
+        fixture.runtime_state(&fixture.root)["workers"],
+        before_state["workers"]
+    );
 }
 
 #[test]
@@ -909,16 +1030,38 @@ fn self_request_cannot_unbind_another_projects_pane() {
         )
         .status
         .success());
-    let journal = fixture.runtime_journal(&other);
-    let before = std::fs::read(&journal).unwrap();
+    let before = fixture.runtime_state(&other);
+    let map_before: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("identity-map.json")).unwrap())
+            .unwrap();
     let request = json!({"op":"UnregisterSelf", "worker_id":own_id,
         "token":credential["token"], "facts":{"tmux":{
             "endpoint":other_binding["tmux_endpoint"], "cwd":other_binding["project_scope"]}}});
     let _response = wire_request(&fixture.socket(), &fixture.root, request);
+    let after = fixture.runtime_state(&other);
+    for field in ["workers", "tasks", "board_details", "task_assignments"] {
+        assert!(
+            after[field] == before[field],
+            "foreign self request must preserve current {field}"
+        );
+    }
+    let map_after: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("identity-map.json")).unwrap())
+            .unwrap();
+    let scope = other.canonicalize().unwrap().to_string_lossy().into_owned();
+    let foreign_slots = |map: &Value| {
+        map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|slot| slot["identity_key"]["project_scope"] == scope)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        std::fs::read(&journal).unwrap(),
-        before,
-        "supplied foreign pane facts must not authorize retirement of its identity or grant"
+        foreign_slots(&map_after),
+        foreign_slots(&map_before),
+        "a valid self request may retire itself but cannot change the foreign identity"
     );
     let route = wire_request(
         &fixture.socket(),
@@ -967,8 +1110,7 @@ fn current_pane_can_remove_own_binding_with_unfinished_work_and_keep_its_host() 
         ],
     );
     assert!(claimed.status.success(), "{}", output_text(&claimed));
-    let journal = fixture.runtime_journal(&fixture.root);
-    let before = std::fs::read_to_string(&journal).unwrap();
+    let before = fixture.runtime_state(&fixture.root);
     let worker = first["result"]["snapshot"]["identity"]["worker_id"]
         .as_str()
         .unwrap();
@@ -1002,11 +1144,13 @@ fn current_pane_can_remove_own_binding_with_unfinished_work_and_keep_its_host() 
         json!({"op":"RouteResolve", "tmux_endpoint":binding["tmux_endpoint"]}),
     );
     assert_eq!(route["ok"], false, "old route must be unusable: {route}");
-    let after = std::fs::read_to_string(journal).unwrap();
-    assert!(
-        after.starts_with(&before),
-        "self removal must retain task history"
-    );
+    let after = fixture.runtime_state(&fixture.root);
+    for field in ["tasks", "board_details", "task_lifecycle"] {
+        assert_eq!(
+            after[field]["unfinished-self-work"], before[field]["unfinished-self-work"],
+            "self removal must retain current {field}"
+        );
+    }
     let repeated = fixture.command_with_pane(&pane, &["worker", "close", "--self"]);
     assert!(repeated.status.success(), "{}", output_text(&repeated));
 }
@@ -1096,44 +1240,76 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         ],
     );
     assert!(other_task.status.success(), "{}", output_text(&other_task));
-    let other_journal = fixture.runtime_journal(&other);
-    let other_before = std::fs::read(&other_journal).unwrap();
+    let other_state_path = fixture.runtime_state_path(&other);
+    let other_before = fixture.runtime_state(&other);
     let denied = fixture.command_at(&other, &other_pane, &["reset", "--project"]);
     assert!(
         !denied.status.success(),
         "a peer must not reset project assets"
     );
-    assert_eq!(std::fs::read(&other_journal).unwrap(), other_before);
+    let after_denial = fixture.runtime_state(&other);
+    for field in [
+        "workers",
+        "tasks",
+        "board_details",
+        "task_assignments",
+        "pending_merges",
+    ] {
+        assert!(
+            after_denial[field] == other_before[field],
+            "denied reset must preserve current {field}"
+        );
+    }
     let pid_before = std::fs::read(fixture.host.join("server.pid")).unwrap();
 
-    let resident = fixture.runtime_journal(&fixture.root);
+    let resident = fixture.runtime_state_path(&fixture.root);
+    let map_path = fixture.host.join("identity-map.json");
+    let before_map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
     let reset = fixture.command_with_pane(&pane, &["reset", "--project"]);
     assert!(reset.status.success(), "{}", output_text(&reset));
     let reset: Value = serde_json::from_slice(&reset.stdout).unwrap();
     assert_eq!(reset["status"], "complete", "{reset}");
-    let proofs: Vec<Value> = std::fs::read_dir(fixture.host.join("context-operations"))
-        .unwrap()
-        .map(|entry| {
-            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap()
-        })
-        .collect();
+    let after_map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
     let removed_scope = std::fs::canonicalize(&fixture.root)
         .unwrap()
         .display()
         .to_string();
     let retained_scope = std::fs::canonicalize(&other).unwrap().display().to_string();
-    assert!(!proofs
+    assert!(!after_map["slots"]
+        .as_array()
+        .unwrap()
         .iter()
-        .any(|proof| proof["project_scope"] == removed_scope));
-    assert!(proofs
-        .iter()
-        .any(|proof| proof["project_scope"] == retained_scope));
+        .any(|slot| slot["identity_key"]["project_scope"] == removed_scope));
+    let other_slots = |map: &Value| {
+        map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|slot| slot["identity_key"]["project_scope"] == retained_scope)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(!other_slots(&before_map).is_empty());
+    assert_eq!(other_slots(&after_map), other_slots(&before_map));
     assert!(!asset.exists());
     assert_eq!(
         std::fs::read(fixture.host.join("server.pid")).unwrap(),
         pid_before
     );
-    assert_eq!(std::fs::read(&other_journal).unwrap(), other_before);
+    let after_reset = fixture.runtime_state(&other);
+    for field in [
+        "workers",
+        "tasks",
+        "board_details",
+        "task_assignments",
+        "pending_merges",
+    ] {
+        assert!(
+            after_reset[field] == other_before[field],
+            "scoped reset must preserve foreign {field}"
+        );
+    }
+    assert!(other_state_path.exists());
     let other_board = fixture.command_at(&other, &other_pane, &["board", "show"]);
     assert!(
         other_board.status.success(),
@@ -1141,12 +1317,17 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         output_text(&other_board)
     );
     assert!(String::from_utf8_lossy(&other_board.stdout).contains("retain-other-history"));
-    assert!(
-        !std::fs::read_to_string(&resident)
-            .unwrap_or_default()
-            .contains("erase-project-history"),
-        "reset must erase resident project history, not only its live projection"
-    );
+    match std::fs::read(&resident) {
+        Ok(bytes) => {
+            let document: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                document["state"]["tasks"]["erase-project-history"].is_null(),
+                "reset must erase the scoped current task"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read reset current state: {error}"),
+    }
     let restored = fixture.context_with_pane(&pane);
     assert!(restored.status.success(), "{}", output_text(&restored));
     let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();

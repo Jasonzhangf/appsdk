@@ -3,7 +3,6 @@ use crate::scope::{HostPaths, ProjectScopeId, Scope};
 use anyhow::Context;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -75,7 +74,6 @@ pub struct RuntimeIdentity {
     pub agent_id: AgentId,
     pub runtime_id: RuntimeId,
     pub appserver_id: AppServerId,
-    pub endpoint_generation: u64,
     pub binding_id: BindingId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
@@ -194,7 +192,6 @@ impl RuntimeIdentity {
             agent_id: AgentId::new(worker_id.to_owned())?,
             runtime_id: RuntimeId::new(format!("runtime-{worker_id}"))?,
             appserver_id: AppServerId::new(CLI_APP_SERVER_ID)?,
-            endpoint_generation: 0,
             binding_id: BindingId::new(format!("binding-{worker_id}"))?,
             session_id: None,
             native_thread_id: None,
@@ -225,7 +222,6 @@ struct RegistrationBinding {
     agent_id: AgentId,
     runtime_id: RuntimeId,
     binding_id: BindingId,
-    endpoint_generation: u64,
     #[serde(default)]
     session_id: Option<SessionId>,
     #[serde(default)]
@@ -290,7 +286,6 @@ pub fn registration_from_receipt(
         agent_id: binding.agent_id,
         runtime_id: binding.runtime_id,
         appserver_id: binding.app_scope_id,
-        endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id,
         session_id: binding.session_id,
         native_thread_id: binding.native_thread_id,
@@ -397,10 +392,6 @@ pub fn role_brief_from_registration_receipt(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingValidationError {
-    StaleGeneration {
-        expected: u64,
-        observed: u64,
-    },
     Mismatch {
         field: &'static str,
         expected: String,
@@ -411,12 +402,6 @@ pub enum BindingValidationError {
 impl fmt::Display for BindingValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::StaleGeneration { expected, observed } => {
-                write!(
-                    f,
-                    "stale endpoint generation: expected {expected}, observed {observed}"
-                )
-            }
             Self::Mismatch {
                 field,
                 expected,
@@ -438,12 +423,6 @@ pub fn validate_binding(
     registered: &RuntimeIdentity,
     incoming: &RuntimeIdentity,
 ) -> Result<(), BindingValidationError> {
-    if registered.endpoint_generation != incoming.endpoint_generation {
-        return Err(BindingValidationError::StaleGeneration {
-            expected: registered.endpoint_generation,
-            observed: incoming.endpoint_generation,
-        });
-    }
     for (field, expected, observed) in [
         (
             "agent_id",
@@ -580,12 +559,94 @@ fn identity_temp_path(path: &std::path::Path) -> PathBuf {
 }
 
 fn write_identity(path: &std::path::Path, ident: &Identity) -> anyhow::Result<()> {
+    write_identity_bytes(path, serde_json::to_string_pretty(ident)?.as_bytes())
+}
+
+fn read_identity_bytes(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_identity_bytes(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     let dir = path.parent().unwrap();
+    let mut missing = Vec::new();
+    let mut ancestor = dir;
+    while !ancestor.exists() {
+        missing.push(ancestor.to_path_buf());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("identity directory has no parent"))?;
+    }
     std::fs::create_dir_all(dir)?;
+    for created in missing.iter().rev() {
+        std::fs::File::open(created.parent().unwrap())?.sync_all()?;
+    }
     let tmp = identity_temp_path(path);
-    write_owner_only(&tmp, serde_json::to_string_pretty(ident)?.as_bytes())?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let result = (|| -> anyhow::Result<()> {
+        write_owner_only(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        return match std::fs::remove_file(&tmp) {
+            Ok(()) => Err(error),
+            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+            Err(cleanup) => Err(anyhow::anyhow!(
+                "{error:#}; credential temp cleanup failed: {cleanup}"
+            )),
+        };
+    }
+    result
+}
+
+/// Only this invocation's unpublished credential replacement can be undone.
+/// The rollback bytes are in memory; an unselected file is never an identity.
+pub(crate) struct StagedCredential {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+}
+
+impl StagedCredential {
+    pub(crate) fn rollback(self) -> anyhow::Result<()> {
+        if read_identity_bytes(&self.path)? == self.original {
+            return Ok(());
+        }
+        match self.original {
+            Some(bytes) => write_identity_bytes(&self.path, &bytes),
+            None => {
+                std::fs::remove_file(&self.path)?;
+                std::fs::File::open(self.path.parent().unwrap())?.sync_all()?;
+                Ok(())
+            }
+        }
+    }
+}
+
+pub(crate) fn stage_registration_credential(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    mut ident: Identity,
+    runtime: RuntimeIdentity,
+    transport: SelectedTransport,
+) -> anyhow::Result<StagedCredential> {
+    let path = identity_path_at(host_paths, &ident.worker_id)?;
+    let staged = StagedCredential {
+        original: read_identity_bytes(&path)?,
+        path,
+    };
+    if let Err(error) =
+        persist_current_binding_at(host_paths, scope, &mut ident, runtime, transport)
+    {
+        return Err(match staged.rollback() {
+            Ok(()) => anyhow::anyhow!("REGISTER_CREDENTIAL_STAGE_FAILED: {error:#}"),
+            Err(rollback) => anyhow::anyhow!("REGISTER_CREDENTIAL_STAGE_FAILED: {error:#}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"),
+        });
+    }
+    Ok(staged)
 }
 
 /// Write `bytes` to `path` with owner-only permissions (0600). Every durable
@@ -605,26 +666,16 @@ fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Persist the server-selected transport alongside the typed runtime binding.
-/// The selection is an output of server admission, never a client preference.
-#[cfg(test)]
-pub fn persist_registration(
-    scope: &Scope,
-    ident: &mut Identity,
-    runtime: RuntimeIdentity,
-    transport: SelectedTransport,
-) -> anyhow::Result<()> {
-    persist_registration_at(&HostPaths::resolve()?, scope, ident, runtime, transport)
-}
-
-pub(crate) fn persist_registration_at(
+/// Save the exact current identity selected by its control owner. A retained
+/// identity may lack delivery facts; complete transport admission belongs to
+/// real registration and its receipt, not this credential writer.
+pub(crate) fn persist_current_binding_at(
     host_paths: &HostPaths,
     scope: &Scope,
     ident: &mut Identity,
     runtime: RuntimeIdentity,
     transport: SelectedTransport,
 ) -> anyhow::Result<()> {
-    validate_registration_transport(&transport, &runtime)?;
     let mut updated = ident.clone();
     updated.project_scope = Some(
         scope
@@ -645,148 +696,6 @@ fn read_identity(path: &std::path::Path) -> anyhow::Result<Option<Identity>> {
     Ok(Some(serde_json::from_str(&std::fs::read_to_string(path)?)?))
 }
 
-/// An archived credential is only a candidate. Registration must still prove
-/// its token against the daemon's authoritative worker record.
-fn archived_pane_identity_at(
-    host_paths: &HostPaths,
-    scope: &Scope,
-    candidate: &crate::proto::TmuxCandidate,
-    route: &crate::proto::RouteResolution,
-) -> anyhow::Result<Option<Identity>> {
-    let expected_scope = scope
-        .route_scope(route.app_scope_id.clone())?
-        .project_scope_id;
-    if route.project_scope != expected_scope {
-        anyhow::bail!("IDENTITY_RESTORE_CROSS_PROJECT: pane route belongs to another project");
-    }
-    let root = host_paths.state_root().join("archives");
-    if !root.is_dir() {
-        return Ok(None);
-    }
-    let mut selected: Option<Identity> = None;
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir()
-            || !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("identities-retired-")
-        {
-            continue;
-        }
-        let path = entry
-            .path()
-            .join(route.agent_id.as_str())
-            .join("identity.json");
-        let Some(identity) = read_identity(&path)? else {
-            continue;
-        };
-        let matches = identity.worker_id == route.agent_id.as_str()
-            && identity.project_scope.as_ref() == Some(&route.project_scope)
-            && identity.runtime.as_ref().is_some_and(|runtime| {
-                runtime.agent_id == route.agent_id
-                    && runtime.binding_id == route.binding_id
-                    && runtime.appserver_id == route.app_scope_id
-            })
-            && identity.transport.as_ref().is_some_and(|transport| {
-                transport.kind == TransportKind::Tmux
-                    && transport.tmux_endpoint.as_ref().is_some_and(|endpoint| {
-                        crate::client::adapters::tmux::same_pane_route(
-                            endpoint,
-                            &candidate.endpoint,
-                        )
-                    })
-            });
-        if !matches {
-            continue;
-        }
-        let selected_generation = selected
-            .as_ref()
-            .and_then(|previous| previous.runtime.as_ref())
-            .map(|runtime| runtime.endpoint_generation)
-            .unwrap_or(0);
-        let observed_generation = identity.runtime.as_ref().unwrap().endpoint_generation;
-        if observed_generation < selected_generation {
-            continue;
-        }
-        if observed_generation == selected_generation
-            && selected.as_ref().is_some_and(|previous| {
-                previous.token != identity.token || previous.runtime != identity.runtime
-            })
-        {
-            anyhow::bail!(
-                "IDENTITY_RESTORE_AMBIGUOUS: archived pane credentials disagree for registered worker"
-            );
-        }
-        selected = Some(identity);
-    }
-    Ok(selected)
-}
-
-fn recover_archived_pane_at(
-    host_paths: &HostPaths,
-    scope: &Scope,
-    candidate: &crate::proto::TmuxCandidate,
-    route: Option<&crate::proto::RouteResolution>,
-) -> anyhow::Result<Option<Identity>> {
-    // Read-only: the daemon supplies the committed host route for this pane,
-    // and the archived credential is validated against that live binding
-    // evidence. There is no daemon-to-self RPC and no write before Register.
-    let Some(route) = route else {
-        return Ok(None);
-    };
-    route.validate()?;
-    archived_pane_identity_at(host_paths, scope, candidate, route)
-}
-
-/// What a current tmux/Codex anchor uniquely resolved to.
-enum AnchorResolution {
-    /// The anchor belongs to the current project scope.
-    CurrentScope(Identity),
-    /// The anchor belongs to another project scope. The daemon bootstrap fails
-    /// closed rather than retiring it.
-    CrossProject,
-}
-
-/// Fail-closed wrapper for scope resolution, init, and explicit recovery:
-/// a cross-project match is an error on these paths.
-fn identity_by_current_anchors_same_scope_at(
-    host_paths: &HostPaths,
-    scope: &Scope,
-    observed: &AnchorObservation,
-) -> anyhow::Result<Option<Identity>> {
-    let resolution = identity_by_current_anchors_at(host_paths, scope, observed)?;
-    if resolution.is_none() && observed.dsh.is_some() {
-        let session_only = AnchorObservation {
-            dsh: None,
-            ..observed.clone()
-        };
-        if identity_by_current_anchors_at(host_paths, scope, &session_only)?.is_some() {
-            anyhow::bail!(
-                "IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the saved identity"
-            );
-        }
-    }
-    match resolution {
-        Some(AnchorResolution::CurrentScope(identity)) => Ok(Some(identity)),
-        Some(AnchorResolution::CrossProject) => anyhow::bail!(
-            "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
-        ),
-        None => Ok(None),
-    }
-}
-
-/// The dsh compound anchor's communication API dimension.
-///
-/// An explicit API must match the saved target. Without a report, the scoped
-/// resolver can recover only a unique durable session owner.
-fn dsh_api_matches(observed: &AnchorObservation, transport: &SelectedTransport) -> bool {
-    observed
-        .dsh
-        .as_ref()
-        .is_none_or(|candidate| dsh_transport_matches(candidate, transport))
-}
-
 pub(crate) fn dsh_transport_matches(
     candidate: &crate::proto::DshCandidate,
     transport: &SelectedTransport,
@@ -798,165 +707,75 @@ pub(crate) fn dsh_transport_matches(
         && transport.session_id.as_deref() == Some(candidate.session_id.as_str())
 }
 
-fn identity_by_current_anchors_at(
+pub(crate) fn draft_identity_with_id(scope: &Scope, worker_id: &str) -> anyhow::Result<Identity> {
+    validate_id(worker_id)?;
+    Ok(Identity {
+        worker_id: worker_id.to_owned(),
+        token: mint_token(),
+        project_scope: Some(
+            scope
+                .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
+                .project_scope_id,
+        ),
+        runtime: None,
+        transport: None,
+    })
+}
+
+/// A real first registration gets a new carrier; an absent map cannot revive
+/// a retired credential through a deterministic historical directory name.
+pub(crate) fn new_registration_identity(
+    scope: &Scope,
+    facts: &crate::proto::IdentityFacts,
+) -> anyhow::Result<Identity> {
+    if facts.session_id.is_none() && facts.dsh_session_id.is_none() && facts.dsh.is_none() {
+        anyhow::bail!("COLLAB_IDENTITY_ANCHOR_MISSING: current agent session id is required");
+    }
+    draft_identity_with_id(scope, &format!("collab-{}", hex(16)))
+}
+
+/// Exact credential read after the sole map has selected a principal.
+pub(crate) fn registered_from_map(
     host_paths: &HostPaths,
     scope: &Scope,
-    observed: &AnchorObservation,
-) -> anyhow::Result<Option<AnchorResolution>> {
-    let identities_root = host_paths.state_root().join("identities");
-    if !identities_root.is_dir() {
+    facts: &crate::proto::IdentityFacts,
+) -> anyhow::Result<Option<Identity>> {
+    let route = scope.route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?;
+    let control = crate::server::binding_store::BindingControlStore::new(host_paths.state_root())
+        .load()
+        .map_err(anyhow::Error::msg)?;
+    let Some(slot) = control
+        .lookup(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            facts,
+            Some(&scope.root.to_string_lossy()),
+        )
+        .map_err(anyhow::Error::msg)?
+    else {
         return Ok(None);
+    };
+    let value = slot
+        .active_binding()
+        .expect("lookup returns active current");
+    let mut ident =
+        read_persisted(host_paths, value.binding.agent_id.as_str())?.ok_or_else(|| {
+            anyhow::anyhow!("IDENTITY_CREDENTIAL_MISSING: mapped worker has no credential")
+        })?;
+    if ident.worker_id != value.binding.agent_id.as_str() {
+        anyhow::bail!("IDENTITY_CREDENTIAL_INVALID: exact mapped principal differs");
     }
-    let mut anchors = Vec::new();
-    for value in observed.session_anchors() {
-        anchors.push(("codex_session_id", value));
-    }
-    for value in observed.thread_anchors() {
-        anchors.push(("codex_thread_id", value));
-    }
-    if let Some(value) = observed.dsh_session_id.as_ref() {
-        anchors.push(("dsh_session_id", value.clone()));
-    }
-    let mut matches = BTreeMap::<String, BTreeMap<String, Identity>>::new();
-    for entry in std::fs::read_dir(identities_root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let Some(identity) = read_identity(&entry.path().join("identity.json"))? else {
-            continue;
-        };
-        let persisted_endpoint = identity
-            .transport
-            .as_ref()
-            .and_then(|transport| transport.tmux_endpoint.as_ref());
-        for (name, value) in &anchors {
-            let matched = match *name {
-                "codex_session_id" => {
-                    persisted_endpoint
-                        .and_then(|persisted| persisted.codex_session_id.as_ref())
-                        .is_some_and(|persisted| persisted == value)
-                        || identity
-                            .runtime
-                            .as_ref()
-                            .and_then(|runtime| runtime.session_id.as_ref())
-                            .is_some_and(|persisted| persisted.as_str() == value)
-                }
-                "codex_thread_id" => {
-                    persisted_endpoint
-                        .and_then(|persisted| persisted.codex_thread_id.as_ref())
-                        .is_some_and(|persisted| persisted == value)
-                        || identity
-                            .runtime
-                            .as_ref()
-                            .and_then(|runtime| runtime.native_thread_id.as_ref())
-                            .is_some_and(|persisted| persisted.as_str() == value)
-                }
-                // The dsh anchor lives on the runtime binding, not on a tmux
-                // endpoint: `RuntimeIdentity.session_id` carries the gateway
-                // session id the adapter returned in its agent-facts reply.
-                "dsh_session_id" => identity.transport.as_ref().is_some_and(|transport| {
-                    transport.kind == TransportKind::Dsh
-                        && identity
-                            .runtime
-                            .as_ref()
-                            .and_then(|runtime| runtime.session_id.as_ref())
-                            .is_some_and(|persisted| persisted.as_str() == value)
-                        && dsh_api_matches(observed, transport)
-                }),
-                _ => false,
-            };
-            if matched {
-                matches
-                    .entry((*name).to_owned())
-                    .or_default()
-                    .insert(identity.worker_id.clone(), identity.clone());
-            }
-        }
-    }
-    let mut matched_workers = BTreeMap::<String, Identity>::new();
-    // Every record that matched any anchor of a worker, deduplicated by
-    // worker_id. One identity can match several anchors (its Codex session and
-    // its thread), so a later anchor must add to this set instead of replacing
-    // the duplicates an earlier anchor already contributed.
-    let expected_scope = scope
-        .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
-        .project_scope_id;
-    if !matches.is_empty()
-        && matches
-            .values()
-            .flat_map(|group| group.values())
-            .all(|identity| identity.project_scope.as_ref() != Some(&expected_scope))
-    {
-        return Ok(Some(AnchorResolution::CrossProject));
-    }
-    for (anchor, identities) in matches {
-        let mut group = identities.into_values().collect::<Vec<_>>();
-        if group.len() > 1 {
-            let current_scope = group
-                .iter()
-                .filter(|identity| identity.project_scope.as_ref() == Some(&expected_scope))
-                .cloned()
-                .collect::<Vec<_>>();
-            if current_scope.len() == 1 {
-                group = current_scope;
-            }
-        }
-        // Two persisted identities can carry the same Codex session anchor when
-        // a stale generation was never retired. The live caller's own endpoint
-        // says which record owns the current binding; this is disambiguation
-        // from the current observation, not a historical pane lookup.
-        if group.len() > 1 {
-            if let Some(candidate) = observed.tmux.as_ref() {
-                let live_binding = group
-                    .iter()
-                    .filter(|identity| {
-                        identity
-                            .transport
-                            .as_ref()
-                            .and_then(|transport| transport.tmux_endpoint.as_ref())
-                            .is_some_and(|persisted| {
-                                crate::client::adapters::tmux::same_owned_pane(
-                                    persisted,
-                                    &candidate.endpoint,
-                                )
-                            })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if live_binding.len() == 1 {
-                    group = live_binding;
-                }
-            }
-        }
-        if group.len() > 1 {
-            let conflicting = group
-                .iter()
-                .map(|identity| identity.worker_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted identities ({conflicting}); the daemon cannot prove a unique owner");
-        }
-        for identity in group {
-            matched_workers.insert(identity.worker_id.clone(), identity);
-        }
-    }
-    match matched_workers.len() {
-        0 => Ok(None),
-        1 => {
-            let (_, identity) = matched_workers.into_iter().next().unwrap();
-            Ok(Some(
-                if identity.project_scope.as_ref() == Some(&expected_scope) {
-                    AnchorResolution::CurrentScope(identity)
-                } else {
-                    AnchorResolution::CrossProject
-                },
-            ))
-        }
-        _ => anyhow::bail!(
-            "IDENTITY_RESTORE_CONFLICT: supplied agent session anchors identify different peers"
-        ),
-    }
+    ident.project_scope = Some(value.binding.project_scope.clone());
+    ident.runtime = Some(RuntimeIdentity {
+        agent_id: value.binding.agent_id.clone(),
+        runtime_id: value.binding.runtime_id.clone(),
+        appserver_id: value.binding.app_scope_id.clone(),
+        binding_id: value.binding.binding_id.clone(),
+        session_id: value.binding.session_id.clone(),
+        native_thread_id: value.binding.native_thread_id.clone(),
+    });
+    ident.transport = Some(value.transport.clone());
+    Ok(Some(ident))
 }
 
 /// Test-only adapter for the subagent launch harness, which names its child
@@ -975,27 +794,6 @@ pub fn load_or_create(
     })?;
     draft_identity_with_id(scope, &worker_id)
 }
-
-pub(crate) fn load_existing_at(
-    host_paths: &HostPaths,
-    scope: &Scope,
-    worker_id: Option<String>,
-) -> anyhow::Result<Option<Identity>> {
-    // Read-only board/scope lookup: it never mints, persists or registers. It
-    // resolves the caller's own anchors (env-derived) to a persisted peer, or
-    // reads one exact named worker. The daemon bootstrap uses
-    // `resolve_for_daemon_at` instead.
-    let explicit_worker = worker_id.filter(|value| !value.trim().is_empty());
-    // A named worker is decided before anchor resolution: an anchor ambiguity
-    // is exactly the case an explicit name resolves.
-    if let Some(worker_id) = explicit_worker {
-        return read_identity(&identity_path_at(host_paths, &worker_id)?);
-    }
-    let observed = AnchorObservation::from_env_at(host_paths)?;
-    identity_by_current_anchors_same_scope_at(host_paths, scope, &observed)
-}
-
-include!("identity_resolver.rs");
 
 #[cfg(test)]
 #[path = "identity_tests.rs"]

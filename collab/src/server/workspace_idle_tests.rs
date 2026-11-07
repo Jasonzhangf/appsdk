@@ -27,13 +27,7 @@ fn seed_idle_master(server: &Server, idle_since_ms: i64, observed_ms: i64) -> St
     )
     .expect("master native thread route must commit");
     crate::server::restore_registered_peer_default_leases(server);
-    let promoted = crate::server::handle_master_promote(
-        server,
-        "master".into(),
-        "token-master".into(),
-        "user-approved".into(),
-    );
-    assert!(promoted.ok, "master promotion failed: {promoted:?}");
+    crate::server::peer_tests::promote_master(server, "master", "user-approved");
     let session = server
         .state
         .lock()

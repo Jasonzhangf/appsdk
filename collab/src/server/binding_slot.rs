@@ -11,6 +11,36 @@ use std::fmt;
 pub(crate) enum PendingEffectKind {
     Register,
     Name,
+    Retire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RoleAction {
+    SetMaster,
+    ClearMaster,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RoleEffect {
+    pub(crate) action: RoleAction,
+    pub(crate) authorization: RoleAuthorization,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RoleAuthorization {
+    User {
+        authorization: String,
+        granted_by: String,
+    },
+    Delegate {
+        actor: String,
+        target: String,
+        grant_id: String,
+        grant_generation: u64,
+    },
 }
 
 /// Logical slot key. It deliberately does NOT include session-derived
@@ -48,14 +78,65 @@ impl IdentityBindingKey {
 pub(crate) struct BindingValue {
     pub(crate) binding: RuntimeBinding,
     pub(crate) transport: SelectedTransport,
+    pub(crate) tab_id: LogicalTab,
+    pub(crate) host: BindingHost,
+    pub(crate) invocation_cwd: String,
+    pub(crate) physical_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) layout_binding_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LogicalTab {
+    pub(crate) project_scope: ProjectScopeId,
+    pub(crate) app_scope_id: AppServerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BindingHost {
+    pub(crate) agent_kind: Option<String>,
+    pub(crate) host_type: String,
+    pub(crate) profile: Option<String>,
 }
 
 impl BindingValue {
     pub(crate) fn new(binding: RuntimeBinding, transport: SelectedTransport) -> Self {
-        Self { binding, transport }
+        let tab_id = LogicalTab {
+            project_scope: binding.project_scope.clone(),
+            app_scope_id: binding.app_scope_id.clone(),
+        };
+        let host_type = match transport.kind {
+            crate::proto::TransportKind::Tmux => "tui",
+            crate::proto::TransportKind::Dsh => "dsh",
+            crate::proto::TransportKind::DesktopBridge => "codex_desktop",
+            crate::proto::TransportKind::AppServer => "native",
+        }
+        .to_owned();
+        Self {
+            invocation_cwd: binding.project_scope.as_str().to_owned(),
+            binding,
+            transport,
+            tab_id,
+            host: BindingHost {
+                agent_kind: None,
+                host_type,
+                profile: None,
+            },
+            physical_name: None,
+            layout_binding_id: None,
+        }
     }
 
     fn validate(&self) -> Result<(), SlotError> {
+        if self.tab_id.project_scope != self.binding.project_scope
+            || self.tab_id.app_scope_id != self.binding.app_scope_id
+        {
+            return Err(SlotError::Invariant(
+                "logical tab differs from binding scope".into(),
+            ));
+        }
         self.binding
             .validate()
             .map_err(|error| SlotError::Invalid(error.to_string()))
@@ -85,6 +166,11 @@ impl BindingValue {
             && self.transport.session_id == other.transport.session_id
             && self.transport.thread_id == other.transport.thread_id
             && self.transport.tmux_endpoint == other.transport.tmux_endpoint
+            && self.tab_id == other.tab_id
+            && self.host == other.host
+            && self.invocation_cwd == other.invocation_cwd
+            && self.physical_name == other.physical_name
+            && self.layout_binding_id == other.layout_binding_id
     }
 }
 
@@ -99,6 +185,7 @@ pub(crate) enum IdentityStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IdentityBindingSlot {
     pub(crate) identity_key: IdentityBindingKey,
+    pub(crate) display_slot: u32,
     pub(crate) identity_status: IdentityStatus,
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
@@ -113,6 +200,8 @@ pub(crate) struct IdentityBindingSlot {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingEffect {
     pub(crate) kind: PendingEffectKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) role: Option<RoleEffect>,
     pub(crate) effect_id: String,
     pub(crate) operation_id: String,
     pub(crate) project_scope: ProjectScopeId,
@@ -151,17 +240,6 @@ impl PendingEffect {
             return Err(SlotError::Invalid(
                 "pending effect requires effect, operation, name, target carrier and revision"
                     .into(),
-            ));
-        }
-        if self
-            .previous_worker_id
-            .as_deref()
-            .is_some_and(|worker| worker == self.target_worker_id)
-            && self.previous_session_id.as_deref() == Some(self.target_session_id.as_str())
-            && self.source_names.is_empty()
-        {
-            return Err(SlotError::Invariant(
-                "pending effect must describe a carrier or name change".into(),
             ));
         }
         Ok(())
@@ -229,6 +307,8 @@ fn identity_key_label(key: &IdentityBindingKey) -> String {
 impl IdentityBindingSlot {
     pub(crate) fn new(identity_key: IdentityBindingKey) -> Self {
         Self {
+            display_slot: super::name_resolution::display_slot(&identity_key.name)
+                .expect("validated identity name"),
             identity_key,
             identity_status: IdentityStatus::Unregistered,
             generation: 0,
@@ -288,14 +368,19 @@ impl IdentityBindingSlot {
             }
         }
 
-        if value.binding.endpoint_generation == 0 {
-            return Err(SlotError::Invalid(
-                "binding endpoint generation must be non-zero".into(),
-            ));
-        }
         let next = self.next_generation()?;
         if let Some(current) = self.current.take() {
             self.previous = Some(current);
+        }
+        // Returning to a retired name can restore exactly the reference fact.
+        // That reference has no distinct handoff information and cannot veto
+        // the new current publication.
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|previous| previous.same_fact(&value))
+        {
+            self.previous = None;
         }
         self.current = Some(value);
         self.identity_status = IdentityStatus::Active;
@@ -329,6 +414,14 @@ impl IdentityBindingSlot {
 
     pub(crate) fn validate(&self) -> Result<(), SlotError> {
         self.validate_shape()?;
+        if super::name_resolution::display_slot(&self.identity_key.name)
+            .map_err(SlotError::Invalid)?
+            != self.display_slot
+        {
+            return Err(SlotError::Invariant(
+                "display slot differs from the registered name".into(),
+            ));
+        }
         if let Some(current) = self.current.as_ref() {
             current.validate()?;
         }
@@ -385,6 +478,8 @@ pub(crate) struct BindingControlSet {
     slots: Vec<IdentityBindingSlot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     effects: Vec<PendingEffect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pending_resets: Vec<String>,
 }
 
 impl BindingControlSet {
@@ -392,15 +487,208 @@ impl BindingControlSet {
         Self::default()
     }
 
+    pub(crate) fn holds_current_binding(&self, binding: &RuntimeBinding) -> bool {
+        self.active_values()
+            .any(|current| &current.binding == binding)
+    }
+
+    /// The only recovery selector. Only active current rows participate.
+    pub(crate) fn lookup(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        facts: &crate::proto::IdentityFacts,
+        cwd: Option<&str>,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        let dsh = facts.dsh_session_id.as_deref().or_else(|| {
+            facts
+                .dsh
+                .as_ref()
+                .map(|candidate| candidate.session_id.as_str())
+        });
+        let candidates = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                &slot.identity_key.project_scope == project
+                    && &slot.identity_key.app_scope_id == app
+            })
+            .filter_map(|slot| slot.active_binding().map(|value| (slot, value)))
+            .filter(|(_, value)| {
+                (dsh.is_none() || value.transport.kind == crate::proto::TransportKind::Dsh)
+                    && (facts.tmux.is_none()
+                        || value.transport.kind == crate::proto::TransportKind::Tmux)
+                    && facts.agent_kind.as_ref().is_none_or(|kind| {
+                        value
+                            .host
+                            .agent_kind
+                            .as_ref()
+                            .is_none_or(|saved| saved == kind)
+                    })
+            })
+            .collect::<Vec<_>>();
+        fn unique(
+            matches: Vec<&IdentityBindingSlot>,
+        ) -> Result<Option<&IdentityBindingSlot>, String> {
+            match matches.as_slice() {
+                [] => Ok(None),
+                [slot] => Ok(Some(*slot)),
+                _ => Err(
+                    "IDENTITY_MAP_AMBIGUOUS: multiple active mappings match the current caller"
+                        .into(),
+                ),
+            }
+        }
+        if facts.tmux.is_some() {
+            if let Some(name) = facts.tmux_session_name.as_ref() {
+                let found = unique(
+                    candidates
+                        .iter()
+                        .filter(|(_, value)| value.physical_name.as_ref() == Some(name))
+                        .map(|(slot, _)| *slot)
+                        .collect(),
+                )?;
+                if found.is_some() {
+                    return Ok(found);
+                }
+            }
+        }
+        if let Some(session) = dsh.or(facts.session_id.as_deref()) {
+            let found = unique(
+                candidates
+                    .iter()
+                    .filter(|(_, value)| {
+                        value
+                            .binding
+                            .session_id
+                            .as_ref()
+                            .is_some_and(|saved| saved.as_str() == session)
+                    })
+                    .map(|(slot, _)| *slot)
+                    .collect(),
+            )?;
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        if let (Some(candidate), Some(cwd)) = (facts.tmux.as_ref(), cwd) {
+            return unique(
+                candidates
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.invocation_cwd == cwd
+                            && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                                crate::client::adapters::tmux::same_owned_pane(
+                                    saved,
+                                    &candidate.endpoint,
+                                )
+                            })
+                    })
+                    .map(|(slot, _)| *slot)
+                    .collect(),
+            );
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn key_for_worker(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        worker: &str,
+    ) -> Result<Option<&IdentityBindingKey>, String> {
+        let mut matches = self.slots.iter().filter(|slot| {
+            &slot.identity_key.project_scope == project
+                && &slot.identity_key.app_scope_id == app
+                && slot
+                    .active_binding()
+                    .is_some_and(|value| value.binding.agent_id.as_str() == worker)
+        });
+        let first = matches.next();
+        if matches.next().is_some() {
+            return Err("IDENTITY_MAP_AMBIGUOUS: worker carries multiple active names".into());
+        }
+        Ok(first.map(|slot| &slot.identity_key))
+    }
+
+    pub(crate) fn current_for_worker(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        worker: &str,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        Ok(self
+            .key_for_worker(project, app, worker)?
+            .and_then(|key| self.slot(key)))
+    }
+
+    pub(crate) fn current_for_name(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        name: &str,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        let mut matches = self.slots.iter().filter(|slot| {
+            &slot.identity_key.project_scope == project
+                && &slot.identity_key.app_scope_id == app
+                && slot.identity_key.name.eq_ignore_ascii_case(name)
+                && slot.active_binding().is_some()
+        });
+        let first = matches.next();
+        if matches.next().is_some() {
+            return Err(format!(
+                "IDENTITY_MAP_AMBIGUOUS: {name} carries multiple active names"
+            ));
+        }
+        Ok(first)
+    }
+
+    pub(crate) fn ordinary_name(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        worker: &str,
+    ) -> Result<String, String> {
+        for name in super::name_resolution::ORDINARY_NAME_POOL {
+            if self.slots.iter().any(|slot| {
+                &slot.identity_key.project_scope == project
+                    && &slot.identity_key.app_scope_id == app
+                    && slot.identity_key.name == name
+                    && slot
+                        .active_binding()
+                        .is_some_and(|value| value.binding.agent_id.as_str() == worker)
+            }) {
+                return Ok(name.into());
+            }
+        }
+        super::name_resolution::ORDINARY_NAME_POOL
+            .into_iter()
+            .find(|name| {
+                !self.slots.iter().any(|slot| {
+                    &slot.identity_key.project_scope == project
+                        && &slot.identity_key.app_scope_id == app
+                        && slot.identity_key.name == *name
+                        && slot.active_binding().is_some()
+                })
+            })
+            .map(str::to_owned)
+            .ok_or_else(|| "NAME_POOL_FULL: all ordinary names have active mappings".into())
+    }
+
     pub(crate) fn from_slots(slots: Vec<IdentityBindingSlot>) -> Self {
         Self {
             slots,
             effects: Vec::new(),
+            pending_resets: Vec::new(),
         }
     }
 
     pub(crate) fn from_parts(slots: Vec<IdentityBindingSlot>, effects: Vec<PendingEffect>) -> Self {
-        Self { slots, effects }
+        Self {
+            slots,
+            effects,
+            pending_resets: Vec::new(),
+        }
     }
 
     pub(crate) fn slot(&self, key: &IdentityBindingKey) -> Option<&IdentityBindingSlot> {

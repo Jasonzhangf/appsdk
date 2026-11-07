@@ -119,6 +119,10 @@ pub struct TransportCandidates {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Current gateway API and target reported by a DSH caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<DshCandidate>,
@@ -143,6 +147,11 @@ pub struct IdentityFacts {
     pub pane_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxCandidate>,
+    /// Current tmux session name. This is the fixed TUI identity anchor after
+    /// first registration; it is observed by the daemon, never selected from
+    /// a caller-controlled environment value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session_name: Option<String>,
     /// Stable address available without display/capture or native runtime IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux_anchor: Option<TmuxPaneAnchor>,
@@ -159,38 +168,6 @@ pub struct IdentityFacts {
 pub struct TmuxPaneAnchor {
     pub socket_path: String,
     pub pane_id: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IdentityOperationPhase {
-    Admitted,
-    Validating,
-    InnerDispatched,
-    EffectObserved,
-    Completed,
-    Refused,
-    Failed,
-    Unknown,
-    Partial,
-    Cancelled,
-}
-
-impl IdentityOperationPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Admitted => "admitted",
-            Self::Validating => "validating",
-            Self::InnerDispatched => "inner_dispatched",
-            Self::EffectObserved => "effect_observed",
-            Self::Completed => "completed",
-            Self::Refused => "refused",
-            Self::Failed => "failed",
-            Self::Unknown => "unknown",
-            Self::Partial => "partial",
-            Self::Cancelled => "cancelled",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,39 +188,6 @@ pub struct IdentityContextRequest {
     pub grant_approval: Option<serde_json::Value>,
     #[serde(default)]
     pub query: bool,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub query_capability: String,
-    /// Daemon-issued single-use reservation ticket. It is internal to the
-    /// context cancellation handshake and never exposed as a public CLI/MCP
-    /// argument.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub invocation_ticket: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RegisterReplyPurpose {
-    ManualCommunicationRestore,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RegisterParticipantReply {
-    pub operation_id: String,
-    pub command_id: String,
-    pub purpose: RegisterReplyPurpose,
-    pub challenge: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<TmuxPaneAnchor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native: Option<RegisterNativeReply>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RegisterNativeReply {
-    AppServer { candidate: AppServerCandidate },
-    Dsh { candidate: DshCandidate },
 }
 
 impl IdentityContextRequest {
@@ -257,54 +201,7 @@ impl IdentityContextRequest {
             approval: None,
             grant_approval: None,
             query: false,
-            query_capability: String::new(),
-            invocation_ticket: String::new(),
         }
-    }
-}
-
-/// Control acknowledgement for one context cancellation request. A
-/// pre-admission cancellation has no operation projection by design.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityContextCancelAck {
-    pub operation_id: String,
-    pub disposition: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projection: Option<IdentityOperationProjection>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityOperationProjection {
-    pub operation_id: String,
-    pub phase: IdentityOperationPhase,
-    pub outcome: String,
-    #[serde(default)]
-    pub committed_phases: Vec<IdentityOperationPhase>,
-    #[serde(default)]
-    pub business_receipts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nested_command_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nested_operation_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityContextQueryResult {
-    pub projection: IdentityOperationProjection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityContextResponseEnvelope {
-    pub result: IdentityOperationProjection,
-}
-
-impl IdentityContextResponseEnvelope {
-    pub fn query(projection: IdentityOperationProjection) -> Self {
-        Self { result: projection }
     }
 }
 
@@ -341,8 +238,6 @@ pub struct ContextOperationResult {
     pub snapshot: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub owner_readback: serde_json::Map<String, serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queried_operation: Option<IdentityOperationProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,7 +343,6 @@ pub struct CommandEnvelope {
     pub command_id: CommandId,
     pub operation_id: OperationId,
     pub actor_binding_id: BindingId,
-    pub endpoint_generation: u64,
     pub scope: RouteScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
@@ -465,7 +359,6 @@ impl CommandEnvelope {
         command_id: CommandId,
         operation_id: OperationId,
         actor_binding_id: BindingId,
-        endpoint_generation: u64,
         scope: RouteScope,
         expected_revision: Option<u64>,
         turn_id: Option<TurnId>,
@@ -476,7 +369,6 @@ impl CommandEnvelope {
             command_id,
             operation_id,
             actor_binding_id,
-            endpoint_generation,
             scope,
             expected_revision,
             turn_id,
@@ -515,7 +407,6 @@ impl CommandEnvelope {
             agent_id: registered.agent_id.clone(),
             runtime_id: registered.runtime_id.clone(),
             appserver_id: registered.appserver_id.clone(),
-            endpoint_generation: self.endpoint_generation,
             binding_id: self.actor_binding_id.clone(),
             session_id: registered.session_id.clone(),
             native_thread_id: registered.native_thread_id.clone(),
@@ -554,7 +445,6 @@ pub struct RouteResolution {
     pub storage_root: String,
     pub agent_id: AgentId,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     pub session_id: Option<SessionId>,
     pub native_thread_id: Option<NativeThreadId>,
 }
@@ -584,9 +474,6 @@ impl RouteResolution {
         }
         if self.project_scope.as_str() != self.canonical_root {
             anyhow::bail!("route resolution project scope does not match canonical root");
-        }
-        if self.endpoint_generation == 0 {
-            anyhow::bail!("route resolution endpoint generation must be non-zero");
         }
         Ok(())
     }
@@ -688,8 +575,7 @@ pub enum ReplyPolicy {
 }
 
 impl ReplyPolicy {
-    /// Wire/projection spelling. One owner keeps the CLI, view, and journal
-    /// spellings identical.
+    /// One spelling for the CLI, public view and current storage.
     pub fn as_str(self) -> &'static str {
         match self {
             ReplyPolicy::Required => "required",
@@ -705,9 +591,6 @@ pub enum Req {
         worker_id: String,
         token: String,
         command: crate::ceo::CeoCommand,
-    },
-    RegisterReply {
-        reply: RegisterParticipantReply,
     },
     BoardShow,
     UnregisterSelf {
@@ -908,13 +791,6 @@ pub enum Req {
     RouteResolve {
         tmux_endpoint: TmuxEndpoint,
     },
-    /// Inspect a committed same-pane master transition whose project journal
-    /// is one generation ahead of the host route. Requires the worker token.
-    RouteResolvePaneRecovery {
-        tmux_endpoint: TmuxEndpoint,
-        worker_id: String,
-        token: String,
-    },
     /// Resolve the unique registered project route for one native App Server
     /// session/thread pair. This is the live counterpart to `RouteResolve` for
     /// native TUI peers that do not carry a tmux pane anchor.
@@ -1032,22 +908,6 @@ pub enum Req {
         feature_id: Option<String>,
         worktree_path: Option<String>,
     },
-    MigrationInspect {
-        worker_id: String,
-        token: String,
-    },
-    MigrationPlan {
-        worker_id: String,
-        token: String,
-    },
-    MigrationApply {
-        worker_id: String,
-        token: String,
-    },
-    MigrationVerify {
-        worker_id: String,
-        token: String,
-    },
     #[serde(alias = "RootPromote")]
     MasterPromote {
         worker_id: String,
@@ -1112,11 +972,6 @@ pub enum Req {
     WorkerStatus {
         worker_id: Option<String>,
     },
-    WorkerName {
-        worker_id: String,
-        token: String,
-        name: Option<String>,
-    },
     WorkRolesSet {
         worker_id: String,
         token: String,
@@ -1154,13 +1009,6 @@ pub enum Req {
         worker_id: String,
         token: String,
         target_id: String,
-    },
-    RemoveWorker {
-        worker_id: String,
-        token: String,
-        target_id: String,
-        #[serde(default)]
-        force: bool,
     },
     ResetBindings {
         confirm: bool,
@@ -1323,6 +1171,27 @@ pub const IDENTITY_CONTEXT_CWD_PROTOCOL: &str = "identity-context-cwd-v1";
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removed_maintenance_requests_are_unknown_wire_variants() {
+        let current: Req = serde_json::from_value(serde_json::json!({"op":"Ping"})).unwrap();
+        assert!(matches!(current, Req::Ping));
+        for operation in [
+            "MigrationInspect",
+            "MigrationPlan",
+            "MigrationApply",
+            "MigrationVerify",
+            "RemoveWorker",
+        ] {
+            let error = serde_json::from_value::<Req>(serde_json::json!({
+                "op":operation, "worker_id":"actor", "token":"test-token", "target_id":"target"
+            }))
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("unknown variant"),
+                "{operation}: {error}"
+            );
+        }
+    }
     use crate::identity::{
         AgentId, AppServerId, BindingId, BindingValidationError, CommandId, NativeThreadId,
         OperationId, RuntimeId,
@@ -1335,7 +1204,6 @@ mod tests {
             agent_id: AgentId::new("agent-1").unwrap(),
             runtime_id: RuntimeId::new("runtime-1").unwrap(),
             appserver_id: AppServerId::new("appserver-1").unwrap(),
-            endpoint_generation: 7,
             binding_id: BindingId::new("binding-1").unwrap(),
             session_id: Some(crate::identity::SessionId::new("session-1").unwrap()),
             native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
@@ -1351,7 +1219,6 @@ mod tests {
             storage_root: root.into(),
             agent_id: AgentId::new("agent-1").unwrap(),
             binding_id: BindingId::new("binding-1").unwrap(),
-            endpoint_generation: 7,
             session_id: Some(crate::identity::SessionId::new("session-1").unwrap()),
             native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
         }
@@ -1367,7 +1234,6 @@ mod tests {
             CommandId::new("command-1").unwrap(),
             OperationId::new("operation-1").unwrap(),
             BindingId::new("binding-1").unwrap(),
-            7,
             scope,
             Some(12),
             Some(TurnId::new("turn-1").unwrap()),
@@ -1383,7 +1249,7 @@ mod tests {
         assert_eq!(encoded["command_id"], "command-1");
         assert_eq!(encoded["operation_id"], "operation-1");
         assert_eq!(encoded["actor_binding_id"], "binding-1");
-        assert_eq!(encoded["endpoint_generation"], 7);
+        assert!(encoded.get("endpoint_generation").is_none());
         assert_eq!(encoded["scope"]["app_scope_id"], "appserver-1");
         assert_eq!(
             encoded["scope"]["project_scope_id"],
@@ -1409,7 +1275,7 @@ mod tests {
         assert_eq!(encoded["storage_root"], env!("CARGO_MANIFEST_DIR"));
         assert_eq!(encoded["agent_id"], "agent-1");
         assert_eq!(encoded["binding_id"], "binding-1");
-        assert_eq!(encoded["endpoint_generation"], 7);
+        assert!(encoded.get("endpoint_generation").is_none());
         assert_eq!(encoded["session_id"], "session-1");
         assert_eq!(encoded["native_thread_id"], "thread-1");
         let decoded: RouteResolution = serde_json::from_value(encoded).unwrap();
@@ -1454,10 +1320,6 @@ mod tests {
         let mut route = registered_route();
         route.storage_root = "relative/storage".into();
         assert!(route.validate().is_err());
-
-        let mut route = registered_route();
-        route.endpoint_generation = 0;
-        assert!(route.validate().is_err());
     }
 
     #[test]
@@ -1470,22 +1332,6 @@ mod tests {
         let before_scope = scope.clone();
 
         command.validate_for(&identity, &scope).unwrap();
-        assert_eq!(command, before_command);
-        assert_eq!(identity, before_identity);
-        assert_eq!(scope, before_scope);
-    }
-
-    #[test]
-    fn command_envelope_rejects_stale_generation_without_mutation() {
-        let identity = registered_identity();
-        let scope = registered_scope();
-        let mut command = envelope(scope.clone());
-        command.endpoint_generation = 6;
-        let before_command = command.clone();
-        let before_identity = identity.clone();
-        let before_scope = scope.clone();
-
-        assert!(command.validate_for(&identity, &scope).is_err());
         assert_eq!(command, before_command);
         assert_eq!(identity, before_identity);
         assert_eq!(scope, before_scope);
@@ -1568,14 +1414,14 @@ mod tests {
         let identity = registered_identity();
         let scope = registered_scope();
         let mut command = envelope(scope.clone());
-        command.endpoint_generation = 6;
+        command.actor_binding_id = BindingId::new("different-binding").unwrap();
 
         let error = command.validate_for(&identity, &scope).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<BindingValidationError>(),
-            Some(BindingValidationError::StaleGeneration {
-                expected: 7,
-                observed: 6
+            Some(BindingValidationError::Mismatch {
+                field: "binding_id",
+                ..
             })
         ));
     }

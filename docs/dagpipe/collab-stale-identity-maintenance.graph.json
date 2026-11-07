@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-stale-identity-maintenance",
   "version": "0.1.0",
-  "description": "一次 daemon 拥有的身份可用性维护到唯一结果。触发只读取当前权威身份、绑定与路由；probe 事实与持久身份状态分开，Present、Cold、Unknown、Timeout、AuthDenied 都保留原身份且不写退役。只有 adapter 明确返回的确定缺席才进入责任核对；存在打开任务、激活 responsibility fence 或未决回复义务时保留并返回 typed retention 回执，不改任务归属。明确缺席且无责任引用时复用既有 peer 生命周期 Close owner 原子退役 binding、route 与订阅，保留名字、任务、mailbox 与恢复数据；不扫描历史 binding、不用日志或快照猜身份、不构造 fallback。唯一结果按轮次输出 retained、retired、unknown 或 refused，不自动重试、不回边、不派生第二条状态 owner。",
+  "description": "一次 daemon 可用性维护到唯一结果。identity-map.json 独占身份与恢复，自动维护保持其 active 名字、角色、绑定和凭据。只有 adapter 明确证明缺席且无责任引用时，复用生命周期 Close owner 清理驻留 worker、投递 route 与订阅；显式注销另走既有控制入口。Present、Cold、Unknown、Timeout、AuthDenied 保留驻留状态。观测后重新核对当前 worker、完整 binding 和责任，在同一 State 锁内核对并准入 Close。唯一结果聚合 retained、retired 与 unknown 及具体原因，不回放历史、不构造第二恢复路径。",
   "inputs": [
     {
       "id": "maintenance_tick",
@@ -61,7 +61,7 @@
       "id": "按证据分级当下可用性",
       "operator": "appsdk.collab_stale_identity.classify",
       "operator_version": "1",
-      "description": "对每个候选绑定按真实 adapter 证据分级为 Present、Cold、Missing、Unknown、Timeout 或 AuthDenied。probe 结果是一次观测事实，不写入持久身份状态；单次 missing、超时、权限拒绝或 unknown 都不等于失效，只有 adapter 确定缺席才进入责任核对。Cold 表示地址可用而当前未加载，Unknown 表示证据不足，两者都不退役。",
+      "description": "按真实 adapter 证据分级为 Present、Cold、Missing 或 Unknown。明确不存在的 pane 或 thread 可以证明 Missing；连接失败、超时、权限拒绝和不完整回执均为 Unknown。观测不写持久身份状态，Cold 和 Unknown 均保留。",
       "inputs": [
         "candidate_bindings"
       ],
@@ -85,7 +85,7 @@
       "id": "核对责任与任务引用",
       "operator": "appsdk.collab_stale_identity.retention_check",
       "operator_version": "1",
-      "description": "仅对确定缺席的候选核对打开任务、激活 responsibility fence 与未决回复义务。任何责任引用都保留身份、任务归属、mailbox 与恢复数据，并返回 typed retention 回执；该分支不启动宿主恢复，也不转派任务。",
+      "description": "观测后读取当前 worker、完整 RuntimeBinding 和目标，变更则保留。在同一 State 锁内核对任务、未读消息、有效用户订阅、激活 fence 与回复义务，再准入 Close。只有 mailbox owner 给出的精确默认收件订阅 ID 属于基础通信，保持完整 snapshot 与 fence，不视为用户待办。仅豁免精确复用操作自己的 fence，其他责任均保留。未完成操作只按完整目标复用，已完成操作不复用为新准入。",
       "inputs": [
         "classified_candidates"
       ],
@@ -106,10 +106,10 @@
       "iterator": "Whole"
     },
     {
-      "id": "沿生命周期 owner 退役确定失效身份",
+      "id": "清理确定缺席的驻留执行绑定",
       "operator": "appsdk.collab_stale_identity.retire_definitive_missing",
       "operator_version": "1",
-      "description": "只对明确缺席且无责任引用的候选复用 peer 生命周期 Close owner：一次原子提交退役当前 binding、route 与订阅，保留名字、任务、mailbox、生命周期操作回执与恢复数据。宿主归档与身份退役分开；失败保持 cleanup-open 并保留 fence，不回滚到部分完成，不改写既有 operation id。",
+      "description": "复用 Close owner 清理明确缺席且无待办责任的驻留 worker 与 route。私有 typed disposition 区分自动清理与显式注销。自动清理保持 active identity map、角色、凭据、消息和精确默认收件订阅，不归档宿主、不撤销 master。没有计划退役的订阅时回执为 NotApplicable。失败保留真实 cleanup-open 与对应 fence。普通 Context 随后按同一 identity map 补齐驻留执行关系。",
       "inputs": [
         "maintenance_decisions"
       ],
@@ -133,7 +133,7 @@
       "id": "输出唯一维护结果",
       "operator": "appsdk.collab_stale_identity.emit_result",
       "operator_version": "1",
-      "description": "每轮只输出一个结果对象，按候选聚合为 retained、retired、unknown 或 refused，并携带每类原因与操作引用；无候选时输出空批次。结果不重放、不驱动重试，后续维护由下一轮触发。",
+      "description": "每轮输出唯一结果对象，聚合 retained、retired 与 unknown 及各候选原因和当前操作引用。无候选时输出空批次。结果不重放、不驱动恢复，下一轮由既有 timer 触发。",
       "inputs": [
         "retirement_outcomes"
       ],
@@ -172,11 +172,11 @@
     },
     {
       "from": "核对责任与任务引用",
-      "to": "沿生命周期 owner 退役确定失效身份",
+      "to": "清理确定缺席的驻留执行绑定",
       "arc_id": "maintenance_decisions"
     },
     {
-      "from": "沿生命周期 owner 退役确定失效身份",
+      "from": "清理确定缺席的驻留执行绑定",
       "to": "输出唯一维护结果",
       "arc_id": "retirement_outcomes"
     }

@@ -12,6 +12,23 @@ fn seed_legacy_runtime(root: &Path) {
     std::fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
 }
 
+fn reset_route(root: &Path, registered_ms: i64) -> crate::server::HostRouteRecord {
+    crate::server::HostRouteRecord {
+        app_scope_id: "appserver-cli".into(),
+        project_scope: root.display().to_string(),
+        canonical_root: root.display().to_string(),
+        storage_root: root.display().to_string(),
+        registered_ms,
+    }
+}
+
+fn publish_reset_routes(state: &Path, routes: &[crate::server::HostRouteRecord]) {
+    crate::server::binding_store::publish_route_records(&state.join("routes.json"), routes)
+        .unwrap()
+        .require_confirmed_route()
+        .unwrap();
+}
+
 fn assert_current_project_marker(root: &Path) {
     let marker = root.join(".agent-collab");
     assert!(marker.is_dir(), "current baseline marker is missing");
@@ -100,43 +117,20 @@ fn retire_host_routes_preserves_unrelated_records() {
         std::fs::create_dir_all(path).unwrap();
     }
     let host = HostPaths::from_state_root(&state).unwrap();
-    let retired = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": project.canonicalize().unwrap().to_string_lossy(),
-        "canonical_root": project.canonicalize().unwrap().to_string_lossy(),
-        "storage_root": project.canonicalize().unwrap().to_string_lossy(),
-        "registered_ms": 1,
-    });
-    let kept = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": other.canonicalize().unwrap().to_string_lossy(),
-        "canonical_root": other.canonicalize().unwrap().to_string_lossy(),
-        "storage_root": other.canonicalize().unwrap().to_string_lossy(),
-        "registered_ms": 2,
-    });
-    std::fs::write(state.join("routes.jsonl"), format!("{retired}\n{kept}\n")).unwrap();
+    let retired = reset_route(&project.canonicalize().unwrap(), 1);
+    let kept = reset_route(&other.canonicalize().unwrap(), 2);
+    publish_reset_routes(&state, &[retired, kept.clone()]);
 
     assert_eq!(retire_host_routes(&host, &project).unwrap(), 1);
-    let remaining = std::fs::read_to_string(state.join("routes.jsonl")).unwrap();
-    assert!(remaining.contains(&other.canonicalize().unwrap().to_string_lossy().to_string()));
-    assert!(!remaining.contains(
-        &project
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
-    ));
+    let remaining = std::fs::read(state.join("routes.json")).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&remaining).unwrap(),
+        json!([kept])
+    );
 
     // Idempotent: a second pass removes nothing and leaves the table intact.
     assert_eq!(retire_host_routes(&host, &project).unwrap(), 0);
-    assert_eq!(
-        std::fs::read_to_string(state.join("routes.jsonl")).unwrap(),
-        remaining
-    );
+    assert_eq!(std::fs::read(state.join("routes.json")).unwrap(), remaining);
 
     for path in [&state, &project, &other] {
         std::fs::remove_dir_all(path).ok();
@@ -211,10 +205,16 @@ fn reset_retires_nonempty_legacy_runtime_files() {
     assert!(!root.join(".agent-collab/server/events.jsonl").exists());
     assert!(!root.join(".agent-collab/server/log.txt").exists());
     assert_current_project_marker(&root);
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["already_reset"], json!(false));
-    assert_eq!(record["archive_durable"], json!(true));
-    assert_eq!(record["delivery_verified"], json!(false));
+    let archives = archive_roots(&state);
+    assert_eq!(archives.len(), 1);
+    assert_eq!(
+        std::fs::read(archives[0].join(".agent-collab/server/events.jsonl")).unwrap(),
+        b"{}\n"
+    );
+    assert_eq!(
+        std::fs::read(archives[0].join(".agent-collab/server/log.txt")).unwrap(),
+        b"old log\n"
+    );
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -300,9 +300,16 @@ fn reset_does_not_treat_nonempty_project_state_as_empty_baseline() {
     assert!(!root.join(".agent-collab/runs/stale.jsonl").exists());
     assert!(!root.join(".agent-collab/server/runtimes").exists());
     assert_current_project_marker(&root);
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["already_reset"], json!(false));
-    assert_eq!(record["delivery_verified"], json!(false));
+    let archives = archive_roots(&state);
+    assert_eq!(archives.len(), 1);
+    assert_eq!(
+        std::fs::read(archives[0].join(".agent-collab/runs/stale.jsonl")).unwrap(),
+        b"{}\n"
+    );
+    assert_eq!(
+        std::fs::read(archives[0].join(".agent-collab/server/runtimes/old/journal.jsonl")).unwrap(),
+        b"legacy\n"
+    );
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -433,7 +440,7 @@ fn reset_rolls_back_legacy_roots_when_route_rewrite_fails() {
 
     let state = temp_root("rollback-routes-state");
     std::fs::create_dir_all(&state).unwrap();
-    let routes = state.join("routes.jsonl");
+    let routes = state.join("routes.json");
     std::fs::write(&routes, b"{not-json}\n").unwrap();
     let host = HostPaths::from_state_root(&state).unwrap();
     let scope = Scope { root: root.clone() };
@@ -465,69 +472,17 @@ fn reset_rolls_back_legacy_roots_when_route_rewrite_fails() {
     std::fs::remove_dir_all(state).ok();
 }
 
-#[test]
-fn reset_rolls_back_legacy_roots_when_reset_record_write_fails() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let root = temp_root("rollback-record");
-    std::fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
-    let legacy = b"{\"ev\":\"NotificationSubscribed\",\"subscription\":{}}\n";
-    std::fs::write(root.join(".agent-collab/server/journal.jsonl"), legacy).unwrap();
-    std::fs::create_dir_all(root.join("docs")).unwrap();
-    let original_doc = b"# Project-owned Collab notes\n";
-    std::fs::write(root.join("docs/collab.md"), original_doc).unwrap();
-
-    let state = temp_root("rollback-record-state");
-    std::fs::create_dir_all(&state).unwrap();
-    let reset_record = state.join("reset.jsonl");
-    let original_record = b"{\"schema\":\"collab-reset/v1\",\"existing\":true}\n";
-    std::fs::write(&reset_record, original_record).unwrap();
-    let mut permissions = std::fs::metadata(&reset_record).unwrap().permissions();
-    permissions.set_mode(0o444);
-    std::fs::set_permissions(&reset_record, permissions).unwrap();
-
-    let host = HostPaths::from_state_root(&state).unwrap();
-    let scope = Scope { root: root.clone() };
-
-    let error = run(
-        &scope,
-        &host,
-        ResetRequest {
-            approval: "operator authorized legacy retirement".into(),
-            discard_legacy: true,
-            ..ResetRequest::default()
-        },
-    )
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("reset rolled back")
-            || error.to_string().contains("DAEMON_MIGRATION_REQUIRED"),
-        "{error:#}"
-    );
-    assert_eq!(
-        std::fs::read(root.join(".agent-collab/server/journal.jsonl")).unwrap(),
-        legacy
-    );
-    assert_eq!(
-        std::fs::read(root.join("docs/collab.md")).unwrap(),
-        original_doc
-    );
-    assert!(root.join(".agent-collab").is_dir());
-    assert!(root
-        .read_dir()
+fn archive_roots(state: &Path) -> Vec<PathBuf> {
+    let path = state.join("archives");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let mut roots = std::fs::read_dir(path)
         .unwrap()
-        .flatten()
-        .all(|entry| !entry.file_name().to_string_lossy().contains("reset-stage")));
-    assert_eq!(std::fs::read(&reset_record).unwrap(), original_record);
-
-    std::fs::remove_dir_all(root).ok();
-    std::fs::remove_dir_all(state).ok();
-}
-
-fn read_last_reset_record(state: &Path) -> serde_json::Value {
-    let text = std::fs::read_to_string(state.join("reset.jsonl")).unwrap();
-    let last = text.lines().last().unwrap();
-    serde_json::from_str(last).unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots
 }
 
 #[test]
@@ -598,10 +553,7 @@ fn reset_rebuilds_an_uninitialized_project_root() {
 
     assert_current_project_marker(&root);
     assert!(!root.join(".agent-collab/server/journal.jsonl").exists());
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["already_reset"], json!(true));
-    assert_eq!(record["retired"], json!([]));
-    assert_eq!(record["delivery_verified"], json!(false));
+    assert!(archive_roots(&state).is_empty());
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -619,47 +571,22 @@ fn prune_stale_host_routes_removes_only_provably_dead_roots() {
     std::fs::create_dir_all(live.join(".agent-collab")).unwrap();
     let host = HostPaths::from_state_root(&state).unwrap();
 
-    let record = |root: &Path| {
-        json!({
-            "version": 1,
-            "op": "register",
-            "app_scope_id": "appserver-cli",
-            "project_scope": root.canonicalize().unwrap().to_string_lossy(),
-            "canonical_root": root.canonicalize().unwrap().to_string_lossy(),
-            "storage_root": root.canonicalize().unwrap().to_string_lossy(),
-            "registered_ms": 1,
-        })
-    };
-    let missing_record = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": missing.to_string_lossy(),
-        "canonical_root": missing.to_string_lossy(),
-        "storage_root": missing.to_string_lossy(),
-        "registered_ms": 1,
-    });
-    std::fs::write(
-        state.join("routes.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            record(&live),
-            record(&uninitialized),
-            missing_record
-        ),
-    )
-    .unwrap();
+    let live_record = reset_route(&live.canonicalize().unwrap(), 1);
+    publish_reset_routes(
+        &state,
+        &[
+            live_record.clone(),
+            reset_route(&uninitialized.canonicalize().unwrap(), 1),
+            reset_route(&missing, 1),
+        ],
+    );
 
     assert_eq!(prune_stale_host_routes(&host).unwrap(), 2);
-    let remaining = std::fs::read_to_string(state.join("routes.jsonl")).unwrap();
-    assert!(remaining.contains(&live.canonicalize().unwrap().to_string_lossy().to_string()));
-    assert!(!remaining.contains(
-        &uninitialized
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
-    ));
+    let remaining = std::fs::read(state.join("routes.json")).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&remaining).unwrap(),
+        json!([live_record])
+    );
 
     for path in [&state, &live, &uninitialized] {
         std::fs::remove_dir_all(path).ok();
@@ -696,13 +623,14 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
     assert_current_project_marker(&root);
     assert!(!root.join(".agent-collab/server/journal.jsonl").exists());
 
-    // The audit record is explicit that this proves reset only.
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["delivery_verified"], json!(false));
-    assert_eq!(record["already_reset"], json!(false));
-    assert_eq!(record["archive_durable"], json!(true));
-    assert_eq!(record["schema"], json!("collab-reset/v1"));
-    assert!(record["archive_root"].is_string());
+    let first_archives = archive_roots(&state);
+    assert_eq!(first_archives.len(), 1);
+    let original =
+        std::fs::read(first_archives[0].join(".agent-collab/server/journal.jsonl")).unwrap();
+    assert_eq!(
+        original,
+        b"{\"ev\":\"NotificationSubscribed\",\"subscription\":{}}\n"
+    );
 
     // Second run is idempotent and does not claim delivery.
     run(
@@ -715,11 +643,11 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
         },
     )
     .unwrap();
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["already_reset"], json!(true));
-    assert_eq!(record["archive_durable"], json!(false));
-    assert_eq!(record["delivery_verified"], json!(false));
-    assert!(record["archive_root"].is_null());
+    assert_eq!(archive_roots(&state), first_archives);
+    assert_eq!(
+        std::fs::read(first_archives[0].join(".agent-collab/server/journal.jsonl")).unwrap(),
+        original
+    );
     assert_current_project_marker(&root);
 
     // Non-empty runtime artifacts are historical state too. They must be
@@ -738,14 +666,23 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
         },
     )
     .unwrap();
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["already_reset"], json!(false));
-    assert_eq!(record["archive_durable"], json!(true));
-    assert!(!record["retired"].as_array().unwrap().is_empty());
+    let archives = archive_roots(&state);
+    assert_eq!(archives.len(), 2);
+    let added = archives
+        .iter()
+        .find(|path| !first_archives.contains(path))
+        .unwrap();
+    assert_eq!(
+        std::fs::read(added.join(".agent-collab/server/events.jsonl")).unwrap(),
+        b"{}\n"
+    );
+    assert_eq!(
+        std::fs::read(added.join(".agent-collab/server/log.txt")).unwrap(),
+        b"started\n"
+    );
     assert!(!root.join(".agent-collab/server/events.jsonl").exists());
     assert!(!root.join(".agent-collab/server/log.txt").exists());
     assert_current_project_marker(&root);
-    assert_eq!(record["delivery_verified"], json!(false));
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -899,29 +836,14 @@ fn reset_project_retires_a_legacy_resident_index() {
         .unwrap(),
     )
     .unwrap();
-    let route = |path: &Path, registered_ms: i64| {
-        let canonical = path.canonicalize().unwrap().to_string_lossy().to_string();
-        json!({
-            "version": 1,
-            "op": "register",
-            "app_scope_id": "appserver-cli",
-            "project_scope": canonical,
-            "canonical_root": canonical,
-            "storage_root": canonical,
-            "registered_ms": registered_ms,
-        })
-    };
-    std::fs::write(
-        state.join("routes.jsonl"),
-        format!("{}\n{}\n", route(&project, 1), route(&other, 2)),
-    )
-    .unwrap();
-    // Host-level audit artifacts are not the project level's target.
-    std::fs::write(
-        state.join("reset.jsonl"),
-        b"{\"schema\":\"collab-reset/v1\",\"prior\":true}\n",
-    )
-    .unwrap();
+    let kept_route = reset_route(&other.canonicalize().unwrap(), 2);
+    publish_reset_routes(
+        &state,
+        &[
+            reset_route(&project.canonicalize().unwrap(), 1),
+            kept_route.clone(),
+        ],
+    );
     std::fs::create_dir_all(state.join("archives/prior")).unwrap();
     std::fs::write(state.join("archives/prior/manifest.json"), b"{}\n").unwrap();
 
@@ -939,9 +861,6 @@ fn reset_project_retires_a_legacy_resident_index() {
     )
     .expect("the storage root must be recoverable with a project reset");
 
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["held_resident_index"], json!(true));
-
     // The project's business payload and resident index are retired.
     assert!(!project.join(".agent-collab/server/journal.jsonl").exists());
     assert!(!project.join(".agent-collab/server/events.jsonl").exists());
@@ -949,7 +868,12 @@ fn reset_project_retires_a_legacy_resident_index() {
     assert!(!project.join(".agent-collab/mailbox/old.jsonl").exists());
     assert!(!project.join(".agent-collab/runs/old.jsonl").exists());
     assert_current_project_marker(&project);
-    let archive_root = PathBuf::from(record["archive_root"].as_str().unwrap());
+    let archives = archive_roots(&state);
+    let archive_root = archives
+        .iter()
+        .find(|path| **path != state.join("archives/prior"))
+        .unwrap();
+    assert_eq!(archives.len(), 2);
     assert_eq!(
         std::fs::read(archive_root.join(".agent-collab/server/journal.jsonl")).unwrap(),
         resident_journal
@@ -964,137 +888,23 @@ fn reset_project_retires_a_legacy_resident_index() {
         std::fs::read(other.join(".agent-collab/mailbox/keep.jsonl")).unwrap(),
         b"{}\n"
     );
-    let routes = std::fs::read_to_string(state.join("routes.jsonl")).unwrap();
-    assert!(routes.contains(&other.canonicalize().unwrap().to_string_lossy().to_string()));
-    assert!(!routes.contains(
-        &project
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
-    ));
-
-    // The host-level audit trail survives and grows by this run.
-    assert!(state.join("archives/prior/manifest.json").exists());
-    let reset_log = std::fs::read_to_string(state.join("reset.jsonl")).unwrap();
-    assert!(reset_log.contains("\"prior\":true"));
-    assert!(reset_log.lines().count() >= 2);
-
-    std::fs::remove_dir_all(root).ok();
-}
-
-/// C1: a journal that cannot be replayed is exactly the state reset exists to
-/// repair. The host level must still run, archive the unreadable journal as
-/// evidence, and report the degraded reset instead of refusing with the replay
-/// error.
-#[test]
-fn reset_host_recovers_an_unreplayable_index_and_reports_degraded() {
-    let root = temp_root("host-unreplayable");
-    let project = root.join("project");
-    let state = root.join("state");
-    let server_dir = project.join(".agent-collab/server");
-    std::fs::create_dir_all(&server_dir).unwrap();
-    std::fs::create_dir_all(&state).unwrap();
-    let canonical = project
-        .canonicalize()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-
-    let mut journal = String::new();
-    journal.push_str(&format!(
-        "{}\n",
-        json!({
-            "ev": "GlobalProjectRegistered",
-            "registration": {
-                "project_scope": canonical,
-                "app_scope_id": "appserver-cli",
-                "registered_at_ms": 1,
-            }
-        })
-    ));
-    // The live defect shape: a reducer rejection for a project scope this
-    // index never registered. Replay stops here.
-    journal.push_str(&format!(
-        "{}\n",
-        json!({
-            "ev": "GlobalRuntimeBound",
-            "binding": {
-                "project_scope": root.join("foreign").display().to_string(),
-                "app_scope_id": "appserver-cli",
-                "agent_id": "agent-x",
-                "runtime_id": "runtime-x",
-                "binding_id": "binding-x",
-                "endpoint_generation": 1,
-            }
-        })
-    ));
-    std::fs::write(server_dir.join("journal.jsonl"), &journal).unwrap();
-    std::fs::write(server_dir.join("events.jsonl"), b"{}\n").unwrap();
-    std::fs::write(server_dir.join("log.txt"), b"resident log\n").unwrap();
-    std::fs::write(
-        state.join("service.json"),
-        serde_json::to_vec(&json!({
-            "desired_state": "down",
-            "generation": 1,
-            "service_scope_root": project.display().to_string(),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let host_paths = HostPaths::for_state_root(&state).unwrap();
-    run(
-        &Scope {
-            root: project.clone(),
-        },
-        &host_paths,
-        ResetRequest {
-            approval: "operator authorized the host reset".into(),
-            discard_legacy: true,
-            level: ResetLevel::Host,
-            storage_root: Some(project.clone()),
-            include_runs: false,
-        },
-    )
-    .expect("an unreplayable index must be recoverable with a reset");
-
-    let record = read_last_reset_record(&state);
-    assert_eq!(record["degraded"], json!(true));
-    assert_eq!(record["index_replay"], json!("unreadable"));
-    assert!(
-        record["index_replay_error"]
-            .as_str()
-            .unwrap()
-            .contains("journal replay failed"),
-        "{record}"
-    );
-    assert!(
-        record["warning"]
-            .as_str()
-            .unwrap()
-            .contains("could not be replayed"),
-        "{record}"
-    );
-
-    // The unreadable journal is archived byte-for-byte as evidence.
-    let archive_root = PathBuf::from(record["archive_root"].as_str().unwrap());
+    let routes = std::fs::read(state.join("routes.json")).unwrap();
     assert_eq!(
-        std::fs::read(archive_root.join("resident-index-journal-jsonl/journal.jsonl")).unwrap(),
-        journal.as_bytes()
+        serde_json::from_slice::<serde_json::Value>(&routes).unwrap(),
+        json!([kept_route])
     );
-    assert!(!server_dir.join("journal.jsonl").exists());
-    assert!(!server_dir.join("events.jsonl").exists());
-    assert!(!server_dir.join("log.txt").exists());
+
+    // Unrelated prior archive contents remain intact.
+    assert!(state.join("archives/prior/manifest.json").exists());
+    assert_eq!(
+        std::fs::read(state.join("archives/prior/manifest.json")).unwrap(),
+        b"{}\n"
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
 
-/// The ownership guarantee survives the C1 weakening. When the journal cannot
-/// be replayed, only the daemon's own `service_scope_root` descriptor can prove
-/// that `--storage-root` is the live index root. A root the descriptor does not
-/// name is still refused, and a replayable journal that names a different root
-/// is still refused.
+/// Host reset refuses malformed, foreign-owned or missing current state.
 #[test]
 fn reset_host_still_refuses_a_storage_root_that_does_not_own_the_index() {
     let root = temp_root("host-foreign");
@@ -1124,26 +934,10 @@ fn reset_host_still_refuses_a_storage_root_that_does_not_own_the_index() {
     .unwrap();
     let host_paths = HostPaths::for_state_root(&state).unwrap();
 
-    // (1) An unreplayable journal that the descriptor does not name is refused.
-    let unreplayable = format!(
-        "{}\n",
-        json!({
-            "ev": "GlobalRuntimeBound",
-            "binding": {
-                "project_scope": root.join("unregistered").display().to_string(),
-                "app_scope_id": "appserver-cli",
-                "agent_id": "agent-x",
-                "runtime_id": "runtime-x",
-                "binding_id": "binding-x",
-                "endpoint_generation": 1,
-            }
-        })
-    );
-    std::fs::write(
-        foreign.join(".agent-collab/server/journal.jsonl"),
-        &unreplayable,
-    )
-    .unwrap();
+    // An invalid current file at an unowned root stays untouched.
+    let current_file = foreign.join(".agent-collab/server/state.json");
+    let invalid = b"{invalid current state}";
+    std::fs::write(&current_file, invalid).unwrap();
     let error = run(
         &Scope {
             root: foreign.clone(),
@@ -1159,28 +953,27 @@ fn reset_host_still_refuses_a_storage_root_that_does_not_own_the_index() {
     )
     .expect_err("a root the descriptor does not name must be refused")
     .to_string();
-    assert!(error.contains("journal replay failed"), "{error}");
-    assert!(foreign.join(".agent-collab/server/journal.jsonl").exists());
+    assert!(error.contains("CURRENT_STATE_DECODE_FAILED:"), "{error}");
+    assert_eq!(std::fs::read(&current_file).unwrap(), invalid);
     assert!(!state.join("archives").exists());
     assert!(!state.join("reset.jsonl").exists());
 
-    // (2) A replayable journal that holds records only for another root is
-    // refused: it is not the index of the root the operator named.
-    std::fs::write(
-        foreign.join(".agent-collab/server/journal.jsonl"),
-        format!(
-            "{}\n",
-            json!({
-                "ev": "GlobalProjectRegistered",
-                "registration": {
-                    "project_scope": other.canonicalize().unwrap().to_string_lossy(),
-                    "app_scope_id": "appserver-cli",
-                    "registered_at_ms": 1,
-                }
-            })
-        ),
-    )
-    .unwrap();
+    // Current relationships naming only another project cannot prove ownership.
+    let mut current = crate::server::state::State::default();
+    current
+        .apply_checked(&crate::server::state::Event::GlobalProjectRegistered {
+            registration: crate::server::global_state::ProjectRegistration::new(
+                crate::scope::ProjectScopeId::new(
+                    other.canonicalize().unwrap().display().to_string(),
+                )
+                .unwrap(),
+                crate::identity::AppServerId::new("appserver-cli").unwrap(),
+            )
+            .unwrap(),
+        })
+        .unwrap();
+    assert!(crate::server::current_state::save(&current_file, &current).unwrap());
+    let before = std::fs::read(&current_file).unwrap();
     let error = run(
         &Scope {
             root: foreign.clone(),
@@ -1194,12 +987,13 @@ fn reset_host_still_refuses_a_storage_root_that_does_not_own_the_index() {
             include_runs: false,
         },
     )
-    .expect_err("a journal that owns no record for this root must be refused")
+    .expect_err("current state with no relationship to this root must be refused")
     .to_string();
     assert!(error.contains("RESET_STORAGE_ROOT_INVALID"), "{error}");
+    assert_eq!(std::fs::read(&current_file).unwrap(), before);
     assert!(!state.join("archives").exists());
 
-    // (3) A root without the index journal is not a collab storage root.
+    // A root without current state is not an established storage owner.
     let error = run(
         &Scope {
             root: foreign.clone(),
@@ -1213,7 +1007,7 @@ fn reset_host_still_refuses_a_storage_root_that_does_not_own_the_index() {
             include_runs: false,
         },
     )
-    .expect_err("a root without an index journal must be refused")
+    .expect_err("a root without current state must be refused")
     .to_string();
     assert!(error.contains("RESET_STORAGE_ROOT_INVALID"), "{error}");
 

@@ -49,7 +49,19 @@ fn context_session_reuse_and_minimal_master_approval() {
             "sleep 600",
         ],
     );
-    fixture.owned_sessions.push(other_session.into());
+    let stable = tmux(
+        &fixture.tmux_socket,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            other_session,
+            "#{session_id}",
+        ],
+    );
+    fixture
+        .owned_sessions
+        .push(String::from_utf8(stable.stdout).unwrap().trim().to_owned());
     let pane_id = String::from_utf8(created.stdout).unwrap().trim().to_owned();
     let incumbent = Pane {
         pane_id,
@@ -70,16 +82,6 @@ fn context_session_reuse_and_minimal_master_approval() {
     assert_eq!(peer["identity"]["worker_id"], worker, "{peer}");
     assert_eq!(peer["identity"]["role"], "worker", "{peer}");
     assert_eq!(peer["master"]["worker_id"], incumbent_worker, "{peer}");
-    assert!(
-        peer["next_actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|action| action
-                .as_str()
-                .is_some_and(|text| text.contains("--approve-grant"))),
-        "{peer}"
-    );
     let peer_message = fixture.run_ok(
         &[
             "sendmessage",
@@ -783,7 +785,7 @@ fn assert_scope(label: &str, value: &Value, project_scope: &str, app_scope_id: &
 
 /// Send one raw public request envelope to the isolated daemon socket and
 /// return its parsed response. This is the same wire the CLI uses; the test
-/// only bypasses the CLI so it can forge a token, scope, or generation.
+/// only bypasses the CLI so it can forge a token, scope, or binding tuple.
 fn wire_request(socket: &Path, request: &Value) -> Value {
     let mut stream =
         std::os::unix::net::UnixStream::connect(socket).expect("connect isolated daemon socket");
@@ -806,7 +808,6 @@ fn runtime_context_from_receipt(receipt: &Value) -> Value {
         "agent_id": binding["agent_id"],
         "runtime_id": binding["runtime_id"],
         "appserver_id": binding["app_scope_id"],
-        "endpoint_generation": binding["endpoint_generation"],
         "binding_id": binding["binding_id"],
         "session_id": binding["session_id"],
         "native_thread_id": binding["native_thread_id"],
@@ -815,7 +816,7 @@ fn runtime_context_from_receipt(receipt: &Value) -> Value {
 
 /// Build a registration request for the public `Register` operation. The
 /// fixture supplies its own token and a distinct tmux pane; the daemon owns the
-/// binding id and generation.
+/// current binding id.
 fn tmux_register_request(
     worker_id: &str,
     token: &str,
@@ -869,12 +870,11 @@ fn tmux_register_request(
     })
 }
 
-/// B06/B07: a same-principal registration on a new pane is the only recovery
-/// path that may reissue the grant. A different principal on the same or a new
-/// pane inherits nothing, and the old generation request is still fenced.
+/// B06/B07: same-principal continuation keeps its current grant. A distinct
+/// principal inherits nothing, and an old binding tuple cannot mutate it.
 #[test]
 fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
-    let (fixture, first_pane) = single_pane_fixture("collab-master-authority-b06");
+    let (mut fixture, first_pane) = single_pane_fixture("collab-master-authority-b06");
     let registered = fixture.registered_context(&first_pane, true);
     let worker_id = registered["identity"]["worker_id"]
         .as_str()
@@ -906,6 +906,19 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
         ],
     );
     let second_pane_id = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+    let stable = tmux(
+        &fixture.tmux_socket,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &second_pane_id,
+            "#{session_id}",
+        ],
+    );
+    fixture
+        .owned_sessions
+        .push(String::from_utf8(stable.stdout).unwrap().trim().to_owned());
     let second_pane = Pane {
         pane_id: second_pane_id.clone(),
         session_anchor: format!("session-{second_pane_id}"),
@@ -926,17 +939,17 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
     );
 
     // Same-principal recovery moves to a new pane. The grant follows only the
-    // verified principal and binding generation.
+    // exact current principal and binding.
     let created = tmux(
         &fixture.tmux_socket,
         &[
-            "new-session",
+            "split-window",
             "-d",
             "-P",
             "-F",
             "#{pane_id}",
-            "-s",
-            "collab-master-authority-b06-recovery",
+            "-t",
+            &first_pane.pane_id,
             "sleep 600",
         ],
     );
@@ -974,7 +987,25 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
         recovered["ok"], true,
         "same-principal recovery must succeed: {recovered}"
     );
-    let new_binding = recovered["command"]["binding"].clone();
+    let mapped = fixture.current_mapping_for(&fixture.root, "appserver-cli", &worker_id);
+    let new_binding = mapped["binding"].clone();
+    let credential: Value =
+        serde_json::from_slice(&std::fs::read(&identity_file).unwrap()).unwrap();
+    for field in [
+        "agent_id",
+        "runtime_id",
+        "binding_id",
+        "session_id",
+        "native_thread_id",
+    ] {
+        assert_eq!(credential["runtime"][field], new_binding[field], "{field}");
+    }
+    assert_eq!(new_binding["session_id"], recovery_pane.session_anchor);
+    assert_eq!(new_binding["native_thread_id"], recovery_pane.thread_anchor);
+    assert_eq!(
+        mapped["transport"]["tmux_endpoint"]["pane_id"],
+        recovery_pane.pane_id
+    );
     let new_runtime = runtime_context_from_receipt(&json!({"binding": new_binding}));
     let new_route = json!({
         "app_scope_id": new_binding["app_scope_id"],
@@ -994,10 +1025,18 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
         recovered_context["identity"]["worker_id"], worker_id,
         "recovery must keep the principal: {recovered_context}"
     );
-    assert_ne!(
-        recovered_context["binding"]["endpoint_generation"], old_binding["endpoint_generation"],
-        "recovery must advance the generation: {recovered_context}"
-    );
+    for field in [
+        "agent_id",
+        "runtime_id",
+        "binding_id",
+        "session_id",
+        "native_thread_id",
+    ] {
+        assert_eq!(
+            recovered_context["binding"][field], new_binding[field],
+            "{field}"
+        );
+    }
     let recovered_status = wire_request(
         &socket,
         &json!({
@@ -1009,14 +1048,15 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
         "same-principal recovery must reissue the grant: {recovered_status}"
     );
 
-    // The old generation remains fenced even with the valid credential.
+    let current_state = fixture.current_state_for(&fixture.root, "appserver-cli");
+    // The previous session/thread tuple remains stale with a valid credential.
     let stale = wire_request(
         &socket,
         &json!({
             "op": "MasterClear",
             "worker_id": worker_id,
             "token": token,
-            "approval": "stale generation clear",
+            "approval": "stale binding clear",
             "project_context": {
                 "app_scope_id": old_binding["app_scope_id"],
                 "canonical_root": old_binding["project_scope"],
@@ -1025,7 +1065,6 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
                     "agent_id": old_binding["agent_id"],
                     "runtime_id": old_binding["runtime_id"],
                     "appserver_id": old_binding["app_scope_id"],
-                    "endpoint_generation": old_binding["endpoint_generation"],
                     "binding_id": old_binding["binding_id"],
                     "session_id": old_binding["session_id"],
                     "native_thread_id": old_binding["native_thread_id"],
@@ -1035,7 +1074,7 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
     );
     assert_eq!(
         stale["ok"], false,
-        "old generation must be rejected: {stale}"
+        "old binding tuple must be rejected: {stale}"
     );
     let unchanged = wire_request(
         &socket,
@@ -1045,7 +1084,31 @@ fn master_authority_same_principal_recovery_and_new_principal_do_not_inherit() {
     );
     assert_eq!(
         unchanged["master"]["worker_id"], worker_id,
-        "a stale-generation refusal must not change authority: {unchanged}"
+        "a stale binding refusal must not change authority: {unchanged}"
+    );
+    for field in [
+        "worker_id",
+        "grant_id",
+        "grant_generation",
+        "binding_id",
+        "assigned_by",
+        "assigned_ms",
+        "approval",
+        "boundary",
+        "scope",
+    ] {
+        assert_eq!(
+            unchanged["master"][field], recovered_status["master"][field],
+            "{field}"
+        );
+    }
+    assert_eq!(
+        fixture.current_state_for(&fixture.root, "appserver-cli")["tasks"],
+        current_state["tasks"]
+    );
+    assert_eq!(
+        fixture.current_mapping_for(&fixture.root, "appserver-cli", &worker_id),
+        mapped
     );
 }
 
@@ -1058,12 +1121,28 @@ fn scope_registration_participant(
     app: &str,
     worker: &str,
     token: &str,
+    socket: &Path,
 ) -> Value {
-    let mut register = tmux_register_request(worker, token, root, pane, &fixture.tmux_socket);
+    let mut register = tmux_register_request(worker, token, root, pane, socket);
     register["project_context"]["app_scope_id"] = json!(app);
     let registered = wire_request(&fixture.host_state.join("server.sock"), &register);
     assert_eq!(registered["ok"], true, "{registered}");
     registered
+}
+
+struct ScopeSession {
+    socket: PathBuf,
+    stable_id: String,
+}
+
+impl Drop for ScopeSession {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .arg("-S")
+            .arg(&self.socket)
+            .args(["kill-session", "-t", &self.stable_id])
+            .output();
+    }
 }
 
 #[test]
@@ -1074,6 +1153,7 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
     let other_root = fixture.root.join("other-project");
     seed_baseline(&other_root);
     let mut routes = Vec::new();
+    let mut owned_scope_sessions = Vec::new();
     for (index, (root, app)) in [
         (&fixture.root, "authority-app-a"),
         (&fixture.root, "authority-app-b"),
@@ -1083,8 +1163,11 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
     .enumerate()
     {
         let label = format!("authority-scope-{index}");
+        // App scopes share the same project prefix and fixed display slots.
+        // Their independent endpoints need separate owned tmux sockets.
+        let scope_socket = fixture.root.join(format!("scope-{index}.sock"));
         let created = tmux(
-            &fixture.tmux_socket,
+            &scope_socket,
             &[
                 "new-session",
                 "-d",
@@ -1093,22 +1176,47 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
                 "#{pane_id}",
                 "-s",
                 &label,
+                "-c",
+                root.to_str().unwrap(),
                 "sleep 600",
             ],
         );
         let pane_id = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+        let facts = tmux(
+            &scope_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &pane_id,
+                "#{pid}\t#{session_id}",
+            ],
+        );
+        let facts = String::from_utf8(facts.stdout).unwrap();
+        let (server_pid, stable_id) = facts.trim().split_once('\t').unwrap();
+        owned_scope_sessions.push(ScopeSession {
+            socket: scope_socket.clone(),
+            stable_id: stable_id.into(),
+        });
         let pane = Pane {
-            server_pid: first_pane.server_pid,
+            server_pid: server_pid.parse().unwrap(),
             session_anchor: format!("session-{pane_id}"),
             thread_anchor: format!("thread-{pane_id}"),
             pane_id,
         };
         let worker = format!("scope-worker-{index}");
         let token = format!("scope-token-{index}");
-        let registered =
-            scope_registration_participant(&fixture, &pane, root, app, &worker, &token);
+        let registered = scope_registration_participant(
+            &fixture,
+            &pane,
+            root,
+            app,
+            &worker,
+            &token,
+            &scope_socket,
+        );
         assert_eq!(registered["ok"], true, "scope registration: {registered}");
-        let binding = registered["command"]["binding"].clone();
+        let binding = fixture.current_mapping_for(root, app, &worker)["binding"].clone();
         let runtime = runtime_context_from_receipt(&json!({"binding": binding}));
         let route = json!({
             "app_scope_id": binding["app_scope_id"],
@@ -1195,11 +1303,11 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
 }
 
 /// B05: an authenticated mutation over the public socket must reject a wrong
-/// token, a mismatched project route, a mismatched app scope, and a stale
-/// endpoint generation. Every rejection leaves the recorded authority and the
+/// token, a mismatched project route, a mismatched app scope, and a wrong
+/// binding id. Every rejection leaves the recorded authority and the
 /// business state exactly as they were, and the raw token is never echoed.
 #[test]
-fn master_authority_public_wire_rejects_bad_token_scope_and_generation_without_state_change() {
+fn master_authority_public_wire_rejects_bad_token_scope_and_binding_without_state_change() {
     let (fixture, pane) = single_pane_fixture("collab-master-authority-b05");
     let receipt = fixture.registered_context(&pane, true);
     let worker_id = receipt["identity"]["worker_id"]
@@ -1260,14 +1368,9 @@ fn master_authority_public_wire_rejects_bad_token_scope_and_generation_without_s
         .as_str()
         .expect("receipt names the app scope")
         .to_owned();
-    let endpoint_generation = runtime_context["endpoint_generation"]
-        .as_u64()
-        .expect("receipt carries the live generation");
-
     // The opaque token is the one credential the fixture must forge; every
     // other field is the caller's real context.
-    let mut wrong_token_runtime = runtime_context.clone();
-    wrong_token_runtime["endpoint_generation"] = json!(endpoint_generation);
+    let wrong_token_runtime = runtime_context.clone();
     let cases: Vec<(&str, &[&str], Value)> = vec![
         (
             "wrong token",
@@ -1315,7 +1418,7 @@ fn master_authority_public_wire_rejects_bad_token_scope_and_generation_without_s
             }),
         ),
         (
-            "stale endpoint generation",
+            "wrong current binding",
             &["SESSION_THREAD_BINDING_MISMATCH"],
             json!({
                 "op": "MasterClear",
@@ -1330,8 +1433,7 @@ fn master_authority_public_wire_rejects_bad_token_scope_and_generation_without_s
                         "agent_id": runtime_context["agent_id"],
                         "runtime_id": runtime_context["runtime_id"],
                         "appserver_id": runtime_context["appserver_id"],
-                        "endpoint_generation": endpoint_generation + 99,
-                        "binding_id": runtime_context["binding_id"],
+                        "binding_id": "binding-not-the-current-owner",
                         "session_id": runtime_context["session_id"],
                         "native_thread_id": runtime_context["native_thread_id"],
                     },

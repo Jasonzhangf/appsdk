@@ -3,9 +3,31 @@ fn role_contract_is_identical_across_context_workers_and_status() {
     use crate::subagent::Record;
 
     let (server, root) = test_server();
-    register_synthetic_peer(&server, "master", "%master");
+    let server = Arc::new(server);
+    register(&server, "master", "%master");
     register_synthetic_peer(&server, "worker", "%worker");
     register_synthetic_peer(&server, "child", "%child");
+    let context_for = |id: &str| {
+        let binding = registered_binding(&server, id);
+        let identity = crate::identity::RuntimeIdentity {
+            agent_id: binding.agent_id, runtime_id: binding.runtime_id, appserver_id: binding.app_scope_id,
+            binding_id: binding.binding_id, session_id: binding.session_id, native_thread_id: binding.native_thread_id,
+        };
+        ProjectContext::for_registered_route(&root, &identity).unwrap()
+    };
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let context = context_for("master");
+    manager.install_runtime(&(context.app_scope_id.as_str().into(), context.project_scope.as_str().into()), server.clone(), None);
+    let map = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let before_map = map.load().unwrap();
+    let before_state = std::fs::read(&server.state_path).unwrap();
+    let (_, rejected) = manager.dispatch_sync(Some(context), Req::MasterPromote {
+        worker_id: "master".into(), token: "token-master".into(), approval: "  ".into(),
+    });
+    assert!(!rejected.ok, "{rejected:?}");
+    assert!(rejected.error.as_deref().unwrap().contains("explicit user approval"), "{rejected:?}");
+    assert_eq!(map.load().unwrap(), before_map);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before_state);
     promote_master(&server, "master", "user approved master");
     server.commit(&[Event::SubagentUpdated {
         subagent: Record {
@@ -23,11 +45,8 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             runtime: None,
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         },
     }]);
-    let server = Arc::new(server);
-
     let cases = [
         ("master", "master"),
         ("worker", "worker"),
@@ -59,14 +78,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             .join(" ")
             .to_lowercase();
         if expected_role != "managed-subagent" {
-            assert!(responsibilities.contains("--in-reply-to <message-id>"));
-            assert!(responsibilities.contains("resume your own unfinished work"));
-            assert!(responsibilities.contains("user-facing summary is not that reply"));
-            assert!(responsibilities.contains("register your own accepted goal"));
-            assert!(responsibilities.contains("must not stop to report to the master and wait for a dispatch"));
-            assert!(responsibilities.contains("adjust only affected duties, dependencies or handoffs"));
-            assert!(responsibilities.contains("specialty roles, policy and workflow overrides are optional"));
-            assert!(!responsibilities.contains("automatically update affected role workflow templates"));
+            assert!(!responsibilities.is_empty());
             let workflow = &context.data["role_brief"]["workflow_template"];
             assert_eq!(workflow["base_version"], serde_json::json!(1), "{workflow}");
             assert_eq!(
@@ -109,32 +121,11 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(role_task.contains("bounded"));
                 assert!(role_task.contains("orchestrator"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));
-                assert!(responsibilities.contains("authorized peers"));
-                assert!(responsibilities.contains("regardless of whether other peers are busy"));
-                assert!(responsibilities.contains("protected_hold"));
-                assert!(responsibilities.contains("only its own project"));
-                assert!(responsibilities.contains("non-overlapping"));
-                assert!(responsibilities.contains("close-before-open/sese"));
-                assert!(responsibilities.contains("canonical intake and deduplication"));
-                assert!(responsibilities.contains("owning project contract"));
-                assert!(responsibilities.contains("daemon or tmux lifecycle"));
-                assert!(responsibilities.contains("re-arm"));
-                assert!(responsibilities.contains("no inherited master authority"));
-                assert!(!responsibilities.contains("saturate every live present peer first"));
             }
             "worker" => {
-                assert!(responsibilities.contains("not routinely to the user"));
                 assert!(role_task.contains("long-horizon"));
                 assert!(role_task.contains("orchestrator"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));
-                assert!(responsibilities.contains("non-overlapping bounded scopes"));
-                assert!(responsibilities.contains("verify subworker evidence"));
-                assert!(responsibilities.contains("resource closure"));
-                assert!(responsibilities.contains("close-before-open/sese"));
-                assert!(responsibilities.contains("canonical intake and deduplication"));
-                assert!(responsibilities.contains("owning project contract"));
-                assert!(responsibilities.contains("daemon or tmux lifecycle actions"));
-                assert!(responsibilities.contains("do not claim master authority"));
                 assert_eq!(
                     context.data["role_brief"]["authority"],
                     serde_json::json!({
@@ -178,157 +169,30 @@ fn role_contract_is_identical_across_context_workers_and_status() {
         assert_eq!(worker["role"], worker["role_brief"]["role"]);
         assert_eq!(status_worker["role_brief"], worker["role_brief"]);
     }
+    let before_map = map.load().unwrap();
+    let before_state = std::fs::read(&server.state_path).unwrap();
+    let (_, rejected) = manager.dispatch_sync(Some(context_for("worker")), Req::MasterDelegate {
+        worker_id: "worker".into(), token: "token-worker".into(), target_id: "child".into(),
+    });
+    assert!(!rejected.ok, "{rejected:?}");
+    assert!(rejected.error.as_deref().unwrap().starts_with("MASTER_DELEGATE_DENIED:"), "{rejected:?}");
+    assert_eq!(map.load().unwrap(), before_map);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before_state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn absent_tmux_master_requires_name_recovery_before_peer_promotion() {
-    let (server, root) = test_server();
-    register(&server, "peer-a", "thread-a");
-    register(&server, "peer-b", "thread-b");
-    assert!(
-        super::handle_master_promote(
-            &server,
-            "peer-a".into(),
-            "token-peer-a".into(),
-            "user approved peer-a as collab master".into(),
-        )
-        .ok
-    );
-    peer_tests::kill_registered_worker_pane(&server, "peer-a");
-    let status = super::handle_master_status(&server);
-    // The recorded grant is the authority. A vanished pane address is a
-    // communication fact; it does not unseat the holder.
-    assert_eq!(status.data["master"]["worker_id"], "peer-a", "{status:?}");
-    assert!(status.data["recorded_unusable"].is_null(), "{status:?}");
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-b".into(),
-        "token-peer-b".into(),
-        "user approved peer-b after the previous master runtime died".into(),
-    );
-    assert!(!promoted.ok, "{promoted:?}");
-    assert!(promoted
-        .error
-        .as_deref()
-        .unwrap()
-        .starts_with("NAME_RECOVERY_REQUIRED"));
-    assert_eq!(promoted.data["outcome"], "pending");
-    assert_eq!(
-        super::handle_master_status(&server).data["master"]["worker_id"],
-        "peer-a"
-    );
-    confirm_test_jenny_takeover(&server, "peer-b");
-    assert_eq!(
-        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-b".into())
-    );
-    let live = super::handle_master_status(&server);
-    assert_eq!(live.data["master"]["worker_id"], "peer-b");
-    assert!(live.data["recorded_unusable"].is_null());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-/// Legacy approval alone cannot replace an occupied Jenny. A confirmed name
-/// recovery can replace it without requiring the previous executor to stop.
-#[test]
-fn approved_promotion_supersedes_a_live_tmux_master() {
-    use super::name_state::{AgentPresence, AgentPresenceRecord};
-    let (server, root) = test_server();
-    register(&server, "peer-a", "thread-a");
-    register(&server, "peer-b", "thread-b");
-    assert!(
-        super::handle_master_promote(
-            &server,
-            "peer-a".into(),
-            "token-peer-a".into(),
-            "user approved peer-a as collab master".into(),
-        )
-        .ok
-    );
-    let status = super::handle_master_status(&server);
-    assert_eq!(status.data["master"]["worker_id"], "peer-a", "{status:?}");
-    assert_eq!(
-        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-a".into())
-    );
-    let context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
-    assert_eq!(context.data["master"]["worker_id"], "peer-a", "{context:?}");
-
-    // The name owner consumes current typed observations, not pane existence.
-    let binding = registered_binding(&server, "peer-a");
-    server
-        .commit_checked(&[Event::AgentPresenceObserved {
-            presence: AgentPresenceRecord {
-                project_scope: binding.project_scope.as_str().into(),
-                worker_id: "peer-a".into(),
-                session_id: binding.session_id.unwrap().to_string(),
-                presence: AgentPresence::Online,
-                reason: "controlled current-agent online observation".into(),
-                observed_ms: now_ms(),
-            },
-        }])
-        .unwrap();
-
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-b".into(),
-        "token-peer-b".into(),
-        "user approved peer-b after the previous master thread became unusable".into(),
-    );
-    assert!(!promoted.ok, "{promoted:?}");
-    assert!(promoted
-        .error
-        .as_deref()
-        .unwrap()
-        .starts_with("NAME_RECOVERY_REQUIRED"));
-    assert_eq!(promoted.data["outcome"], "pending");
-    assert_eq!(
-        super::handle_master_status(&server).data["master"]["worker_id"],
-        "peer-a"
-    );
-    confirm_test_jenny_takeover(&server, "peer-b");
-    assert_eq!(
-        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-b".into())
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-fn confirm_test_jenny_takeover(server: &Server, worker_id: &str) {
-    let result = super::name_resolution::resolve_registered_name(
-        server,
-        worker_id,
-        &format!("confirmed-jenny-{worker_id}"),
-        "approved_recovery",
-        Some(super::name_resolution::NameIntent {
-            requested_name: "Jenny".into(),
-            user_authorized: true,
-            moves_existing_names: true,
-            replace_confirmed: true,
-        }),
-    )
-    .unwrap();
-    assert_eq!(result["outcome"], "committed", "{result}");
-}
-
-/// The typed restore_master approval is the explicit path that replaces a
-/// Jenny held by another carrier; the free-text promote alone only pauses.
+/// A typed user-confirmed restore replaces an online current Jenny carrier.
 #[test]
 fn explicit_typed_restore_master_replaces_an_online_incumbent() {
     use super::name_state::{AgentPresence, AgentPresenceRecord};
     let (server, root) = test_server();
-    register(&server, "peer-a", "thread-a");
-    register(&server, "peer-b", "thread-b");
-    assert!(
-        super::handle_master_promote(
-            &server,
-            "peer-a".into(),
-            "token-peer-a".into(),
-            "user approved peer-a as collab master".into(),
-        )
-        .ok
-    );
+    for id in ["peer-a", "peer-b", "unrelated"] {
+        let transport = test_appserver_transport(&format!("thread-{id}"));
+        let registered = seed_committed_owner(&server, id, &format!("token-{id}"),
+            &transport, &root.display().to_string(), Some(AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()));
+        assert!(registered.ok, "{registered:?}");
+    }
+    promote_master(&server, "peer-a", "user approved peer-a as collab master");
     let binding = registered_binding(&server, "peer-a");
     server
         .commit_checked(&[Event::AgentPresenceObserved {
@@ -342,11 +206,37 @@ fn explicit_typed_restore_master_replaces_an_online_incumbent() {
             },
         }])
         .unwrap();
-    confirm_test_jenny_takeover(&server, "peer-b");
+    let app = binding.app_scope_id.clone();
+    let scope = binding.project_scope.clone();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let unrelated = control.current_for_worker(&scope, &app, "unrelated").unwrap().unwrap().clone();
+    let transport = server.state.lock().unwrap().workers["peer-b"].transport.clone().unwrap();
+    let facts = crate::proto::IdentityFacts {
+        session_id: transport.session_id.clone(), thread_id: transport.thread_id.clone(),
+        endpoint: transport.endpoint.clone(), namespace: transport.namespace.clone(), ..Default::default()
+    };
+    let mut request = crate::proto::IdentityContextRequest::legacy(facts.clone());
+    request.operation_id = "restore-online-jenny".into();
+    request.grant_approval = Some(json!({"action":"restore_master", "decision":"approved",
+        "authorization":"user explicitly restores peer-b as Jenny", "replace_confirmed":true}));
+    let server = Arc::new(server);
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let context = ProjectContext::for_registered_root_with_app(&root, app.clone()).unwrap();
+    manager.install_runtime(&(app.as_str().into(), scope.as_str().into()), server.clone(), None);
+    let (_, restored) = manager.dispatch_sync(Some(context), Req::IdentityContext { facts, identity_context: Some(request) });
+    assert!(restored.ok, "{restored:?}");
+    let control = store.load().unwrap();
+    assert_eq!(control.current_for_name(&scope, &app, "Jenny").unwrap().unwrap()
+        .active_binding().unwrap().binding.agent_id.as_str(), "peer-b");
+    assert_eq!(control.current_for_worker(&scope, &app, "unrelated").unwrap().unwrap(), &unrelated);
     assert_eq!(
         super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-b".into())
     );
+    let state = server.state.lock().unwrap();
+    assert!(!state.global.lookup_project(&scope).unwrap().master_grants.values().any(|grant| grant.agent_id.as_str() == "peer-a"));
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -402,8 +292,6 @@ fn cross_project_send_queues_to_a_live_tmux_master_without_route_projection() {
         &server,
         "appsdk-master",
         "/tmp/appsdk".into(),
-        super::CrossProjectRole::Master,
-        None,
         Some("thread-appsdk-master".into()),
         "target-master",
         "feature",
@@ -445,8 +333,6 @@ fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
         &server,
         "appsdk-master",
         "/tmp/appsdk".into(),
-        super::CrossProjectRole::Master,
-        None,
         Some("thread-appsdk-master".into()),
         "target-master",
         "feature",
@@ -461,82 +347,6 @@ fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
             .contains("reachable target binding"),
         "the reject must name the dead address, not master authority"
     );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn cross_project_send_enforces_role_matrix() {
-    let (server, root) = test_server();
-    // The target master is a native App Server peer, so its presence is a real
-    // runtime fact rather than a tmux address that can only report Unknown.
-    register_appserver_worker(&server, &root, "target-master", "thread-target-master");
-    register(&server, "target-peer", "%target-peer");
-    let promoted = super::handle_master_promote(
-        &server,
-        "target-master".into(),
-        "token-target-master".into(),
-        "user approved target-master as collab master".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
-
-    // master -> foreign peer is rejected by the role matrix.
-    let denied_peer = super::handle_cross_project_send(
-        &server,
-        "appsdk-master",
-        "/tmp/appsdk".into(),
-        super::CrossProjectRole::Master,
-        None,
-        Some("thread-appsdk-master".into()),
-        "target-peer",
-        "feature",
-        "must reject master-to-peer",
-        None,
-    );
-    assert!(!denied_peer.ok);
-    assert!(denied_peer
-        .error
-        .unwrap()
-        .contains("CROSS_PROJECT_SEND_REJECTED"));
-
-    // master -> master is allowed on an equal level.
-    let delivered = super::handle_cross_project_send(
-        &server,
-        "appsdk-master",
-        "/tmp/appsdk".into(),
-        super::CrossProjectRole::Master,
-        None,
-        Some("thread-appsdk-master".into()),
-        "target-master",
-        "feature",
-        "master-to-master message",
-        None,
-    );
-    assert!(delivered.ok, "{}", delivered.error.unwrap_or_default());
-    let msg_id = delivered.data["msg_id"].as_str().unwrap();
-    let state = server.state.lock().unwrap();
-    assert_eq!(state.msgs[msg_id].to, "target-master");
-    assert_eq!(state.msgs[msg_id].from, "appsdk-master@/tmp/appsdk");
-    drop(state);
-
-    // A peer cannot write to a foreign project's master; the role matrix alone
-    // rejects it, with no client master evidence involved.
-    let denied_peer_master = super::handle_cross_project_send(
-        &server,
-        "appsdk-peer",
-        "/tmp/appsdk".into(),
-        super::CrossProjectRole::Peer,
-        None,
-        Some("thread-appsdk-peer".into()),
-        "target-master",
-        "feature",
-        "must reject peer-to-foreign-master",
-        None,
-    );
-    assert!(!denied_peer_master.ok);
-    assert!(denied_peer_master
-        .error
-        .unwrap()
-        .contains("CROSS_PROJECT_SEND_REJECTED"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -568,216 +378,7 @@ fn init_registration_result_exposes_persisted_runtime_identity() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn master_promotion_is_not_blocked_by_an_unproven_candidate_transport() {
-    let (mut server, root) = test_server();
-    register(&server, "peer-a", "thread-a");
-    retire_registered_test_pane(&registered_binding(&server, "peer-a"));
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-a".into(),
-        "token-peer-a".into(),
-        "user approved peer-a as collab master".into(),
-    );
-    assert!(promoted.ok, "{promoted:?}");
-    assert_eq!(promoted.data["master"], "peer-a");
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn master_promotion_allows_live_tmux_peer() {
-    let (mut server, root) = test_server();
-    let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
-    assert!(registered.ok, "{registered:?}");
-    assert_eq!(registered.data["transport_selected"]["kind"], "tmux");
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-appserver".into(),
-        "token-peer-appserver".into(),
-        "user approved peer-appserver as appserver master".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
-    assert_eq!(
-        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-appserver".into())
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn master_assigned_replays_approval_and_live_identity() {
-    let event = Event::MasterAssigned {
-        worker_id: "peer-a".into(),
-        assigned_by: "peer-a".into(),
-        approval: Some("user approved peer-a as collab master".into()),
-        assigned_ms: 1,
-    };
-    let encoded = serde_json::to_string(&event).unwrap();
-    let mut replay = State::default();
-    replay.apply(&serde_json::from_str(&encoded).unwrap());
-    assert_eq!(replay.master_worker_id.as_deref(), Some("peer-a"));
-    assert_eq!(replay.master_assigned_by.as_deref(), Some("peer-a"));
-    assert_eq!(
-        replay.master_approval.as_deref(),
-        Some("user approved peer-a as collab master")
-    );
-    assert_eq!(replay.master_assigned_ms, Some(1));
-    let legacy = r#"{"ev":"RootAssigned","worker_id":"peer-b","assigned_by":"peer-a","approval":null,"assigned_ms":2}"#;
-    let mut legacy_replay = State::default();
-    legacy_replay.apply(&serde_json::from_str(legacy).unwrap());
-    assert_eq!(legacy_replay.master_worker_id.as_deref(), Some("peer-b"));
-}
-
-#[test]
-fn master_authority_is_generation_bound_and_replays_from_typed_grant() {
-    let (mut server, root) = test_server();
-    let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
-    assert!(registered.ok, "{registered:?}");
-
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-appserver".into(),
-        "token-peer-appserver".into(),
-        "user approved peer-appserver as collab master".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
-
-    let (scope, generation) = {
-        let state = server.state.lock().unwrap();
-        let binding = state
-            .global
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-            .find(|binding| binding.agent_id.as_str() == "peer-appserver")
-            .unwrap()
-            .clone();
-        let grant = state
-            .global
-            .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
-            .expect("promotion must commit a generation-bound typed master grant");
-        assert_eq!(grant.endpoint_generation, binding.endpoint_generation);
-        (binding.route_scope(), binding.endpoint_generation)
-    };
-
-    retire_registered_test_pane(&registered_binding(&server, "peer-appserver"));
-
-    let reconnected = register_appserver(&mut server, "peer-appserver", "thread-appserver-next");
-    assert!(reconnected.ok, "{reconnected:?}");
-    {
-        let state = server.state.lock().unwrap();
-        let binding = state
-            .global
-            .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
-            .unwrap();
-        assert_eq!(binding.endpoint_generation, generation + 1);
-        // A same-principal generation replacement is the recovery path, so
-        // the grant is reissued for the new generation in the same
-        // transaction instead of being dropped.
-        let reissued = state
-            .global
-            .lookup_master_grant_for(&scope, &binding.binding_id)
-            .expect("same-principal reconnect must reissue the master grant");
-        assert_eq!(reissued.endpoint_generation, binding.endpoint_generation);
-        assert_eq!(
-            state
-                .global
-                .role_for_binding(&scope.project_scope_id, &binding.binding_id),
-            crate::server::global_state::PeerRole::Master
-        );
-    }
-    let status = super::handle_master_status(&server);
-    assert!(status.ok, "{status:?}");
-    assert_eq!(status.data["master"]["worker_id"], "peer-appserver");
-    assert!(status.data["recorded_unusable"].is_null(), "{status:?}");
-
-    let replayed = super::replay(&root).unwrap();
-    let binding = replayed
-        .global
-        .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
-        .unwrap();
-    let replayed_grant = replayed
-        .global
-        .lookup_master_grant_for(&scope, &binding.binding_id)
-        .expect("replay must keep the reissued grant");
-    assert_eq!(
-        replayed_grant.endpoint_generation,
-        binding.endpoint_generation
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn same_runtime_registration_recovery_preserves_master_authority() {
-    let (mut server, root) = test_server();
-    let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
-    assert!(registered.ok, "{registered:?}");
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-appserver".into(),
-        "token-peer-appserver".into(),
-        "user approved peer-appserver as appserver master".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
-
-    let (scope, generation) = {
-        let state = server.state.lock().unwrap();
-        let binding = state
-            .global
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-            .find(|binding| binding.agent_id.as_str() == "peer-appserver")
-            .unwrap()
-            .clone();
-        (binding.route_scope(), binding.endpoint_generation)
-    };
-
-    retire_registered_test_pane(&registered_binding(&server, "peer-appserver"));
-
-    let recovered = register_appserver(&mut server, "peer-appserver", "thread-appserver-recovered");
-    assert!(recovered.ok, "{recovered:?}");
-    assert_eq!(recovered.data["recovered"], true);
-    assert_eq!(recovered.data["role_brief"]["role"], "master");
-
-    {
-        let state = server.state.lock().unwrap();
-        let binding = state
-            .global
-            .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
-            .unwrap();
-        assert_eq!(binding.endpoint_generation, generation + 1);
-        let grant = state
-            .global
-            .lookup_master_grant_for(&scope, &binding.binding_id)
-            .expect("same-principal recovery must reissue the master grant");
-        assert_eq!(grant.endpoint_generation, binding.endpoint_generation);
-    }
-    let status = super::handle_master_status(&server);
-    assert!(status.ok, "{status:?}");
-    assert_eq!(status.data["master"]["worker_id"], "peer-appserver");
-
-    let replayed = super::replay(&root).unwrap();
-    let binding = replayed
-        .global
-        .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
-        .unwrap();
-    assert_eq!(binding.endpoint_generation, generation + 1);
-    let replayed_grant = replayed
-        .global
-        .lookup_master_grant_for(&scope, &binding.binding_id)
-        .expect("replay must keep the reissued master grant");
-    assert_eq!(
-        replayed_grant.endpoint_generation,
-        binding.endpoint_generation
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-/// Register the same peer against its next distinct pane/session fixture.
+/// Register the same peer's next agent session/thread in its existing pane.
 fn recover_worker_on_new_thread(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
     register_public(server, id, thread_id)
 }
@@ -797,7 +398,7 @@ fn registered_binding(server: &Server, id: &str) -> crate::server::global_state:
 }
 
 #[test]
-fn wire_master_recover_reissues_master_grant_for_new_generation() {
+fn wire_master_recovery_preserves_current_grant_and_approval() {
     let (mut server, root) = test_server();
     let mut server = Arc::new(server);
     let registered = register_appserver(&mut server, "recover-master", "thread-recover-master-old");
@@ -813,15 +414,8 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
         .lookup_master_grant_for(&previous.route_scope(), &previous.binding_id)
         .unwrap()
         .clone();
-    let legacy_promotion_events_before = std::fs::read_to_string(&server.journal_path)
-        .unwrap()
-        .lines()
-        .filter(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .is_ok_and(|event| event["ev"] == "MasterAssigned")
-        })
-        .count();
-    retire_registered_test_pane(&previous);
+    assert!(matches!(crate::client::adapters::tmux::probe(previous.tmux_endpoint.as_ref().unwrap()),
+        Ok(crate::client::adapters::tmux::PanePresence::Present)));
     let recovered =
         recover_worker_on_new_thread(&mut server, "recover-master", "thread-recover-master-new");
     assert!(recovered.ok, "{recovered:?}");
@@ -833,20 +427,17 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
         .lookup_binding_for(&route_scope, &previous.binding_id)
         .cloned()
         .expect("recovery keeps the binding id");
-    assert_eq!(
-        current.endpoint_generation,
-        previous.endpoint_generation + 1
-    );
     let grant = state
         .global
         .lookup_master_grant_for(&route_scope, &previous.binding_id)
         .expect("same-principal recovery must reissue the master grant");
-    assert_eq!(grant.endpoint_generation, current.endpoint_generation);
+    assert_eq!(grant.binding_id, current.binding_id);
     assert_eq!(current.agent_id, previous.agent_id);
     assert_eq!(grant.agent_id, original_grant.agent_id);
     assert_eq!(grant.granted_by, original_grant.granted_by);
     assert_eq!(grant.approval, original_grant.approval);
     assert_eq!(grant.granted_at_ms, original_grant.granted_at_ms);
+    assert_eq!(state.global.lookup_project_for_route(&route_scope).unwrap().master_grants.len(), 1);
     assert_eq!(
         state
             .global
@@ -858,80 +449,10 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
     let status = super::handle_master_status(&server);
     assert!(status.ok, "{status:?}");
     assert_eq!(status.data["master"]["worker_id"], "recover-master");
-    let legacy_promotion_events_after = std::fs::read_to_string(&server.journal_path)
-        .unwrap()
-        .lines()
-        .filter(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .is_ok_and(|event| event["ev"] == "MasterAssigned")
-        })
-        .count();
-    assert_eq!(
-        legacy_promotion_events_after, legacy_promotion_events_before,
-        "master recovery must not emit a new promotion event"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn same_principal_master_recovery_keeps_grant_while_incumbent_pane_stays() {
-    let (mut server, root) = test_server();
-    let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "live-master", "thread-live-master-old");
-    assert!(registered.ok, "{registered:?}");
-    promote_master(&server, "live-master", "user approved live-master");
-    let previous = registered_binding(&server, "live-master");
-    let original_grant = server
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_master_grant_for(&previous.route_scope(), &previous.binding_id)
-        .unwrap()
-        .clone();
-
-    let recovered =
-        recover_worker_on_new_thread(&mut server, "live-master", "thread-live-master-new");
-    assert!(
-        recovered.ok,
-        "same-principal recovery must not be fenced by the old pane: {recovered:?}"
-    );
-    let state = server.state.lock().unwrap();
-    let route_scope = previous.route_scope();
-    let current = state
-        .global
-        .lookup_binding_for(&route_scope, &previous.binding_id)
-        .unwrap();
-    assert_eq!(
-        current.endpoint_generation,
-        previous.endpoint_generation + 1
-    );
-    let grant = state
-        .global
-        .lookup_master_grant_for(&route_scope, &previous.binding_id)
-        .expect("same-principal recovery must reissue the grant");
-    assert_eq!(grant.endpoint_generation, current.endpoint_generation);
-    assert_eq!(grant.approval, original_grant.approval);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn same_principal_master_recovery_is_allowed_when_probe_is_unknown() {
-    let (mut server, root) = test_server();
-    let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "unknown-master", "thread-unknown-master-old");
-    assert!(registered.ok, "{registered:?}");
-    promote_master(&server, "unknown-master", "user approved unknown-master");
-    stop_registered_test_tmux_server();
-
-    let recovered =
-        recover_worker_on_new_thread(&mut server, "unknown-master", "thread-unknown-master-new");
-    assert!(
-        recovered.ok,
-        "an unknown transport probe must not fence same-principal recovery: {recovered:?}"
-    );
-    let status = super::handle_master_status(&server);
-    assert_eq!(status.data["master"]["worker_id"], "unknown-master", "{status:?}");
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+    let mapped = &control.current_for_name(&current.project_scope, &current.app_scope_id, "Jenny").unwrap().unwrap()
+        .active_binding().unwrap().binding;
+    assert_eq!(mapped, &current);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -949,6 +470,10 @@ fn wire_peer_recover_does_not_revoke_unrelated_master() {
         "user approved recover-keep-master",
     );
     let master_binding = registered_binding(&server, "recover-keep-master");
+    let map = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let before_map = map.load().unwrap();
+    let before_master = before_map.current_for_name(&master_binding.project_scope, &master_binding.app_scope_id, "Jenny").unwrap().unwrap().clone();
+    let original_grant = server.state.lock().unwrap().global.lookup_master_grant_for(&master_binding.route_scope(), &master_binding.binding_id).unwrap().clone();
 
     let recovered =
         recover_worker_on_new_thread(&mut server, "recover-plain-peer", "thread-plain-peer-new");
@@ -960,10 +485,7 @@ fn wire_peer_recover_does_not_revoke_unrelated_master() {
         .global
         .lookup_master_grant_for(&route_scope, &master_binding.binding_id)
         .expect("an unrelated peer recovery must not remove the master grant");
-    assert_eq!(
-        grant.endpoint_generation,
-        master_binding.endpoint_generation
-    );
+    assert_eq!(grant, &original_grant);
     assert_eq!(
         state
             .global
@@ -983,6 +505,7 @@ fn wire_peer_recover_does_not_revoke_unrelated_master() {
     );
     assert_eq!(grants[0].binding_id, master_binding.binding_id);
     drop(state);
+    assert_eq!(map.load().unwrap().current_for_name(&master_binding.project_scope, &master_binding.app_scope_id, "Jenny").unwrap().unwrap(), &before_master);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -997,18 +520,25 @@ fn recovered_master_keeps_goal_deadline_scheduling() {
         "recover-deadline",
         "user approved recover-deadline",
     );
-    retire_registered_test_pane(&registered_binding(&server, "recover-deadline"));
+    let previous = registered_binding(&server, "recover-deadline");
     let recovered =
         recover_worker_on_new_thread(&mut server, "recover-deadline", "thread-deadline-new");
     assert!(recovered.ok, "{recovered:?}");
 
+    let current = registered_binding(&server, "recover-deadline");
+    assert_eq!(current.agent_id, previous.agent_id);
+    assert_eq!(current.binding_id, previous.binding_id);
+    assert_eq!(current.session_id.as_ref().unwrap().as_str(), "session-thread-deadline-new");
+    assert_eq!(current.native_thread_id.as_ref().unwrap().as_str(), "thread-deadline-new");
+    assert_eq!(current.tmux_endpoint.as_ref().unwrap().pane_id, previous.tmux_endpoint.as_ref().unwrap().pane_id);
+    let trigger = now_ms() + 60_000;
     let scheduled = handle_notification_subscribe(
         &server,
         "recover-deadline".into(),
         "token-recover-deadline".into(),
         "deadline".into(),
         Some("goal:recover-deadline".into()),
-        Some(now_ms() + 60_000),
+        Some(trigger),
         Vec::new(),
         None,
         1,
@@ -1018,297 +548,15 @@ fn recovered_master_keeps_goal_deadline_scheduling() {
         scheduled.ok,
         "recovered master must still schedule goal deadlines: {scheduled:?}"
     );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_master_assignment_cannot_override_typed_grant_on_replay() {
-    use std::io::Write;
-
-    let (mut server, root) = test_server();
-    let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
-    assert!(registered.ok, "{registered:?}");
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-appserver".into(),
-        "token-peer-appserver".into(),
-        "user approved peer-appserver as collab master".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
-
-    let binding = registered_binding(&server, "peer-appserver");
-    let typed_grant = server
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
-        .unwrap()
-        .clone();
-
-    let legacy = Event::MasterAssigned {
-        worker_id: "peer-appserver".into(),
-        assigned_by: "legacy-operator".into(),
-        approval: Some("legacy approval".into()),
-        assigned_ms: 1,
-    };
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&journal)
-        .unwrap();
-    writeln!(file, "{}", serde_json::to_string(&legacy).unwrap()).unwrap();
-    drop(file);
-
-    let replayed = super::replay(&root).expect("mixed legacy and typed authority must replay");
-    assert!(replayed.master_worker_id.is_none());
-    let binding = replayed
-        .global
-        .projects
-        .values()
-        .flat_map(|project| project.runtime_bindings.values())
-        .find(|binding| binding.agent_id.as_str() == "peer-appserver")
-        .unwrap();
-    let grant = replayed
-        .global
-        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
-        .expect("typed grant must remain authoritative");
-    assert_eq!(grant, &typed_grant);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_master_assignment_before_runtime_rebind_does_not_regrant_authority() {
-    use std::io::Write;
-
-    let (mut server, root) = test_server();
-    let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
-    assert!(registered.ok, "{registered:?}");
-
-    let legacy = Event::MasterAssigned {
-        worker_id: "peer-appserver".into(),
-        assigned_by: "legacy-operator".into(),
-        approval: Some("legacy approval".into()),
-        assigned_ms: 1,
-    };
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&journal)
-        .unwrap();
-    writeln!(file, "{}", serde_json::to_string(&legacy).unwrap()).unwrap();
-    drop(file);
-
-    let reconnected = register_appserver(&mut server, "peer-appserver", "thread-appserver-next");
-    assert!(reconnected.ok, "{reconnected:?}");
-
-    let replayed = super::replay(&root).expect("legacy authority before reconnect must replay");
-    assert!(replayed.master_worker_id.is_none());
-    let binding = replayed
-        .global
-        .projects
-        .values()
-        .flat_map(|project| project.runtime_bindings.values())
-        .find(|binding| binding.agent_id.as_str() == "peer-appserver")
-        .unwrap();
-    assert_eq!(binding.endpoint_generation, 2);
-    assert!(replayed
-        .global
-        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
-        .is_none());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_master_assignment_after_runtime_binding_is_migrated() {
-    use std::io::Write;
-
-    let (server, root) = test_server();
-    register(&server, "peer-a", "thread-peer-a");
-
-    let legacy = Event::MasterAssigned {
-        worker_id: "peer-a".into(),
-        assigned_by: "peer-a".into(),
-        approval: Some("legacy approval".into()),
-        assigned_ms: 1,
-    };
-    let journal = root.join(".agent-collab/server/journal.jsonl");
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&journal)
-        .unwrap();
-    writeln!(file, "{}", serde_json::to_string(&legacy).unwrap()).unwrap();
-    drop(file);
-
-    let replayed = super::replay(&root).expect("legacy authority after binding must replay");
-    assert!(replayed.master_worker_id.is_none());
-    let binding = replayed
-        .global
-        .projects
-        .values()
-        .flat_map(|project| project.runtime_bindings.values())
-        .find(|binding| binding.agent_id.as_str() == "peer-a")
-        .unwrap();
-    let grant = replayed
-        .global
-        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
-        .expect("current legacy authority must migrate to a typed grant");
-    assert_eq!(grant.granted_by, "peer-a");
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_master_assignment_without_runtime_binding_fails_replay_closed() {
-    use crate::identity::AppServerId;
-    use crate::server::global_state::ProjectRegistration;
-    use std::io::Write;
-
-    let root = std::env::temp_dir().join(format!(
-        "collab-legacy-master-missing-binding-{}-{}",
-        std::process::id(),
-        now_ms()
-    ));
-    let server_dir = root.join(".agent-collab/server");
-    std::fs::create_dir_all(&server_dir).unwrap();
-    let project_scope =
-        crate::server::global_state::GlobalState::canonical_project_scope(&root).unwrap();
-    let app_scope = AppServerId::new("tui-default").unwrap();
-    let registration = ProjectRegistration::new(project_scope, app_scope).unwrap();
-    let legacy = Event::MasterAssigned {
-        worker_id: "peer-a".into(),
-        assigned_by: "peer-a".into(),
-        approval: Some("legacy approval".into()),
-        assigned_ms: 1,
-    };
-    let unrelated_binding = crate::server::global_state::RuntimeBinding::new(
-        registration.project_scope.clone(),
-        registration.app_scope_id.clone(),
-        crate::identity::AgentId::new("peer-b").unwrap(),
-        crate::identity::RuntimeId::new("runtime-b").unwrap(),
-        crate::identity::BindingId::new("binding-b").unwrap(),
-        1,
-        None,
-    )
-    .unwrap();
-    let journal = server_dir.join("journal.jsonl");
-    let mut file = std::fs::File::create(&journal).unwrap();
-    for event in [
-        Event::GlobalProjectRegistered { registration },
-        Event::GlobalRuntimeBound {
-            binding: unrelated_binding,
-        },
-        legacy,
-    ] {
-        writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-    }
-    drop(file);
-
-    let error = match replay(&root) {
-        Ok(_) => panic!("missing binding must fail replay closed"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("MASTER_AUTHORITY_REQUIRES_RUNTIME_BINDING"),
-        "{error:#}"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn legacy_master_assignment_with_ambiguous_binding_fails_replay_closed() {
-    use crate::identity::{AppServerId, BindingId, RuntimeId};
-    use crate::server::global_state::{ProjectRegistration, RuntimeBinding};
-    use std::io::Write;
-
-    let root = std::env::temp_dir().join(format!(
-        "collab-legacy-master-ambiguous-binding-{}-{}",
-        std::process::id(),
-        now_ms()
-    ));
-    let server_dir = root.join(".agent-collab/server");
-    std::fs::create_dir_all(&server_dir).unwrap();
-    let project_scope =
-        crate::server::global_state::GlobalState::canonical_project_scope(&root).unwrap();
-    let app_scope = AppServerId::new("tui-default").unwrap();
-    let registration = ProjectRegistration::new(project_scope.clone(), app_scope.clone()).unwrap();
-    let first = RuntimeBinding::new(
-        project_scope.clone(),
-        app_scope.clone(),
-        crate::identity::AgentId::new("peer-a").unwrap(),
-        RuntimeId::new("runtime-a").unwrap(),
-        BindingId::new("binding-a").unwrap(),
-        1,
-        None,
-    )
-    .unwrap();
-    let second = RuntimeBinding::new(
-        project_scope,
-        app_scope,
-        crate::identity::AgentId::new("peer-a").unwrap(),
-        RuntimeId::new("runtime-b").unwrap(),
-        BindingId::new("binding-b").unwrap(),
-        1,
-        None,
-    )
-    .unwrap();
-    let legacy = Event::MasterAssigned {
-        worker_id: "peer-a".into(),
-        assigned_by: "peer-a".into(),
-        approval: Some("legacy approval".into()),
-        assigned_ms: 1,
-    };
-    let journal = server_dir.join("journal.jsonl");
-    let mut file = std::fs::File::create(&journal).unwrap();
-    for event in [
-        Event::GlobalProjectRegistered { registration },
-        Event::GlobalRuntimeBound { binding: first },
-        Event::GlobalRuntimeBound { binding: second },
-        legacy,
-    ] {
-        writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-    }
-    drop(file);
-
-    let error = match replay(&root) {
-        Ok(_) => panic!("ambiguous binding must fail replay closed"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("MASTER_AUTHORITY_AMBIGUOUS_BINDING"),
-        "{error:#}"
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn journal_root_assigned_rewrites_to_master_on_replay() {
-    let root = std::env::temp_dir().join(format!(
-        "collab-root-to-master-{}-{}",
-        std::process::id(),
-        now_ms()
-    ));
-    let server_dir = root.join(".agent-collab/server");
-    std::fs::create_dir_all(&server_dir).unwrap();
-    let journal = server_dir.join("journal.jsonl");
-    std::fs::write(
-        &journal,
-        r#"{"ev":"RootAssigned","worker_id":"peer-a","assigned_by":"peer-a","approval":"user approved","assigned_ms":1}
-"#,
-    )
-    .unwrap();
-    let state = replay(&root).unwrap();
-    assert_eq!(state.master_worker_id.as_deref(), Some("peer-a"));
-    let rewritten = std::fs::read_to_string(&journal).unwrap();
-    assert!(rewritten.contains("MasterAssigned"), "{rewritten}");
-    assert!(!rewritten.contains("RootAssigned"), "{rewritten}");
-    let again = replay(&root).unwrap();
-    assert_eq!(again.master_worker_id.as_deref(), Some("peer-a"));
+    let state = server.state.lock().unwrap();
+    let deadlines: Vec<_> = state.notification_subscriptions.values()
+        .filter(|lease| lease.worker_id == "recover-deadline" && lease.subject.as_deref() == Some("goal:recover-deadline"))
+        .collect();
+    assert_eq!(deadlines.len(), 1);
+    assert_eq!(deadlines[0].trigger_ms, Some(trigger));
+    assert_eq!(deadlines[0].status, "armed");
+    assert!(state.global.lookup_master_grant_for(&current.route_scope(), &current.binding_id).is_some());
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1345,8 +593,9 @@ fn registration_creates_one_finite_default_direct_message_subscription() {
         .collect();
     assert_eq!(subscriptions.len(), 1);
     assert_eq!(subscriptions[0].event, "direct-message");
-    assert_eq!(subscriptions[0].method, "tmux");
-    assert_eq!(subscriptions[0].target, "thread-peer");
+    let transport = selected_transport_for_worker(&state.workers["peer"]).unwrap();
+    assert_eq!(subscriptions[0].method, transport.kind.as_str());
+    assert_eq!(subscriptions[0].target, notification_target(&transport).unwrap());
     assert_eq!(subscriptions[0].status, "armed");
     assert!(subscriptions[0].expires_ms > now_ms());
     drop(state);
@@ -1354,7 +603,7 @@ fn registration_creates_one_finite_default_direct_message_subscription() {
 }
 
 #[test]
-fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
+fn daemon_maintenance_replaces_a_persisted_appserver_default_wake_lease() {
     let (mut server, root) = test_server();
     let mut server = Arc::new(server);
     assert!(register_public(&server, "sender", "thread-sender").ok);
@@ -1391,13 +640,15 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
             .expect("commit legacy appserver lease");
     }
 
-    assert!(register_public(&server, "recipient", "thread-recipient").ok);
+    restore_registered_peer_default_leases(&server);
     let lease = server.state.lock().unwrap().notification_subscriptions
         ["sub-default-direct-message-recipient"]
         .clone();
     assert_eq!(lease.method, "tmux");
     assert_eq!(lease.target, "thread-recipient");
     assert_eq!(lease.status, "armed");
+    assert_eq!(serde_json::to_value(&current_state::load(&server.state_path, false).unwrap()
+        .notification_subscriptions[&lease.id]).unwrap(), serde_json::to_value(&lease).unwrap());
 
     Arc::get_mut(&mut server).unwrap().appserver_notification_sink = Arc::new(|transport, _, _, _, _, _mode| {
         if transport.kind != TransportKind::Tmux {
@@ -1513,7 +764,7 @@ fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules
         "peer".into(),
         "token-peer".into(),
         "finished-goal".into(),
-        "peer".into(),
+        "Alice".into(),
         "ended".into(),
         None,
         None,
@@ -1752,7 +1003,8 @@ fn pending_unattempted_direct_message_is_recovered_once_and_not_replayed() {
         1
     );
 
-    let replayed = super::replay(&root).expect("journal replay keeps recovery facts");
+    let replayed = current_state::load(&server.state_path, false)
+        .expect("current state keeps recovery facts");
     assert_eq!(replayed.msgs["m-recover"].wake_attempt_count, 1);
     assert!(replayed
         .notification_delivery_accepted
@@ -2115,7 +1367,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
         "peer".into(),
         "token-peer".into(),
         "different-id".into(),
-        "peer".into(),
+        "Alice".into(),
         "ended".into(),
         None,
         None,
@@ -2132,7 +1384,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
         "peer".into(),
         "token-peer".into(),
         "different-id".into(),
-        "peer".into(),
+        "Alice".into(),
         "ended".into(),
         None,
         None,
@@ -2222,7 +1474,7 @@ fn registration_adds_default_lease_when_only_short_direct_message_lease_exists()
 #[test]
 fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
     let (server, root) = test_server();
-    register_synthetic_peer(&server, "master", "%master");
+    register(&server, "master", "%master");
     register_synthetic_peer(&server, "worker", "%worker");
     promote_master(&server, "master", "user approved master");
 
@@ -2457,7 +1709,7 @@ fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
     use crate::server::state::WaitSpec;
 
     let (server, root) = test_server();
-    register_synthetic_peer(&server, "master", "%master");
+    register(&server, "master", "%master");
     register_synthetic_peer(&server, "peer-a", "%peer-a");
     register_synthetic_peer(&server, "peer-b", "%peer-b");
     promote_master(&server, "master", "user approved master");

@@ -9,23 +9,15 @@ fn fixture() -> (
     let (server, root) = peer_tests::test_server();
     let server = Arc::new(server);
     server
-        .commit_checked(&[
-            Event::Registered {
-                worker: state::WorkerRec {
-                    id: "reset-master".into(),
-                    token: "reset-token".into(),
-                    cwd: root.display().to_string(),
-                    registered_ms: now_ms(),
-                    transport: None,
-                },
+        .commit_checked(&[Event::Registered {
+            worker: state::WorkerRec {
+                id: "reset-master".into(),
+                token: "reset-token".into(),
+                cwd: root.display().to_string(),
+                registered_ms: now_ms(),
+                transport: None,
             },
-            Event::MasterAssigned {
-                worker_id: "reset-master".into(),
-                assigned_by: "test".into(),
-                approval: None,
-                assigned_ms: now_ms(),
-            },
-        ])
+        }])
         .unwrap();
     let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
     let context = ProjectContext::for_registered_root_with_app(
@@ -44,7 +36,6 @@ fn fixture() -> (
         AgentId::new("reset-master").unwrap(),
         RuntimeId::new("reset-runtime").unwrap(),
         BindingId::new("reset-binding").unwrap(),
-        1,
         Some(crate::identity::SessionId::new("reset-session").unwrap()),
         Some(NativeThreadId::new("reset-thread").unwrap()),
     )
@@ -57,7 +48,6 @@ fn fixture() -> (
         "test",
         "test authorized master",
         binding.binding_id.clone(),
-        1,
         now_ms(),
     )
     .unwrap();
@@ -73,9 +63,24 @@ fn fixture() -> (
             Event::GlobalRuntimeBound {
                 binding: binding.clone(),
             },
-            Event::GlobalCurrentThreadRouteSet { binding },
+            Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            },
             Event::GlobalMasterGranted { grant },
         ])
+        .unwrap();
+    let mut transport = peer_tests::test_appserver_transport("reset-thread");
+    transport.session_id = Some("reset-session".into());
+    binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .commit(binding_store::ControlChange::Commit {
+            key: binding_slot::IdentityBindingKey::new(
+                context.project_scope.clone(),
+                context.app_scope_id.clone(),
+                "Jenny",
+            ),
+            value: binding_slot::BindingValue::new(binding, transport),
+            expected_generation: None,
+        })
         .unwrap();
     (server, root, manager, context)
 }
@@ -102,10 +107,10 @@ fn online_reset_live_manager_succeeds() {
         .is_empty());
     assert!(!manager.has_project_route(context.project_scope.as_str()));
     assert!(
-        server.journal_path.exists(),
-        "shared host journal must survive reset"
+        server.state_path.exists(),
+        "shared host current state must survive reset"
     );
-    let replayed = replay_from_journal(&root, &server.journal_path).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(replayed.workers.is_empty());
     assert!(replayed
         .global
@@ -225,12 +230,11 @@ fn online_reset_preserves_other_project_and_releases_all_app_scopes() {
         .unwrap()
         .notification_subscriptions
         .contains_key("subscription-B"));
-    let replayed = replay_from_journal(&root, &server.journal_path).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(
         replayed.workers.contains_key("other-worker"),
-        "workers after replay: {:?}; journal: {}",
-        replayed.workers.keys(),
-        std::fs::read_to_string(&server.journal_path).unwrap()
+        "workers after loading current state: {:?}",
+        replayed.workers.keys()
     );
     assert!(replayed
         .global
@@ -317,8 +321,12 @@ fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
         context.project_scope.as_str(),
         context.app_scope_id.as_str(),
     );
+    current_state::save(
+        &central.join(".agent-collab/server/state.json"),
+        &State::default(),
+    )
+    .unwrap();
     for path in [
-        central.join(".agent-collab/server/journal.jsonl"),
         central.join(".agent-collab/mailbox/reset-owned-mailbox"),
         central.join(".agent-collab/assets/reset-owned-asset"),
     ] {
@@ -332,6 +340,11 @@ fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
     let unrelated_central = server
         .host_paths
         .app_storage_root(&unrelated_scope, "unrelated-app");
+    assert!(current_state::save(
+        &unrelated_central.join(".agent-collab/server/state.json"),
+        &State::default()
+    )
+    .unwrap());
     let unrelated_asset = unrelated_central.join(".agent-collab/assets/retained");
     std::fs::create_dir_all(unrelated_asset.parent().unwrap()).unwrap();
     std::fs::write(&unrelated_asset, "retained").unwrap();
@@ -350,10 +363,8 @@ fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
         ),
     ] {
         append_host_route_record(
-            &manager.route_journal,
+            &manager.route_file,
             &HostRouteRecord {
-                version: 1,
-                op: "register".into(),
                 app_scope_id: app_scope.into(),
                 project_scope: project_scope.into(),
                 canonical_root: canonical_root.into(),
@@ -379,7 +390,7 @@ fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
         .unwrap()
         .pending_project_resets
         .contains_key(context.project_scope.as_str()));
-    let replayed = replay_from_journal(&root, &server.journal_path).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(replayed.workers.is_empty());
     assert!(replayed
         .pending_project_resets
@@ -402,7 +413,7 @@ fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
         "retained",
         "reset must preserve another project's central app namespace"
     );
-    let records = load_host_route_records(&manager.route_journal).unwrap();
+    let records = load_host_route_records(&manager.route_file).unwrap();
     assert!(!records
         .iter()
         .any(|record| record.project_scope == context.project_scope.as_str()));
@@ -418,25 +429,21 @@ fn stale_route_cleanup_is_durable_idempotent_and_retains_unknown_live() {
     let (server, root, manager, _) = fixture();
     let missing = root.join("missing-project");
     let missing_record = HostRouteRecord {
-        version: 1,
-        op: "register".into(),
         app_scope_id: "stale-app".into(),
         project_scope: missing.display().to_string(),
         canonical_root: missing.display().to_string(),
         storage_root: missing.display().to_string(),
         registered_ms: now_ms(),
     };
-    append_host_route_record(&manager.route_journal, &missing_record).unwrap();
+    append_host_route_record(&manager.route_file, &missing_record).unwrap();
     let live = HostRouteRecord {
-        version: 1,
-        op: "register".into(),
         app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
         project_scope: root.display().to_string(),
         canonical_root: root.display().to_string(),
         storage_root: root.display().to_string(),
         registered_ms: now_ms(),
     };
-    append_host_route_record(&manager.route_journal, &live).unwrap();
+    append_host_route_record(&manager.route_file, &live).unwrap();
     let stale_key = (
         missing_record.app_scope_id.clone(),
         missing_record.project_scope.clone(),
@@ -451,12 +458,12 @@ fn stale_route_cleanup_is_durable_idempotent_and_retains_unknown_live() {
         !missing.exists(),
         "stale materialization must not create project storage"
     );
-    let records = load_host_route_records(&manager.route_journal).unwrap();
+    let records = load_host_route_records(&manager.route_file).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].project_scope, root.display().to_string());
-    let bytes = std::fs::read(&manager.route_journal).unwrap();
+    let bytes = std::fs::read(&manager.route_file).unwrap();
     manager.prune_stale_routes().unwrap();
-    assert_eq!(bytes, std::fs::read(&manager.route_journal).unwrap());
+    assert_eq!(bytes, std::fs::read(&manager.route_file).unwrap());
     assert!(server
         .state
         .lock()
@@ -673,7 +680,8 @@ fn online_reset_durability_error_does_not_delete_payload() {
     let (server, root, manager, context) = fixture();
     let payload = root.join(".agent-collab/payload");
     std::fs::write(&payload, "must remain").unwrap();
-    *server.journal.lock().unwrap() = std::fs::File::open(&server.journal_path).unwrap();
+    std::fs::remove_file(&server.state_path).unwrap();
+    std::fs::create_dir(&server.state_path).unwrap();
     let result = manager.reset_project(&context, "reset-master", "reset-token");
     assert!(!result.ok);
     assert!(result.error.unwrap().contains("RESET_INCOMPLETE"));
@@ -688,169 +696,7 @@ fn online_reset_durability_error_does_not_delete_payload() {
 }
 
 #[test]
-fn online_reset_forgets_project_operations_and_reservations_on_replay() {
-    let (_server, root, manager, context) = fixture();
-    for (id, scope) in [
-        ("operation-A", context.project_scope.as_str()),
-        ("operation-B", "/unrelated/project"),
-    ] {
-        manager
-            .operation_journal
-            .append(operation_journal::OperationAdmission {
-                operation_id: id.into(),
-                project_scope: scope.into(),
-                app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
-                action: "context".into(),
-                invocation: "automatic".into(),
-                intent_digest: "test-intent".into(),
-                query_capability_hash: operation_journal::capability_hash("test-capability"),
-                phase: crate::proto::IdentityOperationPhase::Admitted,
-                committed_phases: Vec::new(),
-                nested_command_id: None,
-                nested_operation_id: None,
-                approval_evidence: None,
-            })
-            .unwrap();
-    }
-    assert_eq!(
-        operation_journal::peek_query_journal(manager.operation_journal.path()).len(),
-        2
-    );
-    assert!(
-        manager
-            .reset_project(&context, "reset-master", "reset-token")
-            .ok
-    );
-    let replayed = operation_journal::peek_query_journal(manager.operation_journal.path());
-    assert_eq!(replayed.len(), 1);
-    assert_eq!(replayed[0].operation_id, "operation-B");
-    let bytes = std::fs::read_to_string(manager.operation_journal.path()).unwrap();
-    assert!(
-        !bytes.contains("operation-A"),
-        "reset must erase historical operation bytes"
-    );
-    assert!(bytes.contains("operation-B"));
-    let reopened =
-        operation_journal::OperationJournal::open(manager.operation_journal.path()).unwrap();
-    assert_eq!(
-        operation_journal::peek_query_journal(reopened.path()).len(),
-        1
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn healthy_operation_journal_restarts_with_the_same_operation_projection() {
-    let (server, root, manager, context) = fixture();
-    let operation_id = "ctxop-restart-project";
-    let capability = "restart-capability";
-    let capability_hash = operation_journal::capability_hash(capability);
-    manager
-        .operation_journal
-        .append(operation_journal::OperationAdmission {
-            operation_id: operation_id.into(),
-            project_scope: context.project_scope.as_str().to_owned(),
-            app_scope_id: context.app_scope_id.as_str().to_owned(),
-            action: "context".into(),
-            invocation: "automatic".into(),
-            intent_digest: "restart-intent".into(),
-            query_capability_hash: capability_hash.clone(),
-            phase: crate::proto::IdentityOperationPhase::Admitted,
-            committed_phases: Vec::new(),
-            nested_command_id: None,
-            nested_operation_id: None,
-            approval_evidence: None,
-        })
-        .unwrap();
-    let before = std::fs::read(manager.operation_journal.path()).unwrap();
-    drop(manager);
-
-    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
-    let projection = manager
-        .operation_journal
-        .query(
-            &crate::proto::IdentityContextRequest {
-                operation_id: operation_id.into(),
-                invocation: "query".into(),
-                action: "query".into(),
-                facts: Default::default(),
-                invocation_cwd: None,
-                approval: None,
-                grant_approval: None,
-                query: true,
-                query_capability: capability.into(),
-                invocation_ticket: String::new(),
-            },
-            context.project_scope.as_str(),
-            context.app_scope_id.as_str(),
-        )
-        .unwrap();
-    assert_eq!(projection.result.operation_id, operation_id);
-    assert_eq!(
-        projection.result.phase,
-        crate::proto::IdentityOperationPhase::Admitted
-    );
-    assert_eq!(
-        std::fs::read(manager.operation_journal.path()).unwrap(),
-        before
-    );
-
-    drop(manager);
-    drop(server);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn online_reset_clears_only_the_target_operation_journal_project() {
-    let (_server, root, manager, context) = fixture();
-    let capability = "reset-scope-capability";
-    let capability_hash = operation_journal::capability_hash(capability);
-    for (operation_id, scope) in [
-        ("reset-target", context.project_scope.as_str()),
-        ("reset-other", "/unrelated/project"),
-    ] {
-        manager
-            .operation_journal
-            .append(operation_journal::OperationAdmission {
-                operation_id: operation_id.into(),
-                project_scope: scope.into(),
-                app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
-                action: "context".into(),
-                invocation: "automatic".into(),
-                intent_digest: "reset-scope-intent".into(),
-                query_capability_hash: capability_hash.clone(),
-                phase: crate::proto::IdentityOperationPhase::Admitted,
-                committed_phases: Vec::new(),
-                nested_command_id: None,
-                nested_operation_id: None,
-                approval_evidence: None,
-            })
-            .unwrap();
-    }
-    assert!(
-        manager
-            .reset_project(&context, "reset-master", "reset-token")
-            .ok
-    );
-    let remaining = operation_journal::peek_query_journal(manager.operation_journal.path());
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].operation_id, "reset-other");
-    let bytes = std::fs::read_to_string(manager.operation_journal.path()).unwrap();
-    assert!(!bytes.contains("reset-target"));
-    assert!(bytes.contains("reset-other"));
-
-    let reopened = operation_journal::OperationJournal::open(manager.operation_journal.path())
-        .expect("reset must leave a healthy journal that can reopen");
-    let reopened_projections = operation_journal::peek_query_journal(reopened.path());
-    assert_eq!(reopened_projections.len(), 1);
-    assert_eq!(reopened_projections[0].operation_id, "reset-other");
-
-    drop(reopened);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn online_reset_external_project_drops_runtime_and_its_journal() {
+fn online_reset_external_project_drops_runtime_and_its_current_state() {
     let (host, host_root, manager, host_context) = fixture();
     let (external, external_root, _external_manager, external_context) = fixture();
     manager.install_runtime(
@@ -861,22 +707,20 @@ fn online_reset_external_project_drops_runtime_and_its_journal() {
     populate(&host, "reset-master", "host");
     populate(&external, "reset-master", "external");
     let external_record = HostRouteRecord {
-        version: 1,
-        op: "register".into(),
         app_scope_id: external_context.app_scope_id.as_str().into(),
         project_scope: external_context.project_scope.as_str().into(),
         canonical_root: external_context.canonical_root.clone(),
         storage_root: external_context.canonical_root.clone(),
         registered_ms: now_ms(),
     };
-    append_host_route_record(&manager.route_journal, &external_record).unwrap();
+    append_host_route_record(&manager.route_file, &external_record).unwrap();
     let result = manager.reset_project(&external_context, "reset-master", "reset-token");
     assert!(result.ok, "{result:?}");
-    assert!(!external.journal_path.exists());
+    assert!(!external.state_path.exists());
     assert!(!external_root.join(".agent-collab").exists());
     assert!(external.state.lock().unwrap().workers.is_empty());
     assert!(external.state.lock().unwrap().admission_frozen());
-    assert!(host.journal_path.exists());
+    assert!(host.state_path.exists());
     assert!(host
         .state
         .lock()
@@ -889,7 +733,7 @@ fn online_reset_external_project_drops_runtime_and_its_journal() {
         &manager.select_runtime(&host_context).unwrap()
     ));
     assert!(!manager.has_project_route(external_context.project_scope.as_str()));
-    assert!(load_host_route_records(&manager.route_journal)
+    assert!(load_host_route_records(&manager.route_file)
         .unwrap()
         .is_empty());
     std::fs::remove_dir_all(host_root).unwrap();
@@ -915,7 +759,6 @@ fn stale_superseded_route_is_retired_without_touching_live_unknown_route() {
     let mut original = original;
     original.native_thread_id = Some(NativeThreadId::new("other-thread").unwrap());
     original.session_id = Some(crate::identity::SessionId::new("other-session").unwrap());
-    original.endpoint_generation += 1;
     other
         .commit_checked(&[Event::GlobalRuntimeBound {
             binding: original.clone(),
@@ -931,7 +774,6 @@ fn stale_superseded_route_is_retired_without_touching_live_unknown_route() {
         None,
     );
     let mut retired = original.clone();
-    retired.endpoint_generation += 1;
     retired.native_thread_id = None;
     retired.tmux_endpoint = None;
     other
@@ -962,7 +804,7 @@ fn stale_superseded_route_is_retired_without_touching_live_unknown_route() {
         }])
         .unwrap();
     manager.prune_stale_routes().unwrap();
-    let replayed = replay_from_journal(&root, &host.journal_path).unwrap();
+    let replayed = current_state::load(&host.state_path, false).unwrap();
     assert!(!replayed
         .global
         .current_thread_routes
@@ -1008,7 +850,6 @@ fn dsh_fixture() -> (
         AgentId::new("dsh-master").unwrap(),
         RuntimeId::new("dsh-runtime").unwrap(),
         BindingId::new("dsh-binding").unwrap(),
-        1,
         Some(crate::identity::SessionId::new("dsh-session-A").unwrap()),
         Some(NativeThreadId::new("agentA").unwrap()),
     )
@@ -1021,7 +862,6 @@ fn dsh_fixture() -> (
         "test",
         "test authorized master",
         binding.binding_id.clone(),
-        1,
         now_ms(),
     )
     .unwrap();
@@ -1033,14 +873,8 @@ fn dsh_fixture() -> (
                     token: "dsh-token".into(),
                     cwd: root.display().to_string(),
                     registered_ms: now_ms(),
-                    transport: Some(transport),
+                    transport: Some(transport.clone()),
                 },
-            },
-            Event::MasterAssigned {
-                worker_id: "dsh-master".into(),
-                assigned_by: "test".into(),
-                approval: None,
-                assigned_ms: now_ms(),
             },
             Event::GlobalProjectRegistered {
                 registration: ProjectRegistration::new(
@@ -1058,6 +892,17 @@ fn dsh_fixture() -> (
             Event::GlobalMasterGranted { grant },
         ])
         .unwrap();
+    binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .commit(binding_store::ControlChange::Commit {
+            key: binding_slot::IdentityBindingKey::new(
+                context.project_scope.clone(),
+                context.app_scope_id.clone(),
+                "Jenny",
+            ),
+            value: binding_slot::BindingValue::new(binding.clone(), transport),
+            expected_generation: None,
+        })
+        .unwrap();
     let identity_dir = server
         .host_paths
         .state_root()
@@ -1074,7 +919,6 @@ fn dsh_fixture() -> (
                 agent_id: binding.agent_id.clone(),
                 runtime_id: binding.runtime_id.clone(),
                 appserver_id: binding.app_scope_id.clone(),
-                endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
                 session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
@@ -1101,10 +945,8 @@ fn online_reset_preserves_live_dsh_binding_and_identity() {
     let (server, root, manager, context, binding) = dsh_fixture();
     let scope = context.project_scope.as_str().to_owned();
     append_host_route_record(
-        &manager.route_journal,
+        &manager.route_file,
         &HostRouteRecord {
-            version: 1,
-            op: "register".into(),
             app_scope_id: context.app_scope_id.as_str().into(),
             project_scope: scope.clone(),
             canonical_root: root.display().to_string(),
@@ -1139,7 +981,6 @@ fn online_reset_preserves_live_dsh_binding_and_identity() {
         AgentId::new("other-worker").unwrap(),
         RuntimeId::new("other-runtime").unwrap(),
         BindingId::new("other-binding").unwrap(),
-        1,
         Some(crate::identity::SessionId::new("other-session").unwrap()),
         Some(NativeThreadId::new("other-thread").unwrap()),
     )
@@ -1237,16 +1078,16 @@ fn online_reset_preserves_live_dsh_binding_and_identity() {
     );
     assert!(
         root.join(".agent-collab").is_dir(),
-        "retained DSH route must stay replayable after restart"
+        "retained DSH route must stay available after restart"
     );
-    let records = load_host_route_records(&manager.route_journal).unwrap();
+    let records = load_host_route_records(&manager.route_file).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].app_scope_id, context.app_scope_id.as_str());
 
-    let replayed = replay_from_journal(&root, &server.journal_path).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(
         replayed.workers.contains_key("dsh-master"),
-        "journal replay must preserve the live DSH worker"
+        "current state must preserve the live DSH worker"
     );
     assert!(replayed
         .global

@@ -374,6 +374,185 @@ fn endpoint_is_absent(error: &str) -> bool {
     error.contains("no server running") || error.contains("error connecting to")
 }
 
+/// Validates a fixed tmux session name. The TUI renames its live session to the
+/// role registration name once; the name must be safe to pass as a tmux target
+/// and stable across recovery. tmux target syntax treats `:` and `.` as
+/// separators, so a fixed name never contains them.
+fn validate_session_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty()
+        || name.starts_with('-')
+        || name
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        || name.contains(':')
+        || name.contains('.')
+    {
+        return Err("TMUX_SESSION_NAME_INVALID: malformed fixed session name".into());
+    }
+    Ok(())
+}
+
+/// Reads the current tmux session name for an observed endpoint. This is the
+/// TUI identity anchor: it stays stable across pane and `$N` changes, unlike
+/// the socket/pane/PID placement.
+pub fn observe_session_name(endpoint: &TmuxEndpoint) -> Result<String, String> {
+    validate_endpoint(endpoint)?;
+    let output = tmux_command(
+        &endpoint.socket_path,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &endpoint.tmux_session_id,
+            "#{session_name}",
+        ],
+    )
+    .map_err(|error| format!("TMUX_SESSION_NAME_QUERY_FAILED: {error}"))?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return Err("TMUX_SESSION_NAME_QUERY_FAILED: empty or malformed session name".into());
+    }
+    Ok(name)
+}
+
+/// Renames the observed TUI tmux session to its fixed role name and reads the
+/// name back. Renaming to the current name is idempotent. A failed rename or a
+/// read-back mismatch is explicit: callers must abort the identity commit and
+/// keep the previous session name instead of persisting a half-anchor.
+/// Observe the current session name only when the endpoint is live. A missing
+/// or unreachable server yields `Ok(None)`: the caller has no live tmux anchor
+/// to move, so identity handlers skip the rename instead of failing a
+/// non-TUI/one-shot caller. Other observation failures stay explicit.
+pub fn session_name_if_live(endpoint: &TmuxEndpoint) -> Result<Option<String>, String> {
+    match observe_session_name(endpoint) {
+        Ok(name) => Ok(Some(name)),
+        Err(error) if endpoint_is_absent(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Find a live tmux pane whose session currently carries `name`. This is used
+/// only to move an orphaned role-name session aside before a successor takes
+/// the same name; the socket-scoped listing does not touch the session.
+pub fn find_live_session_by_name(
+    socket_path: &str,
+    name: &str,
+) -> Result<Option<TmuxEndpoint>, String> {
+    validate_session_name(name)?;
+    let output = match tmux_command(
+        socket_path,
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pid}\t#{session_id}\t#{session_name}\t#{pane_id}\t#{pane_pid}",
+        ],
+    ) {
+        Ok(output) => output,
+        Err(error) if endpoint_is_absent(&error) => return Ok(None),
+        Err(error) => return Err(format!("TMUX_SESSION_LOOKUP_FAILED: {error}")),
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 5 || fields[2] != name {
+            continue;
+        }
+        return Ok(Some(TmuxEndpoint {
+            socket_path: socket_path.to_owned(),
+            server_pid: fields[0]
+                .parse()
+                .map_err(|error| format!("TMUX_SESSION_LOOKUP_INVALID: {error}"))?,
+            tmux_session_id: fields[1].to_owned(),
+            pane_id: fields[3].to_owned(),
+            pane_pid: fields[4]
+                .parse()
+                .map_err(|error| format!("TMUX_SESSION_LOOKUP_INVALID: {error}"))?,
+            codex_session_id: None,
+            codex_thread_id: None,
+        }));
+    }
+    Ok(None)
+}
+
+/// Read the current session name of a registered TUI binding, requiring the
+/// tmux endpoint to be reachable. Unlike `session_name_if_live`, a missing or
+/// unreachable server here is a typed failure: the identity owner must abort
+/// rather than commit a name without a live, readable anchor. `caller_pid`-less
+/// non-TUI callers never reach this path because they have no registered tmux
+/// endpoint.
+pub fn require_live_session_name(endpoint: &TmuxEndpoint) -> Result<String, String> {
+    match observe_session_name(endpoint) {
+        Ok(name) => Ok(name),
+        Err(error) if endpoint_is_absent(&error) => {
+            Err(format!("TMUX_TUI_ANCHOR_UNREACHABLE: {error}"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn rename_session(endpoint: &TmuxEndpoint, target: &str) -> Result<(), String> {
+    validate_endpoint(endpoint)?;
+    validate_session_name(target)?;
+    let previous = observe_session_name(endpoint)?;
+    if previous == target {
+        return Ok(());
+    }
+    if let Err(error) = tmux_command(
+        &endpoint.socket_path,
+        &["rename-session", "-t", &endpoint.tmux_session_id, target],
+    ) {
+        let error = format!("TMUX_SESSION_RENAME_FAILED: {error}");
+        return Err(append_rename_rollback_error(
+            error,
+            restore_session_name(endpoint, &previous),
+        ));
+    }
+    let observed = match observe_session_name(endpoint) {
+        Ok(observed) => observed,
+        Err(error) => {
+            let error = format!("TMUX_SESSION_RENAME_FAILED: readback: {error}");
+            return Err(append_rename_rollback_error(
+                error,
+                restore_session_name(endpoint, &previous),
+            ));
+        }
+    };
+    if observed != target {
+        let error =
+            format!("TMUX_SESSION_RENAME_FAILED: readback returned {observed} instead of {target}");
+        return Err(append_rename_rollback_error(
+            error,
+            restore_session_name(endpoint, &previous),
+        ));
+    }
+    Ok(())
+}
+
+fn restore_session_name(endpoint: &TmuxEndpoint, previous: &str) -> Result<(), String> {
+    if observe_session_name(endpoint)? == previous {
+        return Ok(());
+    }
+    tmux_command(
+        &endpoint.socket_path,
+        &["rename-session", "-t", &endpoint.tmux_session_id, previous],
+    )
+    .map_err(|error| error.to_string())?;
+    let observed = observe_session_name(endpoint)?;
+    if observed != previous {
+        return Err(format!(
+            "readback returned {observed} instead of the previous name {previous}"
+        ));
+    }
+    Ok(())
+}
+
+fn append_rename_rollback_error(error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
+    }
+}
+
 pub fn probe(endpoint: &TmuxEndpoint) -> Result<PanePresence, String> {
     validate_endpoint(endpoint)?;
     let args = [
@@ -859,6 +1038,10 @@ pub(crate) mod tests {
 
     impl TmuxFailureWrapper {
         pub(crate) fn fail_command(command_name: &str) -> Self {
+            Self::with_command_result(command_name, 71)
+        }
+
+        fn with_command_result(command_name: &str, exit_code: u8) -> Self {
             let output = Command::new("which").arg("tmux").output().unwrap();
             assert!(output.status.success());
             let real_tmux = String::from_utf8(output.stdout).unwrap().trim().to_owned();
@@ -875,7 +1058,7 @@ pub(crate) mod tests {
             std::fs::write(
                 &wrapper,
                 format!(
-                    "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"{command_name}\" ]; then\n    echo 'forced {command_name} failure' >&2\n    exit 71\n  fi\ndone\nexec '{real_tmux}' \"$@\"\n"
+                    "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"{command_name}\" ]; then\n    echo 'forced {command_name} failure' >&2\n    exit {exit_code}\n  fi\ndone\nexec '{real_tmux}' \"$@\"\n"
                 ),
             )
             .unwrap();
@@ -1392,5 +1575,95 @@ pub(crate) mod tests {
             .unwrap()
             .contains("paste happened, no receive"));
         // A failed wake returns Err, never the transport result consumed=false/true object.
+    }
+
+    #[test]
+    fn session_name_is_observed_and_rename_is_idempotent() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        assert_eq!(observe_session_name(&endpoint).unwrap(), "collab-test");
+
+        rename_session(&endpoint, "Jenny").unwrap();
+        assert_eq!(observe_session_name(&endpoint).unwrap(), "Jenny");
+
+        // Renaming to the fixed name that is already in place is a no-op
+        // success; callers must not treat a repeated context as a rename error.
+        rename_session(&endpoint, "Jenny").unwrap();
+        assert_eq!(observe_session_name(&endpoint).unwrap(), "Jenny");
+    }
+
+    #[test]
+    fn session_name_if_live_returns_none_for_absent_server() {
+        let endpoint = TmuxEndpoint {
+            socket_path: std::env::temp_dir()
+                .join("collab-session-name-if-live-absent.sock")
+                .to_string_lossy()
+                .into_owned(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        // A non-TUI caller has no live anchor; the optional observation skips.
+        assert_eq!(session_name_if_live(&endpoint).unwrap(), None);
+    }
+
+    #[test]
+    fn registered_tui_endpoint_requires_a_live_readable_session() {
+        let endpoint = TmuxEndpoint {
+            socket_path: std::env::temp_dir()
+                .join("collab-registered-tui-unreachable.sock")
+                .to_string_lossy()
+                .into_owned(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        // A registered TUI binding is not optional: its endpoint must be live
+        // and readable before a name commit, not silently skipped.
+        let error = require_live_session_name(&endpoint).unwrap_err();
+        assert!(error.starts_with("TMUX_TUI_ANCHOR_UNREACHABLE:"), "{error}");
+    }
+
+    #[test]
+    fn registered_tui_endpoint_reads_name_when_the_session_is_live() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        assert_eq!(require_live_session_name(&endpoint).unwrap(), "collab-test");
+    }
+
+    #[test]
+    fn rename_session_rejects_malformed_fixed_name() {
+        for name in ["", " ", "a:b", "a.b", "a b", "-x"] {
+            assert!(
+                validate_session_name(name).is_err(),
+                "{name:?} must not be a valid fixed session name"
+            );
+        }
+        assert!(validate_session_name("Jenny").is_ok());
+        assert!(validate_session_name("appsdk_Jenny").is_ok());
+    }
+
+    #[test]
+    fn failed_rename_is_explicit_and_keeps_the_previous_name() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let _wrapper = TmuxFailureWrapper::fail_command("rename-session");
+
+        let error = rename_session(&endpoint, "Jenny").unwrap_err();
+        assert!(
+            error.starts_with("TMUX_SESSION_RENAME_FAILED: forced rename-session failure"),
+            "{error}"
+        );
+        // The anchor must not change when the rename fails.
+        assert_eq!(observe_session_name(&endpoint).unwrap(), "collab-test");
     }
 }

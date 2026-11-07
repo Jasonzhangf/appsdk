@@ -40,6 +40,49 @@ accepted -> rework -> working
 * -> cancelled
 ```
 
+## Task close admission (hard gate)
+
+A task, board issue, or bug may move to `closed` only through the normal
+`collab task close` path, and only when every item below is true:
+
+1. The owner recorded an exact delivery with `collab task deliver`: a code
+   candidate commit, or explicit `--no-candidate` read-only evidence.
+2. A review accepted the delivered revision with `collab task review --accept`.
+   Self-reported completion, an ACK, a notification receipt, a healthy daemon,
+   or a passing local build is not verification.
+3. For code, the exact delivered candidate is reachable from `refs/heads/main`
+   and `collab task integrated --commit <main-sha> --evidence "<main gates>"`
+   is recorded. `TASK_MERGE_PENDING` blocks close until this is done.
+4. For runtime-affecting work, the built artifact was installed through the
+   product's official installer and the real black-box entry was re-run and
+   passed. Compilation, unit tests, or "tests exist" are not runtime
+   verification.
+5. Owned resources are handled: the worktree/workspace is removed, or a
+   PROTECTED_HOLD is recorded with path, reason, and owner.
+6. `completion_missing` is empty, and no P0/P1 for this task stays open.
+
+If any item is false, the task stays open (`working`, `delivered`, `accepted`,
+or `cleanup_pending`). Do not close it. Reporting "nothing to do" while an
+authorized, unfinished task exists is a process failure.
+
+### Force close
+
+`collab task close --force` is only for an authorized cancellation or a
+verified lifecycle cleanup, and it requires a non-empty `--reason`. A blocker,
+an unverified result, an incomplete delivery, or a wish to stop reminders never
+justifies force close. Force close must record the real outcome and remaining
+work in the cleanup receipt. Master accountability does not end at force close.
+
+### Reopen
+
+`closed` and `cancelled` are terminal in the daemon state machine. A closed
+task cannot be edited, reassigned, or moved back to `working`. If a task was
+closed without meeting the close admission above, register a follow-up task
+`<original-id>-reopen-<yyyyMMdd>` that records the original id, the exact
+missing verification, and the reopened acceptance, then drive that follow-up
+to a normal close. Never treat a wrong close as done; the follow-up is the
+authoritative open obligation.
+
 Select the command for the actual transition from the
 [operations guide](../operations.md#common-command-card); this lifecycle is not
 a fixed command sequence. Reuse valid task and receipt facts.
@@ -180,7 +223,7 @@ Route escalation by role:
   temporarily decline a master collaboration invite to protect their own task.
   If no current master exists, report to the collaborator that initiated the
   task. Legacy managed records grant no new execution authority.
-- Master authority follows [migration-daemon](migration-daemon.md#master-and-deprecated-interfaces).
+- Master authority follows the [current identity boundary](migration-daemon.md#master-and-deprecated-interfaces).
   Goal routing and patrol responsibilities follow the [main Skill](../SKILL.md#task-routing-and-role-responsibilities).
   An unanswered internal request does not become a human approval gate.
   Ask humans only for exclusive facts, uncovered authority or user-constraint changes.

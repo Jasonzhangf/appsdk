@@ -1,6 +1,6 @@
 use super::*;
 use crate::identity::Identity;
-use crate::server::peer_tests::{register_synthetic_peer, test_server};
+use crate::server::peer_tests::{register, register_synthetic_peer, test_server};
 
 fn project_context(root: &Path) -> ProjectContext {
     ProjectContext::for_registered_root_with_app(root, AppServerId::new("tui-default").unwrap())
@@ -37,16 +37,12 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
     let context = project_context(&root);
     let peer = "peer-self";
     let other = "peer-other";
-    assert!(register_synthetic_peer(&server, peer, "%self").ok);
+    assert!(register(&server, peer, "%self").ok);
     assert!(register_synthetic_peer(&server, other, "%other").ok);
-    assert!(
-        handle_master_promote(
-            &server,
-            peer.into(),
-            format!("token-{peer}"),
-            "user approved current-pane self removal".into(),
-        )
-        .ok
+    crate::server::peer_tests::promote_master(
+        &server,
+        peer,
+        "user approved current-pane self removal",
     );
 
     let binding = {
@@ -123,7 +119,7 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
     ]);
 
     let request = self_close_request(&server, &context, peer, "self-with-open-work");
-    let response = handle(&server, Some(&context), request);
+    let response = handle(&server, Some(&context), request, None);
     let result = &response.data["result"];
     assert_eq!(result["outcome"], "complete", "{response:?}");
     assert_eq!(
@@ -183,7 +179,7 @@ fn self_close_removes_the_retired_worker_identity_anchor() {
     std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
 
     let request = self_close_request(&server, &context, peer, "self-removes-anchor");
-    let response = handle(&server, Some(&context), request);
+    let response = handle(&server, Some(&context), request, None);
     assert_eq!(
         response.data["result"]["outcome"], "complete",
         "{response:?}"

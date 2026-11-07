@@ -33,6 +33,40 @@ fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("collab CLI emits JSON")
 }
 
+fn active_identity_slot(fixture: &Fixture, worker_id: &str) -> Value {
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let slots: Vec<_> = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == worker_id
+        })
+        .collect();
+    assert_eq!(
+        slots.len(),
+        1,
+        "active identity must survive resident cleanup"
+    );
+    slots[0].clone()
+}
+
+fn reception_for(fixture: &Fixture, project: &Path, app: &str, worker_id: &str) -> Value {
+    let state = fixture.current_state_for(project, app);
+    let rows: Vec<_> = state["notification_subscriptions"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|row| row["worker_id"] == worker_id && row["event"] == "direct-message")
+        .collect();
+    assert_eq!(rows.len(), 1);
+    rows[0].clone()
+}
+
 fn create_session(fixture: &Fixture, label: &str) -> Pane {
     let output = Command::new("tmux")
         .args([
@@ -161,7 +195,22 @@ fn approve_master(fixture: &Fixture, pane: &Pane) -> Value {
     )
 }
 
-fn kill_owned_session(fixture: &Fixture, session: &str) {
+fn kill_owned_session(fixture: &Fixture, pane: &Pane) {
+    let resolved = Command::new("tmux")
+        .args([
+            "-S",
+            fixture.tmux_socket.to_str().unwrap(),
+            "display-message",
+            "-p",
+            "-t",
+            &pane.pane_id,
+            "#{session_id}",
+        ])
+        .output()
+        .expect("resolve owned pane session");
+    assert!(resolved.status.success());
+    let session = String::from_utf8(resolved.stdout).unwrap();
+    let session = session.trim();
     let output = Command::new("tmux")
         .args([
             "-S",
@@ -191,15 +240,20 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
     let live_pane = create_session(&fixture, "stale-maint-live");
     let dead_pane = create_session(&fixture, "stale-maint-dead");
     let task_pane = create_session(&fixture, "stale-maint-task");
+    let mail_pane = create_session(&fixture, "stale-maint-mail");
     let live_context =
         register_context_in_project(&fixture, &project_root, &live_pane, "live-peer");
     let dead_context =
         register_context_in_project(&fixture, &project_root, &dead_pane, "dead-peer");
     let task_context =
         register_context_in_project(&fixture, &project_root, &task_pane, "task-peer");
+    let mail_context =
+        register_context_in_project(&fixture, &project_root, &mail_pane, "mail-peer");
     let (live_id, _, app_scope_id) = identity(&live_context);
     let (dead_id, dead_binding_id, _) = identity(&dead_context);
     let (task_id, _, _) = identity(&task_context);
+    let (mail_id, _, _) = identity(&mail_context);
+    let dead_slot_before = active_identity_slot(&fixture, &dead_id);
 
     assert_ne!(live_id, dead_id);
     assert_ne!(task_id, live_id);
@@ -225,6 +279,20 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
         .or_else(|| sent["message_id"].as_str())
         .expect("retained message id")
         .to_owned();
+    let mail_only = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &mail_id,
+            "--subject",
+            "unread-only",
+            "--delivery",
+            "queued",
+            "retain without a task",
+        ],
+        Some(&master),
+    );
+    let mail_only_id = mail_only["msg_id"].as_str().unwrap().to_owned();
 
     // Seed real business responsibility through the public CLI: an open task
     // and an unread durable message. The target must be retained when its
@@ -239,17 +307,20 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
         ],
         Some(&task_pane),
     );
-    // Only close the exact test-owned target sessions. The daemon, live peer
-    // session, and tmux server remain intact.
-    kill_owned_session(&fixture, "stale-maint-dead");
-    kill_owned_session(&fixture, "stale-maint-task");
+    // Stop only the isolated fixture daemon while capturing its current lease,
+    // then close the exact owned target sessions before its first startup tick.
+    fixture.reap_daemon();
+    let reception_before = reception_for(&fixture, &project_root, &app_scope_id, &dead_id);
+    kill_owned_session(&fixture, &dead_pane);
+    kill_owned_session(&fixture, &task_pane);
+    kill_owned_session(&fixture, &mail_pane);
     fixture.restart_daemon();
 
     let retired = wait_until(Duration::from_secs(60), || {
         let workers = workers_for_route(&fixture, &project_root, &app_scope_id);
         workers["workers"]
             .as_array()
-            .expect("workers array")
+            .unwrap_or_else(|| panic!("Workers failed during maintenance: {workers}"))
             .iter()
             .all(|worker| worker["id"] != dead_id)
     });
@@ -286,6 +357,15 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
         retained_msg["consumed_by_recv"], false,
         "readable status must not consume the retained mailbox: {retained_msg}"
     );
+    assert!(live["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == mail_id));
+    let mail_only_readback = fixture.run_ok(&["msg", &mail_only_id], Some(&master));
+    assert_eq!(mail_only_readback["to"], mail_id);
+    assert_eq!(mail_only_readback["state"], "pending");
+    assert_eq!(mail_only_readback["consumed_by_recv"], false);
 
     let retired_read = fixture.run_ok(&["worker", "read", &dead_id], Some(&master));
     assert_eq!(
@@ -312,13 +392,92 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
         "route must be retired or explicitly absent: {retired_read}"
     );
 
-    // Route/binding retirement is observable through the public journal.
-    let journal = std::fs::read_to_string(fixture.project_journal()).expect("read journal");
-    assert!(
-        journal.contains(&format!("\"binding_id\":\"{dead_binding_id}\"")),
-        "retired binding remains in durable journal"
+    let dead_slot_after = active_identity_slot(&fixture, &dead_id);
+    assert_eq!(dead_slot_after, dead_slot_before);
+    assert_eq!(
+        reception_for(&fixture, &project_root, &app_scope_id, &dead_id),
+        reception_before
+    );
+    assert_eq!(
+        retired_read["result"]["close"]["subscription_retirement"]["state"],
+        "not-applicable"
+    );
+    assert_eq!(
+        dead_slot_after["current"]["binding"]["binding_id"],
+        dead_binding_id
     );
 
-    kill_owned_session(&fixture, "stale-maint-live");
+    let mut resumed = create_session(&fixture, "stale-maint-resumed");
+    resumed.session_anchor = dead_pane.session_anchor.clone();
+    let resumed_context =
+        register_context_in_project(&fixture, &project_root, &resumed, "resumed-peer");
+    assert_eq!(identity(&resumed_context).0, dead_id);
+    assert_eq!(
+        resumed_context["result"]["snapshot"]["identity"]["display_name"],
+        dead_context["result"]["snapshot"]["identity"]["display_name"]
+    );
+    assert_eq!(
+        resumed_context["result"]["snapshot"]["identity"]["role"],
+        dead_context["result"]["snapshot"]["identity"]["role"]
+    );
+    let received_message = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &dead_id,
+            "--subject",
+            "resumed-inbox",
+            "--delivery",
+            "queued",
+            "receive after maintenance",
+        ],
+        Some(&master),
+    );
+    let received_id = received_message["msg_id"].as_str().unwrap();
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&resumed));
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| { row["id"] == received_id && row["body"] == "receive after maintenance" }));
+    let consumed = fixture.run_ok(&["msg", received_id], Some(&master));
+    assert_eq!(consumed["consumed_by_recv"], true);
+
+    let resumed_slot = active_identity_slot(&fixture, &dead_id);
+    let first_operations = fixture.current_state_for(&project_root, &app_scope_id)
+        ["peer_lifecycle_operations"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, operation)| operation["target"]["worker_id"] == dead_id)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(first_operations.len(), 1);
+    fixture.reap_daemon();
+    let resumed_reception = reception_for(&fixture, &project_root, &app_scope_id, &dead_id);
+    kill_owned_session(&fixture, &resumed);
+    fixture.restart_daemon();
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            let state = fixture.current_state_for(&project_root, &app_scope_id);
+            state["peer_lifecycle_operations"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|operation| {
+                    operation["target"]["worker_id"] == dead_id && operation["phase"] == "complete"
+                })
+                .count()
+                == 2
+        }),
+        "a recovered resident requires a new Close admission"
+    );
+    assert_eq!(active_identity_slot(&fixture, &dead_id), resumed_slot);
+    assert_eq!(
+        reception_for(&fixture, &project_root, &app_scope_id, &dead_id),
+        resumed_reception
+    );
+
+    kill_owned_session(&fixture, &live_pane);
     std::fs::remove_dir_all(&fixture.root).ok();
 }

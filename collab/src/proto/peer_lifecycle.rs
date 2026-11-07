@@ -5,7 +5,6 @@ pub struct PeerLifecycleTarget {
     pub project_scope: ProjectScopeId,
     pub app_scope_id: AppServerId,
     pub binding_id: BindingId,
-    pub endpoint_generation: u64,
     pub transport: PeerLifecycleTransport,
 }
 

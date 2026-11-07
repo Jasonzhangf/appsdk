@@ -433,14 +433,15 @@ cd /abs/path/project
 git status --short --branch
 git worktree list
 find .appsdk .appsdk-control .agent-collab -maxdepth 3 -print 2>/dev/null
-collab migrate inspect
 collab context
 ```
 
 Record the exact project root, branch/HEAD, worktrees, `.appsdk/` and
 `.appsdk-control/` contents, generated roots, `active/`, `protected/`,
-`.agent-collab/` journal/mailbox/tasks/claims, daemon PID/socket, peer
-identities, routes, and migration blockers in the run note. A file name, old
+the current Collab identity map, task/mailbox state and resource claims, daemon
+PID/socket, peer identities, routes, and actual blockers in the run note. Collab
+has no migration-maintenance command; current recovery is `collab context`.
+A file name, old
 PID file, socket existence, or successful `collab status` is not sufficient
 proof of ownership.
 

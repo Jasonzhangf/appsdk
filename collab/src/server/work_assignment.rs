@@ -8,9 +8,9 @@ fn work_executor_gate(
         let route = server_route_scope(server, state)
             .map_err(Resp::err)?
             .ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))?;
-        let matches = state
-            .name_occupancy(route.project_scope_id.as_str(), &name)
-            .is_some_and(|entry| entry.worker_id == actor);
+        let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().map_err(Resp::err)?;
+        let matches = control.current_for_name(&route.project_scope_id, &route.app_scope_id, &name).map_err(Resp::err)?
+            .and_then(|slot| slot.active_binding()).is_some_and(|current| current.binding.agent_id.as_str() == actor);
         if !matches {
             return Err(Resp::err_data(
                 "WORK_EXECUTOR_REQUIRED: task is pinned to another stable name",
@@ -278,6 +278,9 @@ fn board_dispatch_work(
         _ => return Resp::err("project route is not ready"),
     };
     let policy = details.work_policy.clone();
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let available = |worker: &WorkerRec| {
         worker.id != actor
             && !is_managed_subagent(&state, &worker.id)
@@ -287,9 +290,11 @@ fn board_dispatch_work(
                 .is_some_and(|presence| presence.presence == name_state::AgentPresence::Offline)
     };
     let selected = if let Some(name) = policy.executor_name.as_deref() {
-        state
-            .name_occupancy(route.project_scope_id.as_str(), name)
-            .and_then(|entry| state.workers.get(&entry.worker_id))
+        let current = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
+            Ok(current) => current, Err(error) => return Resp::err(error),
+        };
+        current.and_then(|slot| slot.active_binding())
+            .and_then(|current| state.workers.get(current.binding.agent_id.as_str()))
             .filter(|worker| available(worker))
             .map(|worker| {
                 (
@@ -299,18 +304,13 @@ fn board_dispatch_work(
                 )
             })
     } else {
-        let mut candidates: Vec<_> = state
-            .workers
-            .values()
-            .filter(|worker| available(worker))
-            .map(|worker| {
-                let name = state
-                    .name_occupancies
-                    .get(route.project_scope_id.as_str())
-                    .and_then(|names| names.values().find(|entry| entry.worker_id == worker.id))
-                    .map(|entry| entry.name.clone())
-                    .unwrap_or_else(|| worker.id.clone());
-                let roles = worker_work_roles(&state, route.project_scope_id.as_str(), &worker.id);
+        let mut candidates = Vec::new();
+        for worker in state.workers.values().filter(|worker| available(worker)) {
+                let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id) {
+                    Ok(Some(slot)) => slot, Ok(None) => continue, Err(error) => return Resp::err(error),
+                };
+                let name = slot.identity_key.name.clone();
+                let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
                 let matched = policy
                     .preferred_roles
                     .as_ref()
@@ -322,9 +322,8 @@ fn board_dispatch_work(
                                 .and_then(|details| details.invitation.as_ref())
                                 .is_some_and(|invite| invite.peer_id == worker.id))
                 });
-                (matched, unassigned, name, worker.id.clone())
-            })
-            .collect();
+                candidates.push((matched, unassigned, name, worker.id.clone()));
+        }
         candidates.sort_by(|left, right| right.0.cmp(&left.0)
             .then(right.1.cmp(&left.1)).then(left.2.cmp(&right.2)));
         candidates.first().map(|(matched, unassigned, name, id)| {
@@ -383,7 +382,7 @@ mod work_policy_state_tests {
     use super::*;
 
     #[test]
-    fn category_defaults_overrides_and_explicit_clear_survive_compaction() {
+    fn category_defaults_overrides_and_explicit_clear_survive_current_state() {
         let mut state = State::default();
         state
             .apply_checked(&Event::ProjectWorkPolicyUpdated {
@@ -448,10 +447,7 @@ mod work_policy_state_tests {
                 },
             })
             .unwrap();
-        let mut replay = State::default();
-        for event in state.snapshot_events() {
-            replay.apply_checked(&event).unwrap();
-        }
+        let mut replay: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert_eq!(replay.effective_work_policy("child"), resolved);
         assert_eq!(
             replay

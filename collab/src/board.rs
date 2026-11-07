@@ -224,7 +224,6 @@ pub enum BoardCommand {
 pub struct BoardInvitation {
     pub peer_id: String,
     pub binding_id: String,
-    pub endpoint_generation: u64,
     pub message_id: String,
     pub created_ms: i64,
     #[serde(default)]
@@ -267,7 +266,7 @@ impl BoardTaskDetails {
 }
 
 /// Deliberate allowlist: no tokens, runtime endpoints, role briefs, child
-/// identity, internal resource records, or raw journal events.
+/// identity or internal resource records.
 #[derive(Debug, Serialize)]
 pub struct BoardTaskView {
     pub id: String,

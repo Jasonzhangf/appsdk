@@ -1,114 +1,5 @@
 use super::*;
     #[test]
-    fn runtime_binding_replay_keeps_a_legacy_thread_only_route_event_resolvable() {
-        // The live host journal shape: route events written before the dual
-        // key existed, carrying a native thread but no session id.
-        let root = replay_test_root("legacy-thread-only-route-event");
-        let journal = root.join(".agent-collab/server/journal.jsonl");
-        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-        let scope = ProjectScopeId::new("/replay-project").unwrap();
-        let binding = RuntimeBinding {
-            project_scope: scope.clone(),
-            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
-            agent_id: AgentId::new("agent-legacy").unwrap(),
-            runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
-            binding_id: BindingId::new("binding-legacy").unwrap(),
-            endpoint_generation: 4,
-            session_id: None,
-            native_thread_id: Some(NativeThreadId::new("thread-legacy-live").unwrap()),
-            tmux_endpoint: None,
-        };
-        let events = vec![
-            Event::GlobalProjectRegistered {
-                registration: ProjectRegistration::new(
-                    scope.clone(),
-                    AppServerId::new("appserver-cli").unwrap(),
-                )
-                .unwrap(),
-            },
-            Event::GlobalRuntimeBound {
-                binding: binding.clone(),
-            },
-            Event::GlobalCurrentThreadRouteSet {
-                binding: binding.clone(),
-            },
-        ];
-        let body = events
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(&journal, format!("{body}\n")).unwrap();
-
-        let replayed = crate::server::replay(&root).expect("legacy route replay must not abort");
-        let thread = NativeThreadId::new("thread-legacy-live").unwrap();
-        let legacy = replayed
-            .global
-            .legacy_thread_route_matches(&thread)
-            .into_iter()
-            .next()
-            .cloned()
-            .expect("legacy route event must stay resolvable");
-        assert_eq!(legacy.agent_id.as_str(), "agent-legacy");
-        assert_eq!(legacy.endpoint_generation, 4);
-        assert!(legacy.session_id.is_none());
-        assert!(replayed.global.current_thread_routes.is_empty());
-        replayed.global.validate().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn runtime_binding_replay_keeps_ambiguous_legacy_thread_only_routes_as_candidates() {
-        let root = replay_test_root("legacy-thread-ambiguous");
-        let journal = root.join(".agent-collab/server/journal.jsonl");
-        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
-        let scope = ProjectScopeId::new("/replay-project").unwrap();
-        let binding = |agent: &str, binding_id: &str, runtime_id: &str| RuntimeBinding {
-            project_scope: scope.clone(),
-            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
-            agent_id: AgentId::new(agent).unwrap(),
-            runtime_id: RuntimeId::new(runtime_id).unwrap(),
-            binding_id: BindingId::new(binding_id).unwrap(),
-            endpoint_generation: 1,
-            session_id: None,
-            native_thread_id: Some(NativeThreadId::new("thread-shared").unwrap()),
-            tmux_endpoint: None,
-        };
-        let events = vec![
-            Event::GlobalProjectRegistered {
-                registration: ProjectRegistration::new(
-                    scope.clone(),
-                    AppServerId::new("appserver-cli").unwrap(),
-                )
-                .unwrap(),
-            },
-            Event::GlobalRuntimeBound {
-                binding: binding("agent-one", "binding-one", "runtime-one"),
-            },
-            Event::GlobalRuntimeBound {
-                binding: binding("agent-two", "binding-two", "runtime-two"),
-            },
-        ];
-        let body = events
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(&journal, format!("{body}\n")).unwrap();
-        // Replay must not abort on two candidates for one thread; the resolver
-        // fails closed instead, so both survive as read-only candidates.
-        let replayed = crate::server::replay(&root).expect("legacy replay must not abort");
-        let thread = NativeThreadId::new("thread-shared").unwrap();
-        let mut matches = replayed.global.legacy_thread_route_matches(&thread);
-        matches.sort_by(|left, right| left.binding_id.as_str().cmp(right.binding_id.as_str()));
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].binding_id.as_str(), "binding-one");
-        assert_eq!(matches[1].binding_id.as_str(), "binding-two");
-        replayed.global.validate().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn legacy_role_field_is_ignored_on_replay() {
         let mut st = State::default();
         let event: Event = serde_json::from_str(
@@ -331,7 +222,7 @@ use super::*;
     }
 
     #[test]
-    fn cancelled_periodic_subscription_does_not_rearm_on_consume_or_replay() {
+    fn cancelled_periodic_subscription_does_not_rearm_on_consume_or_current_state_load() {
         let subscription_id = "sub-cancelled-periodic";
         let message_id = "message-cancelled-periodic";
         let mut state = State::default();
@@ -413,10 +304,7 @@ use super::*;
             0
         );
 
-        let mut replayed = State::default();
-        for event in state.snapshot_events() {
-            replayed.apply(&event);
-        }
+        let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         let replayed_subscription = &replayed.notification_subscriptions[subscription_id];
         assert_eq!(replayed_subscription.status, "cancelled");
         assert_eq!(replayed_subscription.fired_count, 0);
@@ -424,7 +312,7 @@ use super::*;
     }
 
     #[test]
-    fn periodic_subscription_persists_fixed_absolute_cursor_across_replay() {
+    fn periodic_subscription_persists_fixed_absolute_cursor_in_current_state() {
         let subscription = |id: &str, trigger_ms: Option<i64>| NotificationSubscription {
             id: id.into(),
             worker_id: "master".into(),
@@ -481,10 +369,7 @@ use super::*;
             );
         }
 
-        let mut replayed = State::default();
-        for event in seeded_state.snapshot_events() {
-            replayed.apply(&event);
-        }
+        let replayed: State = serde_json::from_slice(&serde_json::to_vec(&seeded_state).unwrap()).unwrap();
         assert_eq!(
             replayed.notification_subscriptions["sub-periodic-seeded"].trigger_ms,
             seeded_state.notification_subscriptions["sub-periodic-seeded"].trigger_ms
@@ -496,7 +381,7 @@ use super::*;
     }
 
     #[test]
-    fn worker_close_tombstone_replays_without_deleting_re_registration() {
+    fn current_worker_close_state_preserves_re_registration() {
         let worker = |id: &str, token: &str, registered_ms: i64| WorkerRec {
             id: id.into(),
             token: token.into(),
@@ -516,17 +401,14 @@ use super::*;
             worker: worker("peer-a", "token-new", 30),
         });
 
-        let mut replayed = State::default();
-        for event in state.snapshot_events() {
-            replayed.apply(&event);
-        }
+        let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert_eq!(replayed.workers["peer-a"].token, "token-new");
         assert!(!replayed.worker_closures.contains_key("peer-a"));
         assert!(!replayed.worker_snapshots.contains_key("peer-a"));
     }
 
     #[test]
-    fn ack_consumes_scheduled_occurrence_once_and_replay_preserves_cursor() {
+    fn ack_consumes_scheduled_occurrence_once_and_current_state_preserves_cursor() {
         let subscription_id = "sub-ack-periodic";
         let message_id = "message-ack-periodic";
         let mut state = State::default();
@@ -594,10 +476,7 @@ use super::*;
         assert_eq!(subscription.fired_count, 1);
         assert_eq!(subscription.trigger_ms, Some(3_000));
 
-        let mut replayed = State::default();
-        for event in state.snapshot_events() {
-            replayed.apply(&event);
-        }
+        let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         let replayed_subscription = &replayed.notification_subscriptions[subscription_id];
         assert_eq!(replayed_subscription.fired_count, 1);
         assert_eq!(replayed_subscription.trigger_ms, Some(3_000));

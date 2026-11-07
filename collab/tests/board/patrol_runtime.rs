@@ -14,36 +14,28 @@ struct CueBaseline {
     inputs: usize,
 }
 
-fn journal_events(fixture: &AppFixture) -> Vec<Value> {
-    std::fs::read_to_string(fixture.name_journal())
+fn wake_ids(current: &Value) -> BTreeSet<String> {
+    current["wake_bindings"]
+        .as_object()
         .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .keys()
+        .cloned()
         .collect()
 }
 
-fn wake_ids(events: &[Value]) -> BTreeSet<String> {
-    events
+fn notice_ids(current: &Value) -> BTreeSet<String> {
+    current["board_patrol_notice_ids"]
+        .as_array()
+        .unwrap()
         .iter()
-        .filter(|event| event["ev"] == "WakeBound")
-        .filter_map(|event| event["message_id"].as_str().map(str::to_owned))
+        .map(|id| id.as_str().unwrap().to_owned())
         .collect()
 }
 
-fn notice_ids(events: &[Value]) -> BTreeSet<String> {
-    events
-        .iter()
-        .filter(|event| event["ev"] == "BoardPatrolNoticeBound")
-        .filter_map(|event| event["message_id"].as_str().map(str::to_owned))
-        .collect()
-}
-
-fn message_target(events: &[Value], message_id: &str) -> Option<String> {
-    events.iter().find_map(|event| {
-        (event["ev"] == "Sent" && event["msg"]["id"].as_str() == Some(message_id))
-            .then(|| event["msg"]["to"].as_str().map(str::to_owned))
-            .flatten()
-    })
+fn message_target(current: &Value, message_id: &str) -> Option<String> {
+    current["msgs"][message_id]["to"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn input_has_message(input: &Value, message_id: &str) -> bool {
@@ -74,10 +66,10 @@ fn native_input_for(fixture: &AppFixture, thread: &str, message_id: &str) -> boo
 }
 
 fn cue_baseline(fixture: &AppFixture, thread: &str) -> CueBaseline {
-    let events = journal_events(fixture);
+    let current = fixture.current_state();
     CueBaseline {
-        wakes: wake_ids(&events),
-        notices: notice_ids(&events),
+        wakes: wake_ids(&current),
+        notices: notice_ids(&current),
         inputs: fixture
             .state
             .lock()
@@ -111,7 +103,7 @@ fn set_native_status(fixture: &AppFixture, thread: &str, status: &str) {
         .status = status.into();
 }
 
-fn advance_gate(fixture: &mut AppFixture, context: &Value, last_wake_tasks: &[&str]) -> usize {
+fn advance_gate(fixture: &mut AppFixture, context: &Value, last_wake_tasks: &[&str]) -> Value {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -129,7 +121,7 @@ fn advance_fresh_gate(
     fixture: &mut AppFixture,
     context: &Value,
     last_wake_tasks: &[&str],
-) -> usize {
+) -> Value {
     append_gate(fixture, context, last_wake_tasks, None, false)
 }
 
@@ -139,16 +131,12 @@ fn append_gate(
     last_wake_tasks: &[&str],
     idle_episode_start_ms: Option<i64>,
     last_poll_idle: bool,
-) -> usize {
-    let start = journal_events(fixture).len();
+) -> Value {
     let worker_id = context["identity"]["worker_id"]
         .as_str()
         .expect("context has worker id");
     let owner_key = context["name"].as_str().expect("context has stable name");
-    fixture.append_name_events(&[json!({
-        "ev": "BoardPatrolGateUpdated",
-        "worker_id": worker_id,
-        "gate": {
+    let gate = json!({
             "owner_key": owner_key,
             "last_wake_ms": 0,
             "last_realtime_idle_since_ms": i64::MIN,
@@ -156,9 +144,9 @@ fn append_gate(
             "next_due_ms": 0,
             "idle_episode_start_ms": idle_episode_start_ms,
             "last_poll_idle": last_poll_idle
-        }
-    })]);
-    start
+    });
+    fixture.update_current_state(|state| state["board_patrol_gates"][worker_id] = gate.clone());
+    gate
 }
 
 fn wait_for_new_cue(
@@ -170,19 +158,14 @@ fn wait_for_new_cue(
 ) -> Result<String, String> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        let events = journal_events(fixture);
-        for message_id in notice_ids(&events).difference(&baseline.notices) {
-            if message_target(&events, message_id).as_deref() != Some(worker_id) {
+        let current = fixture.current_state();
+        for message_id in notice_ids(&current).difference(&baseline.notices) {
+            if message_target(&current, message_id).as_deref() != Some(worker_id) {
                 continue;
             }
-            let bound = events.iter().any(|event| {
-                event["ev"] == "WakeBound" && event["message_id"] == message_id.as_str()
-            });
-            let accepted = events.iter().any(|event| {
-                event["ev"] == "NotificationDeliveryAccepted"
-                    && event["message_id"] == message_id.as_str()
-                    && event["evidence"].is_object()
-            });
+            let bound = current["wake_bindings"][message_id].is_string();
+            let accepted = !current["notification_delivery_accepted"][message_id].is_null()
+                && current["notification_delivery_evidence"][message_id].is_object();
             if bound && accepted && native_input_for(fixture, thread, message_id) {
                 return Ok(message_id.clone());
             }
@@ -191,30 +174,30 @@ fn wait_for_new_cue(
     }
     Err(format!(
         "board cue did not reach {thread}/{worker_id}; new_notices={:?}",
-        notice_ids(&journal_events(fixture))
+        notice_ids(&fixture.current_state())
             .difference(&baseline.notices)
             .collect::<Vec<_>>()
     ))
 }
 
 fn assert_no_new_cue(fixture: &AppFixture, thread: &str, worker_id: &str, baseline: &CueBaseline) {
-    let events = journal_events(fixture);
-    let new_notices: Vec<_> = notice_ids(&events)
+    let current = fixture.current_state();
+    let new_notices: Vec<_> = notice_ids(&current)
         .difference(&baseline.notices)
         .cloned()
         .collect();
     let delivered_to_worker: Vec<_> = new_notices
         .iter()
-        .filter(|message_id| message_target(&events, message_id).as_deref() == Some(worker_id))
+        .filter(|message_id| message_target(&current, message_id).as_deref() == Some(worker_id))
         .cloned()
         .collect();
     assert!(
         delivered_to_worker.is_empty(),
         "native status must not produce a board cue for {worker_id}: {delivered_to_worker:?}"
     );
-    let new_wakes: Vec<_> = wake_ids(&events)
+    let new_wakes: Vec<_> = wake_ids(&current)
         .difference(&baseline.wakes)
-        .filter(|message_id| message_target(&events, message_id).as_deref() == Some(worker_id))
+        .filter(|message_id| message_target(&current, message_id).as_deref() == Some(worker_id))
         .cloned()
         .collect();
     assert!(
@@ -233,19 +216,15 @@ fn assert_no_new_cue(fixture: &AppFixture, thread: &str, worker_id: &str, baseli
     );
 }
 
-fn latest_gate_after(fixture: &AppFixture, worker_id: &str, start: usize) -> Option<Value> {
-    journal_events(fixture)
-        .into_iter()
-        .skip(start)
-        .filter(|event| event["ev"] == "BoardPatrolGateUpdated" && event["worker_id"] == worker_id)
-        .last()
-        .map(|event| event["gate"].clone())
+fn latest_gate_after(fixture: &AppFixture, worker_id: &str, seeded: Value) -> Option<Value> {
+    let gate = fixture.current_state()["board_patrol_gates"][worker_id].clone();
+    (!gate.is_null() && gate != seeded).then_some(gate)
 }
 
-fn wait_for_skipped_gate(fixture: &AppFixture, worker_id: &str, start: usize) -> Value {
+fn wait_for_skipped_gate(fixture: &AppFixture, worker_id: &str, start: Value) -> Value {
     let deadline = Instant::now() + SKIP_TIMEOUT;
     while Instant::now() < deadline {
-        if let Some(gate) = latest_gate_after(fixture, worker_id, start) {
+        if let Some(gate) = latest_gate_after(fixture, worker_id, start.clone()) {
             if gate["next_due_ms"].as_i64().unwrap_or_default() > 0 {
                 return gate;
             }
@@ -293,12 +272,10 @@ fn board_idle_patrol_runtime_idle_carrier_receives_new_cue() {
     let gate_start = advance_gate(&mut fixture, &alice, &[]);
     let message_id = wait_for_new_cue(&fixture, THREAD_A, &worker_id, &baseline, CUE_TIMEOUT)
         .expect("idle task owner receives one new board cue");
-    let events = journal_events(&fixture);
-    assert!(events.iter().any(|event| {
-        event["ev"] == "BoardPatrolNoticeBound" && event["message_id"] == message_id.as_str()
-    }));
+    let current = fixture.current_state();
+    assert!(notice_ids(&current).contains(&message_id));
     assert_eq!(
-        message_target(&events, &message_id).as_deref(),
+        message_target(&current, &message_id).as_deref(),
         Some(worker_id.as_str())
     );
     assert!(native_input_for(&fixture, THREAD_A, &message_id));
@@ -346,9 +323,9 @@ fn board_idle_patrol_runtime_requires_30m_continuous_idle() {
         .expect("the trusted wake persists its gate");
     assert_eq!(gate["last_wake_tasks"], json!(["T1"]));
     assert_eq!(gate["owner_key"], "Alice");
-    let events = journal_events(&fixture);
+    let current = fixture.current_state();
     assert_eq!(
-        notice_ids(&events)
+        notice_ids(&current)
             .difference(&baseline.notices)
             .cloned()
             .collect::<Vec<_>>(),
@@ -491,11 +468,19 @@ fn board_idle_patrol_runtime_same_name_restoration_routes_only_current_carrier()
     );
     fixture.run_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
     set_native_status(&fixture, THREAD_A, "notLoaded");
-    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
-        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
-        "worker_id":old_worker.as_str(), "session_id":THREAD_A,
-        "presence":"offline", "reason":"fixture old carrier stopped", "observed_ms":1
-    }})]);
+    let project = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| {
+        state["agent_presence"][&project][&old_worker] = json!({
+            "project_scope":project,
+            "worker_id":old_worker.as_str(), "session_id":THREAD_A,
+            "presence":"offline", "reason":"fixture old carrier stopped", "observed_ms":1
+        })
+    });
 
     let restored = fixture.run_public(
         &[
@@ -506,7 +491,7 @@ fn board_idle_patrol_runtime_same_name_restoration_routes_only_current_carrier()
         THREAD_B,
     );
     assert_eq!(restored["name"], "Alice");
-    assert_eq!(restored["name_resolution"]["outcome"], "committed");
+    assert_eq!(restored["session_id"], THREAD_B);
     let current_worker = restored["identity"]["worker_id"]
         .as_str()
         .unwrap()
@@ -537,9 +522,9 @@ fn board_idle_patrol_runtime_same_name_restoration_routes_only_current_carrier()
         CUE_TIMEOUT,
     )
     .expect("the current same-name carrier receives the eligible task cue");
-    let events = journal_events(&fixture);
+    let current = fixture.current_state();
     assert_eq!(
-        message_target(&events, &message_id).as_deref(),
+        message_target(&current, &message_id).as_deref(),
         Some(current_worker.as_str())
     );
     thread::sleep(DUPLICATE_WAIT);
@@ -574,6 +559,7 @@ fn board_idle_patrol_runtime_unconsumed_notice_is_not_retried_and_next_due_is_ne
         .as_str()
         .unwrap()
         .to_owned();
+    let first_current = fixture.current_state();
 
     set_native_idle(&fixture, THREAD_A);
     let second_baseline = cue_baseline(&fixture, THREAD_A);
@@ -588,43 +574,52 @@ fn board_idle_patrol_runtime_unconsumed_notice_is_not_retried_and_next_due_is_ne
     .expect("a later due occurrence creates a new board cue");
     assert_ne!(second_id, first_id);
 
-    let events = journal_events(&fixture);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| {
-                event["ev"] == "WakeBound" && event["message_id"] == first_id.as_str()
-            })
-            .count(),
-        1,
-        "an accepted unconsumed notice must not be rebound"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| {
-                event["ev"] == "NotificationDeliveryAccepted"
-                    && event["message_id"] == first_id.as_str()
-            })
-            .count(),
-        1,
-        "an accepted unconsumed notice must not be re-accepted"
-    );
+    let current = fixture.current_state();
+    for field in [
+        "msgs",
+        "wake_bindings",
+        "notification_delivery_accepted",
+        "notification_delivery_evidence",
+    ] {
+        assert_eq!(
+            current[field][&first_id], first_current[field][&first_id],
+            "a later occurrence must preserve the first notice's current {field}"
+        );
+    }
     assert!(
-        !events.iter().any(|event| {
-            event["ev"] == "ReceiveCommitted"
-                && event["ids"]
+        !current["receive_receipts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|receipt| {
+                receipt["message_ids"]
                     .as_array()
-                    .is_some_and(|ids| ids.iter().any(|id| id == first_id.as_str()))
-        }),
+                    .unwrap()
+                    .iter()
+                    .any(|id| id == first_id.as_str())
+            }),
         "the test must not consume the first notice"
     );
     assert_eq!(
-        notice_ids(&events)
+        notice_ids(&current)
             .difference(&second_baseline.notices)
             .cloned()
             .collect::<Vec<_>>(),
         vec![second_id.clone()]
+    );
+    assert_eq!(
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .get(THREAD_A)
+            .unwrap()
+            .inputs
+            .iter()
+            .filter(|input| input_has_message(input, &first_id))
+            .count(),
+        1,
+        "the unconsumed first notice must have exactly one native input"
     );
     assert_eq!(
         fixture.run_public(&["msg", &first_id], THREAD_A)["state"],

@@ -122,13 +122,11 @@ pub(super) fn tick_with_observer(
             .agent_presence
             .get(scope.as_str())
             .and_then(|workers| workers.get(&worker.id));
-        if !super::name_stewardship::retain_adjudicated_presence(&state, &presence)
-            && old_presence.is_none_or(|old| {
-                old.session_id != presence.session_id
-                    || old.presence != presence.presence
-                    || old.reason != presence.reason
-            })
-        {
+        if old_presence.is_none_or(|old| {
+            old.session_id != presence.session_id
+                || old.presence != presence.presence
+                || old.reason != presence.reason
+        }) {
             if presence.presence != AgentPresence::Unknown {
                 if let Some(old) = old_presence {
                     // A deterministic observation after a verdict must be

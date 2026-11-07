@@ -28,6 +28,9 @@ impl IsolatedTmux {
                 socket.to_str().unwrap(),
                 "new-session",
                 "-d",
+                "-P",
+                "-F",
+                "#{session_id}",
                 "-c",
                 root.to_str().unwrap(),
                 "-s",
@@ -66,7 +69,7 @@ impl IsolatedTmux {
             socket,
             owner_root: root.to_path_buf(),
             pane_command: pane_command.into(),
-            sessions: RefCell::new(vec!["worker-snapshot-test".into()]),
+            sessions: RefCell::new(vec![String::from_utf8(output.stdout).unwrap().trim().to_owned()]),
         }
     }
 
@@ -146,7 +149,6 @@ impl IsolatedTmux {
             "add isolated tmux session: {}",
             String::from_utf8_lossy(&created.stderr)
         );
-        self.sessions.borrow_mut().push(session.clone());
         let output = Command::new("tmux")
             .args([
                 "-S",
@@ -171,6 +173,7 @@ impl IsolatedTmux {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(fields.len(), 4);
+        self.sessions.borrow_mut().push(fields[1].clone());
         crate::proto::TmuxEndpoint {
             socket_path: self.socket.to_string_lossy().into_owned(),
             server_pid: fields[0].parse().unwrap(),
@@ -268,7 +271,34 @@ pub(super) fn seed_committed_owner(
         server, worker_id, token, transport, cwd,
         Some(GlobalState::canonical_project_scope(&server.root).unwrap()), app_scope, false,
     ).unwrap();
-    consume_prepared_register_typed(server, worker_id, transport, prepared, None)
+    let TypedCommand::RegisterWorker { binding, .. } = &prepared.typed.command;
+    let project = binding.project_scope.as_str().to_owned();
+    let session = binding.session_id.as_ref().unwrap().to_string();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let name = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)
+        .unwrap().map(|key| key.name.clone())
+        .unwrap_or_else(|| control.ordinary_name(&binding.project_scope, &binding.app_scope_id, worker_id).unwrap());
+    store.commit(binding_store::ControlChange::Commit {
+        key: binding_slot::IdentityBindingKey::new(binding.project_scope.clone(), binding.app_scope_id.clone(), name.clone()),
+        value: binding_slot::BindingValue::new(binding.clone(), transport.clone()),
+        expected_generation: None,
+    }).unwrap();
+    let response = consume_register_typed(server, worker_id, transport, prepared, None, None);
+    assert!(response.ok, "committed registration fixture: {response:?}");
+    let mut state = server.state.lock().unwrap();
+    let previous = state.name_occupancy(&project, &name);
+    let occupancy = previous.filter(|old| old.worker_id == worker_id && old.session_id == session)
+        .cloned().unwrap_or_else(|| name_state::NameOccupancy {
+            name, worker_id: worker_id.into(), session_id: session,
+            occupancy_revision: previous.map_or(1, |old| old.occupancy_revision + 1),
+            updated_ms: now_ms(), pane_anchor: None,
+        });
+    let events = name_resolution::build_name_resolution_events_with_rename_from(
+        &state, &project, &occupancy, &[], previous,
+    );
+    server.commit_locked_checked(&mut state, &events).unwrap();
+    response
 }
 
 fn retire_registered_test_pane(binding: &crate::server::global_state::RuntimeBinding) {
@@ -619,20 +649,16 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
     let root = std::env::temp_dir().join(format!("collab-peer-{}-{n}", std::process::id()));
     let server_dir = root.join(".agent-collab/server");
     std::fs::create_dir_all(&server_dir).unwrap();
-    let journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(server_dir.join("journal.jsonl"))
-        .unwrap();
+    let state_path = server_dir.join("state.json");
+    current_state::save(&state_path, &State::default()).unwrap();
     (
         Server {
             config: crate::config::Config::default(),
             root: root.clone(),
             storage_root: root.clone(),
-            journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            state_path,
             host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
-            journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(test_appserver_transport(&candidate.thread_id))
             }),
@@ -755,15 +781,18 @@ pub(crate) fn register_synthetic_peer(server: &Server, id: &str, thread_id: &str
 }
 
 fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
-    let endpoint = fixture_peer_endpoint(server, thread_id);
     let app = AppServerId::new("tui-default").unwrap();
     let prior = server.state.lock().unwrap().global.projects.values()
         .flat_map(|project| project.runtime_bindings.values())
         .find(|binding| binding.agent_id.as_str() == id && binding.app_scope_id == app).cloned();
+    let mut endpoint = prior.as_ref().and_then(|binding| binding.tmux_endpoint.clone())
+        .unwrap_or_else(|| fixture_peer_endpoint(server, thread_id));
+    endpoint.codex_session_id = Some(format!("session-{thread_id}"));
+    endpoint.codex_thread_id = Some(thread_id.into());
     let context = match prior {
         Some(binding) => ProjectContext::for_registered_route(&server.root, &crate::identity::RuntimeIdentity {
             agent_id: binding.agent_id, runtime_id: binding.runtime_id, appserver_id: binding.app_scope_id,
-            endpoint_generation: binding.endpoint_generation, binding_id: binding.binding_id,
+            binding_id: binding.binding_id,
             session_id: binding.session_id, native_thread_id: binding.native_thread_id,
         }).unwrap(),
         None => ProjectContext::for_registered_root_with_app(&server.root, app).unwrap(),
@@ -796,22 +825,39 @@ pub(crate) fn bind_test_subagent_record(
         .unwrap_or_else(|| panic!("registered child binding missing for {}", record.peer));
     record.create_operation_id = Some(format!("test-create-{}", record.id));
     record.binding_id = Some(binding.binding_id.as_str().to_owned());
-    record.endpoint_generation = Some(binding.endpoint_generation);
     record
 }
 
-fn promote_master(server: &Server, worker_id: &str, approval: &str) {
-    let response = handle_master_promote(
-        server,
-        worker_id.into(),
-        format!("token-{worker_id}"),
-        approval.into(),
-    );
-    assert!(
-        response.ok,
-        "master promotion for {worker_id} failed: {:?}",
-        response.error
-    );
+pub(crate) fn promote_master(server: &Server, worker_id: &str, approval: &str) {
+    let binding = registered_binding(server, worker_id);
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let source = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)
+        .unwrap().expect("registered fixture has a current name");
+    let value = control.slot(source).unwrap().active_binding().unwrap().clone();
+    store.commit(binding_store::ControlChange::MoveName {
+        target: binding_slot::IdentityBindingKey::new(binding.project_scope.clone(), binding.app_scope_id.clone(), "Jenny"),
+        value,
+        source_names: vec![source.name.clone()],
+        expected_generation: None,
+    }).unwrap();
+    let grant = global_state::MasterGrant::new(
+        binding.project_scope.clone(), binding.app_scope_id, binding.agent_id,
+        "project", "user", approval, binding.binding_id, now_ms(),
+    ).unwrap();
+    let mut state = server.state.lock().unwrap();
+    let previous = state.name_occupancy(binding.project_scope.as_str(), "Jenny");
+    let occupancy = name_state::NameOccupancy {
+        name: "Jenny".into(), worker_id: worker_id.into(),
+        session_id: binding.session_id.as_ref().unwrap().to_string(),
+        occupancy_revision: previous.map_or(1, |old| old.occupancy_revision + 1),
+        updated_ms: now_ms(), pane_anchor: None,
+    };
+    let mut events = vec![Event::GlobalMasterGranted { grant }];
+    events.extend(name_resolution::build_name_resolution_events_with_rename_from(
+        &state, binding.project_scope.as_str(), &occupancy, &[source.name.clone()], previous,
+    ));
+    server.commit_locked_checked(&mut state, &events).unwrap();
 }
 
 fn send_command(root: &Path, id: &str) -> crate::proto::CommandEnvelope {
@@ -823,7 +869,6 @@ fn send_command(root: &Path, id: &str) -> crate::proto::CommandEnvelope {
         CommandId::new(format!("command-{id}")).unwrap(),
         OperationId::new(format!("operation-{id}")).unwrap(),
         BindingId::new(format!("binding-{id}")).unwrap(),
-        1,
         scope,
         None,
         None,

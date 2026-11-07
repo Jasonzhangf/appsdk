@@ -1,114 +1,27 @@
 {
-  "id": "appsdk-collab-context",
-  "version": "0.16.2",
-  "description": "一次 context 请求到一次权威结果的 SESE 流程。cwd 选择项目；优先使用当前 Collab 标记或已有 canonical route，首次注册和 init 可直接使用 cwd，不依赖 Git 拓扑或目录名称；仅限已注册身份的调用在缺少标记和 route 时明确失败。名字承载工作，agent sessionID 锚定执行身份；thread 和端点只定位通信。名字、会话和当前绑定只由一次持久控制集合提交发布，跨文件任务、消息和订阅交接以有界待办完成，不伪称与业务 journal 原子。Desktop CLI 从本次显式能力或当前 bridge 精确 scope 声明取得候选，不要求 AppServer endpoint 或 agent 调 MCP，不从历史 route 补事实。发现失败时，仅既有 live ancestry observer 证实当前实际 tmux pane，才能让 daemon 继续原有 pane 优先 admission；环境标记不证明 pane，不启动替代 transport。无实际 pane 且缺 Desktop 能力则明确失败，保留身份和工作。query 与普通身份读取不发现能力。目录查询为独立只读投影，读取当前控制/route 并返回 targets 与局部错误，不进入物化。名字续接、任务和消息继承归原 owner，不管理 daemon/tmux 生命周期。设计图不代替 live 验收。",
-  "inputs": [{"id": "context_request", "schema": "Object"}],
-  "nodes": [
-    {
-      "id": "核对首次注册预授权", "operator": "appsdk.collab_context.bootstrap_policy", "operator_version": "1",
-      "description": "authorize_first_registered_peer 通过现有 grant_approval 的明确 action、非空 authorization、未拒绝 decision 与精确 scope 创建一次性控制策略。策略动作不注册身份；既有 context operation 和 command receipt 可查询或重试。普通注册在同锁 command 中提交 binding、typed grant 和策略消费；无策略保持 peer，有历史注册或 incumbent 不追授，明确 restore_peer 消费机会而不授予。clear 不重置消费。拒绝或持久失败返回明确错误，不投影成功；完整 journal replay 保持结果。",
-      "inputs": ["durable_name_scope"], "output": {"id": "bootstrap_policy_decision", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
-    },
-    {
-      "id": "解析项目与控制范围",
-      "operator": "appsdk.collab_context.resolve_root",
-      "operator_version": "1",
-      "description": "从当前 cwd 和既有项目映射读取 canonical project，保留 invocation cwd。显式 transport 优先；Desktop 通过 runtime 共享 bridge 自动登记当前 cwd/sessionID/thread，native 核实 scope 后取得精确能力声明并放入 desktop_bridge 输入。CLI 使用正式已安装 bridge 入口，不要求 agent 调 MCP、指定 endpoint 或处理服务生命周期。服务关联 ID 不冒充执行回合。无 host 环境时可读取已发布的精确声明，不扫描其他会话或历史 route。发现失败时只有既有 live ancestry observer 证实实际 tmux pane，才能继续原有 pane admission；无 pane 返回真实 Desktop 错误。query 和普通身份读取绕过发现，不跨 transport fallback。",
-      "inputs": ["context_request"],
-      "output": {"id": "resolved_scope", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "读取现有服务",
-      "operator": "appsdk.collab_context.require_daemon",
-      "operator_version": "1",
-      "description": "只读取 user-managed daemon 是否可达。不可达返回原错并终止本次 context；CLI 不启动、停止、重启或替换服务。",
-      "inputs": ["resolved_scope"],
-      "output": {"id": "daemon_available", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "读取持久名字代理会话与占用",
-      "operator": "appsdk.collab_context.read_name_ownership",
-      "operator_version": "1",
-      "description": "读取 canonical project/app scope 内的名字占用、当前 agent sessionID、typed agent binding/route 与 endpoint generation、presence、activity、background 事实和持久 context operation。不从其他 scope 或历史 pane 选择身份。该读取只提供持久身份与历史观察，不把历史 session/thread/endpoint/namespace 补成这次调用的当前事实。名字 pane 继承只用本次 invocation 中 daemon ancestry 对 caller 进程的 live 观察；保存 transport/binding 的旧 pane、其与 binding 相等或 caller 自报候选都不构成名字锚点；transport 与 binding 相等只表示已保存状态一致。显式通信恢复读取回投账本时，initial_register 与 desktop_registration 只作为退役历史跳过，不转成当前 manual challenge；JSON/framing 或其他有效记录错误仍在投递前明确失败。名字来自固定池，Jenny 不占普通名字名额；presence 与 activity 分开，waiting_user 不按 idle，background 不明时 activity unknown。",
-      "inputs": ["daemon_available"],
-      "output": {"id": "durable_name_scope", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "判定续接分配占用确认或待决",
-      "operator": "appsdk.collab_context.classify_name_resolution",
-      "operator_version": "1",
-      "description": "用户本次明确授权的 target/name/role 意图先分类，先于普通历史解析；有效 master 恢复不能被外项目历史锚点、旧档案、旧 token/generation 或重复 session 否决。外 scope 历史匹配只是不属于本目标的记录，既不能作为拒绝目标恢复的依据，也不能当成本目标凭据；恢复只改动目标 scope 的当前控制，不删除、迁移或重写外项目身份、grant、任务和消息。随后按固定优先级选择唯一当前归属：有效显式名字 → 同项目同 agent session 的 daemon 当前 typed 名字归属 → 本次 invocation 由 daemon live ancestry 观察到的 pane、socket 与调用 cwd 三者精确匹配的名字 → 上述锚点都不存在且确为新的真实会话时才允许新注册。同 session 重复提交幂等恢复，不让 agent 清理或猜测；同 scope 存在多个历史身份而无唯一当前 typed owner 时返回显式冲突，不自动 mint、不按遍历顺序猜。后提交绑定收敛同 scope/session 的旧绑定与 route。同名字当前工作者 S1→S2 自动换绑；离线失去保持权后正常分配；在线其他 session 占名默认不替换，已有本次用户接管确认直接应用，不重复索取。名字续接与 grant 分离：普通名字或 pane 继承不复制 master grant，只有本次有效明确的 master 恢复才进入 grant owner。unknown 的名字归属沿既有裁决，明确用户接管优先。内部历史冲突不暴露为 agent 的选择题；仅真实缺事实或未提供的用户意图返回准确 requires 和完整下一步操作。按明确 transport 检查当前事实；Desktop bridge 缺 executor metadata、受限控制引用或本次 agent session 时返回 missing_facts，不要求或借用历史 AppServer endpoint。不猜 AGY 或 Claude 的会话来源；缺真实 session 元数据时返回 missing_facts。不进入名字解析、占用确认或持久变更。",
-      "inputs": ["bootstrap_policy_decision"],
-      "output": {"id": "name_resolution_decision", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "原子发布当前控制集合",
-      "operator": "appsdk.collab_context.commit_control_resolution",
-      "operator_version": "1",
-      "description": "committed 分支只在本次 native 当前 facts 已通过 required_fields 完整 gate 后，由现有 binding/route/credential owner 在 canonical project/app scope 内生成完整候选并原子发布当前控制集合：稳定名字的 current/previous、当前 agent sessionID、角色、有效 grant、当前绑定与 endpoint generation 同批写入，agent_id 只留在 binding value。相同事实重复提交不旋转代际。确需跨文件交接时，同批写入有界 pending_effect，只引用 operation、scope、名字与旧新载体，不复制任务、消息或 binding。发布在单一 read-modify-rename 内完成；rename 前失败保持旧集合有效且未提交，rename 成功而父目录 sync 失败返回 published/durability_unknown，安装与可见新文件一致的索引，不回滚旧快照。pending 只保存原操作、占用引用和投递进度；缺失 runtime facts 是本次调用终态，不伪装为名字裁决 pending。snapshot 失败、Jenny 不可用或仍 unknown 时原绑定不变，但 Jenny 自身 unknown 且无法响应并获本次明确恢复及接管确认时，直接提交 Jenny/master。缺失、歧义、陈旧或 principal 不符返回 typed code、已知 expected/observed generation 和 collab context 修复指令；提交前核对占用未变化，旧裁决不能覆盖后来者。",
-      "inputs": ["name_resolution_decision"],
-      "output": {"id": "control_commit_result", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "完成该范围必需的跨文件交接",
-      "operator": "appsdk.collab_context.complete_pending_effects",
-      "operator_version": "1",
-      "description": "只消费当前控制集合中的有界 pending_effect，由现有名字/生命周期业务 owner 在该 scope 的 wire mutation gate 下换绑未关闭 board assignment、移交未消费消息的收件与唤醒目标、同步仍有效 goal 订阅到当前载体和 transport target，并用既有 operation/receipt 原子去重。closed、任务状态、证据、资源、revision 历史、merge obligation、消息 ID/正文/原发送者与真实消费回执保持；旧载体不再控制或接收后续 goal，终态不复活。控制已提交而业务效果未提交时保留 pending_effect 并返回 control_committed/effects_pending 与原错；同一 scope 的下一次换绑、任务写、收件与投递先完成待办。业务成功而清除待办失败时按 receipt 跳过效果并只重试清除。worker status 与 board admission 只读已提交控制结果，不从 snapshot 重建控制状态。该节点不创建第二份 binding、name occupancy 或 grant，也不从业务 journal 重建绑定。",
-      "inputs": ["control_commit_result"],
-      "output": {"id": "name_resolution_outcome", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "生成安全环境投影",
-      "operator": "appsdk.collab_context.env_view",
-      "operator_version": "2",
-      "description": "只取允许的 HOME/USER/LOGNAME/CARGO_HOME 与 COLLAB_/APPSDK_/CODEX_ 子集；名字含 TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL 的键丢弃。",
-      "inputs": ["name_resolution_outcome"],
-      "output": {"id": "env_projection", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "输出含名字归属的权威快照",
-      "operator": "appsdk.collab_context.emit_snapshot",
-      "operator_version": "2",
-      "description": "输出本次调用实际终态。同 session 的 native thread 或投递端点变化时，必须在成功早退前复用当前身份提交新 binding/worker transport，退休旧 route、发布新 route，并由现有 Context owner 更新有效订阅；相同事实不增加 generation，普通恢复不重新 Register 或挑战。本次调用缺任何 native 当前事实时，终态为 missing_facts，身份文件、binding、route、订阅、任务和消息保持，不发布旧端点，也不因历史注册把缺项调用报告为恢复完成。snapshot 必须区分 committed、confirmation_required、pending、stale_decision 和 explicit_failure，并包含当前名字、agent sessionID、角色、binding、任务投影和续接引用；不得把 pending 或失败投影成已注册成功。完整有效职责仅由 role_brief 输出一次；模板卡返回来源、版本和当前覆盖元数据，不重复嵌入模板正文。operations 只返回当前适用操作，next_actions 只返回当前任务或本次结果动作。默认快照排除终态订阅、无未结责任的历史和调用者无关账目；持久历史及显式查询保留。CEO 后置装饰遵守同一规则，授权仍来自 host typed grant。",
-      "inputs": ["env_projection"],
-      "output": {"id": "state_snapshot", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    }
+  "id":"appsdk-collab-context","version":"0.16.2",
+  "description":"一次context请求到唯一结果的SESE。四宿主共用identity-map.json进行注册、续接、换名和身份恢复。cwd选择canonical project；名字承载工作，agent sessionID是可换执行载体。公开Register与嵌套Context注册复用既有identity_gate贯穿业务完成，嵌套不重复加锁。新注册先沿原typed规则预检业务冲突，再确认精确候选凭据，最后发布active map；拒绝不得产生半身份。未发布失败恢复原凭据及物理名，已可见Unknown保留新凭据和待办。route只定位项目存储与通信。旧archive、reducer占名、历史route和operation记录不选择身份。既有credential、grant和业务owner仅在表选定精确principal后执行。query只读；不操作daemon或tmux生命周期。",
+  "inputs":[{"id":"context_request","schema":"Object"}],
+  "nodes":[
+    {"id":"解析项目与控制范围","operator":"appsdk.collab_context.resolve_root","operator_version":"1","description":"解析canonical project/app并保留真实invocation cwd。采集本次宿主facts；TUI由daemon观察当前端点和完整物理名。Desktop/DSH保留各自原生能力声明与通信语义，不要求tmux。普通注册恢复不新增profile或native endpoint要求。","inputs":["context_request"],"output":{"id":"resolved_scope","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"读取现有服务","operator":"appsdk.collab_context.require_daemon","operator_version":"1","description":"只使用用户管理的现有daemon。不可达保留原错；CLI不启动、关闭、重启或替换服务。","inputs":["resolved_scope"],"output":{"id":"daemon_available","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"读取持久名字代理会话与占用","operator":"appsdk.collab_context.read_name_ownership","operator_version":"1","description":"唯一读取identity-map.json的active current。缺表为空；空文件、坏JSON、未知版本及表内不变量错误显式失败且不覆盖。只读query投影当前map及已加载owner的当前状态，不创建操作历史，不读写journal，不执行注册、改名或待办效果。","inputs":["daemon_available"],"output":{"id":"durable_name_scope","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"判定续接分配占用确认或待决","operator":"appsdk.collab_context.classify_name_resolution","operator_version":"1","description":"先应用本次有效授权；旧名字、注册、archive及历史歧义不否决它。共享lookup只在当前scope中依次精确匹配完整物理readback、同宿主agent sessionID、typed当前pane与cwd联合归属。不得解析显示名后缀或从NameOccupancy补选。无映射的真实新会话才走Register与表内普通池。active current缺业务worker是同一主体的业务补齐，不重新分配身份；仅在补齐边界读取精确credential并验证project/app/agent与可用token，允许已发布待办期间同主体旧carrier字段。正常已有worker恢复不增加凭据相等校验。真实缺事实或未提供的接管意图准确返回。","inputs":["durable_name_scope"],"output":{"id":"name_resolution_decision","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"原子发布当前控制集合","operator":"appsdk.collab_context.commit_control_resolution","operator_version":"1","description":"Collab负责正常注册改名并读回。共享tm-iterm manifest仅关联固定布局binding，不选择身份、不移动pane。固定位置只读当前项目记录，overview仅作展示引用；项目binding_id跨改名保持，历史overview ID仅在真实当前物理名唯一关联项目记录时纠正。真实项目多候选显式歧义，不用名字池或后缀选位置。现有gate保护唯一JSON writer原子发布current、previous及必要effect。Name intent携带适用角色动作与已接收授权引用；正常执行和恢复共用consumer。首次Register也保留待办。同一current仅缺业务worker时不重复发布map或新增effect。提交前失败回滚本次改名；已发布durability_unknown保留新文件。endpoint generation已退役，无替代版本源。","inputs":["name_resolution_decision"],"output":{"id":"control_commit_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"完成该范围必需的跨文件交接","operator":"appsdk.collab_context.complete_pending_effects","operator_version":"1","description":"原credential、Register、grant和业务owner消费精确待办。active current缺业务worker时复用同一typed Register事务补齐原主体，不发新peer通知、不消费bootstrap策略或赋权。已有Name/Register待办仍按原授权与操作引用完成。真实新普通peer的Register将worker与给当前master的加入通知同一业务事务保存，重复恢复不补发。未关闭任务sessionID、未消费消息、goal及唤醒按名字交接；当前消息的精确名字地址在名字空缺后仍可选取，不要求前任。保留任务ID、状态、证据、资源及真实消费回执；已消费不重放。effects_pending保留待办与原错；效果按当前结果去重后清除待办，不按日志或业务snapshot重建控制。","inputs":["control_commit_result"],"output":{"id":"name_resolution_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"按当前通信证据决定手动回环","operator":"appsdk.collab_context.communication","operator_version":"1","description":"普通Context和重启不重新注册或验证通信。只读query只投影当前交换。显式手动恢复先按精确当前binding的最新投递和真实receive证据分类：健康不回环，未知明确返回unknown，仅明确不通时通过既有Send向自己提交一次恢复消息。实际选定adaptor投递，独立接收方通过原有receive和普通认证reply返回；接受、pending、失败、unknown及真实回环成功均进入唯一结果。异步返回pending而不等待当前turn自答；重复显式调用复用同一当前交换，无新增重试/超时/历史。失败不撤销身份、凭据、名字、角色或既有任务消息订阅归属。当前投递记录只保存本消息最新的typed binding关联，不参与身份选择。","inputs":["name_resolution_outcome"],"output":{"id":"communication_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"生成安全环境投影","operator":"appsdk.collab_context.env_view","operator_version":"2","description":"仅投影允许的环境字段，秘密字段丢弃。只保存确实观察到的profile标识，不记录完整argv或凭据。","inputs":["communication_outcome"],"output":{"id":"env_projection","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"输出含名字归属的权威快照","operator":"appsdk.collab_context.emit_snapshot","operator_version":"2","description":"单出口返回真实committed、pending、missing_facts、explicit_failure、control_committed/effects_pending或durability_unknown。名字与当前绑定来自唯一表，角色来自精确grant owner。身份有效、通信ready、队列接受、目标收到和消费分别报告；不以build或图验证冒称live验收。","inputs":["env_projection"],"output":{"id":"state_snapshot","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
   ],
-  "edges": [
-    {"from": "解析项目与控制范围", "to": "读取现有服务", "arc_id": "resolved_scope"},
-    {"from": "读取现有服务", "to": "读取持久名字代理会话与占用", "arc_id": "daemon_available"},
-    {"from": "读取持久名字代理会话与占用", "to": "核对首次注册预授权", "arc_id": "durable_name_scope"},
-    {"from": "核对首次注册预授权", "to": "判定续接分配占用确认或待决", "arc_id": "bootstrap_policy_decision"},
-    {"from": "判定续接分配占用确认或待决", "to": "原子发布当前控制集合", "arc_id": "name_resolution_decision"},
-    {"from": "原子发布当前控制集合", "to": "完成该范围必需的跨文件交接", "arc_id": "control_commit_result"},
-    {"from": "完成该范围必需的跨文件交接", "to": "生成安全环境投影", "arc_id": "name_resolution_outcome"},
-    {"from": "生成安全环境投影", "to": "输出含名字归属的权威快照", "arc_id": "env_projection"}
+  "edges":[
+    {"from":"解析项目与控制范围","to":"读取现有服务","arc_id":"resolved_scope"},
+    {"from":"读取现有服务","to":"读取持久名字代理会话与占用","arc_id":"daemon_available"},
+    {"from":"读取持久名字代理会话与占用","to":"判定续接分配占用确认或待决","arc_id":"durable_name_scope"},
+    {"from":"判定续接分配占用确认或待决","to":"原子发布当前控制集合","arc_id":"name_resolution_decision"},
+    {"from":"原子发布当前控制集合","to":"完成该范围必需的跨文件交接","arc_id":"control_commit_result"},
+    {"from":"完成该范围必需的跨文件交接","to":"按当前通信证据决定手动回环","arc_id":"name_resolution_outcome"},
+    {"from":"按当前通信证据决定手动回环","to":"生成安全环境投影","arc_id":"communication_outcome"},
+    {"from":"生成安全环境投影","to":"输出含名字归属的权威快照","arc_id":"env_projection"}
   ],
-  "outputs": ["state_snapshot"]
+  "outputs":["state_snapshot"]
 }

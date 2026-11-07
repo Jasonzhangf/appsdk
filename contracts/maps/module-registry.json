@@ -510,6 +510,7 @@
         "AGENTS.md",
         ".appsdk/requirements.json",
         ".agents/skills/appsdk-dev/**",
+        ".evidence/**",
         ".gitattributes",
         ".github/workflows/**",
         ".gitignore",

@@ -269,7 +269,6 @@ jobs:
           set -euo pipefail
           artifact_log="$RUNNER_TEMP/collab-cargo-artifacts.jsonl"
           cargo build --manifest-path collab/Cargo.toml --locked \
-            --features context-cancel-test-hooks \
             --bin collab --bin collab-mcp --message-format=json \
             | tee "$artifact_log"
           python3 - "$artifact_log" <<'PY'
@@ -302,7 +301,9 @@ jobs:
               github_env.write(f"COLLAB_TEST_BINARY={required['collab']}\n")
               github_env.write(f"COLLAB_TEST_MCP_BINARY={required['collab-mcp']}\n")
           PY
-      - run: cargo test --manifest-path collab/Cargo.toml --locked --features context-cancel-test-hooks -- --test-threads=1
+      - name: Build AppSDK public consumer binary
+        run: cargo build --manifest-path rust/Cargo.toml --locked --bin appsdk
+      - run: cargo test --manifest-path collab/Cargo.toml --locked -- --test-threads=1
       - name: Desktop bridge MCP consumer
         run: node --test collab/scripts/tests/desktop-bridge.test.mjs collab/scripts/tests/desktop-runtime.test.mjs
 

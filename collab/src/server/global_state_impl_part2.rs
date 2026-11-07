@@ -28,9 +28,8 @@ impl GlobalState {
     }
 
     /// Project one durable thread-only binding into the read-only
-    /// compatibility index.  A higher `endpoint_generation` for the same app
-    /// scope, thread, and binding is a transport refresh and replaces the
-    /// stored record; a distinct binding id is kept alongside it.
+    /// compatibility index. An explicit refresh replaces the same app scope,
+    /// thread and binding; a distinct binding id is kept alongside it.
     pub fn set_legacy_thread_route(
         &mut self,
         binding: RuntimeBinding,
@@ -58,11 +57,6 @@ impl GlobalState {
             return Ok(self.version());
         }
         self.mutate(|next| {
-            if let Some(existing) = next.legacy_thread_routes.get(&key) {
-                if binding.endpoint_generation <= existing.endpoint_generation {
-                    return Ok(());
-                }
-            }
             next.legacy_thread_routes.insert(key, binding);
             Ok(())
         })
@@ -204,9 +198,8 @@ impl GlobalState {
             // One tmux pane owns exactly one binding, host-wide. Installing this
             // route evicts every other claimant of the same pane, whatever its
             // project or route scope, so the later writer takes the resource.
-            // This reducer is the same path for a live write and for journal
-            // replay, so the invariant holds in both and needs no second
-            // mechanism. An entry at this exact address is left for the insert
+            // The current-state mutation uses this single reducer. An entry
+            // at this exact address is left for the insert
             // below; an entry without a pane is left alone, because it shares no
             // resource.
             if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
@@ -279,10 +272,10 @@ impl GlobalState {
         self.command_receipts.get(command_id.as_str())
     }
 
-    /// Install a receipt that was already committed by the host journal.
+    /// Install a receipt in the current host projection.
     ///
-    /// The legacy reducer owns the journal sequence/revision while this
-    /// host-wide map owns command idempotency.  Consequently the receipt's
+    /// The business reducer owns its revision while this
+    /// host-wide map owns command idempotency. Consequently the receipt's
     /// coordinates are validated as durable values but do not have to be
     /// bounded by this reducer's independent version counters.
     pub fn record_command_projection(&mut self, receipt: CommandReceipt) -> Result<(), StateError> {
@@ -321,46 +314,6 @@ impl GlobalState {
         }
         self.command_receipts
             .insert(receipt.command_id.as_str().to_owned(), receipt);
-        Ok(())
-    }
-
-    /// Install one migration commit evidence record already committed by the
-    /// resident journal.  The outer reducer owns the event and version
-    /// ordering, so this projection deliberately does not bump or validate
-    /// the independent global counters until the caller synchronizes them.
-    pub fn record_migration_commit_evidence(
-        &mut self,
-        evidence: MigrationCommitEvidence,
-    ) -> Result<(), StateError> {
-        evidence.validate()?;
-        if evidence.target_epoch != self.epoch {
-            return Err(StateError::Invariant(format!(
-                "migration commit evidence {} belongs to target epoch {}, expected {}",
-                evidence.operation_id, evidence.target_epoch, self.epoch
-            )));
-        }
-        let operation_key = evidence.operation_id.as_str().to_owned();
-        if let Some(existing) = self.migration_commit_evidence.get(&operation_key) {
-            if existing == &evidence {
-                return Ok(());
-            }
-            return Err(StateError::ReceiptConflict(format!(
-                "migration operation {} was already projected with different commit evidence",
-                evidence.operation_id
-            )));
-        }
-        if let Some(existing) = self
-            .command_receipts
-            .values()
-            .find(|current| current.operation_id == evidence.operation_id)
-        {
-            return Err(StateError::OperationIdReuse {
-                operation_id: evidence.operation_id.as_str().to_owned(),
-                existing_command: existing.command_id.as_str().to_owned(),
-            });
-        }
-        self.migration_commit_evidence
-            .insert(operation_key, evidence);
         Ok(())
     }
 
@@ -437,19 +390,6 @@ impl GlobalState {
                     binding.binding_id
                 )));
             }
-            if binding.endpoint_generation < current.endpoint_generation {
-                return Err(StateError::StaleBinding {
-                    binding_id: binding_key,
-                    expected_generation: current.endpoint_generation,
-                    observed_generation: binding.endpoint_generation,
-                });
-            }
-            if binding.endpoint_generation == current.endpoint_generation {
-                return Err(StateError::BindingConflict(format!(
-                    "binding {} has a different runtime at generation {}",
-                    binding.binding_id, binding.endpoint_generation
-                )));
-            }
         }
 
         let duplicate_runtime = project.runtime_bindings.values().find(|current| {
@@ -479,10 +419,6 @@ impl GlobalState {
             project
                 .runtime_bindings
                 .insert(binding_key.clone(), binding);
-            // A capability is fenced to the endpoint generation.  Rebinding
-            // the same binding ID therefore revokes the old capability in
-            // the same candidate transaction.
-            project.master_grants.remove(&binding_key);
             Ok(())
         })
     }
@@ -506,13 +442,6 @@ impl GlobalState {
                     failed.binding_id
                 )));
             }
-            if previous.endpoint_generation >= failed.endpoint_generation {
-                return Err(StateError::StaleBinding {
-                    binding_id: failed.binding_id.as_str().to_owned(),
-                    expected_generation: failed.endpoint_generation,
-                    observed_generation: previous.endpoint_generation,
-                });
-            }
         }
         if let Some(grant) = &previous_grant {
             grant.validate()?;
@@ -526,7 +455,6 @@ impl GlobalState {
                 || grant.app_scope_id != previous.app_scope_id
                 || grant.agent_id != previous.agent_id
                 || grant.binding_id != previous.binding_id
-                || grant.endpoint_generation != previous.endpoint_generation
             {
                 return Err(StateError::MasterGrantBindingMismatch(format!(
                     "grant {} does not match the previous runtime binding",
@@ -558,7 +486,6 @@ impl GlobalState {
                 || grant.app_scope_id != failed.app_scope_id
                 || grant.agent_id != failed.agent_id
                 || grant.binding_id != failed.binding_id
-                || grant.endpoint_generation != failed.endpoint_generation
             {
                 return Err(StateError::MasterGrantConflict(format!(
                     "binding {} master grant is not the failed transaction state",
@@ -610,19 +537,6 @@ impl GlobalState {
                 incoming.binding_id
             )));
         }
-        if incoming.endpoint_generation < current.endpoint_generation {
-            return Err(StateError::StaleBinding {
-                binding_id: incoming.binding_id.as_str().to_owned(),
-                expected_generation: current.endpoint_generation,
-                observed_generation: incoming.endpoint_generation,
-            });
-        }
-        if incoming.endpoint_generation != current.endpoint_generation {
-            return Err(StateError::BindingConflict(format!(
-                "binding {} generation {} is not current generation {}",
-                incoming.binding_id, incoming.endpoint_generation, current.endpoint_generation
-            )));
-        }
         if incoming != current {
             return Err(StateError::BindingConflict(format!(
                 "binding {} identity differs from the registered endpoint",
@@ -647,13 +561,6 @@ impl GlobalState {
                 "grant {} targets a different app scope or agent",
                 grant.binding_id
             )));
-        }
-        if grant.endpoint_generation != binding.endpoint_generation {
-            return Err(StateError::StaleBinding {
-                binding_id: grant.binding_id.as_str().to_owned(),
-                expected_generation: binding.endpoint_generation,
-                observed_generation: grant.endpoint_generation,
-            });
         }
         if let Some(current) = project.lookup_master_grant(&grant.binding_id) {
             if current == &grant {
@@ -714,90 +621,6 @@ impl GlobalState {
         })
     }
 
-    /// Record one immutable grant-replacement intent. Re-recording an
-    /// identical intent is idempotent (replay); a changed intent is rejected.
-    pub fn record_master_grant_replacement_intent(
-        &mut self,
-        intent: MasterGrantReplacementIntent,
-    ) -> Result<StateVersion, StateError> {
-        intent.validate()?;
-        if let Some(existing) = self
-            .master_grant_replacement_intents
-            .get(&intent.operation_id)
-        {
-            if existing == &intent {
-                return Ok(self.version());
-            }
-            return Err(StateError::Invariant(format!(
-                "grant replacement intent for operation {} changed",
-                intent.operation_id
-            )));
-        }
-        self.mutate(|next| {
-            next.master_grant_replacement_intents
-                .insert(intent.operation_id.clone(), intent.clone());
-            Ok(())
-        })
-    }
-
-    /// Record one immutable grant-replacement completion receipt. It requires
-    /// the exact matching durable intent and is idempotent on replay.
-    pub fn record_master_grant_replacement_receipt(
-        &mut self,
-        receipt: MasterGrantReplacementReceipt,
-    ) -> Result<StateVersion, StateError> {
-        receipt.validate()?;
-        match self
-            .master_grant_replacement_intents
-            .get(&receipt.operation_id)
-        {
-            None => {
-                return Err(StateError::Invariant(format!(
-                    "grant replacement receipt for operation {} has no intent",
-                    receipt.operation_id
-                )))
-            }
-            Some(intent) if intent.intent_id != receipt.intent_id => {
-                return Err(StateError::Invariant(format!(
-                    "grant replacement receipt for operation {} does not match its intent",
-                    receipt.operation_id
-                )))
-            }
-            Some(_) => {}
-        }
-        if let Some(existing) = self
-            .master_grant_replacement_receipts
-            .get(&receipt.operation_id)
-        {
-            if existing == &receipt {
-                return Ok(self.version());
-            }
-            return Err(StateError::Invariant(format!(
-                "grant replacement receipt for operation {} changed",
-                receipt.operation_id
-            )));
-        }
-        self.mutate(|next| {
-            next.master_grant_replacement_receipts
-                .insert(receipt.operation_id.clone(), receipt.clone());
-            Ok(())
-        })
-    }
-
-    pub fn lookup_master_grant_replacement_intent(
-        &self,
-        operation_id: &str,
-    ) -> Option<&MasterGrantReplacementIntent> {
-        self.master_grant_replacement_intents.get(operation_id)
-    }
-
-    pub fn lookup_master_grant_replacement_receipt(
-        &self,
-        operation_id: &str,
-    ) -> Option<&MasterGrantReplacementReceipt> {
-        self.master_grant_replacement_receipts.get(operation_id)
-    }
-
     pub fn role_for_binding(
         &self,
         project_scope: &ProjectScopeId,
@@ -811,7 +634,6 @@ impl GlobalState {
         };
         project
             .lookup_master_grant(binding_id)
-            .filter(|grant| grant.endpoint_generation == binding.endpoint_generation)
             .map_or(PeerRole::Peer, |_| PeerRole::Master)
     }
 
@@ -820,7 +642,6 @@ impl GlobalState {
             return PeerRole::Peer;
         };
         self.lookup_master_grant_for(route_scope, binding_id)
-            .filter(|grant| grant.endpoint_generation == binding.endpoint_generation)
             .map_or(PeerRole::Peer, |_| PeerRole::Master)
     }
 

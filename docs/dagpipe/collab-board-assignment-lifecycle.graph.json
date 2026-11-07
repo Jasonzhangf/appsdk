@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-board-assignment-lifecycle",
-  "version": "0.1.0",
-  "description": "一次 board assignment mutation 的目标设计 SESE，覆盖同名当前工作者的自动 session 换绑，以及任意未关闭任务经现有 invite/respond 扩展显式改派。自动换绑不要求邀请；显式改派只改变归属，不重置任务状态、证据、资源、revision 历史、merge obligation 或 cleanup obligation。closed 与 cancelled 不进入 mutation。名字无可用工作者时保留持久工作归属并投影空执行者，由 mutation/timer owner 向当前 Jenny 回流原因一次；不自动把 Jenny 设为执行者。该图尚未完成 runtime 验收。",
+  "version": "0.2.0",
+  "description": "一次 board assignment mutation 的 SESE。同名自动 session 换绑保留状态。显式 invite/respond 让 pending 任务经 invited 接受后进入 working，不以 owner 等于 publisher 为条件；pending/invited 均先检查没有执行资源和生命周期证据。已经开始的任务交接保留状态、证据、资源及 merge/cleanup 义务。拒绝或撤回首次邀请保持原 owner 并回到 pending；closed/cancelled、过期 revision、错误回应者和旧 binding 明确拒绝，不部分转移。名字无可用工作者时保留工作归属并投影空执行者，由原 owner 回流原因，不自动选择 Jenny。",
   "inputs": [{"id": "assignment_mutation_request", "schema": "Object"}],
   "nodes": [
     {
@@ -41,7 +41,7 @@
       "id": "原子提交归属并保留任务义务",
       "operator": "appsdk.collab_assignment.commit",
       "operator_version": "1",
-      "description": "在 TaskRec/board mutation owner 内按 revision 原子更新 assignment，只改名字和当前 agent sessionID。保留 task ID、状态、证据、资源、revision 历史、pending merge 和 cleanup obligation；不把任务重置成 pending，不替代 review/accept/merge/close。closed 与 cancelled 明确拒绝。",
+      "description": "在 TaskRec/board mutation owner 内按 revision 原子提交。pending 邀请变 invited，pending/invited 的合法接受变 working；首次拒绝/撤回回 pending 且不转移 owner。已开始任务的显式交接及同名自动换绑保留状态、证据、资源、pending merge 和 cleanup obligation。保留 task ID 与 publisher；不替代 review/merge/close。closed/cancelled 明确拒绝。",
       "inputs": ["authorized_assignment"],
       "output": {"id": "assignment_commit", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

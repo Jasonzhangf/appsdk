@@ -69,6 +69,7 @@ fn board_name_presence(
 #[test]
 fn board_name_offline_binding_projects_empty_without_mutation() {
     let (server, root, route) = board_name_fixture();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
     let mut state = server.state.lock().unwrap();
     board_name_presence(
         &mut state,
@@ -84,9 +85,10 @@ fn board_name_offline_binding_projects_empty_without_mutation() {
         &state.workers["old"]
     )
     .is_some());
-    let before = serde_json::to_value(state.snapshot_events()).unwrap();
+    let before = serde_json::to_value(&*state).unwrap();
     let view =
-        board_task_view_with_master(&state, &state.tasks["named-work"], None, None, Some(&route))
+        board_task_view_with_master(&state, &control, &state.tasks["named-work"], None, None, Some(&route))
+            .unwrap()
             .unwrap();
     assert_eq!(view.owner, "");
     assert!(view.needs_reassignment);
@@ -94,7 +96,7 @@ fn board_name_offline_binding_projects_empty_without_mutation() {
     assert_eq!(view.owner_session_id, None);
     assert_eq!(view.reassignment_reason.as_deref(), Some("owner_offline"));
     assert_eq!(
-        serde_json::to_value(state.snapshot_events()).unwrap(),
+        serde_json::to_value(&*state).unwrap(),
         before
     );
     drop(state);
@@ -102,7 +104,7 @@ fn board_name_offline_binding_projects_empty_without_mutation() {
     assert!(response.ok, "{:?}", response.error);
     assert_eq!(response.data["tasks"][0]["owner"], "");
     assert_eq!(
-        serde_json::to_value(server.state.lock().unwrap().snapshot_events()).unwrap(),
+        serde_json::to_value(&*server.state.lock().unwrap()).unwrap(),
         before
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -111,6 +113,17 @@ fn board_name_offline_binding_projects_empty_without_mutation() {
 #[test]
 fn board_name_current_holder_and_unknown_presence_preserve_closed_history() {
     let (server, root, route) = board_name_fixture();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let source = control.key_for_worker(&route.project_scope_id, &route.app_scope_id, "current").unwrap().unwrap();
+    let value = control.slot(source).unwrap().active_binding().unwrap().clone();
+    store.commit(binding_store::ControlChange::MoveName {
+        target: binding_slot::IdentityBindingKey::new(route.project_scope_id.clone(), route.app_scope_id.clone(), "Alice"),
+        value,
+        source_names: vec![source.name.clone()],
+        expected_generation: None,
+    }).unwrap();
+    let control = store.load().unwrap();
     let mut state = server.state.lock().unwrap();
     let occupancy = state
         .name_occupancies
@@ -129,12 +142,13 @@ fn board_name_current_holder_and_unknown_presence_preserve_closed_history() {
         board_name_presence(&mut state, &route, "current", "session-current", presence);
         let view = board_task_view_with_master(
             &state,
+            &control,
             &state.tasks["named-work"],
             None,
             None,
             Some(&route),
         )
-        .unwrap();
+        .unwrap().unwrap();
         assert_eq!(view.owner, "current");
         assert_eq!(view.owner_display_name, "Alice");
         let json = serde_json::to_value(view).unwrap();
@@ -152,7 +166,8 @@ fn board_name_current_holder_and_unknown_presence_preserve_closed_history() {
         AgentPresence::Offline,
     );
     assert_eq!(
-        board_task_view_with_master(&state, &closed, None, None, Some(&route))
+        board_task_view_with_master(&state, &control, &closed, None, None, Some(&route))
+            .unwrap()
             .unwrap()
             .owner,
         "old"
@@ -190,10 +205,7 @@ fn board_name_claim_commits_current_occupancy_assignment() {
     assert_eq!(assignment.assignment_revision, 1);
     assert_eq!(state.tasks["named-work"].status, "working");
     assert_eq!(state.board_details["named-work"].revision, 2);
-    let mut restored = State::default();
-    for event in state.snapshot_events() {
-        restored.apply_checked(&event).unwrap();
-    }
+    let restored: State = serde_json::from_slice(&serde_json::to_vec(&*state).unwrap()).unwrap();
     assert_eq!(restored.task_assignment("named-work"), Some(assignment));
     assert_eq!(
         route.project_scope_id.as_str(),
@@ -206,18 +218,24 @@ fn board_name_claim_commits_current_occupancy_assignment() {
 }
 
 #[test]
-fn board_name_missing_occupancy_does_not_fall_back_to_old_owner() {
+fn board_name_missing_map_row_does_not_fall_back_to_old_owner() {
     let (server, root, route) = board_name_fixture();
-    let mut state = server.state.lock().unwrap();
-    state.name_occupancies.clear();
-    let before = serde_json::to_value(state.snapshot_events()).unwrap();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    store.commit(binding_store::ControlChange::Unregister {
+        key: binding_slot::IdentityBindingKey::new(route.project_scope_id.clone(), route.app_scope_id.clone(), "Alice"),
+        expected_generation: None,
+    }).unwrap();
+    let control = store.load().unwrap();
+    let state = server.state.lock().unwrap();
+    let before = serde_json::to_value(&*state).unwrap();
     let view =
-        board_task_view_with_master(&state, &state.tasks["named-work"], None, None, Some(&route))
+        board_task_view_with_master(&state, &control, &state.tasks["named-work"], None, None, Some(&route))
+            .unwrap()
             .unwrap();
     assert_eq!(view.owner, "");
     assert_eq!(view.reassignment_reason.as_deref(), Some("name_unoccupied"));
     assert_eq!(
-        serde_json::to_value(state.snapshot_events()).unwrap(),
+        serde_json::to_value(&*state).unwrap(),
         before
     );
     drop(state);
@@ -227,6 +245,7 @@ fn board_name_missing_occupancy_does_not_fall_back_to_old_owner() {
 #[test]
 fn board_name_old_session_offline_does_not_hide_current_holder() {
     let (server, root, route) = board_name_fixture();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
     let mut state = server.state.lock().unwrap();
     board_name_presence(
         &mut state,
@@ -236,7 +255,8 @@ fn board_name_old_session_offline_does_not_hide_current_holder() {
         AgentPresence::Offline,
     );
     let view =
-        board_task_view_with_master(&state, &state.tasks["named-work"], None, None, Some(&route))
+        board_task_view_with_master(&state, &control, &state.tasks["named-work"], None, None, Some(&route))
+            .unwrap()
             .unwrap();
     assert_eq!(view.owner, "old");
     assert!(!view.needs_reassignment);
@@ -245,47 +265,9 @@ fn board_name_old_session_offline_does_not_hide_current_holder() {
 }
 
 #[test]
-fn board_name_legacy_claim_preserves_label_without_inventing_assignment_or_occupancy() {
-    let (server, root, _) = board_name_fixture();
-    {
-        let mut state = server.state.lock().unwrap();
-        state.tasks.get_mut("named-work").unwrap().status = "pending".into();
-        state.task_assignments.clear();
-        state.name_occupancies.clear();
-        state
-            .worker_names
-            .insert("old".into(), "Legacy Alice".into());
-    }
-    let rejected = board_claim(
-        &server,
-        "old".into(),
-        "token-old".into(),
-        "named-work".into(),
-        0,
-    );
-    assert!(!rejected.ok);
-    assert!(server.state.lock().unwrap().task_assignments.is_empty());
-    let response = board_claim(
-        &server,
-        "old".into(),
-        "token-old".into(),
-        "named-work".into(),
-        1,
-    );
-    assert!(response.ok, "{:?}", response.error);
-    let state = server.state.lock().unwrap();
-    assert!(state.task_assignment("named-work").is_none());
-    assert_eq!(response.data["task"]["owner"], "old");
-    assert_eq!(response.data["task"]["owner_display_name"], "Legacy Alice");
-    assert!(state.name_occupancies.is_empty());
-    drop(state);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn board_name_legacy_invitation_defaults_original_fields() {
     let invitation: crate::board::BoardInvitation = serde_json::from_value(json!({
-        "peer_id": "peer", "binding_id": "binding", "endpoint_generation": 1,
+        "peer_id": "peer", "binding_id": "binding",
         "message_id": "message", "created_ms": 1,
     }))
     .unwrap();

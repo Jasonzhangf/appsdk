@@ -5,7 +5,7 @@ include!("board_name_tests.rs");
 include!("board_reassign_tests.rs");
 
 /// Register a state-level worker without a transport fixture. These tests
-/// cover board projection and replay, not transport selection.
+/// cover board projection and current state, not transport selection.
 fn register_worker(state: &mut State, id: &str) {
     state.workers.insert(
         id.into(),
@@ -37,7 +37,6 @@ fn register_managed_child(state: &mut State, id: &str, parent: &str, peer: &str)
                 runtime: Some("codex".into()),
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         })
         .unwrap();
@@ -65,6 +64,7 @@ fn task(id: &str, owner: &str) -> TaskRec {
 #[test]
 fn board_lists_only_open_tasks_without_deleting_history() {
     let (server, root) = test_server();
+    let control = binding_slot::BindingControlSet::default();
     let statuses = [
         "pending",
         "working",
@@ -98,7 +98,8 @@ fn board_lists_only_open_tasks_without_deleting_history() {
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks.len(), statuses.len());
     assert_eq!(
-        board_task_view(&state, &state.tasks["closed"])
+        board_task_view(&state, &control, &state.tasks["closed"])
+            .unwrap()
             .unwrap()
             .status,
         "closed"
@@ -108,8 +109,9 @@ fn board_lists_only_open_tasks_without_deleting_history() {
 }
 
 #[test]
-fn compact_snapshot_preserves_public_history_and_exact_revision() {
+fn current_state_preserves_public_history_and_exact_revision() {
     let (server, root) = test_server();
+    let control = binding_slot::BindingControlSet::default();
     let mut state = server.state.lock().unwrap();
     register_worker(&mut state, "peer");
     let mut task = task("public-history", "peer");
@@ -132,20 +134,30 @@ fn compact_snapshot_preserves_public_history_and_exact_revision() {
         })
         .unwrap();
     assert!(!state.workers.contains_key("peer"));
-    assert_eq!(board_task_view(&state, &task).unwrap().revision, 4);
-    let events = state.snapshot_events();
-    let mut restored = State::default();
-    for event in events {
-        restored.apply_checked(&event).unwrap();
-    }
-    let view = board_task_view(&restored, &restored.tasks["public-history"]).unwrap();
+    assert_eq!(
+        board_task_view(&state, &control, &task)
+            .unwrap()
+            .unwrap()
+            .revision,
+        4
+    );
+    let restored: State = serde_json::from_slice(&serde_json::to_vec(&*state).unwrap()).unwrap();
+    let view = board_task_view(&restored, &control, &restored.tasks["public-history"])
+        .unwrap()
+        .unwrap();
     assert_eq!(view.revision, 4);
     assert_eq!(view.owner, "");
     assert_eq!(view.owner_display_name, "");
     assert_eq!(restored.tasks["public-history"].owner, "peer");
     let mut closed = restored.tasks["public-history"].clone();
     closed.status = "closed".into();
-    assert_eq!(board_task_view(&restored, &closed).unwrap().owner, "peer");
+    assert_eq!(
+        board_task_view(&restored, &control, &closed)
+            .unwrap()
+            .unwrap()
+            .owner,
+        "peer"
+    );
     assert_eq!(view.next_step.as_deref(), Some("交付"));
     assert!(!restored.workers.contains_key("peer"));
     drop(state);
@@ -153,22 +165,24 @@ fn compact_snapshot_preserves_public_history_and_exact_revision() {
 }
 
 #[test]
-fn unknown_legacy_actor_is_not_public_after_compaction() {
+fn unknown_actor_is_not_public_after_current_state_round_trip() {
     let mut state = State::default();
+    let control = binding_slot::BindingControlSet::default();
     let task = task("unknown-history", "unknown-actor");
     state
         .apply_checked(&Event::TaskCreated { task: task.clone() })
         .unwrap();
-    assert!(board_task_view(&state, &task).is_none());
-    let mut restored = State::default();
-    for event in state.snapshot_events() {
-        restored.apply_checked(&event).unwrap();
-    }
-    assert!(board_task_view(&restored, &restored.tasks["unknown-history"]).is_none());
+    assert!(board_task_view(&state, &control, &task).unwrap().is_none());
+    let restored: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(
+        board_task_view(&restored, &control, &restored.tasks["unknown-history"])
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
-fn compact_snapshot_preserves_invitation_and_its_capacity_reservation() {
+fn current_state_preserves_invitation_and_its_capacity_reservation() {
     let (server, root) = test_server();
     let mut state = server.state.lock().unwrap();
     register_worker(&mut state, "publisher");
@@ -185,7 +199,6 @@ fn compact_snapshot_preserves_invitation_and_its_capacity_reservation() {
                 invitation: Some(crate::board::BoardInvitation {
                     peer_id: "peer".into(),
                     binding_id: "test-binding".into(),
-                    endpoint_generation: 8,
                     message_id: "offer-message".into(),
                     created_ms: now_ms(),
                     original_status: None,
@@ -198,18 +211,15 @@ fn compact_snapshot_preserves_invitation_and_its_capacity_reservation() {
     assert!(board_peer_has_execution_reservation(&state, "peer", None));
     assert!(!keepalive::actionable("invited"));
     assert!(!task_resource_active("invited"));
-    let mut restored = State::default();
-    for event in state.snapshot_events() {
-        restored.apply_checked(&event).unwrap();
-    }
+    let restored: State = serde_json::from_slice(&serde_json::to_vec(&*state).unwrap()).unwrap();
     assert_eq!(restored.board_details["offer"].revision, 17);
     assert_eq!(
         restored.board_details["offer"]
             .invitation
             .as_ref()
             .unwrap()
-            .endpoint_generation,
-        8
+            .binding_id,
+        "test-binding"
     );
     assert_eq!(restored.tasks["offer"].owner, "publisher");
     assert!(board_peer_has_execution_reservation(
@@ -274,20 +284,17 @@ fn authenticated_managed_queue_is_parent_visible_while_public_output_hides_child
     crate::server::peer_tests::register_synthetic_peer(&server, "parent", "parent-thread");
     crate::server::peer_tests::register_synthetic_peer(&server, "child-peer", "child-thread");
     crate::server::peer_tests::register_synthetic_peer(&server, "other-peer", "other-thread");
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let route = control
+        .active_values()
+        .find(|value| value.binding.agent_id.as_str() == "parent")
+        .unwrap()
+        .binding
+        .route_scope();
     let mut state = server.state.lock().unwrap();
     register_managed_child(&mut state, "child", "parent", "child-peer");
-    state
-        .apply_checked(&Event::WorkerNamed {
-            worker_id: "child-peer".into(),
-            name: Some("Private child name".into()),
-        })
-        .unwrap();
-    state
-        .apply_checked(&Event::WorkerNamed {
-            worker_id: "parent".into(),
-            name: Some("Parent name".into()),
-        })
-        .unwrap();
 
     let mut public = task("public-claimed-by-child", "parent");
     public.created_by = "parent".into();
@@ -319,12 +326,34 @@ fn authenticated_managed_queue_is_parent_visible_while_public_output_hides_child
             task: private.clone(),
         })
         .unwrap();
-    assert!(board_task_view(&state, &state.tasks[&private.id]).is_none());
-    assert!(board_task_view_for(&state, &state.tasks[&private.id], Some("parent")).is_some());
-    assert!(board_task_view_for(&state, &state.tasks[&private.id], Some("child-peer")).is_some());
-    assert!(board_task_view_for(&state, &state.tasks[&private.id], Some("other-peer")).is_none());
+    assert!(board_task_view(&state, &control, &state.tasks[&private.id])
+        .unwrap()
+        .is_none());
+    assert!(
+        board_task_view_for(&state, &control, &state.tasks[&private.id], Some("parent"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(board_task_view_for(
+        &state,
+        &control,
+        &state.tasks[&private.id],
+        Some("child-peer")
+    )
+    .unwrap()
+    .is_some());
+    assert!(board_task_view_for(
+        &state,
+        &control,
+        &state.tasks[&private.id],
+        Some("other-peer")
+    )
+    .unwrap()
+    .is_none());
 
-    let public_view = board_task_view(&state, &state.tasks["public-claimed-by-child"]).unwrap();
+    let public_view = board_task_view(&state, &control, &state.tasks["public-claimed-by-child"])
+        .unwrap()
+        .unwrap();
     assert_eq!(public_view.owner, "parent");
     assert_eq!(public_view.publisher, "parent");
     assert!(!serde_json::to_string(&public_view)
@@ -333,89 +362,56 @@ fn authenticated_managed_queue_is_parent_visible_while_public_output_hides_child
     assert_eq!(public_view.owner_display_name, "Alice");
     assert_ne!(
         public_view.owner_display_name,
-        worker_display_name(&state, "child-peer", false)
+        worker_display_name(&control, Some(&route), "child-peer").unwrap()
     );
-    let child_name = worker_display_name(&state, "child-peer", false);
+    let child_name = worker_display_name(&control, Some(&route), "child-peer").unwrap();
     assert!(!serde_json::to_string(&public_view)
         .unwrap()
         .contains(&serde_json::to_string(&child_name).unwrap()));
-    assert!(!serde_json::to_string(&public_view)
-        .unwrap()
-        .contains("Private child name"));
-    let private_parent =
-        board_task_view_for(&state, &state.tasks["child-private"], Some("parent")).unwrap();
+    let private_parent = board_task_view_for(
+        &state,
+        &control,
+        &state.tasks["child-private"],
+        Some("parent"),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(private_parent.owner, "child-peer");
     assert_eq!(private_parent.publisher, "child-peer");
 
-    let mut restored = State::default();
-    for event in state.snapshot_events() {
-        restored.apply_checked(&event).unwrap();
-    }
+    let restored: State = serde_json::from_slice(&serde_json::to_vec(&*state).unwrap()).unwrap();
     assert_eq!(
         restored.tasks["public-claimed-by-child"].owner,
         "child-peer"
     );
     assert!(restored.board_details["public-claimed-by-child"].public_visibility);
     assert_eq!(
-        board_task_view(&restored, &restored.tasks["public-claimed-by-child"])
-            .unwrap()
-            .owner,
+        board_task_view(
+            &restored,
+            &control,
+            &restored.tasks["public-claimed-by-child"]
+        )
+        .unwrap()
+        .unwrap()
+        .owner,
         "parent"
     );
     assert!(!restored.board_details["child-private"].public_visibility);
+    assert!(board_task_view_for(
+        &restored,
+        &control,
+        &restored.tasks["child-private"],
+        Some("parent")
+    )
+    .unwrap()
+    .is_some());
     assert!(
-        board_task_view_for(&restored, &restored.tasks["child-private"], Some("parent")).is_some()
+        board_task_view(&restored, &control, &restored.tasks["child-private"])
+            .unwrap()
+            .is_none()
     );
-    assert!(board_task_view(&restored, &restored.tasks["child-private"]).is_none());
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn name_overrides_survive_compaction_but_reset_and_retirement_remove_them() {
-    let mut state = State::default();
-    register_worker(&mut state, "peer");
-    state
-        .apply_checked(&Event::WorkerNamed {
-            worker_id: "peer".into(),
-            name: Some("Alice".into()),
-        })
-        .unwrap();
-    let restore = |state: &State| {
-        let mut restored = State::default();
-        for event in state.snapshot_events() {
-            restored.apply_checked(&event).unwrap();
-        }
-        restored
-    };
-    let mut state = restore(&state);
-    assert_eq!(worker_display_name(&state, "peer", true), "Alice");
-    state
-        .apply_checked(&Event::WorkerNamed {
-            worker_id: "peer".into(),
-            name: None,
-        })
-        .unwrap();
-    let mut state = restore(&state);
-    assert_eq!(worker_display_name(&state, "peer", true), "Jenny");
-    state
-        .apply_checked(&Event::WorkerNamed {
-            worker_id: "peer".into(),
-            name: Some("Alice".into()),
-        })
-        .unwrap();
-    state
-        .apply_checked(&Event::WorkerClosed {
-            worker_id: "peer".into(),
-            closed_by: "peer".into(),
-            reason: "user unregister".into(),
-            snapshot_captured_ms: None,
-            at_ms: now_ms(),
-        })
-        .unwrap();
-    let mut state = restore(&state);
-    register_worker(&mut state, "peer");
-    assert_eq!(worker_display_name(&state, "peer", false), "peer");
 }
 
 /// A task that has not reached delivery carries no delivery/review/integration
@@ -584,7 +580,7 @@ fn internal_safety_blocked_writes_never_create_business_approval_records() {
 }
 
 #[test]
-fn pending_block_request_survives_compacted_snapshot_replay() {
+fn pending_block_request_survives_current_state_round_trip() {
     let request = TaskBlockRequest {
         task_id: "task-block".into(),
         requester: "owner".into(),
@@ -603,13 +599,7 @@ fn pending_block_request_survives_compacted_snapshot_replay() {
         })
         .unwrap();
 
-    let replayed = state
-        .snapshot_events()
-        .iter()
-        .fold(State::default(), |mut restored, event| {
-            restored.apply_checked(event).unwrap();
-            restored
-        });
+    let restored: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
 
-    assert_eq!(replayed.task_block_requests["task-block"], request);
+    assert_eq!(restored.task_block_requests["task-block"], request);
 }

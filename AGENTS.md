@@ -93,7 +93,13 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   已验证的 bridge 能力，选定 bridge 后也不回退旧 socket 或其他 transport。
 - Collab 的名字承载工作归属，sessionID 是当前执行载体。这是本项目一切命名、
   注册、身份恢复与任务续接的统一规则。`cwd` 选择项目；注册提供 agent 会话的
-  sessionID 并绑定，不使用 tmux session ID 代替 agent sessionID。
+  sessionID 并绑定，不使用 tmux session `$N` 代替 agent sessionID。
+  名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递和任务锚点：第一次
+  绑定分配固定名字，后续绑定与恢复可显式继承已有名字，新注册为新会话新增名字，
+  旧名字在旧持有者离线或获得用户授权时可顶替。TUI 首次绑定把当前 tmux session
+  改名为角色注册名并读回确认；改名失败不提交身份，持久化失败回滚原名。Codex
+  Desktop 按 agent sessionID、DSH 按 gateway sessionID 承载传输，两者不执行 tmux
+  改名。旧版本按名字一次性迁移后，身份恢复不依赖旧 operation journal。
   名字仍归当前工作者而 sessionID 变化时，daemon 更新该名字的 sessionID，并自动
   换绑 board 中该名字下全部未关闭任务的 sessionID；任务 ID、状态、历史、证据与
   资源保持，已关闭任务保留历史。当前名字工作者继续任务，不以旧 sessionID 阻塞，
@@ -102,7 +108,8 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   直接接管其名字和 master；用户确认高于 Jenny 裁决，不等待旧执行者。
   名字交接时，未消费消息随名字交给当前持有者，并同步收件与唤醒归属；已消费消息
   保留历史，不重放，不改写正文、消息 ID 或真实消费回执。
-  pane、tmux session、socket 路径和 server PID 只定位投递与观测，不作为工作归属。
+  tmux session `$N`、pane、socket 路径和 server PID 只定位投递与观测，不作为
+  身份键；TUI 的固定 tmux session 名字是工作归属锚点，与 agent sessionID 分开。
   CLI 不从 `TMUX` 环境变量注入 socket 路径。历史 pane/native 绑定不否决当前恢复。
   `collab context` 自己迁移历史身份、收敛重复 session 载体并恢复当前通信；不得让
   agent 选择档案、清理旧 route、构造内部 fence 或运行独立迁移作为恢复前置。

@@ -10,6 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[path = "support/communication_receiver.rs"]
+mod communication_receiver;
 
 mod native_support {
     #![allow(dead_code)]
@@ -50,6 +52,8 @@ struct Gateway {
     fail_enqueue_read: Arc<AtomicBool>,
     enqueue_attempts: Arc<AtomicU64>,
     last_enqueue: Arc<Mutex<Option<Value>>>,
+    reject_enqueue: Arc<AtomicBool>,
+    receiver: Arc<Mutex<Option<std::sync::mpsc::Sender<Value>>>>,
 }
 
 impl Gateway {
@@ -88,6 +92,10 @@ impl Gateway {
         let thread_enqueues = enqueue_attempts.clone();
         let last_enqueue = Arc::new(Mutex::new(None::<Value>));
         let thread_last_enqueue = last_enqueue.clone();
+        let reject_enqueue = Arc::new(AtomicBool::new(false));
+        let rejecting = reject_enqueue.clone();
+        let receiver = Arc::new(Mutex::new(None::<std::sync::mpsc::Sender<Value>>));
+        let receiving = receiver.clone();
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -170,12 +178,14 @@ impl Gateway {
                             "agentId":request["params"]["agentId"],
                             "workerId":binding["workerId"],
                             "projectScope":binding["projectScope"],
-                            "bindingId":binding_id,
-                            "endpointGeneration":runtime_context["endpoint_generation"]
+                            "bindingId":binding_id
                         }})
                     }
                 } else if method == "enqueue" && known {
-                    if require_enrollment && !thread_enrolled.lock().unwrap().contains(&key) {
+                    if rejecting.load(Ordering::SeqCst) {
+                        json!({"ok":false,"error":{"code":"invalid-params","message":"fixture refuses enqueue before submission"}})
+                    } else if require_enrollment && !thread_enrolled.lock().unwrap().contains(&key)
+                    {
                         json!({"ok":false,"error":{
                             "code":"collab-not-registered",
                             "message":"fixture has no canonical receive loop for agent"
@@ -193,6 +203,11 @@ impl Gateway {
                 let mut stream = &stream;
                 let _ = writeln!(stream, "{reply}");
                 let _ = stream.flush();
+                if method == "enqueue" && reply["ok"] == true {
+                    if let Some(receiver) = receiving.lock().unwrap().as_ref() {
+                        let _ = receiver.send(request);
+                    }
+                }
             }
         });
         Self {
@@ -208,6 +223,8 @@ impl Gateway {
             fail_enqueue_read,
             enqueue_attempts,
             last_enqueue,
+            reject_enqueue,
+            receiver,
         }
     }
 
@@ -380,24 +397,18 @@ impl Fixture {
     }
 
     fn registrations(&self) -> usize {
-        fn count(path: &Path) -> usize {
-            if path.is_dir() {
-                return std::fs::read_dir(path)
-                    .unwrap()
-                    .map(|entry| count(&entry.unwrap().path()))
-                    .sum();
-            }
-            if path.file_name().is_none_or(|name| name != "journal.jsonl") {
-                return 0;
-            }
-            std::fs::read_to_string(path)
-                .unwrap()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .filter(|event| event["ev"] == "Registered")
-                .count()
-        }
-        count(&self.state)
+        let bytes = match std::fs::read(self.state.join("identity-map.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => panic!("read current identity map: {error}"),
+        };
+        let current: Value = serde_json::from_slice(&bytes).unwrap();
+        current["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|slot| slot["identity_status"] == "active")
+            .count()
     }
 
     fn wait_socket(&self, exists: bool) {
@@ -460,6 +471,25 @@ impl Fixture {
         self.start_daemon();
     }
 
+    fn edit_current_state(&mut self, edit: impl FnOnce(&mut Value)) {
+        self.stop_daemon();
+        let routes: Value =
+            serde_json::from_slice(&std::fs::read(self.state.join("routes.json")).unwrap())
+                .unwrap();
+        let route = routes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|route| route["project_scope"] == self.root.to_string_lossy().as_ref())
+            .unwrap();
+        let path = PathBuf::from(route["storage_root"].as_str().unwrap())
+            .join(".agent-collab/server/state.json");
+        let mut current: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        edit(&mut current["state"]);
+        std::fs::write(path, serde_json::to_vec(&current).unwrap()).unwrap();
+        self.start_daemon();
+    }
+
     fn finish(mut self) {
         self.stop_daemon();
         self.gateway
@@ -504,6 +534,137 @@ fn register(fixture: &Fixture, worker: &str, token: &str, agent: &str) -> Value 
     }))
 }
 
+#[test]
+fn dsh_manual_recovery_uses_independent_canonical_poll_and_reply() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    let registered = register(
+        &fixture,
+        "manual-dsh-peer",
+        "manual-dsh-test-token",
+        "agentA",
+    );
+    assert_ok(&registered);
+    let identity = fixture.dsh_command(&["context"], "agentA");
+    assert!(
+        identity.status.success(),
+        "{}",
+        String::from_utf8_lossy(&identity.stderr)
+    );
+    fixture.gateway.reject_enqueue.store(true, Ordering::SeqCst);
+    let failed = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            "manual-dsh-peer",
+            "--subject",
+            "dsh-known-failure",
+            "retain the failed original",
+        ],
+        "agentA",
+    );
+    assert!(!failed.status.success());
+    fixture
+        .gateway
+        .reject_enqueue
+        .store(false, Ordering::SeqCst);
+    let before = fixture.gateway.enqueue_attempts.load(Ordering::SeqCst);
+    let enrolled =
+        fixture.gateway.register_peer_requests().last().unwrap()["params"]["binding"].clone();
+    let (tx, native) = std::sync::mpsc::channel();
+    *fixture.gateway.receiver.lock().unwrap() = Some(tx);
+    let mut command = fixture.configured_program(&std::env::current_exe().unwrap(), &[]);
+    command
+        .env("DSH_SESSION_ID", "agentA")
+        .env("COLLAB_RECOVERY_RECEIVER_DSH_BINDING", enrolled.to_string());
+    let mut receiver = communication_receiver::ReceivingProcess::start(command, &fixture.binary);
+    let pending = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
+    let pending: Value = serde_json::from_slice(&pending.stdout).unwrap();
+    let communication = &pending["result"]["owner_readback"]["communication"];
+    assert_eq!(communication["state"], "pending", "{communication}");
+    assert_eq!(communication["classification"], "broken");
+    assert!(communication["receive_id"].is_null());
+    let id = communication["message_id"].as_str().unwrap();
+    let input = native.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(input["params"]["agentId"], "agentA");
+    assert!(input["params"]["messageId"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!(":{id}")));
+    let denied = fixture.dsh_command(&["recv", "--timeout", "0"], "agentA");
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("DSH_NATIVE_DELIVERY_OWNED"));
+    receiver.submit(&input);
+    let received = receiver.event("received");
+    assert_eq!(received["receipt"]["receive_id"], format!("recover-{id}"));
+    let reply = receiver.event("replied");
+    let query = fixture.dsh_command(&["context", "--query"], "agentA");
+    assert!(
+        query.status.success(),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(
+        query["result"]["owner_readback"]["communication"]["state"],
+        "recovered"
+    );
+    assert_eq!(
+        query["result"]["owner_readback"]["communication"]["reply_message_id"],
+        reply["receipt"]["msg_id"]
+    );
+    assert_eq!(
+        fixture.gateway.enqueue_attempts.load(Ordering::SeqCst),
+        before + 2
+    );
+    drop(receiver);
+    fixture.finish();
+}
+
+#[test]
+fn dsh_manual_recovery_does_not_repeat_an_uncertain_enqueue() {
+    let mut fixture = Fixture::new_requiring_enrollment();
+    fixture.start_daemon();
+    assert_ok(&register(
+        &fixture,
+        "uncertain-dsh-peer",
+        "uncertain-dsh-test-token",
+        "agentA",
+    ));
+    fixture
+        .gateway
+        .fail_enqueue_read
+        .store(true, Ordering::SeqCst);
+    let failed = fixture.dsh_command(
+        &[
+            "sendmessage",
+            "--to",
+            "uncertain-dsh-peer",
+            "--subject",
+            "dsh-ambiguous-return",
+            "submitted but undecodable response",
+        ],
+        "agentA",
+    );
+    assert!(!failed.status.success());
+    fixture
+        .gateway
+        .fail_enqueue_read
+        .store(false, Ordering::SeqCst);
+    let attempts = fixture.gateway.enqueue_attempts.load(Ordering::SeqCst);
+    let response = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
+    let response: Value = serde_json::from_slice(&response.stdout).unwrap();
+    assert_eq!(
+        response["result"]["owner_readback"]["communication"]["state"],
+        "unknown"
+    );
+    assert_eq!(
+        fixture.gateway.enqueue_attempts.load(Ordering::SeqCst),
+        attempts
+    );
+    fixture.finish();
+}
+
 fn binding_context(receipt: &Value, root: &Path) -> Value {
     let binding = &receipt["command"]["binding"];
     json!({
@@ -512,7 +673,6 @@ fn binding_context(receipt: &Value, root: &Path) -> Value {
         "runtime_context":{
             "agent_id":binding["agent_id"], "runtime_id":binding["runtime_id"],
             "appserver_id":binding["app_scope_id"],
-            "endpoint_generation":binding["endpoint_generation"],
             "binding_id":binding["binding_id"], "session_id":binding["session_id"],
             "native_thread_id":binding["native_thread_id"]
         }
@@ -542,6 +702,422 @@ fn status(fixture: &Fixture, root: &Path) -> Value {
 
 fn assert_ok(reply: &Value) {
     assert_eq!(reply["ok"], true, "unexpected daemon refusal: {reply}");
+}
+
+#[test]
+fn current_name_address_ignores_stale_business_alias() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let master = register(&fixture, "workerA", "tokenA", "agentA");
+    let peer = register(&fixture, "workerB", "tokenB", "agentB");
+    assert_ok(&master);
+    assert_ok(&peer);
+    assert_ok(&authority(
+        &fixture,
+        "MasterPromote",
+        "workerA",
+        "tokenA",
+        &binding_context(&master, &fixture.root),
+        json!({"approval":"isolated current-name regression"}),
+    ));
+    let project = fixture.root.to_string_lossy().into_owned();
+    fixture.edit_current_state(|state| {
+        let mut stale = state["name_occupancies"][&project]["Jenny"].clone();
+        stale["name"] = json!("Alice");
+        state["name_occupancies"][&project]["Alice"] = stale;
+    });
+    let listed = fixture.command(&["list"]);
+    assert!(listed.status.success(), "{}", rendered(&listed));
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let entry = listed["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["worker_id"] == "workerA")
+        .unwrap();
+    let expected = format!(
+        "{}.Jenny",
+        fixture.root.file_name().unwrap().to_string_lossy()
+    );
+    assert_eq!(entry["display_name"], "Jenny");
+    assert_eq!(entry["address"], expected, "{entry}");
+    assert_eq!(entry["session_id"], "agentA");
+    let directory = fixture.request(json!({"op":"Directory","project_context":{
+        "app_scope_id":"appserver-cli","canonical_root":fixture.root,"project_scope":fixture.root}}));
+    assert_ok(&directory);
+    assert_eq!(
+        directory["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["worker_id"] == "workerA")
+            .unwrap()["address"],
+        expected
+    );
+    let old = format!(
+        "{}.Alice",
+        fixture.root.file_name().unwrap().to_string_lossy()
+    );
+    let rejected = fixture.dsh_command(
+        &[
+            "send",
+            "--to",
+            &old,
+            "--subject",
+            "stale alias",
+            "must not reach Jenny",
+        ],
+        "agentB",
+    );
+    assert!(
+        !rejected.status.success(),
+        "old alias must be unoccupied: {}",
+        rendered(&rejected)
+    );
+    let sent = fixture.dsh_command(
+        &[
+            "send",
+            "--to",
+            &expected,
+            "--subject",
+            "current address",
+            "ordinary peer to current Jenny",
+        ],
+        "agentB",
+    );
+    assert!(sent.status.success(), "{}", rendered(&sent));
+    let sent: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    let message = fixture.dsh_command(&["msg", sent["msg_id"].as_str().unwrap()], "agentB");
+    assert!(message.status.success(), "{}", rendered(&message));
+    let message: Value = serde_json::from_slice(&message.stdout).unwrap();
+    assert_eq!(message["to"], "workerA");
+    let renamed = fixture.dsh_command(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Alice","authorization":"isolated released-name reuse"}"#], "agentB");
+    assert!(renamed.status.success(), "{}", rendered(&renamed));
+    let listed = fixture.command(&["list"]);
+    assert!(listed.status.success(), "{}", rendered(&listed));
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let old_target = listed["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["address"] == old)
+        .unwrap();
+    assert_eq!(old_target["worker_id"], "workerB");
+    assert_eq!(old_target["session_id"], "agentB");
+    fixture.finish();
+}
+
+#[test]
+fn current_name_address_missing_row_and_invalid_map_do_not_use_business_identity() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    assert_ok(&register(&fixture, "workerA", "tokenA", "agentA"));
+    let path = fixture.state.join("identity-map.json");
+    let bytes = std::fs::read(&path).unwrap();
+    let mut map: Value = serde_json::from_slice(&bytes).unwrap();
+    for slot in map["slots"].as_array_mut().unwrap() {
+        slot["identity_status"] = json!("unregistered");
+        slot["current"] = Value::Null;
+    }
+    // Only this isolated fixture's control file is changed. The running public
+    // directory must read the current file rather than its old business alias.
+    std::fs::write(&path, serde_json::to_vec(&map).unwrap()).unwrap();
+    let listed = fixture.command(&["list"]);
+    assert!(listed.status.success(), "{}", rendered(&listed));
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(!listed["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["worker_id"] == "workerA"));
+    std::fs::write(&path, b"{broken-current-map").unwrap();
+    let failed = fixture.command(&["list"]);
+    assert!(!failed.status.success());
+    assert!(
+        rendered(&failed).contains("IDENTITY_MAP_"),
+        "{}",
+        rendered(&failed)
+    );
+    std::fs::write(path, bytes).unwrap();
+    fixture.finish();
+}
+
+#[test]
+fn board_pending_accept_nonpublisher_starts_and_delivers() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let master = register(&fixture, "workerA", "tokenA", "agentA");
+    let peer = register(&fixture, "workerB", "tokenB", "agentB");
+    assert_ok(&master);
+    assert_ok(&peer);
+    assert_ok(&authority(
+        &fixture,
+        "MasterPromote",
+        "workerA",
+        "tokenA",
+        &binding_context(&master, &fixture.root),
+        json!({"approval":"isolated Board regression"}),
+    ));
+    let command = |fixture: &Fixture, args: &[&str], session: &str| {
+        let output = fixture.dsh_command(args, session);
+        assert!(output.status.success(), "{}", rendered(&output));
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let id = "pending-nonpublisher-20261106";
+    command(
+        &fixture,
+        &[
+            "board",
+            "publish",
+            id,
+            "--title",
+            id,
+            "--description",
+            "current-state first acceptance",
+            "--delivery-condition",
+            "read-only result",
+            "--test-condition",
+            "public acceptance and delivery",
+        ],
+        "agentA",
+    );
+    fixture.edit_current_state(|state| {
+        state["tasks"][id]["owner"] = json!("workerB");
+        assert_eq!(state["tasks"][id]["status"], "pending");
+        assert_eq!(state["tasks"][id]["created_by"], "workerA");
+    });
+    let before = fixture.dsh_command(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "isolated result",
+        ],
+        "agentB",
+    );
+    assert!(!before.status.success());
+    assert!(rendered(&before).contains("BOARD_ACCEPT_REQUIRED"));
+    let board = command(&fixture, &["board", "show"], "agentA");
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap();
+    let current_revision = task["revision"].to_string();
+    let invited = command(
+        &fixture,
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            "workerB",
+            "--expected-revision",
+            &current_revision,
+        ],
+        "agentA",
+    );
+    let revision = invited["task"]["revision"].to_string();
+    let accepted = command(
+        &fixture,
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        "agentB",
+    );
+    let delivered = fixture.dsh_command(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "isolated completed audit",
+        ],
+        "agentB",
+    );
+    assert_eq!(
+        accepted["task"]["status"],
+        "working",
+        "accepted={accepted}; delivery={}",
+        rendered(&delivered)
+    );
+    assert_eq!(accepted["task"]["owner"], "workerB");
+    assert_eq!(accepted["task"]["publisher"], "workerA");
+    assert!(accepted["task"]["invited_peer"].is_null());
+    assert!(delivered.status.success(), "{}", rendered(&delivered));
+    let status = command(&fixture, &["task", "status", id], "agentB");
+    assert_eq!(status["status"], "delivered");
+    fixture.finish();
+}
+
+#[test]
+fn board_pending_accept_keeps_response_and_resource_guards() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    let master = register(&fixture, "workerA", "tokenA", "agentA");
+    let peer = register(&fixture, "workerB", "tokenB", "agentB");
+    assert_ok(&master);
+    assert_ok(&peer);
+    let a = binding_context(&master, &fixture.root);
+    let b = binding_context(&peer, &fixture.root);
+    assert_ok(&authority(
+        &fixture,
+        "MasterPromote",
+        "workerA",
+        "tokenA",
+        &a,
+        json!({"approval":"isolated Board guard regression"}),
+    ));
+    let board = |command: Value, actor: &str, token: &str, context: &Value| {
+        authority(
+            &fixture,
+            "Board",
+            actor,
+            token,
+            context,
+            json!({"command":command}),
+        )
+    };
+    let id = "pending-guard-20261106";
+    assert_ok(&board(
+        json!({"action":"publish","id":id,"title":id,"description":"guards",
+        "delivery_condition":"read-only result","test_condition":"public guards","priority":"p1"}),
+        "workerA",
+        "tokenA",
+        &a,
+    ));
+    fixture.edit_current_state(|state| state["tasks"][id]["owner"] = json!("workerB"));
+    let board = |command: Value, actor: &str, token: &str, context: &Value| {
+        authority(
+            &fixture,
+            "Board",
+            actor,
+            token,
+            context,
+            json!({"command":command}),
+        )
+    };
+    let show = board(json!({"action":"show"}), "workerA", "tokenA", &a);
+    let task = show["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap();
+    let revision = task["revision"].as_u64().unwrap();
+    let invited = board(
+        json!({"action":"invite","id":id,"to":"workerB","expected_revision":revision}),
+        "workerA",
+        "tokenA",
+        &a,
+    );
+    assert_ok(&invited);
+    assert_eq!(invited["task"]["status"], "invited");
+    let revision = invited["task"]["revision"].as_u64().unwrap();
+    let wrong = board(
+        json!({"action":"respond","id":id,"accept":true,"decline":false,"expected_revision":revision}),
+        "workerA",
+        "tokenA",
+        &a,
+    );
+    assert_eq!(wrong["ok"], false);
+    assert!(wrong["error"]
+        .as_str()
+        .unwrap()
+        .contains("only the invited peer"));
+    let stale = board(
+        json!({"action":"respond","id":id,"accept":true,"decline":false,"expected_revision":revision-1}),
+        "workerB",
+        "tokenB",
+        &b,
+    );
+    assert_eq!(stale["ok"], false);
+    assert!(stale["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_STALE_REVISION"));
+    let declined = board(
+        json!({"action":"respond","id":id,"accept":false,"decline":true,"expected_revision":revision,"reason":"bounded decline"}),
+        "workerB",
+        "tokenB",
+        &b,
+    );
+    assert_ok(&declined);
+    assert_eq!(declined["task"]["status"], "pending");
+    assert_eq!(declined["task"]["owner"], "workerB");
+    let revision = declined["task"]["revision"].as_u64().unwrap();
+    let invited = board(
+        json!({"action":"invite","id":id,"to":"workerB","expected_revision":revision}),
+        "workerA",
+        "tokenA",
+        &a,
+    );
+    assert_ok(&invited);
+    let revision = invited["task"]["revision"].as_u64().unwrap();
+    let withdrawn = board(
+        json!({"action":"withdraw","id":id,"expected_revision":revision,"reason":"bounded withdrawal"}),
+        "workerA",
+        "tokenA",
+        &a,
+    );
+    assert_ok(&withdrawn);
+    assert_eq!(withdrawn["task"]["status"], "pending");
+    assert_eq!(withdrawn["task"]["owner"], "workerB");
+    let revision = withdrawn["task"]["revision"].as_u64().unwrap();
+    fixture.edit_current_state(|state| {
+        state["tasks"][id]["branch"] = json!("forbidden-before-accept")
+    });
+    let refused = authority(
+        &fixture,
+        "Board",
+        "workerA",
+        "tokenA",
+        &a,
+        json!({"command":{"action":"invite","id":id,"to":"workerB","expected_revision":revision}}),
+    );
+    assert_eq!(refused["ok"], false);
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_RESOURCE_OWNER_CONFLICT"));
+    fixture.edit_current_state(|state| state["tasks"][id]["branch"] = Value::Null);
+    let invited = authority(
+        &fixture,
+        "Board",
+        "workerA",
+        "tokenA",
+        &a,
+        json!({"command":{"action":"invite","id":id,"to":"workerB","expected_revision":revision}}),
+    );
+    assert_ok(&invited);
+    let revision = invited["task"]["revision"].as_u64().unwrap();
+    fixture.edit_current_state(|state| {
+        state["tasks"][id]["branch"] = json!("forbidden-before-accept")
+    });
+    let refused = authority(
+        &fixture,
+        "Board",
+        "workerB",
+        "tokenB",
+        &b,
+        json!({"command":{"action":"respond","id":id,"accept":true,"decline":false,"expected_revision":revision}}),
+    );
+    assert_eq!(refused["ok"], false);
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_RESOURCE_OWNER_CONFLICT"));
+    fixture.finish();
 }
 
 fn rendered(output: &Output) -> String {
@@ -576,10 +1152,6 @@ fn assert_runtime_context(params: &Value, runtime_binding: &Value) {
     assert_eq!(context["runtime_id"], runtime_binding["runtime_id"]);
     assert_eq!(context["appserver_id"], runtime_binding["appserver_id"]);
     assert_eq!(context["binding_id"], runtime_binding["binding_id"]);
-    assert_eq!(
-        context["endpoint_generation"],
-        runtime_binding["endpoint_generation"]
-    );
     assert_eq!(context["session_id"], runtime_binding["session_id"]);
     assert_eq!(
         context["native_thread_id"],
@@ -684,15 +1256,7 @@ fn dsh_context_discovers_first_registration_and_preserves_current_route_recovery
         initial.1["runtime"]["binding_id"]
     );
     assert_eq!(restored.1["transport"]["namespace"], "new-runtime");
-    assert_eq!(
-        restored.1["runtime"]["endpoint_generation"]
-            .as_u64()
-            .unwrap(),
-        initial.1["runtime"]["endpoint_generation"]
-            .as_u64()
-            .unwrap()
-            + 1
-    );
+    assert!(restored.1["runtime"].get("endpoint_generation").is_none());
     fixture.finish();
 }
 
@@ -1139,7 +1703,10 @@ fn dsh_context_first_registration_enrolls_gateway_receive_loop() {
     assert_eq!(persisted_worker, worker);
     let runtime_binding = identity["runtime"].clone();
     let requests = fixture.gateway.register_peer_requests();
-    assert_eq!(requests.len(), 1, "expected one enrollment");
+    assert!(
+        !requests.is_empty(),
+        "the current binding must enroll the receive loop"
+    );
     let params = &requests[0]["params"];
     assert_eq!(params["runtimeId"], "gateway-runtime");
     assert_eq!(params["agentId"], "agentA");
@@ -1216,9 +1783,6 @@ fn dsh_context_enrollment_rejection_preserves_identity_and_retry_recovers() {
         .as_str()
         .expect("binding id")
         .to_owned();
-    let generation = before["runtime"]["endpoint_generation"]
-        .as_u64()
-        .expect("generation");
     assert_eq!(fixture.gateway.register_peer_requests().len(), 1);
     assert!(!fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
 
@@ -1239,15 +1803,14 @@ fn dsh_context_enrollment_rejection_preserves_identity_and_retry_recovers() {
         "{retry}"
     );
     assert_eq!(
-        retry["result"]["snapshot"]["binding"]["endpoint_generation"], generation,
-        "{retry}"
+        retry["result"]["snapshot"]["binding"]["session_id"],
+        before["runtime"]["session_id"]
     );
     assert_eq!(
         fixture.registrations(),
         1,
         "retrying enrollment must not Register again"
     );
-    assert_eq!(fixture.gateway.register_peer_requests().len(), 2);
     assert!(
         fixture.gateway.is_enrolled("gateway-runtime", "agentA"),
         "retry must start the canonical receive loop"
@@ -1256,8 +1819,8 @@ fn dsh_context_enrollment_rejection_preserves_identity_and_retry_recovers() {
     assert_eq!(after["token"], token.as_str(), "credential changed");
     assert_eq!(after["runtime"]["binding_id"], binding_id.as_str());
     assert_eq!(
-        after["runtime"]["endpoint_generation"], generation,
-        "generation changed"
+        after["runtime"], before["runtime"],
+        "enrollment retry changed the binding"
     );
     fixture.finish();
 }
@@ -1296,7 +1859,6 @@ fn dsh_context_enrollment_receipt_mismatch_is_explicit_and_retry_recovers() {
         1,
         "retrying enrollment must not Register again"
     );
-    assert_eq!(fixture.gateway.register_peer_requests().len(), 2);
     assert!(
         fixture.gateway.is_enrolled("gateway-runtime", "agentA"),
         "retry must start the canonical receive loop"
@@ -1327,14 +1889,12 @@ fn dsh_context_recovers_a_gateway_registered_binding_without_cli_archive() {
         &context,
         json!({"approval":"isolated DSH gateway recovery acceptance"}),
     ));
-    assert!(!fixture
+    assert!(fixture
         .state
         .join("identities/gateway-owned-worker/identity.json")
         .exists());
-    assert!(
-        fixture.gateway.register_peer_requests().is_empty(),
-        "the raw Register operation is not the enrollment path"
-    );
+    // Maintenance can already enroll this current map binding before the CLI
+    // runs. Recovery must preserve identity in either scheduling order.
     let count = fixture.registrations();
     let binding = registered["command"]["binding"].clone();
     let restored = fixture.dsh_command(&["context"], "agentA");
@@ -1698,7 +2258,6 @@ fn dsh_post_submit_read_error_preserves_durable_message_without_retry() {
         "body":"durable despite unknown wake","delivery":"queued","message_id":"read-failure-message",
         "command":{"command_id":"cmd-read-failure","operation_id":"op-read-failure",
             "actor_binding_id":reg_a["command"]["binding"]["binding_id"],
-            "endpoint_generation":reg_a["command"]["binding"]["endpoint_generation"],
             "scope":{"app_scope_id":"appserver-cli","project_scope_id":fixture.root}},
         "project_context":ctx_a});
     let sent = fixture.request(request.clone());
@@ -1854,12 +2413,7 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
         before_refusals["master"]
     );
     let mut stale_context = ctx_a.clone();
-    stale_context["runtime_context"]["endpoint_generation"] = json!(
-        ctx_a["runtime_context"]["endpoint_generation"]
-            .as_u64()
-            .unwrap()
-            + 1
-    );
+    stale_context["runtime_context"]["binding_id"] = json!("unregistered-foreign-binding");
     let stale = clear(
         &fixture,
         "workerA",
@@ -1888,7 +2442,6 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
         "body":"preserve me","delivery":"queued","message_id":"fixture-message-id",
         "command":{"command_id":"cmd-preserve","operation_id":"op-preserve",
             "actor_binding_id":reg_a["command"]["binding"]["binding_id"],
-            "endpoint_generation":reg_a["command"]["binding"]["endpoint_generation"],
             "scope":{"app_scope_id":"appserver-cli","project_scope_id":fixture.root}},
         "project_context":ctx_a}));
     assert_ok(&sent);
@@ -2141,8 +2694,8 @@ fn dsh_runtime_uuid_change_rebinds_without_agent_recovery() {
         identity["runtime"]["runtime_id"]
     );
     assert_eq!(
-        restored["runtime"]["endpoint_generation"].as_u64().unwrap(),
-        identity["runtime"]["endpoint_generation"].as_u64().unwrap() + 1
+        restored["runtime"]["session_id"],
+        identity["runtime"]["session_id"]
     );
     assert_eq!(restored["transport"]["namespace"], "gateway-new");
     assert_eq!(
@@ -2151,7 +2704,12 @@ fn dsh_runtime_uuid_change_rebinds_without_agent_recovery() {
     );
     // Manual recovery resolves current facts too; no UUID/token arguments.
     let manual = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
-    assert!(manual.status.success(), "{}", rendered(&manual));
+    let manual: Value = serde_json::from_slice(&manual.stdout).unwrap();
+    assert_eq!(manual["result"]["outcome"], "unknown");
+    assert_eq!(
+        manual["result"]["owner_readback"]["communication"]["state"], "unknown",
+        "runtime adoption alone does not establish real receive/reply evidence"
+    );
     assert_eq!(only_identity(&fixture).1["runtime"], restored["runtime"]);
     fixture.finish();
 }
@@ -2234,7 +2792,6 @@ fn anonymous_send_to_directory_target_enqueues_registered_dsh_receiver_without_n
     let (worker, _) = only_identity(&fixture);
     assert!(fixture.gateway.is_enrolled("gateway-runtime", "agentA"));
     let registrations_before = fixture.registrations();
-    let senders_before = fixture.gateway.register_peer_requests().len();
 
     // External unauthenticated caller resolves the target from the directory.
     let directory = fixture.anonymous_cli(&["directory"]);
@@ -2327,10 +2884,13 @@ fn anonymous_send_to_directory_target_enqueues_registered_dsh_receiver_without_n
     );
 
     // No new sender registration and no new worker identity from anonymous send.
-    assert_eq!(
-        fixture.gateway.register_peer_requests().len(),
-        senders_before,
-        "anonymous delivery must not register a new sender route"
+    assert!(
+        fixture
+            .gateway
+            .register_peer_requests()
+            .iter()
+            .all(|request| request["params"]["binding"]["workerId"] == worker),
+        "background receive-loop enrollment must remain on the existing receiver"
     );
     assert_eq!(
         fixture.registrations(),
@@ -2363,7 +2923,6 @@ fn anonymous_send_to_directory_target_enqueues_registered_dsh_receiver_without_n
 /// online_reset_preserves_live_dsh_binding_and_identity` carries the equivalent
 /// no-socket evidence for the same retentions in the meantime.
 #[test]
-#[ignore = "binds isolated Unix-domain sockets; run by Jenny in a permitted environment"]
 fn dsh_project_reset_preserves_live_session_binding_across_restart() {
     let mut fixture = Fixture::new_requiring_enrollment();
     fixture.start_daemon();

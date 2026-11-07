@@ -33,16 +33,53 @@ fn pane_only_context(fixture: &Fixture, pane: &Pane, args: &[&str]) -> Value {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["result"]["outcome"], "completed", "{value}");
-    for receipt in ["route", "credential", "lease"] {
-        assert!(
-            value["result"]["committed_phases"]
-                .as_array()
-                .unwrap_or_else(|| panic!("missing public committed phases: {value}"))
-                .contains(&json!(receipt)),
-            "missing {receipt}: {value}"
+    let snapshot = context_snapshot(&value);
+    let worker = snapshot["identity"]["worker_id"].as_str().unwrap();
+    let app = snapshot["binding"]["app_scope_id"].as_str().unwrap();
+    let mapped = fixture.current_mapping_for(&fixture.root, app, worker);
+    for field in [
+        "agent_id",
+        "runtime_id",
+        "binding_id",
+        "session_id",
+        "native_thread_id",
+    ] {
+        assert_eq!(
+            mapped["binding"][field], snapshot["binding"][field],
+            "{field}"
         );
     }
-    context_snapshot(&value).clone()
+    let credential: Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .host_state
+                .join("identities")
+                .join(worker)
+                .join("identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(credential["worker_id"], worker);
+    assert_eq!(
+        credential["runtime"]["binding_id"],
+        mapped["binding"]["binding_id"]
+    );
+    let state = fixture.current_state_for(&fixture.root, app);
+    let lease =
+        &state["notification_subscriptions"][format!("sub-default-direct-message-{worker}")];
+    assert_eq!(lease["worker_id"], worker);
+    assert_eq!(lease["method"], "tmux");
+    assert_eq!(lease["status"], "armed");
+    let target = mapped["transport"]["thread_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            mapped["transport"]["tmux_endpoint"]["pane_id"]
+                .as_str()
+                .unwrap()
+        });
+    assert_eq!(lease["target"], target);
+    snapshot.clone()
 }
 
 fn pane_shows_message(visible: &str, message_id: &str) -> bool {
@@ -82,18 +119,6 @@ fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
         }
         thread::sleep(Duration::from_millis(50));
     }
-}
-
-fn owned_journal(fixture: &Fixture) -> PathBuf {
-    let project = std::fs::canonicalize(&fixture.root).unwrap();
-    let record: Value = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .find(|record| record["project_scope"] == project.to_string_lossy().as_ref())
-        .expect("owned project route record");
-    PathBuf::from(record["storage_root"].as_str().unwrap())
-        .join(".agent-collab/server/journal.jsonl")
 }
 
 #[test]
@@ -262,26 +287,29 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    let ended_journal = std::fs::read_to_string(owned_journal(&fixture)).unwrap();
-    let ended_wake_count = ended_journal
-        .lines()
-        .filter(|line| {
-            line.contains("\"subscription_id\":\"") && line.contains(&finite_subscription_id)
-        })
-        .filter(|line| line.contains("\"ev\":\"WakeBound\""))
-        .count();
-    assert_eq!(
-        ended_wake_count, 0,
-        "an ended owned finite schedule must not emit a further occurrence: {ended_journal}"
+    let state = fixture.current_state_for(&fixture.root, "appserver-cli");
+    assert!(!state["wake_bindings"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|subscription| subscription == &finite_subscription_id));
+    let subject = format!("deadline:goal:{receiver_goal_id}");
+    assert!(!state["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|message| message["subject"] == subject));
+    let native = tmux(
+        &fixture.tmux_socket,
+        &["capture-pane", "-p", "-t", &receiver.pane_id, "-S", "-4096"],
     );
-    let ended_deadline_messages = ended_journal
-        .lines()
-        .filter(|line| line.contains("\"ev\":\"Sent\""))
-        .filter(|line| line.contains(&format!("\"subject\":\"deadline:goal:{receiver_goal_id}\"")))
-        .count();
-    assert_eq!(
-        ended_deadline_messages, 0,
-        "an ended finite schedule must not send a deadline wake: {ended_journal}"
+    let native: String = String::from_utf8_lossy(&native.stdout)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(
+        !native.contains(&subject),
+        "ended goal cannot reach the native pane"
     );
 
     let route = fixture.run_ok(
@@ -426,9 +454,9 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     assert_eq!(default_subscription["status"], "armed");
 
     // Daemon restart and lost local receipt: the same actual tmux anchor must
-    // return the same worker and generation without a fresh identity.
+    // return the same worker and current binding without a fresh identity.
     let sender_identity = sender_context["identity"].clone();
-    let sender_generation = sender_context["binding"]["endpoint_generation"].clone();
+    let sender_binding = sender_context["binding"].clone();
     fixture.stop_daemon();
     std::fs::remove_dir_all(fixture.host_state.join("identities")).unwrap();
     fixture.start_daemon();
@@ -456,10 +484,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         "master"
     );
     assert_eq!(restart_context["identity"]["worker_id"], sender_id);
-    assert_eq!(
-        restart_context["binding"]["endpoint_generation"],
-        sender_generation
-    );
+    assert_eq!(restart_context["binding"], sender_binding);
     assert_eq!(
         restart_context["identity"], sender_identity,
         "same tmux anchor must restore the same identity"
@@ -676,7 +701,6 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
             "grant_id": master["grant_id"],
             "grant_generation": master["grant_generation"],
             "binding_id": master["binding_id"],
-            "endpoint_generation": master["endpoint_generation"],
             "assigned_by": master["assigned_by"],
             "assigned_ms": master["assigned_ms"],
             "boundary": master["boundary"],
@@ -732,13 +756,22 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         recovered["binding"]["runtime_id"],
         before["binding"]["runtime_id"]
     );
-    assert!(
-        recovered["binding"]["endpoint_generation"]
-            .as_u64()
-            .unwrap()
-            > before["binding"]["endpoint_generation"].as_u64().unwrap(),
-        "changed current native facts must refresh the delivery endpoint"
-    );
+    assert_eq!(recovered["binding"]["session_id"], new.session_anchor);
+    assert_eq!(recovered["binding"]["native_thread_id"], new.thread_anchor);
+    let mapped = fixture.current_mapping_for(&fixture.root, "appserver-cli", &worker_id);
+    for field in [
+        "agent_id",
+        "runtime_id",
+        "binding_id",
+        "session_id",
+        "native_thread_id",
+    ] {
+        assert_eq!(
+            mapped["binding"][field], recovered["binding"][field],
+            "{field}"
+        );
+    }
+    assert_eq!(mapped["transport"]["tmux_endpoint"]["pane_id"], new.pane_id);
     let receipt: Value = serde_json::from_slice(
         &std::fs::read(
             fixture
@@ -750,10 +783,18 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        receipt["runtime"]["endpoint_generation"],
-        recovered["binding"]["endpoint_generation"]
-    );
+    for field in [
+        "agent_id",
+        "runtime_id",
+        "binding_id",
+        "session_id",
+        "native_thread_id",
+    ] {
+        assert_eq!(
+            receipt["runtime"][field], recovered["binding"][field],
+            "{field}"
+        );
+    }
     let route_output = fixture
         .configured_command(
             &["route", "resolve", "--pane-id", &new.pane_id],
@@ -771,10 +812,16 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         String::from_utf8_lossy(&route_output.stderr)
     );
     let route: Value = serde_json::from_slice(&route_output.stdout).unwrap();
-    assert_eq!(
-        route["endpoint_generation"],
-        recovered["binding"]["endpoint_generation"]
-    );
+    for field in [
+        "agent_id",
+        "app_scope_id",
+        "project_scope",
+        "binding_id",
+        "session_id",
+        "native_thread_id",
+    ] {
+        assert_eq!(route[field], recovered["binding"][field], "{field}");
+    }
     let grant_after = fixture.run_ok(&["master", "status"], Some(&new));
     for field in [
         "worker_id",
@@ -792,10 +839,6 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         );
     }
     assert_eq!(
-        grant_after["master"]["endpoint_generation"],
-        recovered["binding"]["endpoint_generation"]
-    );
-    assert_eq!(
         grant_after["master"]["binding_id"],
         recovered["binding"]["binding_id"]
     );
@@ -806,10 +849,7 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     );
     let again = fixture.run_context(&["context"], Some(&new));
     assert_eq!(again["identity"]["worker_id"], worker_id);
-    assert_eq!(
-        again["binding"]["endpoint_generation"],
-        recovered["binding"]["endpoint_generation"]
-    );
+    assert_eq!(again["binding"], recovered["binding"]);
 
     let sent = fixture.run_ok(
         &[
@@ -1178,10 +1218,7 @@ fn implicit_context_repairs_a_rejected_same_pane_credential() {
 }
 
 /// `collab context` is the bootstrap read, so it is also where a peer reads
-/// back its own runtime binding. A peer that loses the registration receipt
-/// otherwise cannot address its route again: the endpoint generation then
-/// appears only inside a rejection message, and recovering from there would
-/// mean inferring a control value from an error.
+/// back the current map binding after its local registration receipt is lost.
 #[test]
 fn context_returns_the_binding_receipt_that_addresses_the_route() {
     let root = unique_root();
@@ -1258,12 +1295,6 @@ fn context_returns_the_binding_receipt_that_addresses_the_route() {
             .as_str()
             .is_some_and(|id| !id.is_empty()),
         "the receipt must name its binding: {context}"
-    );
-    assert!(
-        binding["endpoint_generation"]
-            .as_u64()
-            .is_some_and(|generation| generation >= 1),
-        "the receipt must carry a usable endpoint generation: {context}"
     );
 
     // The receipt is the daemon's record, not a copy of the caller's local

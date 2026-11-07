@@ -1,11 +1,206 @@
 impl ProjectRuntimeManager {
-    fn binding_control_store(&self) -> crate::server::binding_store::BindingControlStore {
-        let store = crate::server::binding_store::BindingControlStore::at(&self.route_journal);
-        #[cfg(test)]
-        if test_hooks::take_fail_next_parent_sync() {
-            store.fail_parent_sync_on_next_publish();
+    fn ensure_current_worker_for_context(
+        &self,
+        context: &ProjectContext,
+        facts: &crate::proto::IdentityFacts,
+        invocation_cwd: Option<&str>,
+    ) -> Result<(), String> {
+        let control = self.binding_control_store().load()?;
+        if control.lookup(&context.project_scope, &context.app_scope_id, facts, invocation_cwd)?.is_none() {
+            return Ok(());
         }
-        store
+        let root = Path::new(&context.canonical_root);
+        context.validate_registered_root(root).map_err(|error| format!("{error:#}"))?;
+        validate_project_registration_cwd(&context.canonical_root, root)?;
+        let runtime = self.select_runtime(context)?;
+        let _register = self.register_gate.lock().unwrap();
+        let control = self.binding_control_store().load()?;
+        let Some(slot) = control.lookup(&context.project_scope, &context.app_scope_id, facts, invocation_cwd)? else {
+            return Ok(());
+        };
+        let value = slot.active_binding().expect("lookup selects active current");
+        let pending = control.pending_effects().find(|effect|
+            effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+                && effect.project_scope == context.project_scope
+                && effect.app_scope_id == context.app_scope_id
+                && effect.name == slot.identity_key.name
+                && effect.target_worker_id == value.binding.agent_id.as_str()
+                && value.binding.session_id.as_ref().map(|id| id.as_str()) == Some(effect.target_session_id.as_str())
+                && !Self::pending_effect_superseded(&control, effect));
+        self.materialize_current_worker_locked(&runtime, value, pending)
+    }
+
+    /// The current map already owns this principal. Recreate only its missing
+    /// business relationship through the same atomic Register transaction.
+    fn materialize_current_worker_locked(
+        &self,
+        runtime: &Server,
+        value: &crate::server::binding_slot::BindingValue,
+        pending: Option<&crate::server::binding_slot::PendingEffect>,
+    ) -> Result<(), String> {
+        let worker = value.binding.agent_id.as_str();
+        if runtime.state.lock().unwrap().workers.contains_key(worker) {
+            return Ok(());
+        }
+        let credential = crate::identity::read_persisted(&self.host.host_paths, worker)
+            .map_err(|error| format!("{error:#}"))?
+            .ok_or("IDENTITY_CREDENTIAL_MISSING: mapped worker has no credential")?;
+        let principal = credential.runtime.as_ref()
+            .ok_or("IDENTITY_CREDENTIAL_INVALID: mapped credential has no registered principal")?;
+        if credential.worker_id != worker
+            || credential.project_scope.as_ref() != Some(&value.binding.project_scope)
+            || principal.agent_id != value.binding.agent_id
+            || principal.appserver_id != value.binding.app_scope_id
+            || credential.token.trim().is_empty()
+        {
+            return Err("IDENTITY_CREDENTIAL_INVALID: exact mapped principal or token differs".into());
+        }
+        let prepared = runtime.prepare_register_envelope_for_current(
+            worker, &credential.token, &value.transport, value.binding.project_scope.clone(),
+            &runtime.root.to_string_lossy(), value.binding.app_scope_id.clone(),
+            false, Some(&value.binding), pending.filter(|effect|
+                effect.kind == crate::server::binding_slot::PendingEffectKind::Register)
+                .map(|effect| effect.operation_id.as_str()),
+        )?;
+        let origin = pending.filter(|effect|
+            effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+                && effect.operation_id == prepared.nested_operation_id)
+            .map(|effect| RegisterOrigin::InitialCurrentContinuation { explicit_peer: effect.name != "Jenny" })
+            .unwrap_or(RegisterOrigin::CurrentPrincipal);
+        runtime.typed_dispatch_register_with_origin(prepared.typed, None, origin)
+            .map_err(|error| format!("CURRENT_WORKER_MATERIALIZATION_FAILED: {error}"))?;
+        if !runtime.state.lock().unwrap().workers.contains_key(worker) {
+            return Err("CURRENT_WORKER_MATERIALIZATION_INCOMPLETE: Register receipt has no worker".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn consume_register_effect(&self, effect_id: Option<&str>) -> Result<(), String> {
+        let effect_id = effect_id.ok_or("REGISTER_CONTROL_INTENT_REQUIRED")?;
+        let _register = self.register_gate.lock().unwrap();
+        let map = self.binding_control_store().load()?;
+        if let Some(effect) = map.pending_effect(effect_id) {
+            self.recover_pending_effect_locked(&map, effect)?;
+        }
+        Ok(())
+    }
+
+    fn retire_mapped_self(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker: &str,
+        token: &str,
+    ) -> Resp {
+        use crate::server::binding_slot::{PendingEffect, PendingEffectKind};
+        let _register = self.register_gate.lock().unwrap();
+        {
+            let state = runtime.state.lock().unwrap();
+            if let Err(error) = verify(&state, worker, token) {
+                return error;
+            }
+        }
+        let map = match self.binding_control_store().load() {
+            Ok(map) => map,
+            Err(error) => return Resp::err(error),
+        };
+        let key = match map.key_for_worker(&context.project_scope, &context.app_scope_id, worker) {
+            Ok(Some(key)) => key.clone(),
+            Ok(None) => return Resp::data(json!({"result":{"outcome":"complete"}})),
+            Err(error) => return Resp::err(error),
+        };
+        let value = map
+            .slot(&key)
+            .and_then(|slot| slot.active_binding())
+            .expect("active key");
+        let Some(session) = value.binding.session_id.as_ref() else {
+            return Resp::err("IDENTITY_SESSION_MISSING");
+        };
+        let effect = PendingEffect {
+            kind: PendingEffectKind::Retire,
+            role: None,
+            effect_id: format!("retire-{}-{}", value.binding.binding_id, now_ms()),
+            operation_id: format!("self-unregister-{}", value.binding.binding_id),
+            project_scope: key.project_scope.clone(),
+            app_scope_id: key.app_scope_id.clone(),
+            name: key.name.clone(),
+            previous_worker_id: Some(worker.into()),
+            previous_session_id: Some(session.to_string()),
+            target_worker_id: worker.into(),
+            target_session_id: session.to_string(),
+            occupancy_revision: 1,
+            source_names: Vec::new(),
+            moves_existing_names: false,
+            pane_anchor: None,
+            created_ms: now_ms(),
+        };
+        match self.commit_control_change_locked(
+            crate::server::binding_store::ControlChange::UnregisterWithEffect {
+                key,
+                effect: effect.clone(),
+            },
+        ) {
+            Ok(commit)
+                if commit.durability == crate::server::binding_store::Durability::Confirmed => {}
+            Ok(_) => return Resp::err_data(
+                "BINDING_CONTROL_DURABILITY_UNKNOWN: retirement published; effects remain pending",
+                json!({"control_committed":true}),
+            ),
+            Err(error) => return Resp::err(error),
+        }
+        let published = match self.binding_control_store().load() {
+            Ok(map) => map,
+            Err(error) => return Resp::err(error),
+        };
+        match self.recover_pending_effect_locked(&published, &effect) {
+            Ok(()) => Resp::data(json!({"result":{"outcome":"complete"}})),
+            Err(error) => Resp::err_data(
+                format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"),
+                json!({"control_committed":true}),
+            ),
+        }
+    }
+
+    fn mapped_key_for_worker(
+        &self,
+        context: &ProjectContext,
+        worker: &str,
+        _binding: &RuntimeBinding,
+    ) -> Result<crate::server::binding_slot::IdentityBindingKey, String> {
+        self.binding_control_store()
+            .load()?
+            .key_for_worker(&context.project_scope, &context.app_scope_id, worker)?
+            .cloned()
+            .ok_or_else(|| "IDENTITY_MAP_NOT_FOUND: worker has no current name".into())
+    }
+
+    fn mapped_adapter_bindings(
+        &self,
+        runtime: &Arc<Server>,
+        kind: &TransportKind,
+    ) -> Vec<RuntimeBinding> {
+        let control = match self.binding_control_store().load() {
+            Ok(control) => control,
+            Err(error) => {
+                append_log(&self.host.log_path(), &error);
+                return Vec::new();
+            }
+        };
+        control
+            .active_values()
+            .filter(|value| {
+                &value.transport.kind == kind
+                    && value.binding.native_thread_id.is_some()
+                    && Path::new(value.binding.project_scope.as_str()) == runtime.root
+            })
+            .map(|value| value.binding.clone())
+            .collect()
+    }
+
+    fn binding_control_store(&self) -> crate::server::binding_store::BindingControlStore {
+        crate::server::binding_store::BindingControlStore::new(
+            self.host.host_paths.state_root(),
+        )
     }
 
     pub(crate) fn commit_control_change(
@@ -16,6 +211,42 @@ impl ProjectRuntimeManager {
         self.commit_control_change_locked(change)
     }
 
+    fn prepare_control_value(
+        control: &crate::server::binding_slot::BindingControlSet,
+        key: &crate::server::binding_slot::IdentityBindingKey,
+        value: &mut crate::server::binding_slot::BindingValue,
+    ) -> Result<(), String> {
+        let previous = control.active_values().find(|saved| {
+            saved.binding.agent_id == value.binding.agent_id
+                && saved.binding.route_scope() == value.binding.route_scope()
+        });
+        if let Some(previous) = previous {
+            value.tab_id = previous.tab_id.clone();
+            value.layout_binding_id = previous.layout_binding_id.clone();
+            if value.host.agent_kind.is_none() {
+                value.host.agent_kind = previous.host.agent_kind.clone();
+            }
+            if value.host.profile.is_none() {
+                value.host.profile = previous.host.profile.clone();
+            }
+            if value.invocation_cwd == key.project_scope.as_str() {
+                value.invocation_cwd = previous.invocation_cwd.clone();
+            }
+        }
+        if let Some(endpoint) = value.binding.tmux_endpoint.as_ref() {
+            value.physical_name = Some(crate::client::adapters::tmux::observe_session_name(endpoint)?);
+            if let Ok(Some(layout)) = crate::server::tm_layout::observe(value) {
+                value.layout_binding_id = Some(layout.binding_id);
+            }
+            value.host.host_type = match value.host.agent_kind.as_deref() {
+                Some("codex") => "codex_tui",
+                Some("antigravity") => "agy_tui",
+                _ => "tui",
+            }.into();
+        }
+        Ok(())
+    }
+
     /// Commit one control change while the caller already holds the register
     /// gate. The name-decision critical section takes the gate once and then
     /// runs plan, control publish and business commit under a single
@@ -23,119 +254,92 @@ impl ProjectRuntimeManager {
     /// recursively acquiring the non-reentrant gate.
     pub(crate) fn commit_control_change_locked(
         &self,
-        change: crate::server::binding_store::ControlChange,
+        mut change: crate::server::binding_store::ControlChange,
     ) -> Result<crate::server::binding_store::StoreCommit, String> {
-        self.binding_control_store().commit(change)
-    }
-
-    /// The exact current binding and selected transport for one worker, read
-    /// from a caller-held state snapshot. Both the locking public entries and
-    /// the locked control-first path share this so the key and the value come
-    /// from the same state.
-    fn control_binding_and_transport(
-        state: &State,
-        context: &ProjectContext,
-        worker_id: &str,
-        label: &str,
-    ) -> Result<(RuntimeBinding, SelectedTransport), String> {
-        let route_scope = RouteScope {
-            app_scope_id: context.app_scope_id.clone(),
-            project_scope_id: context.project_scope.clone(),
+        use crate::server::binding_store::ControlChange;
+        let control = self.binding_control_store().load()?;
+        let value_and_key = match &mut change {
+            ControlChange::Commit { key, value, .. }
+            | ControlChange::CommitWithEffect { key, value, .. } => Some((key, value)),
+            ControlChange::MoveName { target, value, .. }
+            | ControlChange::MoveNameWithEffect { target, value, .. } => Some((target, value)),
+            _ => None,
         };
-        let binding = state
-            .global
-            .lookup_project_for_route(&route_scope)
-            .and_then(|project| {
-                project
-                    .runtime_bindings
-                    .values()
-                    .filter(|binding| binding.agent_id.as_str() == worker_id)
-                    .max_by_key(|binding| binding.endpoint_generation)
-            })
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "BINDING_CONTROL_BINDING_MISSING: {label} for {worker_id} has no runtime binding"
-                )
-            })?;
-        let worker = state.workers.get(worker_id).ok_or_else(|| {
-            format!("BINDING_CONTROL_WORKER_MISSING: {label} for {worker_id} has no worker")
-        })?;
-        let transport = selected_transport_for_worker(worker).ok_or_else(|| {
-            format!(
-                "BINDING_CONTROL_TRANSPORT_MISSING: {label} for {worker_id} has no selected transport"
-            )
-        })?;
-        Ok((binding, transport))
-    }
-
-    fn control_key_for_worker(
-        &self,
-        runtime: &Server,
-        context: &ProjectContext,
-        worker_id: &str,
-        binding: &RuntimeBinding,
-    ) -> Result<crate::server::binding_slot::IdentityBindingKey, String> {
-        let state = runtime.state.lock().unwrap();
-        let names = state
-            .name_occupancies
-            .get(context.project_scope.as_str())
-            .ok_or_else(|| {
-                format!(
-                    "BINDING_CONTROL_NAME_MISSING: project {} has no name occupancy for {worker_id}",
-                    context.project_scope.as_str()
-                )
-            })?;
-        let mut by_worker = names
-            .values()
-            .filter(|holder| holder.worker_id.as_str() == worker_id);
-        let holder = match binding.session_id.as_ref() {
-            Some(session) => {
-                let matches = by_worker
-                    .filter(|holder| holder.session_id == session.as_str())
-                    .collect::<Vec<_>>();
-                match matches.as_slice() {
-                    [holder] => *holder,
-                    [] => {
-                        return Err(format!(
-                            "BINDING_CONTROL_NAME_MISSING: {worker_id} has no stable name for session {session}"
-                        ))
-                    }
-                    _ => {
-                        return Err(format!(
-                            "BINDING_CONTROL_NAME_AMBIGUOUS: {worker_id} has multiple stable names for session {session}"
-                        ))
-                    }
+        if let Some((key, value)) = value_and_key {
+            Self::prepare_control_value(&control, key, value)?;
+        }
+        let change = match change {
+            ControlChange::Commit {
+                key,
+                value,
+                expected_generation,
+            } => {
+                let sources = control
+                    .slots()
+                    .filter(|slot| {
+                        slot.identity_key != key
+                            && slot.identity_key.project_scope == key.project_scope
+                            && slot.identity_key.app_scope_id == key.app_scope_id
+                            && slot.active_binding().is_some_and(|saved| {
+                                saved.binding.agent_id == value.binding.agent_id
+                            })
+                    })
+                    .map(|slot| slot.identity_key.name.clone())
+                    .collect();
+                ControlChange::MoveName {
+                    target: key,
+                    value,
+                    source_names: sources,
+                    expected_generation,
                 }
             }
-            None => match by_worker.collect::<Vec<_>>().as_slice() {
-                [holder] => *holder,
-                [] => {
-                    return Err(format!(
-                        "BINDING_CONTROL_NAME_MISSING: {worker_id} has no stable name"
-                    ))
+            ControlChange::CommitWithEffect {
+                key,
+                value,
+                expected_generation,
+                effect,
+            } => {
+                let sources = control
+                    .slots()
+                    .filter(|slot| {
+                        slot.identity_key != key
+                            && slot.identity_key.project_scope == key.project_scope
+                            && slot.identity_key.app_scope_id == key.app_scope_id
+                            && slot.active_binding().is_some_and(|saved| {
+                                saved.binding.agent_id == value.binding.agent_id
+                            })
+                    })
+                    .map(|slot| slot.identity_key.name.clone())
+                    .collect();
+                ControlChange::MoveNameWithEffect {
+                    target: key,
+                    value,
+                    source_names: sources,
+                    expected_generation,
+                    effect,
+                    companion: None,
                 }
-                _ => {
-                    return Err(format!(
-                        "BINDING_CONTROL_NAME_AMBIGUOUS: {worker_id} has multiple stable names"
-                    ))
-                }
-            },
+            }
+            change => change,
         };
-        Ok(crate::server::binding_slot::IdentityBindingKey::new(
-            context.project_scope.clone(),
-            context.app_scope_id.clone(),
-            holder.name.clone(),
-        ))
+        let store = self.binding_control_store();
+        #[cfg(test)]
+        if test_hooks::take_fail_next_parent_sync() {
+            store.fail_parent_sync_on_next_publish();
+        }
+        store.commit(change)
     }
 
     /// Build the durable handoff intent for one control-first decision. A
-    /// no-change carrier keeps no effect. Automatic session/pane inheritance
-    /// needs the displaced holder's exact worker/session as `previous`; the
-    /// explicit rename carries the caller's previous names plus the displaced
-    /// holder of the target name. When no handoff applies, `None` keeps the
-    /// committed control slot without a pending effect.
+    /// no-change carrier keeps no effect. Automatic fixed-name or session
+    /// inheritance needs the displaced holder's exact worker/session as
+    /// `previous`; the explicit rename carries the caller's previous names plus
+    /// the displaced holder of the target name. When no handoff applies, `None`
+    /// keeps the committed control slot without a pending effect. The
+    /// daemon-observed pane and invocation cwd travel with the effect so the
+    /// replayed business occupancy keeps the same joint recovery anchor.
     fn handoff_effect(
+        control: &crate::server::binding_slot::BindingControlSet,
         state: &State,
         context: &ProjectContext,
         worker_id: &str,
@@ -151,20 +355,36 @@ impl ProjectRuntimeManager {
         let target_carrier_is_current = state
             .name_occupancy(context.project_scope.as_str(), target_name)
             .is_some_and(|holder| {
-                holder.worker_id == worker_id
-                    && holder.session_id == target_session_id
+                holder.worker_id == worker_id && holder.session_id == target_session_id
             });
-        let has_rename_source = source_names
-            .iter()
-            .any(|name| name != target_name);
+        let has_rename_source = source_names.iter().any(|name| name != target_name);
         if target_carrier_is_current && !has_rename_source {
             return None;
         }
-        let previous = state.name_occupancy(context.project_scope.as_str(), target_name);
+        let key = crate::server::binding_slot::IdentityBindingKey::new(
+            context.project_scope.clone(),
+            context.app_scope_id.clone(),
+            target_name,
+        );
+        let previous = state
+            .name_occupancy(context.project_scope.as_str(), target_name)
+            .filter(|holder| {
+                control
+                    .slot(&key)
+                    .and_then(|slot| slot.active_binding())
+                    .is_some_and(|value| {
+                        value.binding.agent_id.as_str() == holder.worker_id
+                            && value.binding.session_id.as_ref().map(|id| id.as_str())
+                                == Some(holder.session_id.as_str())
+                    })
+            });
         let changed_previous = previous.is_some_and(|holder| {
             holder.worker_id != worker_id || holder.session_id != target_session_id
         });
-        if !changed_previous && !has_rename_source {
+        if kind != crate::server::binding_slot::PendingEffectKind::Register
+            && !changed_previous
+            && !has_rename_source
+        {
             return None;
         }
         let occupancy_revision = previous
@@ -174,15 +394,13 @@ impl ProjectRuntimeManager {
             .map(|holder| holder.occupancy_revision)
             .unwrap_or_else(|| {
                 state
-                    .name_occupancy_revision(
-                        context.project_scope.as_str(),
-                        target_name,
-                    )
+                    .name_occupancy_revision(context.project_scope.as_str(), target_name)
                     .checked_add(1)
                     .unwrap_or(0)
             });
         Some(crate::server::binding_slot::PendingEffect {
             kind,
+            role: None,
             effect_id: effect_id.to_owned(),
             operation_id: operation_id.to_owned(),
             project_scope: context.project_scope.clone(),
@@ -204,152 +422,6 @@ impl ProjectRuntimeManager {
     /// inventing one. `None` means the name owner has not decided this
     /// carrier's name yet; that decision happens once later from live facts,
     /// so a refresh must not assign a pool name and preempt it here.
-    fn worker_control_name_opt(
-        &self,
-        runtime: &Server,
-        context: &ProjectContext,
-        worker_id: &str,
-        binding: &RuntimeBinding,
-    ) -> anyhow::Result<Option<String>> {
-        match self.control_key_for_worker(runtime, context, worker_id, binding) {
-            Ok(key) => Ok(Some(key.name)),
-            Err(error) if error.starts_with("BINDING_CONTROL_NAME_MISSING") => Ok(None),
-            Err(error) => Err(anyhow::Error::msg(error)),
-        }
-    }
-
-    /// Publish the control slot for a restored identity only when it already
-    /// holds a stable name decided by the name owner. A nameless legacy
-    /// identity is left for the later single context name decision, which
-    /// publishes its own slot from the live pane and cwd facts.
-    fn publish_refresh_control_slot(
-        &self,
-        runtime: &Server,
-        context: &ProjectContext,
-        worker_id: &str,
-        binding: RuntimeBinding,
-        transport: SelectedTransport,
-    ) -> anyhow::Result<()> {
-        let Some(name) = self.worker_control_name_opt(runtime, context, worker_id, &binding)?
-        else {
-            return Ok(());
-        };
-        let committed = self
-            .commit_control_binding_named(context, &name, binding, transport, None)
-            .map_err(anyhow::Error::msg)?;
-        if committed.durability == crate::server::binding_store::Durability::Unknown {
-            anyhow::bail!("BINDING_CONTROL_DURABILITY_UNKNOWN: control was published but its durability is unknown");
-        }
-        Ok(())
-    }
-
-    /// Commit the control binding under a stable name that the name owner has
-    /// already decided from real current facts. Recovery cannot derive the
-    /// slot key from a pre-existing occupancy: an old identity may have no name
-    /// yet, so the name decision runs first and hands the exact name here.
-    fn commit_control_binding_named(
-        &self,
-        context: &ProjectContext,
-        name: &str,
-        binding: RuntimeBinding,
-        transport: SelectedTransport,
-        expected_generation: Option<u64>,
-    ) -> Result<crate::server::binding_store::StoreCommit, String> {
-        self.commit_control_change(control_commit_change(
-            context,
-            name,
-            binding,
-            transport,
-            expected_generation,
-        ))
-    }
-
-    /// Locked form of [`commit_control_binding_named`] for a caller that
-    /// already holds the register gate.
-    fn commit_control_binding_named_locked(
-        &self,
-        context: &ProjectContext,
-        name: &str,
-        binding: RuntimeBinding,
-        transport: SelectedTransport,
-        expected_generation: Option<u64>,
-    ) -> Result<crate::server::binding_store::StoreCommit, String> {
-        self.commit_control_change_locked(control_commit_change(
-            context,
-            name,
-            binding,
-            transport,
-            expected_generation,
-        ))
-    }
-
-    /// Publish the control slot for the name the single context name decision
-    /// just planned. The caller holds the register gate and the project-state
-    /// lock, so the target name comes from the same snapshot as the business
-    /// handoff that follows. A no-op repeat (same carrier and session keeping
-    /// its name) is idempotent and never rotates the slot generation.
-    pub(crate) fn commit_control_name_decision_locked(
-        &self,
-        state: &State,
-        context: &ProjectContext,
-        worker_id: &str,
-        target_name: &str,
-        operation_id: &str,
-        effect_id: &str,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
-    ) -> Result<crate::server::binding_store::Durability, String> {
-        let (binding, transport) =
-            Self::control_binding_and_transport(state, context, worker_id, "name decision")?;
-        let key = crate::server::binding_slot::IdentityBindingKey::new(
-            context.project_scope.clone(),
-            context.app_scope_id.clone(),
-            target_name.to_owned(),
-        );
-        let target_session_id = binding
-            .session_id
-            .as_ref()
-            .ok_or_else(|| {
-                "BINDING_CONTROL_TRANSPORT_MISSING: name decision binding has no agent session"
-                    .to_owned()
-            })?
-            .as_str()
-            .to_owned();
-        let value = crate::server::binding_slot::BindingValue::new(binding, transport);
-        match Self::handoff_effect(
-            state,
-            context,
-            worker_id,
-            target_name,
-            &target_session_id,
-            operation_id,
-            effect_id,
-            crate::server::binding_slot::PendingEffectKind::Name,
-            Vec::new(),
-            false,
-            pane_anchor,
-        ) {
-            Some(effect) => self
-                .commit_control_change_locked(
-                    crate::server::binding_store::ControlChange::CommitWithEffect {
-                        key,
-                        value,
-                        expected_generation: None,
-                        effect,
-                    },
-                )
-                .map(|commit| commit.durability),
-            None => self
-                .commit_control_change_locked(
-                    crate::server::binding_store::ControlChange::Commit {
-                        key,
-                        value,
-                        expected_generation: None,
-                    },
-                )
-                .map(|commit| commit.durability),
-        }
-    }
-
     /// Publish the exact prepared Register binding into the control resource
     /// before the business Register commit. The prepared envelope is the same
     /// snapshot whose binding and transport the reducer then commits, so the
@@ -361,6 +433,8 @@ impl ProjectRuntimeManager {
         &self,
         runtime: &Server,
         prepared: &crate::server::PreparedRegisterEnvelope,
+        facts: Option<&crate::proto::IdentityFacts>,
+        tmux_session_name: Option<&str>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     ) -> Result<String, String> {
         let crate::server::state::TypedCommand::RegisterWorker {
@@ -386,28 +460,26 @@ impl ProjectRuntimeManager {
         };
         let _register = self.register_gate.lock().unwrap();
         let state = runtime.state.lock().unwrap();
-        let Some(name) = name_resolution::plan_automatic_name_for_binding(
+        prepared.typed.envelope.validate()
+            .map_err(|error| format!("typed registrar rejected registration: {}",
+                notification_contract::MutationError::InvalidCommand(error.to_string())))?;
+        runtime.validate_typed_register(&state, &prepared.typed)
+            .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
+        let control = self.binding_control_store().load()?;
+        let name = name_resolution::name_for_registration(
             &state,
-            &prepared.nested_operation_id,
-            "register",
+            &control,
             binding,
-            pane_anchor.clone(),
-        )?
-        else {
-            return Err(
-                "NAME_PENDING: register control-first name decision requires authorization".into(),
-            );
-        };
+        )?;
         let target_session_id = binding
             .session_id
             .as_ref()
-            .ok_or(
-                "BINDING_CONTROL_REGISTER_REJECTED: candidate binding has no agent session",
-            )?
+            .ok_or("BINDING_CONTROL_REGISTER_REJECTED: candidate binding has no agent session")?
             .as_str()
             .to_owned();
         let effect_id = format!("register-{}", prepared.nested_operation_id);
         let effect = Self::handoff_effect(
+            &control,
             &state,
             &context,
             binding.agent_id.as_str(),
@@ -418,31 +490,74 @@ impl ProjectRuntimeManager {
             crate::server::binding_slot::PendingEffectKind::Register,
             Vec::new(),
             false,
-            pane_anchor,
+            pane_anchor.clone(),
         );
         let key = crate::server::binding_slot::IdentityBindingKey::new(
             context.project_scope.clone(),
             context.app_scope_id.clone(),
             name.clone(),
         );
-        let value =
-            crate::server::binding_slot::BindingValue::new(binding.clone(), transport);
-        let committed = match effect {
-            Some(effect) => self.commit_control_change_locked(
-                crate::server::binding_store::ControlChange::CommitWithEffect {
+        let mut value = crate::server::binding_slot::BindingValue::new(binding.clone(), transport);
+        if let Some(facts) = facts {
+            value.host.agent_kind = facts.agent_kind.clone();
+            value.host.profile = facts.profile.clone();
+        }
+        if let Some(anchor) = pane_anchor.as_ref() {
+            value.invocation_cwd = anchor.cwd.clone();
+        }
+        Self::prepare_control_value(&control, &key, &mut value)?;
+        let route = binding.route_scope();
+        let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref()
+            == Some(binding.agent_id.as_str());
+        let new_principal = !state.workers.contains_key(&worker.id)
+            && !control.active_values().any(|current| current.binding.same_principal(binding));
+        drop(state);
+        let staged = if new_principal {
+            Some(crate::identity::stage_registration_credential(
+                &self.host.host_paths, &Scope { root: runtime.root.clone() },
+                crate::identity::Identity { worker_id:worker.id.clone(), token:worker.token.clone(),
+                    project_scope:None, runtime:None, transport:None },
+                crate::identity::RuntimeIdentity { agent_id:binding.agent_id.clone(),
+                    runtime_id:binding.runtime_id.clone(), appserver_id:binding.app_scope_id.clone(),
+                    binding_id:binding.binding_id.clone(), session_id:binding.session_id.clone(),
+                    native_thread_id:binding.native_thread_id.clone() },
+                value.transport.clone(),
+            ).map_err(|error| format!("{error:#}"))?)
+        } else { None };
+        let rename = match crate::server::identity_context::rename_prepared_anchor(
+            &value,
+            &value.invocation_cwd, &name,
+            is_current_master,
+            None,
+        ) {
+            Ok(rename) => rename,
+            Err(error) => return Err(match staged.map(|staged| staged.rollback()).transpose() {
+                Ok(_) => error,
+                Err(rollback) => format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"),
+            }),
+        };
+        let change = match effect {
+            Some(effect) => crate::server::binding_store::ControlChange::CommitWithEffect {
                     key,
                     value,
                     expected_generation: None,
                     effect,
                 },
-            )?,
-            None => self.commit_control_change_locked(
-                crate::server::binding_store::ControlChange::Commit {
+            None => crate::server::binding_store::ControlChange::Commit {
                     key,
                     value,
                     expected_generation: None,
                 },
-            )?,
+        };
+        let committed = match self.commit_control_change_locked(change) {
+            Ok(committed) => committed,
+            Err(mut error) => {
+                let rename = rename.map(|rename| rename.rollback()).transpose();
+                let credential = staged.map(|staged| staged.rollback()).transpose();
+                if let Err(rollback) = rename { error = format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"); }
+                if let Err(rollback) = credential { error = format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"); }
+                return Err(error);
+            }
         };
         if committed.durability == crate::server::binding_store::Durability::Unknown {
             return Err(
@@ -453,27 +568,6 @@ impl ProjectRuntimeManager {
             );
         }
         Ok(effect_id)
-    }
-
-    /// Clear the exact control-first Register effect after the business
-    /// registration and its route publication succeeded. A failed dispatch
-    /// leaves the effect in place so the next recovery pass can either apply
-    /// the handoff or report the missing business owner.
-    pub(crate) fn clear_register_pending_effect(
-        &self,
-        effect_id: Option<&str>,
-    ) -> Result<(), String> {
-        let Some(effect_id) = effect_id else {
-            return Ok(());
-        };
-        self.clear_pending_effect(effect_id)
-    }
-
-    /// Clear one completed pending effect. The caller must not hold the
-    /// register gate; this helper acquires it once for the control publish.
-    pub(crate) fn clear_pending_effect(&self, effect_id: &str) -> Result<(), String> {
-        let _register = self.register_gate.lock().unwrap();
-        self.clear_pending_effect_locked(effect_id)
     }
 
     /// Clear one completed pending effect while the caller already holds the
@@ -578,6 +672,85 @@ impl ProjectRuntimeManager {
         control: &crate::server::binding_slot::BindingControlSet,
         effect: &crate::server::binding_slot::PendingEffect,
     ) -> Result<(), String> {
+        if let Some(primary) = effect.effect_id.strip_suffix(":outgoing") {
+            if self.binding_control_store().load()?.pending_effect(primary).is_some() {
+                return Err(format!("PENDING_EFFECT_PRIMARY_INCOMPLETE: {primary}"));
+            }
+        }
+        if effect.kind == crate::server::binding_slot::PendingEffectKind::Retire {
+            let key = crate::server::binding_slot::IdentityBindingKey::new(
+                effect.project_scope.clone(),
+                effect.app_scope_id.clone(),
+                &effect.name,
+            );
+            let slot = control.slot(&key).ok_or("PENDING_EFFECT_MAPPING_MISSING")?;
+            // A new current mapping supersedes this retired binding. Never
+            // consume the prior intent against its successor.
+            if slot.active_binding().is_some() {
+                return self.clear_pending_effect_locked(&effect.effect_id);
+            }
+            let value = slot
+                .reference_previous()
+                .ok_or("PENDING_EFFECT_RETIREMENT_BINDING_MISSING")?;
+            if value.binding.agent_id.as_str() != effect.target_worker_id
+                || value.binding.session_id.as_ref().map(|id| id.as_str())
+                    != Some(effect.target_session_id.as_str())
+            {
+                return self.clear_pending_effect_locked(&effect.effect_id);
+            }
+            let runtime = self
+                .routes
+                .lock()
+                .unwrap()
+                .get(&(
+                    effect.app_scope_id.to_string(),
+                    effect.project_scope.as_str().to_owned(),
+                ))
+                .and_then(|route| route.runtime.clone())
+                .ok_or("PENDING_EFFECT_RUNTIME_MISSING")?;
+            let token = runtime
+                .state
+                .lock()
+                .unwrap()
+                .workers
+                .get(&effect.target_worker_id)
+                .map(|worker| worker.token.clone());
+            if let Some(token) = token {
+                let context = ProjectContext {
+                    project_scope: effect.project_scope.clone(),
+                    app_scope_id: effect.app_scope_id.clone(),
+                    canonical_root: runtime.root.to_string_lossy().into_owned(),
+                    runtime_context: None,
+                };
+                let response = peer_lifecycle::unregister_self(
+                    &runtime,
+                    Some(&context),
+                    &effect.target_worker_id,
+                    &token,
+                    Some(&value.binding),
+                );
+                if !response.ok {
+                    return Err(response
+                        .error
+                        .unwrap_or_else(|| "PENDING_EFFECT_RETIREMENT_FAILED".into()));
+                }
+            }
+            crate::identity::clear_persisted_identity(
+                &self.host.host_paths,
+                &effect.target_worker_id,
+            )
+            .map_err(|error| format!("PENDING_EFFECT_RETIREMENT_CREDENTIAL_FAILED: {error}"))?;
+            if value.binding.tmux_endpoint.is_some()
+                || (value.binding.session_id.is_some() && value.binding.native_thread_id.is_some())
+            {
+                self.host
+                    .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+                        binding: value.binding.clone(),
+                    }])
+                    .map_err(|error| format!("PENDING_EFFECT_RETIREMENT_ROUTE_FAILED: {error}"))?;
+            }
+            return self.clear_pending_effect_locked(&effect.effect_id);
+        }
         // A newer control commit for the same stable name supersedes this
         // intent. Replaying or blocking on the older carrier would regress the
         // name or block a scope that already converged; the effect is retired
@@ -623,33 +796,156 @@ impl ProjectRuntimeManager {
             app_scope_id: effect.app_scope_id.clone(),
             project_scope_id: effect.project_scope.clone(),
         };
-        let mut state = runtime.state.lock().unwrap();
-        if !state
-            .workers
-            .contains_key(&effect.target_worker_id)
+        let slot_key = crate::server::binding_slot::IdentityBindingKey::new(
+            effect.project_scope.clone(),
+            effect.app_scope_id.clone(),
+            effect.name.clone(),
+        );
+        let slot = control
+            .slot(&slot_key)
+            .ok_or("PENDING_EFFECT_MAPPING_MISSING")?;
+        let value = slot
+            .active_binding()
+            .ok_or("PENDING_EFFECT_MAPPING_INACTIVE")?;
+        if matches!(effect.kind,
+            crate::server::binding_slot::PendingEffectKind::Name
+                | crate::server::binding_slot::PendingEffectKind::Register)
         {
+            self.materialize_current_worker_locked(&runtime, value, Some(effect))?;
+        }
+        let mut state = runtime.state.lock().unwrap();
+        if !state.workers.contains_key(&effect.target_worker_id) {
             return Err(format!(
                 "PENDING_EFFECT_TARGET_MISSING: effect {} targets worker {} with no committed registration",
                 effect.effect_id, effect.target_worker_id
             ));
         }
+        let mut role_events = Vec::new();
+        if let Some(role) = &effect.role {
+            use crate::server::binding_slot::{RoleAction, RoleAuthorization};
+            let current = current_master_grant(&state, Some(&route_scope));
+            let applied = match role.action {
+                RoleAction::SetMaster => current.as_ref().is_some_and(|grant| {
+                    grant.agent_id.as_str() == effect.target_worker_id
+                        && grant.binding_id == value.binding.binding_id
+                }),
+                RoleAction::ClearMaster => current.is_none(),
+            };
+            if !applied {
+                let (granted_by, authorization) = match &role.authorization {
+                    RoleAuthorization::Delegate {
+                        actor,
+                        target,
+                        grant_id,
+                        grant_generation,
+                    } => {
+                        let grant = current.ok_or(
+                            "MASTER_DELEGATE_DENIED: caller no longer holds the accepted grant",
+                        )?;
+                        if actor != grant.agent_id.as_str()
+                            || grant_id != grant.resource_id()
+                            || *grant_generation != grant.resource_generation()
+                            || target != &effect.target_worker_id
+                        {
+                            return Err(
+                                "MASTER_DELEGATE_DENIED: accepted grant ownership changed".into()
+                            );
+                        }
+                        (actor.as_str(), "delegated by the current master")
+                    }
+                    RoleAuthorization::User {
+                        authorization,
+                        granted_by,
+                    } => {
+                        if authorization.trim().is_empty()
+                            || authorization.chars().any(char::is_control)
+                            || granted_by.trim().is_empty()
+                            || granted_by.chars().any(char::is_control)
+                        {
+                            return Err("ROLE_AUTHORIZATION_INVALID".into());
+                        }
+                        (granted_by.as_str(), authorization.as_str())
+                    }
+                };
+                match role.action {
+                    RoleAction::SetMaster => {
+                        let grant = master_grant_for_worker(
+                            &state,
+                            &route_scope,
+                            &effect.target_worker_id,
+                            granted_by,
+                            authorization,
+                        )?;
+                        role_events = master_authority_transfer_events(&state, &route_scope, grant);
+                    }
+                    RoleAction::ClearMaster => {
+                        role_events = master_authority_revoke_events(&state, &route_scope)
+                    }
+                }
+            }
+        }
+        if effect.kind == crate::server::binding_slot::PendingEffectKind::Name {
+            let current = state
+                .global
+                .lookup_binding_for(&route_scope, &value.binding.binding_id)
+                .cloned()
+                .ok_or(
+                    "PENDING_EFFECT_BINDING_MISSING: exact existing principal binding is absent",
+                )?;
+            if current != value.binding
+                || state.workers[&effect.target_worker_id].transport.as_ref()
+                    != Some(&value.transport)
+            {
+                if current != value.binding
+                    && (!current.same_principal(&value.binding)
+                        || slot
+                            .reference_previous()
+                            .is_none_or(|previous| previous.binding != current))
+                {
+                    return Err("PENDING_EFFECT_BINDING_CONFLICT: exact prior mapping differs from the registered binding".into());
+                }
+                let mut worker = state.workers[&effect.target_worker_id].clone();
+                worker.transport = Some(value.transport.clone());
+                let mut events = vec![
+                    Event::GlobalRuntimeBound {
+                        binding: value.binding.clone(),
+                    },
+                    Event::Registered { worker },
+                ];
+                if current.tmux_endpoint.is_some()
+                    || (current.session_id.is_some() && current.native_thread_id.is_some())
+                {
+                    events.insert(
+                        0,
+                        Event::GlobalCurrentThreadRouteRetired {
+                            binding: current.clone(),
+                        },
+                    );
+                }
+                runtime
+                    .commit_locked_checked(&mut state, &events)
+                    .map_err(|error| format!("PENDING_EFFECT_BINDING_COMMIT_FAILED: {error}"))?;
+            }
+        }
         if effect.kind == crate::server::binding_slot::PendingEffectKind::Register
-            && !Self::pending_effect_complete(&state, effect)
+            && (state
+                .global
+                .lookup_binding_for(&route_scope, &value.binding.binding_id)
+                != Some(&value.binding)
+                || !state
+                    .global
+                    .command_receipts
+                    .values()
+                    .any(|receipt| receipt.operation_id.as_str() == effect.operation_id))
         {
-            // A Register effect is published before the business Register
-            // command. If that command never landed, the reducer has no
-            // worker/token/name occupancy to replay. Synthesizing one from the
-            // control slot would invent a carrier and bypass the Register
-            // owner. Keep the exact effect visible and block dependent
-            // business work until a real Register completes it.
+            // Only a real Register receipt can materialize its business
+            // effects. The map never mints a missing worker or credential.
             return Err(format!(
                 "PENDING_EFFECT_REGISTER_INCOMPLETE: effect {} has no completed business Register",
                 effect.effect_id
             ));
         }
-        if effect.kind == crate::server::binding_slot::PendingEffectKind::Name
-            && !Self::pending_effect_complete(&state, effect)
-        {
+        if !Self::pending_effect_complete(&state, effect) || !role_events.is_empty() {
             let occupancy = crate::server::name_state::NameOccupancy {
                 name: effect.name.clone(),
                 worker_id: effect.target_worker_id.clone(),
@@ -669,6 +965,13 @@ impl ProjectRuntimeManager {
                     effect.project_scope.as_str(),
                     &occupancy,
                     rename_sources,
+                    state
+                        .name_occupancy(effect.project_scope.as_str(), &effect.name)
+                        .filter(|holder| {
+                            Some(holder.worker_id.as_str()) == effect.previous_worker_id.as_deref()
+                                && Some(holder.session_id.as_str())
+                                    == effect.previous_session_id.as_deref()
+                        }),
                 );
             // The mailbox/subscription/task constructors can legitimately
             // emit no name-resolution record when the target occupancy is
@@ -688,19 +991,92 @@ impl ProjectRuntimeManager {
                     },
                 );
             }
-            if effect.name != "Jenny"
-                && current_master_worker_id(&state, Some(&route_scope)).as_deref()
-                    == Some(effect.target_worker_id.as_str())
-            {
-                events.extend(master_authority_revoke_events(&state, &route_scope));
-            }
+            events.extend(role_events);
             if !events.is_empty() {
                 runtime
                     .commit_locked_checked(&mut state, &events)
                     .map_err(|error| format!("PENDING_EFFECT_COMMIT_FAILED: {error}"))?;
             }
         }
+        let mut identity = self
+            .recovered_binding_identity(
+                &ProjectContext {
+                    app_scope_id: effect.app_scope_id.clone(),
+                    canonical_root: runtime.root.to_string_lossy().into_owned(),
+                    project_scope: effect.project_scope.clone(),
+                    runtime_context: None,
+                },
+                &value.binding,
+                &state,
+            )
+            .ok_or("PENDING_EFFECT_CREDENTIAL_MISSING")?;
+        identity.transport = Some(value.transport.clone());
         drop(state);
+        crate::identity::persist_current_binding_at(
+            &self.host.host_paths,
+            &Scope {
+                root: runtime.root.clone(),
+            },
+            &mut identity,
+            crate::identity::RuntimeIdentity {
+                agent_id: value.binding.agent_id.clone(),
+                runtime_id: value.binding.runtime_id.clone(),
+                appserver_id: value.binding.app_scope_id.clone(),
+                binding_id: value.binding.binding_id.clone(),
+                session_id: value.binding.session_id.clone(),
+                native_thread_id: value.binding.native_thread_id.clone(),
+            },
+            value.transport.clone(),
+        )
+        .map_err(|error| format!("PENDING_EFFECT_CREDENTIAL_FAILED: {error}"))?;
+        if matches!(
+            effect.kind,
+            crate::server::binding_slot::PendingEffectKind::Name
+                | crate::server::binding_slot::PendingEffectKind::Register
+        ) {
+            let mut publications = Vec::new();
+            if let Some(previous) = slot.reference_previous().filter(|previous| {
+                previous.binding != value.binding
+                    && Some(previous.binding.agent_id.as_str())
+                        == effect.previous_worker_id.as_deref()
+                    && previous.binding.session_id.as_ref().map(|id| id.as_str())
+                        == effect.previous_session_id.as_deref()
+                    && (previous.binding.tmux_endpoint.is_some()
+                        || (previous.binding.session_id.is_some()
+                            && previous.binding.native_thread_id.is_some()))
+            }) {
+                publications.push(Event::GlobalCurrentThreadRouteRetired {
+                    binding: previous.binding.clone(),
+                });
+            }
+            if let Some(owner) = value.binding.tmux_endpoint.as_ref().and_then(|endpoint| {
+                self.host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .global
+                    .lookup_unique_tmux_pane_route(endpoint)
+                    .cloned()
+            }) {
+                if owner != value.binding {
+                    publications.push(Event::GlobalCurrentThreadRouteRetired { binding: owner });
+                }
+            }
+            if !self.binding_publication_matches(&value.binding)
+                && (value.binding.tmux_endpoint.is_some()
+                    || (value.binding.session_id.is_some()
+                        && value.binding.native_thread_id.is_some()))
+            {
+                publications.push(Event::GlobalCurrentThreadRouteSet {
+                    binding: value.binding.clone(),
+                });
+            }
+            if !publications.is_empty() {
+                self.host
+                    .commit_checked(&publications)
+                    .map_err(|error| format!("PENDING_EFFECT_ROUTE_FAILED: {error}"))?;
+            }
+        }
         let committed = self.commit_control_change_locked(
             crate::server::binding_store::ControlChange::ClearEffect {
                 effect_id: effect.effect_id.clone(),
@@ -735,7 +1111,11 @@ impl ProjectRuntimeManager {
             Some(slot) => match slot.active_binding() {
                 Some(value) => {
                     value.binding.agent_id.as_str() != effect.target_worker_id
-                        || value.binding.session_id.as_ref().map(|session| session.as_str())
+                        || value
+                            .binding
+                            .session_id
+                            .as_ref()
+                            .map(|session| session.as_str())
                             != Some(effect.target_session_id.as_str())
                 }
                 None => true,
@@ -748,10 +1128,9 @@ impl ProjectRuntimeManager {
         state: &State,
         effect: &crate::server::binding_slot::PendingEffect,
     ) -> bool {
-        let Some(holder) = state.name_occupancy(
-            effect.project_scope.as_str(),
-            effect.name.as_str(),
-        ) else {
+        let Some(holder) =
+            state.name_occupancy(effect.project_scope.as_str(), effect.name.as_str())
+        else {
             return false;
         };
         if holder.worker_id != effect.target_worker_id
@@ -759,6 +1138,9 @@ impl ProjectRuntimeManager {
             || holder.occupancy_revision < effect.occupancy_revision
         {
             return false;
+        }
+        if !effect.moves_existing_names {
+            return true;
         }
         effect
             .source_names
@@ -781,6 +1163,8 @@ impl ProjectRuntimeManager {
     fn register_control_first_hook<'a>(
         &'a self,
         runtime: &'a Arc<Server>,
+        facts: Option<crate::proto::IdentityFacts>,
+        tmux_session_name: Option<String>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
         effect_id_out: &'a mut Option<String>,
     ) -> impl FnMut(&crate::server::PreparedRegisterEnvelope) -> Result<(), String> + 'a {
@@ -788,168 +1172,11 @@ impl ProjectRuntimeManager {
             *effect_id_out = Some(self.publish_register_control_before_consume(
                 runtime,
                 prepared,
+                facts.as_ref(),
+                tmux_session_name.as_deref(),
                 pane_anchor.clone(),
             )?);
             Ok(())
-        }
-    }
-
-    /// Publish the successful Register owner's exact reducer binding into the
-    /// host control resource. The stable name is already decided by the
-    /// adjacent name owner, so this does not choose, inherit or rewrite it.
-    pub(crate) fn persist_registered_binding(
-        &self,
-        runtime: &Server,
-        context: &ProjectContext,
-        worker_id: &str,
-    ) -> Result<crate::server::binding_store::Durability, String> {
-        let (binding, transport) = {
-            let state = runtime.state.lock().unwrap();
-            Self::control_binding_and_transport(
-                &state,
-                context,
-                worker_id,
-                "successful registration",
-            )?
-        };
-        // Decide the stable name before publishing the control slot. The name
-        // owner is the real current-facts authority; a control commit cannot
-        // require a pre-existing occupancy because a legacy identity may have
-        // no name yet. Registration keeps its exact user contract: same session
-        // keeps the name, otherwise the pane anchor or fixed pool decides.
-        let name = name_resolution::ensure_worker_control_name(runtime, worker_id)?;
-        self.commit_control_binding_named(
-            context,
-            &name,
-            binding,
-            transport,
-            None,
-        )
-        .map(|commit| commit.durability)
-    }
-
-    /// Commit an explicit ordinary name move to the binding-control resource
-    /// before the business name/handoff commit runs. The caller holds the
-    /// register gate and the project-state lock. The target stable name
-    /// receives the caller's exact current binding, and every previous name the
-    /// caller held is retired in the same atomic control write. Jenny takeovers
-    /// and pending decisions return `None` from the planner and stay on the
-    /// existing grant/confirmation path. Returns the moved target name when a
-    /// control move was published.
-    fn commit_explicit_name_control_move_locked(
-        &self,
-        runtime: &Server,
-        state: &State,
-        context: &ProjectContext,
-        worker_id: &str,
-        operation_id: &str,
-        invocation: &str,
-        intent: &name_resolution::NameIntent,
-        pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
-        effect_id: &str,
-    ) -> Result<Option<String>, String> {
-        let Some(planned) = name_resolution::plan_explicit_name_move_locked(
-            runtime,
-            state,
-            worker_id,
-            operation_id,
-            invocation,
-            intent,
-            pane_anchor.clone(),
-        )?
-        else {
-            return Ok(None);
-        };
-        let (binding, transport) =
-            Self::control_binding_and_transport(state, context, worker_id, "explicit name move")?;
-        let target = crate::server::binding_slot::IdentityBindingKey::new(
-            context.project_scope.clone(),
-            context.app_scope_id.clone(),
-            planned.target.clone(),
-        );
-        let target_session_id = binding
-            .session_id
-            .as_ref()
-            .ok_or_else(|| {
-                "BINDING_CONTROL_TRANSPORT_MISSING: explicit name move binding has no agent session"
-                    .to_owned()
-            })?
-            .as_str()
-            .to_owned();
-        let effect = Self::handoff_effect(
-            state,
-            context,
-            worker_id,
-            &planned.target,
-            &target_session_id,
-            operation_id,
-            effect_id,
-            crate::server::binding_slot::PendingEffectKind::Name,
-            planned.source_names.clone(),
-            intent.moves_existing_names,
-            pane_anchor,
-        );
-        let commit = match effect {
-            Some(effect) => self.commit_control_change_locked(
-                crate::server::binding_store::ControlChange::MoveNameWithEffect {
-                    target,
-                    value: crate::server::binding_slot::BindingValue::new(binding, transport),
-                    source_names: planned.source_names,
-                    expected_generation: None,
-                    effect,
-                },
-            )?,
-            None => self.commit_control_change_locked(
-                crate::server::binding_store::ControlChange::MoveName {
-                    target,
-                    value: crate::server::binding_slot::BindingValue::new(binding, transport),
-                    source_names: planned.source_names,
-                    expected_generation: None,
-                },
-            )?,
-        };
-        match commit.durability {
-            crate::server::binding_store::Durability::Confirmed => Ok(Some(planned.target)),
-            crate::server::binding_store::Durability::Unknown => Err(
-                "BINDING_CONTROL_DURABILITY_UNKNOWN: the explicit name move was published but its \
-                 parent directory sync is unconfirmed; do not replay it as a success"
-                    .into(),
-            ),
-        }
-    }
-
-    pub(crate) fn unregister_control_binding(
-        &self,
-        runtime: &Server,
-        context: &ProjectContext,
-        worker_id: &str,
-        binding: &RuntimeBinding,
-    ) -> Result<crate::server::binding_store::Durability, String> {
-        let key = self.control_key_for_worker(runtime, context, worker_id, binding)?;
-        self.commit_control_change(crate::server::binding_store::ControlChange::Unregister {
-            key,
-            expected_generation: None,
-        })
-        .map(|commit| commit.durability)
-    }
-
-    /// A published control file whose parent directory could not be synced is
-    /// visible but not known to be durable. It must never be reported as a
-    /// plain success: the caller can neither treat the write as confirmed nor
-    /// replay it as if nothing landed.
-    fn mark_control_durability_unknown(response: &mut Resp) {
-        response.ok = false;
-        response.error = Some(
-            "BINDING_CONTROL_DURABILITY_UNKNOWN: the binding control file was published \
-             but its parent directory sync result is unknown; do not replay this as a success"
-                .into(),
-        );
-        if !response.data.is_object() {
-            response.data = json!({});
-        }
-        if let Some(object) = response.data.as_object_mut() {
-            object.insert("control_committed".into(), json!(true));
-            object.insert("durability".into(), json!("unknown"));
         }
     }
 
@@ -961,7 +1188,18 @@ impl ProjectRuntimeManager {
         &self,
         controlled: &crate::server::binding_slot::BindingControlSet,
     ) -> Result<(), String> {
+        let mut bindings = Vec::new();
         for value in controlled.active_values() {
+            if value.binding.tmux_endpoint.is_none() && value.binding.native_thread_id.is_none() {
+                append_log(
+                    &self.host.log_path(),
+                    &format!(
+                        "BINDING_CONTROL_ROUTE_PENDING: binding {} retains its identity; current delivery facts are missing",
+                        value.binding.binding_id
+                    ),
+                );
+                continue;
+            }
             let key = (
                 value.binding.app_scope_id.as_str().to_owned(),
                 value.binding.project_scope.as_str().to_owned(),
@@ -999,31 +1237,40 @@ impl ProjectRuntimeManager {
                 );
                 continue;
             }
-            self.reconcile_binding_publication(&value.binding)?;
+            bindings.push(value.binding.clone());
+        }
+        for binding in &bindings {
+            let unresolved_pane = binding.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                let conflicting_control = bindings.iter().any(|other| {
+                    let same_claim =
+                        other.binding_id == binding.binding_id && other.same_principal(binding);
+                    !same_claim
+                        && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
+                            crate::client::adapters::tmux::same_owned_pane(endpoint, other_endpoint)
+                        })
+                });
+                conflicting_control
+                    && self
+                        .host
+                        .state
+                        .lock()
+                        .unwrap()
+                        .global
+                        .lookup_unique_tmux_pane_route(endpoint)
+                        .is_none()
+            });
+            if unresolved_pane {
+                // No current host owner resolves these conflicting historical
+                // values. Keep them unpublished until a real context request
+                // supplies the current facts and authority; do not pick one.
+                continue;
+            }
+            match self.reconcile_binding_publication(binding) {
+                Ok(()) | Err(BindingPublicationError::AddressConflict(_)) => {}
+                Err(BindingPublicationError::Persistence(error)) => return Err(error),
+            }
         }
         Ok(())
-    }
-}
-
-/// Build the `Commit` control change for one decided stable name from the
-/// exact current binding and transport. Both the locking and locked control
-/// entries call this so the key and value stay identical.
-fn control_commit_change(
-    context: &ProjectContext,
-    name: &str,
-    binding: RuntimeBinding,
-    transport: SelectedTransport,
-    expected_generation: Option<u64>,
-) -> crate::server::binding_store::ControlChange {
-    let key = crate::server::binding_slot::IdentityBindingKey::new(
-        context.project_scope.clone(),
-        context.app_scope_id.clone(),
-        name.to_owned(),
-    );
-    crate::server::binding_store::ControlChange::Commit {
-        key,
-        value: crate::server::binding_slot::BindingValue::new(binding, transport),
-        expected_generation,
     }
 }
 

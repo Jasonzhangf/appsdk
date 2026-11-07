@@ -2,6 +2,7 @@ fn handle_create(
     server: &Server,
     context: Option<&ProjectContext>,
     request: &PeerLifecycleRequest,
+    manager: &ProjectRuntimeManager,
 ) -> Resp {
     let PeerLifecycleRequest::Create {
         worker_id,
@@ -277,6 +278,7 @@ fn handle_create(
         ..Default::default()
     };
     let registered = register_created_peer(
+        manager,
         server,
         peer_id,
         &identity.token,
@@ -342,7 +344,6 @@ fn handle_create(
         agent_id: binding.agent_id.clone(),
         runtime_id: binding.runtime_id.clone(),
         appserver_id: binding.app_scope_id.clone(),
-        endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id.clone(),
         session_id: binding.session_id.clone(),
         native_thread_id: binding.native_thread_id.clone(),
@@ -356,7 +357,7 @@ fn handle_create(
     if let Err(error) = create_commit(server, &record) {
         return error;
     }
-    if let Err(error) = crate::identity::persist_registration_at(
+    if let Err(error) = crate::identity::persist_current_binding_at(
         &server.host_paths,
         &scope,
         &mut identity,
@@ -526,9 +527,13 @@ pub(super) fn handle(
     server: &Server,
     context: Option<&ProjectContext>,
     request: PeerLifecycleRequest,
+    manager: Option<&ProjectRuntimeManager>,
 ) -> Resp {
     match &request {
-        PeerLifecycleRequest::Create { .. } => handle_create(server, context, &request),
+        PeerLifecycleRequest::Create { .. } => match manager {
+            Some(manager) => handle_create(server, context, &request, manager),
+            None => unavailable(&request, "PEER_LIFECYCLE_CREATE_HOST_REQUIRED", true),
+        },
         PeerLifecycleRequest::Read { .. } => handle_read(server, context, &request),
         PeerLifecycleRequest::Update { .. } => handle_update(server, context, &request),
         PeerLifecycleRequest::Close { .. } => handle_close(server, context, &request),

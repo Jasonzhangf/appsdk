@@ -2,22 +2,33 @@ use super::binding_slot::{
     BindingControlSet, BindingValue, CommitOutcome, IdentityBindingKey, IdentityBindingSlot,
     MoveNameOutcome, PendingEffect,
 };
-use super::{load_host_route_records, HostRouteRecord};
+use super::HostRouteRecord;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-pub(crate) const BINDING_CONTROL_FILE: &str = "routes.jsonl";
-pub(crate) const BINDING_CONTROL_KIND: &str = "binding_control";
+pub(crate) const BINDING_CONTROL_FILE: &str = "identity-map.json";
+
+/// Routes locate storage and communication only. They carry no identity map.
+pub(crate) fn publish_route_records(
+    path: &Path,
+    routes: &[HostRouteRecord],
+) -> Result<Durability, String> {
+    let body =
+        serde_json::to_vec(routes).map_err(|error| format!("HOST_ROUTE_ENCODE_FAILED: {error}"))?;
+    BindingControlStore::at(path).publish_bytes(&body)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BindingControlLine {
-    kind: String,
+struct IdentityMapFile {
+    schema_version: u32,
     slots: Vec<IdentityBindingSlot>,
     #[serde(default)]
     effects: Vec<PendingEffect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_resets: Vec<String>,
 }
 
 /// Whether the rename landed and the parent directory sync result is known.
@@ -39,8 +50,7 @@ impl Durability {
     }
 }
 
-/// A single typed control edit. Route lines are preserved by the store; the
-/// control set is the only ownership fact this resource publishes.
+/// A single typed edit to the sole identity control resource.
 #[derive(Debug, Clone)]
 pub(crate) enum ControlChange {
     Commit {
@@ -51,6 +61,10 @@ pub(crate) enum ControlChange {
     Unregister {
         key: IdentityBindingKey,
         expected_generation: Option<u64>,
+    },
+    UnregisterWithEffect {
+        key: IdentityBindingKey,
+        effect: PendingEffect,
     },
     MoveName {
         target: IdentityBindingKey,
@@ -70,6 +84,7 @@ pub(crate) enum ControlChange {
         source_names: Vec<String>,
         expected_generation: Option<u64>,
         effect: PendingEffect,
+        companion: Option<(IdentityBindingKey, BindingValue, PendingEffect)>,
     },
     SetEffect {
         effect: PendingEffect,
@@ -97,7 +112,7 @@ pub(crate) struct StoreCommit {
 }
 
 /// The host control resource is the sole durable binding owner. It uses one
-/// atomic whole-file replace discipline shared with the route journal: a crash
+/// atomic whole-file replace discipline: a crash
 /// leaves either the previous valid set or the complete new set, never a
 /// partially written identity. No journal is appended and no binding history
 /// is replayed from a project journal.
@@ -115,8 +130,7 @@ impl BindingControlStore {
         Self::at(&state_root.join(BINDING_CONTROL_FILE))
     }
 
-    /// Construct a store over an exact shared route/control file path. This is
-    /// used by the route writers that already hold the journal path.
+    /// Exact path constructor for isolated fixtures and the atomic writer.
     pub(crate) fn at(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
@@ -125,6 +139,53 @@ impl BindingControlStore {
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Retire identity eligibility and retain the exact reset scope before
+    /// the existing reset owner clears any business state.
+    pub(crate) fn begin_reset(&self, scope: &str) -> Result<(), String> {
+        let mut map = self.load()?;
+        map.remove_scope_except_dsh(scope);
+        if !map.pending_resets.iter().any(|pending| pending == scope) {
+            map.pending_resets.push(scope.to_owned());
+        }
+        self.save(&map)?.require_confirmed_route()
+    }
+
+    pub(crate) fn complete_reset(&self, scope: &str) -> Result<(), String> {
+        let mut map = self.load()?;
+        map.pending_resets.retain(|pending| pending != scope);
+        self.save(&map)?.require_confirmed_route()
+    }
+
+    /// The caller holds the manager's registration gate and has authenticated
+    /// an exact lifecycle target. Business cleanup cannot retire its successor.
+    pub(crate) fn retire_binding(
+        &self,
+        binding: &super::global_state::RuntimeBinding,
+    ) -> Result<(), String> {
+        let map = self.load()?;
+        let Some(key) = map.key_for_worker(
+            &binding.project_scope,
+            &binding.app_scope_id,
+            binding.agent_id.as_str(),
+        )?
+        else {
+            return Ok(());
+        };
+        let slot = map.slot(key).expect("active key");
+        if slot.active_binding().map(|value| &value.binding) != Some(binding) {
+            return Err(
+                "RETIRE_TARGET_CHANGED: current mapping differs from the exact lifecycle target"
+                    .into(),
+            );
+        }
+        self.commit(ControlChange::Unregister {
+            key: key.clone(),
+            expected_generation: Some(slot.generation),
+        })?
+        .durability
+        .require_confirmed_route()
     }
 
     /// Test-only injection for the next publication-confirmation sync, including
@@ -141,79 +202,38 @@ impl BindingControlStore {
         self.load_with_presence().map(|(set, _)| set)
     }
 
-    /// Load the control set and report whether the shared route file contains
-    /// a control line. Legacy route files have no such line; callers must not
-    /// treat the empty set as an active control gate. Routes without a
-    /// control line stay lazy and materialize only when selected.
     pub(crate) fn load_with_presence(&self) -> Result<(BindingControlSet, bool), String> {
-        let content = match std::fs::read_to_string(&self.path) {
-            Ok(content) => content,
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok((BindingControlSet::new(), false))
             }
             Err(error) => {
                 return Err(format!(
-                    "BINDING_CONTROL_READ_FAILED: {}: {error}",
+                    "IDENTITY_MAP_READ_FAILED: {}: {error}",
                     self.path.display()
                 ))
             }
         };
-        if content.is_empty() {
-            return Ok((BindingControlSet::new(), false));
-        }
-        let mut set = None;
-        let mut present = false;
-        for (index, line) in content.lines().enumerate() {
-            let line = line.trim_end_matches('\r');
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
-                format!(
-                    "BINDING_CONTROL_DECODE_FAILED: {}: line {}: {error}",
-                    self.path.display(),
-                    index + 1
-                )
-            })?;
-            if value.get("kind").and_then(serde_json::Value::as_str) != Some(BINDING_CONTROL_KIND) {
-                continue;
-            }
-            present = true;
-            let line: BindingControlLine = serde_json::from_value(value).map_err(|error| {
-                format!(
-                    "BINDING_CONTROL_DECODE_FAILED: {}: line {}: {error}",
-                    self.path.display(),
-                    index + 1
-                )
-            })?;
-            if line.kind != BINDING_CONTROL_KIND {
-                return Err(format!(
-                    "BINDING_CONTROL_INVALID: {}: unexpected control kind {}",
-                    self.path.display(),
-                    line.kind
-                ));
-            }
-            if set.is_some() {
-                return Err(format!(
-                    "BINDING_CONTROL_INVALID: {}: duplicate binding control line",
-                    self.path.display()
-                ));
-            }
-            set = Some(BindingControlSet::from_parts(line.slots, line.effects));
-        }
-        let set = set.unwrap_or_else(BindingControlSet::new);
-        set.validate().map_err(|error| {
-            format!("BINDING_CONTROL_INVALID: {}: {error}", self.path.display())
+        let file: IdentityMapFile = serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "IDENTITY_MAP_DECODE_FAILED: {}: {error}",
+                self.path.display()
+            )
         })?;
-        Ok((set, present))
-    }
-
-    /// Load both the route records and the control set from the shared file.
-    /// This is the single read used by every shared-resource writer.
-    pub(crate) fn load_shared(&self) -> Result<(Vec<HostRouteRecord>, BindingControlSet), String> {
-        let routes = load_host_route_records(&self.path)?;
-        let control = self.load()?;
-        Ok((routes, control))
+        if file.schema_version != 1 {
+            return Err(format!(
+                "IDENTITY_MAP_VERSION_UNSUPPORTED: {}: {}",
+                self.path.display(),
+                file.schema_version
+            ));
+        }
+        let mut control = BindingControlSet::from_parts(file.slots, file.effects);
+        control.pending_resets = file.pending_resets;
+        control
+            .validate()
+            .map_err(|error| format!("IDENTITY_MAP_INVALID: {}: {error}", self.path.display()))?;
+        Ok((control, true))
     }
 
     /// Apply one typed control change and atomically publish the shared
@@ -221,7 +241,7 @@ impl BindingControlStore {
     /// sync failure returns Durability::Unknown without rolling back the new
     /// file that is already visible.
     pub(crate) fn commit(&self, change: ControlChange) -> Result<StoreCommit, String> {
-        let (routes, mut control) = self.load_shared()?;
+        let mut control = self.load()?;
         let mut effect_changed = false;
         let outcome = match change {
             ControlChange::Commit {
@@ -259,6 +279,15 @@ impl BindingControlStore {
                     )
                 })?;
                 StoreChangeOutcome::Slot(slot)
+            }
+            ControlChange::UnregisterWithEffect { key, effect } => {
+                let outcome = control
+                    .unregister(&key, None)
+                    .map_err(|error| error.to_string())?;
+                effect_changed = control
+                    .set_effect(effect)
+                    .map_err(|error| error.to_string())?;
+                StoreChangeOutcome::Slot(outcome)
             }
             ControlChange::Unregister {
                 key,
@@ -303,6 +332,7 @@ impl BindingControlStore {
                 source_names,
                 expected_generation,
                 effect,
+                companion,
             } => {
                 let moved = control
                     .move_name(&target, value, &source_names, expected_generation)
@@ -318,6 +348,15 @@ impl BindingControlStore {
                         self.path.display()
                     )
                 })?;
+                if let Some((key, value, effect)) = companion {
+                    let changed = control
+                        .commit(&key, value, None)
+                        .map_err(|error| error.to_string())?;
+                    effect_changed |= matches!(changed, CommitOutcome::Committed { .. });
+                    effect_changed |= control
+                        .set_effect(effect)
+                        .map_err(|error| error.to_string())?;
+                }
                 StoreChangeOutcome::Moved(moved)
             }
             ControlChange::SetEffect { effect } => {
@@ -338,7 +377,7 @@ impl BindingControlStore {
             },
         };
         let durability = if effect_changed {
-            self.publish_shared(&routes, &control)?
+            self.save(&control)?
         } else {
             match outcome {
                 StoreChangeOutcome::Slot(CommitOutcome::Unchanged { .. })
@@ -389,7 +428,7 @@ impl BindingControlStore {
                         }
                     }
                 }
-                _ => self.publish_shared(&routes, &control)?,
+                _ => self.save(&control)?,
             }
         };
         Ok(StoreCommit {
@@ -398,26 +437,30 @@ impl BindingControlStore {
         })
     }
 
-    /// Persist one complete control set while preserving the route records.
-    /// Exposed for tests and legacy callers; production uses `commit`.
+    /// Persist the complete map with one atomic replacement.
     pub(crate) fn save(&self, set: &BindingControlSet) -> Result<Durability, String> {
-        let (routes, _) = self.load_shared()?;
-        self.publish_shared(&routes, set)
-    }
-
-    /// Serialize one complete shared resource and publish it atomically. This
-    /// is the only write path for the combined route + binding_control file.
-    pub(crate) fn publish_shared(
-        &self,
-        routes: &[HostRouteRecord],
-        set: &BindingControlSet,
-    ) -> Result<Durability, String> {
         set.validate().map_err(|error| {
             format!(
                 "BINDING_CONTROL_SAVE_REJECTED: {}: {error}",
                 self.path.display()
             )
         })?;
+        let file = IdentityMapFile {
+            schema_version: 1,
+            slots: set.slots().cloned().collect(),
+            effects: set.pending_effects().cloned().collect(),
+            pending_resets: set.pending_resets.clone(),
+        };
+        let body = serde_json::to_vec_pretty(&file).map_err(|error| {
+            format!(
+                "IDENTITY_MAP_ENCODE_FAILED: {}: {error}",
+                self.path.display()
+            )
+        })?;
+        self.publish_bytes(&body)
+    }
+
+    fn publish_bytes(&self, body: &[u8]) -> Result<Durability, String> {
         let parent = self.path.parent().ok_or_else(|| {
             format!(
                 "BINDING_CONTROL_SAVE_FAILED: {} has no parent",
@@ -430,33 +473,6 @@ impl BindingControlStore {
                 parent.display()
             )
         })?;
-
-        let mut body = Vec::new();
-        for route in routes {
-            serde_json::to_writer(&mut body, route).map_err(|error| {
-                format!(
-                    "BINDING_CONTROL_SAVE_FAILED: serialize route {}: {error}",
-                    self.path.display()
-                )
-            })?;
-            body.push(b'\n');
-        }
-        // Publish a control line when the set has any slot or pending effect.
-        // A completely empty set is byte-equivalent to a legacy route-only
-        // file, so route writers must not silently upgrade it into "has a
-        // control line".
-        if set.slots().next().is_some() || set.pending_effects().next().is_some() {
-            let control = BindingControlLine {
-                kind: BINDING_CONTROL_KIND.to_owned(),
-                slots: set.slots().cloned().collect(),
-                effects: set.pending_effects().cloned().collect(),
-            };
-            let mut line = serde_json::to_vec(&control).map_err(|error| {
-                format!("BINDING_CONTROL_SAVE_FAILED: serialize control set: {error}")
-            })?;
-            line.push(b'\n');
-            body.extend_from_slice(&line);
-        }
 
         static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -490,7 +506,7 @@ impl BindingControlStore {
                 temp.display()
             ));
         }
-        if let Err(error) = temp_file.write_all(&body) {
+        if let Err(error) = temp_file.write_all(body) {
             let _ = std::fs::remove_file(&temp);
             return Err(format!(
                 "BINDING_CONTROL_SAVE_FAILED: write temp {}: {error}",

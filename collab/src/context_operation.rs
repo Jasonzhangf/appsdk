@@ -1,5 +1,5 @@
 use crate::identity::{AppServerId, OperationId};
-use crate::proto::{IdentityContextRequest, IdentityFacts, ProjectContext};
+use crate::proto::ProjectContext;
 use crate::scope::{HostPaths, Scope};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,6 @@ pub(crate) struct ContextOperationProof {
 #[derive(Debug)]
 pub(crate) struct PreparedContextOperation {
     pub(crate) proof: ContextOperationProof,
-    pub(crate) request: IdentityContextRequest,
 }
 
 fn proof_dir(host_paths: &HostPaths) -> PathBuf {
@@ -32,32 +31,6 @@ fn proof_dir(host_paths: &HostPaths) -> PathBuf {
 
 fn proof_path(host_paths: &HostPaths, operation_id: &str) -> PathBuf {
     proof_dir(host_paths).join(format!("{operation_id}.json"))
-}
-
-pub(crate) fn remove_project_proofs(
-    host_paths: &HostPaths,
-    project_scope: &str,
-) -> anyhow::Result<()> {
-    let directory = proof_dir(host_paths);
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            let proof: ContextOperationProof = serde_json::from_slice(&std::fs::read(&path)?)?;
-            if proof.project_scope == project_scope {
-                std::fs::remove_file(path)?;
-            }
-        }
-    }
-    std::fs::File::open(directory)?.sync_all()?;
-    Ok(())
 }
 
 fn validate_operation_id(operation_id: &str) -> anyhow::Result<()> {
@@ -205,25 +178,9 @@ pub(crate) fn prepare_mutating_operation(
     host_paths: &HostPaths,
     project_context: &ProjectContext,
     operation_id: Option<String>,
-    invocation: &str,
-    facts: IdentityFacts,
 ) -> anyhow::Result<PreparedContextOperation> {
     let proof = load_or_create_proof(host_paths, project_context, operation_id)?;
-    Ok(PreparedContextOperation {
-        request: IdentityContextRequest {
-            operation_id: proof.operation_id.clone(),
-            invocation: invocation.to_owned(),
-            action: "context".into(),
-            facts,
-            invocation_cwd: None,
-            approval: None,
-            grant_approval: None,
-            query: false,
-            query_capability: proof.query_capability.clone(),
-            invocation_ticket: String::new(),
-        },
-        proof,
-    })
+    Ok(PreparedContextOperation { proof })
 }
 
 pub(crate) fn prepare_query_operation(
@@ -242,21 +199,7 @@ pub(crate) fn prepare_query_operation(
             "IDENTITY_OPERATION_PROOF_SCOPE_MISMATCH: proof scope does not match requested project/app scope"
         );
     }
-    Ok(PreparedContextOperation {
-        request: IdentityContextRequest {
-            operation_id: proof.operation_id.clone(),
-            invocation: "query".into(),
-            action: "query".into(),
-            facts: IdentityFacts::default(),
-            invocation_cwd: None,
-            approval: None,
-            grant_approval: None,
-            query: true,
-            query_capability: proof.query_capability.clone(),
-            invocation_ticket: String::new(),
-        },
-        proof,
-    })
+    Ok(PreparedContextOperation { proof })
 }
 
 #[cfg(test)]
@@ -288,118 +231,4 @@ pub(crate) fn default_project_context(scope: &Scope) -> anyhow::Result<ProjectCo
         &scope.root,
         &AppServerId::new(crate::identity::CLI_APP_SERVER_ID)?,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn context(root: &Path) -> ProjectContext {
-        ProjectContext::for_registered_root_with_app(
-            root,
-            AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "ctxop-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        root
-    }
-
-    #[test]
-    fn mutating_proof_is_persisted_before_send_with_mode_0600_and_random_capability() {
-        let root = root("proof");
-        let host_paths = HostPaths::for_state_root(root.join("state")).unwrap();
-        let project_context = context(&root);
-        let prepared = prepare_mutating_operation(
-            &host_paths,
-            &project_context,
-            None,
-            "automatic",
-            IdentityFacts::default(),
-        )
-        .unwrap();
-        let path = proof_path(&host_paths, &prepared.proof.operation_id);
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert!(prepared.proof.query_capability.starts_with("base64url:"));
-        assert_eq!(
-            prepared.request.query_capability,
-            prepared.proof.query_capability
-        );
-        assert!(prepared.request.query_capability.len() >= 50);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn same_operation_key_reuses_the_original_proof_and_rejects_a_foreign_scope() {
-        let root = root("reuse");
-        let host_paths = HostPaths::for_state_root(root.join("state")).unwrap();
-        let project_context = context(&root);
-        let first = prepare_mutating_operation(
-            &host_paths,
-            &project_context,
-            Some("ctxop-reuse".into()),
-            "automatic",
-            IdentityFacts::default(),
-        )
-        .unwrap();
-        let second = prepare_mutating_operation(
-            &host_paths,
-            &project_context,
-            Some("ctxop-reuse".into()),
-            "automatic",
-            IdentityFacts::default(),
-        )
-        .unwrap();
-        assert_eq!(first.proof, second.proof);
-        let other = root.join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        let error = prepare_mutating_operation(
-            &host_paths,
-            &context(&other),
-            Some("ctxop-reuse".into()),
-            "automatic",
-            IdentityFacts::default(),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("PROOF_SCOPE_MISMATCH"));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn query_reads_the_original_capability_and_uses_the_exact_b23_shape() {
-        let root = root("query");
-        let host_paths = HostPaths::for_state_root(root.join("state")).unwrap();
-        let project_context = context(&root);
-        let prepared = prepare_mutating_operation(
-            &host_paths,
-            &project_context,
-            Some("ctxop-query".into()),
-            "supplement",
-            IdentityFacts::default(),
-        )
-        .unwrap();
-        let queried =
-            prepare_query_operation(&host_paths, &project_context, "ctxop-query".into()).unwrap();
-        assert_eq!(queried.request.invocation, "query");
-        assert_eq!(queried.request.action, "query");
-        assert!(queried.request.query);
-        assert_eq!(
-            queried.request.query_capability,
-            prepared.proof.query_capability
-        );
-        assert!(queried.request.facts.session_id.is_none());
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }

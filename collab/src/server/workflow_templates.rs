@@ -253,6 +253,9 @@ fn handle_workflow_template_set(
     target: String,
     template: Option<crate::board::WorkflowTemplateSpec>,
 ) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &actor, &token) {
         return error;
@@ -280,14 +283,22 @@ fn handle_workflow_template_set(
     };
     let mut notices = Vec::new();
     if let Some(event) = plan.event {
-        let mut recipients: Vec<_> = state.workers.keys().filter(|id| **id != actor && !is_managed_subagent(&state, id))
-            .filter(|id| plan.target == "peer" || plan.target.strip_prefix("role:").is_some_and(|role|
-                worker_work_roles(&state, route.project_scope_id.as_str(), id).iter().any(|value| value == role)))
-            .cloned().collect();
+        let mut recipients = Vec::new();
+        for id in state.workers.keys().filter(|id| **id != actor && !is_managed_subagent(&state, id)) {
+            let roles = match worker_work_roles(&state, &control, Some(&route), id) {
+                Ok(roles) => roles, Err(error) => return Resp::err(error),
+            };
+            if plan.target == "peer" || plan.target.strip_prefix("role:").is_some_and(|role| roles.iter().any(|value| value == role)) {
+                recipients.push(id.clone());
+            }
+        }
         recipients.sort();
         for recipient in recipients {
-            notices.extend(relationship_notice_events(&state, route.project_scope_id.as_str(), &recipient,
-                "workflow-template-changed", format!("流程模板 {} 已{}。读取 collab context 获取当前模板。已接任务的归属、指定执行者、reviewer 和验收条件保持；只协调受影响的职责或交接。", plan.target, if plan.outcome == "reset" {"重置"} else {"更新"})));
+            let events = match relationship_notice_events(&state, &control, &route, &recipient,
+                "workflow-template-changed", format!("流程模板 {} 已{}。读取 collab context 获取当前模板。已接任务的归属、指定执行者、reviewer 和验收条件保持；只协调受影响的职责或交接。", plan.target, if plan.outcome == "reset" {"重置"} else {"更新"})) {
+                Ok(events) => events, Err(error) => return Resp::err(error),
+            };
+            notices.extend(events);
         }
         let mut events = vec![event];
         events.extend(notices.clone());
@@ -408,7 +419,7 @@ mod workflow_template_state_tests {
     }
 
     #[test]
-    fn configured_templates_survive_snapshot_compaction_and_reset_clears_targets() {
+    fn configured_templates_survive_current_state_and_reset_clears_targets() {
         let mut state = State::default();
         state
             .apply_checked(&set_event("/project", "peer", 1, "Peer override"))
@@ -417,10 +428,7 @@ mod workflow_template_state_tests {
             .apply_checked(&set_event("/project", "role:designer", 1, "Designer task"))
             .unwrap();
 
-        let mut replay = State::default();
-        for event in state.snapshot_events() {
-            replay.apply_checked(&event).unwrap();
-        }
+        let mut replay: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert_eq!(state.workflow_templates, replay.workflow_templates);
 
         replay
@@ -465,7 +473,27 @@ mod workflow_template_state_tests {
     #[test]
     fn stable_name_session_handoff_keeps_role_template_selection() {
         let mut state = State::default();
+        let mut control = binding_slot::BindingControlSet::default();
+        let route = RouteScope {
+            project_scope_id: crate::scope::ProjectScopeId::new("/project").unwrap(),
+            app_scope_id: crate::identity::AppServerId::new("appserver-cli").unwrap(),
+        };
         for (worker, session, revision) in [("old", "s1", 1), ("current", "s2", 2)] {
+            let thread = format!("thread-{worker}");
+            let mut transport = crate::server::peer_tests::test_appserver_transport(&thread);
+            transport.session_id = Some(session.into());
+            let binding = RuntimeBinding::new_with_session(
+                route.project_scope_id.clone(), route.app_scope_id.clone(),
+                crate::identity::AgentId::new(worker).unwrap(),
+                crate::identity::RuntimeId::new(format!("runtime-{worker}")).unwrap(),
+                crate::identity::BindingId::new(format!("binding-{worker}")).unwrap(),
+                Some(crate::identity::SessionId::new(session).unwrap()),
+                Some(crate::identity::NativeThreadId::new(thread).unwrap()),
+            ).unwrap();
+            control.commit(
+                &binding_slot::IdentityBindingKey::new(route.project_scope_id.clone(), route.app_scope_id.clone(), "Alice"),
+                binding_slot::BindingValue::new(binding, transport), None,
+            ).unwrap();
             state
                 .apply_checked(&Event::NameResolutionCommitted {
                     project_scope: "/project".into(),
@@ -500,8 +528,8 @@ mod workflow_template_state_tests {
                     .unwrap();
             }
         }
-        assert!(worker_work_roles(&state, "/project", "old").is_empty());
-        let roles = worker_work_roles(&state, "/project", "current");
+        assert!(worker_work_roles(&state, &control, Some(&route), "old").unwrap().is_empty());
+        let roles = worker_work_roles(&state, &control, Some(&route), "current").unwrap();
         assert_eq!(roles, ["designer"]);
         let projection = workflow_template_projection(&state, "/project", "peer", &roles);
         assert_eq!(projection["specialties"][0]["target"], json!("role:designer"));

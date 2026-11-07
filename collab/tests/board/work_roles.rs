@@ -134,6 +134,98 @@ fn minimal_role_change_notifies_counterpart_without_reassigning_task() {
 }
 
 #[test]
+fn minimal_registration_without_master_has_no_notice_or_later_backfill() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context", "--approve-grant",
+        r#"{"action":"restore_master","authorization":"fixture establishes a master after peers registered"}"#], THREAD_A);
+    assert!(notices(&fixture, THREAD_A, "peer-registered").is_empty());
+    fixture.run_public(&["context"], THREAD_B);
+    assert!(notices(&fixture, THREAD_A, "peer-registered").is_empty());
+    fixture.run_public(&["context"], THREAD_C);
+    assert_eq!(notices(&fixture, THREAD_A, "peer-registered").len(), 1);
+    assert!(notices(&fixture, THREAD_B, "peer-registered").is_empty());
+}
+
+#[test]
+fn minimal_registration_notice_survives_a_rejected_native_wake() {
+    let fixture = relationship_fixture();
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_A)
+        .unwrap()
+        .reject_input = true;
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let current = fixture.current_state();
+    let messages: Vec<_> = current["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|message| message["subject"] == "peer-registered")
+        .collect();
+    assert_eq!(messages.len(), 1);
+    let id = messages[0]["id"].as_str().unwrap();
+    assert_eq!(messages[0]["state"], "pending");
+    assert!(current["notification_delivery_accepted"][id].is_null());
+    assert!(current["notification_delivery_failures"][id].is_object());
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_A)
+        .unwrap()
+        .reject_input = false;
+    assert_eq!(notices(&fixture, THREAD_A, "peer-registered")[0]["id"], id);
+    let again = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(again["binding"], peer["binding"]);
+    assert!(notices(&fixture, THREAD_A, "peer-registered").is_empty());
+}
+
+#[test]
+fn minimal_registration_worker_and_notice_share_current_publication() {
+    let fixture = relationship_fixture();
+    let path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let retained = fixture.root.join("retained-current-state.json");
+    std::fs::rename(&path, &retained).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let refused = fixture.command_public(&["context"], THREAD_B);
+    assert!(
+        !refused.status.success(),
+        "unpublished Register must remain a failure"
+    );
+    let text = String::from_utf8_lossy(&refused.stderr);
+    assert!(text.contains("CURRENT_STATE_WRITE_FAILED"), "{text}");
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let attempted = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["current"]["binding"]["session_id"] == THREAD_B)
+        .unwrap();
+    let worker = &attempted["current"]["binding"]["agent_id"];
+    let who = fixture.run_public(&["who"], THREAD_A);
+    assert!(!who["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| &row["id"] == worker));
+    let inbox = fixture.run_public(&["inbox"], THREAD_A);
+    assert!(!inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["subject"] == "peer-registered"));
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(retained, path).unwrap();
+}
+
+#[test]
 fn minimal_workflow_change_notifies_only_affected_peers_and_reset() {
     let fixture = relationship_fixture();
     fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
@@ -298,9 +390,7 @@ fn named_reviewer_accepts_a_delivered_task_without_being_owner_or_master() {
     details["invitation"] = Value::Null;
     // Existing saved task input isolates reviewer admission from the new
     // policy writer, so a failure identifies the original authorization gap.
-    fixture.append_name_events(&[
-        json!({"ev":"BoardDetailsChanged","task_id":"named-review","details":details}),
-    ]);
+    fixture.update_current_state(|state| state["board_details"]["named-review"] = details);
     let accepted = fixture.run_public(
         &[
             "task",
@@ -316,7 +406,7 @@ fn named_reviewer_accepts_a_delivered_task_without_being_owner_or_master() {
 }
 
 #[test]
-fn roles_registration_master_update_clear_and_replay_are_public() {
+fn roles_registration_master_update_clear_and_current_state_restart_are_public() {
     let mut fixture = setup_roles();
     let before = fixture.run_public(&["board", "show"], THREAD_A);
     assert_eq!(
@@ -357,11 +447,23 @@ fn roles_registration_master_update_clear_and_replay_are_public() {
         ],
         THREAD_A,
     );
-    let journal = fixture.name_journal();
+    let state_path = fixture.project_state_for(&fixture.project, "appserver-cli");
     fixture.run_public(&["reset", "--project"], THREAD_A);
-    let retained = std::fs::read_to_string(journal).unwrap_or_default();
-    assert!(!retained.contains("NameWorkRolesUpdated"));
-    assert!(!retained.contains("ProjectWorkPolicyUpdated"));
+    match std::fs::read(state_path) {
+        Ok(bytes) => {
+            let retained: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(retained["state"]["name_work_roles"]
+                .as_object()
+                .unwrap()
+                .is_empty());
+            assert!(retained["state"]["project_work_policy"]
+                .as_object()
+                .unwrap()
+                .is_empty());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read reset current state: {error}"),
+    }
     assert!(
         fixture.host_state.join("server.sock").exists(),
         "project reset preserves the host daemon"

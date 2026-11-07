@@ -10,7 +10,7 @@ pub struct MailboxNameAddress {
     pub name: String,
 }
 
-/// Immutable handoff history. Native acceptance is historical delivery evidence,
+/// Current mailbox mutation input. Native acceptance is delivery evidence,
 /// not a receive receipt. The baseline grants one wake to the new execution carrier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxHandoff {
@@ -33,9 +33,9 @@ pub(crate) fn handoff_events(
     project: &str,
     next: &NameOccupancy,
     rename_from: &[String],
+    previous: Option<&NameOccupancy>,
 ) -> Vec<Event> {
-    let previous = state.name_occupancy(project, &next.name);
-    if previous.is_some_and(|previous| {
+    if rename_from.is_empty() && previous.is_some_and(|previous| {
         previous.worker_id == next.worker_id && previous.session_id == next.session_id
     }) {
         return Vec::new();
@@ -53,10 +53,13 @@ pub(crate) fn handoff_events(
                             && (address.name == next.name
                                 || rename_from.iter().any(|name| name == &address.name))
                     }
-                    // Old journals cannot recover historical names. Only the
-                    // current previous holder is a valid legacy selector.
+                    // Worker-addressed mail follows only a known current holder.
                     None => previous.is_some_and(|holder| message.to == holder.worker_id),
                 }
+                && !(previous.is_none()
+                    && message.to == next.worker_id
+                    && !state.mailbox_name_addresses.get(&message.id).is_some_and(|address|
+                        address.name != next.name && rename_from.contains(&address.name)))
         })
         .collect();
     messages.sort_by(|a, b| a.id.cmp(&b.id));
@@ -92,20 +95,12 @@ pub(crate) fn handoff_events(
 
 impl State {
     pub(crate) fn apply_mailbox_handoff(&mut self, handoff: &MailboxHandoff) {
-        if self.mailbox_handoffs.iter().any(|existing| {
-            existing.project_scope == handoff.project_scope
-                && existing.name == handoff.name
-                && existing.occupancy_revision == handoff.occupancy_revision
-                && existing.message_id == handoff.message_id
-        }) {
-            return;
-        }
-        self.mailbox_handoffs.push(handoff.clone());
         if let Some(message) = self.msgs.get_mut(&handoff.message_id) {
             if message.to == handoff.previous_recipient
                 && matches!(message.state.as_str(), "pending" | "delivered")
             {
                 message.to = handoff.recipient.clone();
+                self.mailbox_handoff_wakes.insert(message.id.clone(), message.wake_attempt_count);
                 self.wake_bindings.insert(
                     message.id.clone(),
                     super::mailbox::default_direct_message_id(&handoff.recipient),
@@ -125,14 +120,6 @@ impl State {
 
     pub(crate) fn handoff_wake_pending(&self, message: &Message) -> bool {
         matches!(message.state.as_str(), "pending" | "delivered")
-            && self
-                .mailbox_handoffs
-                .iter()
-                .rev()
-                .find(|handoff| handoff.message_id == message.id)
-                .is_some_and(|handoff| {
-                    handoff.recipient == message.to
-                        && handoff.wake_attempt_count == message.wake_attempt_count
-                })
+            && self.mailbox_handoff_wakes.get(&message.id) == Some(&message.wake_attempt_count)
     }
 }

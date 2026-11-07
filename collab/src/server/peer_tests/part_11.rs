@@ -5,7 +5,7 @@ fn capture_and_probe_errors_do_not_change_persisted_pane_identity() {
     let tmux = IsolatedTmux::start_single(&root);
     assert!(register_tmux(&server, "pane-owner", tmux.endpoints().remove(0)).ok);
     let server = Arc::new(server);
-    assert!(approve_promotion(&server, "pane-owner").ok);
+    promote_master(&server, "pane-owner", "user approval");
     let worker = server.state.lock().unwrap().workers["pane-owner"].clone();
     let binding = registered_binding(&server, "pane-owner");
     let grant = dispatch(&server, Req::MasterStatus).data["master"].clone();
@@ -114,15 +114,7 @@ fn recreated_tmux_pane_preserves_identity_without_fabricating_online_recovery() 
     };
     let endpoint_live = probe_evidence();
     let server_arc = std::sync::Arc::new(server);
-    let promote_resp = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "master-worker".into(),
-            token: "token-master-worker".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promote_resp.ok);
+    promote_master(&server_arc, "master-worker", "approved");
     let grant = dispatch(&server_arc, Req::MasterStatus).data["master"].clone();
 
     let offline = dispatch(
@@ -273,15 +265,7 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
     register(&server, "master-worker", "thread-master");
     register(&server, "edge-worker", "thread-stale");
     let server_arc = std::sync::Arc::new(server);
-    let promote_resp = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "master-worker".into(),
-            token: "token-master-worker".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promote_resp.ok);
+    promote_master(&server_arc, "master-worker", "approved");
     let stale_worker = server_arc.state.lock().unwrap().workers["edge-worker"].clone();
     kill_registered_worker_pane(&server_arc, "edge-worker");
     assert!(register(&server_arc, "edge-worker", "thread-stale").ok);
@@ -330,15 +314,7 @@ fn presence_edge_skips_a_tmux_only_peer() {
     assert!(register_tmux(&server, "master-worker", endpoints[0].clone()).ok);
     assert!(register_tmux(&server, "edge-worker", endpoints[1].clone()).ok);
     let mut server_arc = std::sync::Arc::new(server);
-    let promote_resp = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "master-worker".into(),
-            token: "token-master-worker".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promote_resp.ok, "{promote_resp:?}");
+    promote_master(&server_arc, "master-worker", "approved");
 
     let status = dispatch(
         &server_arc,
@@ -427,16 +403,7 @@ fn status_all_aggregates_workers_tasks_subagents_and_summary() {
     let (server, root) = test_server();
     let server_arc = Arc::new(server);
 
-    // Register a worker
-    server_arc.commit(&[Event::Registered {
-        worker: WorkerRec {
-            id: "worker-1".into(),
-            token: "tok-1".into(),
-            cwd: root.display().to_string(),
-            registered_ms: 1000,
-            transport: Some(test_appserver_transport("thread-worker-1")),
-        },
-    }]);
+    register_appserver_worker(&server_arc, &root, "worker-1", "thread-worker-1");
 
     // Create a task
     server_arc.commit(&[Event::TaskCreated {
@@ -723,7 +690,6 @@ fn context_returns_the_callers_binding_when_the_root_holds_several_app_scopes() 
         crate::identity::AgentId::new("agent-other-scope").unwrap(),
         RuntimeId::new("runtime-other-scope").unwrap(),
         BindingId::new("binding-other-scope").unwrap(),
-        1,
         Some(SessionId::new("session-other-scope").unwrap()),
         Some(crate::identity::NativeThreadId::new("thread-other-scope").unwrap()),
     )
@@ -775,15 +741,7 @@ fn context_records_tmux_offline_but_never_fabricates_online_recovery() {
     register(&server, "cold-worker", "thread-cold");
     kill_registered_worker_pane(&server, "cold-worker");
     let server_arc = std::sync::Arc::new(server);
-    let promoted = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "master-worker".into(),
-            token: "token-master-worker".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promoted.ok, "{promoted:?}");
+    promote_master(&server_arc, "master-worker", "approved");
 
     // The first read only establishes the offline baseline; it must not notify.
     let baseline = handle_context(
@@ -832,121 +790,6 @@ fn context_records_tmux_offline_but_never_fabricates_online_recovery() {
     std::fs::remove_dir_all(root).ok();
 }
 
-fn approve_promotion(server: &Arc<Server>, worker_id: &str) -> Resp {
-    dispatch(
-        server,
-        Req::MasterPromote {
-            worker_id: worker_id.into(),
-            token: format!("token-{worker_id}"),
-            approval: "user approval".into(),
-        },
-    )
-}
-
-/// A pane has one owner, so the later registrant on the recorded master's pane
-/// closes the master and retires its binding. The owner's explicit approval
-/// must still be able to name the new authority, otherwise the project is left
-/// with no authority at all.
-#[test]
-fn user_approved_promotion_replaces_a_master_after_its_pane_is_taken() {
-    let (server, root) = test_server();
-    let tmux = IsolatedTmux::start_single(&root);
-    let server = Arc::new(server);
-
-    let mut endpoint = tmux.endpoints().remove(0);
-    endpoint.codex_session_id = Some("session-old-master".into());
-    endpoint.codex_thread_id = Some("thread-old-master".into());
-    assert!(register_tmux(&server, "old-master", endpoint.clone()).ok);
-    let master_binding = registered_binding(&server, "old-master");
-    server
-        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-            binding: master_binding,
-        }])
-        .unwrap();
-    assert!(approve_promotion(&server, "old-master").ok);
-    assert_eq!(
-        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
-        "old-master"
-    );
-
-    // A later Codex thread takes the same pane. The pane shell keeps its pid,
-    // so the recorded master still probes present.
-    let mut taker = endpoint.clone();
-    taker.codex_session_id = Some("session-taker".into());
-    taker.codex_thread_id = Some("thread-taker".into());
-    assert!(register_tmux(&server, "taker", taker).ok);
-    let taker_binding = registered_binding(&server, "taker");
-    server
-        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-            binding: taker_binding,
-        }])
-        .unwrap();
-
-    // The later registrant owns the pane, so the recorded master is closed and
-    // its authority is gone. The pane never makes a retired claimant live.
-    assert_ne!(
-        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
-        "old-master"
-    );
-    assert!(!server
-        .state
-        .lock()
-        .unwrap()
-        .workers
-        .contains_key("old-master"));
-
-    let promoted = approve_promotion(&server, "taker");
-    assert!(!promoted.ok, "{promoted:?}");
-    assert_eq!(promoted.data["outcome"], "pending");
-    confirm_test_jenny_takeover(&server, "taker");
-    assert_eq!(
-        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
-        "taker"
-    );
-    drop(tmux);
-    std::fs::remove_dir_all(root).ok();
-}
-
-/// Replacing occupied Jenny needs confirmation in addition to role approval.
-#[test]
-fn user_approved_promotion_replaces_a_master_that_owns_its_anchor() {
-    let (server, root) = test_server();
-    let tmux = IsolatedTmux::start_single(&root);
-    let server = Arc::new(server);
-
-    let mut endpoint = tmux.endpoints().remove(0);
-    endpoint.codex_session_id = Some("session-master".into());
-    endpoint.codex_thread_id = Some("thread-master".into());
-    assert!(register_tmux(&server, "master", endpoint.clone()).ok);
-    let master_binding = registered_binding(&server, "master");
-    server
-        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-            binding: master_binding,
-        }])
-        .unwrap();
-    assert!(approve_promotion(&server, "master").ok);
-
-    let mut other = tmux.add_session();
-    other.codex_session_id = Some("session-other".into());
-    other.codex_thread_id = Some("thread-other".into());
-    assert!(register_tmux(&server, "other", other).ok);
-
-    let promoted = approve_promotion(&server, "other");
-    assert!(!promoted.ok, "{promoted:?}");
-    assert_eq!(promoted.data["outcome"], "pending");
-    assert_eq!(
-        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
-        "master"
-    );
-    confirm_test_jenny_takeover(&server, "other");
-    assert_eq!(
-        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
-        "other"
-    );
-    drop(tmux);
-    std::fs::remove_dir_all(root).ok();
-}
-
 /// Seed a legacy pending task (owner equals creator, no worktree) so the
 /// dispatch gate can observe the unaccepted `pending` status directly.
 fn seed_pending_task(server: &Server, id: &str, owner: &str, created_by: &str) {
@@ -978,7 +821,7 @@ fn seed_pending_task(server: &Server, id: &str, owner: &str, created_by: &str) {
 fn force_close_pending_task_clears_accept_gate_through_dispatch() {
     let (server, root) = test_server();
     assert!(register_synthetic_peer(&server, "owner", "thread-pending-owner").ok);
-    assert!(register_synthetic_peer(&server, "master", "thread-pending-master").ok);
+    assert!(register(&server, "master", "thread-pending-master").ok);
     promote_master(&server, "master", "user approved pending force close test");
     seed_pending_task(&server, "legacy-pending", "owner", "owner");
     let server = Arc::new(server);
@@ -1025,8 +868,8 @@ fn force_close_pending_task_clears_accept_gate_through_dispatch() {
         "closed"
     );
 
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     drop(server);
-    let replayed = replay(&root).unwrap();
     assert_eq!(replayed.tasks["legacy-pending"].status, "closed");
     std::fs::remove_dir_all(root).ok();
 }

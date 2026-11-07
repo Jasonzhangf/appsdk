@@ -425,32 +425,6 @@ esac
     }
 }
 
-fn board_journal_path(fixture: &AppFixture) -> PathBuf {
-    let project = std::fs::canonicalize(&fixture.project).unwrap();
-    let record = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .find(|row| row["project_scope"] == project.to_string_lossy().as_ref())
-        .expect("project route record");
-    PathBuf::from(record["storage_root"].as_str().unwrap())
-        .join(".agent-collab/server/journal.jsonl")
-}
-
-fn append_board_events(fixture: &mut AppFixture, events: &[Value]) {
-    fixture.stop_daemon();
-    let journal = board_journal_path(fixture);
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&journal)
-        .expect("open project journal");
-    for event in events {
-        writeln!(file, "{}", serde_json::to_string(event).unwrap()).unwrap();
-    }
-    file.sync_all().unwrap();
-    fixture.start_daemon();
-}
-
 #[test]
 fn unclosed_task_with_retired_owner_is_visible_without_an_assignee() {
     let (mut fixture, master, peer) = setup();
@@ -467,41 +441,57 @@ fn unclosed_task_with_retired_owner_is_visible_without_an_assignee() {
     );
     assert_eq!(claimed["task"]["owner"], peer);
     fixture.stop_daemon();
-    let project = std::fs::canonicalize(&fixture.project).unwrap();
-    let record = std::fs::read_to_string(fixture.host_state.join("routes.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .find(|row| row["project_scope"] == project.to_string_lossy().as_ref())
-        .unwrap();
-    let journal = PathBuf::from(record["storage_root"].as_str().unwrap())
-        .join(".agent-collab/server/journal.jsonl");
     // Start the read-only consumer from a retained task whose owner has
     // already retired. Retirement admission itself is not under test here.
-    let retired = json!({"ev": "WorkerClosed", "worker_id": peer,
-        "closed_by": master, "reason": "owned fixture retired identity",
-        "snapshot_captured_ms": null, "at_ms": 1});
-    use std::io::Write;
-    writeln!(
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&journal)
-            .unwrap(),
-        "{retired}"
-    )
-    .unwrap();
-    let task_records = |path: &std::path::Path| -> Vec<Value> {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|row| {
-                row["task"]["id"] == "orphaned-open-task" || row["task_id"] == "orphaned-open-task"
-            })
-            .collect()
-    };
-    let before = task_records(&journal);
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let slot = map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| slot["current"]["binding"]["agent_id"] == peer)
+        .unwrap();
+    slot["previous"] = slot["current"].take();
+    slot["identity_status"] = json!("unregistered");
+    slot["generation"] = json!(slot["generation"].as_u64().unwrap() + 1);
+    std::fs::write(map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+    let path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    document["state"]["workers"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&peer)
+        .unwrap();
+    document["state"]["keepalives"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&peer);
+    std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+    let before = fixture.current_state();
     fixture.start_daemon();
+    // The timer owns unavailable-name reflow. Let that current episode settle
+    // before measuring whether the Board reader changes the assignment.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let assignment = loop {
+        let assignment = fixture.current_state()["task_assignments"]["orphaned-open-task"].clone();
+        if matches!(
+            assignment["reflow"]["delivery"].as_str(),
+            Some("delivered" | "failed")
+        ) {
+            break assignment;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retired-owner reflow did not settle: {assignment}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    for field in ["task_id", "name", "session_id"] {
+        assert_eq!(
+            assignment[field],
+            before["task_assignments"]["orphaned-open-task"][field]
+        );
+    }
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let task = board["tasks"]
         .as_array()
@@ -514,10 +504,16 @@ fn unclosed_task_with_retired_owner_is_visible_without_an_assignee() {
     assert_eq!(task["publisher"], master);
     assert_eq!(task["status"], "working");
     assert_eq!(task["revision"], claimed["task"]["revision"]);
+    let after = fixture.current_state();
+    for field in ["tasks", "board_details"] {
+        assert_eq!(
+            after[field]["orphaned-open-task"], before[field]["orphaned-open-task"],
+            "board must preserve the current {field} record"
+        );
+    }
     assert_eq!(
-        task_records(&journal),
-        before,
-        "board must preserve task ownership and history"
+        after["task_assignments"]["orphaned-open-task"], assignment,
+        "Board read must preserve the settled current assignment"
     );
 }
 
@@ -624,29 +620,25 @@ fn display_name_defaults_follow_current_master_without_renaming_identity() {
 fn restore_online_master(fixture: &mut AppFixture, thread: &str) -> Value {
     // Presence is the precondition under test. A responsive Fake AppServer
     // alone is not a committed name-presence observation.
-    let journal = std::fs::read_to_string(board_journal_path(fixture)).unwrap();
-    let holder = journal
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|event| {
-            event["ev"] == "NameResolutionCommitted" && event["occupancy"]["name"] == "Jenny"
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let holder = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Jenny" && slot["identity_status"] == "active")
+        .unwrap();
+    let project = holder["identity_key"]["project_scope"].as_str().unwrap();
+    let binding = &holder["current"]["binding"];
+    let worker = binding["agent_id"].as_str().unwrap();
+    fixture.update_current_state(|state| {
+        state["agent_presence"][project][worker] = json!({
+            "project_scope":project, "worker_id":worker, "session_id":binding["session_id"],
+            "presence":"online", "reason":"controlled current name-holder presence", "observed_ms":1
         })
-        .last()
-        .expect("current Jenny name occupancy");
-    append_board_events(
-        fixture,
-        &[json!({"ev":"AgentPresenceObserved", "presence":{
-            "project_scope":holder["project_scope"], "worker_id":holder["occupancy"]["worker_id"],
-            "session_id":holder["occupancy"]["session_id"], "presence":"online",
-            "reason":"controlled current name-holder presence", "observed_ms":1
-        }})],
-    );
-    let unconfirmed = fixture.command_public(&["context", "--approve-grant",
-        r#"{"action":"restore_master","authorization":"isolated fixture requests replacement"}"#], thread);
-    assert!(
-        !unconfirmed.status.success(),
-        "online replacement needs this request's second confirmation"
-    );
+    });
     fixture.run_public(&["context", "--approve-grant",
         r#"{"action":"restore_master","authorization":"isolated fixture confirms online replacement","replace_confirmed":true}"#], thread)
 }
@@ -1385,11 +1377,13 @@ fn resource_reassignment_consumer(status: &str) {
         .unwrap()
         .to_string_lossy()
         .into_owned();
+    let named = fixture.run_public(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Carol","authorization":"fixture names the real reassignment recipient"}"#], THREAD_C);
+    assert_eq!(named["name"], "Carol");
+    assert_eq!(named["identity"]["worker_id"], carol);
     let worktree = "/tmp/collab-t5-reassign-worktree";
-    let events = vec![
-        json!({
-            "ev": "TaskUpdated",
-            "task": {
+    fixture.update_current_state(|state| {
+        state["tasks"]["reassign-work"] = json!({
                 "id": "reassign-work",
                 "owner": peer,
                 "created_by": master,
@@ -1403,99 +1397,54 @@ fn resource_reassignment_consumer(status: &str) {
                 "wait": null,
                 "created_ms": 1,
                 "updated_ms": 1000
-            }
-        }),
-        json!({
-            "ev": "TaskLifecycleUpdated",
-            "task_id": "reassign-work",
-            "record": {
+        });
+        state["task_lifecycle"]["reassign-work"] = json!({
                 "delivery_evidence": "cargo test --test board green",
                 "delivered_ms": 900,
                 "delivery_commit": "candidate-reassign",
                 "review_evidence": "independent review pass",
                 "reviewer": master,
                 "reviewed_ms": 950
-            }
-        }),
-        json!({
-            "ev": "WorktreeBound",
-            "binding": {
+        });
+        state["worktree_bindings"]["binding-reassign-work"] = json!({
                 "worktree_root": worktree,
                 "owning_project_scope": project_scope,
                 "task_id": "reassign-work",
                 "owner_agent_id": peer,
                 "binding_id": "binding-reassign-work",
                 "base_commit": "base-reassign"
-            }
-        }),
-        json!({
-            "ev": "MergeRequested",
-            "request": {
+        });
+        state["pending_merges"]["reassign-work"] = json!({
                 "task_id": "reassign-work",
                 "owner": peer,
                 "requested_by": master,
                 "requested_ms": 950,
                 "candidate_commit": "candidate-reassign"
-            }
-        }),
-        json!({
-            "ev": "NameResolutionCommitted",
-            "project_scope": project_scope,
-            "occupancy": {
-                "name": "Bob",
-                "worker_id": peer,
-                "session_id": THREAD_B,
-                "occupancy_revision": 1,
-                "updated_ms": 1000
-            },
-            "assignments": []
-        }),
-        json!({
-            "ev": "TaskAssignmentUpdated",
-            "assignment": {
+        });
+        state["task_assignments"]["reassign-work"] = json!({
                 "task_id": "reassign-work",
                 "name": "Bob",
                 "session_id": THREAD_B,
                 "assignment_revision": 1,
                 "updated_ms": 1000
-            }
-        }),
-        json!({
-            "ev": "NameResolutionCommitted",
-            "project_scope": project_scope,
-            "occupancy": {
-                "name": "Carol",
-                "worker_id": carol,
-                "session_id": THREAD_C,
-                "occupancy_revision": 1,
-                "updated_ms": 1000
-            },
-            "assignments": []
-        }),
-        json!({
-            "ev": "AgentPresenceObserved",
-            "presence": {
+        });
+        state["agent_presence"][&project_scope][&peer] = json!({
                 "project_scope": project_scope,
                 "worker_id": peer,
                 "session_id": THREAD_B,
                 "presence": "offline",
                 "reason": "fixture: agent exited",
                 "observed_ms": 1001
-            }
-        }),
-        json!({
-            "ev": "AgentPresenceObserved",
-            "presence": {
+        });
+        state["agent_presence"][&project_scope][&carol] = json!({
                 "project_scope": project_scope,
                 "worker_id": carol,
                 "session_id": THREAD_C,
                 "presence": "online",
                 "reason": "fixture: current session observed",
                 "observed_ms": 1001
-            }
-        }),
-    ];
-    append_board_events(&mut fixture, &events);
+        });
+    });
 
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let task = board["tasks"]
@@ -1725,15 +1674,13 @@ fn closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata() 
             ],
             THREAD_A,
         );
-        append_board_events(
-            &mut fixture,
-            &[json!({"ev": "TaskUpdated", "task": {
-                "id": "closed-offer", "owner": master, "created_by": master,
-                "feature_id": null, "worktree_path": null, "branch": null, "base_commit": null,
-                "priority": "p1", "status": status, "next_step": "historical", "wait": null,
-                "created_ms": 1, "updated_ms": 2
-            }})],
-        );
+        fixture.update_current_state(|state| {
+            state["tasks"]["closed-offer"]["status"] = json!(status);
+            state["tasks"]["closed-offer"]["next_step"] = json!("historical");
+            state["tasks"]["closed-offer"]["updated_ms"] = json!(2);
+            state["board_details"]["closed-offer"]["revision"] =
+                json!(invited["task"]["revision"].as_u64().unwrap() + 1);
+        });
         let board = fixture.run_public(&["board", "show"], THREAD_A);
         assert!(
             !board["tasks"]
@@ -1746,7 +1693,7 @@ fn closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata() 
         let historical = fixture.run_public(&["task", "status", "closed-offer"], THREAD_A);
         assert_eq!(historical["status"], status);
         assert_eq!(historical["owner"], master);
-        // The isolated TaskUpdated event above advances the invitation's revision once.
+        // The stopped current-state fixture advances the invitation revision once.
         let revision = (invited["task"]["revision"].as_u64().unwrap() + 1).to_string();
         let response = fixture.command_public(
             &[

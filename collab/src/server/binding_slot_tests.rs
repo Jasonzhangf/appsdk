@@ -12,6 +12,11 @@ fn key(name: &str) -> IdentityBindingKey {
 }
 
 fn key_in(project: &str, name: &str) -> IdentityBindingKey {
+    let name = match name {
+        "alice" => "Alice",
+        "bob" => "Bob",
+        name => name,
+    };
     IdentityBindingKey::new(
         ProjectScopeId::new(project).unwrap(),
         AppServerId::new("appserver-cli").unwrap(),
@@ -20,22 +25,6 @@ fn key_in(project: &str, name: &str) -> IdentityBindingKey {
 }
 
 fn value(key: &IdentityBindingKey, agent: &str, runtime: &str, endpoint: &str) -> BindingValue {
-    let generation = match runtime {
-        "runtime-a" => 1,
-        "runtime-b" => 2,
-        "runtime-c" => 3,
-        _ => 1,
-    };
-    value_at_generation(key, agent, runtime, endpoint, generation)
-}
-
-fn value_at_generation(
-    key: &IdentityBindingKey,
-    agent: &str,
-    runtime: &str,
-    endpoint: &str,
-    generation: u64,
-) -> BindingValue {
     let session_id = SessionId::new(format!("{runtime}-session")).unwrap();
     let native_thread_id = NativeThreadId::new(format!("{runtime}-thread")).unwrap();
     let binding = RuntimeBinding::new_with_session(
@@ -44,7 +33,6 @@ fn value_at_generation(
         AgentId::new(agent).unwrap(),
         RuntimeId::new(runtime).unwrap(),
         BindingId::new(format!("binding-{runtime}")).unwrap(),
-        generation,
         Some(session_id.clone()),
         Some(native_thread_id.clone()),
     )
@@ -81,12 +69,57 @@ fn first_binding_becomes_current_without_previous() {
 
     assert_eq!(slot.identity_status(), IdentityStatus::Active);
     assert_eq!(slot.generation(), 1);
-    assert_eq!(
-        slot.active_binding().unwrap().binding.endpoint_generation,
-        1
-    );
     assert!(slot.reference_previous().is_none());
     slot.validate().unwrap();
+}
+
+#[test]
+fn current_lookup_rejects_two_matching_names_without_mutation_or_cross_scope_match() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(&alice, value(&alice, "carrier", "shared", "endpoint"), None)
+        .unwrap();
+    let facts = crate::proto::IdentityFacts {
+        session_id: Some("shared-session".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        control
+            .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        alice,
+    );
+    control
+        .commit(&bob, value(&bob, "carrier", "shared", "endpoint"), None)
+        .unwrap();
+    let before = serde_json::to_value(&control).unwrap();
+    let error = control
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .unwrap_err();
+    assert!(error.starts_with("IDENTITY_MAP_AMBIGUOUS:"), "{error}");
+    assert_eq!(serde_json::to_value(&control).unwrap(), before);
+    assert!(control
+        .lookup(
+            &ProjectScopeId::new("/tmp/unrelated-project").unwrap(),
+            &alice.app_scope_id,
+            &facts,
+            None,
+        )
+        .unwrap()
+        .is_none());
+    assert!(control
+        .lookup(
+            &alice.project_scope,
+            &AppServerId::new("other-app").unwrap(),
+            &facts,
+            None,
+        )
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -134,17 +167,12 @@ fn repeated_binding_fact_does_not_roll_or_advance_generation() {
     let mut repeated = value(&key, "alice", "runtime-a", "endpoint-a");
     repeated.transport.capabilities = vec!["changed".to_owned()];
     repeated.transport.self_check = "changed self check".to_owned();
-    repeated.binding.endpoint_generation = 99;
 
     assert_eq!(
         slot.commit(&key, repeated, Some(1)).unwrap(),
         CommitOutcome::Unchanged { generation: 1 }
     );
     assert_eq!(slot.generation(), 1);
-    assert_eq!(
-        slot.active_binding().unwrap().binding.endpoint_generation,
-        1
-    );
     assert!(slot.reference_previous().is_none());
     slot.validate().unwrap();
 }
@@ -188,18 +216,18 @@ fn stable_name_keeps_one_slot_across_session_derived_agents() {
 }
 
 #[test]
-fn new_session_can_start_its_own_endpoint_generation_at_one() {
+fn new_session_replaces_the_current_carrier_without_an_endpoint_counter() {
     let key = key("alice");
     let mut slot = IdentityBindingSlot::new(key.clone());
     slot.commit(
         &key,
-        value_at_generation(&key, "carrier-s1", "runtime-a", "endpoint-a", 1),
+        value(&key, "carrier-s1", "runtime-a", "endpoint-a"),
         Some(0),
     )
     .unwrap();
     slot.commit(
         &key,
-        value_at_generation(&key, "carrier-s2", "runtime-b", "endpoint-b", 1),
+        value(&key, "carrier-s2", "runtime-b", "endpoint-b"),
         Some(1),
     )
     .unwrap();
@@ -332,7 +360,7 @@ fn rebuild_keeps_the_registration_before_close_as_previous() {
     slot.unregister(Some(1)).unwrap();
     slot.commit(
         &key,
-        value_at_generation(&key, "carrier-s2", "runtime-b", "endpoint-b", 3),
+        value(&key, "carrier-s2", "runtime-b", "endpoint-b"),
         Some(2),
     )
     .unwrap();
@@ -368,7 +396,7 @@ fn rebuild_new_carrier_after_retirement_keeps_last_binding() {
     assert_eq!(
         slot.commit(
             &key,
-            value_at_generation(&key, "carrier-s2", "runtime-b", "endpoint-b", 1),
+            value(&key, "carrier-s2", "runtime-b", "endpoint-b"),
             Some(2)
         )
         .unwrap(),
@@ -537,7 +565,7 @@ fn move_name_retires_the_source_slot_and_keeps_the_displaced_holder_as_previous(
         .move_name(
             &alice,
             value(&alice, "bob-s2", "runtime-c", "endpoint-c"),
-            &["bob".to_owned()],
+            &[bob.name.clone()],
             Some(1),
         )
         .unwrap();
@@ -596,7 +624,7 @@ fn move_name_does_not_retire_the_target_when_source_equals_target() {
         .move_name(
             &alice,
             value(&alice, "alice-s2", "runtime-b", "endpoint-b"),
-            &["alice".to_owned()],
+            &[alice.name.clone()],
             Some(1),
         )
         .unwrap();

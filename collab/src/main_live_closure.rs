@@ -605,11 +605,6 @@ pub(crate) fn live_closure_probe(
     let workers: serde_json::Value = call_project(scope, &ident, &Req::Workers)?;
     let master: serde_json::Value = call_project(scope, &ident, &Req::MasterStatus)?;
     let daemon_producer = live_closure_daemon_producer_path(&path);
-    let endpoint_generation = ident
-        .runtime
-        .as_ref()
-        .map(|runtime| runtime.endpoint_generation)
-        .unwrap_or_default();
     let first_failure = |code: &str, detail: &str| {
         out(&json!({
             "status": "failed",
@@ -618,7 +613,6 @@ pub(crate) fn live_closure_probe(
             "path": path,
             "first_failure": {"code": code, "detail": detail},
             "identity": ident.worker_id.clone(),
-            "endpoint_generation": endpoint_generation,
         }));
     };
     if daemon_producer && to_project.is_some() {
@@ -760,7 +754,7 @@ pub(crate) fn live_closure_probe(
         anyhow::bail!("COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH");
     }
     let challenge = format!(
-        "appsdk-collab-live:{closure_id}:{path}:{source_commit}:{artifact_hash}:{environment_id}:{endpoint_generation}"
+        "appsdk-collab-live:{closure_id}:{path}:{source_commit}:{artifact_hash}:{environment_id}"
     );
     let timeout = live_closure_timeout()?;
     let response: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
@@ -916,7 +910,6 @@ pub(crate) fn live_closure_probe(
             "status": "pending_daemon_restart",
             "reason": "the challenge was produced by the resident daemon and observed by the target, but no daemon restart/replay occurred in this probe"
         })),
-        "endpoint_generation": endpoint_generation,
         "receipt": receipt,
         "source": "collab daemon route + collab recv durable consumption receipt"
     }));

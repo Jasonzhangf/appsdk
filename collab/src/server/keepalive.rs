@@ -406,18 +406,35 @@ fn board_patrol_pass_at(server: &Server, now: i64) {
 }
 
 fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now: i64) {
+    if let Err(error) = board_patrol_worker_checked(server, worker, now) {
+        super::presence::append_log(
+            &server.log_path(),
+            &format!("BOARD_PATROL_IDENTITY_FAILED: {}: {error}", worker.id),
+        );
+    }
+}
+
+fn board_patrol_worker_checked(
+    server: &Server,
+    worker: &super::state::WorkerRec,
+    now: i64,
+) -> Result<(), String> {
     use super::name_state::AgentActivity;
     use crate::board_patrol_policy::{evaluate_board_patrol, PatrolDecision, PatrolTriggerMode};
 
     let candidate = {
         let state = server.state.lock().unwrap();
         if state.admission_frozen() {
-            return;
+            return Ok(());
         }
-        board_patrol_candidate(&state, worker, now)
+        let control =
+            super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()?;
+        let route = super::server_route_scope(server, &state)?;
+        board_patrol_candidate(&state, &control, route.as_ref(), worker, now)?
     };
     let Some(candidate) = candidate else {
-        return;
+        return Ok(());
     };
     let activity = match current_board_patrol_activity(server, worker) {
         Ok(activity) => activity,
@@ -432,23 +449,34 @@ fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now
 
     let mut state = server.state.lock().unwrap();
     if state.admission_frozen() || state.workers.get(&worker.id) != Some(worker) {
-        return;
+        return Ok(());
     }
-    if super::state::board_patrol_current_owner_key(&state, &worker.id).as_deref()
+    let control =
+        super::binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
+    let route = super::server_route_scope(server, &state)?;
+    if super::state::board_patrol_current_owner_key(&state, &control, route.as_ref(), &worker.id)?
+        .as_deref()
         != Some(candidate.owner_key.as_str())
     {
-        return;
+        return Ok(());
     }
-    if super::state::board_patrol_eligible_task_ids(&state, &worker.id).as_deref()
+    if super::state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), &worker.id)?
+        .as_deref()
         != Some(candidate.eligible.as_slice())
     {
-        return;
+        return Ok(());
     }
     if state.board_patrol_gates.get(&worker.id) != candidate.gate.as_ref() {
-        return;
+        return Ok(());
     }
-    if board_patrol_name_address(&state, worker, &candidate.owner_key) != candidate.address {
-        return;
+    let address = route
+        .as_ref()
+        .map(|route| super::name_mailbox::MailboxNameAddress {
+            project_scope: route.project_scope_id.as_str().into(),
+            name: candidate.owner_key.clone(),
+        });
+    if address != candidate.address {
+        return Ok(());
     }
     // Board patrol owns its own trusted episode, tracked on the gate. A fresh
     // idle poll seeds the start; a continuous idle poll extends it; a
@@ -508,11 +536,11 @@ fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now
                 gate,
                 now,
             ) else {
-                return;
+                return Ok(());
             };
-            if server.commit_locked_checked(&mut state, &events).is_err() {
-                return;
-            }
+            server
+                .commit_locked_checked(&mut state, &events)
+                .map_err(|error| error.to_string())?;
             drop(state);
             let _ = super::attempt_notification_detailed_with_at(
                 server,
@@ -522,6 +550,7 @@ fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now
             );
         }
     }
+    Ok(())
 }
 
 fn board_patrol_wake_events(
@@ -585,60 +614,42 @@ struct BoardPatrolCandidate {
 
 fn board_patrol_candidate(
     state: &State,
+    control: &super::binding_slot::BindingControlSet,
+    route: Option<&crate::scope::RouteScope>,
     worker: &super::state::WorkerRec,
     now: i64,
-) -> Option<BoardPatrolCandidate> {
-    worker.transport.as_ref()?;
-    let owner_key = super::state::board_patrol_current_owner_key(state, &worker.id)?;
-    let eligible = super::state::board_patrol_eligible_task_ids(state, &worker.id)?;
+) -> Result<Option<BoardPatrolCandidate>, String> {
+    if worker.transport.is_none() {
+        return Ok(None);
+    }
+    let Some(owner_key) =
+        super::state::board_patrol_current_owner_key(state, control, route, &worker.id)?
+    else {
+        return Ok(None);
+    };
+    let Some(eligible) =
+        super::state::board_patrol_eligible_task_ids(state, control, route, &worker.id)?
+    else {
+        return Ok(None);
+    };
     if eligible.is_empty() {
-        return None;
+        return Ok(None);
     }
     let gate = state.board_patrol_gates.get(&worker.id).cloned();
     // The periodic window alone decides whether a fresh activity read is
     // worth doing. The trusted idle duration is evaluated after that read.
     if gate.as_ref().is_some_and(|gate| now < gate.next_due_ms) {
-        return None;
+        return Ok(None);
     }
-    Some(BoardPatrolCandidate {
-        address: board_patrol_name_address(state, worker, &owner_key),
+    Ok(Some(BoardPatrolCandidate {
+        address: route.map(|route| super::name_mailbox::MailboxNameAddress {
+            project_scope: route.project_scope_id.as_str().into(),
+            name: owner_key.clone(),
+        }),
         owner_key,
         eligible,
         gate,
-    })
-}
-
-fn board_patrol_name_address(
-    state: &State,
-    worker: &super::state::WorkerRec,
-    owner_key: &str,
-) -> Option<super::name_mailbox::MailboxNameAddress> {
-    let session_id = worker.transport.as_ref()?.session_id.as_deref();
-    let holder_matches = |holder: &super::name_state::NameOccupancy| {
-        holder.name == owner_key
-            && holder.worker_id == worker.id
-            && session_id.is_none_or(|session| session == holder.session_id)
-    };
-    if let Some(holder) = state.name_occupancy(&worker.cwd, owner_key) {
-        if holder_matches(holder) {
-            return Some(super::name_mailbox::MailboxNameAddress {
-                project_scope: worker.cwd.clone(),
-                name: owner_key.to_owned(),
-            });
-        }
-    }
-    state
-        .name_occupancies
-        .iter()
-        .find_map(|(project_scope, names)| {
-            names
-                .get(owner_key)
-                .filter(|holder| holder_matches(holder))
-                .map(|_| super::name_mailbox::MailboxNameAddress {
-                    project_scope: project_scope.clone(),
-                    name: owner_key.to_owned(),
-                })
-        })
+    }))
 }
 
 fn board_patrol_subscription(
@@ -951,7 +962,6 @@ mod tests {
             runtime: Some("codex".into()),
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         }
     }
 
@@ -1104,16 +1114,8 @@ mod tests {
         use super::super::peer_tests::register_synthetic_peer;
         let (server, root) = test_server();
         register_synthetic_peer(&server, "worker", "thread-worker");
-        register_synthetic_peer(&server, "master", "thread-master");
-        assert!(
-            super::super::handle_master_promote(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "user approved master".into()
-            )
-            .ok
-        );
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
         server
             .state
             .lock()
@@ -1239,16 +1241,8 @@ mod tests {
         use super::super::peer_tests::register_synthetic_peer;
         let (server, root) = test_server();
         register_synthetic_peer(&server, "worker", "thread-worker");
-        register_synthetic_peer(&server, "master", "thread-master");
-        assert!(
-            super::super::handle_master_promote(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "user approved master".into()
-            )
-            .ok
-        );
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
         server
             .state
             .lock()
@@ -1318,15 +1312,7 @@ mod tests {
         let (server, root) = test_server();
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
-        assert!(
-            super::super::handle_master_promote(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "user approved master".into(),
-            )
-            .ok
-        );
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
         let now = super::super::state::now_ms();
         server.commit(&[
             Event::SubagentUpdated {
@@ -1356,15 +1342,7 @@ mod tests {
         let (server, root) = test_server();
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
-        assert!(
-            super::super::handle_master_promote(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "user approved master".into(),
-            )
-            .ok
-        );
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
         let now = super::super::state::now_ms();
         server.commit(&[Event::SubagentUpdated {
             subagent: managed("managed", "master", "child", "idle", now),
@@ -1381,15 +1359,7 @@ mod tests {
         let (server, root) = test_server();
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
-        assert!(
-            super::super::handle_master_promote(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "user approved master".into(),
-            )
-            .ok
-        );
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
         let now = super::super::state::now_ms();
         server.commit(&[
             Event::SubagentUpdated {
@@ -1475,7 +1445,6 @@ mod tests {
                 runtime: Some("codex".into()),
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         });
 
@@ -1488,15 +1457,7 @@ mod tests {
         let (server, root) = test_server();
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
-        assert!(
-            super::super::handle_master_promote(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "user approved master".into(),
-            )
-            .ok
-        );
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
         let now = super::super::state::now_ms();
         server.commit(&[
             Event::SubagentUpdated {
@@ -1588,15 +1549,7 @@ mod tests {
         let (server, root) = test_server();
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
-        assert!(
-            super::super::handle_master_promote(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "user approved master".into(),
-            )
-            .ok
-        );
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
         let now = super::super::state::now_ms();
         server.commit(&[
             Event::MergeRequested {
@@ -1930,6 +1883,34 @@ mod tests {
         worker: &super::super::state::WorkerRec,
         name: &str,
     ) {
+        let store =
+            super::super::binding_store::BindingControlStore::new(server.host_paths.state_root());
+        let control = store.load().unwrap();
+        let value = control
+            .active_values()
+            .find(|value| value.binding.agent_id.as_str() == worker.id)
+            .unwrap()
+            .clone();
+        let source = control
+            .key_for_worker(
+                &value.binding.project_scope,
+                &value.binding.app_scope_id,
+                &worker.id,
+            )
+            .unwrap()
+            .unwrap();
+        store
+            .commit(super::super::binding_store::ControlChange::MoveName {
+                target: super::super::binding_slot::IdentityBindingKey::new(
+                    value.binding.project_scope.clone(),
+                    value.binding.app_scope_id.clone(),
+                    name,
+                ),
+                value,
+                source_names: vec![source.name.clone()],
+                expected_generation: None,
+            })
+            .unwrap();
         let project_scope = super::super::global_state::GlobalState::canonical_project_scope(
             std::path::Path::new(&worker.cwd),
         )
@@ -2363,7 +2344,17 @@ mod tests {
         install_appserver_statuses(&mut server, vec![("thread-alice".into(), "idle".into())]);
         let now = super::super::state::now_ms();
         let (message_id, subscription_id, events) = {
+            let control = super::super::binding_store::BindingControlStore::new(
+                server.host_paths.state_root(),
+            )
+            .load()
+            .unwrap();
             let state = server.state.lock().unwrap();
+            let route = super::super::server_route_scope(&server, &state).unwrap();
+            let candidate =
+                super::board_patrol_candidate(&state, &control, route.as_ref(), &worker, now)
+                    .unwrap()
+                    .expect("current map carrier has an eligible task");
             let gate = crate::board_patrol_policy::PeerBoardPatrolGate {
                 owner_key: "Alice".into(),
                 last_wake_ms: now,
@@ -2373,38 +2364,25 @@ mod tests {
                 idle_episode_start_ms: Some(now),
                 last_poll_idle: true,
             };
-            let address = super::board_patrol_name_address(&state, &worker, "Alice");
             super::board_patrol_wake_events(
                 &state,
                 &worker,
-                address.as_ref(),
-                &["T1".to_owned()],
+                candidate.address.as_ref(),
+                &candidate.eligible,
                 gate,
                 now,
             )
             .expect("default direct-message lease exists")
         };
-        let kinds: Vec<String> = events
-            .iter()
-            .map(|event| {
-                serde_json::to_value(event).unwrap()["ev"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
-            })
-            .collect();
-        assert_eq!(
-            kinds,
-            [
-                "BoardPatrolGateUpdated",
-                "DeliveryMode",
-                "BoardPatrolNoticeBound",
-                "Sent",
-                "MailboxNameAddressed",
-                "WakeBound",
-            ]
-        );
         server.commit(&events);
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.msgs[&message_id].to, worker.id);
+            assert_eq!(state.mailbox_name_addresses[&message_id].name, "Alice");
+            assert_eq!(state.wake_bindings[&message_id], subscription_id);
+            assert!(state.board_patrol_notice_ids.contains(&message_id));
+            assert!(state.board_patrol_gates.contains_key(&worker.id));
+        }
         server.commit(&[Event::BoardPatrolCancelled {
             record: crate::board_patrol_policy::TaskPatrolCancelRecord {
                 task_id: "T1".into(),
@@ -2439,25 +2417,25 @@ mod tests {
         let old = seed_board_patrol_owner(&server, "old", "thread-old");
         let current = seed_board_patrol_owner(&server, "current", "thread-current");
         occupy_board_patrol_name(&server, &current, "Alice");
-        let current_name_occupancies: Vec<_> = {
-            let state = server.state.lock().unwrap();
-            state
-                .name_occupancies
-                .values()
-                .flat_map(|names| names.values())
-                .filter(|occupancy| occupancy.worker_id == current.id)
-                .cloned()
-                .collect()
-        };
+        let control =
+            super::super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .unwrap();
+        let scope =
+            super::super::global_state::GlobalState::canonical_project_scope(&server.root).unwrap();
+        let app = crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
         assert_eq!(
-            current_name_occupancies.len(),
-            1,
-            "fixture invariant: current worker must hold exactly one name across alias scopes, got {current_name_occupancies:?}"
+            control
+                .current_for_name(&scope, &app, "Alice")
+                .unwrap()
+                .unwrap()
+                .active_binding()
+                .unwrap()
+                .binding
+                .agent_id
+                .as_str(),
+            "current"
         );
-        {
-            let mut state = server.state.lock().unwrap();
-            state.worker_names.insert("old".into(), "Alice".into());
-        }
         add_board_patrol_task(
             &server,
             "T1",
@@ -2488,7 +2466,15 @@ mod tests {
         );
         tick_at(&server, super::super::state::now_ms());
         let state = server.state.lock().unwrap();
-        assert!(super::super::state::board_patrol_current_owner_key(&state, "old").is_none());
+        let route = super::super::server_route_scope(&server, &state).unwrap();
+        assert!(super::super::state::board_patrol_current_owner_key(
+            &state,
+            &control,
+            route.as_ref(),
+            "old"
+        )
+        .unwrap()
+        .is_none());
         assert_eq!(state.board_patrol_notice_ids.len(), 1);
         let message_id = state.board_patrol_notice_ids.iter().next().unwrap();
         assert_eq!(state.msgs[message_id].to, "current");

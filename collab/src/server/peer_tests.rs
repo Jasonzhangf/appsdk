@@ -1,6 +1,5 @@
 use super::*;
 use crate::identity::{runtime_from_registration_receipt, BindingId, RuntimeId, SessionId};
-use crate::server::notification_contract::JournalError;
 use crate::server::state::{default_priority, is_goal_deadline, TaskRec};
 use serde_json::Value;
 use std::cell::RefCell;

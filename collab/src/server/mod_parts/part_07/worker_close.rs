@@ -115,9 +115,8 @@ fn handle_worker_close(
 
     let now = now_ms();
     let operation_id = format!(
-        "close-{}-{}-{}",
+        "close-{}-{}",
         sanitize_identifier(&binding.binding_id.as_str()),
-        binding.endpoint_generation,
         sanitize_identifier(&worker_id)
     );
     let fence = Event::ResponsibilityFenceSet {
@@ -127,7 +126,6 @@ fn handle_worker_close(
             project_scope: binding.project_scope.as_str().to_owned(),
             app_scope: binding.app_scope_id.as_str().to_owned(),
             binding_id: binding.binding_id.as_str().to_owned(),
-            endpoint_generation: binding.endpoint_generation,
             snapshot: state::responsibility_snapshot(&state, &target_id),
             state: "closing".into(),
             created_ms: now,
@@ -143,7 +141,9 @@ fn handle_worker_close(
     // The fence is durable before the close record. The record itself is a
     // safe target-owned retirement while the fence stays active for a later
     // lifecycle owner that must prove host terminal and exact readback.
-    if let Err(error) = server.commit_locked(&mut state, &[fence, close_event]) {
+    let retirement = crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .retire_binding(&binding);
+    if let Err(error) = retirement.and_then(|()| server.commit_locked(&mut state, &[fence, close_event]).map_err(|error| error.to_string())) {
         drop(state);
         return Resp::err(format!("WORKER_CLOSE_DURABILITY_FAILED: {error}"));
     }

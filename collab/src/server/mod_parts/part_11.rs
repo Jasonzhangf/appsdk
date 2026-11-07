@@ -18,9 +18,9 @@ fn dispatch_with_route_context_bound(
         &mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>,
     >,
 ) -> Resp {
-    if mutation_blocked_during_migration(&req) && server.state.lock().unwrap().admission_frozen() {
+    if mutation_blocked_during_project_reset(&req) && server.state.lock().unwrap().admission_frozen() {
         return Resp::err(
-            "MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed",
+            "PROJECT_RESET_PENDING: this scope is completing an already committed project reset",
         );
     }
     let unaccepted_resource_task = match &req {
@@ -48,13 +48,13 @@ fn dispatch_with_route_context_bound(
         .as_ref()
         .map(|context| context.app_scope_id.clone());
     match req {
-        Req::UnregisterSelf { worker_id, token } => peer_lifecycle::unregister_self(server, project_context.as_ref(), &worker_id, &token),
+        Req::MasterPromote { .. } | Req::MasterClear { .. } | Req::MasterDelegate { .. } =>
+            Resp::err("MASTER_CHANGE_HOST_REQUIRED: role changes belong to ProjectRuntimeManager"),
+        Req::UnregisterSelf { .. } => Resp::err("SELF_REMOVAL_HOST_REQUIRED"),
         Req::ProjectReset { .. } => Resp::err("PROJECT_RESET_HOST_REQUIRED"),
-        Req::RegisterReply { .. } => Resp::err("REGISTER_REPLY_HOST_REQUIRED"),
-        Req::PeerLifecycle { request } => peer_lifecycle::handle(server, project_context.as_ref(), request),
+        Req::PeerLifecycle { request } => peer_lifecycle::handle(server, project_context.as_ref(), request, None),
         Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
         Req::BoardShow => handle_board_show(server, None),
-        Req::WorkerName { worker_id, token, name } => handle_worker_name(server, worker_id, token, name),
         Req::WorkRolesSet { worker_id, token, name, roles } => handle_work_roles(server, worker_id, token, name, roles),
         Req::WorkflowTemplateSet {
             worker_id,
@@ -406,7 +406,7 @@ fn dispatch_with_route_context_bound(
             Resp::data(json!({"unread": items.len(), "messages": items}))
         }
         Req::Context { worker_id, token } => handle_context(server, worker_id, token),
-        Req::RouteResolve { .. } | Req::RouteResolvePaneRecovery { .. } | Req::RouteResolveNative { .. } => {
+        Req::RouteResolve { .. } | Req::RouteResolveNative { .. } => {
             Resp::err("RouteResolve/RouteResolveNative are only handled by the host daemon connection path")
         }
         Req::MsgStatus { msg_id } => {
@@ -573,31 +573,6 @@ fn dispatch_with_route_context_bound(
             feature_id,
             worktree_path,
         } => task_conflicts(server, feature_id, worktree_path),
-        Req::MigrationInspect { worker_id, token } => {
-            handle_migration_inspect(server, worker_id, token)
-        }
-        Req::MigrationPlan { worker_id, token } => handle_migration_plan(server, worker_id, token),
-        Req::MigrationApply { worker_id, token } => {
-            handle_migration_apply(server, worker_id, token)
-        }
-        Req::MigrationVerify { worker_id, token } => {
-            handle_migration_verify(server, worker_id, token)
-        }
-        Req::MasterPromote {
-            worker_id,
-            token,
-            approval,
-        } => handle_master_promote(server, worker_id, token, approval),
-        Req::MasterClear {
-            worker_id,
-            token,
-            approval,
-        } => handle_master_clear(server, worker_id, token, approval),
-        Req::MasterDelegate {
-            worker_id,
-            token,
-            target_id,
-        } => handle_master_delegate(server, worker_id, token, target_id),
         Req::MasterWakeHold {
             worker_id,
             token,
@@ -635,14 +610,18 @@ fn dispatch_with_route_context_bound(
             conversation,
         } => handle_default_show(server, channel, channel_instance, conversation),
         Req::Workers => {
+            let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control, Err(error) => return Resp::err(error),
+            };
             record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| (worker_id.clone(), role_brief(server, &st, worker_id)))
-                    .collect::<std::collections::HashMap<_, _>>();
+                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
+                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -651,11 +630,12 @@ fn dispatch_with_route_context_bound(
                     role_briefs,
                 )
             };
-            let mut workers: Vec<serde_json::Value> = workers_rec
+            let workers = workers_rec
                 .iter()
                 .map(|w| {
                     worker_status_summary_with_maps(
                         server,
+                        &control,
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
@@ -663,7 +643,8 @@ fn dispatch_with_route_context_bound(
                         w,
                     )
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>();
+            let mut workers = match workers { Ok(workers) => workers, Err(error) => return Resp::err(error) };
             workers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
             Resp::data(json!({
                 "workers": workers,
@@ -677,14 +658,18 @@ fn dispatch_with_route_context_bound(
             reason,
         } => handle_worker_close(server, worker_id, token, target_id, reason),
         Req::WorkerStatus { worker_id } => {
+            let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control, Err(error) => return Resp::err(error),
+            };
             record_ordinary_peer_presence_edges(server, worker_id.as_deref());
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| (worker_id.clone(), role_brief(server, &st, worker_id)))
-                    .collect::<std::collections::HashMap<_, _>>();
+                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
+                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -693,12 +678,13 @@ fn dispatch_with_route_context_bound(
                     role_briefs,
                 )
             };
-            let mut workers: Vec<serde_json::Value> = workers_rec
+            let workers = workers_rec
                 .iter()
                 .filter(|w| worker_id.as_ref().is_none_or(|id| id == &w.id))
                 .map(|w| {
                     worker_status_summary_with_maps(
                         server,
+                        &control,
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
@@ -706,7 +692,8 @@ fn dispatch_with_route_context_bound(
                         w,
                     )
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>();
+            let mut workers = match workers { Ok(workers) => workers, Err(error) => return Resp::err(error) };
             workers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
             Resp::data(json!({
                 "workers": workers,
@@ -730,14 +717,8 @@ fn dispatch_with_route_context_bound(
             token: _,
             target_id: _,
         } => Resp::err("master transfer is deprecated; authority is task-scoped"),
-        Req::RemoveWorker {
-            worker_id: _,
-            token: _,
-            target_id: _,
-            force: _,
-        } => Resp::err("remove-worker is deprecated; use task-owner cleanup and migration verify"),
         Req::ResetBindings { confirm: _ } => Resp::err(
-            "binding reset is deprecated; preserve journal/mailbox and use migration rebind",
+            "binding reset is deprecated; preserve current work/messages and use collab context",
         ),
         Req::Shutdown { password } => handle_user_shutdown(server, password.as_ref()),
         Req::Ping => {
@@ -751,6 +732,9 @@ fn dispatch_with_route_context_bound(
             }))
         }
         Req::StatusAll => {
+            let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control, Err(error) => return Resp::err(error),
+            };
             record_ordinary_peer_presence_edges(server, None);
             let (
                 workers_rec,
@@ -770,8 +754,9 @@ fn dispatch_with_route_context_bound(
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| (worker_id.clone(), role_brief(server, &st, worker_id)))
-                    .collect::<std::collections::HashMap<_, _>>();
+                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
+                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
                 let mut tasks: Vec<serde_json::Value> =
                     st.tasks.values().map(|task| task_view(&st, task)).collect();
                 tasks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -795,11 +780,12 @@ fn dispatch_with_route_context_bound(
                     role_briefs,
                 )
             };
-            let mut workers: Vec<serde_json::Value> = workers_rec
+            let workers = workers_rec
                 .iter()
                 .map(|w| {
                     worker_status_summary_with_maps(
                         server,
+                        &control,
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
@@ -807,7 +793,8 @@ fn dispatch_with_route_context_bound(
                         w,
                     )
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>();
+            let mut workers = match workers { Ok(workers) => workers, Err(error) => return Resp::err(error) };
             workers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
 
             Resp::data(json!({
@@ -845,13 +832,6 @@ fn dispatch_with_route_context_bound(
                 })
                 .cloned()
                 .collect();
-            let recipient_messages = worker_id.as_deref().map(|recipient| {
-                st.msgs
-                    .values()
-                    .filter(|message| message.to == recipient)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
             let sort_order = sort.as_deref().unwrap_or("time-asc");
             if sort_order == "time-desc" {
                 msgs.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
@@ -860,60 +840,11 @@ fn dispatch_with_route_context_bound(
             }
             let count = msgs.len();
             drop(st);
-            let projection = worker_id.as_deref().and_then(|recipient| {
-                let path = server
-                    .storage_root
-                    .join(".agent-collab/mailbox")
-                    .join(format!("recipient-{recipient}.jsonl"));
-                match read_recipient_mailbox(&path, recipient) {
-                    Ok(read) => {
-                        let missing = missing_recipient_projection_messages(
-                            recipient_messages.as_deref().unwrap_or_default(),
-                            recipient,
-                            &read,
-                        );
-                        let status = if read.partial_tail {
-                            "partial-tail"
-                        } else if !read.recoverable_errors.is_empty() {
-                            "recoverable-error"
-                        } else if missing.is_empty() {
-                            "ok"
-                        } else {
-                            "incomplete"
-                        };
-                        let mut exact_errors = read.recoverable_errors.clone();
-                        if !missing.is_empty() {
-                            exact_errors.push(format!(
-                                "recipient JSONL is missing message records: {}",
-                                missing.join(",")
-                            ));
-                        }
-                        let exact_error =
-                            (!exact_errors.is_empty()).then(|| exact_errors.join(" | "));
-                        Some(json!({
-                            "status": status,
-                            "partial_tail": read.partial_tail,
-                            "recoverable_errors": read.recoverable_errors,
-                            "missing_message_ids": missing,
-                            "exact_error": exact_error,
-                            "records": read.records,
-                        }))
-                    }
-                    Err(error) => Some(json!({
-                        "status": "error",
-                        "exact_error": error,
-                        "records": [],
-                    })),
-                }
-            });
-            let mut response = json!({
+            let response = json!({
                 "count": count,
                 "sort": sort_order,
                 "messages": msgs,
             });
-            if let Some(projection) = projection {
-                response["recipient_jsonl"] = projection;
-            }
             Resp::data(response)
         }
     }
@@ -989,7 +920,6 @@ fn msg_status_caller(state: &State, context: &ProjectContext) -> Result<WorkerRe
         agent_id: binding.agent_id.clone(),
         runtime_id: binding.runtime_id.clone(),
         appserver_id: binding.app_scope_id.clone(),
-        endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id.clone(),
         session_id: binding.session_id.clone(),
         native_thread_id: binding.native_thread_id.clone(),
@@ -1101,7 +1031,6 @@ fn request_requires_project_context(req: &Req) -> bool {
         Req::Ping
             | Req::DirectoryAll
             | Req::RouteResolve { .. }
-            | Req::RouteResolvePaneRecovery { .. }
             | Req::RouteResolveNative { .. }
     )
 }
@@ -1116,7 +1045,6 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         Req::PeerLifecycle { request: crate::proto::PeerLifecycleRequest::Read { worker_id, .. } | crate::proto::PeerLifecycleRequest::Update { worker_id, .. } | crate::proto::PeerLifecycleRequest::Close { worker_id, .. } } => Ok(vec![WireRoutePrincipal::Authenticated { worker_id }]),
         Req::Ceo { worker_id, .. }
         | Req::Board { worker_id, .. }
-        | Req::WorkerName { worker_id, .. }
         | Req::WorkRolesSet { worker_id, .. }
         | Req::WorkflowTemplateSet { worker_id, .. }
         | Req::Subagent { worker_id, .. }
@@ -1143,18 +1071,13 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::TaskClose { worker_id, .. }
         | Req::TaskFinalizeCleanup { worker_id, .. }
         | Req::TaskDispatch { worker_id, .. }
-        | Req::MigrationInspect { worker_id, .. }
-        | Req::MigrationPlan { worker_id, .. }
-        | Req::MigrationApply { worker_id, .. }
-        | Req::MigrationVerify { worker_id, .. }
         | Req::MasterPromote { worker_id, .. }
         | Req::MasterClear { worker_id, .. }
         | Req::MasterDelegate { worker_id, .. }
         | Req::WorkerClose { worker_id, .. }
         | Req::WorkerSnapshot { worker_id, .. }
         | Req::MasterRecover { worker_id, .. }
-        | Req::TransferMaster { worker_id, .. }
-        | Req::RemoveWorker { worker_id, .. } => {
+        | Req::TransferMaster { worker_id, .. } => {
             Ok(vec![WireRoutePrincipal::Authenticated { worker_id }])
         }
         Req::Send {
@@ -1279,7 +1202,7 @@ fn validate_wire_route_principals(
 /// project reducer sees it. Registration is host-wide: an initialized project
 /// may register its exact canonical root with the resident daemon even when it
 /// is not the daemon's startup project. Operations for that route remain
-/// explicitly not-ready until a project reducer/journal owner is available.
+/// explicitly not-ready until a current project-state owner is available.
 /// Shutdown is authenticated only when a maintenance password is configured.
 ///
 /// `None` means no password is set, so a shutdown request is accepted without
@@ -1321,15 +1244,6 @@ pub(crate) fn validate_request_context(
     server: &Server,
     req: &Req,
     project_context: Option<&ProjectContext>,
-) -> Result<(), String> {
-    validate_request_context_with_register_approval(server, req, project_context, None)
-}
-
-pub(crate) fn validate_request_context_with_register_approval(
-    server: &Server,
-    req: &Req,
-    project_context: Option<&ProjectContext>,
-    register_approval: Option<&RegisterApprovalProof>,
 ) -> Result<(), String> {
     if let Req::Shutdown { password } = req {
         match crate::config::maintenance_password_opt() {
@@ -1384,7 +1298,7 @@ pub(crate) fn validate_request_context_with_register_approval(
                 validate_project_registration_cwd(cwd, root)?;
             } else {
                 return Err(format!(
-                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: project route {} is registered but has no migrated reducer/journal owner",
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: project route {} is registered but has no current state owner",
                     root.display()
                 ));
             }
@@ -1425,7 +1339,7 @@ pub(crate) fn validate_request_context_with_register_approval(
         );
     }
     validate_wire_route_principals(server, req, &route_scope)?;
-    validate_wire_runtime_binding(server, req, project_context, register_approval)
+    validate_wire_runtime_binding(server, req, project_context)
 }
 
 /// Validate the explicit project-registration boundary. The marker is the

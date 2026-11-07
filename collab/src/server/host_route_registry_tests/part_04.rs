@@ -34,15 +34,15 @@
     }
 
     #[tokio::test]
-    async fn not_ready_route_does_not_mutate_state_or_primary_journal() {
-        let (server, root, journal_path) = test_server();
+    async fn not_ready_route_does_not_mutate_current_state() {
+        let (server, root, state_path) = test_server();
         let other_root = root.with_file_name(format!(
             "{}-other",
             root.file_name().unwrap().to_string_lossy()
         ));
         std::fs::create_dir_all(&other_root).unwrap();
         register_known_project(&server, &other_root);
-        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_state = std::fs::read(&state_path).unwrap();
         let before_revision = server.state.lock().unwrap().revision;
         let response =
             dispatch_wire(server.clone(), Some(context(&other_root)), Req::StatusAll).await;
@@ -51,7 +51,7 @@
             .error
             .unwrap()
             .starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:"));
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before_state);
         assert_eq!(server.state.lock().unwrap().revision, before_revision);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(other_root).unwrap();
@@ -59,18 +59,12 @@
 
     #[tokio::test]
     async fn cross_project_wire_request_is_rejected_without_resident_mutation() {
-        let (server, root, journal_path) = test_server();
+        let (server, root, state_path) = test_server();
         let project_context = context_with_app(&root, "app-wire");
         let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
-        commit_host_route_fixture(&manager, &server, "target-master", "token-target-master",
+        let master_binding = commit_host_route_fixture(&manager, &server, "target-master", "token-target-master",
             project_context.app_scope_id.as_str(), committed_tmux_endpoint(&root, "thread-target-master"));
-        let promoted = handle_master_promote(
-            &server,
-            "target-master".into(),
-            "token-target-master".into(),
-            "user approved target-master".into(),
-        );
-        assert!(promoted.ok, "{promoted:?}");
+        grant_master_fixture(&server, &master_binding);
 
         let mailbox_dir = root.join(".agent-collab/mailbox");
         std::fs::create_dir_all(&mailbox_dir).unwrap();
@@ -91,7 +85,7 @@
             entries
         };
         let before_mailbox = mailbox_snapshot(&mailbox_dir);
-        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_state_file = std::fs::read(&state_path).unwrap();
         let message_snapshot = |messages: &std::collections::HashMap<String, Message>| {
             let mut entries = messages
                 .iter()
@@ -144,11 +138,10 @@
         assert_eq!(state.wake_bindings, before_state.4);
         assert_eq!(state.global, before_state.5);
         drop(state);
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before_state_file);
         assert_eq!(mailbox_snapshot(&mailbox_dir), before_mailbox);
         std::fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn repeated_registry_builds_do_not_duplicate_or_replace_route_owner() {
         let (server, root, _) = test_server();
@@ -200,27 +193,21 @@
     }
 
     #[test]
-    fn persisted_resident_route_replays_and_admits_register() {
+    fn persisted_resident_route_loads_and_admits_register() {
         let (mut server, root, _) = test_server();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let canonical_root = root.canonicalize().unwrap();
         let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
             app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
             project_scope: canonical_root.to_string_lossy().into_owned(),
             canonical_root: canonical_root.to_string_lossy().into_owned(),
             storage_root: canonical_root.to_string_lossy().into_owned(),
             registered_ms: 1,
         };
-        std::fs::write(
-            &route_journal,
-            format!("{}\n", serde_json::to_string(&record).unwrap()),
-        )
-        .unwrap();
+        binding_store::publish_route_records(&route_file, &[record]).unwrap().require_confirmed_route().unwrap();
 
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let registration = server
@@ -263,7 +250,7 @@
         let (mut server, host_root, _) = test_server();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let app_scope = "resident-app";
         let context = context_with_app(&host_root, app_scope);
@@ -278,7 +265,7 @@
         assert!(registered.ok, "{registered:?}");
         assert!(Arc::ptr_eq(&resident_runtime, &server));
         let storage_root = resident_runtime.storage_root.clone();
-        let records = load_host_route_records(&route_journal).unwrap();
+        let records = load_host_route_records(&route_file).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].app_scope_id, app_scope);
         assert_eq!(
@@ -329,17 +316,16 @@
     }
 
     #[test]
-    fn resident_route_publish_failure_does_not_leave_a_replayable_route() {
+    fn resident_route_publish_failure_does_not_leave_a_loadable_route() {
         let (mut server, root, _) = test_server();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
-        let reducer_journal = root.join(".agent-collab/server/journal.jsonl");
-        let reducer_journal_before = std::fs::read(&reducer_journal).unwrap();
+        let route_file = host_paths.state_root().join("routes.json");
+        let state_before_file = std::fs::read(&server.state_path).unwrap();
         let mut manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
-        let route_journal_blocker = root.join("route-journal-blocker");
-        std::fs::create_dir_all(&route_journal_blocker).unwrap();
-        Arc::get_mut(&mut manager).unwrap().route_journal = route_journal_blocker;
+        let route_blocker = root.join("route-publication-blocker");
+        std::fs::create_dir_all(&route_blocker).unwrap();
+        Arc::get_mut(&mut manager).unwrap().route_file = route_blocker;
         let state_before = {
             let state = server.state.lock().unwrap();
             (
@@ -367,13 +353,13 @@
             "{failed:?}"
         );
         assert!(
-            !route_journal.exists(),
-            "failed publish wrote a route journal"
+            !route_file.exists(),
+            "failed publish installed a current route"
         );
         assert_eq!(
-            std::fs::read(&reducer_journal).unwrap(),
-            reducer_journal_before,
-            "failed route publication mutated the reducer journal"
+            std::fs::read(&server.state_path).unwrap(),
+            state_before_file,
+            "failed route publication mutated the current business state"
         );
         {
             let state = server.state.lock().unwrap();
@@ -400,15 +386,13 @@
     }
 
     #[test]
-    fn malformed_resident_route_storage_is_rejected_during_replay() {
+    fn malformed_resident_route_storage_is_rejected_during_load() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let canonical_root = root.canonicalize().unwrap();
         let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
             app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
             project_scope: canonical_root.to_string_lossy().into_owned(),
             canonical_root: canonical_root.to_string_lossy().into_owned(),
@@ -417,11 +401,7 @@
                 .into_owned(),
             registered_ms: 1,
         };
-        std::fs::write(
-            &route_journal,
-            format!("{}\n", serde_json::to_string(&record).unwrap()),
-        )
-        .unwrap();
+        binding_store::publish_route_records(&route_file, &[record]).unwrap().require_confirmed_route().unwrap();
 
         let error = match ProjectRuntimeManager::new(server, &host_paths) {
             Ok(_) => panic!("malformed resident route was replayed"),
@@ -432,6 +412,29 @@
             "unexpected replay error: {error}"
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn central_namespace_initializes_only_before_it_is_declared() {
+        let (server, root, _) = test_server();
+        let paths = &server.host_paths;
+        let project = GlobalState::canonical_project_scope(&root).unwrap();
+        let key = ("current-namespace".into(), project.as_str().into());
+        let route_file = paths.state_root().join("routes.json");
+        let storage = select_central_runtime_storage(paths, &route_file, &key, None).unwrap();
+        let state_path = storage.join(".agent-collab/server/state.json");
+        assert!(current_state::load(&state_path, false).unwrap().workers.is_empty());
+        std::fs::remove_file(&state_path).unwrap();
+        binding_store::publish_route_records(&route_file, &[HostRouteRecord {
+            app_scope_id: key.0.clone(), project_scope: key.1.clone(), canonical_root: key.1,
+            storage_root: storage.display().to_string(), registered_ms: 1,
+        }]).unwrap().require_confirmed_route().unwrap();
+        let before = std::fs::read(&route_file).unwrap();
+        let error = select_central_runtime_storage(paths, &route_file, &(key.0, project.as_str().into()), None).unwrap_err();
+        assert!(error.starts_with("CURRENT_STATE_MIGRATION_REQUIRED:"), "{error}");
+        assert!(!state_path.exists());
+        assert_eq!(std::fs::read(&route_file).unwrap(), before);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -476,8 +479,8 @@
     }
 
     #[test]
-    fn legacy_multiple_app_routes_keep_one_resident_reducer() {
-        let (server, root, journal_path) = test_server();
+    fn multiple_app_routes_keep_one_resident_reducer() {
+        let (server, root, state_path) = test_server();
         register_known_project_with_app(&server, &root, "app-a");
         assert!(
             seed_published_registration_fixture(
@@ -493,11 +496,11 @@
         register_known_project_with_app(&server, &root, "app-b");
 
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
-        std::fs::write(&route_journal, b"").unwrap();
-        let before_route_journal = std::fs::read(&route_journal).unwrap();
-        let before_resident_journal = std::fs::read(&journal_path).unwrap();
+        binding_store::publish_route_records(&route_file, &[]).unwrap().require_confirmed_route().unwrap();
+        let before_routes = std::fs::read(&route_file).unwrap();
+        let before_state = std::fs::read(&state_path).unwrap();
 
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths)
             .expect("legacy resident and pending app routes must replay without a second reducer");
@@ -516,10 +519,10 @@
             .get(&("app-b".into(), project_scope))
             .expect("the secondary app route must remain explicit metadata");
         assert!(pending.runtime.is_none());
-        assert_eq!(std::fs::read(&route_journal).unwrap(), before_route_journal);
+        assert_eq!(std::fs::read(&route_file).unwrap(), before_routes);
         assert_eq!(
-            std::fs::read(&journal_path).unwrap(),
-            before_resident_journal
+            std::fs::read(&state_path).unwrap(),
+            before_state
         );
         assert!(!root.join(".agent-collab/server/runtimes").exists());
 
@@ -527,97 +530,25 @@
     }
 
     #[test]
-    fn missing_route_root_is_ignored_without_rewriting_route_journal() {
+    fn missing_route_root_is_pruned_from_current_routes() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let missing_root = root.join("missing-project");
         let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
             app_scope_id: "appserver-cli".into(),
             project_scope: missing_root.to_string_lossy().into_owned(),
             canonical_root: missing_root.to_string_lossy().into_owned(),
             storage_root: missing_root.to_string_lossy().into_owned(),
             registered_ms: 1,
         };
-        let contents = format!("{}\n", serde_json::to_string(&record).unwrap());
-        std::fs::write(&route_journal, &contents).unwrap();
+        binding_store::publish_route_records(&route_file, &[record]).unwrap().require_confirmed_route().unwrap();
 
         let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
 
         assert!(manager.routes.lock().unwrap().is_empty());
-        assert!(load_host_route_records(&route_journal).unwrap().is_empty());
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resident_route_replays_from_host_journal() {
-        let (server, root, _) = test_server();
-        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
-        std::fs::create_dir_all(host_paths.state_root()).unwrap();
-        let canonical_root = root.canonicalize().unwrap();
-        let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
-            app_scope_id: "appserver-cli".into(),
-            project_scope: canonical_root.to_string_lossy().into_owned(),
-            canonical_root: canonical_root.to_string_lossy().into_owned(),
-            storage_root: canonical_root.to_string_lossy().into_owned(),
-            registered_ms: 1,
-        };
-        std::fs::write(
-            &route_journal,
-            format!("{}\n", serde_json::to_string(&record).unwrap()),
-        )
-        .unwrap();
-
-        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
-        let routes = manager.routes.lock().unwrap();
-        let route = routes
-            .get(&(
-                "appserver-cli".into(),
-                canonical_root.to_string_lossy().into_owned(),
-            ))
-            .unwrap();
-        assert!(route
-            .runtime
-            .as_ref()
-            .is_some_and(|runtime| Arc::ptr_eq(runtime, &server)));
-        assert_eq!(route.storage_root, canonical_root);
-        assert_eq!(
-            std::fs::read_to_string(&route_journal).unwrap(),
-            format!("{}\n", serde_json::to_string(&record).unwrap())
-        );
-        assert_eq!(
-            server
-                .state
-                .lock()
-                .unwrap()
-                .global
-                .lookup_registration(
-                    &GlobalState::canonical_project_scope(&root).unwrap(),
-                    &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()
-                )
-                .map(|registration| registration.project_scope.as_str().to_owned()),
-            Some(canonical_root.to_string_lossy().into_owned())
-        );
-        assert_eq!(
-            server
-                .state
-                .lock()
-                .unwrap()
-                .global
-                .lookup_registration(
-                    &GlobalState::canonical_project_scope(&root).unwrap(),
-                    &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()
-                )
-                .map(|registration| registration.registered_at_ms),
-            Some(1)
-        );
+        assert!(load_host_route_records(&route_file).unwrap().is_empty());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -627,7 +558,7 @@
         let (mut server, root, _) = test_server();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         let registered = seed_committed_registration_fixture(
             &server,
             "resident-repair-worker".into(),
@@ -638,7 +569,7 @@
         );
         assert!(registered.ok, "{registered:?}");
         assert!(
-            !route_journal.exists(),
+            !route_file.exists(),
             "unfinalized registration unexpectedly published a route"
         );
 
@@ -656,7 +587,7 @@
             .unwrap();
 
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
-        let records = load_host_route_records(&route_journal).unwrap();
+        let records = load_host_route_records(&route_file).unwrap();
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0].registered_ms, registration.registered_at_ms);
         assert_eq!(
@@ -726,45 +657,41 @@
     fn resident_route_repair_failure_blocks_startup() {
         let (server, root, _) = test_server();
         register_known_project_with_app(&server, &root, crate::identity::CLI_APP_SERVER_ID);
-        let blocker = root.join("route-journal-state-root");
-        std::fs::create_dir_all(blocker.join("routes.jsonl")).unwrap();
+        let blocker = root.join("route-publication-state-root");
+        std::fs::create_dir_all(blocker.join("routes.json")).unwrap();
         let blocked_host_paths = HostPaths::for_state_root(blocker).unwrap();
 
         let error = match ProjectRuntimeManager::new(server, &blocked_host_paths) {
             Ok(_) => panic!("route repair failure must block daemon startup"),
             Err(error) => error,
         };
-        assert!(error.starts_with("HOST_ROUTE_REPLAY_FAILED:"), "{error}");
-        assert!(error.contains("route journal"), "{error}");
+        assert!(error.starts_with("HOST_ROUTE_READ_FAILED:"), "{error}");
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn uninitialized_route_root_is_ignored_without_rewriting_route_journal() {
+    fn uninitialized_route_root_is_pruned_from_current_routes() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let uninitialized_root = root.join("uninitialized-project");
         std::fs::create_dir_all(&uninitialized_root).unwrap();
         let canonical_root = uninitialized_root.canonicalize().unwrap();
         let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
             app_scope_id: "appserver-cli".into(),
             project_scope: canonical_root.to_string_lossy().into_owned(),
             canonical_root: canonical_root.to_string_lossy().into_owned(),
             storage_root: canonical_root.to_string_lossy().into_owned(),
             registered_ms: 1,
         };
-        let contents = format!("{}\n", serde_json::to_string(&record).unwrap());
-        std::fs::write(&route_journal, &contents).unwrap();
+        binding_store::publish_route_records(&route_file, &[record]).unwrap().require_confirmed_route().unwrap();
 
         let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
 
         assert!(manager.routes.lock().unwrap().is_empty());
-        assert!(load_host_route_records(&route_journal).unwrap().is_empty());
+        assert!(load_host_route_records(&route_file).unwrap().is_empty());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -780,8 +707,8 @@
         std::fs::create_dir_all(&real_parent).unwrap();
         symlink(&real_parent, &alias_parent).unwrap();
 
-        let real_future_path = real_parent.join("future").join("journal");
-        let aliased_future_path = alias_parent.join("future").join("journal");
+        let real_future_path = real_parent.join("future").join("state");
+        let aliased_future_path = alias_parent.join("future").join("state");
         assert_eq!(
             storage_owner_path(&real_future_path).unwrap(),
             storage_owner_path(&aliased_future_path).unwrap()
@@ -800,8 +727,8 @@
         let dangling_parent = root.join("dangling-parent");
         symlink(&missing_parent, &dangling_parent).unwrap();
 
-        let target_path = missing_parent.join("future").join("journal");
-        let dangling_path = dangling_parent.join("future").join("journal");
+        let target_path = missing_parent.join("future").join("state");
+        let dangling_path = dangling_parent.join("future").join("state");
         assert_eq!(
             storage_owner_path(&target_path).unwrap(),
             storage_owner_path(&dangling_path).unwrap()
@@ -812,7 +739,7 @@
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn runtime_storage_symlink_escape_rejects_register_before_journal_write() {
+    async fn runtime_storage_symlink_escape_rejects_register_before_state_write() {
         use std::os::unix::fs::symlink;
 
         let (server, host_root, _) = test_server();
@@ -845,8 +772,8 @@
         );
         std::fs::create_dir_all(escape_storage_root.parent().unwrap()).unwrap();
         symlink(&external_root, &escape_storage_root).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
-        let before_route_journal = std::fs::read(&route_journal).unwrap();
+        let route_file = host_paths.state_root().join("routes.json");
+        let before_routes = std::fs::read(&route_file).unwrap();
         let (_, escape_response) = register_host_fixture(&manager,
             Some(escape_context.clone()),
             Req::register("runtime-escape-worker".into(),
@@ -863,14 +790,14 @@
             }),
             "{escape_response:?}"
         );
-        assert_eq!(std::fs::read(&route_journal).unwrap(), before_route_journal);
+        assert_eq!(std::fs::read(&route_file).unwrap(), before_routes);
         assert!(!manager
             .routes
             .lock()
             .unwrap()
             .contains_key(&ProjectRuntimeManager::route_key(&escape_context)));
         assert!(!external_root
-            .join(".agent-collab/server/journal.jsonl")
+            .join(".agent-collab/server/state.json")
             .exists());
 
         let escape_key = (
@@ -887,7 +814,7 @@
             "{build_error}"
         );
         assert!(!external_root
-            .join(".agent-collab/server/journal.jsonl")
+            .join(".agent-collab/server/state.json")
             .exists());
 
         drop(manager);
@@ -898,7 +825,7 @@
 
     #[cfg(unix)]
     #[test]
-    fn runtime_storage_symlink_escape_rejects_replay_before_runtime_creation() {
+    fn runtime_storage_symlink_escape_rejects_current_route_load_before_runtime_creation() {
         use std::os::unix::fs::symlink;
 
         let (server, host_root, _) = test_server();
@@ -920,8 +847,6 @@
         std::fs::create_dir_all(storage_root.parent().unwrap()).unwrap();
         symlink(&external_root, &storage_root).unwrap();
         let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
             app_scope_id: "replay-escape".into(),
             project_scope: project_scope.as_str().into(),
             canonical_root: project_scope.as_str().into(),
@@ -929,12 +854,8 @@
             registered_ms: 1,
         };
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
-        std::fs::write(
-            &route_journal,
-            format!("{}\n", serde_json::to_string(&record).unwrap()),
-        )
-        .unwrap();
+        let route_file = host_paths.state_root().join("routes.json");
+        binding_store::publish_route_records(&route_file, &[record]).unwrap().require_confirmed_route().unwrap();
 
         let replay_error = match ProjectRuntimeManager::new(server, &host_paths) {
             Ok(_) => panic!("runtime storage symlink escape must fail during replay"),
@@ -946,7 +867,7 @@
             "{replay_error}"
         );
         assert!(!external_root
-            .join(".agent-collab/server/journal.jsonl")
+            .join(".agent-collab/server/state.json")
             .exists());
 
         std::fs::remove_dir_all(host_root).unwrap();
@@ -956,7 +877,7 @@
 
     #[cfg(unix)]
     #[test]
-    fn dangling_symlink_storage_owner_rejects_alias_route_before_journal_write() {
+    fn dangling_symlink_storage_owner_rejects_alias_route_before_publication() {
         use std::os::unix::fs::symlink;
 
         let (server, root, _) = test_server();
@@ -976,9 +897,9 @@
 
         let real_storage_root = real_parent.join("future");
         let aliased_storage_root = alias_parent.join("future");
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
-        std::fs::write(&route_journal, b"").unwrap();
+        binding_store::publish_route_records(&route_file, &[]).unwrap().require_confirmed_route().unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         manager.routes.lock().unwrap().insert(
             ("existing-app".into(), "/existing-project".into()),
@@ -990,7 +911,7 @@
         );
 
         let context = context_with_app(&root, "dangling-alias-app");
-        let before_route_journal = std::fs::read(&route_journal).unwrap();
+        let before_routes = std::fs::read(&route_file).unwrap();
         let error = manager
             .append_route_record(&context, &aliased_storage_root)
             .unwrap_err();
@@ -1001,9 +922,9 @@
             "{error}"
         );
         assert_eq!(
-            std::fs::read(&route_journal).unwrap(),
-            before_route_journal,
-            "an alias collision must be rejected before route journal publication"
+            std::fs::read(&route_file).unwrap(),
+            before_routes,
+            "an alias collision must be rejected before current route publication"
         );
         assert!(!manager.routes.lock().unwrap().contains_key(&(
             "dangling-alias-app".into(),
@@ -1039,10 +960,10 @@
             root.file_name().unwrap().to_string_lossy()
         ));
         std::fs::create_dir_all(external_root.join(".agent-collab/server")).unwrap();
-        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
-        std::fs::write(&route_journal, b"").unwrap();
-        let before_route_journal = std::fs::read(&route_journal).unwrap();
+        binding_store::publish_route_records(&route_file, &[]).unwrap().require_confirmed_route().unwrap();
+        let before_routes = std::fs::read(&route_file).unwrap();
 
         std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
         let context = context_with_app(&external_root, "permission-external-app");
@@ -1064,14 +985,14 @@
                     && error.contains("Permission denied")),
             "{response:?}"
         );
-        assert_eq!(std::fs::read(&route_journal).unwrap(), before_route_journal);
+        assert_eq!(std::fs::read(&route_file).unwrap(), before_routes);
         assert!(!manager
             .routes
             .lock()
             .unwrap()
             .contains_key(&ProjectRuntimeManager::route_key(&context)));
         assert!(!external_root
-            .join(".agent-collab/server/journal.jsonl")
+            .join(".agent-collab/server/state.json")
             .exists());
 
         drop(manager);
@@ -1082,7 +1003,7 @@
 
     #[tokio::test]
     async fn first_register_uses_the_explicit_context_app_scope() {
-        let (server, root, journal_path) = test_server();
+        let (server, root, state_path) = test_server();
         let project_context = context_with_app(&root, "app-wire");
         let response = register_wire_fixture(
             server.clone(),
@@ -1094,9 +1015,7 @@
         ).await;
         assert!(response.ok, "{response:?}");
         let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
-        let promoted = handle_master_promote(&server, "wire-worker".into(),
-            "token-wire-worker".into(), "fixture grants Jenny through its name owner".into());
-        assert!(promoted.ok, "{promoted:?}");
+        super::peer_tests::promote_master(&server, "wire-worker", "fixture grants Jenny through its name owner");
         let grant = {
             let state = server.state.lock().unwrap();
             let project = state.global.lookup_project(&project_scope).unwrap();
@@ -1106,7 +1025,7 @@
             project.lookup_master_grant(&binding.binding_id).unwrap().clone()
         };
         let runtime = runtime_for_registered(&server, &root, "wire-worker", "app-wire");
-        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_state = std::fs::read(&state_path).unwrap();
         let before_revision = server.state.lock().unwrap().revision;
         let repeated = dispatch_wire(
             server.clone(),
@@ -1135,27 +1054,26 @@
         let binding = project
             .lookup_binding(&BindingId::new("binding-wire-worker").unwrap())
             .unwrap();
-        assert_eq!(binding.endpoint_generation, grant.endpoint_generation);
+        assert_eq!(binding.agent_id, grant.agent_id);
         assert_eq!(
             project.lookup_master_grant(&binding.binding_id),
             Some(&grant)
         );
         assert_eq!(state.revision, before_revision);
         drop(state);
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before_state);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
     async fn first_register_accepts_the_explicit_appserver_runtime() {
-        let (server, root, journal_path) = test_server();
+        let (server, root, state_path) = test_server();
         let app = "app-wire";
         let worker_id = "wire-runtime-worker";
         let runtime = RuntimeIdentity {
             agent_id: AgentId::new(worker_id).unwrap(),
             runtime_id: RuntimeId::new("runtime-wire-runtime-worker").unwrap(),
             appserver_id: AppServerId::new(app).unwrap(),
-            endpoint_generation: 0,
             binding_id: BindingId::new("binding-wire-runtime-worker").unwrap(),
             session_id: Some(
                 crate::identity::SessionId::new("session-thread-wire-runtime-worker").unwrap(),
@@ -1177,14 +1095,14 @@
         assert_eq!(registered.appserver_id, runtime.appserver_id);
         assert_eq!(registered.binding_id, runtime.binding_id);
         assert_eq!(registered.native_thread_id, runtime.native_thread_id);
-        assert!(registered.endpoint_generation > 0);
-        assert!(journal_path.is_file());
+        assert_eq!(registered.session_id, runtime.session_id);
+        assert!(state_path.is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn delayed_second_app_register_is_rejected_without_resident_mutation() {
-        let (server, root, journal_path) = test_server();
+        let (server, root, state_path) = test_server();
         let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
         let first_context = context_with_app(&root, "app-a");
         let second_context = context_with_app(&root, "app-b");
@@ -1224,7 +1142,7 @@
             .unwrap();
         server.typed_dispatch(first).unwrap();
 
-        let before_second_journal = std::fs::read(&journal_path).unwrap();
+        let before_second_state_file = std::fs::read(&state_path).unwrap();
         let before_second_state = {
             let state = server.state.lock().unwrap();
             (
@@ -1270,7 +1188,7 @@
         assert_eq!(state.workers, before_second_state.2);
         assert_eq!(state.global, before_second_state.3);
         drop(state);
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before_second_journal);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before_second_state_file);
         assert!(validate_request_context(&server, &Req::StatusAll, Some(&first_context)).is_ok());
         assert!(!validate_request_context(&server, &Req::StatusAll, Some(&second_context)).is_ok());
 
@@ -1353,60 +1271,6 @@
             .values()
             .filter(|binding| binding.agent_id.as_str() == "child")
             .all(|binding| binding.app_scope_id == app));
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn direct_registration_route_failure_reports_cleanup_failure() {
-        let (mut server, root, _) = test_server();
-        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
-        // Establish an unpublished typed owner, then exercise the real direct
-        // registration publication/cleanup boundary with a replayed command.
-        let candidates = test_candidates_at("thread-route-failure-worker", &root);
-        let seeded = seed_committed_registration_fixture(&server, "route-failure-worker".into(),
-            "token-route-failure-worker".into(), root.display().to_string(),
-            Some(AppServerId::new("route-failure-app").unwrap()), candidates.clone());
-        assert!(seeded.ok, "{seeded:?}");
-        inject_current_thread_route_journal_fault(CurrentThreadRouteJournalFault::Sync);
-        let registered = handle_register_with_app_scope(
-            &server,
-            "route-failure-worker".into(),
-            "token-route-failure-worker".into(),
-            root.display().to_string(),
-            Some(AppServerId::new("route-failure-app").unwrap()),
-            candidates,
-        );
-        assert!(!registered.ok, "{registered:?}");
-        let error = registered.error.unwrap_or_default();
-        assert!(
-            error.contains("ROUTE_TRANSITION_DURABILITY_FAILED:")
-                && error.contains("registration cleanup failed:"),
-            "{error}"
-        );
-
-        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
-        let state = server.state.lock().unwrap();
-        assert!(state.workers.contains_key("route-failure-worker"));
-        let binding = state
-            .global
-            .lookup_binding_for(
-                &RouteScope {
-                    app_scope_id: AppServerId::new("route-failure-app").unwrap(),
-                    project_scope_id: project_scope,
-                },
-                &BindingId::new("binding-route-failure-worker").unwrap(),
-            )
-            .cloned()
-            .expect("failed registration keeps an explicitly retired binding");
-        assert!(binding.native_thread_id.is_some());
-        assert!(state
-            .global
-            .lookup_current_thread_route(
-                &crate::identity::SessionId::new("session-thread-route-failure-worker").unwrap(),
-                &NativeThreadId::new("thread-route-failure-worker").unwrap()
-            )
-            .is_none());
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

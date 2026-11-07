@@ -1,0 +1,24 @@
+{
+  "id":"appsdk-collab-identity-anchor",
+  "version":"1.0.0",
+  "description":"统一身份映射恢复设计。所有宿主只从identity-map.json选择身份；注册、sessionID换绑、名字/角色变化、注销及启动恢复共用唯一writer。先删除旧archive/occupancy/route历史选择与fallback，再实现新路径。单链承载本次typed结果，条件不适用原样传递，终止结果不触发后续成功副作用；不复制控制真源。完整业务分支见docs/design/collab-unified-identity-map.md。图不证明运行验收。",
+  "inputs":[{"id":"context_request","schema":"Object"}],
+  "nodes":[
+    {"id":"读取四类宿主当前事实","operator":"appsdk.collab_identity.collect","operator_version":"1","description":"按真实Codex/AGY TUI、Desktop或DSH收集当前sessionID和对应端点。TUI仅观察现有tmux；Desktop/DSH不要求tmux。profile可缺省。iTerm布局和manifest不参与身份选择。","inputs":["context_request"],"output":{"id":"host_facts","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"只查询统一映射并分类动作","operator":"appsdk.collab_identity.classify_intent","operator_version":"1","description":"读取固定identity-map.json。缺文件为空表，损坏返回原错；无自动导入。query只读。本次有效授权优先，所有其余候选只来自active current：精确保存物理名、当前agent sessionID、当前typed端点与cwd联合匹配。previous和所有表外历史不参与选择。无匹配按当前事实走首次注册或返回缺项。","inputs":["host_facts"],"output":{"id":"map_decision","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"核对已选主体与本次授权","operator":"appsdk.collab_name.check_claimant","operator_version":"1","description":"表先选择唯一project/app/name/current主体，之后只按精确主体读取合法凭据与grant owner，不能再扫描其他身份。显式合法新绑不受旧token投影或低优先级历史否决。Jenny固定显示槽1，普通池按顺序映射2到21；显示槽不授予master权限。","inputs":["map_decision"],"output":{"id":"authorized_change","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"准备TUI物理名与失败回滚","operator":"appsdk.collab_identity.anchor","operator_version":"1","description":"只对适用的当前TUI变更执行cwd末级目录_显示槽_逻辑名改名并读回，如routecodex_1_Jenny。保存两端实际旧名供既有owner回滚；Desktop/DSH跳过。无裸Jenny全局搜索、无session重建、无tmux生命周期。终止结果原样传递。","inputs":["authorized_change"],"output":{"id":"prepared_change","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"提交唯一映射与有界交接意图","operator":"appsdk.collab_binding.commit","operator_version":"1","description":"复用BindingControlStore和register gate原子发布版本化JSON slots/effects。四宿主注册写表、ID变化更新current、名字移动和注销/reset均经同一入口；逻辑tab取canonical project/app，载体变化不重算。必要首次Register也保存精确pending intent。未发布失败沿既有owner回滚物理名；已发布sync未知保留新事实并返回durability_unknown，不伪报回滚。","inputs":["prepared_change"],"output":{"id":"map_commit","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"按名字完成既有业务交接","operator":"appsdk.collab_name.sync_open_assignments","operator_version":"1","description":"仅已提交变更按原有bounded PendingEffect和真实receipt续接未关闭assignment、未消费消息、goal及唤醒。pane投递归属替换不退休另一条精确active映射的主体；保留其worker、完整业务binding/transport、凭据、名字及责任。真正名字或session交接仍由已提交map效果owner完成。无新增业务镜像，不重放已消费消息，不改已关闭/已改派工作。效果失败保留pending并返回真实部分结果。","inputs":["map_commit"],"output":{"id":"effect_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"交回当前身份与真实阶段","operator":"appsdk.collab_identity.emit_outcome","operator_version":"1","description":"唯一出口保留成功、缺事实、无权、文件错误、取消、回滚未收口、durability_unknown和effects_pending的真实类型。恢复不重新Register或验证通信；身份有效性与当前可达性分别呈现。","inputs":["effect_result"],"output":{"id":"identity_anchor_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges":[
+    {"from":"读取四类宿主当前事实","to":"只查询统一映射并分类动作","arc_id":"host_facts"},
+    {"from":"只查询统一映射并分类动作","to":"核对已选主体与本次授权","arc_id":"map_decision"},
+    {"from":"核对已选主体与本次授权","to":"准备TUI物理名与失败回滚","arc_id":"authorized_change"},
+    {"from":"准备TUI物理名与失败回滚","to":"提交唯一映射与有界交接意图","arc_id":"prepared_change"},
+    {"from":"提交唯一映射与有界交接意图","to":"按名字完成既有业务交接","arc_id":"map_commit"},
+    {"from":"按名字完成既有业务交接","to":"交回当前身份与真实阶段","arc_id":"effect_result"}
+  ],
+  "outputs":["identity_anchor_outcome"]
+}

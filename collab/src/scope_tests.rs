@@ -2,6 +2,23 @@ use super::*;
 use serde_json::json;
 use std::process::Command;
 
+fn scope_route(root: &Path, app: &str, registered_ms: i64) -> crate::server::HostRouteRecord {
+    crate::server::HostRouteRecord {
+        app_scope_id: app.into(),
+        project_scope: root.display().to_string(),
+        canonical_root: root.display().to_string(),
+        storage_root: root.display().to_string(),
+        registered_ms,
+    }
+}
+
+fn publish_scope_routes(state_root: &Path, routes: &[crate::server::HostRouteRecord]) {
+    crate::server::binding_store::publish_route_records(&state_root.join("routes.json"), routes)
+        .unwrap()
+        .require_confirmed_route()
+        .unwrap();
+}
+
 fn test_root(name: &str) -> PathBuf {
     Path::new("/tmp").join(format!(
         "cs-{name}-{}-{}",
@@ -105,16 +122,8 @@ fn identity_route_resolves_only_for_its_app_scope_and_contains_cwd() {
 
     let state_root = root.join("host-state");
     std::fs::create_dir_all(&state_root).unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": canonical.canonicalize().unwrap(),
-        "canonical_root": canonical.canonicalize().unwrap(),
-        "storage_root": canonical.canonicalize().unwrap(),
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&canonical.canonicalize().unwrap(), "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
@@ -197,16 +206,8 @@ fn scope_resolve_reuses_identity_route_from_a_worktree() {
 
     let canonical = canonical.canonicalize().unwrap();
     let symlink = symlink.canonicalize().unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": canonical,
-        "canonical_root": canonical,
-        "storage_root": canonical,
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&canonical, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[route]);
     let identity_dir = state_root.join("identities/worker-a");
     std::fs::create_dir_all(&identity_dir).unwrap();
     std::fs::write(
@@ -435,16 +436,8 @@ fn read_only_route_resolution_preserves_non_cli_scope_from_a_linked_worktree() {
 
     let canonical = canonical.canonicalize().unwrap();
     let worktree = worktree.canonicalize().unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-vscode",
-        "project_scope": canonical,
-        "canonical_root": canonical,
-        "storage_root": canonical,
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&canonical, "appserver-vscode", 1);
+    publish_scope_routes(&state_root, &[route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let resolved = canonical_route_for_cwd(&host_paths, &worktree).unwrap();
@@ -504,29 +497,9 @@ fn read_only_route_resolution_keeps_a_nested_project_inside_a_linked_worktree() 
 
     let canonical = canonical.canonicalize().unwrap();
     let nested = nested.canonicalize().unwrap();
-    let main_route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": canonical,
-        "canonical_root": canonical,
-        "storage_root": canonical,
-        "registered_ms": 1
-    });
-    let nested_route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": nested,
-        "canonical_root": nested,
-        "storage_root": nested,
-        "registered_ms": 2
-    });
-    std::fs::write(
-        state_root.join("routes.jsonl"),
-        format!("{main_route}\n{nested_route}\n"),
-    )
-    .unwrap();
+    let main_route = scope_route(&canonical, "appserver-cli", 1);
+    let nested_route = scope_route(&nested, "appserver-cli", 2);
+    publish_scope_routes(&state_root, &[main_route, nested_route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let resolved = canonical_route_for_cwd(&host_paths, &nested).unwrap();
@@ -582,16 +555,8 @@ fn read_only_route_resolution_accepts_a_registered_worktree_only_route() {
     assert!(status.success());
     let worktree = worktree.canonicalize().unwrap();
     std::fs::create_dir_all(worktree.join(".agent-collab")).unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": worktree,
-        "canonical_root": worktree,
-        "storage_root": worktree,
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&worktree, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let resolved = canonical_route_for_cwd(&host_paths, &worktree).unwrap();
@@ -648,20 +613,8 @@ fn identity_route_contains_a_linked_worktree_without_git() {
 
     let canonical = canonical.canonicalize().unwrap();
     let worktree = worktree.canonicalize().unwrap();
-    let canonical_route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": canonical,
-        "canonical_root": canonical,
-        "storage_root": canonical,
-        "registered_ms": 1
-    });
-    std::fs::write(
-        state_root.join("routes.jsonl"),
-        format!("{canonical_route}\n"),
-    )
-    .unwrap();
+    let canonical_route = scope_route(&canonical, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[canonical_route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
@@ -720,20 +673,8 @@ fn identity_route_prefers_a_registered_worktree_without_git() {
 
     let worktree = worktree.canonicalize().unwrap();
     std::fs::create_dir_all(worktree.join(".agent-collab")).unwrap();
-    let worktree_route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": worktree,
-        "canonical_root": worktree,
-        "storage_root": worktree,
-        "registered_ms": 1
-    });
-    std::fs::write(
-        state_root.join("routes.jsonl"),
-        format!("{worktree_route}\n"),
-    )
-    .unwrap();
+    let worktree_route = scope_route(&worktree, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[worktree_route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
@@ -792,29 +733,9 @@ fn identity_route_prefers_the_most_specific_registered_route() {
     let canonical = canonical.canonicalize().unwrap();
     let worktree = worktree.canonicalize().unwrap();
     std::fs::create_dir_all(worktree.join(".agent-collab")).unwrap();
-    let canonical_route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": canonical,
-        "canonical_root": canonical,
-        "storage_root": canonical,
-        "registered_ms": 1
-    });
-    let worktree_route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": worktree,
-        "canonical_root": worktree,
-        "storage_root": worktree,
-        "registered_ms": 2
-    });
-    std::fs::write(
-        state_root.join("routes.jsonl"),
-        format!("{worktree_route}\n{canonical_route}\n"),
-    )
-    .unwrap();
+    let canonical_route = scope_route(&canonical, "appserver-cli", 1);
+    let worktree_route = scope_route(&worktree, "appserver-cli", 2);
+    publish_scope_routes(&state_root, &[worktree_route, canonical_route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
@@ -875,16 +796,8 @@ fn identity_route_preserves_a_nested_project_root() {
     let project = project.canonicalize().unwrap();
     let worktree = worktree.canonicalize().unwrap();
     std::fs::create_dir_all(worktree.join(".agent-collab")).unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": project,
-        "canonical_root": project,
-        "storage_root": project,
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&project, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
@@ -964,16 +877,8 @@ fn identity_route_preserves_a_submodule_root() {
 
     let submodule = submodule.canonicalize().unwrap();
     std::fs::create_dir_all(submodule.join(".agent-collab")).unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": submodule,
-        "canonical_root": submodule,
-        "storage_root": submodule,
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&submodule, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();
@@ -1264,27 +1169,27 @@ fn identity_route_rejects_malformed_control_records() {
     std::fs::create_dir_all(&state_root).unwrap();
     let canonical = canonical.canonicalize().unwrap();
 
-    let valid = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": canonical,
-        "canonical_root": canonical,
-        "storage_root": canonical,
-        "registered_ms": 1
-    });
+    let valid = serde_json::to_value(scope_route(&canonical, "appserver-cli", 1)).unwrap();
+    let other_project = root.join("other-project");
+    std::fs::create_dir_all(&other_project).unwrap();
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    let app_scope = AppServerId::new("appserver-cli").unwrap();
+    let route_file = state_root.join("routes.json");
+    std::fs::write(&route_file, serde_json::to_vec(&json!([valid])).unwrap()).unwrap();
+    assert_eq!(
+        canonical_route_for_identity(&host_paths, &worktree, &app_scope)
+            .unwrap()
+            .root,
+        canonical
+    );
     let cases = [
         json!({
-            "version": 1,
-            "op": "register",
             "app_scope_id": "appserver-cli",
             "project_scope": canonical,
             "canonical_root": canonical,
             "registered_ms": 1
         }),
         json!({
-            "version": 1,
-            "op": "register",
             "app_scope_id": "appserver-cli",
             "project_scope": canonical,
             "canonical_root": canonical,
@@ -1293,8 +1198,6 @@ fn identity_route_rejects_malformed_control_records() {
             "unknown": true
         }),
         json!({
-            "version": 1,
-            "op": "register",
             "app_scope_id": "appserver-cli",
             "project_scope": root.join("other-project"),
             "canonical_root": canonical,
@@ -1303,25 +1206,34 @@ fn identity_route_rejects_malformed_control_records() {
         }),
     ];
 
-    for invalid in cases {
-        std::fs::write(
-            state_root.join("routes.jsonl"),
-            format!("{invalid}\n{valid}\n"),
-        )
-        .unwrap();
-        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-        let app_scope = AppServerId::new("appserver-cli").unwrap();
-        assert!(canonical_route_for_identity(&host_paths, &worktree, &app_scope).is_err());
+    for (invalid, expected) in cases.into_iter().zip([
+        "missing field",
+        "unknown field",
+        "route project scope does not match canonical root",
+    ]) {
+        let bytes = serde_json::to_vec(&json!([invalid])).unwrap();
+        std::fs::write(&route_file, &bytes).unwrap();
+        let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(std::fs::read(&route_file).unwrap(), bytes);
     }
 
     std::fs::write(
-        state_root.join("routes.jsonl"),
-        format!("{valid}\n{valid}\n"),
+        &route_file,
+        serde_json::to_vec(&json!([valid, valid])).unwrap(),
     )
     .unwrap();
-    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-    let app_scope = AppServerId::new("appserver-cli").unwrap();
-    assert!(canonical_route_for_identity(&host_paths, &worktree, &app_scope).is_err());
+    let before = std::fs::read(&route_file).unwrap();
+    let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
+    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert_eq!(std::fs::read(&route_file).unwrap(), before);
+    std::fs::write(&route_file, serde_json::to_vec(&json!([valid])).unwrap()).unwrap();
+    assert_eq!(
+        canonical_route_for_identity(&host_paths, &worktree, &app_scope)
+            .unwrap()
+            .root,
+        canonical
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -1343,16 +1255,8 @@ fn read_only_route_resolution_binds_symlinked_marker_to_registered_project() {
     )
     .unwrap();
     let project_root = project_root.canonicalize().unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": project_root,
-        "canonical_root": project_root,
-        "storage_root": project_root,
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&project_root, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let resolved = canonical_route_for_cwd(&host_paths, &caller_root).unwrap();
@@ -1379,16 +1283,8 @@ fn read_only_route_resolution_rejects_marker_to_unregistered_project() {
     )
     .unwrap();
     let registered_root = registered_root.canonicalize().unwrap();
-    let route = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": registered_root,
-        "canonical_root": registered_root,
-        "storage_root": registered_root,
-        "registered_ms": 1
-    });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let route = scope_route(&registered_root, "appserver-cli", 1);
+    publish_scope_routes(&state_root, &[route]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     // The marker names a project with no registered route. The lookup must not
@@ -1415,29 +1311,9 @@ fn identity_route_ignores_missing_stale_root_and_keeps_current_route() {
     std::fs::create_dir_all(&state_root).unwrap();
     let canonical = canonical.canonicalize().unwrap();
 
-    let stale = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": missing,
-        "canonical_root": missing,
-        "storage_root": missing,
-        "registered_ms": 1
-    });
-    let current = json!({
-        "version": 1,
-        "op": "register",
-        "app_scope_id": "appserver-cli",
-        "project_scope": canonical,
-        "canonical_root": canonical,
-        "storage_root": canonical,
-        "registered_ms": 2
-    });
-    std::fs::write(
-        state_root.join("routes.jsonl"),
-        format!("{stale}\n{current}\n"),
-    )
-    .unwrap();
+    let stale = scope_route(&missing, "appserver-cli", 1);
+    let current = scope_route(&canonical, "appserver-cli", 2);
+    publish_scope_routes(&state_root, &[stale, current]);
 
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     let app_scope = AppServerId::new("appserver-cli").unwrap();

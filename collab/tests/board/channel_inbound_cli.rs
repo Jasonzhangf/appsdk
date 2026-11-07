@@ -289,11 +289,17 @@ fn unread_qqbot_message_follows_the_named_holder_on_handoff() {
         ],
         THREAD_A,
     );
-    fixture.append_name_events(&[json!({"ev":"AgentPresenceObserved", "presence":{
-        "project_scope":std::fs::canonicalize(&fixture.project).unwrap(),
+    let project = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| state["agent_presence"][&project][alice["identity"]["worker_id"].as_str().unwrap()] = json!({
+        "project_scope":project,
         "worker_id":alice["identity"]["worker_id"], "session_id":THREAD_A,
         "presence":"online", "reason":"isolated fixture", "observed_ms":1
-    }})]);
+    }));
     let next = fixture.run_public(&["context", "--approve-grant",
         r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture confirmed handoff","replace_confirmed":true}"#], THREAD_B);
     let received = fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);

@@ -64,6 +64,45 @@ fn register_appserver(server: &Server, worker_id: &str, thread_id: &str) -> Runt
         .unwrap_or_else(|| panic!("current binding for {worker_id}"))
 }
 
+fn register_desktop_bridge(
+    server: &Server,
+    worker_id: &str,
+    thread_id: &str,
+    endpoint: &str,
+) -> RuntimeBinding {
+    let app = AppServerId::new("desktop").unwrap();
+    let transport = SelectedTransport {
+        kind: TransportKind::DesktopBridge,
+        endpoint: Some(endpoint.into()),
+        namespace: Some("codex_app".into()),
+        session_id: Some(format!("session-{worker_id}")),
+        thread_id: Some(thread_id.into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
+        self_check: "Desktop bridge verified registered thread and project".into(),
+    };
+    let response = seed_committed_owner(
+        server,
+        worker_id,
+        &format!("token-{worker_id}"),
+        &transport,
+        &server.root.display().to_string(),
+        Some(app.clone()),
+    );
+    assert!(response.ok, "seed DesktopBridge peer: {response:?}");
+    server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == worker_id && binding.app_scope_id == app)
+        .cloned()
+        .unwrap_or_else(|| panic!("current binding for {worker_id}"))
+}
+
 fn binding_for(server: &Server, worker_id: &str) -> RuntimeBinding {
     let state = server.state.lock().unwrap();
     let mut bindings = state
@@ -284,7 +323,11 @@ fn definitive_missing_appserver_worker_retires_without_self_removal() {
     let retired = entry(&summary, "retired", "missing-peer");
     assert_eq!(
         retired["operation_id"],
-        format!("stale-identity-maintenance:{}", binding.binding_id.as_str())
+        format!(
+            "stale-identity-maintenance:{}-{}",
+            binding.binding_id.as_str(),
+            binding.endpoint_generation
+        )
     );
     assert_eq!(retired["close"]["runtime_archive"]["state"], "missing");
     let operation_id = retired["operation_id"].as_str().unwrap();
@@ -322,6 +365,91 @@ fn definitive_missing_appserver_worker_retires_without_self_removal() {
         identity_path.exists(),
         "daemon maintenance must not clear the persisted identity"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_desktop_projection_does_not_retire_a_live_bridge_thread() {
+    let (mut server, root) = test_server();
+    install_appserver_status(&mut server);
+    let binding = register_desktop_bridge(
+        &server,
+        "bridge-peer",
+        "thread-present",
+        "unix:///tmp/collab-test-desktop-bridge.sock",
+    );
+    let session = server.state.lock().unwrap().workers["bridge-peer"]
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.session_id.clone())
+        .expect("DesktopBridge fixture has a session");
+    server.commit(&[Event::AgentPresenceObserved {
+        presence: AgentPresenceRecord {
+            project_scope: binding.project_scope.as_str().into(),
+            worker_id: "bridge-peer".into(),
+            session_id: session,
+            presence: AgentPresence::Offline,
+            reason: "stale desktop projection fixture".into(),
+            observed_ms: 1,
+        },
+    }]);
+
+    let summary = maintain_definitive_missing(&server, 3_600);
+
+    assert_only_bucket(&summary, "retained", "bridge-peer");
+    let retained = entry(&summary, "retained", "bridge-peer");
+    assert_eq!(retained["reason"]["presence"], "present", "{summary}");
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("bridge-peer"));
+    assert!(!state.worker_closures.contains_key("bridge-peer"));
+    assert_eq!(
+        state
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            .unwrap()
+            .endpoint_generation,
+        binding.endpoint_generation
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn desktop_bridge_connection_failure_is_not_definitive_missing() {
+    let (mut server, root) = test_server();
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        if thread_id != "thread-desktop" {
+            panic!("unexpected DesktopBridge thread {thread_id}");
+        }
+        Err(format!(
+            "{} connection refused",
+            crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX
+        ))
+    });
+    let binding = register_desktop_bridge(
+        &server,
+        "unsubmitted-peer",
+        "thread-desktop",
+        "unix:///tmp/collab-test-desktop-bridge.sock",
+    );
+
+    let summary = maintain_definitive_missing(&server, 3_700);
+
+    assert_only_bucket(&summary, "retained", "unsubmitted-peer");
+    assert_eq!(
+        entry(&summary, "retained", "unsubmitted-peer")["reason"]["presence"],
+        "unknown"
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("unsubmitted-peer"));
+    assert!(!state.worker_closures.contains_key("unsubmitted-peer"));
+    assert!(state.peer_lifecycle_operations.values().all(|operation| {
+        !operation
+            .target
+            .as_ref()
+            .is_some_and(|target| target.worker_id == "unsubmitted-peer")
+    }));
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -633,6 +761,127 @@ fn responsibility_added_during_probe_is_retained_before_admission() {
             .starts_with("stale-identity-maintenance:")));
     assert!(state.responsibility_fences.is_empty());
     drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exact_target_rebind_during_probe_is_retained_before_admission() {
+    let (mut server, root) = test_server();
+    let (probe_started_tx, probe_started_rx) = std::sync::mpsc::channel::<()>();
+    let (rebind_done_tx, rebind_done_rx) = std::sync::mpsc::channel::<()>();
+    let probe_started_tx = Mutex::new(probe_started_tx);
+    let rebind_done_rx = Mutex::new(rebind_done_rx);
+    server.appserver_thread_status = Arc::new(move |_, thread_id| {
+        if thread_id != "thread-rebind" {
+            panic!("unexpected App Server thread {thread_id}");
+        }
+        probe_started_tx.lock().unwrap().send(()).unwrap();
+        rebind_done_rx.lock().unwrap().recv().unwrap();
+        Err("thread not found".into())
+    });
+    let server = Arc::new(server);
+    let binding = register_appserver(&server, "rebind-peer", "thread-rebind");
+    let writer_server = Arc::clone(&server);
+    let writer = std::thread::spawn(move || {
+        probe_started_rx.recv().unwrap();
+        let mut rebound = writer_server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == "rebind-peer")
+            .cloned()
+            .expect("current rebind peer binding");
+        rebound.endpoint_generation += 1;
+        writer_server
+            .try_commit(&[Event::GlobalRuntimeBound { binding: rebound }])
+            .unwrap();
+        rebind_done_tx.send(()).unwrap();
+    });
+
+    let summary = maintain_definitive_missing(&server, 6_150);
+    writer.join().unwrap();
+
+    assert_only_bucket(&summary, "retained", "rebind-peer");
+    assert_eq!(
+        entry(&summary, "retained", "rebind-peer")["reason"]["kind"],
+        "target_changed_during_probe"
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("rebind-peer"));
+    assert!(!state.worker_closures.contains_key("rebind-peer"));
+    assert_eq!(
+        state
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            .unwrap()
+            .endpoint_generation,
+        binding.endpoint_generation + 1
+    );
+    assert!(state
+        .peer_lifecycle_operations
+        .values()
+        .all(|operation| !operation
+            .operation_id
+            .starts_with("stale-identity-maintenance:")));
+    assert!(state.responsibility_fences.is_empty());
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn maintenance_operation_identity_and_reuse_require_exact_generation() {
+    let (mut server, root) = test_server();
+    install_appserver_status(&mut server);
+    let binding = register_appserver(&server, "generation-peer", "thread-generation");
+    let target = {
+        let state = server.state.lock().unwrap();
+        target_for_self_binding(&state, &binding)
+    };
+    let first = maintenance_operation_id(&target);
+    let mut next = target.clone();
+    next.endpoint_generation += 1;
+    let second = maintenance_operation_id(&next);
+    assert_ne!(
+        first, second,
+        "a later generation needs a distinct operation"
+    );
+
+    let snapshot = {
+        let state = server.state.lock().unwrap();
+        state::responsibility_snapshot(&state, "generation-peer")
+    };
+    let admitted = admit_maintenance_close(
+        &server,
+        &target,
+        snapshot,
+        &first,
+        &maintenance_actor(&target.worker_id),
+    )
+    .expect("exact target admission");
+    assert_eq!(admitted.exact_target(), &target);
+
+    let next_snapshot = {
+        let state = server.state.lock().unwrap();
+        state::responsibility_snapshot(&state, "generation-peer")
+    };
+    let conflict = admit_maintenance_close(
+        &server,
+        &next,
+        next_snapshot,
+        &first,
+        &maintenance_actor(&target.worker_id),
+    );
+    assert!(
+        conflict
+            .as_ref()
+            .is_err_and(|error| error.contains("PEER_LIFECYCLE_MAINTENANCE_INTENT_CONFLICT")),
+        "a different generation must not reuse the old operation: {conflict:?}"
+    );
+
     std::fs::remove_dir_all(root).unwrap();
 }
 

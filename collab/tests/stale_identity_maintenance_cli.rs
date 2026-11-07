@@ -197,12 +197,34 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
         register_context_in_project(&fixture, &project_root, &dead_pane, "dead-peer");
     let task_context =
         register_context_in_project(&fixture, &project_root, &task_pane, "task-peer");
-    let (live_id, live_binding_id, app_scope_id) = identity(&live_context);
+    let (live_id, _, app_scope_id) = identity(&live_context);
     let (dead_id, dead_binding_id, _) = identity(&dead_context);
     let (task_id, _, _) = identity(&task_context);
 
     assert_ne!(live_id, dead_id);
     assert_ne!(task_id, live_id);
+
+    // Seed an unread durable message to the task peer. Its pane is killed after
+    // the message is queued, so the retained side can afterwards read it through
+    // the public interface without consuming it.
+    let sent = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            &task_id,
+            "--subject",
+            "stale-maint-retained-unread",
+            "--delivery",
+            "queued",
+            "retain this unread mailbox",
+        ],
+        Some(&master),
+    );
+    let retained_msg_id = sent["msg_id"]
+        .as_str()
+        .or_else(|| sent["message_id"].as_str())
+        .expect("retained message id")
+        .to_owned();
 
     // Seed real business responsibility through the public CLI: an open task
     // and an unread durable message. The target must be retained when its
@@ -256,6 +278,39 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
         Some(&master),
     );
     assert_eq!(task["id"], "stale-maint-retained-task", "{task}");
+
+    let retained_msg = fixture.run_ok(&["msg", &retained_msg_id], Some(&master));
+    assert_eq!(retained_msg["to"], task_id, "{retained_msg}");
+    assert_eq!(retained_msg["state"], "pending", "{retained_msg}");
+    assert_eq!(
+        retained_msg["consumed_by_recv"], false,
+        "readable status must not consume the retained mailbox: {retained_msg}"
+    );
+
+    let retired_read = fixture.run_ok(&["worker", "read", &dead_id], Some(&master));
+    assert_eq!(
+        retired_read["result"]["outcome"], "closed",
+        "public lifecycle read must report the closed target: {retired_read}"
+    );
+    assert_eq!(
+        retired_read["result"]["close"]["worker_retirement"]["state"], "verified",
+        "{retired_read}"
+    );
+    assert_eq!(
+        retired_read["result"]["close"]["binding_retirement"]["state"], "verified",
+        "{retired_read}"
+    );
+    assert_eq!(
+        retired_read["result"]["close"]["close_outcome"], "complete",
+        "{retired_read}"
+    );
+    let route_retirement = retired_read["result"]["close"]["route_retirement"]["state"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        matches!(route_retirement, "verified" | "not-applicable"),
+        "route must be retired or explicitly absent: {retired_read}"
+    );
 
     // Route/binding retirement is observable through the public journal.
     let journal = std::fs::read_to_string(fixture.project_journal()).expect("read journal");

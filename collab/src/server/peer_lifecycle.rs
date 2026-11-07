@@ -1016,6 +1016,14 @@ fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifec
 /// its fence instead of creating a new one each timer round.
 const MAINTENANCE_OPERATION_PREFIX: &str = "stale-identity-maintenance:";
 
+fn maintenance_operation_id(target: &PeerLifecycleTarget) -> String {
+    format!(
+        "{MAINTENANCE_OPERATION_PREFIX}{}-{}",
+        target.binding_id.as_str(),
+        target.endpoint_generation
+    )
+}
+
 fn maintenance_binding_for(state: &State, worker: &WorkerRec) -> Option<RuntimeBinding> {
     let transport = worker.transport.as_ref()?;
     let mut bindings = state
@@ -1185,6 +1193,11 @@ fn admit_maintenance_close(
         .get(operation_id)
         .cloned();
     if let Some(existing) = existing {
+        if existing.action != PeerLifecycleAction::Close || existing.exact_target() != target {
+            return Err(format!(
+                "PEER_LIFECYCLE_MAINTENANCE_INTENT_CONFLICT: {operation_id}"
+            ));
+        }
         if existing.phase == PeerLifecyclePhase::IntentPersisted {
             let dispatched = advance_record_with_close(
                 &existing,
@@ -1297,6 +1310,20 @@ pub(super) fn maintain_definitive_missing(server: &Server, _now: i64) -> serde_j
                 continue;
             }
         };
+        // The probe ran unlocked; the target to admit must be the exact target
+        // that was probed, including the binding identity and generation. Any
+        // rebind during that window holds retirement so a live rebinding peer is
+        // never retired through its stale predecessor.
+        if fresh.target != candidate.target {
+            retained.push(maintenance_retained(
+                worker_id,
+                binding_id,
+                json!({
+                    "kind": "target_changed_during_probe",
+                }),
+            ));
+            continue;
+        }
         if responsibility_gained(&candidate, &fresh) {
             retained.push(maintenance_retained(
                 worker_id,
@@ -1307,42 +1334,39 @@ pub(super) fn maintain_definitive_missing(server: &Server, _now: i64) -> serde_j
             ));
             continue;
         }
-        if let Some(requires) = close_responsibility_requires(&candidate.snapshot) {
+        if let Some(requires) = close_responsibility_requires(&fresh.snapshot) {
             retained.push(maintenance_retained(worker_id, binding_id, json!(requires)));
             continue;
         }
-        if !candidate.active_fences.is_empty() {
+        if !fresh.active_fences.is_empty() {
             retained.push(maintenance_retained(
                 worker_id,
                 binding_id,
                 json!({
                     "kind": "active_responsibility_fence",
-                    "operation_ids": candidate.active_fences,
+                    "operation_ids": fresh.active_fences,
                 }),
             ));
             continue;
         }
-        if !candidate.pending_reply_obligations.is_empty() {
+        if !fresh.pending_reply_obligations.is_empty() {
             retained.push(maintenance_retained(
                 worker_id,
                 binding_id,
                 json!({
                     "kind": "pending_reply_obligation",
-                    "message_ids": candidate.pending_reply_obligations,
+                    "message_ids": fresh.pending_reply_obligations,
                 }),
             ));
             continue;
         }
 
-        let operation_id = format!(
-            "{MAINTENANCE_OPERATION_PREFIX}{}",
-            candidate.target.binding_id.as_str()
-        );
+        let operation_id = maintenance_operation_id(&candidate.target);
         let actor_id = maintenance_actor(&candidate.target.worker_id);
         let record = match admit_maintenance_close(
             server,
             &candidate.target,
-            candidate.snapshot.clone(),
+            fresh.snapshot,
             &operation_id,
             &actor_id,
         ) {

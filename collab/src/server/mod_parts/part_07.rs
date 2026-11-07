@@ -311,34 +311,16 @@ pub(crate) fn maintenance_presence(
             let Some(thread_id) = transport.thread_id.as_deref() else {
                 return IdentityPresence::Unknown;
             };
-            match (server.appserver_thread_status)(&transport, thread_id) {
-                Ok(raw) => match raw
-                    .pointer("/thread/status/type")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    Some("notLoaded") => IdentityPresence::Cold,
-                    // A resident thread in an error state is not definitively
-                    // absent, so retain it instead of retiring its control plane.
-                    Some("systemError") => IdentityPresence::Unknown,
-                    Some(_) => IdentityPresence::Present,
-                    None => IdentityPresence::Unknown,
-                },
-                // Only an explicit adapter statement that the exact thread is
-                // absent is definitive Missing; timeouts, auth denials and
-                // other transport errors stay Unknown.
-                Err(error)
-                    if error.contains("not found")
-                        || error.contains("MISSING")
-                        || error.contains("GONE") =>
-                {
-                    IdentityPresence::Missing
-                }
-                Err(_) => IdentityPresence::Unknown,
-            }
+            thread_status_presence((server.appserver_thread_status)(&transport, thread_id))
         }
         TransportKind::DesktopBridge => {
-            let state = server.state.lock().unwrap();
-            desktop_identity_presence(server, &state, worker)
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return IdentityPresence::Unknown;
+            };
+            // Maintenance presence must come from the DesktopBridge adapter's
+            // current thread fact, not from a persisted local projection. The
+            // default oracle routes DesktopBridge to read_thread_status.
+            thread_status_presence((server.appserver_thread_status)(&transport, thread_id))
         }
         TransportKind::Dsh => dsh_identity_presence(&transport),
     }
@@ -383,6 +365,33 @@ pub(crate) fn close_endpoint_target(state: &State, worker_id: &str) -> CloseEndp
             .filter(|binding| binding.agent_id.as_str() == worker_id)
             .cloned()
             .collect(),
+    }
+}
+
+/// Classify one adapter-owned thread/status fact. Only an explicit statement
+/// that the exact thread is absent is definitive Missing; notSubmitted, target
+/// mismatch, system errors and other transport failures stay Unknown.
+fn thread_status_presence(result: Result<serde_json::Value, String>) -> IdentityPresence {
+    match result {
+        Ok(raw) => match raw
+            .pointer("/thread/status/type")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("notLoaded") => IdentityPresence::Cold,
+            // A resident thread in an error state is not definitively absent, so
+            // retain it instead of retiring its control plane.
+            Some("systemError") => IdentityPresence::Unknown,
+            Some(_) => IdentityPresence::Present,
+            None => IdentityPresence::Unknown,
+        },
+        Err(error)
+            if error.contains("not found")
+                || error.contains("MISSING")
+                || error.contains("GONE") =>
+        {
+            IdentityPresence::Missing
+        }
+        Err(_) => IdentityPresence::Unknown,
     }
 }
 

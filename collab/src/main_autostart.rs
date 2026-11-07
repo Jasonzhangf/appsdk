@@ -788,7 +788,7 @@ mod plist_tests {
         (root, home, state, fake_bin, log.display().to_string())
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn up_reloads_loaded_launch_agent_from_new_plist() {
         let _lock = crate::scope::TEST_ENV_LOCK
@@ -824,7 +824,7 @@ mod plist_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn up_reports_launchd_bootstrap_failure() {
         let _lock = crate::scope::TEST_ENV_LOCK

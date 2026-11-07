@@ -1,0 +1,20 @@
+{
+  "id": "appsdk-collab-activation",
+  "version": "1.0.0",
+  "description": "一次正式用户激活请求的 SESE。卸载确认完成后才加载；当前公开入口响应后才成功。真实错误汇入同一出口，不用调用前状态伪造成功；不操作 tmux 生命周期。",
+  "inputs": [{"id":"activation_request","schema":"Object"}],
+  "nodes": [
+    {"id":"核实用户维护入口","operator":"appsdk.collab_activation.authorize","operator_version":"1","description":"保留真实用户终端边界。拒绝 agent 时无生命周期副作用。","inputs":["activation_request"],"output":{"id":"authorized_request","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"准备服务声明","operator":"appsdk.collab_activation.prepare","operator_version":"1","description":"沿正式 owner 写服务声明；失败作为结果传递并跳过后续副作用。","inputs":["authorized_request"],"output":{"id":"prepared_activation","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"完成监督服务切换","operator":"appsdk.collab_activation.reload","operator_version":"1","description":"已加载时 bootout 精确目标，观察该目标从存在到明确不存在后 bootstrap 一次。使用既有5秒100毫秒等待界限；查询错误或到期不继续加载。未加载时沿现有load入口。真实加载错误直接保留。","inputs":["prepared_activation"],"output":{"id":"activation_effect","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"核实当前公开入口","operator":"appsdk.collab_activation.readiness","operator_version":"1","description":"只有本次加载成功且当前daemon公开入口可达才成功；调用前was_running不参与成功判定。进程内恢复引用既有startup图。真实错误跳过探测并交回原错。","inputs":["activation_effect"],"output":{"id":"activation_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"交回真实激活结果","operator":"appsdk.collab_activation.emit","operator_version":"1","description":"成功、拒绝、加载失败、查询失败和未就绪汇入同一出口，保留真实结果类型。","inputs":["activation_outcome"],"output":{"id":"activation_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+  ],
+  "edges": [
+    {"from":"核实用户维护入口","to":"准备服务声明","arc_id":"authorized_request"},
+    {"from":"准备服务声明","to":"完成监督服务切换","arc_id":"prepared_activation"},
+    {"from":"完成监督服务切换","to":"核实当前公开入口","arc_id":"activation_effect"},
+    {"from":"核实当前公开入口","to":"交回真实激活结果","arc_id":"activation_outcome"}
+  ],
+  "outputs":["activation_result"]
+}

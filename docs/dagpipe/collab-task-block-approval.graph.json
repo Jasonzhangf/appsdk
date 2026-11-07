@@ -46,7 +46,7 @@
       "id": "原子提交申请或决定",
       "operator": "appsdk.collab_task_block_approval.commit_decision",
       "operator_version": "1",
-      "description": "在同一个 daemon 锁与一次 checked 事件批次内提交结果：pending 只写申请记录；approved 在同一批次把申请置 approved 并只允许把任务从可阻塞状态推进到 blocked；rejected/stale/unauthorized 只写申请终态或返回错误，绝不改任务状态。资源冲突、等待到期和依赖释放各由自己的 owner 直接写任务，不进入本申请记录。提交前再次核对 revision 与申请状态，旧决定不能覆盖后来的申请。部分写失败保留原 journal 与内存状态。",
+      "description": "在同一个 daemon 锁与一次 checked 当前状态批次内提交结果：pending 只写申请记录；approved 在同一批次把申请置 approved 并只允许把任务从可阻塞状态推进到 blocked；rejected/stale/unauthorized 只写申请终态或返回错误，绝不改任务状态。资源冲突、等待到期和依赖释放各由自己的 owner 直接写任务，不进入本申请记录。提交前再次核对 revision 与申请状态，旧决定不能覆盖后来的申请。发布前写失败保留原当前状态文件与内存；已发布但目录持久化未知时保留已发布事实并返回真实未知结果。",
       "inputs": ["classified_decision"],
       "output": {"id": "committed_state", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

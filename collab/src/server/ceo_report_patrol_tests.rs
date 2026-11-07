@@ -3,13 +3,11 @@ use super::*;
 use crate::ceo::CeoGrant;
 use crate::ceo_report_state::{CeoNoticeGate, CeoProgressContent};
 use crate::server::global_state::GlobalState;
-use crate::server::name_resolution::build_name_resolution_events;
-use crate::server::name_state::NameOccupancy;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Weak};
 
 const CEO_WORKER: &str = "ceo";
-const CEO_NAME: &str = "CEO";
+const CEO_NAME: &str = "Alice";
 const CEO_THREAD: &str = "thread-ceo";
 const NOTICE_SUBJECT: &str = "ceo-report-due";
 const PATROL_INTERVAL_MS: u64 = 900_000;
@@ -78,27 +76,23 @@ fn patrol_fixture_inner(
     if let Some(slot) = weak_server {
         slot.set(Arc::downgrade(&server)).ok();
     }
-    let worker =
-        peer_tests::register_appserver_worker(&server, &canonical_root, CEO_WORKER, CEO_THREAD);
+    peer_tests::register_appserver_worker(&server, &canonical_root, CEO_WORKER, CEO_THREAD);
     let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
-    let session_id = worker
-        .transport
-        .as_ref()
-        .and_then(|transport| transport.session_id.clone())
-        .unwrap_or_else(|| format!("session-{CEO_THREAD}"));
-    {
-        let mut state = server.state.lock().unwrap();
-        let occupancy = NameOccupancy {
-            name: CEO_NAME.into(),
-            worker_id: CEO_WORKER.into(),
-            session_id,
-            occupancy_revision: 1,
-            updated_ms: now_ms(),
-            pane_anchor: None,
-        };
-        let events = build_name_resolution_events(&state, project_scope.as_str(), &occupancy);
-        server.commit_locked_checked(&mut state, &events).unwrap();
-    }
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    assert_eq!(
+        control
+            .key_for_worker(
+                &project_scope,
+                &AppServerId::new("tui-default").unwrap(),
+                CEO_WORKER
+            )
+            .unwrap()
+            .unwrap()
+            .name,
+        CEO_NAME
+    );
     let workspace = server.root.to_string_lossy().into_owned();
     server.commit(&[Event::CeoGrantSet {
         grant: Some(CeoGrant {
@@ -186,21 +180,6 @@ fn notice_messages(server: &Server) -> Vec<Message> {
         .collect()
 }
 
-fn event_variants_for(server: &Server, message_id: &str) -> Vec<String> {
-    std::fs::read_to_string(&server.journal_path)
-        .unwrap()
-        .lines()
-        .filter(|line| line.contains(message_id))
-        .filter_map(|line| {
-            let value: serde_json::Value = serde_json::from_str(line).unwrap();
-            value
-                .get("ev")
-                .and_then(|tag| tag.as_str())
-                .map(str::to_owned)
-        })
-        .collect()
-}
-
 #[test]
 fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
     let fixture = idle_fixture();
@@ -250,12 +229,9 @@ fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
     assert_eq!(state.msgs[&notice.id].wake_attempt_count, 1);
     drop(state);
 
-    let variants = event_variants_for(&fixture.server, &notice.id);
-    let mode = variants.iter().position(|name| name == "DeliveryMode");
-    let sent = variants.iter().position(|name| name == "Sent");
-    assert!(mode.is_some(), "missing DeliveryMode in {variants:?}");
-    assert!(sent.is_some(), "missing Sent in {variants:?}");
-    assert!(mode < sent, "delivery mode must precede Sent: {variants:?}");
+    let loaded = current_state::load(&fixture.server.state_path, false).unwrap();
+    assert_eq!(loaded.delivery_modes[&notice.id], "explicit-notification");
+    assert_eq!(loaded.msgs[&notice.id].body, notice.body);
 }
 
 #[test]

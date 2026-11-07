@@ -46,7 +46,7 @@ fn msg_reports_missing_caller_identity_before_target_lookup() {
 }
 
 #[test]
-fn msg_reports_unregistered_caller_route_before_target_lookup() {
+fn msg_reports_unregistered_caller_mapping_before_target_lookup() {
     const UNREGISTERED_THREAD: &str = "01a0d63a-0000-7000-8000-000000000001";
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
@@ -69,8 +69,9 @@ fn msg_reports_unregistered_caller_route_before_target_lookup() {
         assert!(!output.status.success(), "unregistered caller must fail");
         let text = failed_cli_text(&output);
         assert!(
-            text.contains("CALLER_ROUTE_NOT_FOUND"),
-            "unregistered caller route must be explicit: {text}"
+            text.contains("CALLER_IDENTITY_REQUIRED")
+                && text.contains("no active identity mapping"),
+            "unregistered caller mapping must be explicit: {text}"
         );
         assert!(
             text.contains("caller") && text.contains("collab context"),
@@ -173,6 +174,12 @@ fn unauthenticated_directory_query_empty_and_free_of_presence_side_effects() {
     let fixture = AppFixture::new();
 
     // Directory query before any peers are registered
+    let routes_path = fixture.host_state.join("routes.json");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let routes_before = routes_path
+        .exists()
+        .then(|| std::fs::read(&routes_path).unwrap());
+    let map_before = map_path.exists().then(|| std::fs::read(&map_path).unwrap());
     let output = fixture.command_without_native_facts(&["directory"]);
     assert!(
         output.status.success(),
@@ -187,11 +194,15 @@ fn unauthenticated_directory_query_empty_and_free_of_presence_side_effects() {
         "empty directory must return empty array: {dir}"
     );
 
-    // Journal/routes must not have any registered routes or presence edges
-    let routes_path = fixture.host_state.join("routes.jsonl");
-    assert!(
-        !routes_path.exists(),
-        "unauthenticated directory query must not create a host route or presence side-effects"
+    assert_eq!(
+        routes_path
+            .exists()
+            .then(|| std::fs::read(&routes_path).unwrap()),
+        routes_before
+    );
+    assert_eq!(
+        map_path.exists().then(|| std::fs::read(&map_path).unwrap()),
+        map_before
     );
 }
 
@@ -204,11 +215,9 @@ fn directory_query_projects_whitelist_without_sensitive_facts_or_presence_record
     assert_eq!(alice["name"], "Alice");
     assert_eq!(bob["name"], "Bob");
 
-    let journal_path = fixture.name_journal();
-    let events_before: usize = std::fs::read_to_string(&journal_path)
-        .unwrap_or_default()
-        .lines()
-        .count();
+    let routes_before = std::fs::read(fixture.host_state.join("routes.json")).unwrap();
+    let map_before = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let before = fixture.current_state();
 
     // Query directory from an unauthenticated caller
     let output = fixture.command_without_native_facts(&["directory"]);
@@ -247,15 +256,21 @@ fn directory_query_projects_whitelist_without_sensitive_facts_or_presence_record
         assert!(entry.get("tasks").is_none());
     }
 
-    // Verify no presence or mutation was written to journal by directory query
-    let events_after: usize = std::fs::read_to_string(&journal_path)
-        .unwrap_or_default()
-        .lines()
-        .count();
     assert_eq!(
-        events_before, events_after,
-        "directory query must be strictly read-only and not append any journal records"
+        std::fs::read(fixture.host_state.join("routes.json")).unwrap(),
+        routes_before
     );
+    assert_eq!(
+        std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        map_before
+    );
+    let after = fixture.current_state();
+    for field in ["workers", "agent_presence", "tasks", "task_assignments"] {
+        assert_eq!(
+            after[field], before[field],
+            "directory must preserve current {field}"
+        );
+    }
 }
 
 #[test]
@@ -457,11 +472,12 @@ fn authenticated_send_records_real_identity_without_regression() {
 }
 
 #[test]
-fn pinned_session_survives_public_continuation_and_retention_replay_without_cross_session_delivery()
-{
+fn pinned_session_survives_public_continuation_and_current_retention_without_cross_session_delivery(
+) {
     const NEXT_SESSION: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fdd";
     let mut fixture = AppFixture::new();
     let receiver = fixture.run_public(&["context"], THREAD_B);
+    let name = receiver["name"].as_str().unwrap();
     let worker = receiver["identity"]["worker_id"]
         .as_str()
         .unwrap()
@@ -478,7 +494,7 @@ fn pinned_session_survives_public_continuation_and_retention_replay_without_cros
         "sendmessage",
         "--unknown-sender",
         "--to",
-        &worker,
+        name,
         "--target-session",
         THREAD_B,
         "--delivery",
@@ -509,23 +525,25 @@ fn pinned_session_survives_public_continuation_and_retention_replay_without_cros
     assert_eq!(before["wake_attempts"], 0);
     assert_eq!(before["consumed_by_recv"], false);
 
-    // Supply an unrelated, expired historical message as retention input. The
+    // Supply an unrelated, expired current message as retention input. The
     // pinned message and its binding above still come from the real CLI. The
-    // daemon must perform its own purge/compaction; no snapshot is synthesized.
-    fixture.append_name_events(&[json!({"ev":"Sent", "msg":{
-        "id":"m1-1", "from":"unknown", "to":worker,
-        "type":"notify", "subject":"expired retention sibling", "body":"old history",
-        "in_reply_to":null, "created_ms":1, "state":"pending",
-        "wake_attempt_count":0, "last_wake_attempt_ms":0, "retry_attempted":false
-    }})]);
-    let compacted = std::fs::read_to_string(fixture.name_journal()).unwrap();
-    assert!(
-        compacted
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|event| event["ev"] == "ReducerSnapshot"),
-        "the expired sibling must trigger the daemon's real retention compaction"
-    );
+    // daemon must perform its own current-state retention.
+    fixture.update_current_state(|state| {
+        state["msgs"]["m1-1"] = json!({
+            "id":"m1-1", "from":"unknown", "to":worker,
+            "type":"notify", "subject":"expired retention sibling", "body":"old history",
+            "in_reply_to":null, "created_ms":1, "state":"pending",
+            "wake_attempt_count":0, "last_wake_attempt_ms":0, "retry_attempted":false
+        })
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.current_state()["msgs"]["m1-1"].is_null() {
+        assert!(
+            Instant::now() < deadline,
+            "expired sibling was not removed by current retention"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 
     // Only the external native provider's facts change. The real context CLI
     // must perform the identity continuation and persist the new binding.
@@ -536,7 +554,14 @@ fn pinned_session_survives_public_continuation_and_retention_replay_without_cros
         .get_mut(THREAD_B)
         .unwrap()
         .session_id = Some(NEXT_SESSION.into());
-    let continued = fixture.command_public_with_session(&["context"], NEXT_SESSION, THREAD_B);
+    let approval = json!({"action":"restore_name","requested_name":name,
+        "authorization":"fixture continues the current work name on a new session"})
+    .to_string();
+    let continued = fixture.command_public_with_session(
+        &["context", "--approve-grant", &approval],
+        NEXT_SESSION,
+        THREAD_B,
+    );
     assert!(
         continued.status.success(),
         "{}{}",
@@ -545,7 +570,9 @@ fn pinned_session_survives_public_continuation_and_retention_replay_without_cros
     );
     let continued: Value = serde_json::from_slice(&continued.stdout).unwrap();
     let snapshot = &continued["result"]["snapshot"];
-    assert_eq!(snapshot["identity"]["worker_id"], worker);
+    assert_eq!(snapshot["name"], name);
+    assert_ne!(snapshot["identity"]["worker_id"], worker);
+    let worker = snapshot["identity"]["worker_id"].as_str().unwrap();
     assert_eq!(snapshot["binding"]["session_id"], NEXT_SESSION);
 
     // Replay the actual committed send and continuation, then enable delivery.
@@ -561,7 +588,7 @@ fn pinned_session_survives_public_continuation_and_retention_replay_without_cros
     let replayed: Value = serde_json::from_slice(&replayed.stdout).unwrap();
     assert_eq!(
         replayed["target_session"], THREAD_B,
-        "retention snapshot replay must retain the original fixed session: {replayed}"
+        "current-state restart must retain the original fixed session: {replayed}"
     );
     let fresh = fixture.command_without_native_facts(&[
         "sendmessage",

@@ -128,6 +128,62 @@ fn platform_nearest_agent() -> Option<AgentKind> {
     None
 }
 
+/// Capture only the nearest real agent's kind and --profile on the caller's
+/// verified pane ancestry. Full argv is transient and never logged or saved.
+pub(crate) fn caller_profile_in_pane(
+    caller: u32,
+    pane: u32,
+) -> Option<(AgentKind, Option<String>)> {
+    let mut pid = caller;
+    let mut seen = std::collections::HashSet::new();
+    while pid > 1 && seen.insert(pid) {
+        let process = std::process::Command::new("ps")
+            .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !process.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(process.stdout).ok()?;
+        let (parent, comm) = parse_ppid_and_comm(&text)?;
+        if let Some(kind) = classify_nearest_agent([comm]) {
+            let profile = std::process::Command::new("ps")
+                .args(["-o", "args=", "-p", &pid.to_string()])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .and_then(|args| profile_argument(&args));
+            return Some((kind, profile));
+        }
+        if pid == pane {
+            break;
+        }
+        pid = parent;
+    }
+    None
+}
+
+fn profile_argument(args: &str) -> Option<String> {
+    let mut parts = args.split_whitespace();
+    while let Some(part) = parts.next() {
+        let value = if matches!(part, "--profile" | "-p") {
+            parts.next()
+        } else {
+            part.strip_prefix("--profile=")
+        };
+        if let Some(value) = value.filter(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        }) {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

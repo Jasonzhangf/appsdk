@@ -42,7 +42,6 @@ fn master_grant_for_worker(
         granted_by,
         approval,
         binding.binding_id.clone(),
-        binding.endpoint_generation,
         now_ms(),
     )
     .map_err(|error| error.to_string())
@@ -179,11 +178,7 @@ fn retire_claimant_events(
     previous: &RuntimeBinding,
     reason: &str,
 ) -> Result<Vec<Event>, String> {
-    let next_generation = previous.endpoint_generation.checked_add(1).ok_or_else(|| {
-        "RUNTIME_BINDING_REJECTED: reclaimed anchor generation overflow".to_owned()
-    })?;
     let mut retired = previous.clone();
-    retired.endpoint_generation = next_generation;
     retired.native_thread_id = None;
     retired.tmux_endpoint = None;
     let mut events = vec![
@@ -288,7 +283,7 @@ fn communication_recovery_brief() -> serde_json::Value {
     })
 }
 
-fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
+fn base_role_brief(state: &State, route_scope: &RouteScope, worker_id: &str) -> serde_json::Value {
     let active_progress_rule = "Patrol is a safety-net wake, never an execution dependency. After registering or rearming it, immediately continue ready authorized work: investigate, dispatch, verify, integrate and clean up. Never wait for the next wake while a next action exists; a future deadline or unavailable patrol service is not a blocker. Wait only for evidenced external dependencies or uncovered approvals, and continue independent work.";
     let own_goal_rule = "Master and peer are goal orchestrators at different levels, not execution workers. Restore or register your own accepted goal with `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`; verify your own `appsdk goal status --json` receipt before dispatch. Read, update, rearm and cancel only your own goal. Never ask master to proxy-register a peer goal, and never register or hold another peer's goal as master. A task, board assignment, note or timer alone is not goal registration. Stable name owns the goal; sessionID is the current carrier, independent of Desktop/TUI or tmux placement. Use the current installed Collab Skill and this current role brief; an older worktree's skill-source copy is not another operating contract. Retire master-only goal, peer-as-executor and all-peers-busy-before-GCM instructions.";
     let idle_patrol_rule = workflow_template_rule("idle_patrol_rule");
@@ -297,8 +292,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
     let work_role_execution_rule = workflow_template_rule("work_role_execution_rule");
     let work_role_next_action_rule = workflow_template_rule("work_role_next_action");
     let peer_task_list_rule = workflow_template_rule("peer_task_list_rule");
-    let route_scope = server_route_scope(server, state).ok().flatten();
-    if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
+    if current_master_worker_id(state, Some(route_scope)).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",
             "orchestration_function": "goal_orchestrator",
@@ -311,7 +305,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
                 work_role_next_action_rule,
                 peer_task_list_rule,
                 collaboration_reply_rule,
-                "The sendmessage reply command applies only within this project. For cross-project from=<worker>@<project>, reply from your own project with `collab master send --project <source-project> --to <source-worker> --subject <topic> <result>` and include the original message ID in the body. Discover a target master's current worker ID with the read-only `(cd <target-project> && collab master status)`; never register as another project's agent or search historical display-name bindings. Both endpoints must be current master grant holders. Current master send has no CLI reply marker or linked-reply option; do not claim body correlation clears an obligation.",
+                "Any two registered identities may communicate directly across projects. Discover the exact current project.name address with collab list, then send from your own project using collab send --to '<project.name>' --subject '<topic>' --content '<result>'. Preserve the original message reference when replying; message permission does not grant task management or another identity.",
                 active_progress_rule,
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
                 "A master patrols only its own project. After registration, promotion, or restoration, update this project's inspection tasks and your own patrol subscriptions; refresh them when scope or monitored events change. Inspect buglist P0/P1, actual peer work progress evidence, owned worktree and runtime resource cleanup of stale resources, canonical issue intake, and all currently supported monitored events.",
@@ -355,7 +349,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
             "role": "managed-subagent",
             "role_task": "Legacy compatibility record only. You have no production execution authority and are not the goal orchestrator.",
             "responsibilities": [
-                "Preserve this record only as compatibility evidence for diagnosis or migration.",
+                "Preserve this record only as existing diagnostic evidence.",
                 "Do not accept new work, create a schedule, recursively dispatch, register Collab, expand permissions, or claim the long-horizon goal.",
                 "Ordinary long-horizon work belongs to a peer; bounded execution and observation use an independent `codex exec --profile gcm` worker.",
                 "Report the compatibility limitation to the current peer or master and stop."
@@ -370,7 +364,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
                 "kind": "managed-subagent",
                 "parent": parent
             },
-            "blocked_boundary": "Do not execute from this legacy record. Report the compatibility limitation and required migration path.",
+            "blocked_boundary": "Do not execute from this legacy record. Report the unsupported boundary and use the current identity/Board entry.",
             "completion_action": "Leave historical state intact and direct new work to a peer or an independent GCM worker.",
             "next_action": "Do not accept new work from this record; report its compatibility-only role and stop.",
             "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
@@ -386,7 +380,7 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
             work_role_execution_rule,
             work_role_next_action_rule,
             collaboration_reply_rule,
-            "The sendmessage reply command applies only within this project. Cross-project communication is master-only: forward the request and original message to your own current master; do not pass worker@project to sendmessage, change cwd to impersonate another project, or infer master authority from a work role or CEO title.",
+            "Any two registered identities may communicate directly across projects. Discover the exact current project.name address with collab list, then send from your own project using collab send --to '<project.name>' --subject '<topic>' --content '<result>'. Preserve the original message reference when replying; message permission does not grant task management or another identity.",
             "As a peer, report to the requester, delegator or project master by default, not routinely to the user. Report to the user only for a direct user question or reporting request, a decision only the user can make, or a material exception affecting the user.",
             active_progress_rule,
             "Split the accepted goal into non-overlapping bounded scopes, then dispatch bounded one-shot execution or observation to independent `codex exec --profile gcm` subworkers; use autonomous peers only for subordinate long-horizon goals within the authorized scope.",
@@ -426,27 +420,25 @@ fn base_role_brief(server: &Server, state: &State, worker_id: &str) -> serde_jso
 /// `base_role_brief` remains the owner of identity, authority and mandatory
 /// runtime constraints. The selected identity template adds its workflow text,
 /// then configured specialty cards are appended in the current work-role order.
-fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
-    let mut brief = base_role_brief(server, state, worker_id);
+fn role_brief(server: &Server, state: &State, control: &binding_slot::BindingControlSet, worker_id: &str) -> Result<serde_json::Value, String> {
+    let project_scope = GlobalState::canonical_project_scope(&server.root).map_err(|error| error.to_string())?;
+    let mut current = control.active_values().filter(|value|
+        value.binding.project_scope == project_scope && value.binding.agent_id.as_str() == worker_id);
+    let binding = current.next().ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping")?;
+    if current.next().is_some() {
+        return Err("IDENTITY_MAP_AMBIGUOUS: worker has several current app mappings".into());
+    }
+    let route_scope = binding.binding.route_scope();
+    let mut brief = base_role_brief(state, &route_scope, worker_id);
     let base_role = match brief.get("role").and_then(serde_json::Value::as_str) {
         Some("master") => "master",
         Some("worker") => "peer",
-        _ => return brief,
+        _ => return Ok(brief),
     };
-    let route_scope = server_route_scope(server, state).ok().flatten();
-    let project_scope = route_scope
-        .as_ref()
-        .map(|route| route.project_scope_id.as_str().to_owned())
-        .or_else(|| {
-            GlobalState::canonical_project_scope(&server.root)
-                .ok()
-                .map(|scope| scope.as_str().to_owned())
-        })
-        .unwrap_or_default();
-    let roles = worker_work_roles(state, &project_scope, worker_id);
-    let workflow = effective_workflow_templates(state, &project_scope, base_role, &roles);
+    let roles = worker_work_roles(state, control, Some(&route_scope), worker_id)?;
+    let workflow = effective_workflow_templates(state, project_scope.as_str(), base_role, &roles);
     apply_workflow_template(&mut brief, &workflow);
-    brief
+    Ok(brief)
 }
 
 fn apply_workflow_template(brief: &mut serde_json::Value, workflow: &EffectiveWorkflow) {

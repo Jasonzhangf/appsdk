@@ -1,192 +1,79 @@
-# Collab State Paths and Components
+# Collab 当前状态与组件
 
-## Global host runtime truth
+## 状态归属
 
-The host-wide daemon state root is resolved by the installed binary:
+生产状态根为 `$HOME/.collab`；隔离测试可指定 `COLLAB_STATE_DIR`。
 
 ```text
-$COLLAB_STATE_DIR for isolated tests, else $HOME/.collab
-  server.sock
-  daemon.lock
-  server.pid
-  events.jsonl
-  journal.jsonl
-  log.txt
-  routes.jsonl
-  projects/<encoded-project>/apps/<encoded-app>/.agent-collab/server/
+identity-map.json
+routes.json
+identities/<worker-id>/identity.json
+projects/<encoded-project>/apps/<encoded-app>/.agent-collab/server/state.json
+server.sock
+daemon.lock
+server.pid
+service-record.json
+log.txt
 ```
 
-Usage:
+- `identity-map.json` 是唯一当前身份选择源。注册、换绑、换名、角色变化与恢复
+  使用同一 owner。表内的 previous 不提供候选，也不否决新的有效授权。
+- `routes.json` 只定位当前项目/app 存储与通信。它不能恢复或授予身份。
+- `identities/` 保存表内已选定 principal 的精确凭据。不扫描旧凭据选身份。
+- 每个项目/app 的 `state.json` 保存最新任务、描述、证据、消息及消费状态、
+  当前关系与有效授权。变更直接更新当前文件；重启直接读取，不保存变更历史。
+- `server.sock`、`daemon.lock` 和 `server.pid` 归全局用户管理的 daemon。
+  不手改、不删除锁、不启动第二个 daemon。
+- `service-record.json` 声明正式监督服务的根目录。安装与激活是不同动作。
+- `log.txt` 只供诊断，不参与身份、任务或投递决策。
 
-- `server.sock` belongs to the global user-managed daemon. Agent commands do not
-  create or remove it. Never write to it by hand.
-- `daemon.lock` prevents a second daemon. Do not delete or edit it.
-- `server.pid` is the current daemon PID. Read it through `collab context` or
-  `collab status --all`; do not use it to control the user-managed service.
-- `events.jsonl` records service lifecycle diagnostics. It does not select an
-  identity or reconstruct task state.
-- `journal.jsonl` stores context operation receipts. Runtime reducer journals
-  live in the central project/app namespace. Do not edit either journal.
-- `log.txt` is diagnostic output. Read it for exact errors; never use it as a
-  source of truth for task or identity state.
-- `routes.jsonl` is the host-wide admission/storage index for app
-  scopes and project roots. It is not a route selector. Never hand-edit it.
-  The daemon automatically retires missing or deinitialized project routes
-  and routes whose loaded reducer binding is absent or superseded.
-  Project reset removes target route history through the same writer owner.
+新版不读取旧存储格式。已有业务目录缺少 `state.json` 时，返回
+`CURRENT_STATE_MIGRATION_REQUIRED`；不把旧项目当成新项目静默清空。
+本次获授权的一次性交接由维护 owner 准备新当前文件。普通恢复不导入旧文件。
 
-The current project master may reset the current project online:
+## 身份、名字和布局
 
-```sh
-collab reset --project
-```
+cwd 选择项目。名字承载工作归属，真实 agent sessionID 承载当前执行。
+同名工作者更换 sessionID 时，当前表更新绑定，并续接该名字下未关闭任务。
+任务 ID、状态和证据保留。只读查询不补注册、不修表、不选择历史身份。
 
-Run it from the current project. The daemon deletes that project's historical
-messages, routes, tasks, assets and load. It preserves other projects and the
-global daemon. There is no offline prerequisite or archive prerequisite, and
-historical pane owners or open work do not block the reset. Real persistence,
-I/O or input-safety errors remain explicit. No legacy discard mode or separate
-approval argument exists for this project reset.
+TUI 使用已存在的 tmux 通信端点。共享 tm-iterm manifest 拥有固定布局
+`binding_id + tab_id + pane_order`。Collab 只关联既有位置，不改写 manifest。
+物理名为 `<cwd末级目录>_<固定位置序号>_<名字>`；只有固定位置 1 可 promote 为 Jenny。
+正常运行由 Collab 改名。tm-iterm 默认创建与解析，显式批量改名另行执行。
+不能拆 session 显示名推断位置。tmux `$N`、pane、socket、PID 都不是 agent sessionID。
 
-Do not `cp`, `grep`, `mv`, truncate, or edit `routes.jsonl`; that bypasses the
-owner and destroys route provenance. If existing `.agent-collab/` state must be
-preserved, use migration instead of reset.
+Desktop 直接绑定真实 sessionID/thread 和当前 bridge。DSH 直接绑定真实 gateway
+sessionID。它们使用同一个身份表，不要求 tmux，也不执行 tmux 改名。
+runtime profile 只在能从真实宿主观察时保存；缺少 profile 不阻碍身份恢复。
 
-An ordinary version upgrade is not a reset. Install the current reviewed
-binary and refresh the embedded Skill; leave `~/.collab/` and the running
-daemon untouched. The global daemon is user-managed. Host reset and maintenance
-are outside the agent interface.
+## 当前身份入口
 
-## Production tmux sockets
-
-The tmux launcher owns its sockets and lifecycle. A socket is an IPC address,
-not a durable identity. Collab maintenance does not relocate, stop or restart
-tmux. The path of an existing socket never blocks identity recovery.
-
-Production CLI observation does not parse `TMUX` to inject a socket path. The
-daemon observes the caller's actual pane and session through its known runtime
-endpoints. cwd selects the project; the stable name owns the work and the
-reported agent sessionID is its current execution carrier. tmux session does
-not select identity. The observed socket and pane locate delivery only. A stale
-environment value or historical pane binding cannot override that observation.
-
-## Project discovery and centralized persistence
-
-The project `.agent-collab/` marker discovers a project. It is not a second
-runtime truth. Project journals, mailbox, tasks, claims and bindings persist
-under the global host root's project/app namespace. The project cwd remains
-the logical scope even though its data is stored beneath `~/.collab`.
-
-The current runtime opens only the centralized project/app store. Legacy
-project-local journals and mailbox files belong to the retired storage version;
-they are not imported or replayed by registration, recovery or daemon startup.
-They remain on disk. A stale route storage reference is rebound to the current
-central store without copying old data. Existing central peers and messages
-remain authoritative; a corrupt central journal still fails explicitly.
-Do not copy or edit journals to repair an active service.
-No command may reconstruct the current peer from a legacy
-`runs/<worker-id>/identity.json`. AppSDK reset must never delete
-`.agent-collab/`; do not delete files by hand or run migration to bypass a
-registration error.
-
-For a new project, use the installed `collab context`. Existing tasks and
-messages belong to the storage owner; ordinary version installation or
-identity recovery is not authorization to discard them.
-
-## Identity and role
-
-- Names own project work across supported hosts; the registered
-  agent sessionID is the current execution carrier. The current AppServer
-  route uses its verified owner and exact agent sessionID/threadID pair.
-  A tmux socket, pane, tmux session and process ID locate transport or probes;
-  they do not select identity. Do not reconstruct an endpoint or edit routes.
-- A Git worktree does not inherit `.agent-collab/` and is not an identity
-  context. Run `collab context`; the CLI automatically observes runtime facts
-  and the daemon owns identity selection, creation, recovery, update,
-  credential/binding/lease persistence, route publication, and the complete
-  snapshot. Historical routes are not candidates and `routes.jsonl` must not
-  be read to guess one. Never register the worktree as a second peer or create
-  a second route.
-- Default role is `peer`; master is explicit and user-approved.
-- `collab context` is the single information endpoint for the current peer,
-  binding, role, transport, liveness, tasks, master, and peers.
-- `collab master status`, `collab who`, `collab status --all`, and
-  `collab worker status` are read-only operator diagnostics. They are not agent
-  identity-recovery steps.
-- If `collab context` reports `requires_identity_update`, read
-  `required_fields`, `reason`, and `exact_error`. Supply only the requested
-  AppServer `session_id`, `thread_id`, `endpoint`, or `namespace` values for this invocation through
-  `collab context --provide`. The daemon completes identity selection,
-  recovery, registration, credential persistence, binding, and lease state.
-  Explicit conflicts and errors preserve their original error.
-
-## Transport selection
-
-- Workers never choose transport themselves. The daemon validates runtime facts
-  and selects the channel.
-- Initial registration prefers a verified current tmux pane, and the daemon
-  selects transport according to runtime facts. Context reconciles the current
-  explicit capability with the durable binding. Supplying a current Desktop
-  bridge capability is an explicit transport update. An RPC error never selects
-  another transport or an old endpoint; tmux is not a native communication,
-  wake, presence, or status fallback.
-- Do not treat pane presence as evidence of Codex turn state or message
-  consumption.
-
-## Registration verification
-
-Run `collab context`. It resolves the canonical project root, accepts an
-explicit non-Git ordinary workspace as that root, observes the available
-runtime facts, and asks the daemon to establish or recover the identity. Git
-subdirectories and unregistered playground worktrees remain fail-closed. If the
-snapshot contains `requires_identity_update`, supply only the
-requested current factual fields in this invocation. Every AppServer context must
-carry current session/thread/endpoint/namespace from the host environment or
-`--provide`; historical registration cannot fill missing current facts.
-MCP callers submit current facts through `provide` on each call. `--query` is
-only a retained-operation read and needs no current endpoint:
+运行 `collab context`。Desktop 可直接使用 CLI 自动发现已登记的当前 bridge，
+不要求先调用 MCP。需要补充事实时，只提供返回的 `required_fields`：
 
 ```sh
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'
 ```
 
-For the AppServer branch, the factual supplement uses `session_id`, `thread_id`,
-`endpoint`, and `namespace`. Desktop bridge instead obtains the current scoped
-capability and real caller metadata through its normal managed MCP entry.
-Do not supply a tools pipe as an AppServer endpoint or copy an old caller turn.
-The agent sessionID still identifies the execution carrier independently of
-the native thread. The supplement does not accept `worker_id`, approval, token,
-generation, binding, or project scope. Do not run `appsdk init`, run
-`collab init` as a substitute for `collab context`, run a manual identity
-recovery command, or start a status/route/archive hunt to repair identity. A
-conflicting claim on your tmux pane (stale, or from another worker or project)
-is replaced by the daemon inside the same `collab context` call, so it is not a
-case you adjudicate. If `collab context` fails with an explicit conflict or
-error, preserve it and stop the affected recovery action; continue independent
-authorized work. Never edit `routes.jsonl`,
-`server.pid`, journal, mailbox, or identity files to make registration appear
-healthy.
+不提交 worker_id、token、generation 或历史绑定来替代宿主事实。
+`--query` 只投影当前表与当前状态。缺少投递事实时保留身份并报告当前缺项，
+不伪造可达，也不阻止其他 scope 正常启动或恢复。
 
-## Read-only route diagnostics
+普通角色是 peer。master 由有效用户授权或现有合法委派建立，名字和布局不授予权限。
+任何两个已注册对象均可普通直发；身份认证、精确收件人和回复关联继续生效。
+通知接受、真正消费和回信分别报告，不互相替代。
 
-A registered AppServer route is live only when the verified owner resolves the
-exact saved session/thread and project cwd through native `thread/read`. A
-tmux-only binding uses current persisted worker/binding/pane ownership for
-identity `Present` and validity, without live probe. Route reads and restoration
-use that ownership. A missing endpoint is absent; a failed status probe is
-unknown. Neither registered identity nor endpoint presence proves agent
-activity, transport submission or message consumption.
+## 维护边界
 
-An operator may use these read-only diagnostics for audit:
+安装只写产品与 Skill，不代表运行中的 daemon 已更新。daemon 关闭、启动由用户
+通过正式维护入口执行。Collab 不拥有 tmux 生命周期；任何安装、恢复或状态交接
+都不关闭 tmux server、不重启 tmux，也不终止宿主 pane。
 
-```sh
-collab route resolve --native-thread-id <thread-id> --session-id <session-id>
-collab worker status <peer-id>
-collab status --all
-```
+当前项目 master 可用 `collab reset --project` 清除此项目的当前数据。
+它保留其他项目和全局 daemon。普通安装、身份恢复与规则升级不授权清空任务或消息。
+AppSDK 的 `.appsdk/`、`.appsdk-control/` 和独立 bug 系统保持各自归属。
 
-Route resolution compares supplied runtime IDs with the current registered
-binding and never selects another thread by history. It is read-only and returns
-no token. The daemon remains the sole owner of route selection and identity
-recovery. Never edit `routes.jsonl`, identity files, journal, or mailbox to force
-a route, and never start a second daemon.
+通过 `collab master status`、`collab who`、`collab status --all` 或
+`collab worker status` 读取诊断。不要手改当前表、凭据、任务、消息或 socket
+来伪造恢复成功。保留真实错误，只暂停受影响动作，继续独立工作。

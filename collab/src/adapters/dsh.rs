@@ -129,7 +129,6 @@ pub struct DshRuntimeContext<'a> {
     pub runtime_id: &'a str,
     pub appserver_id: &'a str,
     pub binding_id: &'a str,
-    pub endpoint_generation: u64,
     pub session_id: Option<&'a str>,
     pub native_thread_id: Option<&'a str>,
 }
@@ -143,7 +142,6 @@ impl<'a> DshRuntimeContext<'a> {
             "runtime_id": self.runtime_id,
             "appserver_id": self.appserver_id,
             "binding_id": self.binding_id,
-            "endpoint_generation": self.endpoint_generation,
             "session_id": self.session_id,
             "native_thread_id": self.native_thread_id,
         })
@@ -577,18 +575,6 @@ fn validate_enrollment_receipt(
             )));
         }
     }
-    let generation = result
-        .get("endpointGeneration")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            receipt_mismatch("register-peer receipt is missing endpointGeneration".into())
-        })?;
-    if generation != enrollment.runtime_context.endpoint_generation {
-        return Err(receipt_mismatch(format!(
-            "register-peer receipt endpointGeneration {generation} does not match committed {}",
-            enrollment.runtime_context.endpoint_generation
-        )));
-    }
     if result.get("token").is_some() {
         return Err(receipt_mismatch(
             "register-peer receipt must not echo the credential".into(),
@@ -790,7 +776,6 @@ mod enrollment_tests {
                 runtime_id: "runtime-collab-A",
                 appserver_id: "appserver-A",
                 binding_id: "binding-1",
-                endpoint_generation: 2,
                 session_id: Some("session-A"),
                 native_thread_id: Some("native-thread-A"),
             },
@@ -803,8 +788,7 @@ mod enrollment_tests {
             "agentId": "native-thread-A",
             "workerId": "workerA",
             "projectScope": "/project",
-            "bindingId": "binding-1",
-            "endpointGeneration": 2
+            "bindingId": "binding-1"
         })
     }
 
@@ -825,7 +809,6 @@ mod enrollment_tests {
             ("/workerId", json!("workerB")),
             ("/projectScope", json!("/other")),
             ("/bindingId", json!("binding-2")),
-            ("/endpointGeneration", json!(3)),
         ] {
             let mut result = receipt();
             *result.pointer_mut(pointer).expect("receipt field") = drifted;
@@ -854,7 +837,7 @@ mod enrollment_tests {
         assert_eq!(context["runtime_id"], "runtime-collab-A");
         assert_eq!(context["appserver_id"], "appserver-A");
         assert_eq!(context["binding_id"], "binding-1");
-        assert_eq!(context["endpoint_generation"], 2);
+        assert!(context.get("endpoint_generation").is_none());
         assert_eq!(context["session_id"], "session-A");
         assert_eq!(context["native_thread_id"], "native-thread-A");
         assert_ne!(context["runtime_id"], committed.runtime_id);

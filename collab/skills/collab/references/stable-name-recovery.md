@@ -1,172 +1,88 @@
-# 稳定名字、会话与工作继承
+# 当前身份映射、名字和恢复
 
-状态：目标合同。安装 Skill 不等于 daemon 已加载实现；运行行为须单独验收。
+安装二进制、安装 Skill、激活 daemon 是三个状态。只有当前 daemon 的公开入口验收
+才能证明新版正在运行。向 master 或 peer 发恢复通知不等于完成版本切换。
 
-## 恢复操作：context 自己迁移，agent 不做历史清理
+## 唯一身份源
 
-Desktop 的身份锚点就是当前 agent sessionID；名字继续承载工作归属。
-agent sessionID 与 native thread ID 分开保存，不能因示例中两值相同就互相替代。
-当前 thread 或投递端点
-变化时，`collab context` 必须保留原名字、身份和工作，更新 binding、transport、
-current route 与有效订阅目标，并退休旧 route；相同事实重复恢复不增加 generation。
-不要从旧 transcript 抄 thread ID，也不要因为已注册就继续沿用旧 thread。普通恢复
-不重新注册或挑战；显式通信修复使用 `collab context --recover-communication`，
-其真实回投结果与普通身份恢复分别验收。历史注册回投记录由 context 自动兼容，
-不要求 agent 编辑或清空账本。
+Collab 用 `~/.collab/identity-map.json` 保存当前名字、角色、agent sessionID、宿主
+类型及投递绑定。文件格式是 `schema_version`、`slots`、`effects` 和
+`pending_resets`；`effects` 只保存尚未完成的当前效果，完成后删除。
+注册、换绑、改名、角色变化、恢复和注销都经过这个 owner。
 
-每次 AppServer 注册或恢复，都由当前调用方提交本次的 sessionID、thread ID、AppServer
-endpoint 和 namespace。CLI 可从当前宿主明确提供的环境采集；缺少的字段必须在本次
-`--provide` 或 MCP `provide` 中提供。daemon 不知道调用方的新端点，不能从历史注册
-补齐本次事实。MCP 长驻进程的启动环境不能保证仍是当前事实，调用者须逐次提供
-当前 native facts。不能猜 socket，也不能把 tools pipe 当成 AppServer endpoint。
-缺字段返回 `missing_facts`，保留持久身份和工作，不宣称恢复完成。
-普通恢复不增加回投挑战；`--query` 只读既有操作，不要求当前通信事实。
-tmux 与 DSH 继续按各自现有机制采集，不增加 native endpoint 要求。
+daemon 的消息、任务、有效授权和关系保存在各业务 owner 的当前 `state.json`。
+它们不能反向选择身份。所有 journal 读写、重放、修复、压缩、阶段记录和旧注册
+挑战链均已移除。不要生成替代历史，不要从档案、旧事件或操作回执选身份。
 
-Desktop 使用正常受宿主管理的 MCP bridge 时，走独立的 Desktop transport。
-bridge 从本次 executor metadata 取得真实 caller thread/turn，并将当前受限本地
-入口交给 `context`；agent sessionID 仍来自当前执行会话，不能用 thread ID 替代。
-不要求 Desktop 填写不存在的 AppServer endpoint，不查询 managed AppServer
-是否加载聊天来否定 bridge 能力。普通工具参数不能自选上游 caller/turn 或任意目标。
-agent 注册、恢复、发信和收信可用 Collab CLI，不要求调用 MCP 工具。当前 CLI
-能力输入与自动发现缺口见[Desktop CLI 用法](migration-daemon.md#desktop-cli-registration-and-messaging)。
-缺 executor metadata 或 bridge 不可用时，保留明确错误，修所属 bridge 入口；
-不要抄旧 turn、猜 socket、启动 keeper、重启 tmux 或切换旧 transport。
-bridge 的宿主接受、实际新 turn、消费和回复分别验收；只有入队或 socket 可连接
-都不证明唤醒。源实现、正式安装与当前 MCP/daemon 是否加载仍分别报告。
+旧版本的当前数据由本次获授权的一次性交接准备。新版没有旧表 import 或 journal
+读取入口。已有业务存储缺少新当前状态时返回迁移错误，不会静默置空。
+agent 不手改身份表、复制 token、reset 项目或替换旧 worker 来绕过错误。
 
-普通已注册命令读取身份时，由 daemon 按当前 project/app/agent sessionID 返回唯一
-当前绑定，再读取对应凭据。pane、tmux session、thread 和端点不选择工作身份，
-普通读取和收发不隐式执行 context，也不把投递位置换回旧 pane。该查询是只读，
-不能把它返回的历史通信字段补进新的 context。DSH 保留 gateway 身份路径。
+## 正常恢复
 
-当前宿主已提供完整事实时，普通注册或恢复调用：
+在实际项目和实际宿主执行：
 
 ```sh
 collab context
 ```
 
-AppServer 宿主环境缺字段时，在每次调用中提交从当前宿主取得的事实；
-下面的 AppServer 示例不用于替代 Desktop 的独立 bridge 能力输入：
+`cwd` 选择项目。daemon 只在当前 map 内查询本项目和 app scope 的绑定。
+当前名字、agent sessionID 或 manifest 固定 binding 定位同一当前对象；旧数据
+不能否决本次有效注册或用户授权。没有映射时按本次真实事实注册新的当前载体。
+缺事实、坏文件、不可用服务和写入失败都返回原错，不合成恢复成功。
+
+AppServer 首次注册或真实换端点时可补本次事实：
 
 ```sh
-collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"<当前 thread ID>","endpoint":"<当前 AppServer endpoint>","namespace":"codex_app"}'
+collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"<当前 native thread ID>","endpoint":"<当前 AppServer endpoint>","namespace":"codex_tui"}'
 ```
 
-daemon 负责旧身份兼容、重复 session 收敛、旧 route 退役、当前名字/session/通信
-换绑及有效订阅对齐。agent 不枚举档案选身份，不比较时间戳、token 或 generation，
-不先 close 历史 worker，不编辑或删除 identity/route/journal，不 reset 项目，也不
-为迁移启动或重启服务。旧记录不拥有否决当前恢复的权力。
+不能把 agent sessionID、native thread ID 和 tmux `$N` 互相替代。
+已经命中当前映射时可复用该映射的 adaptor；复用不表示观测到了新的端点。
+不要从旧 transcript 抄信息，不猜 socket，也不把 MCP tools pipe 当 AppServer。
 
-内部选择顺序固定，不由 agent 判断候选：
+`collab context --query` 只读当前映射和当前快照，不查旧操作，也不需要操作能力码。
+`--op` 仅关联本次调用，不建立操作历史或恢复 selector。
 
-| 当前输入或状态 | context 的责任 |
-| --- | --- |
-| 用户已明确授权精确恢复目标 | 先处理该意图，再做旧状态兼容；历史歧义不能提前否决 |
-| 当前 session 有唯一有效 typed 名字归属 | 续接该名字及当前工作，刷新执行和通信绑定 |
-| 同 session 有多个旧 binding 或仅有重复历史档案 | 在服务端收敛；无唯一当前归属时从当前 session 建立稳定载体，不按档案顺序、mtime 或 pane 猜 |
-| 同项目/app/session 新注册成功提交 | 新载体取代旧投递绑定；保留名字工作和历史，不停止旧进程 |
-| 不同 session 在线持有用户指定名字 | 没有本次确认时返回明确确认请求；已有确认直接应用，不再次询问 |
-| 名字占用确实 unknown | 沿现有持久裁决；用户明确恢复并确认接管不可用 Jenny 时直接接管 |
-| 确实缺当前事实、服务不可达或持久写入失败 | 返回具体缺项或原错，区分未完成与成功；不转成历史身份选择题 |
+## 当前授权与角色
 
-用户明确要求恢复普通 peer 时，用现有控制入口表达该意图，不猜旧 worker ID：
+只有用户授权才恢复 master。普通 peer 恢复不推导 master 权限。
 
 ```sh
-collab context --approve-grant '{"decision":"approved","action":"restore_peer","authorization":"<本次用户原话>"}'
+collab context --approve-grant '{"action":"restore_master","authorization":"<本次用户授权>"}'
+collab context --approve-grant '{"action":"restore_peer","authorization":"<本次用户授权>"}'
+collab context --approve-grant '{"action":"restore_name","requested_name":"Alice","authorization":"<本次用户授权>"}'
 ```
 
-用户明确指定既有 worker 身份时，目标来自本次用户指令或 daemon 返回的精确目标：
+授权作用于本次 map 选定的当前对象。不要提交旧 `target_identity`、incumbent fence、
+digest、generation、时间戳、裁决请求或旧完整 approval。旧身份准入和 grant
+replacement 阶段链已删除。当前 scope 不符或授权缺失会明确失败。
 
-```sh
-collab context --approve-identity '{"decision":"approved","action":"restore_peer","target_identity":"<明确目标 worker ID>","authorization":"<本次用户原话>"}'
-```
+正常成功结果是 `completed`，且 snapshot 的 `registered=true`。读取其中的实际
+名字、角色和当前绑定继续工作。pending、queued、missing_facts 和错误都不是恢复
+完成。只补返回结果要求的真实事实，不让 agent 选择历史身份。
 
-`restore_identity` 保持目标角色；`restore_peer` 明确恢复为 peer。恢复 Jenny/master
-使用既有 `--approve-grant` 的 `restore_master` 意图，不能从普通 peer 恢复推导 master。
-用户指定普通名字时，用 `restore_name` 和 `requested_name`，不用 display label 代替。
-不同 session 在线占名的接管用 `replace_confirmed:true` 表达已取得的本次确认；
-同 session 正常恢复不要求这个确认，不重复索取已提供的授权。
+## 固定布局与物理名字
 
-daemon 自行读取 scope 和当前占用引用。agent 不构造 `expected_incumbent`、digest、
-时间戳或历史 fence。已有完整 approval 仍兼容。需要保留操作号时使用结果中的
-operation_id；只读查进度用 `collab context --query --op '<operation_id>'`，query 不带
-approval。曾失败的操作保留失败记录；发起新的用户恢复意图时开启新 invocation，
-不以同一失败操作的幂等回执冒充再次执行。
+Collab 和 tm-iterm 共用 `~/.local/state/tm-iterm/manifest.json`。manifest 管理固定
+`binding_id`、`tab_id`、`pane_order`、cwd 和 iTerm profile。Collab 只关联固定 binding，
+不改布局位置。正常运行由 Collab 改名；tm-iterm 默认创建和解析，只有用户显式
+调用批量改名脚本时才改名。
 
-正常结果为 `completed` 且 snapshot `registered=true`，同时报告实际名字、角色、
-session 和当前 binding；queued/partial/pending 不等于恢复完成。确实缺运行事实时，
-只补结果 `requires`/`required_fields` 指定的真实字段，不探测别人的 pane 来猜。
-历史档案歧义属于 context 内部迁移事项，不能作为 agent 的工作分支。若旧已加载
-runtime 仍返回裸 `IDENTITY_RESTORE_AMBIGUOUS`，保留 operation_id 和原错，报告实现
-或版本缺陷；不要把错误当成用户授权不足，更不要手工清理以绕过。未受影响工作继续。
+物理 tmux session 名是 `<cwd末级folder>_<固定位置序号>_<Collab名字>`，例如
+`routecodex_1_Jenny`。序号始终属于 manifest 固定位置，不能随角色或名字分配。
+只有固定位置 1 可以升为 Jenny。排序和 pane 对应读取 manifest 的 `tab_id` 与
+`pane_order`，不能从 session 名格式猜布局。Collab 后缀不改变固定 binding。
 
-## 名字、角色与会话
+tm-iterm 只读 Collab identity map。禁止把转换出的 `entries`、布局数据或迁移预览
+写入 `~/.collab/identity-map.json`。布局 manifest 与身份表有各自的唯一 owner。
 
-名字承载项目内工作归属，master/peer 表示角色和权限，agent sessionID 是当前
-执行载体。注册报告 agent sessionID 并由 daemon 绑定。tmux session、pane、socket
-和 server PID 仅定位探测与投递，不是身份或任务键；明确弃用旧的 tmux session
-选择 peer 规则，不以历史 pane/native 绑定否决当前恢复。
+Desktop 和 DSH 使用同一身份表，只是绑定方式不同。Desktop 使用宿主 bridge 的
+当前 sessionID 和真实 caller 能力；DSH 使用 gateway 的当前 sessionID、endpoint
+和接收循环。两者不依赖 tmux 改名，也不增加不存在的 native 字段。
 
-名字仍归当前工作者而 sessionID 变化时，daemon 更新名字的 sessionID，并自动
-同步 board 中该名字下全部未关闭任务的 sessionID。任务 ID、状态、证据、资源与
-历史保持，已关闭任务不回写。当前名字工作者直接续接旧任务，不要求 Jenny 再次
-assign，不以旧 session 不一致阻塞。旧执行者不另行通知、停止、撤权或管控。
+名字续接同步该名字下未关闭任务的当前 sessionID，保留任务 ID、证据、资源与状态。
+名字交接转交未消费消息，并对齐当前收件和唤醒目标。已消费消息不重放，不伪造
+消费结果。队列接受、宿主接受和真正消费分别验收。
 
-名字交接也转交该名字的未消费消息，更新当前收件与唤醒目标。消息 ID、正文、原
-发送者和真实消费回执保持；已消费历史不回写、不重放。队列接受、adaptor 接受与
-目标消费分别报告，不能因换绑把尚未消费消息标为已消费。
-
-## 分配、恢复与裁决
-
-daemon 按项目管理名字。master 为 Jenny，普通名字按固定顺序取首个可用项：
-
-`Alice, Bob, Carol, David, Emma, Frank, Grace, Henry, Iris, Jack, Kate, Leo, Mia, Noah, Olivia, Peter, Quinn, Rose, Sam, Tina`
-
-Jenny 不占普通池名额，各项目独立占用。池满返回明确错误。普通恢复按 agent
-sessionID 找当前名字；同名正常续接更新当前 session 与位置，不重复确认。用户
-指定恢复 Jenny 时同时接管 master 及该名字工作。其他工作者在线占名时默认不
-替换，用户要求接管需本次二次确认。确认离线后失去保持权，可重新分配。
-Jenny 自身 unknown 且无法响应时，用户明确指定恢复 Jenny 并完成本次接管确认，
-直接接管 Jenny 名字和 master。用户确认高于 Jenny 裁决，不等待旧执行者。
-
-原 session 重连，原名未被接管则自动恢复；已被接管则从池分配新名，不自动抢回。
-master 已被明确清除或自身注销时，普通 `context` 恢复 peer，不以历史 Jenny 占用
-要求授权或自动恢复旧权限。只有仍有效的 master grant 或本次指定 Jenny 的授权
-恢复才能取得 Jenny/master。
-新持有者继承该名字未完成工作、总结、笔记和经验，不创建空白替身。
-
-daemon 周期观察当前具体 agent 是否在场及其 activity。Codex 当前在场为 online；
-busy、idle、waiting_user 均保名，waiting_user 不可当可派单 idle。当前轮明确等待
-后台命令属于 busy；后台事实不足以分类时保留 activity unknown。确认回 shell 且
-无 agent 为 offline；历史滚屏不算在场。探测失败或不支持为 unknown，不据此释放。
-
-在线归属 unknown 时由当前项目 Jenny 获取当前 pane snapshot 裁决，结果交 daemon
-应用。裁决应用后，归属名字的当前工作者继续任务并同步 session 与未关闭任务。
-仍 unknown、snapshot 失败或 Jenny 不可用时保留原绑定和待决请求，不猜测离线。
-online/activity unknown 已确认在线，不触发归属裁决。检测由 daemon 统一调度。
-
-## 任务与角色交接
-
-名字当前无可用工作者时，未关闭任务显示空，持久名字引用与任务保留。向当前
-Jenny 说明因原绑定不可用回流，需要她重新 assign；不自动让 Jenny 执行。未改派
-时名字恢复自动接续，已改派任务跟随新名字。
-
-master 和 peer 都主要承接长程目标，负责拆分、派发、资源管理、验收与交付，优先
-让子 agent 编码。一次性执行/观察发独立 `codex exec --profile gcm`；长程目标交
-可用且获授权 peer。无 peer 时保留长程目标并拆分。注册和恢复说明双方职责，建议
-按各自关注的目标、P0/P1、阻塞和资源设置有限的定时巡检。缺事实问 owning peer，
-设计解释问设计师，范围或资源冲突问 master；内部未回复不自动转问人类。
-只有人类独占事实、新授权或用户硬约束变化才向人类询问，未受影响工作继续。
-peer 对自己的日常长程任务主动建立并维护巡检任务与订阅。每次收到 master 新任务，
-先评估目标、依赖、阻塞、优先级及资源，再更新已有巡检任务和订阅；仅补缺项、
-移除已过时的自有范围，避免重复定时器。回报巡检范围变化或无需变更的具体原因。
-任务完成后由 agent 主动关闭该任务的有限巡检任务和定时订阅。没有新任务、无事可做时，
-关闭这些有限巡检，不续订或重建空循环。接收新任务的消息订阅继续保留；新任务到来后，
-重新评估再开启所需巡检。当前 master 的 `project-patrol` 常驻项目巡检按
-[board idle 巡检契约](board-idle-patrol.md) 保留；单个 goal 结束不关闭它。只关闭自己的
-巡检范围，不取消其他目标的订阅。
-
-恢复名字后读取项目 orchestration-local 中该名字的总结与派发记录，从未完成节点
-继续。升级交接报告名字、角色、当前 agent sessionID、未完成目标、资源及巡检项。
-不重启 tmux，不重建 pane，不手改 journal，也不由 agent 启停全局 daemon。
+任何身份、升级或通信恢复都不关闭、重启 tmux server，也不终止宿主 pane。

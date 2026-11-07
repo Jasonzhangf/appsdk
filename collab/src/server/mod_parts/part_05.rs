@@ -4,63 +4,19 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(format!(
-                "HOST_ROUTE_REPLAY_FAILED: read route journal: {error}"
+                "HOST_ROUTE_READ_FAILED: {error}"
             ))
         }
     };
-    if content.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !content.ends_with('\n') {
-        return Err("HOST_ROUTE_REPLAY_FAILED: route journal must end with a newline".into());
-    }
-    let mut records = Vec::new();
+    let records: Vec<HostRouteRecord> = serde_json::from_str(&content)
+        .map_err(|error| format!("HOST_ROUTE_DECODE_FAILED: {error}"))?;
     let mut seen_keys = std::collections::BTreeMap::<RouteKey, usize>::new();
     let mut seen_storage_roots = std::collections::BTreeMap::<String, (RouteKey, usize)>::new();
-    for (index, chunk) in content.split_inclusive('\n').enumerate() {
-        let line = chunk
-            .strip_suffix('\n')
-            .expect("split_inclusive always returns a newline-terminated chunk");
-        // Accept the conventional JSONL CRLF representation while treating
-        // every other empty/whitespace-only physical line as corruption. A
-        // trailing newline is framing, not an additional blank record.
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if line.trim().is_empty() {
-            return Err(format!(
-                "HOST_ROUTE_REPLAY_FAILED: empty route journal line {}",
-                index + 1
-            ));
-        }
-        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
-            format!(
-                "HOST_ROUTE_REPLAY_FAILED: route journal line {}: {error}",
-                index + 1
-            )
-        })?;
-        if value.get("kind").and_then(serde_json::Value::as_str)
-            == Some(crate::server::binding_store::BINDING_CONTROL_KIND)
-        {
-            continue;
-        }
-        let record = serde_json::from_value::<HostRouteRecord>(value).map_err(|error| {
-            format!(
-                "HOST_ROUTE_REPLAY_FAILED: route journal line {}: {error}",
-                index + 1
-            )
-        })?;
+    for (index, record) in records.iter().enumerate() {
         let key = (record.app_scope_id.clone(), record.project_scope.clone());
-        if record.version == 1 && record.op == "delete" {
-            records.retain(|old: &HostRouteRecord| {
-                (old.app_scope_id.as_str(), old.project_scope.as_str())
-                    != (record.app_scope_id.as_str(), record.project_scope.as_str())
-            });
-            seen_keys.remove(&key);
-            seen_storage_roots.retain(|_, (owner, _)| owner != &key);
-            continue;
-        }
         if let Some(previous_line) = seen_keys.insert(key.clone(), index + 1) {
             return Err(format!(
-                "HOST_ROUTE_REPLAY_FAILED: duplicate route key ({}, {}) at lines {} and {}",
+                "HOST_ROUTE_INVALID: duplicate route key ({}, {}) at rows {} and {}",
                 key.0,
                 key.1,
                 previous_line,
@@ -71,7 +27,7 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
             seen_storage_roots.insert(record.storage_root.clone(), (key.clone(), index + 1))
         {
             return Err(format!(
-                "HOST_ROUTE_REPLAY_FAILED: duplicate runtime storage root {} for routes ({}, {}) and ({}, {}) at lines {} and {}",
+                "HOST_ROUTE_INVALID: duplicate runtime storage root {} for routes ({}, {}) and ({}, {}) at rows {} and {}",
                 record.storage_root,
                 previous_key.0,
                 previous_key.1,
@@ -81,7 +37,6 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
                 index + 1
             ));
         }
-        records.push(record);
     }
     Ok(records)
 }
@@ -90,12 +45,6 @@ pub(crate) fn validate_host_route_record(
     record: &HostRouteRecord,
     host_paths: &HostPaths,
 ) -> Result<(RouteKey, PathBuf, PathBuf), String> {
-    if record.version != 1 || record.op != "register" {
-        return Err(format!(
-            "HOST_ROUTE_REPLAY_FAILED: unsupported route record version/op {}/{}",
-            record.version, record.op
-        ));
-    }
     let app_scope = AppServerId::new(record.app_scope_id.clone())
         .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: app scope: {error}"))?;
     let project_scope = ProjectScopeId::new(record.project_scope.clone())
@@ -169,15 +118,6 @@ fn route_record_is_replayable(record: &HostRouteRecord) -> Result<bool, String> 
     }
 }
 
-fn validate_command_id(value: &str) -> Result<(), notification_contract::JournalError> {
-    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-        return Err(notification_contract::JournalError::InvalidCommand(
-            "command and operation ids must be non-empty, <=256 bytes, and control-free".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn purge_expired_storage(server: &Server, now: i64) -> usize {
     if server.state.lock().unwrap().admission_frozen() {
         return 0;
@@ -192,21 +132,19 @@ pub(crate) fn purge_expired_storage(server: &Server, now: i64) -> usize {
         })
         .map(|message| message.id.clone())
         .collect();
-    mailbox::purge_message_snapshot_files(&server.storage_root, &expired, &st);
     if expired.is_empty() {
         return 0;
     }
-    for id in &expired {
-        st.drop_message(id);
+    let mut candidate = st.clone();
+    for id in &expired { candidate.drop_message(id); }
+    if let Err(error) = candidate.advance_version() {
+        server.report_state_error(&notification_contract::MutationError::InvalidState(error));
+        return 0;
     }
-    if let Err(error) = server.rewrite_journal_locked(&st) {
-        st.journal_poison = Some(error.to_string());
-        append_log(
-            &server.log_path(),
-            &format!("JOURNAL_COMPACTION_FAILED: {error}"),
-        );
+    match server.publish_current_state(&mut st, candidate) {
+        Ok(_) => expired.len(),
+        Err(error) => { server.report_state_error(&error); 0 }
     }
-    expired.len()
 }
 
 pub fn gen_msg_id() -> String {
@@ -569,7 +507,7 @@ fn default_direct_message_events(
         return events;
     }
     // The default lease is system-owned and must follow the registered
-    // transport. Keep an explicit journal transition before replacing a
+    // transport. Commit the current subscription before replacing a
     // retired target so upgrades cannot leave the peer permanently unwoken.
     if current_is_armed {
         let Some(thread_id) = notification_target(transport) else {
@@ -835,7 +773,21 @@ fn attempt_tmux_notification_with_retry(
     if !state.scheduler_message_deliverable(message_id) {
         return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
     }
-    if !crate::server::state::board_patrol_notice_is_current(&state, message_id) {
+    let has_patrol_notice = state.board_patrol_notice_ids.iter()
+        .any(|id| state.msgs.get(id).is_some_and(|message| message.to == recipient));
+    let patrol_current = if has_patrol_notice {
+        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control, Err(error) => return NotificationAttempt::NotAttempted(error),
+        };
+        let route = match server_route_scope(server, &state) {
+            Ok(route) => route, Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+        };
+        match state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), recipient) {
+            Ok(tasks) => tasks.is_some_and(|tasks| !tasks.is_empty()),
+            Err(error) => return NotificationAttempt::NotAttempted(error),
+        }
+    } else { true };
+    if state.board_patrol_notice_ids.contains(message_id) && !patrol_current {
         return NotificationAttempt::NotAttempted(
             "board patrol notice no longer has canonical eligible tasks".into(),
         );
@@ -874,6 +826,13 @@ fn attempt_tmux_notification_with_retry(
             .into(),
         );
     }
+    if transport.kind == TransportKind::Dsh
+        && state.msgs.get(message_id).is_some_and(|message| message.to == recipient && message.state == "read")
+        && state.receive_receipts.values().any(|receipt| receipt.worker_id == recipient
+            && receipt.message_ids.iter().any(|id| id == message_id))
+    {
+        return NotificationAttempt::Consumed;
+    }
     let delivery_mode = state
         .delivery_modes
         .get(&seed_id)
@@ -888,7 +847,7 @@ fn attempt_tmux_notification_with_retry(
             let message_explicit = is_explicit_notification(&state, message);
             (message.to == recipient
                 && state.scheduler_message_deliverable(&message.id)
-                && crate::server::state::board_patrol_notice_is_current(&state, &message.id)
+                && (!state.board_patrol_notice_ids.contains(&message.id) || patrol_current)
                 && message_explicit == explicit
                 && state
                     .target_sessions
@@ -977,26 +936,28 @@ fn attempt_tmux_notification_with_retry(
             "notification delivery window has not elapsed".into(),
         );
     }
-    // Revalidate every marked patrol cue under the same lock that commits the
-    // actual attempt. A cancellation or task transition committed before this
-    // point must prevent the attempt; an attempt already submitted cannot be
-    // retracted afterwards.
-    if !batch
-        .iter()
-        .all(|message| crate::server::state::board_patrol_notice_is_current(&state, &message.1))
-    {
-        return NotificationAttempt::NotAttempted(
-            "board patrol notice no longer has canonical eligible tasks".into(),
-        );
-    }
-    server.commit_locked_reporting(
-        &mut state,
-        &[Event::WakeAttempted {
+    let selected_binding = (|| -> Result<_, String> {
+        let Some(route) = server_route_scope(server, &state)? else { return Ok(None); };
+        let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
+        Ok(control.current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)?
+            .and_then(notification_contract::SelectedDeliveryBinding::from_slot)
+            .filter(|binding| binding.transport == *transport))
+    })();
+    let selected_binding = match selected_binding {
+        Ok(binding) => binding,
+        Err(error) => return NotificationAttempt::Rejected(error),
+    };
+    let mut attempt_events = vec![Event::WakeAttempted {
             ids: batch.iter().map(|message| message.1.clone()).collect(),
             attempted_ms: now,
             retry,
-        }],
-    );
+        }];
+    attempt_events.extend(batch.iter().map(|message| Event::NotificationDeliverySelected {
+        message_id: message.1.clone(), selected_binding: selected_binding.clone(),
+    }));
+    if let Err(error) = server.commit_locked_checked(&mut state, &attempt_events) {
+        return NotificationAttempt::Rejected(error.to_string());
+    }
     drop(state);
 
     let text = truncate_notification(compose_notification(
@@ -1386,6 +1347,13 @@ fn notification_send_response(
         return Resp::data(data);
     }
     match notification {
+        NotificationAttempt::Consumed => {
+            data["durable"] = json!(true);
+            data["notification"] = json!("not-attempted-already-consumed");
+            data["consumed"] = json!(true);
+            data["repair_required"] = json!(false);
+            Resp::data(data)
+        }
         NotificationAttempt::Deferred => {
             data["durable"] = json!(true);
             data["notification"] = json!("queued");
@@ -1470,24 +1438,24 @@ fn attempt_scheduler_notification(
     request_id: &str,
     message_id: &str,
     subscription_id: &str,
-) -> SchedulerNotificationAttempt {
+) -> Result<SchedulerNotificationAttempt, Resp> {
     if !server.config.notifications.enabled {
-        return SchedulerNotificationAttempt::Unavailable;
+        return Ok(SchedulerNotificationAttempt::Unavailable);
     }
     let claim_ms = {
         let mut state = server.state.lock().unwrap();
         let Some(admission) = state.scheduler_admissions.get(request_id) else {
-            return SchedulerNotificationAttempt::Unavailable;
+            return Ok(SchedulerNotificationAttempt::Unavailable);
         };
         if admission.status == "notifying" {
             if now_ms().saturating_sub(admission.updated_ms) < state::REQUEST_COOLDOWN_MS {
-                return SchedulerNotificationAttempt::InFlight;
+                return Ok(SchedulerNotificationAttempt::InFlight);
             }
         } else if admission.status != "pending" {
-            return SchedulerNotificationAttempt::Unavailable;
+            return Ok(SchedulerNotificationAttempt::Unavailable);
         }
         let claim_ms = now_ms();
-        server.commit_locked_reporting(
+        server.commit_locked(
             &mut state,
             &[Event::SchedulerAdmissionStatus {
                 request_id: request_id.into(),
@@ -1495,7 +1463,7 @@ fn attempt_scheduler_notification(
                 error: None,
                 updated_ms: claim_ms,
             }],
-        );
+        ).map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
         claim_ms
     };
     let delivery = {
@@ -1548,7 +1516,7 @@ fn attempt_scheduler_notification(
     let Some((recipient, transport, source_thread_id, delay, explicit, allow_retry)) = delivery
     else {
         clear_scheduler_notification_claim(server, request_id, claim_ms);
-        return SchedulerNotificationAttempt::Rejected;
+        return Ok(SchedulerNotificationAttempt::Rejected);
     };
     let notified = attempt_tmux_notification_with_retry(
         server,
@@ -1576,7 +1544,7 @@ fn attempt_scheduler_notification(
     if notified.accepted() {
         let mut state = server.state.lock().unwrap();
         if scheduler_notification_claim_is_current(&state, request_id, claim_ms) {
-            server.commit_locked_reporting(
+            server.commit_locked(
                 &mut state,
                 &[Event::SchedulerAdmissionStatus {
                     request_id: request_id.into(),
@@ -1584,18 +1552,47 @@ fn attempt_scheduler_notification(
                     error: None,
                     updated_ms: now_ms(),
                 }],
-            );
+            ).map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
         }
-        SchedulerNotificationAttempt::Accepted
+        Ok(SchedulerNotificationAttempt::Accepted)
     } else {
+        if matches!(notified, NotificationAttempt::Consumed | NotificationAttempt::NotAttempted(_)) {
+            let outcome = finish_scheduler_consumption(server, request_id, message_id, claim_ms)?;
+            if outcome != SchedulerNotificationAttempt::Rejected {
+                return Ok(outcome);
+            }
+        }
         clear_scheduler_notification_claim(server, request_id, claim_ms);
-        SchedulerNotificationAttempt::Rejected
+        Ok(SchedulerNotificationAttempt::Rejected)
     }
+}
+
+fn finish_scheduler_consumption(
+    server: &Server,
+    request_id: &str,
+    message_id: &str,
+    claim_ms: i64,
+) -> Result<SchedulerNotificationAttempt, Resp> {
+    let mut state = server.state.lock().unwrap();
+    if !scheduler_notification_claim_is_current(&state, request_id, claim_ms) {
+        return Ok(SchedulerNotificationAttempt::InFlight);
+    }
+    let admission = &state.scheduler_admissions[request_id];
+    let consumed = admission.message_id == message_id && state.msgs.get(message_id).is_some_and(|message|
+        message.to == admission.worker_id && matches!(message.state.as_str(), "read" | "delivered"));
+    if !consumed {
+        return Ok(SchedulerNotificationAttempt::Rejected);
+    }
+    server.commit_locked(&mut state, &[Event::SchedulerAdmissionStatus {
+        request_id: request_id.into(), status: "succeeded".into(), error: None, updated_ms: now_ms(),
+    }]).map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
+    Ok(SchedulerNotificationAttempt::Consumed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchedulerNotificationAttempt {
     Accepted,
+    Consumed,
     Rejected,
     InFlight,
     Unavailable,

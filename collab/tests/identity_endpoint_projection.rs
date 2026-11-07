@@ -199,6 +199,24 @@ fn missing_pane_and_lost_socket_report_not_live() {
         .expect("peer pane id is utf8")
         .trim()
         .to_owned();
+    let peer_session_id = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &peer_pane_id,
+                "#{session_id}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert!(peer_session_id.starts_with('$'));
+    fixture.owned_sessions.push(peer_session_id.clone());
     let peer_pane = Pane {
         server_pid: master_pane.server_pid,
         pane_id: peer_pane_id.clone(),
@@ -211,7 +229,7 @@ fn missing_pane_and_lost_socket_report_not_live() {
     // error for a missing target, so false and unknown are both truthful.
     tmux(
         &fixture.tmux_socket,
-        &["kill-pane", "-t", &master_pane.pane_id],
+        &["kill-session", "-t", &fixture.owned_sessions[0]],
     );
 
     assert_not_live_consistent(&fixture, &peer_pane, &master_id, &grant_id);
@@ -220,24 +238,51 @@ fn missing_pane_and_lost_socket_report_not_live() {
     // no longer decide and the endpoint must report `null`, never `true`.
     tmux(
         &fixture.tmux_socket,
-        &["kill-session", "-t", &format!("{label}-peer")],
+        &["kill-session", "-t", &peer_session_id],
     );
+    fixture.owned_sessions.clear();
     // Observe the lost endpoint from a real independent caller, rather than
     // impersonating a process in the session that was just closed.
     let lost_socket = fixture.tmux_socket.clone();
     let observer_socket = fixture.root.join("observer.sock");
     let observer_session = format!("{label}-observer");
     let observer_seed = format!("{label}-observer-seed");
-    tmux(
+    fixture.tmux_socket = observer_socket.clone();
+    let seed = tmux(
         &observer_socket,
-        &["new-session", "-d", "-s", &observer_seed, "sleep 600"],
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}",
+            "-s",
+            &observer_seed,
+            "sleep 600",
+        ],
     );
-    tmux(
+    let seed_id = String::from_utf8(seed.stdout).unwrap().trim().to_owned();
+    fixture.owned_sessions.push(seed_id.clone());
+    let observer = tmux(
         &observer_socket,
-        &["new-session", "-d", "-s", &observer_session, "sleep 600"],
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}",
+            "-s",
+            &observer_session,
+            "sleep 600",
+        ],
     );
-    tmux(&observer_socket, &["kill-session", "-t", &observer_seed]);
-    fixture.owned_sessions.push(observer_session);
+    let observer_id = String::from_utf8(observer.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    fixture.owned_sessions.push(observer_id);
+    tmux(&observer_socket, &["kill-session", "-t", &seed_id]);
+    fixture.owned_sessions.retain(|session| session != &seed_id);
     std::fs::write(
         fixture.host_state.join("tmux-endpoints.json"),
         serde_json::to_vec(&json!({

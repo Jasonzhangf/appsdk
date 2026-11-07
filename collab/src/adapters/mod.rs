@@ -112,7 +112,6 @@ mod legacy {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SubmissionReceipt {
         pub endpoint: EndpointKind,
-        pub generation: u64,
         pub binding_id: BindingId,
         pub turn: Option<TurnId>,
         pub response: serde_json::Value,
@@ -128,7 +127,6 @@ mod legacy {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct InterruptReceipt {
         pub endpoint: EndpointKind,
-        pub generation: u64,
         pub target_turn: TurnId,
         pub status: InterruptStatus,
     }
@@ -157,10 +155,6 @@ mod legacy {
         },
         InvalidBinding {
             detail: String,
-        },
-        StaleBinding {
-            expected: u64,
-            observed: u64,
         },
         WrongTurn {
             expected: Option<String>,
@@ -196,7 +190,6 @@ mod legacy {
                 | Self::UnknownEndpoint { .. }
                 | Self::CapabilityUnavailable { .. }
                 | Self::InvalidBinding { .. }
-                | Self::StaleBinding { .. }
                 | Self::WrongTurn { .. } => NotificationDeliveryClass::KnownNotDelivered,
                 // A timeout, a thread-writer conflict on another endpoint, or any
                 // unclassified decode/transport failure leaves the native outcome
@@ -290,10 +283,6 @@ mod legacy {
             Self::InvalidBinding { detail } => {
                 write!(f, "ADAPTER_INVALID_BINDING: {detail}")
             }
-            Self::StaleBinding { expected, observed } => write!(
-                f,
-                "ADAPTER_STALE_BINDING: expected endpoint generation {expected}, observed {observed}"
-            ),
             Self::WrongTurn { expected, observed } => write!(
                 f,
                 "ADAPTER_WRONG_TURN: expected turn {}, observed {}",
@@ -542,16 +531,6 @@ mod legacy {
     ) -> Result<(), AdapterError> {
         let registered_scope = route_scope(envelope)?;
         if let Err(error) = command.validate_for(binding.identity, &registered_scope) {
-            if let Some(crate::identity::BindingValidationError::StaleGeneration {
-                expected,
-                observed,
-            }) = error.downcast_ref::<crate::identity::BindingValidationError>()
-            {
-                return Err(AdapterError::StaleBinding {
-                    expected: *expected,
-                    observed: *observed,
-                });
-            }
             return Err(AdapterError::InvalidBinding {
                 detail: error.to_string(),
             });
@@ -591,12 +570,6 @@ mod legacy {
                 ),
             });
         }
-        if receipt.generation != binding.identity.endpoint_generation {
-            return Err(AdapterError::StaleBinding {
-                expected: binding.identity.endpoint_generation,
-                observed: receipt.generation,
-            });
-        }
         if receipt.binding_id != binding.identity.binding_id {
             return Err(AdapterError::InvalidBinding {
                 detail: format!(
@@ -625,12 +598,6 @@ mod legacy {
                 ),
             });
         }
-        if receipt.generation != binding.identity.endpoint_generation {
-            return Err(AdapterError::StaleBinding {
-                expected: binding.identity.endpoint_generation,
-                observed: receipt.generation,
-            });
-        }
         validate_turn_matches(Some(target_turn), Some(&receipt.target_turn))?;
         Ok(receipt)
     }
@@ -653,12 +620,11 @@ mod legacy {
         use std::os::unix::net::UnixListener;
         use std::path::PathBuf;
 
-        fn registered_identity(appserver: &str, generation: u64, binding: &str) -> RuntimeIdentity {
+        fn registered_identity(appserver: &str, binding: &str) -> RuntimeIdentity {
             RuntimeIdentity {
                 agent_id: AgentId::new("agent-1").unwrap(),
                 runtime_id: RuntimeId::new("runtime-1").unwrap(),
                 appserver_id: AppServerId::new(appserver).unwrap(),
-                endpoint_generation: generation,
                 binding_id: BindingId::new(binding).unwrap(),
                 session_id: None,
                 native_thread_id: None,
@@ -672,14 +638,12 @@ mod legacy {
         fn request(
             binding: &EndpointBinding,
             turn: Option<&TurnId>,
-            generation: u64,
             root: &PathBuf,
         ) -> RequestEnvelope {
             let command = CommandEnvelope::new(
                 CommandId::new("command-1").unwrap(),
                 OperationId::new("operation-1").unwrap(),
                 binding.identity.binding_id.clone(),
-                generation,
                 RouteScope::for_registered_project(binding.identity.appserver_id.clone(), root)
                     .unwrap(),
                 None,
@@ -831,7 +795,6 @@ mod legacy {
         ) -> SubmissionReceipt {
             SubmissionReceipt {
                 endpoint: kind,
-                generation: binding.identity.endpoint_generation,
                 binding_id: binding.identity.binding_id.clone(),
                 turn,
                 response: serde_json::json!({"accepted": true}),
@@ -887,16 +850,15 @@ mod legacy {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&root).unwrap();
-            let identity = registered_identity("appserver-desktop", 7, "binding-7");
+            let identity = registered_identity("appserver-desktop", "binding-7");
             let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
-            let envelope = request(&binding, Some(&turn("turn-1")), 7, &root);
+            let envelope = request(&binding, Some(&turn("turn-1")), &root);
             let expected = receipt(EndpointKind::Desktop, &binding, Some(turn("turn-1")));
             let adapter = FakeAdapter {
                 endpoint: EndpointKind::Desktop,
                 submit: Ok(expected.clone()),
                 interrupt: Ok(InterruptReceipt {
                     endpoint: EndpointKind::Desktop,
-                    generation: 7,
                     target_turn: turn("turn-1"),
                     status: InterruptStatus::Accepted,
                 }),
@@ -906,46 +868,6 @@ mod legacy {
             assert_eq!(
                 submit_registered(&adapter, &binding, &envelope).unwrap(),
                 expected
-            );
-            std::fs::remove_dir_all(root).ok();
-        }
-
-        #[test]
-        fn registered_submit_rejects_stale_generation_before_adapter_call() {
-            let root = std::env::temp_dir().join(format!(
-                "collab-adapter-stale-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&root).unwrap();
-            let identity = registered_identity("appserver-desktop", 9, "binding-9");
-            let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
-            let envelope = request(&binding, Some(&turn("turn-1")), 8, &root);
-            let adapter = FakeAdapter {
-                endpoint: EndpointKind::Desktop,
-                submit: Ok(receipt(
-                    EndpointKind::Desktop,
-                    &binding,
-                    Some(turn("turn-1")),
-                )),
-                interrupt: Ok(InterruptReceipt {
-                    endpoint: EndpointKind::Desktop,
-                    generation: 9,
-                    target_turn: turn("turn-1"),
-                    status: InterruptStatus::Accepted,
-                }),
-            };
-
-            let error = submit_registered(&adapter, &binding, &envelope).unwrap_err();
-            assert_eq!(
-                error,
-                AdapterError::StaleBinding {
-                    expected: 9,
-                    observed: 8
-                }
             );
             std::fs::remove_dir_all(root).ok();
         }
@@ -961,9 +883,9 @@ mod legacy {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&root).unwrap();
-            let identity = registered_identity("appserver-tui", 3, "binding-3");
+            let identity = registered_identity("appserver-tui", "binding-3");
             let binding = EndpointBinding::new(EndpointKind::Tui, &identity);
-            let mut envelope = request(&binding, Some(&turn("turn-1")), 3, &root);
+            let mut envelope = request(&binding, Some(&turn("turn-1")), &root);
             if let Req::Send {
                 command: Some(command),
                 ..
@@ -976,7 +898,6 @@ mod legacy {
                 submit: Ok(receipt(EndpointKind::Tui, &binding, Some(turn("turn-1")))),
                 interrupt: Ok(InterruptReceipt {
                     endpoint: EndpointKind::Tui,
-                    generation: 3,
                     target_turn: turn("turn-1"),
                     status: InterruptStatus::Accepted,
                 }),
@@ -991,9 +912,9 @@ mod legacy {
         #[test]
         fn registered_submit_rejects_context_for_a_different_appserver() {
             let root = temp_root("wrong-context");
-            let identity = registered_identity("appserver-desktop", 4, "binding-4");
+            let identity = registered_identity("appserver-desktop", "binding-4");
             let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
-            let mut envelope = request(&binding, Some(&turn("turn-1")), 4, &root);
+            let mut envelope = request(&binding, Some(&turn("turn-1")), &root);
             envelope.project_context.as_mut().unwrap().app_scope_id =
                 AppServerId::new("appserver-other").unwrap();
             let adapter = FakeAdapter {
@@ -1025,9 +946,9 @@ mod legacy {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&root).unwrap();
-            let identity = registered_identity("appserver-tui", 3, "binding-3");
+            let identity = registered_identity("appserver-tui", "binding-3");
             let binding = EndpointBinding::new(EndpointKind::Tui, &identity);
-            let envelope = request(&binding, Some(&turn("turn-1")), 3, &root);
+            let envelope = request(&binding, Some(&turn("turn-1")), &root);
             let mut wrong_receipt = receipt(EndpointKind::Tui, &binding, Some(turn("turn-1")));
             wrong_receipt.turn = Some(turn("turn-2"));
             let adapter = FakeAdapter {
@@ -1035,7 +956,6 @@ mod legacy {
                 submit: Ok(wrong_receipt),
                 interrupt: Ok(InterruptReceipt {
                     endpoint: EndpointKind::Tui,
-                    generation: 3,
                     target_turn: turn("turn-1"),
                     status: InterruptStatus::Accepted,
                 }),
@@ -1053,41 +973,6 @@ mod legacy {
         }
 
         #[test]
-        fn registered_submit_rejects_stale_receipt_generation() {
-            let root = std::env::temp_dir().join(format!(
-                "collab-adapter-receipt-stale-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&root).unwrap();
-            let identity = registered_identity("appserver-desktop", 7, "binding-7");
-            let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
-            let envelope = request(&binding, Some(&turn("turn-1")), 7, &root);
-            let mut stale_receipt = receipt(EndpointKind::Desktop, &binding, Some(turn("turn-1")));
-            stale_receipt.generation = 6;
-            let adapter = FakeAdapter {
-                endpoint: EndpointKind::Desktop,
-                submit: Ok(stale_receipt),
-                interrupt: Err(AdapterError::EndpointUnavailable {
-                    endpoint: EndpointKind::Desktop,
-                }),
-            };
-
-            let error = submit_registered(&adapter, &binding, &envelope).unwrap_err();
-            assert_eq!(
-                error,
-                AdapterError::StaleBinding {
-                    expected: 7,
-                    observed: 6
-                }
-            );
-            std::fs::remove_dir_all(root).ok();
-        }
-
-        #[test]
         fn unavailable_adapter_never_falls_back_to_another_endpoint() {
             let root = std::env::temp_dir().join(format!(
                 "collab-adapter-unavailable-{}-{}",
@@ -1098,9 +983,9 @@ mod legacy {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&root).unwrap();
-            let identity = registered_identity("appserver-tui", 3, "binding-3");
+            let identity = registered_identity("appserver-tui", "binding-3");
             let binding = EndpointBinding::new(EndpointKind::Tui, &identity);
-            let envelope = request(&binding, Some(&turn("turn-1")), 3, &root);
+            let envelope = request(&binding, Some(&turn("turn-1")), &root);
             let adapter = AdapterRegistry::new().adapter(EndpointKind::Tui);
 
             let submit_error = submit_registered(&adapter, &binding, &envelope).unwrap_err();
@@ -1126,9 +1011,9 @@ mod legacy {
         #[test]
         fn unsupported_capabilities_fail_before_adapter_execution() {
             let root = temp_root("capability");
-            let identity = registered_identity("appserver-desktop", 2, "binding-2");
+            let identity = registered_identity("appserver-desktop", "binding-2");
             let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
-            let envelope = request(&binding, Some(&turn("turn-1")), 2, &root);
+            let envelope = request(&binding, Some(&turn("turn-1")), &root);
             let adapter = UnsupportedAdapter;
 
             let submit_error = submit_registered(&adapter, &binding, &envelope).unwrap_err();
@@ -1155,9 +1040,9 @@ mod legacy {
         #[test]
         fn endpoint_mismatch_fails_before_adapter_execution() {
             let root = temp_root("endpoint-mismatch");
-            let identity = registered_identity("appserver-desktop", 2, "binding-2");
+            let identity = registered_identity("appserver-desktop", "binding-2");
             let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
-            let envelope = request(&binding, Some(&turn("turn-1")), 2, &root);
+            let envelope = request(&binding, Some(&turn("turn-1")), &root);
             let adapter = EndpointMismatchAdapter::new();
 
             let submit_error = submit_registered(&adapter, &binding, &envelope).unwrap_err();
@@ -1191,11 +1076,10 @@ mod legacy {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&root).unwrap();
-            let identity = registered_identity("appserver-desktop", 5, "binding-5");
+            let identity = registered_identity("appserver-desktop", "binding-5");
             let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
             let expected = InterruptReceipt {
                 endpoint: EndpointKind::Desktop,
-                generation: 5,
                 target_turn: turn("turn-1"),
                 status: InterruptStatus::Accepted,
             };
@@ -1216,7 +1100,7 @@ mod legacy {
 
         #[test]
         fn registered_interrupt_rejects_wrong_native_turn() {
-            let identity = registered_identity("appserver-desktop", 5, "binding-5");
+            let identity = registered_identity("appserver-desktop", "binding-5");
             let binding = EndpointBinding::new(EndpointKind::Desktop, &identity);
             let adapter = FakeAdapter {
                 endpoint: EndpointKind::Desktop,
@@ -1225,7 +1109,6 @@ mod legacy {
                 }),
                 interrupt: Ok(InterruptReceipt {
                     endpoint: EndpointKind::Desktop,
-                    generation: 5,
                     target_turn: turn("turn-2"),
                     status: InterruptStatus::Accepted,
                 }),

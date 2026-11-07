@@ -96,7 +96,7 @@ fn set_remind_clear_round_trip_and_view_fields() {
 }
 
 #[test]
-fn snapshot_replay_preserves_unsettled_and_reminded_obligation() {
+fn current_state_preserves_unsettled_and_reminded_obligation() {
     let mut state = State::default();
     state.apply(&Event::ReplyObligationSet {
         obligation: obligation("m1", "proj", "requester", "peer", None),
@@ -106,11 +106,7 @@ fn snapshot_replay_preserves_unsettled_and_reminded_obligation() {
         reminded: true,
     });
 
-    let events = state.snapshot_events();
-    let mut replayed = State::default();
-    for event in &events {
-        replayed.apply(event);
-    }
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     let pending = replayed.pending_reply_obligations("peer");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].message_id, "m1");
@@ -118,7 +114,7 @@ fn snapshot_replay_preserves_unsettled_and_reminded_obligation() {
 }
 
 #[test]
-fn cleared_obligation_does_not_return_after_compaction() {
+fn cleared_obligation_does_not_return_from_current_state() {
     let mut state = State::default();
     state.apply(&Event::ReplyObligationSet {
         obligation: obligation("m1", "proj", "requester", "peer", None),
@@ -127,10 +123,7 @@ fn cleared_obligation_does_not_return_after_compaction() {
         message_id: "m1".into(),
     });
 
-    let mut replayed = State::default();
-    for event in &state.snapshot_events() {
-        replayed.apply(event);
-    }
+    let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert!(replayed.pending_reply_obligations("peer").is_empty());
 }
 
@@ -204,32 +197,48 @@ fn project_reset_clears_only_its_own_scope() {
 
 #[test]
 fn linked_reply_must_come_from_recipient_to_sender() {
-    let state = State::default();
+    let control = crate::server::binding_slot::BindingControlSet::default();
+    let app = crate::identity::AppServerId::new("appserver-cli").unwrap();
     let pending = obligation("m1", "proj", "requester", "peer", None);
 
     // Right recipient, right target.
-    assert!(validate_reply(&state, &pending, "peer", "requester").is_ok());
+    assert!(validate_reply(&control, &app, &pending, "peer", "requester").is_ok());
     // Third party cannot answer for the recipient.
-    assert!(validate_reply(&state, &pending, "other", "requester").is_err());
+    assert!(validate_reply(&control, &app, &pending, "other", "requester").is_err());
     // The recipient cannot answer a different target.
-    assert!(validate_reply(&state, &pending, "peer", "other").is_err());
+    assert!(validate_reply(&control, &app, &pending, "peer", "other").is_err());
 }
 
 #[test]
 fn scope_and_name_helpers_prefer_declared_scope_and_stable_name() {
-    let mut state = State::default();
-    state
-        .workers
-        .insert("peer".into(), worker("peer", "/tmp/proj"));
-    state.worker_names.insert("peer".into(), "peer-name".into());
-    assert_eq!(stable_name(&state, "peer").as_deref(), Some("peer-name"));
+    let (server, root) = crate::server::peer_tests::test_server();
+    let registered = crate::server::peer_tests::register_synthetic_peer(&server, "peer", "peer");
+    assert!(registered.ok, "{registered:?}");
+    let control =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .unwrap();
+    let binding = &control
+        .active_values()
+        .find(|value| value.binding.agent_id.as_str() == "peer")
+        .unwrap()
+        .binding;
+    let name = stable_name(
+        &control,
+        &binding.project_scope,
+        &binding.app_scope_id,
+        "peer",
+    )
+    .unwrap();
+    assert_eq!(name.as_deref(), Some("Alice"));
+    let state = server.state.lock().unwrap();
     assert_eq!(
         resolve_scope(&state, "peer", Some("declared")).as_deref(),
         Some("declared")
     );
 
     let built = build_obligation(
-        &state,
+        name,
         "m1".into(),
         "declared".into(),
         "peer".into(),
@@ -237,6 +246,8 @@ fn scope_and_name_helpers_prefer_declared_scope_and_stable_name() {
         None,
         ReplyPolicy::OnCompletion,
     );
-    assert_eq!(built.from_name.as_deref(), Some("peer-name"));
+    assert_eq!(built.from_name.as_deref(), Some("Alice"));
     assert_eq!(built.policy, ReplyPolicy::OnCompletion);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }

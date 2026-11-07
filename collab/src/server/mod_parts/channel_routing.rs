@@ -58,61 +58,29 @@ pub(crate) struct ResolvedNamedTarget {
 /// before selecting one, so `Bob` and `BOB` in different occupancies are an
 /// explicit ambiguity instead of an arbitrary first match.
 fn resolve_name_case_insensitive(
-    state: &crate::server::state::State,
-    project_scope: &str,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
     requested: &str,
 ) -> Result<ResolvedNamedTarget, String> {
-    let mut matches: Vec<(String, String)> = state
-        .name_occupancies
-        .get(project_scope)
-        .map(|names| {
-            names
-                .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case(requested))
-                .map(|(name, holder)| (name.clone(), holder.worker_id.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    // One worker may hold two case-folded spellings of the same name; that is
-    // still one holder. Only distinct holders make the address ambiguous.
-    matches.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-    matches.dedup_by(|a, b| a.1 == b.1);
-    match matches.len() {
-        0 => Err(format!(
-            "NAME_ADDRESS_UNOCCUPIED: {requested} has no current holder in this project"
-        )),
-        1 => {
-            let (name, worker_id) = matches.remove(0);
-            Ok(ResolvedNamedTarget { worker_id, name })
-        }
-        _ => Err(format!(
-            "NAME_ADDRESS_AMBIGUOUS: {requested} folds to multiple current holders"
-        )),
-    }
+    let slot = control.current_for_name(&route.project_scope_id, &route.app_scope_id, requested)?
+        .ok_or_else(|| format!("NAME_ADDRESS_UNOCCUPIED: {requested} has no current holder in this project"))?;
+    let current = slot.active_binding().expect("current name query returns active binding");
+    Ok(ResolvedNamedTarget { name: slot.identity_key.name.clone(),
+        worker_id: current.binding.agent_id.as_str().to_owned() })
 }
 
 pub(crate) fn resolve_ceo_holder_from_grant(
     state: &crate::server::state::State,
-    project_scope: &str,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
     grant: &crate::ceo::CeoGrant,
 ) -> Result<String, String> {
-    if grant.workspace != project_scope {
+    if grant.workspace != route.project_scope_id.as_str() {
         return Err(
             "CHANNEL_CEO_ROUTE_UNAVAILABLE: the active CEO grant belongs to another project".into(),
         );
     }
-    let holder = state
-        .name_occupancies
-        .get(project_scope)
-        .and_then(|names| {
-            names
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(&grant.name))
-                .map(|(_, holder)| holder)
-        })
-        .ok_or_else(|| {
-            "CHANNEL_CEO_HOLDER_UNAVAILABLE: the CEO grant name has no current holder".to_string()
-        })?;
+    let holder = resolve_name_case_insensitive(control, route, &grant.name)?;
     if !state.workers.contains_key(&holder.worker_id) {
         return Err(
             "CHANNEL_CEO_HOLDER_UNAVAILABLE: the CEO holder is not a registered worker".into(),
@@ -123,13 +91,14 @@ pub(crate) fn resolve_ceo_holder_from_grant(
 
 fn resolve_ceo_holder(
     state: &crate::server::state::State,
-    project_scope: &str,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
 ) -> Result<String, String> {
     let grant = state.ceo_grant.as_ref().ok_or_else(|| {
         "CHANNEL_CEO_GRANT_MISSING: no typed CEO grant is active; [ceo] does not fall back to the project master"
             .to_string()
     })?;
-    resolve_ceo_holder_from_grant(state, project_scope, grant)
+    resolve_ceo_holder_from_grant(state, control, route, grant)
 }
 
 /// The single case-insensitive stable-address resolver shared by `sendmessage`,
@@ -138,12 +107,13 @@ fn resolve_ceo_holder(
 /// `None` so each caller can apply its own raw-target rule.
 pub(crate) fn resolve_named_target(
     state: &crate::server::state::State,
-    project_scope: &str,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
     project_key: &str,
     address: &str,
 ) -> Result<Option<ResolvedNamedTarget>, String> {
     if address.eq_ignore_ascii_case("ceo") || address.eq_ignore_ascii_case(project_key) {
-        let worker_id = resolve_ceo_holder(state, project_scope)?;
+        let worker_id = resolve_ceo_holder(state, control, route)?;
         let name = state
             .ceo_grant
             .as_ref()
@@ -163,7 +133,7 @@ pub(crate) fn resolve_named_target(
                 "CROSS_PROJECT_ADDRESS_UNSUPPORTED: {project} is not the current project key {project_key}"
             ));
         }
-        return resolve_name_case_insensitive(state, project_scope, name).map(Some);
+        return resolve_name_case_insensitive(control, route, name).map(Some);
     }
     // A raw worker ID keeps its legacy direct-send meaning even for the typed
     // not-registered failure path. A bare stable name is resolved only when it
@@ -172,12 +142,9 @@ pub(crate) fn resolve_named_target(
     if state.workers.contains_key(address) {
         return Ok(None);
     }
-    let name_like = state
-        .name_occupancies
-        .get(project_scope)
-        .is_some_and(|names| names.keys().any(|name| name.eq_ignore_ascii_case(address)));
+    let name_like = control.current_for_name(&route.project_scope_id, &route.app_scope_id, address)?.is_some();
     if name_like {
-        resolve_name_case_insensitive(state, project_scope, address).map(Some)
+        resolve_name_case_insensitive(control, route, address).map(Some)
     } else {
         Ok(None)
     }
@@ -187,14 +154,14 @@ pub(crate) fn resolve_named_target(
 /// worker. Project scope, name and `ceo` matching are all case-insensitive.
 fn resolve_address(
     state: &crate::server::state::State,
+    control: &binding_slot::BindingControlSet,
     route: &RouteScope,
     project_key: &str,
     address: &str,
 ) -> Result<String, String> {
-    let project_scope = route.project_scope_id.as_str();
-    let worker_id = match resolve_named_target(state, project_scope, project_key, address)? {
+    let worker_id = match resolve_named_target(state, control, route, project_key, address)? {
         Some(target) => target.worker_id,
-        None => resolve_name_case_insensitive(state, project_scope, address)?.worker_id,
+        None => resolve_name_case_insensitive(control, route, address)?.worker_id,
     };
     // The resolved target must be reachable on this route scope; an unresolved
     // binding is an explicit non-deliverable result, not a silent success.
@@ -220,9 +187,10 @@ pub(crate) fn resolve_channel_inbound_target(
     let project_key = canonical_project_key(&server.root).ok_or_else(|| {
         "CHANNEL_ROUTE_SCOPE_MISSING: the current project key is unavailable".to_string()
     })?;
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
 
     if let Some(leading) = parse_leading_address(body) {
-        let to = resolve_address(state, &route, &project_key, &leading.raw)?;
+        let to = resolve_address(state, &control, &route, &project_key, &leading.raw)?;
         return Ok(ResolvedInbound {
             to,
             recipient_address: leading.raw,
@@ -249,7 +217,7 @@ pub(crate) fn resolve_channel_inbound_target(
         "CHANNEL_DEFAULT_MISSING: this conversation has no default target; send an explicit [address]"
             .to_string()
     })?;
-    let to = resolve_address(state, &route, &project_key, &default.target_address)?;
+    let to = resolve_address(state, &control, &route, &project_key, &default.target_address)?;
     Ok(ResolvedInbound {
         to,
         recipient_address: default.target_address,

@@ -180,14 +180,10 @@ fn admit_dsh_candidate(
 
 type RouteKey = (String, String);
 
-/// A host route is only a small admission record.  The reducer and mailbox
-/// facts belong to the runtime selected by this record, never to the
-/// resident project's journal.
+/// Current storage and communication location. Identity belongs to the map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HostRouteRecord {
-    pub(crate) version: u8,
-    pub(crate) op: String,
     pub(crate) app_scope_id: String,
     pub(crate) project_scope: String,
     pub(crate) canonical_root: String,
@@ -195,7 +191,7 @@ pub(crate) struct HostRouteRecord {
     pub(crate) registered_ms: i64,
 }
 
-pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the current project; it restores identity, registration and the current delivery route through the user-managed daemon, and returns the current role's operations. Do not edit routes.jsonl, copy identity tokens, or use mailbox state as transport delivery";
+pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the current project; it restores identity, registration and the current delivery route through the user-managed daemon, and returns the current role's operations. Do not edit routes.json, copy identity tokens, or use mailbox state as transport delivery";
 
 struct RuntimeRoute {
     root: PathBuf,
@@ -204,9 +200,7 @@ struct RuntimeRoute {
 }
 
 /// Hard cap on concurrently materialized external project reducers. Every
-/// materialized reducer owns one writer lock and one append journal file, so
-/// an unbounded route projection would otherwise consume two descriptors per
-/// route before serving any request. The cap leaves room below the common
+/// materialized reducer owns a writer lock. The cap leaves room below the common
 /// 256-descriptor soft limit for listener, socket, identity, and timer files.
 pub(crate) const MAX_MATERIALIZED_EXTERNAL_RUNTIMES: usize = 64;
 
@@ -224,8 +218,7 @@ fn materialized_runtime_budget_error(materialized_external: usize, cap: usize) -
 struct ProjectRuntimeManager {
     host: Arc<Server>,
     host_root: PathBuf,
-    route_journal: PathBuf,
-    operation_journal: Arc<crate::server::operation_journal::OperationJournal>,
+    route_file: PathBuf,
     routes: Mutex<std::collections::BTreeMap<RouteKey, RuntimeRoute>>,
     project_locks: Mutex<std::collections::BTreeMap<PathBuf, std::fs::File>>,
     register_gate: Mutex<()>,

@@ -25,13 +25,18 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
     let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
     if matches!(task.status.as_str(), "closed" | "cancelled") { return Resp::err("BOARD_TASK_CLOSED: closed tasks cannot be reassigned"); }
     if details.invitation.is_some() || task.status == "invited" { return Resp::err("task already has a pending invitation"); }
-    let first_invitation = task.status == "pending" && task.owner == task.created_by;
+    let first_invitation = task.status == "pending";
     if first_invitation {
         if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
     }
     let route = match server_route_scope(server, &state) { Ok(Some(route)) => route, _ => return Resp::err("project route is not ready") };
-    let to = state.name_occupancy(route.project_scope_id.as_str(), &to)
-        .map(|occupancy| occupancy.worker_id.clone()).unwrap_or(to);
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let to = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, &to) {
+        Ok(Some(slot)) => slot.active_binding().unwrap().binding.agent_id.as_str().to_owned(),
+        Ok(None) => to, Err(error) => return Resp::err(error),
+    };
     if to == actor || is_managed_subagent(&state, &to) { return Resp::err("BOARD_ORDINARY_PEER_REQUIRED: invite a different ordinary peer"); }
     if !state.workers.contains_key(&to) { return Resp::err("peer not registered"); }
     if let Err(error)=work_executor_gate(server,&state,&id,&to) {return error;}
@@ -40,7 +45,7 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
     let message_id = format!("board-invite-{}-{}", id, details.revision + 1);
     details.invitation = Some(crate::board::BoardInvitation {
         peer_id: to.clone(), binding_id: binding.binding_id.as_str().into(),
-        endpoint_generation: binding.endpoint_generation, message_id: message_id.clone(), created_ms: now,
+        message_id: message_id.clone(), created_ms: now,
         original_status: Some(task.status.clone()), original_owner: Some(task.owner.clone()),
     });
     details.last_response = None;
@@ -68,7 +73,10 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
     if let Some(subscription) = &subscription { events.push(Event::WakeBound { message_id: message_id.clone(), subscription_id: subscription.id.clone() }); }
     if let Err(error) = server.commit_locked_checked(&mut state, &events) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
     let master = current_master_worker_id(&state, Some(&route));
-    let data = json!({ "task": state.tasks.get(&id).and_then(|task| board_task_view_with_master(&state, task, Some(&actor), master.as_deref(), Some(&route))), "msg_id": message_id, "consumed": false });
+    let task = match state.tasks.get(&id).map(|task| board_task_view_with_master(&state, &control, task, Some(&actor), master.as_deref(), Some(&route))).transpose() {
+        Ok(task) => task.flatten(), Err(error) => return Resp::err(error),
+    };
+    let data = json!({ "task": task, "msg_id": message_id, "consumed": false });
     drop(state);
     let attempt = match &subscription {
         Some(subscription) => attempt_notification_detailed_with_at(server, &message_id, &subscription.id, now_ms()),
@@ -88,9 +96,8 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
     if invite.peer_id != actor { return Resp::err("only the invited peer may respond"); }
     let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
     if matches!(task.status.as_str(), "closed" | "cancelled") { return Resp::err("BOARD_TASK_CLOSED: closed tasks cannot accept invitations"); }
-    let first_invitation = task.status == "invited";
+    let first_invitation = matches!(task.status.as_str(), "pending" | "invited");
     if first_invitation {
-        if task.owner != task.created_by { return Resp::err("task invitation is not awaiting a response"); }
         if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
     }
     let mut events = Vec::new();
@@ -100,14 +107,20 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
         if let Err(error) = board_resume_gate(&state, &task.owner, &id) { return error; }
         let route = match server_route_scope(server, &state) { Ok(Some(route)) => route, _ => return Resp::err("project route is not ready") };
         let binding = match authoritative_send_binding(&state, &route, &actor) { Ok(binding) => binding, Err(error) => return Resp::err(error) };
-        if binding.binding_id.as_str() != invite.binding_id || binding.endpoint_generation != invite.endpoint_generation {
+        if binding.binding_id.as_str() != invite.binding_id {
             return Resp::err("BOARD_STALE_INVITATION: recipient rebound; master must withdraw and issue a new invitation");
         }
-        let occupancy = state.name_occupancies.get(route.project_scope_id.as_str())
-            .and_then(|names| names.values().find(|occupancy| occupancy.worker_id == actor));
-        if let Some(occupancy) = occupancy {
+        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control, Err(error) => return Resp::err(error),
+        };
+        let current = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
+            Ok(current) => current, Err(error) => return Resp::err(error),
+        };
+        if let Some(slot) = current {
+            let current = slot.active_binding().unwrap();
+            let Some(session) = current.binding.session_id.as_ref() else { return Resp::err("BOARD_TARGET_SESSION_REQUIRED"); };
             events.push(Event::TaskAssignmentUpdated { assignment: name_state::TaskAssignment {
-                task_id: id.clone(), name: occupancy.name.clone(), session_id: occupancy.session_id.clone(),
+                task_id: id.clone(), name: slot.identity_key.name.clone(), session_id: session.as_str().into(),
                 assignment_revision: state.task_assignment(&id).map_or(1, |assignment| assignment.assignment_revision + 1),
                 reflow: None, updated_ms: now_ms(),
             } });

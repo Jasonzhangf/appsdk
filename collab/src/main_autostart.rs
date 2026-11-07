@@ -282,19 +282,26 @@ fn reload_loaded_job(path: &Path) -> anyhow::Result<()> {
         .args(["bootout", &domain])
         .output()?;
     if !bootout.status.success() {
-        // bootout fails if the job was never loaded or already removed. If the
-        // job is not loaded, bootstrap will load it fresh, so treat "not loaded"
-        // as success and let bootstrap handle a real error.
-        let stderr = String::from_utf8_lossy(&bootout.stderr);
-        if !stderr.contains("Could not find") && !bootout.status.code().is_some_and(|c| c == 3) {
+        // A failed removal is harmless only when the exact service is absent.
+        if launch_agent_present(&domain, &label)? {
             anyhow::bail!(
                 "launchctl bootout failed for {} ({}): {}{}",
                 domain,
                 bootout.status,
                 String::from_utf8_lossy(&bootout.stdout).trim(),
-                stderr.trim(),
+                String::from_utf8_lossy(&bootout.stderr).trim(),
             );
         }
+    }
+
+    // bootout acknowledges the request before launchd finishes removal.
+    // Bootstrap is safe only after the exact target is no longer present.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while launch_agent_present(&domain, &label)? {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("LAUNCH_AGENT_REMOVAL_NOT_COMPLETE: {domain}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     let bootstrap_domain = format!("gui/{uid}");
@@ -311,6 +318,24 @@ fn reload_loaded_job(path: &Path) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn launch_agent_present(domain: &str, label: &str) -> anyhow::Result<bool> {
+    let output = Command::new("launchctl").args(["print", domain]).output()?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains(&format!("Could not find service \"{label}\"")) {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "launchctl print failed for {} ({}): {}{}",
+        domain,
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim(),
+        stderr.trim()
+    );
 }
 
 fn reload_guidance(label: &str, path: &Path) -> String {
@@ -734,8 +759,8 @@ mod plist_tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  list) printf '\\\"PID\\\" = 123;\\n' ;;\n  bootstrap) if [ \"${{FAKE_BOOTSTRAP_FAIL:-0}}\" = 1 ]; then printf 'fake bootstrap failure\\n' >&2; exit 7; fi ;;\nesac\n",
-                log.display()
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  list) printf '\"PID\" = 123;\\n' ;;\n  bootout) printf 2 > '{remaining}' ;;\n  print)\n    if [ \"${{FAKE_QUERY_FAIL:-0}}\" = 1 ]; then echo 'fake query failure' >&2; exit 8; fi\n    if [ \"${{FAKE_REMOVAL_STUCK:-0}}\" = 1 ]; then exit 0; fi\n    count=$(cat '{remaining}' 2>/dev/null || echo 0)\n    if [ \"$count\" -gt 0 ]; then echo $((count - 1)) > '{remaining}'; exit 0; fi\n    echo \"Could not find service \\\"${{2##*/}}\\\" in domain for user gui: 501\" >&2; exit 113 ;;\n  bootstrap)\n    count=$(cat '{remaining}' 2>/dev/null || echo 0)\n    if [ \"$count\" -gt 0 ]; then echo 'Operation already in progress' >&2; exit 37; fi\n    if [ \"${{FAKE_BOOTSTRAP_FAIL:-0}}\" = 1 ]; then echo 'fake bootstrap failure' >&2; exit 7; fi ;;\nesac\n",
+                log = log.display(), remaining = root.join("removal-remaining").display()
             ),
         )
         .unwrap();
@@ -763,7 +788,7 @@ mod plist_tests {
         (root, home, state, fake_bin, log.display().to_string())
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn up_reloads_loaded_launch_agent_from_new_plist() {
         let _lock = crate::scope::TEST_ENV_LOCK
@@ -799,7 +824,7 @@ mod plist_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn up_reports_launchd_bootstrap_failure() {
         let _lock = crate::scope::TEST_ENV_LOCK
@@ -825,5 +850,47 @@ mod plist_tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_query_failure_stops_before_bootstrap() {
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (root, _home, _state, fake_bin, log) = reload_fixture();
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path =
+            EnvGuard::set_value("PATH", &format!("{}:{}", fake_bin.display(), original_path));
+        let _label = EnvGuard::set_value(AUTOSTART_LABEL_ENV, "com.appsdk.collab.query-failure");
+        let _fail = EnvGuard::set_value("FAKE_QUERY_FAIL", "1");
+        let error = reload_loaded_job(&root.join("job.plist")).unwrap_err();
+        assert!(
+            error.to_string().contains("fake query failure"),
+            "{error:#}"
+        );
+        assert!(!std::fs::read_to_string(log).unwrap().contains("bootstrap"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_pending_removal_stops_before_bootstrap() {
+        let _lock = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (root, _home, _state, fake_bin, log) = reload_fixture();
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path =
+            EnvGuard::set_value("PATH", &format!("{}:{}", fake_bin.display(), original_path));
+        let _label = EnvGuard::set_value(AUTOSTART_LABEL_ENV, "com.appsdk.collab.pending-removal");
+        let _stuck = EnvGuard::set_value("FAKE_REMOVAL_STUCK", "1");
+        let error = reload_loaded_job(&root.join("job.plist")).unwrap_err();
+        assert!(
+            error.to_string().contains("REMOVAL_NOT_COMPLETE"),
+            "{error:#}"
+        );
+        assert!(!std::fs::read_to_string(log).unwrap().contains("bootstrap"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

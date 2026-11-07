@@ -33,15 +33,17 @@ fn register_route(project_root: &Path, state_root: &Path) {
     std::fs::create_dir_all(state_root).unwrap();
     let root = project_root.canonicalize().unwrap();
     let route = json!({
-        "version": 1,
-        "op": "register",
         "app_scope_id": "appserver-cli",
         "project_scope": root,
         "canonical_root": root,
         "storage_root": root,
         "registered_ms": 1
     });
-    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    std::fs::write(
+        state_root.join("routes.json"),
+        serde_json::to_vec(&json!([route])).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]

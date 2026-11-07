@@ -8,172 +8,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-static CONTEXT_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn context_cancel_signal(_signal: libc::c_int) {
-    CONTEXT_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
-}
-
-fn install_context_cancel_handler() -> anyhow::Result<()> {
-    unsafe {
-        // Install the handler without SA_RESTART so a signal interrupts the
-        // blocking response read and the CLI can send the scoped control
-        // request on a second connection.
-        let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = context_cancel_signal as *const () as libc::sighandler_t;
-        action.sa_flags = 0;
-        libc::sigemptyset(&mut action.sa_mask);
-        if libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) != 0 {
-            anyhow::bail!(
-                "IDENTITY_OPERATION_CANCEL_SIGNAL_FAILED: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-        // The MCP adapter blocks SIGINT across exec so the CLI installs this
-        // handler before an early cancellation can terminate the child. Unblock
-        // it now that the handler is in place.
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        if libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) != 0 {
-            anyhow::bail!(
-                "IDENTITY_OPERATION_CANCEL_SIGNAL_FAILED: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn take_context_cancel_requested() -> bool {
-    CONTEXT_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
-}
-
-#[cfg(feature = "context-cancel-test-hooks")]
-pub(crate) fn context_cancel_requested() -> bool {
-    CONTEXT_CANCEL_REQUESTED.load(Ordering::SeqCst)
-}
-
-fn local_cancelled_payload(request: &crate::proto::IdentityContextRequest) -> Value {
-    json!({
-        "ok": false,
-        "result": {
-            "operation_id": request.operation_id,
-            "invocation": request.invocation,
-            "action": request.action,
-            "phase": null,
-            "outcome": "cancelled",
-            "committed_phases": [],
-            "failed_phase": null,
-            "requires": {
-                "kind": null,
-                "fields": [],
-                "sources": {},
-                "approval": null,
-                "repair_invocation": null
-            },
-            "snapshot": null,
-            "owner_readback": {}
-        }
-    })
-}
-
-/// Internal CLI-to-adapter classification of one mutating context call. The
-/// local pre-send cancellation is never confused with a daemon-acknowledged
-/// cancellation that also has `phase: null` but a durable operation.
-enum ContextCallOutcome {
-    LocalCancelled,
-    Response(proto::Resp),
-}
-
-fn context_call_with_cancel(
-    sock: &Path,
-    request: &crate::proto::IdentityContextRequest,
-    project_context: &ProjectContext,
-) -> anyhow::Result<ContextCallOutcome> {
-    install_context_cancel_handler()?;
-    #[cfg(feature = "context-cancel-test-hooks")]
-    crate::context_cancel_test_hooks::barrier(
-        "client_pre_send",
-        &request.operation_id,
-        std::process::id(),
-        None,
-        None,
-        context_cancel_requested,
-    );
-    if take_context_cancel_requested() {
-        return Ok(ContextCallOutcome::LocalCancelled);
-    }
-    let mut stream =
-        UnixStream::connect(sock).map_err(|error| anyhow::anyhow!("DAEMON_UNKNOWN: {error}"))?;
-    let envelope = proto::RequestEnvelope::new(
-        Req::IdentityContext {
-            facts: IdentityFacts::default(),
-            identity_context: Some(request.clone()),
-        },
-        Some(project_context.clone()),
-    );
-    let mut line = serde_json::to_vec(&envelope)?;
-    line.push(b'\n');
-    if let Err(error) = stream.write_all(&line).and_then(|()| stream.flush()) {
-        if error.kind() == std::io::ErrorKind::Interrupted {
-            // The signal arrived while the request bytes were being sent.
-            // Preserve the original connection and use the separate control
-            // path; never resend the mutation.
-        } else {
-            anyhow::bail!("DAEMON_UNKNOWN: failed to send request: {error}");
-        }
-    }
-    stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-    let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    loop {
-        match reader.read_line(&mut response) {
-            Ok(0) => anyhow::bail!("DAEMON_UNKNOWN: daemon closed the connection before replying"),
-            Ok(_) => {
-                let parsed = serde_json::from_str(response.trim()).map_err(|error| {
-                    anyhow::anyhow!("DAEMON_UNKNOWN: malformed response: {error}")
-                })?;
-                return Ok(ContextCallOutcome::Response(parsed));
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::Interrupted
-                        | std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                if take_context_cancel_requested() {
-                    let cancel = crate::proto::IdentityContextRequest {
-                        operation_id: request.operation_id.clone(),
-                        invocation: "cancel".into(),
-                        action: "cancel".into(),
-                        facts: IdentityFacts::default(),
-                        invocation_cwd: None,
-                        approval: None,
-                        grant_approval: None,
-                        query: false,
-                        query_capability: request.query_capability.clone(),
-                        invocation_ticket: request.invocation_ticket.clone(),
-                    };
-                    let _ = client::call_with_context_response(
-                        sock,
-                        &Req::IdentityContext {
-                            facts: IdentityFacts::default(),
-                            identity_context: Some(cancel),
-                        },
-                        Some(project_context.clone()),
-                    );
-                }
-            }
-            Err(error) => {
-                anyhow::bail!("DAEMON_UNKNOWN: failed to read response: {error}");
-            }
-        }
-    }
-}
-
 pub(crate) fn cli_project_context(root: &std::path::Path) -> anyhow::Result<ProjectContext> {
     ProjectContext::for_registered_root_with_app(
         root,
@@ -212,9 +46,10 @@ fn resolve_context_root_with(
     allow_first_registration: bool,
 ) -> anyhow::Result<(Scope, &'static str)> {
     let canonical_cwd = std::fs::canonicalize(cwd)?;
-    // The project marker is `.agent-collab`. Collab never consults git, so the
-    // same rule works for plain directories, nested directories, and task
-    // worktrees. A symlinked marker binds a task directory to its project.
+    // The project marker `.agent-collab` wins for plain directories, nested
+    // directories, and task worktrees. A symlinked marker binds a task
+    // directory to its project. Git is only a first-registration boundary
+    // below and must not create baselines inside Git subdirectories.
     if let Some(root) = scope::project_root_for_cwd(&canonical_cwd) {
         let resolution = if root == canonical_cwd {
             "cwd"
@@ -225,6 +60,22 @@ fn resolve_context_root_with(
     }
     if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
         return Ok((Scope { root: route.root }, "canonical-route"));
+    }
+    // A Git checkout root is identified by a valid `.git` marker, never by
+    // forking git. First registration inside a Git checkout but below its root
+    // would create a second baseline nested in the same repository, so it must
+    // fail closed. A query or other registered-only caller still falls through
+    // to the fail-closed checks below when no baseline or route exists.
+    if allow_first_registration {
+        if let Some(git_root) = scope::git_checkout_root_for_cwd(&canonical_cwd) {
+            if git_root != canonical_cwd {
+                anyhow::bail!(
+                    "COLLAB_CONTEXT_UNRESOLVED: refusing to create a Collab baseline in Git subdirectory {}; run `collab context` from the Git checkout root {}",
+                    canonical_cwd.display(),
+                    git_root.display()
+                );
+            }
+        }
     }
     // A cwd inside an existing project (an ancestor carries `.agent-collab`)
     // binds to that project through its route; without a route it must fail
@@ -260,7 +111,7 @@ pub(crate) fn context_bootstrap(
 ) -> anyhow::Result<ContextBootstrap> {
     let (scope, project_root_resolution) = resolve_bootstrap_root(host_paths, cwd)?;
     // Observe the user-managed daemon before any baseline, identity, route, or
-    // journal write. Ordinary context never launches or restarts it.
+    // state write. Ordinary context never launches or restarts it.
     client::require_server(&scope.sock_path())?;
     let baseline_created = if scope.root.join(".agent-collab").is_dir() {
         false
@@ -374,6 +225,8 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         anyhow::bail!("IDENTITY_FACT_INVALID: --provide must contain at least one identity fact");
     }
     Ok(IdentityFacts {
+        agent_kind: None,
+        profile: None,
         dsh_session_id: supplement.dsh.as_ref().map(|dsh| dsh.session_id.clone()),
         dsh: supplement.dsh,
         desktop_bridge: supplement.desktop_bridge,
@@ -384,6 +237,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         caller_pid: None,
         pane_hint: None,
         tmux: None,
+        tmux_session_name: None,
         tmux_anchor: None,
     })
 }
@@ -493,10 +347,6 @@ pub(crate) fn identity_context_required(snapshot: &Value) -> anyhow::Error {
     anyhow::Error::new(client::ServerResponseError { response })
 }
 
-pub(crate) fn context_snapshot(provide: Option<String>) -> anyhow::Result<serde_json::Value> {
-    context_operation(None, provide.as_deref(), false, None)
-}
-
 fn parse_approval_json(flag: &str, raw: &str) -> anyhow::Result<Value> {
     let approval: Value = serde_json::from_str(raw).map_err(|error| {
         anyhow::anyhow!("IDENTITY_APPROVAL_METADATA_INVALID: invalid {flag} JSON: {error}")
@@ -523,101 +373,6 @@ fn context_project_context(
         }
         None => crate::context_operation::default_project_context(scope),
     }
-}
-
-pub(crate) fn context_operation(
-    operation_id: Option<String>,
-    provide: Option<&str>,
-    query: bool,
-    explicit_project_root: Option<&std::path::Path>,
-) -> anyhow::Result<serde_json::Value> {
-    context_operation_with_options(
-        operation_id,
-        explicit_project_root,
-        None,
-        None,
-        None,
-        provide,
-        query,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn context_operation_with_options(
-    operation_id: Option<String>,
-    explicit_project_root: Option<&Path>,
-    app_scope: Option<&str>,
-    approve_identity: Option<&str>,
-    approve_grant: Option<&str>,
-    provide: Option<&str>,
-    query: bool,
-) -> anyhow::Result<serde_json::Value> {
-    context_operation_with_intent(
-        operation_id,
-        explicit_project_root,
-        app_scope,
-        approve_identity,
-        approve_grant,
-        provide,
-        query,
-        false,
-    )
-}
-
-pub(crate) fn return_registration_challenge(raw: &str) -> anyhow::Result<Value> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Challenge {
-        operation_id: String,
-        command_id: String,
-        purpose: proto::RegisterReplyPurpose,
-        challenge: String,
-    }
-    let challenge: Challenge = serde_json::from_str(raw)?;
-    let facts = crate::client::adapters::codex_app_server::identity_facts_from_env()?;
-    let anchor = facts.tmux_anchor.or_else(|| {
-        crate::client::adapters::tmux::pane_hint_from_env()
-            .and_then(|_| crate::client::adapters::tmux::anchor_from_env().ok())
-    });
-    let native = if anchor.is_none() {
-        Some(proto::RegisterNativeReply::AppServer {
-            candidate: proto::AppServerCandidate {
-                endpoint: facts.endpoint.ok_or_else(|| {
-                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: endpoint")
-                })?,
-                namespace: facts.namespace.ok_or_else(|| {
-                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: namespace")
-                })?,
-                session_id: facts.session_id.ok_or_else(|| {
-                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: session_id")
-                })?,
-                thread_id: facts.thread_id.ok_or_else(|| {
-                    anyhow::anyhow!("REGISTER_REPLY_NATIVE_FACTS_REQUIRED: thread_id")
-                })?,
-                cwd: std::env::current_dir()?.to_string_lossy().into_owned(),
-            },
-        })
-    } else {
-        None
-    };
-    let paths = scope::HostPaths::resolve()?;
-    let cwd = std::env::current_dir()?;
-    let (scope, _) = resolve_context_root(&paths, &cwd)?;
-    let response = client::call_with_context_response(
-        &scope.sock_path(),
-        &Req::RegisterReply {
-            reply: proto::RegisterParticipantReply {
-                operation_id: challenge.operation_id,
-                command_id: challenge.command_id,
-                purpose: challenge.purpose,
-                challenge: challenge.challenge,
-                anchor,
-                native,
-            },
-        },
-        Some(cli_project_context(&scope.root)?),
-    )?;
-    Ok(serde_json::to_value(response)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -650,47 +405,54 @@ pub(crate) fn context_operation_with_intent(
         (bootstrap.scope.clone(), Some(bootstrap))
     };
     let project_context = context_project_context(explicit_project_root, app_scope, &scope)?;
-    let mut prepared = if query {
-        let operation_id = operation_id.ok_or_else(|| {
-            anyhow::anyhow!("IDENTITY_OPERATION_QUERY_INVALID: --query requires --op")
-        })?;
-        crate::context_operation::prepare_query_operation(
-            &host_paths,
-            &project_context,
-            operation_id,
-        )?
+    let correlation =
+        operation_id.unwrap_or_else(|| format!("ctxop-{:032x}", rand::random::<u128>()));
+    identity::OperationId::new(correlation.clone())?;
+    let mut request = if query {
+        crate::proto::IdentityContextRequest {
+            operation_id: correlation.clone(),
+            invocation: "query".into(),
+            action: "context".into(),
+            facts: collect_identity_facts(provide)?,
+            invocation_cwd: Some(cwd.to_string_lossy().into_owned()),
+            approval: None,
+            grant_approval: None,
+            query: true,
+        }
     } else {
         let mut facts = collect_identity_facts(provide)?;
+        let control = server::binding_store::BindingControlStore::new(host_paths.state_root())
+            .load()
+            .map_err(anyhow::Error::msg)?;
+        let mapped_slot = control
+            .lookup(
+                &project_context.project_scope,
+                &project_context.app_scope_id,
+                &facts,
+                Some(&cwd.to_string_lossy()),
+            )
+            .map_err(anyhow::Error::msg)?;
+        let mapped = mapped_slot.is_some();
+        let same_mapped_thread = mapped_slot
+            .and_then(|slot| slot.active_binding())
+            .is_some_and(|value| {
+                value
+                    .binding
+                    .native_thread_id
+                    .as_ref()
+                    .map(identity::NativeThreadId::as_str)
+                    == facts.thread_id.as_deref()
+            });
         if let Some(session) = facts
             .dsh_session_id
             .as_deref()
-            .filter(|_| facts.dsh.is_none())
+            .filter(|_| facts.dsh.is_none() && !mapped)
         {
-            // Bootstrap is separate from recovery. Only the daemon's current
-            // scoped route can establish an existing owner; an archive cannot.
-            match client::resolve_native_session_route(
-                &scope.sock_path(),
+            facts.dsh = crate::client::adapters::dsh::discover_bootstrap_candidate(
+                host_paths.state_root(),
                 session,
-                project_context.clone(),
-            ) {
-                Ok(_) => {}
-                Err(error)
-                    if error
-                        .downcast_ref::<client::ServerResponseError>()
-                        .is_some_and(|error| {
-                            error.response.error.as_deref().is_some_and(|message| {
-                                message.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
-                            })
-                        }) =>
-                {
-                    facts.dsh = crate::client::adapters::dsh::discover_bootstrap_candidate(
-                        host_paths.state_root(),
-                        session,
-                        &scope.root,
-                    )?;
-                }
-                Err(error) => return Err(error),
-            }
+                &scope.root,
+            )?;
         }
         let explicit_transport = facts.endpoint.is_some()
             || provide
@@ -734,49 +496,20 @@ pub(crate) fn context_operation_with_intent(
                         facts.pane_hint.as_deref(),
                     )
                     .unwrap_or_else(|_error| None);
-                    if current_pane.is_none() {
-                        if !error.is::<crate::desktop_capability::DeclarationMissing>() {
-                            return Err(error);
-                        }
-                        let (Some(session), Some(thread)) =
-                            (facts.session_id.as_deref(), facts.thread_id.as_deref())
-                        else {
-                            return Err(error);
-                        };
-                        match client::resolve_native_session_route(
-                            &scope.sock_path(),
-                            session,
-                            project_context.clone(),
-                        ) {
-                            Ok(route)
-                                if route
-                                    .native_thread_id
-                                    .as_ref()
-                                    .map(identity::NativeThreadId::as_str)
-                                    == Some(thread) => {}
-                            Ok(_) => return Err(error),
-                            Err(route_error)
-                                if route_error
-                                    .downcast_ref::<client::ServerResponseError>()
-                                    .is_some_and(|error| {
-                                        error.response.error.as_deref().is_some_and(|message| {
-                                            message.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
-                                        })
-                                    }) =>
-                            {
-                                return Err(error)
-                            }
-                            Err(route_error) => return Err(route_error),
-                        }
+                    if current_pane.is_none()
+                        && !(mapped
+                            && same_mapped_thread
+                            && error.is::<crate::desktop_capability::DeclarationMissing>())
+                    {
+                        return Err(error);
                     }
                 }
             }
         }
-        crate::context_operation::prepare_mutating_operation(
-            &host_paths,
-            &project_context,
-            operation_id,
-            if recover_communication {
+        crate::proto::IdentityContextRequest {
+            operation_id: correlation.clone(),
+            action: "context".into(),
+            invocation: if recover_communication {
                 "manual_communication_restore"
             } else if approval.is_some() || grant_approval.is_some() {
                 "approved_recovery"
@@ -784,73 +517,26 @@ pub(crate) fn context_operation_with_intent(
                 "supplement"
             } else {
                 "automatic"
-            },
-            facts,
-        )?
-    };
-    if !query {
-        prepared.request.invocation_cwd = client::supports_identity_context_cwd(&scope.sock_path())
-            .then(|| cwd.to_string_lossy().into_owned());
-    }
-    if !query {
-        prepared.request.approval = approval;
-        prepared.request.grant_approval = grant_approval;
-        let prepare_request = crate::proto::IdentityContextRequest {
-            operation_id: prepared.request.operation_id.clone(),
-            invocation: prepared.request.invocation.clone(),
-            action: "prepare_invocation".into(),
-            facts: prepared.request.facts.clone(),
-            invocation_cwd: prepared.request.invocation_cwd.clone(),
-            approval: prepared.request.approval.clone(),
-            grant_approval: prepared.request.grant_approval.clone(),
-            query: false,
-            query_capability: prepared.request.query_capability.clone(),
-            invocation_ticket: String::new(),
-        };
-        let prepared_response = client::call_with_context_response(
-            &scope.sock_path(),
-            &Req::IdentityContext {
-                facts: IdentityFacts::default(),
-                identity_context: Some(prepare_request),
-            },
-            Some(project_context.clone()),
-        )?;
-        if !prepared_response.ok {
-            return Err(anyhow::Error::new(client::ServerResponseError {
-                response: prepared_response,
-            }));
-        }
-        prepared.request.invocation_ticket = prepared_response
-            .data
-            .get("invocation_ticket")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| {
-                anyhow::anyhow!("IDENTITY_OPERATION_PREPARE_SHAPE_INVALID: no ticket returned")
-            })?;
-    }
-    let response = if query {
-        client::call_with_context_response(
-            &scope.sock_path(),
-            &Req::IdentityContext {
-                facts: IdentityFacts::default(),
-                identity_context: Some(prepared.request),
-            },
-            Some(project_context),
-        )?
-    } else {
-        match context_call_with_cancel(&scope.sock_path(), &prepared.request, &project_context)? {
-            ContextCallOutcome::LocalCancelled => {
-                // The classification is a transport concern: record it on
-                // stderr so the MCP adapter suppresses only the local pre-send
-                // cancellation while the public stdout payload is unchanged.
-                eprintln!("COLLAB_CONTEXT_LOCAL_CANCELLATION");
-                return Ok(local_cancelled_payload(&prepared.request));
             }
-            ContextCallOutcome::Response(response) => response,
+            .into(),
+            facts,
+            invocation_cwd: Some(cwd.to_string_lossy().into_owned()),
+            approval: None,
+            grant_approval: None,
+            query: false,
         }
     };
-    let mut v = public_context_response(response, query, &prepared.proof.operation_id)?;
+    request.approval = approval;
+    request.grant_approval = grant_approval;
+    let response = client::call_with_context_response(
+        &scope.sock_path(),
+        &Req::IdentityContext {
+            facts: IdentityFacts::default(),
+            identity_context: Some(request),
+        },
+        Some(project_context),
+    )?;
+    let mut v = public_context_response(response)?;
     if let Some(bootstrap) = bootstrap {
         if let Some(value) = v.as_object_mut() {
             let snapshot = value
@@ -870,10 +556,7 @@ pub(crate) fn context_operation_with_intent(
             } else {
                 "unresolved"
             };
-            value.insert(
-                "operation_id".to_string(),
-                json!(prepared.proof.operation_id),
-            );
+            value.insert("operation_id".to_string(), json!(correlation));
             value.insert(
                 "bootstrap".to_string(),
                 json!({
@@ -890,11 +573,7 @@ pub(crate) fn context_operation_with_intent(
     Ok(v)
 }
 
-pub(crate) fn public_context_response(
-    response: proto::Resp,
-    query: bool,
-    operation_id: &str,
-) -> anyhow::Result<Value> {
+pub(crate) fn public_context_response(response: proto::Resp) -> anyhow::Result<Value> {
     // `Resp.ok` owns transport/operation success on the wire; the typed
     // operation payload is the flattened `result` object. A typed incomplete
     // result arrives as `ok:false` with a `result`; a genuine transport
@@ -909,45 +588,7 @@ pub(crate) fn public_context_response(
     let result = result.ok_or_else(|| {
         anyhow::anyhow!("IDENTITY_CONTEXT_INVALID: daemon returned an unrecognized response shape")
     })?;
-    if !query {
-        return Ok(json!({"ok": true, "result": result}));
-    }
-    let projection = result;
-    let mut queried = projection.as_object().cloned().unwrap_or_default();
-    let requires = json!({
-        "kind": null,
-        "fields": [],
-        "sources": {},
-        "approval": null,
-        "repair_invocation": null
-    });
-    queried
-        .entry("failed_phase".to_owned())
-        .or_insert(Value::Null);
-    queried.insert("requires".to_owned(), requires);
-    queried.insert("owner_readback".to_owned(), json!({}));
-    Ok(json!({
-        "ok": true,
-        "result": {
-            "operation_id": operation_id,
-            "invocation": "query",
-            "action": "query",
-            "phase": null,
-            "outcome": "completed",
-            "committed_phases": [],
-            "failed_phase": null,
-            "requires": {
-                "kind": null,
-                "fields": [],
-                "sources": {},
-                "approval": null,
-                "repair_invocation": null
-            },
-            "snapshot": null,
-            "owner_readback": {},
-            "queried_operation": queried
-        }
-    }))
+    Ok(json!({"ok": true, "result": result}))
 }
 
 pub(crate) fn lifecycle_identity(scope: &scope::Scope) -> anyhow::Result<Identity> {
@@ -999,8 +640,6 @@ pub(crate) fn peer_lifecycle_create(
         &scope.host_paths()?,
         &context,
         operation_id,
-        "worker_create",
-        IdentityFacts::default(),
     )?
     .proof;
     client::call_with_context_response(
@@ -1081,8 +720,6 @@ pub(crate) fn peer_lifecycle_update(
             &scope.host_paths()?,
             &lifecycle_context(scope, ident)?,
             None,
-            "worker_update",
-            IdentityFacts::default(),
         )?;
         let target = peer_lifecycle_result(&prepared)?.target.ok_or_else(|| {
             anyhow::anyhow!("PEER_LIFECYCLE_INVALID: daemon returned no exact target")
@@ -1155,8 +792,6 @@ pub(crate) fn peer_lifecycle_close(
             &scope.host_paths()?,
             &lifecycle_context(scope, ident)?,
             None,
-            "worker_close",
-            IdentityFacts::default(),
         )?;
         let target = peer_lifecycle_result(&prepared)?.target.ok_or_else(|| {
             anyhow::anyhow!("PEER_LIFECYCLE_INVALID: daemon returned no exact target")
@@ -1224,7 +859,6 @@ pub(crate) fn command_envelope(
         CommandId::new(format!("command-{}-{nonce}", std::process::id()))?,
         OperationId::new(format!("operation-{}-{nonce}", std::process::id()))?,
         runtime.binding_id.clone(),
-        runtime.endpoint_generation,
         route,
         None,
         None,

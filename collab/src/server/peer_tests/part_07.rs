@@ -437,9 +437,9 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         "manual close recorded; worktree/branch cleanup remains unverified"
     );
     let task_updated_ms = server.state.lock().unwrap().tasks["orphan"].updated_ms;
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    let journal_after_first = std::fs::read_to_string(&journal_path).unwrap();
-    *server.state.lock().unwrap() = replay(&root).unwrap();
+    let state_path = server.state_path.clone();
+    let state_after_first = std::fs::read(&state_path).unwrap();
+    *server.state.lock().unwrap() = current_state::load(&state_path, false).unwrap();
 
     let second = handle_task_close(
         &server,
@@ -462,8 +462,8 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         task_updated_ms
     );
     assert_eq!(
-        std::fs::read_to_string(&journal_path).unwrap(),
-        journal_after_first
+        std::fs::read(&state_path).unwrap(),
+        state_after_first
     );
     // The same orphan address proof must also authorize the existing cleanup
     // owner. This task declared no filesystem or Git resource to remove.
@@ -471,13 +471,13 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
     assert!(finalized.ok, "{finalized:?}");
     assert_eq!(finalized.data["cleanup"]["result"], "verified");
     let finalized_id = finalized.data["cleanup"]["receipt_id"].clone();
-    let finalized_journal = std::fs::read(&journal_path).unwrap();
-    *server.state.lock().unwrap() = replay(&root).unwrap();
+    let finalized_state = std::fs::read(&state_path).unwrap();
+    *server.state.lock().unwrap() = current_state::load(&state_path, false).unwrap();
     let finalize_again = handle_task_finalize_cleanup(&server, "peer".into(), "token-peer".into(), "orphan".into(), None);
     assert!(finalize_again.ok, "{finalize_again:?}");
     assert_eq!(finalize_again.data["idempotent"], true);
     assert_eq!(finalize_again.data["cleanup"]["receipt_id"], finalized_id);
-    assert_eq!(std::fs::read(&journal_path).unwrap(), finalized_journal);
+    assert_eq!(std::fs::read(&state_path).unwrap(), finalized_state);
     let owner = server.state.lock().unwrap().workers["owner"].clone();
     assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(false)));
     std::fs::remove_dir_all(root).ok();
@@ -535,35 +535,6 @@ fn worktree_claim_requires_cleanup_and_cannot_cancel() {
             "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree; close only after merged cleanup"
         )
     );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn merged_worktree_without_cleanup_receipt_fails_audit() {
-    let (server, root) = test_server();
-    let now = now_ms();
-    server.commit(&[Event::TaskCreated {
-        task: TaskRec {
-            id: "merged-task".into(),
-            owner: "peer".into(),
-            created_by: "peer".into(),
-            feature_id: None,
-            worktree_path: Some("playground/merged-wt".into()),
-            branch: Some("codex/merged-wt".into()),
-            base_commit: None,
-            priority: default_priority(),
-            status: "merged".into(),
-            next_step: None,
-            wait: None,
-            isolation_mode: None,
-            created_ms: now,
-            updated_ms: now,
-        },
-    }]);
-    let issues = migration_issues(&server, &server.state.lock().unwrap());
-    assert!(issues
-        .iter()
-        .any(|issue| issue.starts_with("TASK_CLEANUP_INCOMPLETE:merged-task:")));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -919,263 +890,6 @@ fn terminal_or_delivered_task_cannot_wait() {
     std::fs::remove_dir_all(root).ok();
 }
 
-#[test]
-fn peer_migration_freezes_snapshot_and_resumes_after_verify() {
-    let (server, root) = test_server();
-    register_appserver_worker(&server, &root, "peer", "thread-peer");
-    assert!(handle_migration_inspect(&server, "peer".into(), "token-peer".into()).ok);
-    assert!(handle_migration_plan(&server, "peer".into(), "token-peer".into()).ok);
-    let applied = handle_migration_apply(&server, "peer".into(), "token-peer".into());
-    assert!(applied.ok);
-    assert!(applied.data["admission_frozen"].as_bool().unwrap());
-    let verified = handle_migration_verify(&server, "peer".into(), "token-peer".into());
-    assert!(verified.ok);
-    assert!(verified.data["verified"].as_bool().unwrap());
-    assert!(!server.state.lock().unwrap().admission_frozen());
-    let repeated = handle_migration_verify(&server, "peer".into(), "token-peer".into());
-    assert!(repeated.ok);
-    assert_eq!(repeated.data["verified"], true);
-    assert_eq!(repeated.data["idempotent"], true);
-    assert_eq!(repeated.data["resumed"], false);
-    assert!(repeated.data["next"]
-        .as_str()
-        .unwrap()
-        .contains("do not rerun"));
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn migration_transaction_lease_rejects_second_peer() {
-    let (server, root) = test_server();
-    register_appserver_worker(&server, &root, "peer-a", "thread-peer-a");
-    register_appserver_worker(&server, &root, "peer-b", "thread-peer-b");
-    assert!(handle_migration_plan(&server, "peer-a".into(), "token-peer-a".into()).ok);
-    let second = handle_migration_plan(&server, "peer-b".into(), "token-peer-b".into());
-    assert!(!second.ok);
-    assert_eq!(
-        second.error.as_deref(),
-        Some("MIGRATION_TRANSACTION_HELD_BY_ANOTHER_PEER")
-    );
-    assert_eq!(second.data["holder"], "peer-a");
-    assert_eq!(second.data["requester"], "peer-b");
-    assert_eq!(second.data["retry_allowed"], false);
-    assert!(second.data["next"]
-        .as_str()
-        .unwrap()
-        .contains("do not retry"));
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn migration_verify_rejection_exposes_current_state_and_stops_retry() {
-    let (server, root) = test_server();
-    register(&server, "peer", "%peer");
-    let response = handle_migration_verify(&server, "peer".into(), "token-peer".into());
-    assert!(!response.ok);
-    assert_eq!(
-        response.error.as_deref(),
-        Some("no migration record to verify")
-    );
-    assert_eq!(response.data["retry_allowed"], false);
-    assert!(response.data["next"].as_str().unwrap().contains("inspect"));
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn migration_rejects_wait_without_matching_active_resource_holder() {
-    let (server, root) = test_server();
-    register(&server, "holder", "%holder");
-    register(&server, "waiter", "%waiter");
-    assert!(create_task(&server, "holder", "held", "shared-feature").ok);
-    assert!(!create_task(&server, "waiter", "waiting", "shared-feature").ok);
-    assert!(
-        handle_task_wait(
-            &server,
-            "waiter".into(),
-            "token-waiter".into(),
-            "waiting".into(),
-            "held".into(),
-        )
-        .ok
-    );
-    server
-        .state
-        .lock()
-        .unwrap()
-        .tasks
-        .get_mut("held")
-        .unwrap()
-        .status = "closed".into();
-
-    let inspected = handle_migration_inspect(&server, "waiter".into(), "token-waiter".into());
-    assert!(inspected.ok);
-    assert!(inspected.data["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|issue| issue
-            .as_str()
-            .unwrap()
-            .contains("inactive blocking task held")));
-
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn changed_migration_snapshot_remains_frozen() {
-    let (server, root) = test_server();
-    register_appserver_worker(&server, &root, "peer", "thread-peer");
-    assert!(handle_migration_plan(&server, "peer".into(), "token-peer".into()).ok);
-    assert!(handle_migration_apply(&server, "peer".into(), "token-peer".into()).ok);
-
-    let now = now_ms();
-    server.commit(&[Event::TaskCreated {
-        task: TaskRec {
-            id: "tampered".into(),
-            owner: "peer".into(),
-            created_by: "peer".into(),
-            feature_id: Some("tampered".into()),
-            worktree_path: None,
-            branch: None,
-            base_commit: None,
-            priority: default_priority(),
-            status: "working".into(),
-            next_step: None,
-            wait: None,
-            isolation_mode: None,
-            created_ms: now,
-            updated_ms: now,
-        },
-    }]);
-    let verified = handle_migration_verify(&server, "peer".into(), "token-peer".into());
-    assert!(verified.ok);
-    assert!(!verified.data["verified"].as_bool().unwrap());
-    assert!(verified.data["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|issue| issue.as_str().unwrap().contains("snapshot hash mismatch")));
-    assert!(server.state.lock().unwrap().admission_frozen());
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
-    let (server, root) = test_server();
-    register_appserver_worker(&server, &root, "peer", "thread-peer");
-    assert!(create_task(&server, "peer", "task", "feature").ok);
-    assert!(handle_migration_plan(&server, "peer".into(), "token-peer".into()).ok);
-    assert!(handle_migration_apply(&server, "peer".into(), "token-peer".into()).ok);
-    let server = Arc::new(server);
-
-    let mutations = vec![
-        Req::Send {
-            from: "peer".into(),
-            worker_id: Some("peer".into()),
-            token: Some("token-peer".into()),
-            command: Some(send_command(&root, "peer-freeze")),
-            to: "peer".into(),
-            mtype: "notify".into(),
-            subject: Some("release".into()),
-            body: "RESOURCE_RELEASED feature".into(),
-            in_reply_to: None,
-            reply_policy: None,
-            target_session: None,
-            delivery: "immediate".into(),
-        },
-        Req::Poll {
-            worker_id: "peer".into(),
-            token: "token-peer".into(),
-            timeout_ms: 1,
-            receive_id: None,
-        },
-        Req::Ack {
-            worker_id: "peer".into(),
-            token: "token-peer".into(),
-            ids: vec!["message".into()],
-        },
-        Req::TaskUpdate {
-            worker_id: "peer".into(),
-            token: "token-peer".into(),
-            task_id: "task".into(),
-            status: Some("verifying".into()),
-            next_step: None,
-            blocker_action: None,
-            decision_reason: None,
-        },
-        Req::MigrationPlan {
-            worker_id: "peer".into(),
-            token: "token-peer".into(),
-        },
-        Req::MigrationApply {
-            worker_id: "peer".into(),
-            token: "token-peer".into(),
-        },
-    ];
-    for request in mutations {
-        let response = dispatch(&server, request);
-        assert_eq!(
-            response.error.as_deref(),
-            Some(
-                "MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed"
-            )
-        );
-    }
-
-    let read = dispatch(
-        &server,
-        Req::TaskStatus {
-            task_id: Some("task".into()),
-        },
-    );
-    assert!(read.ok);
-    // The registered peer is a native App Server binding, so a rebind needs a
-    // fresh live tmux address. The frozen admission rule keys on the identity,
-    // not on the transport kind, so this still exercises "an existing identity
-    // may rebind".
-    let rebind_tmux = IsolatedTmux::start(&root);
-    let mut rebind_endpoints = rebind_tmux.endpoints();
-    let mut endpoint = rebind_endpoints.remove(0);
-    endpoint.codex_session_id = Some("session-thread-peer".into());
-    endpoint.codex_thread_id = Some("thread-peer".into());
-    let rebound = dispatch(
-        &server,
-        Req::register("peer".into(),
-             "token-peer".into(),
-             root.display().to_string(),
-             Some(crate::proto::TransportCandidates {
-                desktop_bridge: None,
-                appserver: None,
-                dsh: None,
-                tmux: Some(crate::proto::TmuxCandidate {
-                    endpoint: endpoint.clone(),
-                    cwd: root.display().to_string(),
-                }),
-            })),
-    );
-    assert!(rebound.ok);
-    let new_identity = dispatch(
-        &server,
-        Req::register("new-peer".into(),
-             "token-new-peer".into(),
-             root.display().to_string(),
-             Some(crate::proto::TransportCandidates {
-                desktop_bridge: None,
-                appserver: None,
-                dsh: None,
-                tmux: Some(crate::proto::TmuxCandidate {
-                    endpoint,
-                    cwd: root.display().to_string(),
-                }),
-            })),
-    );
-    assert_eq!(
-        new_identity.error.as_deref(),
-        Some("MIGRATION_ADMISSION_FROZEN: only an existing identity may rebind")
-    );
-    assert_eq!(server.state.lock().unwrap().workers.len(), 1);
-    std::fs::remove_dir_all(root).ok();
-}
 
 #[test]
 fn authenticated_send_uses_registered_cwd_for_authoritative_route_scope() {
@@ -1209,11 +923,13 @@ fn authenticated_send_returns_typed_durability_failure_before_wake() {
     let (server, root) = test_server();
     assert!(register(&server, "sender", "%sender").ok);
     assert!(register(&server, "recipient", "%recipient").ok);
-    *server.journal.lock().unwrap() =
-        std::fs::File::open(root.join(".agent-collab/server/journal.jsonl")).unwrap();
+    std::fs::remove_file(&server.state_path).unwrap();
+    std::fs::create_dir(&server.state_path).unwrap();
+    let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+    let server = Arc::new(server);
 
     let response = dispatch(
-        &Arc::new(server),
+        &server,
         authenticated_send(&root, "sender", "recipient", "durability"),
     );
     assert!(!response.ok);
@@ -1221,7 +937,8 @@ fn authenticated_send_returns_typed_durability_failure_before_wake() {
         .error
         .as_deref()
         .is_some_and(|error| error.starts_with("SEND_DURABILITY_FAILED:")));
-    assert!(response.error.as_deref().unwrap().contains("journal"));
+    assert!(response.error.as_deref().unwrap().contains("directory"), "{response:?}");
+    assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1271,23 +988,10 @@ pub(crate) fn register_appserver_worker(
     thread_id: &str,
 ) -> WorkerRec {
     let transport = test_appserver_transport(thread_id);
-    let project_scope =
-        crate::server::global_state::GlobalState::canonical_project_scope(root).unwrap();
     let app_scope = crate::identity::AppServerId::new("tui-default").unwrap();
-    let envelope = server
-        .typed_register_envelope_for_scope(
-            id,
-            &format!("token-{id}"),
-            &transport,
-            project_scope,
-            root.to_str().unwrap(),
-            app_scope,
-            false,
-        )
-        .unwrap();
-    server
-        .typed_dispatch(envelope)
-        .expect("appserver registration must succeed");
+    let registered = seed_committed_owner(server, id, &format!("token-{id}"), &transport,
+        root.to_str().unwrap(), Some(app_scope));
+    assert!(registered.ok, "{registered:?}");
     server.state.lock().unwrap().workers[id].clone()
 }
 

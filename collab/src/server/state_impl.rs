@@ -1,30 +1,6 @@
 use super::*;
-use crate::server::global_state::CurrentThreadRouteReplayStatus;
-
-pub(crate) fn board_patrol_owner_key(state: &State, worker_id: &str) -> String {
-    let scoped = state
-        .workers
-        .get(worker_id)
-        .and_then(|worker| state.name_occupancies.get(&worker.cwd))
-        .and_then(|names| names.values().find(|holder| holder.worker_id == worker_id));
-    let unique = scoped.or_else(|| {
-        let mut holders = state
-            .name_occupancies
-            .values()
-            .flat_map(|names| names.values())
-            .filter(|holder| holder.worker_id == worker_id);
-        let first = holders.next();
-        if holders.next().is_none() {
-            first
-        } else {
-            None
-        }
-    });
-    unique
-        .map(|holder| holder.name.clone())
-        .or_else(|| state.worker_names.get(worker_id).cloned())
-        .unwrap_or_else(|| worker_id.to_owned())
-}
+use crate::scope::RouteScope;
+use crate::server::binding_slot;
 
 fn rearm_cancelled_project_patrol(
     state: &mut State,
@@ -37,11 +13,11 @@ fn rearm_cancelled_project_patrol(
         return;
     }
     let became_actionable = crate::server::keepalive::actionable(&task.status)
-        && !previous.is_some_and(|previous| {
-            crate::server::keepalive::actionable(&previous.status)
-        });
-    let wait_released =
-        previous.and_then(|previous| previous.wait.as_ref()).is_some() && task.wait.is_none();
+        && !previous.is_some_and(|previous| crate::server::keepalive::actionable(&previous.status));
+    let wait_released = previous
+        .and_then(|previous| previous.wait.as_ref())
+        .is_some()
+        && task.wait.is_none();
     if !created && !became_actionable && !wait_released {
         return;
     }
@@ -51,40 +27,30 @@ fn rearm_cancelled_project_patrol(
         .filter(|subscription| {
             crate::server::is_exact_project_patrol(subscription)
                 && subscription.status == "cancelled"
-                && state
-                    .global
-                    .projects
-                    .values()
-                    .any(|project| {
-                        project.master_grants.values().any(|grant| {
-                            grant.agent_id.as_str() == subscription.worker_id
-                                && state
-                                    .global
-                                    .lookup_master_grant(&grant.project_scope, &grant.binding_id)
-                                    .is_some_and(|current| current == grant)
-                                && state
-                                    .global
-                                    .lookup_binding_for(
-                                        &crate::scope::RouteScope {
-                                            app_scope_id: grant.app_scope_id.clone(),
-                                            project_scope_id: grant.project_scope.clone(),
-                                        },
-                                        &grant.binding_id,
-                                    )
-                                    .is_some_and(|binding| {
-                                        binding.endpoint_generation == grant.endpoint_generation
-                                            && binding.agent_id == grant.agent_id
-                                    })
-                        })
+                && state.global.projects.values().any(|project| {
+                    project.master_grants.values().any(|grant| {
+                        grant.agent_id.as_str() == subscription.worker_id
+                            && state
+                                .global
+                                .lookup_master_grant(&grant.project_scope, &grant.binding_id)
+                                .is_some_and(|current| current == grant)
+                            && state
+                                .global
+                                .lookup_binding_for(
+                                    &crate::scope::RouteScope {
+                                        app_scope_id: grant.app_scope_id.clone(),
+                                        project_scope_id: grant.project_scope.clone(),
+                                    },
+                                    &grant.binding_id,
+                                )
+                                .is_some_and(|binding| binding.agent_id == grant.agent_id)
                     })
+                })
         })
         .map(|subscription| subscription.id.clone())
         .collect();
     for subscription_id in subscription_ids {
-        let Some(subscription) = state
-            .notification_subscriptions
-            .get_mut(&subscription_id)
-        else {
+        let Some(subscription) = state.notification_subscriptions.get_mut(&subscription_id) else {
             continue;
         };
         let Some(worker) = state.workers.get(&subscription.worker_id).cloned() else {
@@ -100,16 +66,15 @@ fn rearm_cancelled_project_patrol(
         subscription.target = target.to_owned();
         subscription.status = "armed".into();
         subscription.status_reason = None;
-        subscription.trigger_ms =
-            Some(event_ms.saturating_add(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS));
+        subscription.trigger_ms = Some(
+            event_ms.saturating_add(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS),
+        );
         subscription.repeat_count = subscription
             .repeat_count
             .max(subscription.fired_count.saturating_add(100));
-        subscription.expires_ms = subscription
-            .expires_ms
-            .max(event_ms.saturating_add(
-                (crate::server::MAX_NOTIFICATION_TTL_SECONDS as i64) * 1000,
-            ));
+        subscription.expires_ms = subscription.expires_ms.max(
+            event_ms.saturating_add((crate::server::MAX_NOTIFICATION_TTL_SECONDS as i64) * 1000),
+        );
         subscription.updated_ms = event_ms;
     }
 }
@@ -139,42 +104,16 @@ pub(crate) fn board_patrol_owned_unclosed_task_ids(
 
 /// Resolve the stable owner only when this worker is the current carrier.
 ///
-/// A stable name can outlive the session that first used it. `worker_names`
-/// keeps historical aliases, so a stale carrier must not patrol tasks assigned
-/// to the name now held by another worker. Unnamed workers keep their worker
-/// id as the owner key.
-pub(crate) fn board_patrol_current_owner_key(state: &State, worker_id: &str) -> Option<String> {
-    let worker = state.workers.get(worker_id)?;
-    let owner_key = board_patrol_owner_key(state, worker_id);
-    let holder = state
-        .name_occupancies
-        .get(&worker.cwd)
-        .and_then(|names| names.get(&owner_key))
-        .or_else(|| {
-            let mut holders = state
-                .name_occupancies
-                .values()
-                .filter_map(|names| names.get(&owner_key));
-            let first = holders.next()?;
-            if holders.all(|holder| {
-                holder.worker_id == first.worker_id && holder.session_id == first.session_id
-            }) {
-                Some(first)
-            } else {
-                None
-            }
-        });
-    match holder {
-        Some(holder) => {
-            let session_matches = worker
-                .transport
-                .as_ref()
-                .and_then(|transport| transport.session_id.as_deref())
-                .is_none_or(|session| session == holder.session_id);
-            (holder.worker_id == worker_id && session_matches).then_some(owner_key)
-        }
-        None => (owner_key == worker_id).then_some(owner_key),
-    }
+/// Only the current map carrier may patrol work held by this name.
+pub(crate) fn board_patrol_current_owner_key(state: &State, control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>, worker_id: &str) -> Result<Option<String>, String> {
+    let Some(worker) = state.workers.get(worker_id) else { return Ok(None); };
+    let Some(route) = route else { return Ok(None); };
+    let Some(slot) = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)? else { return Ok(None); };
+    let current = slot.active_binding().unwrap();
+    let matches = worker.transport.as_ref().and_then(|transport| transport.session_id.as_deref())
+        .is_none_or(|session| current.binding.session_id.as_ref().is_some_and(|current| current.as_str() == session));
+    Ok(matches.then(|| slot.identity_key.name.clone()))
 }
 
 /// Canonical unclosed, uncancelled task set for the current carrier.
@@ -183,31 +122,17 @@ pub(crate) fn board_patrol_current_owner_key(state: &State, worker_id: &str) -> 
 /// has no canonical patrol ownership at all.
 pub(crate) fn board_patrol_eligible_task_ids(
     state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
     worker_id: &str,
-) -> Option<Vec<String>> {
-    let owner_key = board_patrol_current_owner_key(state, worker_id)?;
+) -> Result<Option<Vec<String>>, String> {
+    let Some(owner_key) = board_patrol_current_owner_key(state, control, route, worker_id)? else { return Ok(None); };
     let owned = board_patrol_owned_unclosed_task_ids(state, worker_id, &owner_key);
-    Some(crate::board_patrol_policy::eligible_patrol_task_ids(
+    Ok(Some(crate::board_patrol_policy::eligible_patrol_task_ids(
         &owned,
         &owner_key,
         &state.cancelled_board_patrol_tasks,
-    ))
-}
-
-/// Attempt-time guard for a marked board-idle notice.
-///
-/// Unmarked messages are ordinary mail and always pass. A marked notice is
-/// deliverable only while its current recipient still owns at least one
-/// canonical eligible task. Cancellations committed before this check are
-/// therefore visible; an already-submitted native attempt cannot be retracted.
-pub(crate) fn board_patrol_notice_is_current(state: &State, message_id: &str) -> bool {
-    if !state.board_patrol_notice_ids.contains(message_id) {
-        return true;
-    }
-    let Some(message) = state.msgs.get(message_id) else {
-        return false;
-    };
-    board_patrol_eligible_task_ids(state, &message.to).is_some_and(|task_ids| !task_ids.is_empty())
+    )))
 }
 
 impl State {
@@ -235,135 +160,7 @@ impl State {
         true
     }
 
-    /// Backfill strict routes that replay did not establish.
-    ///
-    /// Route events are authoritative for existing ownership. Durable
-    /// bindings only fill an address with no live claimant or tombstone, and a
-    /// pane with several historical bindings is not uniquely restorable.
-    pub(crate) fn restore_unique_current_thread_routes_from_bindings(
-        &mut self,
-    ) -> Result<(), String> {
-        let mut bindings = self
-            .global
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-            .filter(|binding| binding.native_thread_id.is_some())
-            .cloned()
-            .collect::<Vec<_>>();
-        bindings.sort_by(|left, right| {
-            left.native_thread_id
-                .as_ref()
-                .map(|thread| thread.as_str())
-                .cmp(
-                    &right
-                        .native_thread_id
-                        .as_ref()
-                        .map(|thread| thread.as_str()),
-                )
-        });
-        let mut pane_binding_counts = std::collections::BTreeMap::new();
-        for binding in &bindings {
-            if binding.tmux_endpoint.is_some() {
-                let key = crate::server::global_state::installed_route_address_key(binding)
-                    .expect("validated pane binding has a route address");
-                *pane_binding_counts.entry(key).or_insert(0usize) += 1;
-            }
-        }
-        let mut recovered = self.global.clone();
-        for binding in bindings {
-            let thread = binding.native_thread_id.clone().unwrap();
-            if binding.session_id.is_none() {
-                // A durable thread-only binding is a legacy record.  Keep it
-                // resolvable through the read-only compatibility index instead
-                // of aborting the whole host journal; the next explicit
-                // registration or rebind upgrades it to the strict dual key.
-                recovered
-                    .set_legacy_thread_route(binding)
-                    .map_err(|error| {
-                        format!("journal replay rejected legacy thread route: {error}")
-                    })?;
-                continue;
-            }
-            match recovered.current_thread_route_replay_status(&binding) {
-                CurrentThreadRouteReplayStatus::Installed
-                | CurrentThreadRouteReplayStatus::Tombstoned
-                | CurrentThreadRouteReplayStatus::Contested => continue,
-                CurrentThreadRouteReplayStatus::Ambiguous(_) if binding.tmux_endpoint.is_some() => {
-                    // The replay projection already owns this pane. Restoring
-                    // historical candidates in thread order must not evict it.
-                    continue;
-                }
-                CurrentThreadRouteReplayStatus::Ambiguous(existing) => {
-                    return Err(format!(
-                        "journal replay rejected ambiguous current thread route {thread}: {} is already live at this address",
-                        existing.binding_id
-                    ));
-                }
-                CurrentThreadRouteReplayStatus::Missing => {}
-            }
-            if binding.tmux_endpoint.is_some() {
-                let key = crate::server::global_state::installed_route_address_key(&binding)
-                    .expect("validated pane binding has a route address");
-                if pane_binding_counts.get(&key).copied() != Some(1) {
-                    continue;
-                }
-            }
-            recovered
-                .set_current_thread_route(binding)
-                .map_err(|error| {
-                    format!("journal replay rejected current thread route: {error}")
-                })?;
-        }
-        recovered.set_counters(self.sequence, self.revision);
-        self.global = recovered;
-        Ok(())
-    }
-
-    /// Project every durable thread-only binding into the read-only legacy
-    /// compatibility index.
-    ///
-    /// This runs on every replay, independently of
-    /// `restore_unique_current_thread_routes_from_bindings`.  That helper
-    /// backfills strict routes from durable bindings; this index covers the
-    /// thread-only binding shape, including journals whose route events are
-    /// themselves thread-only (the live host journal).
-    pub(crate) fn index_legacy_thread_routes_from_bindings(&mut self) -> Result<(), String> {
-        let mut bindings = self
-            .global
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-            .filter(|binding| binding.native_thread_id.is_some() && binding.session_id.is_none())
-            .cloned()
-            .collect::<Vec<_>>();
-        bindings.sort_by(|left, right| {
-            (
-                left.native_thread_id.as_ref().map(|thread| thread.as_str()),
-                left.binding_id.as_str(),
-            )
-                .cmp(&(
-                    right
-                        .native_thread_id
-                        .as_ref()
-                        .map(|thread| thread.as_str()),
-                    right.binding_id.as_str(),
-                ))
-        });
-        let mut recovered = self.global.clone();
-        for binding in bindings {
-            recovered
-                .set_legacy_thread_route(binding)
-                .map_err(|error| format!("journal replay rejected legacy thread route: {error}"))?;
-        }
-        recovered.set_counters(self.sequence, self.revision);
-        self.global = recovered;
-        Ok(())
-    }
-
-    /// Keep the typed projection on the daemon journal's version axis.  The
-    /// resident reducer is the only owner of these counters; the nested
-    /// global state mirrors them for typed CAS and receipts.
+    /// Keep the typed CAS projection on the current owner's revision.
     pub(crate) fn sync_global_version(&mut self) {
         self.global.set_counters(self.sequence, self.revision);
     }
@@ -377,23 +174,6 @@ impl State {
             .revision
             .checked_add(1)
             .ok_or_else(|| "revision counter overflow".to_string())?;
-        self.sequence = sequence;
-        self.revision = revision;
-        self.sync_global_version();
-        Ok(())
-    }
-
-    pub(crate) fn set_checkpoint_version(
-        &mut self,
-        sequence: u64,
-        revision: u64,
-    ) -> Result<(), String> {
-        if sequence < self.sequence || revision < self.revision {
-            return Err(format!(
-                "reducer checkpoint regresses version: current ({}, {}), observed ({sequence}, {revision})",
-                self.sequence, self.revision
-            ));
-        }
         self.sequence = sequence;
         self.revision = revision;
         self.sync_global_version();
@@ -419,15 +199,12 @@ impl State {
         if is_goal_deadline(subscription) {
             if !subscription.periodic_declared {
                 subscription.status = "consumed".into();
-                subscription.status_reason =
-                    Some("goal-deadline-one-shot-delivered".into());
+                subscription.status_reason = Some("goal-deadline-one-shot-delivered".into());
                 if let Some(consumed_ms) = consumed_ms {
                     subscription.updated_ms = consumed_ms;
                 }
                 if clears_master_goal_due {
-                    crate::server::notification_state::clear_master_goal_due(
-                        &mut self.master_wake,
-                    );
+                    crate::server::notification_state::clear_master_goal_due(&mut self.master_wake);
                 }
                 return;
             }
@@ -438,29 +215,23 @@ impl State {
             let interval = subscription.interval_ms;
             if subscription.fired_count >= subscription.repeat_count {
                 subscription.status = "consumed".into();
-                subscription.status_reason =
-                    Some("goal-deadline-periodic-delivered".into());
+                subscription.status_reason = Some("goal-deadline-periodic-delivered".into());
                 if let Some(consumed_ms) = consumed_ms {
                     subscription.updated_ms = consumed_ms;
                 }
                 if clears_master_goal_due {
-                    crate::server::notification_state::clear_master_goal_due(
-                        &mut self.master_wake,
-                    );
+                    crate::server::notification_state::clear_master_goal_due(&mut self.master_wake);
                 }
                 return;
             }
             let Some(interval) = interval else {
                 subscription.status = "consumed".into();
-                subscription.status_reason =
-                    Some("goal-deadline-periodic-invalid".into());
+                subscription.status_reason = Some("goal-deadline-periodic-invalid".into());
                 if let Some(consumed_ms) = consumed_ms {
                     subscription.updated_ms = consumed_ms;
                 }
                 if clears_master_goal_due {
-                    crate::server::notification_state::clear_master_goal_due(
-                        &mut self.master_wake,
-                    );
+                    crate::server::notification_state::clear_master_goal_due(&mut self.master_wake);
                 }
                 return;
             };
@@ -468,9 +239,9 @@ impl State {
                 .trigger_ms
                 .map(|trigger| trigger.saturating_add(interval))
                 .unwrap_or_else(|| {
-                    subscription.created_ms.saturating_add(
-                        interval.saturating_mul(subscription.fired_count as i64),
-                    )
+                    subscription
+                        .created_ms
+                        .saturating_add(interval.saturating_mul(subscription.fired_count as i64))
                 });
             subscription.trigger_ms = Some(next_trigger);
             subscription.status = "armed".into();
@@ -583,13 +354,9 @@ impl State {
             .collect()
     }
 
-    /// Apply one event for legacy callers.  The journal writer uses
-    /// [`Self::apply_checked`] so a global reducer rejection is returned to
-    /// the command boundary instead of being mistaken for success.
+    #[cfg(test)]
     pub fn apply(&mut self, ev: &Event) {
-        if let Err(error) = self.apply_checked(ev) {
-            self.journal_poison.get_or_insert(error);
-        }
+        self.apply_checked(ev).expect("valid test mutation");
     }
 
     pub fn apply_checked(&mut self, ev: &Event) -> Result<(), String> {
@@ -697,14 +464,6 @@ impl State {
                 self.worker_snapshots.remove(&worker.id);
                 self.workers.insert(worker.id.clone(), worker.clone());
             }
-            Event::WorkerNamed { worker_id, name } => match name {
-                Some(name) => {
-                    self.worker_names.insert(worker_id.clone(), name.clone());
-                }
-                None => {
-                    self.worker_names.remove(worker_id);
-                }
-            },
             Event::ConversationDefaultSet { default } => {
                 self.conversation_defaults
                     .insert(default.key(), default.clone());
@@ -725,7 +484,8 @@ impl State {
                     .insert(message_id.clone(), envelope.clone());
             }
             Event::ChannelReplyRouteBound { message_id, route } => {
-                self.channel_reply_routes.insert(message_id.clone(), route.clone());
+                self.channel_reply_routes
+                    .insert(message_id.clone(), route.clone());
             }
             Event::ChannelDeliveryResultRecorded { result } => {
                 self.channel_delivery_results
@@ -733,7 +493,6 @@ impl State {
             }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
-                self.worker_names.remove(worker_id);
                 self.master_wake.idle_workers.retain(|id| id != worker_id);
                 self.master_wake
                     .newly_idle_workers
@@ -757,7 +516,6 @@ impl State {
                     },
                 );
                 self.workers.remove(worker_id);
-                self.worker_names.remove(worker_id);
                 self.keepalives.remove(worker_id);
                 self.master_wake.idle_workers.retain(|id| id != worker_id);
                 self.master_wake
@@ -779,7 +537,6 @@ impl State {
                     || fence.project_scope.trim().is_empty()
                     || fence.app_scope.trim().is_empty()
                     || fence.binding_id.trim().is_empty()
-                    || fence.endpoint_generation == 0
                 {
                     return Err(format!(
                         "responsibility fence {} has incomplete exact target identity",
@@ -797,7 +554,6 @@ impl State {
                     || operation.target.as_ref().is_some_and(|target| {
                         target.worker_id.trim().is_empty()
                             || target.binding_id.as_str().trim().is_empty()
-                            || target.endpoint_generation == 0
                             || target.project_scope != operation.project_scope
                             || target.app_scope_id != operation.app_scope_id
                     })
@@ -952,6 +708,12 @@ impl State {
                         message.last_wake_attempt_ms = *attempted_ms;
                         message.retry_attempted |= *retry;
                     }
+                }
+            }
+            Event::NotificationDeliverySelected { message_id, selected_binding } => {
+                match selected_binding {
+                    Some(binding) => { self.notification_delivery_bindings.insert(message_id.clone(), binding.clone()); }
+                    None => { self.notification_delivery_bindings.remove(message_id); }
                 }
             }
             Event::NotificationDeliveryFailed {
@@ -1150,8 +912,8 @@ impl State {
             Event::ReceiveCommitted { receipt, ids } => {
                 self.receive_receipts
                     .insert(receipt.receive_id.clone(), receipt.clone());
-                self.apply(&Event::Delivered { ids: ids.clone() });
-                self.apply(&Event::Acked { ids: ids.clone() });
+                self.apply_checked(&Event::Delivered { ids: ids.clone() })?;
+                self.apply_checked(&Event::Acked { ids: ids.clone() })?;
             }
             Event::Delivered { ids } => {
                 for id in ids {
@@ -1270,9 +1032,6 @@ impl State {
             Event::BoardPatrolNoticeBound { message_id } => {
                 self.board_patrol_notice_ids.insert(message_id.clone());
             }
-            Event::ReducerSnapshot { .. } => {
-                return Err("reducer snapshot is replay-only".into());
-            }
             Event::TaskCreated { task } | Event::TaskUpdated { task } => {
                 let created = matches!(ev, Event::TaskCreated { .. });
                 let previous_task = self.tasks.get(&task.id).cloned();
@@ -1287,7 +1046,7 @@ impl State {
                         .task_assignments
                         .get(&task.id)
                         .map(|assignment| assignment.name.clone())
-                        .unwrap_or_else(|| board_patrol_owner_key(self, &task.owner));
+                        .unwrap_or_else(|| task.owner.clone());
                     if record_owner != current_owner {
                         self.cancelled_board_patrol_tasks.remove(&task.id);
                     }
@@ -1385,9 +1144,6 @@ impl State {
                 self.project_work_policy
                     .insert(work_kind.clone(), policy.clone());
             }
-            Event::NameRecoveryUpdated { recovery } => {
-                self.apply_name_recovery(recovery)?;
-            }
             Event::AgentPresenceObserved { presence } => {
                 self.apply_agent_presence(presence)?;
             }
@@ -1434,9 +1190,6 @@ impl State {
                 self.cleanup_receipts
                     .insert(receipt.task_id.clone(), receipt.clone());
             }
-            Event::MigrationUpdated { migration } => {
-                self.migration = Some(migration.clone());
-            }
             Event::CeoGrantSet { grant } => {
                 self.ceo_grant = grant.clone();
                 // A grant belongs to one CEO identity. Clear only the notice
@@ -1479,26 +1232,6 @@ impl State {
             }
             Event::CeoReportStateRestored { report_state } => {
                 self.ceo_report_state = report_state.clone();
-            }
-            Event::ReducerCheckpoint { .. } => {}
-            Event::CommandStarted { .. } => {}
-            Event::CommandRecorded {
-                command_id,
-                receipt,
-            } => {
-                self.project_command_receipt(command_id, receipt)?;
-                self.legacy_command_ids.insert(command_id.clone());
-                self.command_receipts
-                    .insert(command_id.clone(), receipt.clone());
-            }
-            Event::CommandCompleted {
-                command_id,
-                operation_id: _,
-                receipt,
-            } => {
-                self.project_command_receipt(command_id, receipt)?;
-                self.command_receipts
-                    .insert(command_id.clone(), receipt.clone());
             }
             Event::MasterAssigned {
                 worker_id,
@@ -1617,10 +1350,9 @@ impl State {
             Event::GlobalCurrentThreadRouteSet { binding } => {
                 let mut next = self.global.clone();
                 if binding.session_id.is_none() && binding.tmux_endpoint.is_none() {
-                    // A durable thread-only route predates the strict dual key.
-                    // Replay must keep it resolvable through the read-only
-                    // compatibility index instead of aborting the host
-                    // journal; the next explicit rebind upgrades it.
+                    // A thread-only address has no complete session binding.
+                    // Keep it in the communication index; identity lookup
+                    // still requires an active current map row.
                     next.set_legacy_thread_route(binding.clone())
                         .map_err(|error| {
                             format!("global reducer rejected legacy thread route: {error}")
@@ -1646,53 +1378,15 @@ impl State {
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;
             }
-            Event::GlobalMigrationCommitEvidence { evidence } => {
-                self.apply_global_event(&GlobalEvent::MigrationCommitEvidence {
-                    evidence: evidence.clone(),
-                })?;
-            }
             Event::GlobalRuntimeBindingLedgerClassified { .. }
             | Event::GlobalLedgerScanReceiptRecorded { .. } => {}
-            Event::GlobalMasterGrantReplacementStarted { intent } => {
-                self.apply_global_event(&GlobalEvent::MasterGrantReplacementStarted {
-                    intent: intent.clone(),
-                })?;
-            }
-            Event::GlobalMasterGrantReplacementCompleted { receipt } => {
-                self.apply_global_event(&GlobalEvent::MasterGrantReplacementCompleted {
-                    receipt: receipt.clone(),
-                })?;
-            }
         }
         Ok(())
     }
 
-    fn project_command_receipt(
-        &mut self,
-        command_id: &str,
-        receipt: &CommandReceipt,
-    ) -> Result<(), String> {
-        let command_id = crate::identity::CommandId::new(command_id.to_owned())
-            .map_err(|error| format!("global command receipt has invalid command id: {error}"))?;
-        let operation_id = crate::identity::OperationId::new(receipt.operation_id.clone())
-            .map_err(|error| format!("global command receipt has invalid operation id: {error}"))?;
-        self.global
-            .record_command_projection(crate::server::global_state::CommandReceipt {
-                command_id,
-                operation_id,
-                epoch: self.global.epoch,
-                sequence: receipt.sequence,
-                revision: receipt.revision,
-                outcome: receipt.outcome.clone(),
-            })
-            .map_err(|error| format!("global command receipt rejected: {error}"))
-    }
-
     pub fn apply_global_event(&mut self, event: &GlobalEvent) -> Result<(), String> {
         // GlobalEvent::apply already mutates through the atomic clone-then-commit
-        // primitive, so cloning the whole global state a second time here only
-        // added one more O(state) copy per event and made journal replay
-        // quadratic for journals with many repeated global events.
+        // primitive. A second whole-state clone adds no independent guarantee.
         let sequence = self.sequence;
         let revision = self.revision;
         event
@@ -1707,17 +1401,18 @@ impl State {
         self.msgs.remove(id);
         self.board_patrol_notice_ids.remove(id);
         self.mailbox_name_addresses.remove(id);
-        self.mailbox_handoffs
-            .retain(|handoff| handoff.message_id != id);
+        self.mailbox_handoff_wakes.remove(id);
         self.notification_delivery_failures.remove(id);
         self.notification_delivery_accepted.remove(id);
         self.notification_delivery_evidence.remove(id);
+        self.notification_delivery_bindings.remove(id);
         self.target_sessions.remove(id);
         self.delivery_modes.remove(id);
         self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
         self.channel_envelopes.remove(id);
-        self.platform_event_index.retain(|_, message_id| message_id != id);
+        self.platform_event_index
+            .retain(|_, message_id| message_id != id);
         self.channel_reply_routes.remove(id);
         self.channel_delivery_results.remove(id);
     }
@@ -1827,612 +1522,10 @@ impl State {
         (missing.is_empty(), missing)
     }
 
-    pub fn snapshot_events(&self) -> Vec<Event> {
-        let (sequence, revision, mut events) = self.snapshot_contents();
-        events.push(Event::ReducerCheckpoint { sequence, revision });
-        events
-    }
-
-    /// Produce the restoration payload for a compacted journal baseline.
-    /// The caller stores the counters in the replay-only envelope.
-    pub fn snapshot_contents(&self) -> (u64, u64, Vec<Event>) {
-        let mut events = Vec::new();
-        // History precedes current mailbox rows so restoration does not repeat
-        // a handoff or reset a later consumption or wake.
-        events.extend(
-            self.mailbox_handoffs
-                .iter()
-                .cloned()
-                .map(|handoff| Event::MailboxReassigned { handoff }),
-        );
-        for (project_scope, clear_local) in &self.pending_project_resets {
-            events.push(Event::ProjectResetStarted {
-                project_scope: project_scope.clone(),
-                clear_local: *clear_local,
-                worker_ids: Vec::new(),
-            });
-        }
-        if master_wake_snapshot_required(&self.master_wake) {
-            events.push(Event::MasterWakeUpdated {
-                accumulator: self.master_wake.clone(),
-            });
-        }
-        let mut fences: Vec<_> = self.responsibility_fences.values().cloned().collect();
-        fences.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
-        events.extend(
-            fences
-                .into_iter()
-                .map(|fence| Event::ResponsibilityFenceSet { fence }),
-        );
-        let mut operations: Vec<_> = self.peer_lifecycle_operations.values().cloned().collect();
-        operations.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
-        events.extend(
-            operations
-                .into_iter()
-                .map(|operation| Event::PeerLifecycleOperationRecorded { operation }),
-        );
-        let mut closures: Vec<_> = self.worker_closures.values().cloned().collect();
-        closures.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
-        events.extend(closures.into_iter().map(|receipt| Event::WorkerClosed {
-            worker_id: receipt.worker_id,
-            closed_by: receipt.closed_by,
-            reason: receipt.reason,
-            snapshot_captured_ms: receipt.snapshot_captured_ms,
-            at_ms: receipt.at_ms,
-        }));
-        let mut workers: Vec<_> = self.workers.values().cloned().collect();
-        workers.sort_by(|a, b| a.id.cmp(&b.id));
-        events.extend(
-            workers
-                .into_iter()
-                .map(|worker| Event::Registered { worker }),
-        );
-        let mut names: Vec<_> = self.worker_names.iter().collect();
-        names.sort_by(|left, right| left.0.cmp(right.0));
-        events.extend(names.into_iter().map(|(id, name)| Event::WorkerNamed {
-            worker_id: id.clone(),
-            name: Some(name.clone()),
-        }));
-        let mut keepalives: Vec<_> = self.keepalives.iter().collect();
-        keepalives.sort_by(|a, b| a.0.cmp(b.0));
-        events.extend(
-            keepalives
-                .into_iter()
-                .map(|(worker_id, record)| Event::KeepaliveUpdated {
-                    worker_id: worker_id.clone(),
-                    record: record.clone(),
-                }),
-        );
-        let mut subagents: Vec<_> = self.subagents.values().cloned().collect();
-        subagents.sort_by(|a, b| a.id.cmp(&b.id));
-        events.extend(
-            subagents
-                .into_iter()
-                .map(|subagent| Event::SubagentUpdated { subagent }),
-        );
-        let mut snapshots: Vec<_> = self.subagent_snapshots.values().cloned().collect();
-        snapshots.sort_by(|a, b| a.subagent_id.cmp(&b.subagent_id));
-        events.extend(
-            snapshots
-                .into_iter()
-                .map(|receipt| Event::SubagentSnapshotCaptured {
-                    subagent_id: receipt.subagent_id,
-                    thread_id: receipt.thread_id,
-                    captured_ms: receipt.captured_ms,
-                }),
-        );
-        let mut worker_snapshots: Vec<_> = self.worker_snapshots.values().cloned().collect();
-        worker_snapshots.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
-        events.extend(
-            worker_snapshots
-                .into_iter()
-                .map(|receipt| Event::WorkerSnapshotCaptured {
-                    worker_id: receipt.worker_id,
-                    thread_id: receipt.thread_id,
-                    captured_ms: receipt.captured_ms,
-                }),
-        );
-        let mut tasks: Vec<_> = self.tasks.values().cloned().collect();
-        tasks.sort_by(|a, b| a.id.cmp(&b.id));
-        events.extend(tasks.into_iter().map(|task| Event::TaskCreated { task }));
-        let mut revisions: Vec<_> = self
-            .name_occupancy_revisions
-            .iter()
-            .flat_map(|(project, names)| {
-                names
-                    .iter()
-                    .map(move |(name, revision)| (project.clone(), name.clone(), *revision))
-            })
-            .collect();
-        revisions.sort();
-        events.extend(
-            revisions
-                .into_iter()
-                .map(
-                    |(project_scope, name, revision)| Event::NameOccupancyRevisionRetained {
-                        project_scope,
-                        name,
-                        revision,
-                    },
-                ),
-        );
-        let mut occupancies: Vec<_> = self
-            .name_occupancies
-            .iter()
-            .flat_map(|(project_scope, names)| {
-                names
-                    .values()
-                    .map(move |occupancy| (project_scope.clone(), occupancy.clone()))
-            })
-            .collect();
-        occupancies.sort_by(|(left_scope, left), (right_scope, right)| {
-            (left_scope.as_str(), left.name.as_str())
-                .cmp(&(right_scope.as_str(), right.name.as_str()))
-        });
-        for (project_scope, occupancy) in occupancies {
-            let mut assignments: Vec<_> = self
-                .task_assignments
-                .values()
-                .filter(|assignment| {
-                    assignment.name == occupancy.name
-                        && assignment.session_id == occupancy.session_id
-                })
-                .cloned()
-                .collect();
-            assignments.sort_by(|left, right| left.task_id.cmp(&right.task_id));
-            events.push(Event::NameResolutionCommitted {
-                project_scope,
-                occupancy,
-                assignments,
-            });
-        }
-        let mut assignments: Vec<_> = self.task_assignments.values().cloned().collect();
-        assignments.sort_by(|left, right| left.task_id.cmp(&right.task_id));
-        events.extend(
-            assignments
-                .into_iter()
-                .map(|assignment| Event::TaskAssignmentUpdated { assignment }),
-        );
-        let mut role_records: Vec<_> = self
-            .name_work_roles
-            .iter()
-            .flat_map(|(project_scope, names)| {
-                names
-                    .values()
-                    .map(move |record| (project_scope.clone(), record.clone()))
-            })
-            .collect();
-        role_records.sort_by(|(left_scope, left), (right_scope, right)| {
-            (left_scope.as_str(), left.name.as_str())
-                .cmp(&(right_scope.as_str(), right.name.as_str()))
-        });
-        events.extend(role_records.into_iter().map(|(project_scope, record)| {
-            Event::NameWorkRolesUpdated {
-                project_scope,
-                record,
-            }
-        }));
-        let mut template_records: Vec<_> = self
-            .workflow_templates
-            .iter()
-            .flat_map(|(project_scope, targets)| {
-                targets.iter().map(move |(target, entry)| {
-                    (project_scope.clone(), target.clone(), entry.clone())
-                })
-            })
-            .collect();
-        template_records.sort_by(
-            |(left_scope, left_target, _), (right_scope, right_target, _)| {
-                (left_scope.as_str(), left_target.as_str())
-                    .cmp(&(right_scope.as_str(), right_target.as_str()))
-            },
-        );
-        events.extend(
-            template_records
-                .into_iter()
-                .map(
-                    |(project_scope, target, entry)| Event::WorkflowTemplateUpdated {
-                        project_scope,
-                        target,
-                        entry: Some(entry),
-                    },
-                ),
-        );
-        let mut project_policies: Vec<_> = self.project_work_policy.iter().collect();
-        project_policies.sort_by(|left, right| left.0.cmp(right.0));
-        events.extend(project_policies.into_iter().map(|(work_kind, policy)| {
-            Event::ProjectWorkPolicyUpdated {
-                work_kind: work_kind.clone(),
-                policy: policy.clone(),
-            }
-        }));
-        let mut recoveries: Vec<_> = self.name_recoveries.values().cloned().collect();
-        recoveries.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
-        events.extend(
-            recoveries
-                .into_iter()
-                .map(|recovery| Event::NameRecoveryUpdated { recovery }),
-        );
-        let mut presences: Vec<_> = self
-            .agent_presence
-            .iter()
-            .flat_map(|(project_scope, workers)| {
-                workers
-                    .values()
-                    .map(move |presence| (project_scope.clone(), presence.clone()))
-            })
-            .collect();
-        presences.sort_by(|(left_scope, left), (right_scope, right)| {
-            (left_scope.as_str(), left.worker_id.as_str())
-                .cmp(&(right_scope.as_str(), right.worker_id.as_str()))
-        });
-        events.extend(
-            presences
-                .into_iter()
-                .map(|(_, presence)| Event::AgentPresenceObserved { presence }),
-        );
-        let mut activities: Vec<_> = self
-            .agent_activity
-            .iter()
-            .flat_map(|(project_scope, workers)| {
-                workers
-                    .values()
-                    .map(move |activity| (project_scope.clone(), activity.clone()))
-            })
-            .collect();
-        activities.sort_by(|(left_scope, left), (right_scope, right)| {
-            (left_scope.as_str(), left.worker_id.as_str())
-                .cmp(&(right_scope.as_str(), right.worker_id.as_str()))
-        });
-        events.extend(
-            activities
-                .into_iter()
-                .map(|(_, activity)| Event::AgentActivityObserved { activity }),
-        );
-        let mut scheduler_admissions: Vec<_> =
-            self.scheduler_admissions.values().cloned().collect();
-        scheduler_admissions.sort_by(|a, b| a.request_id.cmp(&b.request_id));
-        events.extend(
-            scheduler_admissions
-                .into_iter()
-                .map(|admission| Event::SchedulerAdmission { admission }),
-        );
-        let mut block_requests: Vec<_> = self.task_block_requests.values().cloned().collect();
-        block_requests.sort_by(|a, b| a.task_id.cmp(&b.task_id));
-        events.extend(
-            block_requests
-                .into_iter()
-                .map(|request| Event::TaskBlockRequestUpdated { request }),
-        );
-        let mut lifecycle: Vec<_> = self.task_lifecycle.iter().collect();
-        lifecycle.sort_by(|a, b| a.0.cmp(b.0));
-        events.extend(
-            lifecycle
-                .into_iter()
-                .map(|(task_id, record)| Event::TaskLifecycleUpdated {
-                    task_id: task_id.clone(),
-                    record: record.clone(),
-                }),
-        );
-        let mut merges: Vec<_> = self.pending_merges.values().cloned().collect();
-        merges.sort_by(|a, b| a.task_id.cmp(&b.task_id));
-        events.extend(
-            merges
-                .into_iter()
-                .map(|request| Event::MergeRequested { request }),
-        );
-        let mut receipts: Vec<_> = self.cleanup_receipts.values().cloned().collect();
-        receipts.sort_by(|a, b| a.task_id.cmp(&b.task_id));
-        events.extend(
-            receipts
-                .into_iter()
-                .map(|receipt| Event::CleanupVerified { receipt }),
-        );
-        let mut subscriptions: Vec<_> = self.notification_subscriptions.values().cloned().collect();
-        subscriptions.sort_by(|a, b| a.id.cmp(&b.id));
-        events.extend(
-            subscriptions
-                .into_iter()
-                .map(|subscription| Event::NotificationSubscribed { subscription }),
-        );
-        let mut delivery_failures: Vec<_> = self
-            .notification_delivery_failures
-            .values()
-            .cloned()
-            .collect();
-        delivery_failures.sort_by(|a, b| {
-            (a.failed_ms, a.message_id.as_str()).cmp(&(b.failed_ms, b.message_id.as_str()))
-        });
-        events.extend(delivery_failures.into_iter().map(|failure| {
-            Event::NotificationDeliveryFailed {
-                message_id: failure.message_id,
-                operation: failure.operation,
-                error: failure.error,
-                failed_ms: failure.failed_ms,
-                retryable: failure.retryable,
-            }
-        }));
-        let mut accepted: Vec<_> = self
-            .notification_delivery_accepted
-            .iter()
-            .map(|(message_id, accepted_ms)| (message_id.clone(), *accepted_ms))
-            .collect();
-        accepted.sort_by(|a, b| (a.1, a.0.as_str()).cmp(&(b.1, b.0.as_str())));
-        events.extend(accepted.into_iter().map(|(message_id, accepted_ms)| {
-            let evidence = self
-                .notification_delivery_evidence
-                .get(&message_id)
-                .cloned();
-            Event::NotificationDeliveryAccepted {
-                message_id,
-                accepted_ms,
-                evidence,
-            }
-        }));
-        let mut messages: Vec<_> = self.msgs.values().cloned().collect();
-        messages.sort_by(|a, b| (a.created_ms, a.id.clone()).cmp(&(b.created_ms, b.id.clone())));
-        for msg in messages {
-            let id = msg.id.clone();
-            events.push(Event::Sent { msg });
-            if let Some(target_session) = self.target_sessions.get(&id) {
-                events.push(Event::TargetSessionBound {
-                    message_id: id.clone(),
-                    target_session: target_session.clone(),
-                });
-            }
-            if let Some(address) = self.mailbox_name_addresses.get(&id) {
-                events.push(Event::MailboxNameAddressed {
-                    message_id: id.clone(),
-                    address: address.clone(),
-                });
-            }
-            if let Some(mode) = self.delivery_modes.get(&id) {
-                events.push(Event::DeliveryMode {
-                    msg_id: id.clone(),
-                    mode: mode.clone(),
-                    source_thread_id: self.delivery_source_threads.get(&id).cloned(),
-                });
-            }
-            if let Some(subscription_id) = self.wake_bindings.get(&id) {
-                events.push(Event::WakeBound {
-                    message_id: id,
-                    subscription_id: subscription_id.clone(),
-                });
-            }
-        }
-        let mut defaults: Vec<_> = self.conversation_defaults.values().cloned().collect();
-        defaults.sort_by(|a, b| a.key().cmp(&b.key()));
-        events.extend(
-            defaults
-                .into_iter()
-                .map(|default| Event::ConversationDefaultSet { default }),
-        );
-        let mut envelopes: Vec<_> = self.channel_envelopes.iter().collect();
-        envelopes.sort_by(|a, b| a.0.cmp(b.0));
-        events.extend(envelopes.into_iter().map(|(message_id, envelope)| {
-            Event::ChannelEnvelopeRecorded {
-                message_id: message_id.clone(),
-                idempotency_key: crate::server::channel_envelope::platform_event_key(
-                    &envelope.channel_instance,
-                    &envelope.external_conversation,
-                    &envelope.platform_message_id,
-                ),
-                envelope: envelope.clone(),
-            }
-        }));
-        let mut reply_routes: Vec<_> = self.channel_reply_routes.iter().collect();
-        reply_routes.sort_by(|a, b| a.0.cmp(b.0));
-        events.extend(
-            reply_routes
-                .into_iter()
-                .map(|(message_id, route)| Event::ChannelReplyRouteBound {
-                    message_id: message_id.clone(),
-                    route: route.clone(),
-                }),
-        );
-        let mut delivery_results: Vec<_> = self.channel_delivery_results.values().cloned().collect();
-        delivery_results.sort_by(|a, b| a.message_id.cmp(&b.message_id));
-        events.extend(
-            delivery_results
-                .into_iter()
-                .map(|result| Event::ChannelDeliveryResultRecorded { result }),
-        );
-        // Unsettled obligations survive compaction. They follow the message
-        // rows above so a restored journal has the original message first.
-        let mut obligations: Vec<_> = self.reply_obligations.values().cloned().collect();
-        obligations.sort_by(|a, b| {
-            (a.created_ms, a.message_id.as_str()).cmp(&(b.created_ms, b.message_id.as_str()))
-        });
-        events.extend(
-            obligations
-                .into_iter()
-                .map(|obligation| Event::ReplyObligationSet { obligation }),
-        );
-        if let Some(migration) = self.migration.clone() {
-            events.push(Event::MigrationUpdated { migration });
-        }
-        if let Some(grant) = self.ceo_grant.clone() {
-            events.push(Event::CeoGrantSet { grant: Some(grant) });
-        }
-        let mut bootstraps: Vec<_> = self.ceo_bootstraps.values().cloned().collect();
-        bootstraps.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
-        events.extend(
-            bootstraps
-                .into_iter()
-                .map(|record| Event::CeoBootstrapSet { record }),
-        );
-        let mut command_receipts: Vec<_> = self.command_receipts.iter().collect();
-        command_receipts.sort_by(|a, b| a.0.cmp(b.0));
-        for (command_id, receipt) in command_receipts {
-            if self.legacy_command_ids.contains(command_id) {
-                events.push(Event::CommandRecorded {
-                    command_id: command_id.clone(),
-                    receipt: receipt.clone(),
-                });
-            } else {
-                events.push(Event::CommandStarted {
-                    command_id: command_id.clone(),
-                    operation_id: receipt.operation_id.clone(),
-                });
-                events.push(Event::CommandCompleted {
-                    command_id: command_id.clone(),
-                    operation_id: receipt.operation_id.clone(),
-                    receipt: receipt.clone(),
-                });
-            }
-        }
-        let mut bindings: Vec<_> = self.worktree_bindings.values().cloned().collect();
-        bindings.sort_by(|a, b| a.binding_id.cmp(&b.binding_id));
-        events.extend(
-            bindings
-                .into_iter()
-                .map(|binding| Event::WorktreeBound { binding }),
-        );
-        for (_, project) in &self.global.projects {
-            for policy in project.bootstrap_policies.values() {
-                events.push(Event::GlobalBootstrapPolicySet {
-                    policy: policy.clone(),
-                });
-            }
-            for registration in project.registrations.values() {
-                events.push(Event::GlobalProjectRegistered {
-                    registration: registration.clone(),
-                });
-            }
-            for binding in project.runtime_bindings.values() {
-                events.push(Event::GlobalRuntimeBound {
-                    binding: binding.clone(),
-                });
-            }
-            for grant in project.master_grants.values() {
-                events.push(Event::GlobalMasterGranted {
-                    grant: grant.clone(),
-                });
-            }
-        }
-        for intent in self.global.master_grant_replacement_intents.values() {
-            events.push(Event::GlobalMasterGrantReplacementStarted {
-                intent: intent.clone(),
-            });
-        }
-        for receipt in self.global.master_grant_replacement_receipts.values() {
-            events.push(Event::GlobalMasterGrantReplacementCompleted {
-                receipt: receipt.clone(),
-            });
-        }
-        events.extend(
-            self.global
-                .current_thread_routes
-                .values()
-                .cloned()
-                .map(|binding| Event::GlobalCurrentThreadRouteSet { binding }),
-        );
-        // Legacy thread-only routes must survive compaction too.  Replaying a
-        // snapshot that already contains a strict route skips the
-        // bindings-based restoration, so omitting these would silently drop
-        // every pre-dual-key route on the next restart.
-        let mut legacy_routes: Vec<_> =
-            self.global.legacy_thread_routes.values().cloned().collect();
-        legacy_routes.sort_by(|left, right| {
-            (
-                left.app_scope_id.as_str(),
-                left.native_thread_id.as_ref().map(|thread| thread.as_str()),
-                left.binding_id.as_str(),
-            )
-                .cmp(&(
-                    right.app_scope_id.as_str(),
-                    right
-                        .native_thread_id
-                        .as_ref()
-                        .map(|thread| thread.as_str()),
-                    right.binding_id.as_str(),
-                ))
-        });
-        events.extend(
-            legacy_routes
-                .into_iter()
-                .map(|binding| Event::GlobalCurrentThreadRouteSet { binding }),
-        );
-        events.extend(
-            self.global
-                .current_thread_route_tombstones
-                .values()
-                .cloned()
-                .map(|tombstone| Event::GlobalCurrentThreadRouteTombstoneSet { tombstone }),
-        );
-        let mut migration_commit_evidence: Vec<_> = self
-            .global
-            .migration_commit_evidence
-            .values()
-            .cloned()
-            .collect();
-        migration_commit_evidence
-            .sort_by(|a, b| a.operation_id.as_str().cmp(b.operation_id.as_str()));
-        events.extend(
-            migration_commit_evidence
-                .into_iter()
-                .map(|evidence| Event::GlobalMigrationCommitEvidence { evidence }),
-        );
-        // Restore exact final descriptive records after replaying the resource
-        // snapshots above. Snapshot TaskCreated is not an additional update.
-        let mut details: Vec<_> = self.board_details.iter().collect();
-        details.sort_by(|left, right| left.0.cmp(right.0));
-        events.extend(
-            details
-                .into_iter()
-                .map(|(task_id, details)| Event::BoardDetailsChanged {
-                    task_id: task_id.clone(),
-                    details: details.clone(),
-                }),
-        );
-        events.extend(
-            self.cancelled_board_patrol_tasks
-                .values()
-                .cloned()
-                .map(|record| Event::BoardPatrolCancelled { record }),
-        );
-        events.extend(self.board_patrol_gates.iter().map(|(worker_id, gate)| {
-            Event::BoardPatrolGateUpdated {
-                worker_id: worker_id.clone(),
-                gate: gate.clone(),
-            }
-        }));
-        events.extend(
-            self.board_patrol_notice_ids
-                .iter()
-                .cloned()
-                .map(|message_id| Event::BoardPatrolNoticeBound { message_id }),
-        );
-        // Carry the canonical CEO report state only when it is meaningful: an
-        // existing CEO grant, a pending revision, an unacknowledged batch, a
-        // recorded actual-report time, or a non-default notice gate. This
-        // preserves cleared-grant outstanding progress, report history and
-        // notice reservations while avoiding an unused empty CEO state on every
-        // non-CEO project. The restore assigns the exact helper state.
-        let ceo_meaningful = self.ceo_grant.is_some()
-            || !self.ceo_report_state.pending_revisions().is_empty()
-            || self.ceo_report_state.batch_count() > 0
-            || self.ceo_report_state.last_actual_report_ms().is_some()
-            || self.ceo_report_state.notice_gate
-                != crate::ceo_report_state::CeoNoticeGate::default();
-        if ceo_meaningful {
-            events.push(Event::CeoReportStateRestored {
-                report_state: self.ceo_report_state.clone(),
-            });
-        }
-        (self.sequence, self.revision, events)
-    }
-
     pub fn admission_frozen(&self) -> bool {
-        self.journal_poison.is_some()
-            || self
-                .pending_project_resets
-                .values()
-                .any(|clear_local| *clear_local)
-            || self
-                .migration
-                .as_ref()
-                .is_some_and(|migration| migration.admission_frozen)
+        self.pending_project_resets
+            .values()
+            .any(|clear_local| *clear_local)
     }
 
     /// Unread (not yet acked) inbox of a worker, oldest first.
@@ -2440,12 +1533,6 @@ impl State {
         let current_session = self
             .workers
             .get(worker_id)
-            .or_else(|| {
-                self.worker_names
-                    .iter()
-                    .find(|(_, name)| name.as_str() == worker_id)
-                    .and_then(|(id, _)| self.workers.get(id))
-            })
             .and_then(|w| w.transport.as_ref())
             .and_then(|t| t.session_id.as_deref());
         let mut v: Vec<&Message> = self
@@ -2498,7 +1585,7 @@ impl State {
         })
     }
 
-    /// Earlier replies remain journaled, but only the newest one is active.
+    /// Retained earlier replies stay queryable; only the newest one is active.
     pub fn superseded_replies(&self, request_id: &str) -> Vec<String> {
         let mut ids: Vec<String> = self
             .msgs
@@ -2643,18 +1730,8 @@ mod board_patrol_state_tests {
         }
     }
 
-    fn replay_through_serde(state: &State) -> State {
-        let body = state
-            .snapshot_events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>();
-        let mut replayed = State::default();
-        for line in body {
-            let event: Event = serde_json::from_str(&line).unwrap();
-            replayed.apply(&event);
-        }
-        replayed
+    fn current_state_round_trip(state: &State) -> State {
+        serde_json::from_slice(&serde_json::to_vec(state).unwrap()).unwrap()
     }
 
     #[test]
@@ -2674,7 +1751,7 @@ mod board_patrol_state_tests {
             gate: gate("owner-a"),
         });
 
-        let replayed = replay_through_serde(&state);
+        let replayed = current_state_round_trip(&state);
 
         assert_eq!(
             replayed.cancelled_board_patrol_tasks.get("task-a"),
@@ -2718,7 +1795,7 @@ mod board_patrol_state_tests {
             task_id: "task-a".into(),
         });
 
-        let replayed = replay_through_serde(&state);
+        let replayed = current_state_round_trip(&state);
         assert!(replayed.cancelled_board_patrol_tasks.is_empty());
     }
 }
@@ -2729,18 +1806,8 @@ mod ceo_report_state_wiring_tests {
     use crate::ceo_report_state::{CeoNoticeGate, CeoProgressContent};
     use std::collections::BTreeMap;
 
-    fn replay_through_serde(state: &State) -> State {
-        let body = state
-            .snapshot_events()
-            .iter()
-            .map(|event| serde_json::to_string(event).unwrap())
-            .collect::<Vec<_>>();
-        let mut replayed = State::default();
-        for line in body {
-            let event: Event = serde_json::from_str(&line).unwrap();
-            replayed.apply(&event);
-        }
-        replayed
+    fn current_state_round_trip(state: &State) -> State {
+        serde_json::from_slice(&serde_json::to_vec(state).unwrap()).unwrap()
     }
 
     fn content(subject: &str, body: &str) -> CeoProgressContent {
@@ -2772,12 +1839,6 @@ mod ceo_report_state_wiring_tests {
             batch_id: batch_id.into(),
             reported_ms,
         }
-    }
-
-    fn contains_restored(events: &[Event]) -> bool {
-        events
-            .iter()
-            .any(|event| matches!(event, Event::CeoReportStateRestored { .. }))
     }
 
     fn ceo_grant(workspace: &str) -> crate::ceo::CeoGrant {
@@ -2833,9 +1894,7 @@ mod ceo_report_state_wiring_tests {
         state.apply(&progress("proj-a", "first"));
         state.apply(&prepared("batch-1", "proj-a", 1));
 
-        assert!(contains_restored(&state.snapshot_events()));
-
-        let replayed = replay_through_serde(&state);
+        let replayed = current_state_round_trip(&state);
 
         let pending = replayed
             .ceo_report_state
@@ -2874,7 +1933,7 @@ mod ceo_report_state_wiring_tests {
             2
         );
 
-        let mut replayed = replay_through_serde(&state);
+        let mut replayed = current_state_round_trip(&state);
         assert_eq!(
             replayed
                 .ceo_report_state
@@ -2915,10 +1974,7 @@ mod ceo_report_state_wiring_tests {
     }
 
     #[test]
-    fn default_state_emits_no_empty_ceo_event_but_nonempty_report_state_does() {
-        let untouched = State::default();
-        assert!(!contains_restored(&untouched.snapshot_events()));
-
+    fn current_report_state_survives_without_a_ceo_grant() {
         let mut cleared_grant = State::default();
         cleared_grant.apply(&Event::CeoGrantSet {
             grant: Some(crate::ceo::CeoGrant {
@@ -2934,15 +1990,9 @@ mod ceo_report_state_wiring_tests {
         assert!(cleared_grant.ceo_grant.is_none());
 
         cleared_grant.apply(&progress("project-after-revoke", "retained"));
-        let events = cleared_grant.snapshot_events();
-        let restored = events
-            .iter()
-            .find_map(|event| match event {
-                Event::CeoReportStateRestored { report_state } => Some(report_state),
-                _ => None,
-            })
-            .expect("nonempty report state is retained without a CEO grant");
-        assert!(restored.pending_revision("project-after-revoke").is_some());
+        let current = current_state_round_trip(&cleared_grant);
+        assert!(current.ceo_grant.is_none());
+        assert!(current.ceo_report_state.pending_revision("project-after-revoke").is_some());
     }
 
     #[test]
@@ -2958,7 +2008,7 @@ mod ceo_report_state_wiring_tests {
         });
         state.apply(&notice_gate(900_000, 1));
 
-        let replayed = replay_through_serde(&state);
+        let replayed = current_state_round_trip(&state);
 
         assert_eq!(
             replayed.ceo_report_state.notice_gate,
@@ -2980,9 +2030,7 @@ mod ceo_report_state_wiring_tests {
         assert!(state.ceo_report_state.pending_revisions().is_empty());
         assert_eq!(state.ceo_report_state.batch_count(), 0);
         assert_eq!(state.ceo_report_state.last_actual_report_ms(), None);
-        assert!(contains_restored(&state.snapshot_events()));
-
-        let replayed = replay_through_serde(&state);
+        let replayed = current_state_round_trip(&state);
         assert_eq!(
             replayed.ceo_report_state.notice_gate,
             expected_notice_gate(450_000, 7)
@@ -3014,7 +2062,7 @@ mod ceo_report_state_wiring_tests {
         assert_eq!(state.ceo_report_state.notice_gate, CeoNoticeGate::default());
         assert_report_history_preserved(&state);
 
-        let replayed = replay_through_serde(&state);
+        let replayed = current_state_round_trip(&state);
         assert_eq!(
             replayed.ceo_report_state.notice_gate,
             CeoNoticeGate::default()

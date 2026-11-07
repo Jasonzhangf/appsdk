@@ -3,8 +3,6 @@
         register, register_appserver_worker, test_appserver_transport, test_server,
     };
     use crate::server::state::MasterWakeSignal;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Condvar, Mutex};
@@ -22,22 +20,65 @@
             last_message: None, error: None, probe_failures: vec![], runtime: Some("codex".into()),
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         } }]);
     }
 
     fn promote_master(server: &Server) {
-        let response = handle_master_promote(
-            server,
-            "master".into(),
-            "token-master".into(),
-            "scheduler test".into(),
-        );
-        assert!(response.ok, "master promotion failed: {response:?}");
+        crate::server::peer_tests::promote_master(server, "master", "scheduler test");
+    }
+
+    fn private_peer_context(server: &Server) -> ProjectContext {
+        let state = server.state.lock().unwrap();
+        let binding = state.global.projects.values().flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == "peer").unwrap();
+        ProjectContext::for_registered_route(&server.root, &crate::identity::RuntimeIdentity {
+            agent_id: binding.agent_id.clone(), runtime_id: binding.runtime_id.clone(),
+            appserver_id: binding.app_scope_id.clone(), binding_id: binding.binding_id.clone(),
+            session_id: binding.session_id.clone(), native_thread_id: binding.native_thread_id.clone(),
+        }).unwrap()
+    }
+
+    // Current persisted reservations still have retry, visibility and Working
+    // readers. This fixture does not simulate the removed admission logger.
+    fn seed_private_reservation(server: &Server, request_id: &str, status: &str) {
+        let message_id = format!("scheduler-{request_id}");
+        let now = now_ms();
+        let mut child = server.state.lock().unwrap().subagents["managed-peer"].clone();
+        child.status = "assigned".into();
+        child.thread_id = server.state.lock().unwrap().workers["peer"]
+            .transport.as_ref().unwrap().thread_id.clone();
+        child.last_message = Some(message_id.clone());
+        server.commit(&[
+            Event::Sent { msg: Message {
+                id: message_id.clone(), from: "master".into(), to: "peer".into(),
+                mtype: "notify".into(), subject: Some("Current reservation".into()),
+                body: "Preserve the original payload".into(), in_reply_to: Some("source-message".into()),
+                created_ms: now, state: "pending".into(), wake_attempt_count: 0,
+                last_wake_attempt_ms: 0, retry_attempted: false,
+            } },
+            Event::TaskCreated { task: TaskRec {
+                id: format!("task-{message_id}"), owner: "peer".into(), created_by: "master".into(),
+                feature_id: Some("current-feature".into()), worktree_path: None, branch: None,
+                base_commit: None, priority: "p1".into(), status: "assigned".into(),
+                next_step: Some("accept".into()), wait: None, isolation_mode: None,
+                created_ms: now, updated_ms: now,
+            } },
+            Event::SubagentUpdated { subagent: child },
+            Event::DeliveryMode { msg_id: message_id.clone(), mode: "explicit-notification".into(), source_thread_id: None },
+            Event::WakeBound { message_id: message_id.clone(), subscription_id: "sub-default-direct-message-peer".into() },
+            Event::SchedulerAdmission { admission: crate::server::state::SchedulerAdmissionRecord {
+                request_id: request_id.into(), decision: "reuse-idle-managed-subagent".into(),
+                worker_id: "peer".into(), managed_subagent_id: Some("managed-peer".into()),
+                message_id: message_id.clone(), task_id: format!("task-{message_id}"),
+                status: status.into(), error: (status == "failed").then(|| "stored reservation failed".into()),
+                created_ms: now, updated_ms: now,
+            } },
+        ]);
+        *server.state.lock().unwrap() = current_state::load(&server.state_path, false).unwrap();
     }
 
     #[test]
-    fn start_admits_registered_idle_peer_before_managed_child_without_duplicates() {
+    fn authenticated_start_is_unsupported_without_mutation() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "idle-peer", "%idle-peer");
@@ -82,12 +123,8 @@
         assert!(state.subagents.is_empty());
         assert!(state.tasks.is_empty());
         assert!(state.msgs.is_empty());
+        assert!(state.scheduler_admissions.is_empty());
         drop(state);
-        assert!(
-            !std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
-                .unwrap_or_default()
-                .contains("scheduler_admission")
-        );
 
         let denied = start(None, "wrong-token");
         assert!(!denied.ok);
@@ -96,6 +133,7 @@
         assert!(state.subagents.is_empty());
         assert!(state.tasks.is_empty());
         assert!(state.msgs.is_empty());
+        assert!(state.scheduler_admissions.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -224,7 +262,6 @@
                 runtime: Some("codex".into()),
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         }]);
         assert!(registered_available_peer_for_admission(&server, "master").is_none());
@@ -281,7 +318,6 @@
                 runtime: Some("codex".into()),
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         }]);
         let server = Arc::new(server);
@@ -376,7 +412,6 @@
                 runtime: Some("codex".into()),
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         }]);
 
@@ -393,56 +428,6 @@
             .as_deref()
             .unwrap_or_default()
             .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn admission_audit_failure_is_explicit_and_does_not_create_child() {
-        let (server, root) = test_server();
-        register(&server, "master", "%master");
-        register(&server, "idle-peer", "%idle-peer");
-        promote_master(&server);
-        let events = root.join(".agent-collab/server/events.jsonl");
-        std::fs::create_dir(&events).unwrap();
-        let server = Arc::new(server);
-        let result = dispatch(
-            &server,
-            Req::Subagent {
-                worker_id: "master".into(),
-                token: "token-master".into(),
-                command: crate::subagent::Action::Start {
-                    id: None,
-                    runtime: Some("codex".into()),
-                },
-                launch_env: Default::default(),
-            },
-        );
-        assert!(!result.ok);
-        assert!(result
-            .error
-            .unwrap()
-            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
-        assert!(server.state.lock().unwrap().subagents.is_empty());
-        assert!(server.state.lock().unwrap().scheduler_admissions.is_empty());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn no_capacity_records_explicit_create_admission() {
-        let (server, root) = test_server();
-        register(&server, "master", "%master");
-        promote_master(&server);
-        let unsupported =
-            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
-                .unwrap_err();
-        assert!(unsupported
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
-        let audit = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
-            .unwrap_or_default();
-        assert!(!audit.contains("create-managed-subagent"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -469,7 +454,6 @@
                     runtime: Some("codex".into()),
                     create_operation_id: None,
                     binding_id: None,
-                    endpoint_generation: None,
                 },
             },
             Event::Registered {
@@ -519,7 +503,6 @@
                     runtime: Some("codex".into()),
                     create_operation_id: None,
                     binding_id: None,
-                    endpoint_generation: None,
                 },
             },
             Event::Registered {
@@ -572,7 +555,6 @@
                     runtime: Some("codex".into()),
                     create_operation_id: None,
                     binding_id: None,
-                    endpoint_generation: None,
                 },
             },
             Event::MasterWakeSignal {
@@ -612,7 +594,6 @@
                     runtime: Some("codex".into()),
                     create_operation_id: None,
                     binding_id: None,
-                    endpoint_generation: None,
                 },
             },
             Event::WorkerClosed {
@@ -701,7 +682,7 @@
         assert!(state.msgs.is_empty());
         assert!(state.scheduler_admissions.is_empty());
         drop(state);
-        let replayed = replay(&root).unwrap();
+        let replayed = current_state::load(&server.state_path, false).unwrap();
         assert!(replayed.tasks.is_empty());
         assert!(replayed.scheduler_admissions.is_empty());
         std::fs::remove_dir_all(root).unwrap();
@@ -730,7 +711,6 @@
                 runtime: Some("codex".into()),
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         }]);
         let server = Arc::new(server);
@@ -771,8 +751,6 @@
         assert_eq!(state.subagents["managed-child"].status, "idle");
         assert_eq!(state.subagents["managed-child"].last_message, None);
         drop(state);
-        assert!(!root.join(".agent-collab/server/events.jsonl").exists(),
-            "rejected ordinary dispatch must not create an admission audit");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -871,11 +849,12 @@
 
         // Notification admission is not task acceptance or message consumption.
         // The private child keeps its existing private readiness protocol.
-        let replayed = replay(&root).unwrap();
+        let replayed = current_state::load(&server.state_path, false).unwrap();
         assert_eq!(replayed.scheduler_admissions["req-notify-rejected-1"].status, "succeeded");
         let task = &replayed.tasks["task-scheduler-req-notify-rejected-1"];
         assert_eq!(task.status, "assigned");
-        assert!(board_task_view(&replayed, task).is_none(), "private assignment must stay off the public board");
+        let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+        assert!(board_task_view(&replayed, &control, task).unwrap().is_none(), "private assignment must stay off the public board");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -955,7 +934,6 @@
                 runtime: Some("codex".into()),
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         }]);
         let server = Arc::new(server);
@@ -996,14 +974,13 @@
     }
 
     #[test]
-    fn scheduler_dispatch_audit_failure_is_stable_on_request_retry() {
+    fn scheduler_dispatch_persisted_failed_reservation_is_stable_on_retry() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register_private_dispatch_peer(&server);
         promote_master(&server);
-        let activity_path = root.join(".agent-collab/server/events.jsonl");
-        std::fs::create_dir_all(activity_path.parent().unwrap()).unwrap();
-        std::fs::create_dir(&activity_path).unwrap();
+        seed_private_reservation(&server, "req-failed-reservation-1", "failed");
+        let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
         let server = Arc::new(server);
         let request = |body: &str| {
             dispatch(
@@ -1012,8 +989,8 @@
                     worker_id: "master".into(),
                     token: "token-master".into(),
                     command: crate::subagent::Action::Dispatch {
-                        request_id: "req-audit-failure-1".into(),
-                        subject: "Audit failure task".into(),
+                        request_id: "req-failed-reservation-1".into(),
+                        subject: "Changed subject is ignored".into(),
                         body: body.into(),
                         feature_id: None,
                         worktree_path: None,
@@ -1029,174 +1006,173 @@
         let first = request("first body");
         assert!(!first.ok, "{first:?}");
         let first_error = first.error.clone().unwrap();
-        assert!(first_error.contains("scheduler admission audit failed"));
+        assert_eq!(first_error, "stored reservation failed");
         assert_eq!(first.data["reservation"], true);
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs["scheduler-req-audit-failure-1"].state, "pending");
-        assert_eq!(
-            state.msgs["scheduler-req-audit-failure-1"].wake_attempt_count,
-            0
-        );
-        drop(state);
-        *server.state.lock().unwrap() = replay(&root).unwrap();
+        assert_eq!(first.data["message_id"], "scheduler-req-failed-reservation-1");
+        assert_eq!(first.data["task_id"], "task-scheduler-req-failed-reservation-1");
         let second = request("retry body is ignored");
         assert!(!second.ok, "{second:?}");
         assert_eq!(second.error.as_deref(), Some(first_error.as_str()));
         assert_eq!(second.data["reservation"], true);
         assert_eq!(second.data["message_id"], first.data["message_id"]);
         assert_eq!(second.data["task_id"], first.data["task_id"]);
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.tasks.len(), 1);
-        assert_eq!(state.msgs.len(), 1);
-        assert_eq!(
-            state.scheduler_admissions["req-audit-failure-1"].status,
-            "failed"
-        );
-        drop(state);
+        assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
+        assert_eq!(serde_json::to_value(current_state::load(&server.state_path, false).unwrap()).unwrap(), before);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn scheduler_dispatch_audit_failure_cannot_be_accepted_by_managed_child() {
-        let (server, root) = test_server();
-        register(&server, "master", "%master");
-        // The managed peer is the dispatch recipient, so it needs a
-        // genuinely-observed native runtime; a tmux pane is only an address and
-        // cannot be admitted as a live recipient.
-        register_appserver_worker(&server, &root, "managed-peer", "thread-managed-peer");
-        promote_master(&server);
-        server.commit(&[Event::SubagentUpdated {
-            subagent: crate::subagent::Record {
-                id: "managed-child-failed-audit".into(),
-                parent: "master".into(),
-                peer: "managed-peer".into(),
-                status: "idle".into(),
-                thread_id: Some("thread-managed-peer".into()),
-                profile: None,
-                created_ms: now_ms(),
-                ready_deadline_ms: 0,
-                last_message: None,
-                error: None,
-                probe_failures: Vec::new(),
-                runtime: Some("codex".into()),
-                create_operation_id: None,
-                binding_id: None,
-                endpoint_generation: None,
-            },
-        }]);
-        std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();
-        let server = Arc::new(server);
-        let dispatch_result = dispatch(
-            &server,
-            Req::Subagent {
-                worker_id: "master".into(),
-                token: "token-master".into(),
-                command: crate::subagent::Action::Dispatch {
-                    request_id: "req-managed-failed-audit-1".into(),
-                    subject: "Failed managed task".into(),
-                    body: "Must not execute".into(),
-                    feature_id: None,
-                    worktree_path: None,
-                    branch: None,
-                    base_commit: None,
-                    priority: "p2".into(),
-                    next_step: None,
-                },
-                launch_env: Default::default(),
-            },
-        );
-        assert!(!dispatch_result.ok, "{dispatch_result:?}");
-        let working = crate::subagent::handle_with_env(
-            &server,
-            "managed-peer",
-            "token-managed-peer",
-            crate::subagent::Action::Working {
-                id: "managed-child-failed-audit".into(),
-            },
-            Default::default(),
-        );
-        assert!(!working.ok, "{working:?}");
-        assert!(working
-            .error
-            .unwrap_or_default()
-            .contains("scheduler assignment admission is failed"));
-        let state = server.state.lock().unwrap();
-        assert_eq!(
-            state.scheduler_admissions["req-managed-failed-audit-1"].status,
-            "failed"
-        );
-        assert_eq!(
-            state.subagents["managed-child-failed-audit"].status,
-            "assigned"
-        );
-        assert_eq!(
-            state.tasks["task-scheduler-req-managed-failed-audit-1"].status,
-            "assigned"
-        );
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn scheduler_dispatch_audit_failure_does_not_wake_long_poll_or_recv() {
+    fn managed_child_working_requires_its_succeeded_reservation() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register_private_dispatch_peer(&server);
         promote_master(&server);
-        std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();
+        let working = || crate::subagent::handle_with_env(
+            &server, "peer", "token-peer",
+            crate::subagent::Action::Working { id: "managed-peer".into() }, Default::default());
+        for status in ["pending", "failed"] {
+            seed_private_reservation(&server, "req-working-1", status);
+            let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+            let denied = working();
+            assert!(!denied.ok, "{denied:?}");
+            assert!(denied.error.unwrap().contains(&format!("scheduler assignment admission is {status}")));
+            assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
+        }
+        seed_private_reservation(&server, "req-working-1", "succeeded");
+        let mut wrong_child = server.state.lock().unwrap().scheduler_admissions["req-working-1"].clone();
+        wrong_child.managed_subagent_id = Some("different-child".into());
+        server.commit(&[Event::SchedulerAdmission { admission: wrong_child }]);
+        let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        let denied = working();
+        assert!(!denied.ok, "{denied:?}");
+        assert!(denied.error.unwrap().contains("managed subagent does not own scheduler task"));
+        assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
+        seed_private_reservation(&server, "req-working-1", "succeeded");
+        let before_message = serde_json::to_value(&server.state.lock().unwrap().msgs["scheduler-req-working-1"]).unwrap();
+        let accepted = working();
+        assert!(accepted.ok, "{accepted:?}");
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.subagents["managed-peer"].status, "working");
+        assert_eq!(state.tasks["task-scheduler-req-working-1"].status, "working");
+        assert_eq!(serde_json::to_value(&state.msgs["scheduler-req-working-1"]).unwrap(), before_message);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_reservation_is_hidden_from_poll_inbox_and_notification() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register_private_dispatch_peer(&server);
+        promote_master(&server);
+        server.config.notifications.enabled = true;
+        seed_private_reservation(&server, "req-hidden-failed-1", "failed");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let sink_attempts = Arc::clone(&attempts);
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
+            sink_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"accepted": true}))
+        });
+        let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        let attempt = attempt_notification_detailed_with_at(&server,
+            "scheduler-req-hidden-failed-1", "sub-default-direct-message-peer", now_ms());
+        assert!(matches!(attempt, NotificationAttempt::NotAttempted(ref error) if error == "scheduler admission is not deliverable"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
         let server = Arc::new(server);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (poll_result, dispatch_result) = runtime.block_on(async {
-            let poll = handle_poll_async(Arc::clone(&server), "peer".into(), 100);
-            let dispatch_server = Arc::clone(&server);
-            let dispatch = tokio::task::spawn_blocking(move || {
-                std::thread::sleep(Duration::from_millis(10));
-                dispatch(
-                    &dispatch_server,
-                    Req::Subagent {
-                        worker_id: "master".into(),
-                        token: "token-master".into(),
-                        command: crate::subagent::Action::Dispatch {
-                            request_id: "req-long-poll-failed-audit-1".into(),
-                            subject: "Failed long poll task".into(),
-                            body: "Must not be consumed".into(),
-                            feature_id: None,
-                            worktree_path: None,
-                            branch: None,
-                            base_commit: None,
-                            priority: "p2".into(),
-                            next_step: None,
-                        },
-                        launch_env: Default::default(),
-                    },
-                )
-            });
-            let (poll_result, dispatch_result) = tokio::join!(poll, dispatch);
-            (poll_result, dispatch_result.unwrap())
-        });
+        let poll_result = runtime.block_on(handle_poll_async(Arc::clone(&server), "peer".into(), 100));
         assert!(poll_result.ok, "{poll_result:?}");
         assert_eq!(poll_result.data["count"], 0);
         assert_eq!(poll_result.data["timeout"], true);
-        assert!(!dispatch_result.ok, "{dispatch_result:?}");
         let state = server.state.lock().unwrap();
-        assert_eq!(
-            state.msgs["scheduler-req-long-poll-failed-audit-1"].wake_attempt_count,
-            0
-        );
         assert_eq!(state.inbox_of("peer").len(), 0);
-        assert_eq!(
-            state.scheduler_admissions["req-long-poll-failed-audit-1"].status,
-            "failed"
-        );
+        assert_eq!(serde_json::to_value(&*state).unwrap(), before);
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
+    fn scheduler_notification_reconciles_consumption_before_batch_selection() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register_private_dispatch_peer(&server);
+        promote_master(&server);
+        server.config.notifications.enabled = true;
+        seed_private_reservation(&server, "req-consumed-before-wake", "pending");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sink_calls = calls.clone();
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
+            sink_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"accepted":true}))
+        });
+        let before_task = serde_json::to_value(&server.state.lock().unwrap().tasks["task-scheduler-req-consumed-before-wake"]).unwrap();
+        let before_child = serde_json::to_value(&server.state.lock().unwrap().subagents["managed-peer"]).unwrap();
+        let mut expected_message = serde_json::to_value(&server.state.lock().unwrap().msgs["scheduler-req-consumed-before-wake"]).unwrap();
+        expected_message["state"] = json!("read");
+        let context = private_peer_context(&server);
+        let server = Arc::new(server);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let poll = runtime.block_on(handle_poll_async_with_context(server.clone(), "peer".into(),
+            Some("token-peer".into()), 100, Some(context.clone()), Some("receive-before-wake".into())));
+        assert!(poll.ok, "{poll:?}");
+        assert_eq!(poll.data["count"], 1);
+        assert_eq!(poll.data["messages"][0]["body"], expected_message["body"]);
+        let attempt = attempt_scheduler_notification(&server, "req-consumed-before-wake",
+            "scheduler-req-consumed-before-wake", "sub-default-direct-message-peer");
+        assert_eq!(attempt.unwrap(), SchedulerNotificationAttempt::Consumed);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.scheduler_admissions["req-consumed-before-wake"].status, "succeeded");
+        assert_eq!(state.receive_receipts["receive-before-wake"].worker_id, "peer");
+        assert_eq!(state.receive_receipts["receive-before-wake"].message_ids, vec!["scheduler-req-consumed-before-wake"]);
+        assert_eq!(serde_json::to_value(&state.tasks["task-scheduler-req-consumed-before-wake"]).unwrap(), before_task);
+        assert_eq!(serde_json::to_value(&state.subagents["managed-peer"]).unwrap(), before_child);
+        assert_eq!(serde_json::to_value(&state.msgs["scheduler-req-consumed-before-wake"]).unwrap(), expected_message);
+        assert!(!state.notification_delivery_accepted.contains_key("scheduler-req-consumed-before-wake"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(state);
+        let second = runtime.block_on(handle_poll_async_with_context(server.clone(), "peer".into(),
+            Some("token-peer".into()), 100, Some(context), Some("receive-after-wake".into())));
+        assert!(second.ok, "{second:?}");
+        assert_eq!(second.data["count"], 0);
+        let loaded = current_state::load(&server.state_path, false).unwrap();
+        assert_eq!(loaded.scheduler_admissions["req-consumed-before-wake"].status, "succeeded");
+        assert_eq!(serde_json::to_value(&loaded.msgs["scheduler-req-consumed-before-wake"]).unwrap(), expected_message);
+        let newer_claim = now_ms() + 1;
+        server.commit_checked(&[Event::SchedulerAdmissionStatus {
+            request_id: "req-consumed-before-wake".into(), status: "notifying".into(), error: None,
+            updated_ms: newer_claim,
+        }]).unwrap();
+        let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        assert_eq!(finish_scheduler_consumption(&server, "req-consumed-before-wake",
+            "scheduler-req-consumed-before-wake", newer_claim - 1).unwrap(), SchedulerNotificationAttempt::InFlight);
+        assert_eq!(finish_scheduler_consumption(&server, "req-consumed-before-wake",
+            "another-message", newer_claim).unwrap(), SchedulerNotificationAttempt::Rejected);
+        assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
+        let saved_path = root.join("saved-current-state.json");
+        std::fs::rename(&server.state_path, &saved_path).unwrap();
+        std::fs::create_dir(&server.state_path).unwrap();
+        let error = finish_scheduler_consumption(&server, "req-consumed-before-wake",
+            "scheduler-req-consumed-before-wake", newer_claim).unwrap_err();
+        assert!(error.error.as_deref().unwrap().starts_with("SCHEDULER_DURABILITY_FAILED:"), "{error:?}");
+        assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
+        assert_eq!(serde_json::to_value(current_state::load(&saved_path, false).unwrap()).unwrap(), before);
+        std::fs::remove_dir(&server.state_path).unwrap();
+        std::fs::rename(saved_path, &server.state_path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn scheduler_dispatch_success_wakes_long_poll() {
+        use std::future::Future;
+        use std::task::{Context, Wake, Waker};
+        struct PollWake(tokio::sync::Notify);
+        impl Wake for PollWake {
+            fn wake(self: Arc<Self>) { self.0.notify_one(); }
+            fn wake_by_ref(self: &Arc<Self>) { self.0.notify_one(); }
+        }
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
         register_private_dispatch_peer(&server);
@@ -1208,16 +1184,43 @@
             .notification_subscriptions
             .contains_key("sub-default-direct-message-peer"));
         promote_master(&server);
+        let context = private_peer_context(&server);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (sink_release_tx, sink_release_rx) = std::sync::mpsc::channel();
+        let sink_release_rx = Mutex::new(sink_release_rx);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sink_calls = calls.clone();
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
+            sink_calls.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            sink_release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(json!({"accepted":true}))
+        });
         let server = Arc::new(server);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .max_blocking_threads(1)
             .build()
             .unwrap();
         let (poll_result, dispatch_result) = runtime.block_on(async {
-            let poll = handle_poll_async(Arc::clone(&server), "peer".into(), 5_000);
+            let mut poll = Box::pin(handle_poll_async_with_context(server.clone(), "peer".into(),
+                Some("token-peer".into()), 5_000, Some(context), Some("receive-successful-dispatch".into())));
+            let wake = Arc::new(PollWake(tokio::sync::Notify::new()));
+            let waker = Waker::from(wake.clone());
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            started_rx.await.unwrap();
+            assert!(poll.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), wake.0.notified()).await.unwrap();
+            assert!(poll.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
             let dispatch_server = Arc::clone(&server);
-            let dispatch = tokio::task::spawn_blocking(move || {
-                std::thread::sleep(Duration::from_millis(10));
+            let dispatch_thread = std::thread::spawn(move || {
                 dispatch(
                     &dispatch_server,
                     Req::Subagent {
@@ -1238,8 +1241,11 @@
                     },
                 )
             });
-            let (poll_result, dispatch_result) = tokio::join!(poll, dispatch);
-            (poll_result, dispatch_result.unwrap())
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)).unwrap()).await.unwrap();
+            let poll_result = tokio::time::timeout(Duration::from_secs(5), poll).await.unwrap();
+            sink_release_tx.send(()).unwrap();
+            let dispatch_result = tokio::task::spawn_blocking(move || dispatch_thread.join().unwrap()).await.unwrap();
+            (poll_result, dispatch_result)
         });
         assert!(poll_result.ok, "{poll_result:?}");
         assert_eq!(poll_result.data["count"], 1);
@@ -1249,6 +1255,8 @@
             "scheduler-req-long-poll-success-1"
         );
         assert!(dispatch_result.ok, "{dispatch_result:?}");
+        assert_eq!(dispatch_result.data["notification"], "sent");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         let state = server.state.lock().unwrap();
         assert_eq!(
             state.scheduler_admissions["req-long-poll-success-1"].status,
@@ -1258,105 +1266,38 @@
             state.msgs["scheduler-req-long-poll-success-1"].state,
             "read"
         );
+        assert_eq!(state.receive_receipts["receive-successful-dispatch"].message_ids, vec!["scheduler-req-long-poll-success-1"]);
+        assert_eq!(state.tasks["task-scheduler-req-long-poll-success-1"].status, "assigned");
+        assert_eq!(state.subagents["managed-peer"].status, "assigned");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn scheduler_dispatch_recovers_pending_reservation_without_duplicates() {
-        // Simulate a process interruption after the reservation and audit write,
-        // but before the durable succeeded status commit.
+        // Recover a current pending reservation after Poll consumes its message.
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register_appserver_worker(&server, &root, "peer", "thread-peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         promote_master(&server);
-        server.commit(&[
-            Event::Sent {
-                msg: Message {
-                    id: "scheduler-req-pending-recovery-1".into(),
-                    from: "master".into(),
-                    to: "peer".into(),
-                    mtype: "notify".into(),
-                    subject: Some("Pending recovery".into()),
-                    body: "Reuse reservation".into(),
-                    in_reply_to: None,
-                    created_ms: now_ms(),
-                    state: "pending".into(),
-                    wake_attempt_count: 0,
-                    last_wake_attempt_ms: 0,
-                    retry_attempted: false,
-                },
-            },
-            Event::TaskCreated {
-                task: TaskRec {
-                    id: "task-scheduler-req-pending-recovery-1".into(),
-                    owner: "peer".into(),
-                    created_by: "master".into(),
-                    feature_id: None,
-                    worktree_path: None,
-                    branch: None,
-                    base_commit: None,
-                    priority: "p2".into(),
-                    status: "assigned".into(),
-                    next_step: Some("accept".into()),
-                    wait: None,
-                    isolation_mode: None,
-                    created_ms: now_ms(),
-                    updated_ms: now_ms(),
-                },
-            },
-            Event::DeliveryMode {
-                msg_id: "scheduler-req-pending-recovery-1".into(),
-                mode: "explicit-notification".into(),
-                source_thread_id: None,
-            },
-            Event::WakeBound {
-                message_id: "scheduler-req-pending-recovery-1".into(),
-                subscription_id: "sub-default-direct-message-peer".into(),
-            },
-            Event::SchedulerAdmission {
-                admission: crate::server::state::SchedulerAdmissionRecord {
-                    request_id: "req-pending-recovery-1".into(),
-                    decision: "use-registered-peer".into(),
-                    worker_id: "peer".into(),
-                    managed_subagent_id: None,
-                    message_id: "scheduler-req-pending-recovery-1".into(),
-                    task_id: "task-scheduler-req-pending-recovery-1".into(),
-                    status: "pending".into(),
-                    error: None,
-                    created_ms: now_ms(),
-                    updated_ms: now_ms(),
-                },
-            },
-        ]);
-        record_scheduler_admission(
-            &server,
-            json!({
-                "request_id": "req-pending-recovery-1",
-                "decision": "use-registered-peer",
-                "worker_id": "peer",
-                "message_id": "scheduler-req-pending-recovery-1",
-                "task_id": "task-scheduler-req-pending-recovery-1",
-                "status": "pending",
-            }),
-        )
-        .unwrap();
-        let audit_path = root.join(".agent-collab/server/events.jsonl");
-        let original_mode = std::fs::metadata(&audit_path).unwrap().permissions().mode();
-        let mut read_only = std::fs::metadata(&audit_path).unwrap().permissions();
-        read_only.set_mode(original_mode & !0o222);
-        std::fs::set_permissions(&audit_path, read_only).unwrap();
+        seed_private_reservation(&server, "req-pending-recovery-1", "pending");
+        let context = private_peer_context(&server);
+        let before_task = serde_json::to_value(&server.state.lock().unwrap().tasks["task-scheduler-req-pending-recovery-1"]).unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let sink_attempts = Arc::clone(&attempts);
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
+            sink_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"accepted": true}))
+        });
         let server = Arc::new(server);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        // This case recovers an already-consumed pending reservation. Complete
-        // the public poll first: racing it against recovery could instead take
-        // the native notification path, whose audit is deliberately read-only.
-        // That path correctly rejects delivery and is a different failure case.
-        let poll_result = runtime.block_on(handle_poll_async(Arc::clone(&server), "peer".into(), 1_000));
+        let poll_result = runtime.block_on(handle_poll_async_with_context(server.clone(), "peer".into(),
+            Some("token-peer".into()), 1_000, Some(context), Some("receive-pending-reservation".into())));
+        let consumed_message = serde_json::to_value(&server.state.lock().unwrap().msgs["scheduler-req-pending-recovery-1"]).unwrap();
         let recovered = dispatch(
                     &server,
                     Req::Subagent {
@@ -1376,9 +1317,6 @@
                         launch_env: Default::default(),
                     },
                 );
-        let mut restored = std::fs::metadata(&audit_path).unwrap().permissions();
-        restored.set_mode(original_mode);
-        std::fs::set_permissions(&audit_path, restored).unwrap();
         assert!(poll_result.ok, "{poll_result:?}");
         assert_eq!(poll_result.data["count"], 1);
         assert!(!poll_result.data["timeout"].as_bool().unwrap_or(false));
@@ -1388,22 +1326,26 @@
         );
         assert!(recovered.ok, "{recovered:?}");
         assert_eq!(recovered.data["recovered"], true);
-        assert_eq!(recovered.data["decision"], "use-registered-peer");
+        assert_eq!(recovered.data["decision"], "reuse-idle-managed-subagent");
+        assert_eq!(recovered.data["notification"], "already-consumed");
+        assert_eq!(recovered.data["message_id"], "scheduler-req-pending-recovery-1");
+        assert_eq!(recovered.data["task_id"], "task-scheduler-req-pending-recovery-1");
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
         let state = server.state.lock().unwrap();
         assert_eq!(state.msgs.len(), 1);
         assert_eq!(state.tasks.len(), 1);
+        assert_eq!(serde_json::to_value(&state.tasks["task-scheduler-req-pending-recovery-1"]).unwrap(), before_task);
+        assert_eq!(serde_json::to_value(&state.msgs["scheduler-req-pending-recovery-1"]).unwrap(), consumed_message);
+        assert_eq!(state.subagents["managed-peer"].status, "assigned");
+        assert_eq!(state.receive_receipts["receive-pending-reservation"].worker_id, "peer");
+        assert_eq!(state.receive_receipts["receive-pending-reservation"].message_ids, vec!["scheduler-req-pending-recovery-1"]);
         assert_eq!(
             state.scheduler_admissions["req-pending-recovery-1"].status,
             "succeeded"
         );
         drop(state);
-        let audit_count = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
-            .unwrap()
-            .lines()
-            .filter(|line| {
-                line.contains("scheduler_admission") && line.contains("req-pending-recovery-1")
-            })
-            .count();
-        assert_eq!(audit_count, 1);
+        let repeated_poll = runtime.block_on(handle_poll_async(Arc::clone(&server), "peer".into(), 100));
+        assert!(repeated_poll.ok, "{repeated_poll:?}");
+        assert_eq!(repeated_poll.data["count"], 0);
         std::fs::remove_dir_all(root).unwrap();
     }

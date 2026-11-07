@@ -54,21 +54,29 @@ fn handle_task_review(
         }
     }
     let required_reviewer = required_work_reviewer(&st, &task_id);
+    let route = match server_route_scope(server, &st) {
+        Ok(Some(route)) => route, Ok(None) => return Resp::err("reviewer project route is not ready"),
+        Err(error) => return Resp::err(error),
+    };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let reviewer_name = if let Some(name) = required_reviewer.as_deref() {
-        let route = match server_route_scope(server,&st) {
-            Ok(Some(route)) => route,
-            _ => return Resp::err("required reviewer project route is not ready"),
+        let holder = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
+            Ok(holder) => holder, Err(error) => return Resp::err(error),
         };
-        if st.name_occupancy(route.project_scope_id.as_str(),name)
-            .is_none_or(|entry| entry.worker_id != worker_id)
+        if holder.and_then(|slot| slot.active_binding())
+            .is_none_or(|current| current.binding.agent_id.as_str() != worker_id)
         { return Resp::err("TASK_REQUIRED_REVIEWER: only the named reviewer's current holder may review this task"); }
         Some(name.to_owned())
     } else {
         if !task_integration_authorized(server, &st, &task, &worker_id) {
         return Resp::err("task review requires task owner or live master authority");
         }
-        st.name_occupancies.values().flat_map(|names|names.values())
-            .find(|entry|entry.worker_id==worker_id).map(|entry|entry.name.clone())
+        match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker_id) {
+            Ok(slot) => slot.map(|slot| slot.identity_key.name.clone()),
+            Err(error) => return Resp::err(error),
+        }
     };
     let now = now_ms();
     let mut reviewed = task;
@@ -185,7 +193,7 @@ fn handle_task_review(
         // Surface any non-accepted wake attempt as an explicit repair terminal;
         // pending_merges stays durable regardless.
         match attempt_notification_detailed_with_at(server, &message_id, &subscription_id, now) {
-            NotificationAttempt::Accepted | NotificationAttempt::Deferred => {}
+            NotificationAttempt::Accepted | NotificationAttempt::Consumed | NotificationAttempt::Deferred => {}
             NotificationAttempt::Rejected(error) => {
                 notification_attempt_failure = Some(error);
             }
@@ -1369,6 +1377,9 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
 
 /// The current Context serializer without lease rearm or presence-edge writes.
 fn context_projection(server: &Server, worker_id: String, token: String) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let st = server.state.lock().unwrap();
     if let Err(error) = verify(&st, &worker_id, &token) {
         return error;
@@ -1394,7 +1405,9 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .map(|task| task_view(&st, task))
         .collect();
     tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    let current_role_brief = role_brief(server, &st, &worker_id);
+    let current_role_brief = match role_brief(server, &st, &control, &worker_id) {
+        Ok(brief) => brief, Err(error) => return Resp::err(error),
+    };
     let role = current_role_brief
         .get("role")
         .and_then(serde_json::Value::as_str)
@@ -1433,6 +1446,15 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             Err(error) => return Resp::err(error),
         },
     };
+    let mapped = match route_scope.as_ref() {
+        Some(route) => match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker_id) {
+            Ok(Some(slot)) => slot, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: worker has no current name"),
+            Err(error) => return Resp::err(error),
+        },
+        None => return Resp::err("IDENTITY_MAP_SCOPE_MISSING: worker has no project/app route"),
+    };
+    let mapped_current = mapped.active_binding().unwrap();
+    let binding = Some(mapped_current.binding.clone());
     let worktrees: Vec<serde_json::Value> = {
         let mut worktrees = st
             .worktree_bindings
@@ -1476,19 +1498,22 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             })
             .collect()
     };
-    let mut peer_snapshots: Vec<_> = st
+    let peer_snapshots = st
         .workers
         .values()
         .map(|peer| {
-            let peer_role = role_brief(server, &st, &peer.id)
+            let peer_role = role_brief(server, &st, &control, &peer.id)?
                 .get("role")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("worker")
                 .to_owned();
-            let display_name = worker_display_name(&st, &peer.id, peer_role == "master");
-            (peer.clone(), peer_role, display_name)
+            let display_name = worker_display_name(&control, route_scope.as_ref(), &peer.id)?;
+            Ok((peer.clone(), peer_role, display_name))
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>();
+    let mut peer_snapshots = match peer_snapshots {
+        Ok(peers) => peers, Err(error) => return Resp::err(error),
+    };
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
     // Manager scope digest. A manager's default context read must answer, in
     // one snapshot, whether each durable subordinate manager is covered by a
@@ -1619,21 +1644,21 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     };
     let management_tasks: Vec<serde_json::Value> = if manages_project {
         let master_id = current_master_worker_id(&st, route_scope.as_ref());
-        let mut rows: Vec<serde_json::Value> = st
-            .tasks
-            .values()
-            .filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled"))
-            .filter_map(|task| {
-                board_task_view_with_master(
-                    &st,
-                    task,
-                    Some(&worker_id),
-                    master_id.as_deref(),
-                    route_scope.as_ref(),
-                )
-            })
-            .filter_map(|view| serde_json::to_value(view).ok())
-            .collect();
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for task in st.tasks.values().filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled")) {
+            match board_task_view_with_master(
+                &st,
+                &control,
+                task,
+                Some(&worker_id),
+                master_id.as_deref(),
+                route_scope.as_ref(),
+            ) {
+                Ok(Some(view)) => rows.push(json!(view)),
+                Ok(None) => {},
+                Err(error) => return Resp::err(error),
+            }
+        }
         rows.sort_by(|left, right| {
             left["id"]
                 .as_str()
@@ -1687,10 +1712,15 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         .cloned()
         .collect();
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
-    let display_name = worker_display_name(&st, &worker.id, role == "master");
-    let work_roles_by_worker: std::collections::HashMap<_, _> = st.workers.keys()
-        .map(|id| (id.clone(), worker_work_roles(&st, route_scope.as_ref().map_or("",|route|route.project_scope_id.as_str()), id)))
-        .collect();
+    let display_name = match worker_display_name(&control, route_scope.as_ref(), &worker.id) {
+        Ok(name) => name, Err(error) => return Resp::err(error),
+    };
+    let work_roles_by_worker = st.workers.keys()
+        .map(|id| worker_work_roles(&st, &control, route_scope.as_ref(), id).map(|roles| (id.clone(), roles)))
+        .collect::<Result<std::collections::HashMap<_, _>, String>>();
+    let work_roles_by_worker = match work_roles_by_worker {
+        Ok(roles) => roles, Err(error) => return Resp::err(error),
+    };
     let work_policies=st.project_work_policy.clone();
     let pending_reply_obligations = st.reply_obligation_view(&worker_id);
     drop(st);
@@ -1807,7 +1837,9 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
                 .copied()
                 .flatten()
         });
-        master_authority_view_with_endpoint(&st, route_scope.as_ref(), endpoint_live)
+        match master_authority_view_with_endpoint(&st, &control, route_scope.as_ref(), endpoint_live) {
+            Ok(master) => master, Err(error) => return Resp::err(error),
+        }
     };
     let recorded_unusable = serde_json::Value::Null;
     let next_actions: Vec<String> = tasks
@@ -1884,6 +1916,9 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
     Resp::data(json!({
         "schema_version": 1,
         "registration": registration,
+        "name": mapped.identity_key.name,
+        "session_id": mapped_current.binding.session_id,
+        "layout": tm_layout::projection(mapped_current),
         "binding": binding,
         "registered": true,
         "project_root": server.root,
@@ -1892,7 +1927,7 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
             "display_name": display_name,
             "kind": "peer",
             "role": role,
-            "transport": transport,
+            "transport": mapped_current.transport,
         },
         "role_brief": current_role_brief,
         "work_roles": work_roles_by_worker.get(&worker.id).cloned().unwrap_or_default(),
@@ -1945,6 +1980,6 @@ fn context_projection(server: &Server, worker_id: String, token: String) -> Resp
         "master": master,
         "recorded_unusable": recorded_unusable,
         "authority": authority,
-        "truth": "server journal, mailbox, and live transport probes; `collab context` performs an idempotent bootstrap (canonical root, baseline, daemon, identity, registration) before projecting this snapshot",
+        "truth": "identity-map.json owns current identity; state.json stores current tasks and messages; live adapter observations report delivery reachability. collab context restores the current binding through the user-managed daemon",
     }))
 }

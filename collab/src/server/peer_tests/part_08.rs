@@ -201,7 +201,7 @@ async fn receive_id_commits_the_batch_and_replays_it_after_a_lost_response() {
 }
 
 #[tokio::test]
-async fn receive_id_replay_survives_a_truncated_journal_restart() {
+async fn receive_id_retry_survives_current_state_reload() {
     let (server, root) = test_server();
     seeded_receive_peer(&server, &root, "receive-restart-message", "peer");
     let server = Arc::new(server);
@@ -216,11 +216,8 @@ async fn receive_id_replay_survives_a_truncated_journal_restart() {
     .await;
     assert!(first.ok, "{first:?}");
     assert_eq!(first.data["messages"][0]["id"], "receive-restart-message");
+    let restored = current_state::load(&server.state_path, false).unwrap();
     drop(server);
-
-    // A fresh reducer replayed from the committed journal must still answer
-    // the same identity with the same batch instead of an unread inbox.
-    let restored = replay(&root).expect("replay committed journal");
     let receipt = restored
         .receive_receipts
         .get("receive-restart-1")
@@ -268,71 +265,6 @@ async fn receive_id_rejects_another_actor_and_another_route() {
             .is_some_and(|error| error.starts_with("RECEIVE_IDENTITY_MISMATCH")),
         "{foreign:?}"
     );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn legacy_sent_event_replay_classifies_message_without_reply_reference() {
-    let (_server, root) = test_server();
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    std::fs::write(
-        &journal_path,
-        r#"{"ev":"Sent","msg":{"id":"legacy-message","from":"peer-a","to":"peer-b","type":"request","subject":"legacy","body":"legacy body","created_ms":1,"state":"pending"}}
-"#,
-    )
-    .unwrap();
-
-    let state = replay(&root).expect("legacy Sent event must replay");
-    let message = state
-        .msgs
-        .get("legacy-message")
-        .expect("replay must retain the legacy message");
-    assert_eq!(message.in_reply_to, None);
-    assert_eq!(message.mtype, "request");
-    assert_eq!(
-        state
-            .inbox_of("peer-b")
-            .iter()
-            .map(|message| message.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["legacy-message"]
-    );
-    assert!(!state.answered("legacy-message"));
-
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn malformed_journal_replay_fails_fast() {
-    let (_server, root) = test_server();
-    std::fs::write(
-        root.join(".agent-collab/server/journal.jsonl"),
-        "{manual-edit\n",
-    )
-    .unwrap();
-    let error = replay(&root).err().expect("malformed journal must fail");
-    assert!(error
-        .to_string()
-        .contains("manual journal edits are unsupported"));
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn concatenated_journal_events_replay_and_self_heal() {
-    let (_server, root) = test_server();
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    let event1 = json!({"ev":"KeepaliveUpdated","worker_id":"w1","record":{"observed":"unknown","idle_since_ms":100,"activity_ms":50,"last_notice_ms":0,"last_notice_id":null,"unacked":0,"suspected_offline":false}}).to_string();
-    let event2 = json!({"ev":"KeepaliveUpdated","worker_id":"w2","record":{"observed":"unknown","idle_since_ms":200,"activity_ms":150,"last_notice_ms":0,"last_notice_id":null,"unacked":0,"suspected_offline":false}}).to_string();
-    std::fs::write(&journal_path, format!("{}{}\n", event1, event2)).unwrap();
-
-    let state = replay(&root).expect("concatenated journal events must self-heal and replay");
-    assert_eq!(state.keepalives.len(), 2);
-    assert_eq!(state.keepalives["w1"].idle_since_ms, 100);
-    assert_eq!(state.keepalives["w2"].idle_since_ms, 200);
-
-    let content = std::fs::read_to_string(&journal_path).unwrap();
-    let lines: Vec<_> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 2);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -696,7 +628,6 @@ async fn tmux_peer_send_then_collab_recv_commits_queryable_consumption() {
         agent_id: binding.agent_id,
         runtime_id: binding.runtime_id,
         appserver_id: binding.app_scope_id,
-        endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id,
         session_id: binding.session_id,
         native_thread_id: binding.native_thread_id,
@@ -983,35 +914,15 @@ fn send_without_subscription_is_mailbox_only_and_deduplicated() {
     assert!(first.ok);
     let message_id = first.data["msg_id"].as_str().unwrap().to_owned();
     assert_eq!(server.state.lock().unwrap().msgs.len(), 1);
-    assert!(root
-        .join(".agent-collab/mailbox")
-        .join(format!("{message_id}.json"))
-        .exists());
-    let jsonl = root.join(".agent-collab/mailbox/recipient-recipient.jsonl");
-    assert!(std::fs::read_to_string(&jsonl)
-        .unwrap()
-        .lines()
-        .any(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .map(|record| {
-                    record["schema_version"] == 1
-                        && record["record_type"] == "message"
-                        && record["recipient"] == "recipient"
-                        && record["category"] == "direct"
-                        && record["task_ids"].is_array()
-                        && record["created_ms"].is_i64()
-                        && record["window_start_ms"].is_null()
-                        && record["window_end_ms"].is_null()
-                        && record["state"] == "pending"
-                        && record["exact_error"].as_str().is_some_and(|error| {
-                            error.starts_with("MAILBOX_SCOPE_BINDING_UNAVAILABLE:")
-                        })
-                        && record["message"]["id"] == message_id
-                })
-                .unwrap_or(false)
-        }));
+    let stored = current_state::load(&server.state_path, false).unwrap();
+    assert_eq!(stored.msgs.len(), 1);
+    assert_eq!(stored.msgs[&message_id].id, message_id);
+    assert_eq!(stored.msgs[&message_id].from, "sender");
+    assert_eq!(stored.msgs[&message_id].to, "recipient");
+    assert_eq!(stored.msgs[&message_id].state, "pending");
+    assert_eq!(stored.msgs[&message_id].wake_attempt_count, 0);
     assert_eq!(
-        replay(&root).unwrap().msgs[&message_id].body,
+        current_state::load(&server.state_path, false).unwrap().msgs[&message_id].body,
         "RESOURCE_OCCUPIED feature=shared"
     );
     assert_eq!(first.data["notification"], "mailbox-only-no-subscription");
@@ -1148,7 +1059,7 @@ fn qqbot_same_text_with_different_platform_events_commits_separate_messages() {
 
     let replayed = {
         drop(server.state.lock().unwrap());
-        replay(&root).unwrap()
+        current_state::load(&server.state_path, false).unwrap()
     };
     assert_eq!(replayed.msgs.len(), 2);
     assert_eq!(replayed.channel_envelopes.len(), 2);
@@ -1557,7 +1468,7 @@ fn send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery() {
     assert_eq!(state.msgs[&message_id].state, "pending");
     assert!(state.notification_delivery_failures.contains_key(&message_id));
     drop(state);
-    let replayed = replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(replayed.msgs.contains_key(&message_id));
     assert!(replayed.notification_delivery_failures.contains_key(&message_id));
     std::fs::remove_dir_all(root).ok();
@@ -1612,7 +1523,7 @@ fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     );
     assert!(!state.notification_delivery_failures[message_id].retryable);
     drop(state);
-    let replayed = replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     let failure = &replayed.notification_delivery_failures[message_id];
     assert_eq!(failure.operation, "notification.emitted");
     assert_eq!(
@@ -1621,19 +1532,8 @@ fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     );
     assert!(failure.failed_ms > 0);
 
-    {
-        let state = server.state.lock().unwrap();
-        server.rewrite_journal_locked(&state).unwrap();
-    }
-    let compacted = replay(&root).unwrap();
-    assert_eq!(
-        compacted.notification_delivery_failures[message_id],
-        *failure
-    );
-    assert!(root
-        .join(".agent-collab/mailbox")
-        .join(format!("{message_id}.json"))
-        .exists());
+    assert_eq!(replayed.msgs[message_id].body, "The candidate is ready for your review.");
+    assert_eq!(replayed.msgs[message_id].state, "pending");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1713,7 +1613,7 @@ fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
         Some("TMUX_NOTIFICATION_REJECTED: no notification batch is ready")
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    let replayed = replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(replayed.msgs[&message_id].wake_attempt_count, 2);
     assert!(replayed.msgs[&message_id].retry_attempted);
     std::fs::remove_dir_all(root).ok();
@@ -1861,19 +1761,20 @@ fn explicit_retry_is_refused_for_a_decode_failure() {
 }
 
 #[test]
-fn reregistration_replaces_a_stale_default_target_with_current_tmux_route() {
-    let (server, root) = test_server();
+fn daemon_maintenance_replaces_a_stale_default_target_with_current_tmux_route() {
+    let (mut server, root) = test_server();
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
+        Ok(serde_json::json!({"text_submitted":true,"enter_submitted":true,"consumed":false}))
+    });
     let server = Arc::new(server);
     assert!(register_public(&server, "peer", "%peer").ok);
     {
         let mut state = server.state.lock().unwrap();
-        state
-            .notification_subscriptions
-            .get_mut("sub-default-direct-message-peer")
-            .unwrap()
-            .target = "thread-stale".into();
+        let mut subscription = state.notification_subscriptions["sub-default-direct-message-peer"].clone();
+        subscription.target = "thread-stale".into();
+        server.commit_locked_checked(&mut state, &[Event::NotificationSubscribed { subscription }]).unwrap();
     }
-    assert!(register_public(&server, "peer", "%peer").ok);
+    restore_registered_peer_default_leases(&server);
     let state = server.state.lock().unwrap();
     let subscription = &state.notification_subscriptions["sub-default-direct-message-peer"];
     let current_thread = state.workers["peer"]
@@ -1883,7 +1784,18 @@ fn reregistration_replaces_a_stale_default_target_with_current_tmux_route() {
         .unwrap();
     assert_eq!(subscription.target, current_thread);
     assert_eq!(subscription.method, "tmux");
+    assert_eq!(subscription.status, "armed");
+    assert_eq!(serde_json::to_value(&current_state::load(&server.state_path, false).unwrap()
+        .notification_subscriptions[&subscription.id]).unwrap(), serde_json::to_value(subscription).unwrap());
     drop(state);
+    let sent = handle_send(&server, "peer".into(), "peer".into(), "notify".into(),
+        Some("maintained reception".into()), "current lease routes this body".into(), None, "immediate".into());
+    assert!(sent.ok, "{sent:?}");
+    assert_eq!(sent.data["notification"], "tmux-input-submitted");
+    let persisted = current_state::load(&server.state_path, false).unwrap();
+    let message = &persisted.msgs[sent.data["msg_id"].as_str().unwrap()];
+    assert_eq!(message.to, "peer");
+    assert_eq!(message.body, "current lease routes this body");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1927,8 +1839,7 @@ fn explicit_send_repairs_stale_default_direct_message_before_wake() {
         assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
     }
     assert_eq!(
-        replay(&root)
-            .unwrap()
+        current_state::load(&server.state_path, false).unwrap()
             .notification_subscriptions["sub-default-direct-message-recipient"]
             .target,
         "mismatched-thread-recipient"
@@ -1955,6 +1866,14 @@ fn routing_project_key(server: &Server) -> String {
 }
 
 fn routing_seat(server: &Server, name: &str, worker: &str) {
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let value = control.active_values().find(|value| value.binding.agent_id.as_str() == worker).unwrap().clone();
+    let source = control.key_for_worker(&value.binding.project_scope, &value.binding.app_scope_id, worker).unwrap().unwrap();
+    store.commit(binding_store::ControlChange::MoveName {
+        target: binding_slot::IdentityBindingKey::new(value.binding.project_scope.clone(), value.binding.app_scope_id.clone(), name),
+        value, source_names: vec![source.name.clone()], expected_generation: None,
+    }).unwrap();
     let scope = routing_project_scope(server);
     let mut st = server.state.lock().unwrap();
     let session = st
@@ -2171,7 +2090,7 @@ fn qqbot_ceo_leading_address_requires_a_typed_grant_not_the_master() {
     use crate::ceo::CeoGrant;
 
     let (server, root) = routing_fixture(&[("ceo-id", "t-ceo"), ("master-id", "t-master")]);
-    routing_seat(&server, "CEO", "ceo-id");
+    routing_seat(&server, "Alice", "ceo-id");
     routing_seat(&server, "Jenny", "master-id");
     let scope = routing_project_scope(&server);
 
@@ -2199,7 +2118,7 @@ fn qqbot_ceo_leading_address_requires_a_typed_grant_not_the_master() {
         grant: Some(CeoGrant {
             workspace: scope,
             app_scope_id: "tui-default".into(),
-            name: "CEO".into(),
+            name: "Alice".into(),
             granted_by: "user".into(),
             approval: "approved".into(),
             granted_ms: 1,
@@ -2220,112 +2139,18 @@ fn qqbot_ceo_leading_address_requires_a_typed_grant_not_the_master() {
 }
 
 #[test]
-fn qqbot_leading_address_fold_conflict_is_ambiguous() {
-    let (server, root) = routing_fixture(&[("bob-id", "t-bob"), ("other-id", "t-other")]);
-    routing_seat(&server, "Bob", "bob-id");
-    routing_seat(&server, "BOB", "other-id");
-    routing_set_default(&server, "u1:session", "Bob");
-    let project = routing_project_key(&server);
-
-    let response = handle_channel_inbound(
-        &server,
-        "external:qqbot".into(),
-        String::new(),
-        "QQBot inbound".into(),
-        format!("[{project}.Bob] ambiguous"),
-        routing_envelope("u1:session", "platform-fold"),
-    );
-    assert!(!response.ok);
-    assert!(
-        response
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NAME_ADDRESS_AMBIGUOUS"),
-        "{response:?}"
-    );
-    assert!(
-        server.state.lock().unwrap().msgs.is_empty(),
-        "a fold conflict must not pick an arbitrary target or the default"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn qqbot_send_fold_conflict_is_ambiguous_without_a_message() {
-    let (server, root) = routing_fixture(&[("bob-id", "t-bob"), ("other-id", "t-other")]);
-    routing_seat(&server, "Bob", "bob-id");
-    routing_seat(&server, "BOB", "other-id");
-    let token = server.state.lock().unwrap().workers["bob-id"].token.clone();
-
-    let response = handle_send(
-        &server,
-        "bob-id".into(),
-        "Bob".into(),
-        "notify".into(),
-        Some("ambiguous send".into()),
-        "must not pick one holder".into(),
-        None,
-        "immediate".into(),
-    );
-    assert!(!response.ok, "fold conflict must reject before any message: {response:?}");
-    assert!(
-        response
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NAME_ADDRESS_AMBIGUOUS"),
-        "{response:?}"
-    );
-    assert!(
-        server.state.lock().unwrap().msgs.is_empty(),
-        "a fold conflict must never select an arbitrary holder"
-    );
-
-    let default = handle_default_set(
-        &server,
-        "bob-id".into(),
-        token,
-        "qqbot".into(),
-        "qqbot@host".into(),
-        "u1:session".into(),
-        "Bob".into(),
-    );
-    assert!(!default.ok, "fold conflict must reject default mutation: {default:?}");
-    assert!(
-        default
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NAME_ADDRESS_AMBIGUOUS"),
-        "{default:?}"
-    );
-    assert!(
-        crate::server::conversation_default::lookup_default(
-            &server.state.lock().unwrap(),
-            "qqbot",
-            "qqbot@host",
-            "u1:session"
-        )
-        .is_none(),
-        "a fold conflict must not persist any default"
-    );
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
 fn qqbot_bare_project_default_routes_unaddressed_inbound_to_typed_ceo() {
     use crate::ceo::CeoGrant;
 
     let (server, root) = routing_fixture(&[("ceo-id", "t-ceo")]);
-    routing_seat(&server, "CEO", "ceo-id");
+    routing_seat(&server, "Alice", "ceo-id");
     let scope = routing_project_scope(&server);
     let token = server.state.lock().unwrap().workers["ceo-id"].token.clone();
     server.commit(&[Event::CeoGrantSet {
         grant: Some(CeoGrant {
             workspace: scope,
             app_scope_id: "tui-default".into(),
-            name: "CEO".into(),
+            name: "Alice".into(),
             granted_by: "user".into(),
             approval: "approved".into(),
             granted_ms: 1,
@@ -2522,8 +2347,8 @@ fn qqbot_two_channel_instances_with_same_conversation_switch_independently_and_r
         );
     }
 
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     drop(server);
-    let replayed = replay(&root).unwrap();
     assert_eq!(
         crate::server::conversation_default::lookup_default(
             &replayed,

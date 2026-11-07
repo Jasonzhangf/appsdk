@@ -6,6 +6,26 @@ struct OwnedTmuxSession {
 }
 
 impl OwnedTmuxSession {
+    fn for_pane(socket: &Path, pane: &Pane) -> Self {
+        let session = String::from_utf8(
+            tmux(
+                socket,
+                &[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &pane.pane_id,
+                    "#{session_id}",
+                ],
+            )
+            .stdout,
+        )
+        .unwrap();
+        Self {
+            socket: socket.to_path_buf(),
+            session: session.trim().to_owned(),
+        }
+    }
     fn kill(&mut self) {
         if self.socket.exists() {
             let output = Command::new("tmux")
@@ -116,8 +136,8 @@ fn create_session_on_socket(fixture: &Fixture, label: &str, socket: &Path) -> Pa
     let pane = Pane {
         server_pid,
         pane_id: pane_id.clone(),
-        session_anchor: format!("session-{pane_id}"),
-        thread_anchor: format!("thread-{pane_id}"),
+        session_anchor: format!("session-{label}-{pane_id}"),
+        thread_anchor: format!("thread-{label}-{pane_id}"),
     };
     fixture.start_pane_runner_on_socket(socket, &pane.pane_id, "sleep 600");
     pane
@@ -262,40 +282,112 @@ fn identity(context: &Value) -> (String, String, String) {
     )
 }
 
-fn central_runtime_journal(fixture: &Fixture, project_root: &Path) -> PathBuf {
-    assert_eq!(
-        std::fs::canonicalize(project_root).expect("canonicalize project root"),
-        fixture.root.canonicalize().expect("canonical fixture root")
+fn release_current_pane_route(
+    fixture: &Fixture,
+    project: &Path,
+    socket: &Path,
+    target: &Pane,
+    context: &Value,
+) {
+    let (worker, binding, app) = identity(context);
+    let map_path = fixture.host_state.join("identity-map.json");
+    let selected = || {
+        let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+        let slots: Vec<_> = map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|slot| {
+                slot["identity_status"] == "active"
+                    && slot["current"]["binding"]["agent_id"] == worker
+            })
+            .cloned()
+            .collect();
+        assert_eq!(slots.len(), 1);
+        slots[0].clone()
+    };
+    let before = selected();
+    let business_before = fixture.current_state_for(project, &app);
+    let credential = fixture
+        .host_state
+        .join("identities")
+        .join(&worker)
+        .join("identity.json");
+    let credential_before = std::fs::read(&credential).unwrap();
+    let other = fixture.root.join("temporary-pane-project");
+    seed_baseline(&other);
+    let output = fixture
+        .command_on_socket(
+            socket,
+            &["context", "--op", "temporary-pane-context"],
+            target,
+        )
+        .current_dir(&other)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "temporary project registration: {output:?}"
     );
-    fixture.project_journal()
-}
-
-fn retire_binding_route(fixture: &mut Fixture, project_root: &Path, binding_id: &str) {
-    let journal_path = central_runtime_journal(fixture, project_root);
-    let binding = std::fs::read_to_string(&journal_path)
-        .expect("read project journal")
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|record| {
-            record["ev"] == "GlobalCurrentThreadRouteSet"
-                && record["binding"]["binding_id"] == binding_id
-        })
-        .last()
-        .and_then(|record| record.get("binding").cloned())
-        .expect("target route publication");
-    fixture.stop_daemon();
-    let mut journal = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&journal_path)
-        .expect("open project journal for typed replay");
-    serde_json::to_writer(
-        &mut journal,
-        &json!({"ev": "GlobalCurrentThreadRouteRetired", "binding": binding}),
-    )
-    .expect("serialize route retirement");
-    journal.write_all(b"\n").expect("append route retirement");
-    drop(journal);
-    fixture.restart_daemon();
+    let temporary = parse_json(&output.stdout);
+    let temporary_worker = temporary["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    assert_ne!(temporary_worker, worker);
+    assert!(fixture.current_state()["global"]["current_thread_routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|route| route[1]["agent_id"] == temporary_worker
+            && route[1]["tmux_endpoint"]["pane_id"] == target.pane_id));
+    assert_eq!(selected(), before, "A's mapping survives B registration");
+    let after_register = fixture.current_state_for(project, &app);
+    assert_eq!(
+        after_register["workers"][&worker], business_before["workers"][&worker],
+        "B registration cannot retire an exact active A principal"
+    );
+    assert_eq!(
+        after_register["global"]["projects"],
+        business_before["global"]["projects"]
+    );
+    assert_eq!(std::fs::read(&credential).unwrap(), credential_before);
+    let output = fixture
+        .command_on_socket(socket, &["worker", "close", "--self"], target)
+        .current_dir(&other)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "temporary project self-close: {output:?}"
+    );
+    assert_eq!(parse_json(&output.stdout)["result"]["outcome"], "complete");
+    assert_eq!(
+        selected(),
+        before,
+        "A's active binding survives B's retirement"
+    );
+    assert_eq!(std::fs::read(credential).unwrap(), credential_before);
+    let business_after = fixture.current_state_for(project, &app);
+    assert_eq!(
+        business_after["workers"][&worker],
+        business_before["workers"][&worker]
+    );
+    assert_eq!(
+        business_after["notification_subscriptions"],
+        business_before["notification_subscriptions"]
+    );
+    assert_eq!(
+        business_after["global"]["projects"],
+        business_before["global"]["projects"]
+    );
+    assert!(
+        !fixture.current_state()["global"]["current_thread_routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|route| route[1]["binding_id"] == binding
+                || route[1]["agent_id"] == temporary_worker)
+    );
 }
 
 fn wire_request(socket: &Path, request: &Value) -> Value {
@@ -337,8 +429,13 @@ fn worker_row(workers: &Value, worker_id: &str) -> Value {
         .unwrap_or_else(|| panic!("worker {worker_id} missing from {workers}"))
 }
 
-fn read_exact(fixture: &Fixture, master: &Pane, target_id: &str) -> Value {
-    fixture.run_ok(&["worker", "read", target_id], Some(master))
+fn read_exact(fixture: &Fixture, project: &Path, master: &Pane, target_id: &str) -> Value {
+    let output = fixture
+        .configured_command(&["worker", "read", target_id], Some(master))
+        .current_dir(project)
+        .output()
+        .unwrap();
+    parse_json(&output.stdout)
 }
 
 fn assert_not_retired(
@@ -370,16 +467,23 @@ fn assert_not_retired(
     let workers = workers_for_route(fixture, project_root, app_scope_id);
     let row = worker_row(&workers, target_id);
     assert_eq!(row["transport"]["kind"], "tmux", "{row}");
-    let read = read_exact(fixture, master, target_id);
+    let read = read_exact(fixture, project_root, master, target_id);
     assert_eq!(read["result"]["target"]["binding_id"], binding_id, "{read}");
 }
 
-fn close_target(fixture: &Fixture, master: &Pane, target_id: &str, reason: &str) -> Value {
+fn close_target(
+    fixture: &Fixture,
+    project: &Path,
+    master: &Pane,
+    target_id: &str,
+    reason: &str,
+) -> Value {
     let output = fixture
         .configured_command(
             &["worker", "close", target_id, "--reason", reason],
             Some(master),
         )
+        .current_dir(project)
         .output()
         .expect("run public worker close");
     assert!(
@@ -390,9 +494,10 @@ fn close_target(fixture: &Fixture, master: &Pane, target_id: &str, reason: &str)
     parse_json(&output.stdout)
 }
 
-fn query_operation(fixture: &Fixture, master: &Pane, operation_id: &str) -> Value {
+fn query_operation(fixture: &Fixture, project: &Path, master: &Pane, operation_id: &str) -> Value {
     let output = fixture
         .configured_command(&["worker", "query", "--op", operation_id], Some(master))
+        .current_dir(project)
         .output()
         .expect("run public worker query");
     assert!(
@@ -403,34 +508,44 @@ fn query_operation(fixture: &Fixture, master: &Pane, operation_id: &str) -> Valu
     parse_json(&output.stdout)
 }
 
-fn setup_master_and_route_less_target(label: &str) -> (Fixture, Pane, Pane, Value) {
-    let (mut fixture, master) = Fixture::isolated_with_pane_command(label, "sleep 600");
-    fixture.run_ok(&["context"], Some(&master));
-    promote_master(&fixture, &fixture.root, &master);
+fn setup_master_and_route_less_target(label: &str) -> (Fixture, Pane, Pane, Value, PathBuf) {
+    let (fixture, host) = Fixture::isolated_with_pane_command(label, "sleep 600");
+    fixture.run_ok(&["context"], Some(&host));
+    let project = fixture.root.join("target-project");
+    seed_baseline(&project);
+    let project = project.canonicalize().unwrap();
+    let master = create_session_on_socket(&fixture, "target-master", &fixture.tmux_socket);
+    fixture.track_tmux_session("target-master");
+    register_context_in_project(&fixture, &project, &master, "target-master-register", false);
+    promote_master(&fixture, &project, &master);
 
     let target = create_session_on_socket(&fixture, "route-less-target", &fixture.tmux_socket);
     fixture.track_tmux_session("route-less-target");
     let target_context = register_context_in_project(
         &fixture,
-        &fixture.root,
+        &project,
         &target,
         &format!("{label}-target"),
         true,
     );
-    let (_, binding_id, _) = identity(&target_context);
-    let project_root = fixture.root.clone();
-    retire_binding_route(&mut fixture, &project_root, &binding_id);
-    (fixture, master, target, target_context)
+    release_current_pane_route(
+        &fixture,
+        &project,
+        &fixture.tmux_socket,
+        &target,
+        &target_context,
+    );
+    (fixture, master, target, target_context, project)
 }
 
 #[test]
 fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (mut fixture, master, target, target_context) =
+    let (mut fixture, master, target, target_context, project) =
         setup_master_and_route_less_target("stale-peer-close");
     let (target_id, binding_id, app_scope_id) = identity(&target_context);
 
-    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
+    let workers = workers_for_route(&fixture, &project, &app_scope_id);
     let row = worker_row(&workers, &target_id);
     // This fixture proves a durable identity and live endpoint. Its runner
     // does not prove agent presence; the close must still probe the endpoint.
@@ -462,7 +577,7 @@ fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
             fixture.tmux_socket.to_str().unwrap(),
             "kill-session",
             "-t",
-            "route-less-target",
+            &target.pane_id,
         ])
         .output()
         .expect("close owned route-less target session");
@@ -474,6 +589,7 @@ fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
 
     let close = close_target(
         &fixture,
+        &project,
         &master,
         &target_id,
         "remove route-less no-session binding causing tombstone poison",
@@ -510,15 +626,15 @@ fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
         .as_str()
         .expect("close operation id")
         .to_owned();
-    let queried = query_operation(&fixture, &master, &operation_id);
+    let queried = query_operation(&fixture, &project, &master, &operation_id);
     assert_eq!(queried["result"], close["result"], "{queried}");
 
     fixture.stop_daemon();
     fixture.restart_daemon();
-    let replayed = query_operation(&fixture, &master, &operation_id);
+    let replayed = query_operation(&fixture, &project, &master, &operation_id);
     assert_eq!(replayed["result"], close["result"], "{replayed}");
 
-    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
+    let workers = workers_for_route(&fixture, &project, &app_scope_id);
     assert!(
         workers["workers"]
             .as_array()
@@ -532,11 +648,11 @@ fn close_retires_a_route_less_tmux_peer_after_its_exact_pane_is_missing() {
 #[test]
 fn close_route_less_present_target_stays_cleanup_open_without_retirement() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, master, _target, target_context) =
+    let (fixture, master, _target, target_context, project) =
         setup_master_and_route_less_target("route-less-present-close");
     let (target_id, binding_id, app_scope_id) = identity(&target_context);
 
-    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
+    let workers = workers_for_route(&fixture, &project, &app_scope_id);
     let row = worker_row(&workers, &target_id);
     // A live pane is sufficient for the refusal under test, independent of
     // whether the background agent probe has classified the runner yet.
@@ -545,6 +661,7 @@ fn close_route_less_present_target_stays_cleanup_open_without_retirement() {
 
     let close = close_target(
         &fixture,
+        &project,
         &master,
         &target_id,
         "must not archive a live route-less pane",
@@ -561,7 +678,7 @@ fn close_route_less_present_target_stays_cleanup_open_without_retirement() {
     assert_not_retired(
         &fixture,
         &master,
-        &fixture.root,
+        &project,
         &app_scope_id,
         &target_id,
         &binding_id,
@@ -571,50 +688,56 @@ fn close_route_less_present_target_stays_cleanup_open_without_retirement() {
     let operation_id = close["result"]["operation_id"]
         .as_str()
         .expect("close operation id");
-    let queried = query_operation(&fixture, &master, operation_id);
+    let queried = query_operation(&fixture, &project, &master, operation_id);
     assert_eq!(queried["result"], close["result"], "{queried}");
 }
 
 #[test]
 fn close_route_less_unknown_target_stays_unknown_without_retirement() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (mut fixture, master) =
+    let (fixture, host) =
         Fixture::isolated_with_pane_command("route-less-unknown-close", "sleep 600");
-    fixture.run_ok(&["context"], Some(&master));
-    promote_master(&fixture, &fixture.root, &master);
+    fixture.run_ok(&["context"], Some(&host));
+    let project = fixture.root.join("target-project");
+    seed_baseline(&project);
+    let project = project.canonicalize().unwrap();
+    let master = create_session_on_socket(&fixture, "target-master", &fixture.tmux_socket);
+    fixture.track_tmux_session("target-master");
+    register_context_in_project(&fixture, &project, &master, "target-master-register", false);
+    promote_master(&fixture, &project, &master);
 
     let unknown_socket = fixture.root.join("unknown.sock");
-    create_session_on_socket(&fixture, "route-less-unknown-keeper", &unknown_socket);
-    let mut keeper_session = OwnedTmuxSession {
-        socket: unknown_socket.clone(),
-        session: "route-less-unknown-keeper".to_owned(),
-    };
+    let keeper = create_session_on_socket(&fixture, "route-less-unknown-keeper", &unknown_socket);
+    let mut keeper_session = OwnedTmuxSession::for_pane(&unknown_socket, &keeper);
     let target = create_session_on_socket(&fixture, "route-less-unknown-target", &unknown_socket);
-    let mut target_session = OwnedTmuxSession {
-        socket: unknown_socket.clone(),
-        session: "route-less-unknown-target".to_owned(),
-    };
+    let mut target_session = OwnedTmuxSession::for_pane(&unknown_socket, &target);
     let target_context = register_context_on_socket(
         &fixture,
         &unknown_socket,
-        &fixture.root,
+        &project,
         &target,
         "route-less-unknown-context",
     );
     let (target_id, binding_id, app_scope_id) = identity(&target_context);
-    let project_root = fixture.root.clone();
-    retire_binding_route(&mut fixture, &project_root, &binding_id);
+    release_current_pane_route(
+        &fixture,
+        &project,
+        &unknown_socket,
+        &target,
+        &target_context,
+    );
 
     target_session.kill();
     keeper_session.kill();
     target_session.wait_for_server_exit();
-    let workers = workers_for_route(&fixture, &fixture.root, &app_scope_id);
+    let workers = workers_for_route(&fixture, &project, &app_scope_id);
     let row = worker_row(&workers, &target_id);
     assert_eq!(row["identity_valid"], true, "{row}");
     assert_eq!(row["endpoint_live"], Value::Null, "{row}");
 
     let close = close_target(
         &fixture,
+        &project,
         &master,
         &target_id,
         "must not retire a target with an unknown tmux terminal",
@@ -631,7 +754,7 @@ fn close_route_less_unknown_target_stays_unknown_without_retirement() {
     assert_not_retired(
         &fixture,
         &master,
-        &fixture.root,
+        &project,
         &app_scope_id,
         &target_id,
         &binding_id,
@@ -641,6 +764,6 @@ fn close_route_less_unknown_target_stays_unknown_without_retirement() {
     let operation_id = close["result"]["operation_id"]
         .as_str()
         .expect("close operation id");
-    let queried = query_operation(&fixture, &master, operation_id);
+    let queried = query_operation(&fixture, &project, &master, operation_id);
     assert_eq!(queried["result"], close["result"], "{queried}");
 }

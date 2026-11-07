@@ -5,9 +5,9 @@ impl ProjectRuntimeManager {
         }
         let _publication = self.register_gate.lock().unwrap();
         project_reset::retire_stale_project_routes(&self.host, &key.1)?;
-        for record in load_host_route_records(&self.route_journal)? {
+        for record in load_host_route_records(&self.route_file)? {
             if record.project_scope == key.1 {
-                project_reset::delete_route(&self.route_journal, &record)?;
+                project_reset::delete_route(&self.route_file, &record)?;
             }
         }
         self.routes
@@ -21,11 +21,11 @@ impl ProjectRuntimeManager {
     /// consulted; idle and unreachable live identities remain routable.
     fn prune_stale_routes(&self) -> Result<(), String> {
         let _publication = self.register_gate.lock().unwrap();
-        let records = load_host_route_records(&self.route_journal)?;
+        let records = load_host_route_records(&self.route_file)?;
         for record in records {
             if project_reset::route_is_deinitialized(Path::new(&record.canonical_root))? {
                 project_reset::retire_stale_project_routes(&self.host, &record.project_scope)?;
-                project_reset::delete_route(&self.route_journal, &record)?;
+                project_reset::delete_route(&self.route_file, &record)?;
                 self.routes
                     .lock()
                     .unwrap()
@@ -127,6 +127,9 @@ impl ProjectRuntimeManager {
             .filter(|worker| worker.cwd == runtime.root.to_string_lossy() || worker.cwd == scope)
             .map(|worker| worker.id.clone())
             .collect();
+        if let Err(error) = self.binding_control_store().begin_reset(scope) {
+            return Resp::err(format!("RESET_INCOMPLETE: publish identity reset intent: {error}"));
+        }
         if let Err(error) = self.host.commit_checked(&[Event::ProjectResetStarted {
             project_scope: scope.to_owned(),
             clear_local: clear_host_local,
@@ -135,7 +138,6 @@ impl ProjectRuntimeManager {
             return Resp::err(format!("RESET_INCOMPLETE: persist reset intent: {error}"));
         }
         let result = (|| -> Result<(), String> {
-            self.operation_journal.reset_project(scope)?;
             // Remove all app scopes, including already materialized reducers.
             let runtimes: Vec<Arc<Server>> = self
                 .routes
@@ -165,7 +167,7 @@ impl ProjectRuntimeManager {
                 .lock()
                 .unwrap()
                 .retain(|(_, project), _| project != scope);
-            project_reset::finish_reset(&self.host, &self.route_journal, scope)
+            project_reset::finish_reset(&self.host, &self.route_file, scope)
         })();
         match result {
             Ok(()) => Resp::data(json!({"status": "complete", "project_scope": scope,

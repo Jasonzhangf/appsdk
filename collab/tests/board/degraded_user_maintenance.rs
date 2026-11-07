@@ -1,4 +1,4 @@
-//! User maintenance must survive project replay failure. Reuse the existing
+//! Healthy user maintenance and explicit current-state startup failure. Reuse the existing
 //! public integration executable. No production daemon
 //! or terminal host is involved: this test owns its child, HOME and socket.
 use serde_json::{json, Value};
@@ -27,7 +27,7 @@ fn request(socket: &std::path::Path, value: Value) -> Value {
 }
 
 #[test]
-fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
+fn current_daemon_maintenance_is_authenticated_and_malformed_state_fails_startup() {
     let root = std::env::temp_dir().join(format!(
         "cm-{}-{}",
         std::process::id(),
@@ -70,16 +70,28 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
         true,
         "retired local corruption must not enter current runtime"
     );
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
-    let journals = super::central_storage::runtime_journals(&host.join("projects"));
-    assert_eq!(journals.len(), 1);
-    let journal = journals[0].clone();
-    std::fs::write(&journal, b"{malformed-fixture}\n").unwrap();
-    std::fs::remove_file(&socket).ok();
-    child.0 = start();
-    super::daemon_readiness::wait_for_ping(&mut child.0, &socket, Duration::from_secs(30));
-    assert_eq!(request(&socket, json!({"op":"Ping"}))["degraded"], true);
+    let canonical = root.canonicalize().unwrap();
+    // Empty resident startup has no registered route. Use the declared
+    // project/app storage address; do not search stored business content.
+    let component = |value: &str| {
+        assert!(
+            value.len() <= 96,
+            "this fixture uses one declared path component"
+        );
+        let hex: String = value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("v1-{}-{hex}", value.len())
+    };
+    let current_state = host
+        .join("projects")
+        .join(component(canonical.to_str().unwrap()))
+        .join("apps")
+        .join(component("appserver-cli"))
+        .join(".agent-collab/server/state.json");
+    assert!(current_state.is_file());
     // Keep another client connected: successful maintenance must also release it.
     let mut idle_client = UnixStream::connect(&socket).unwrap();
     idle_client
@@ -94,10 +106,6 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
         assert!(!host.join("DOWN").exists());
         assert!(child.0.try_wait().unwrap().is_none());
     }
-    assert_eq!(
-        request(&socket, json!({"op":"MasterStatus"}))["error"],
-        "PROJECT_RUNTIME_UNAVAILABLE: project replay failed"
-    );
     let stopped = request(
         &socket,
         json!({"op":"Shutdown","password":"test-owned-maintenance"}),
@@ -119,6 +127,35 @@ fn degraded_daemon_keeps_authenticated_user_shutdown_available() {
     drop(idle_client);
     assert!(host.join("DOWN").exists());
     assert!(!socket.exists());
+    assert!(!host.join("server.pid").exists());
     assert_eq!(std::fs::read(&journal).unwrap(), b"{malformed-fixture}\n");
+    std::fs::write(&current_state, b"{malformed-current-state}\n").unwrap();
+    child.0 = start();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(
+                !status.success(),
+                "malformed current state must fail startup"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "malformed current-state startup did not return"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !socket.exists(),
+        "failed startup must not advertise a listener"
+    );
+    assert!(std::fs::read_to_string(root.join("daemon.log"))
+        .unwrap()
+        .contains("CURRENT_STATE_DECODE_FAILED"));
+    assert_eq!(
+        std::fs::read(current_state).unwrap(),
+        b"{malformed-current-state}\n"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -205,7 +205,7 @@ fn idle_master_keeps_static_guidance_in_role_brief_without_fake_task_actions() {
 #[test]
 fn master_context_routes_work_by_task_kind() {
     let (server, root) = test_server();
-    register_synthetic_peer(&server, "master", "%master");
+    register(&server, "master", "%master");
     promote_master(&server, "master", "user-approved");
 
     let context = handle_context(&server, "master".into(), "token-master".into());
@@ -373,12 +373,13 @@ fn binding_projection_is_scoped_before_same_named_binding_uniqueness() {
         isolation_mode: None,
         created_ms: now_ms(), updated_ms: now_ms(),
     };
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
     let mut state = server.state.lock().unwrap();
     state.apply_checked(&Event::TaskCreated { task: task.clone() }).unwrap();
     state.apply_checked(&Event::BoardDetailsChanged { task_id: task.id.clone(), details:
         crate::board::BoardTaskDetails { public_visibility: true, revision: 1, ..Default::default() }
     }).unwrap();
-    assert_eq!(board_task_view(&state, &task).unwrap().owner, worker.id);
+    assert_eq!(board_task_view(&state, &control, &task).unwrap().unwrap().owner, worker.id);
     let mut other_app = binding.clone();
     other_app.app_scope_id = AppServerId::new("other-app").unwrap();
     other_app.binding_id = BindingId::new("other-app-binding").unwrap();
@@ -387,7 +388,7 @@ fn binding_projection_is_scoped_before_same_named_binding_uniqueness() {
         registration: global_state::ProjectRegistration::new(other_app.project_scope.clone(), other_app.app_scope_id.clone()).unwrap(),
     }).unwrap();
     state.apply_checked(&Event::GlobalRuntimeBound { binding: other_app.clone() }).unwrap();
-    assert_eq!(board_task_view_with_master(&state, &task, None, None, Some(&binding.route_scope())).unwrap().owner, worker.id,
+    assert_eq!(board_task_view_with_master(&state, &control, &task, None, None, Some(&binding.route_scope())).unwrap().unwrap().owner, worker.id,
         "a same-named binding in another app must not invalidate the requested board owner");
     state.global.projects.get_mut(binding.project_scope.as_str()).unwrap()
         .runtime_bindings.remove(other_app.binding_id.as_str());
@@ -397,13 +398,13 @@ fn binding_projection_is_scoped_before_same_named_binding_uniqueness() {
     assert_eq!(worker_identity_presence(&server, &worker), IdentityPresence::Missing,
         "a foreign-only binding must not prove a local identity");
     let mut state = server.state.lock().unwrap();
-    assert_eq!(board_task_view(&state, &task).unwrap().owner, "");
+    assert_eq!(board_task_view(&state, &control, &task).unwrap().unwrap().owner, "");
     state.apply_checked(&Event::GlobalRuntimeBound { binding: binding.clone() }).unwrap();
     let mut duplicate = binding.clone();
     duplicate.binding_id = BindingId::new("duplicate-local-binding").unwrap();
     duplicate.runtime_id = RuntimeId::new("duplicate-local-runtime").unwrap();
     state.apply_checked(&Event::GlobalRuntimeBound { binding: duplicate }).unwrap();
-    assert_eq!(board_task_view(&state, &task).unwrap().owner, "");
+    assert_eq!(board_task_view(&state, &control, &task).unwrap().unwrap().owner, "");
     drop(state);
     assert_eq!(worker_identity_presence(&server, &worker), IdentityPresence::Missing,
         "multiple applicable local bindings must not be guessed");
@@ -811,7 +812,7 @@ fn squash_merged_holder(
     assert_ne!(feature_tip, squash);
 
     register_synthetic_peer(server, "holder", "%holder");
-    register_synthetic_peer(server, "master", "%master");
+    register(server, "master", "%master");
     promote_master(server, "master", "user approved squash cleanup test");
     let canonical_wt = root
         .join("playground/squash-wt")
@@ -1070,7 +1071,6 @@ fn codex_subagents_exchange_messages() {
         runtime: Some("codex".into()),
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     });
     let codex = bind_test_subagent_record(&server, Record {
         id: "codex-rt".into(),
@@ -1087,7 +1087,6 @@ fn codex_subagents_exchange_messages() {
         runtime: Some("codex".into()),
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     });
     server.commit(&[
         Event::SubagentUpdated {
@@ -1282,12 +1281,13 @@ fn worker_status_keeps_tmux_liveness_unknown_despite_offline_keepalive_hint() {
     )]);
     let summary = worker_status_summary_with_maps(
         &server,
+        &binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap(),
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         &keepalives,
         json!({"role": "peer"}),
         &worker,
-    );
+    ).unwrap();
     assert_eq!(summary["status"], "unknown");
     assert_eq!(summary["agent_state"], "unknown");
     assert_eq!(summary["diagnostic"], serde_json::Value::Null);
@@ -1298,18 +1298,9 @@ fn worker_status_keeps_tmux_liveness_unknown_despite_offline_keepalive_hint() {
 #[test]
 fn worker_status_senses_registered_appserver_routes() {
     let (server, root) = test_server();
-    server.state.lock().unwrap().workers.insert(
-        "status-appserver".into(),
-        crate::server::state::WorkerRec {
-            id: "status-appserver".into(),
-            token: "token-status-appserver".into(),
-            cwd: server.root.display().to_string(),
-            registered_ms: now_ms(),
-            transport: Some(test_appserver_transport("thread-status-appserver")),
-        },
-    );
+    register_appserver_worker(&server, &root, "status-appserver", "thread-status-appserver");
     let resp = dispatch(&Arc::new(server), Req::WorkerStatus { worker_id: None });
-    assert!(resp.ok);
+    assert!(resp.ok, "{resp:?}");
     let workers = resp.data["workers"].as_array().unwrap();
     assert_eq!(workers.len(), 1);
     let w = &workers[0];
@@ -1328,16 +1319,7 @@ fn worker_status_senses_registered_appserver_routes() {
 #[test]
 fn worker_status_uses_appserver_status_not_candidate_check_for_presence() {
     let (mut server, root) = test_server();
-    server.state.lock().unwrap().workers.insert(
-        "lost-appserver".into(),
-        crate::server::state::WorkerRec {
-            id: "lost-appserver".into(),
-            token: "token-lost-appserver".into(),
-            cwd: server.root.display().to_string(),
-            registered_ms: now_ms(),
-            transport: Some(test_appserver_transport("thread-lost-appserver")),
-        },
-    );
+    register_appserver_worker(&server, &root, "lost-appserver", "thread-lost-appserver");
     server.appserver_candidate_check =
         Arc::new(|_| panic!("legacy AppServer presence must not probe the AppServer adapter"));
     let resp = dispatch(&Arc::new(server), Req::WorkerStatus { worker_id: None });
@@ -1611,18 +1593,10 @@ fn external_or_operator_sender_can_send_without_registration() {
 #[test]
 fn worker_freed_transitions_notify_live_master() {
     let (server, root) = test_server();
-    register_synthetic_peer(&server, "master-worker", "thread-master");
+    register(&server, "master-worker", "thread-master");
     register_synthetic_peer(&server, "task-worker", "thread-worker");
     let server_arc = std::sync::Arc::new(server);
-    let promote_resp = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "master-worker".into(),
-            token: "token-master-worker".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promote_resp.ok);
+    promote_master(&server_arc, "master-worker", "approved");
 
     let now = now_ms();
     server_arc.commit(&[
@@ -1712,15 +1686,7 @@ fn master_working_to_idle_leaves_reminder_to_the_master_idle_timer() {
     let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     let server_arc = std::sync::Arc::new(server);
-    let promote_resp = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "master-worker".into(),
-            token: "token-master-worker".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promote_resp.ok);
+    promote_master(&server_arc, "master-worker", "approved");
 
     let now = now_ms();
     server_arc.commit(&[
@@ -1788,15 +1754,7 @@ fn master_idle_requires_live_master_armed_subscription_and_empty_backlog() {
         .values()
         .any(|m| m.subject == Some("master-idle: unpromoted".into())));
 
-    let promote_resp = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "unpromoted".into(),
-            token: "token-unpromoted".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promote_resp.ok);
+    promote_master(&server_arc, "unpromoted", "approved");
     server_arc.commit(&[
         Event::KeepaliveUpdated {
             worker_id: "unpromoted".into(),
@@ -1821,17 +1779,7 @@ fn master_idle_requires_live_master_armed_subscription_and_empty_backlog() {
     let (server, root) = test_server();
     register(&server, "busy-master", "thread-master");
     let server_arc = std::sync::Arc::new(server);
-    assert!(
-        dispatch(
-            &server_arc,
-            Req::MasterPromote {
-                worker_id: "busy-master".into(),
-                token: "token-busy-master".into(),
-                approval: "approved".into(),
-            }
-        )
-        .ok
-    );
+    promote_master(&server_arc, "busy-master", "approved");
     create_task(&server_arc, "busy-master", "task-actionable", "feature");
     server_arc.commit(&[Event::KeepaliveUpdated {
         worker_id: "busy-master".into(),
@@ -1854,15 +1802,7 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
     register(&server, "master-worker", "thread-master");
     register(&server, "stuck-worker", "thread-stuck");
     let server_arc = std::sync::Arc::new(server);
-    let promote_resp = dispatch(
-        &server_arc,
-        Req::MasterPromote {
-            worker_id: "master-worker".into(),
-            token: "token-master-worker".into(),
-            approval: "approved".into(),
-        },
-    );
-    assert!(promote_resp.ok);
+    promote_master(&server_arc, "master-worker", "approved");
 
     // Seed the durable notification baseline, independent of identity and
     // current pane activity, to exercise the real offline notification edge.

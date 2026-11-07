@@ -88,12 +88,12 @@ fn validate_layerfs_project_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The resident v1 daemon owns one project reducer/journal.  Keep that
+/// The resident daemon owns one current project-state reducer. Keep that
 /// ownership explicit at the host boundary instead of treating the process
 /// root as an implicit fallback for every valid project context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HostRouteOwner {
-    ResidentProject { root: PathBuf, journal: PathBuf },
+    ResidentProject { root: PathBuf },
     RegisteredNotReady { root: PathBuf },
 }
 
@@ -111,15 +111,10 @@ impl HostRouteRegistry {
         let resident_scope = GlobalState::canonical_project_scope(&server.root)
             .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
         let resident_root = PathBuf::from(resident_scope.as_str());
-        let resident_journal = server
-            .storage_root
-            .join(".agent-collab")
-            .join("server")
-            .join("journal.jsonl");
         // GlobalState is the only durable registration index available to the
         // v1 resident process.  A registered project without a resident
         // reducer remains visible as a route, but cannot be sent to this
-        // project's State/journal until multi-project migration is complete.
+        // project's State until a separate runtime owner is available.
         let st = server.state.lock().unwrap();
         let resident_app_scope = st
             .global
@@ -153,7 +148,6 @@ impl HostRouteRegistry {
                 {
                     HostRouteOwner::ResidentProject {
                         root: resident_root.clone(),
-                        journal: resident_journal.clone(),
                     }
                 } else {
                     HostRouteOwner::RegisteredNotReady {
@@ -192,8 +186,8 @@ const TASK_STATUSES: [&str; 14] = [
     "cancelled",
 ];
 /// Lock used by releases before the host-scoped state directory existed.
-/// A new daemon must fence this writer before it replays the project journal;
-/// otherwise an old binary could append concurrently under the new socket.
+/// A new daemon must fence this writer before loading current state;
+/// otherwise an old binary could mutate the same files under the new socket.
 const LEGACY_HOST_DAEMON_LOCK_PATH: &str = "/tmp/collab-host.lock";
 const DAEMON_LIVE_CLOSURE_MODE: &str = "daemon-live-closure";
 const RESTART_REPLAY_PENDING_MODE: &str = "restart-replay-pending";
@@ -469,101 +463,19 @@ fn app_scope_storage_path(root: &Path, app_scope: &str) -> PathBuf {
     )
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy)]
-pub(crate) enum CommandJournalFault {
-    StartAppend = 1,
-    StartSync = 2,
-    CompletionAppend = 3,
-    CompletionSync = 4,
-}
-
-#[cfg(test)]
-thread_local! {
-    static COMMAND_JOURNAL_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn inject_command_journal_fault(fault: CommandJournalFault) {
-    COMMAND_JOURNAL_FAULT.with(|injected| injected.set(fault as u8));
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum SubagentJournalFault {
-    StartAppend = 11,
-    StartSync = 12,
-    CloseFirstAppend = 21,
-    CloseFirstSync = 22,
-    CloseFinalAppend = 31,
-    CloseFinalSync = 32,
-    WorkingAppend = 41,
-    WorkingSync = 42,
-}
-
-#[cfg(test)]
-thread_local! {
-    static SUBAGENT_JOURNAL_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn inject_subagent_journal_fault(fault: SubagentJournalFault) {
-    SUBAGENT_JOURNAL_FAULT.with(|injected| injected.set(fault as u8));
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum TaskRegisterJournalFault {
-    Append = 51,
-    Sync = 52,
-}
-
-#[cfg(test)]
-thread_local! {
-    static TASK_REGISTER_JOURNAL_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn inject_task_register_journal_fault(fault: TaskRegisterJournalFault) {
-    TASK_REGISTER_JOURNAL_FAULT.with(|injected| injected.set(fault as u8));
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum CurrentThreadRouteJournalFault {
-    Append,
-    Sync,
-}
-
-#[cfg(test)]
-thread_local! {
-    static CURRENT_THREAD_ROUTE_JOURNAL_FAULT: std::cell::Cell<Option<CurrentThreadRouteJournalFault>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn inject_current_thread_route_journal_fault(fault: CurrentThreadRouteJournalFault) {
-    CURRENT_THREAD_ROUTE_JOURNAL_FAULT.with(|injected| injected.set(Some(fault)));
-}
-
-#[derive(Clone, Copy)]
-enum CommandJournalPhase {
-    Start,
-    Business,
-    Completion,
-}
 
 #[cfg(test)]
 const DIRECT_MESSAGE_WAKE_COOLDOWN_MS: i64 = 60_000;
 
 #[derive(Debug)]
 enum NotificationDeliveryError {
-    Journal(notification_contract::JournalError),
+    State(notification_contract::MutationError),
 }
 
 #[derive(Debug)]
 enum NotificationAttempt {
     Accepted,
+    Consumed,
     Deferred,
     NotAttempted(String),
     Rejected(String),
@@ -578,7 +490,7 @@ impl NotificationAttempt {
 impl std::fmt::Display for NotificationDeliveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Journal(error) => write!(f, "notification delivery commit failed: {error}"),
+            Self::State(error) => write!(f, "notification delivery commit failed: {error}"),
         }
     }
 }
@@ -890,13 +802,12 @@ pub struct Server {
     ///
     /// `storage_root` is separate because a host daemon may own more than one
     /// appserver route for the same project.  Those routes must not share a
-    /// reducer journal or mailbox projection.  The resident route keeps both
+    /// current-state file or mailbox projection. The resident route keeps both
     /// paths equal for backwards compatibility.
     pub storage_root: PathBuf,
-    pub journal_path: PathBuf,
+    pub state_path: PathBuf,
     pub(crate) host_paths: HostPaths,
     pub state: Mutex<State>,
-    pub journal: Mutex<std::fs::File>,
     pub appserver_candidate_check: Arc<AppServerCandidateCheck>,
     #[cfg(not(test))]
     pub tmux_notification_sink: Arc<TmuxNotificationSink>,
@@ -910,7 +821,7 @@ pub struct Server {
 // admission check itself cannot hold `State` while a handler runs.  Keep a
 // process-local gate per daemon root so a rebind cannot slip between those
 // two phases.  This mutex is synchronization only; route and generation
-// truth remains in `State`/the journal.
+// truth remains in the declared current control/state resources.
 static WIRE_ROUTE_MUTATION_GATES: OnceLock<
     Mutex<std::collections::HashMap<PathBuf, Arc<Mutex<()>>>>,
 > = OnceLock::new();
@@ -922,44 +833,6 @@ fn wire_route_mutation_gate(server: &Server) -> Arc<Mutex<()>> {
         .entry(server.root.clone())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
-}
-
-fn record_activity(root: &Path, kind: &str, detail: serde_json::Value) -> Result<(), String> {
-    let path = root.join(".agent-collab/server/events.jsonl");
-    let record = json!({
-        "ts": now_ms(),
-        "kind": kind,
-        "detail": detail,
-    });
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|error| format!("open events: {error}"))?;
-    use std::io::Write;
-    let mut line =
-        serde_json::to_vec(&record).map_err(|error| format!("serialize events: {error}"))?;
-    line.push(b'\n');
-    file.write_all(&line)
-        .map_err(|error| format!("append events: {error}"))
-}
-
-fn request_activity(req: &Req, resp: &Resp) -> serde_json::Value {
-    let mut request = serde_json::to_value(req).unwrap_or_else(|_| json!({}));
-    if let Some(obj) = request.as_object_mut() {
-        obj.remove("token");
-        obj.remove("launch_env");
-        obj.remove("facts");
-    }
-    json!({
-        "op": request.get("op").cloned().unwrap_or(json!("unknown")),
-        "actor": request.get("worker_id").or_else(|| request.get("from")).cloned(),
-        "task_id": request.get("task_id").cloned(),
-        "target": request.get("to").cloned(),
-        "ok": resp.ok,
-        "error": resp.error,
-        "request": request,
-    })
 }
 
 #[cfg(test)]

@@ -389,10 +389,17 @@ fn handle_notification_subscribe(
 }
 
 fn handle_notification_status(server: &Server, worker_id: String, token: String) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
+    let route = match server_route_scope(server, &state) { Ok(route) => route, Err(error) => return Resp::err(error) };
+    let owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), &worker_id) {
+        Ok(Some(name)) => name, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: patrol owner has no current name"), Err(error) => return Resp::err(error),
+    };
     let mut subscriptions: Vec<&NotificationSubscription> = state
         .notification_subscriptions
         .values()
@@ -407,15 +414,11 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
     let mut project_board_patrol: Vec<(String, String, serde_json::Value)> = Vec::new();
     if is_current_master {
         for current_worker_id in state.workers.keys() {
-            let Some(current_owner_key) =
-                crate::server::state::board_patrol_current_owner_key(&state, current_worker_id)
-            else {
-                continue;
+            let current_owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), current_worker_id) {
+                Ok(Some(name)) => name, Ok(None) => continue, Err(error) => return Resp::err(error),
             };
-            let Some(eligible_task_ids) =
-                crate::server::state::board_patrol_eligible_task_ids(&state, current_worker_id)
-            else {
-                continue;
+            let eligible_task_ids = match state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), current_worker_id) {
+                Ok(Some(tasks)) => tasks, Ok(None) => continue, Err(error) => return Resp::err(error),
             };
             let owned_unclosed = crate::server::state::board_patrol_owned_unclosed_task_ids(
                 &state,
@@ -457,7 +460,6 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
             (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
         });
     }
-    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
     let owned_unclosed =
         crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let mut cancelled_tasks: Vec<String> = state
@@ -515,7 +517,7 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
                 json!({
                 "status": status,
                 "armed": status == "armed",
-                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "owner_key": owner_key,
                 "worker_id": subscription.worker_id,
                 "session_id": state.workers.get(&worker_id)
                     .and_then(|worker| worker.transport.as_ref())
@@ -541,7 +543,7 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
             None => json!({
                 "status": "missing",
                 "armed": false,
-                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "owner_key": owner_key,
                 "worker_id": worker_id,
                 "subscription_id": serde_json::Value::Null,
                 "event": "master-idle",
@@ -577,10 +579,17 @@ fn handle_notification_cancel(
     if event == "master-idle" && !task_ids.is_empty() {
         return Resp::err("--task-id is valid only for --event board-idle");
     }
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
+    let route = match server_route_scope(server, &state) { Ok(route) => route, Err(error) => return Resp::err(error) };
+    let owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), &worker_id) {
+        Ok(Some(name)) => name, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: patrol owner has no current name"), Err(error) => return Resp::err(error),
+    };
     if event == "master-idle" {
         let holder = match current_master_holder(server, &state) {
             Ok(master) => master,
@@ -599,7 +608,7 @@ fn handle_notification_cancel(
             return Resp::data(json!({
                 "event": "master-idle",
                 "subject": PROJECT_PATROL_SUBJECT,
-                "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+                "owner_key": owner_key,
                 "subscription_id": subscription.id,
                 "status": "cancelled",
                 "changed": false,
@@ -663,7 +672,7 @@ fn handle_notification_cancel(
         return Resp::data(json!({
             "event": "master-idle",
             "subject": PROJECT_PATROL_SUBJECT,
-            "owner_key": crate::server::state::board_patrol_owner_key(&state, &worker_id),
+            "owner_key": owner_key,
             "subscription_id": subscription.id,
             "status": "cancelled",
             "changed": true,
@@ -672,7 +681,6 @@ fn handle_notification_cancel(
             "eligibility": eligibility,
         }));
     }
-    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
     let owned_unclosed =
         crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let mut next = state.cancelled_board_patrol_tasks.clone();
@@ -714,11 +722,17 @@ fn handle_notification_board_rearm(
     token: String,
     task_ids: Vec<String>,
 ) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = verify(&state, &worker_id, &token) {
         return error;
     }
-    let owner_key = crate::server::state::board_patrol_owner_key(&state, &worker_id);
+    let route = match server_route_scope(server, &state) { Ok(route) => route, Err(error) => return Resp::err(error) };
+    let owner_key = match state::board_patrol_current_owner_key(&state, &control, route.as_ref(), &worker_id) {
+        Ok(Some(name)) => name, Ok(None) => return Resp::err("IDENTITY_MAP_NOT_FOUND: patrol owner has no current name"), Err(error) => return Resp::err(error),
+    };
     let owned_unclosed =
         crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let requested: Vec<String> = if task_ids.is_empty() {
@@ -840,11 +854,13 @@ fn handle_goal_schedule_reconcile_with_period(
     let Some(route_scope) = route_scope else {
         return Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING");
     };
-    let owns_name = state
-        .name_occupancies
-        .get(route_scope.project_scope_id.as_str())
-        .and_then(|names| names.get(&goal_owner))
-        .is_some_and(|holder| holder.worker_id == worker_id);
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let owns_name = match control.current_for_name(&route_scope.project_scope_id, &route_scope.app_scope_id, &goal_owner) {
+        Ok(slot) => slot.and_then(|slot| slot.active_binding()).is_some_and(|current| current.binding.agent_id.as_str() == worker_id),
+        Err(error) => return Resp::err(error),
+    };
     if !owns_name {
         return Resp::err(format!(
             "GOAL_SCHEDULE_OWNER_MISMATCH: caller does not own stable name {goal_owner}"
@@ -1236,393 +1252,6 @@ fn verify(state: &State, worker_id: &str, token: &str) -> Result<WorkerRec, Resp
     }
 }
 
-fn migration_issues(server: &Server, state: &State) -> Vec<String> {
-    let mut issues = Vec::new();
-    for worker in state.workers.values() {
-        match worker_presence_in_state(server, state, worker) {
-            IdentityPresence::Present => {}
-            IdentityPresence::Cold => {}
-            IdentityPresence::Missing => issues.push(format!(
-                "worker {} has no live registered tmux pane",
-                worker.id
-            )),
-            IdentityPresence::Unknown => issues.push(format!(
-                "worker {} transport liveness is unknown",
-                worker.id
-            )),
-        }
-    }
-    for task in state.tasks.values() {
-        if task.worktree_path.is_some()
-            && matches!(task.status.as_str(), "merged" | "closed" | "cancelled")
-            && !state.cleanup_receipts.contains_key(&task.id)
-        {
-            issues.push(format!(
-                "TASK_CLEANUP_INCOMPLETE:{}:{}",
-                task.id,
-                task.worktree_path.as_deref().unwrap_or("unknown")
-            ));
-        }
-        if let Some(receipt) = state.cleanup_receipts.get(&task.id) {
-            if receipt.task_id != task.id
-                || receipt.worktree_path != task.worktree_path
-                || receipt.branch != task.branch
-            {
-                issues.push(format!("TASK_CLEANUP_RECEIPT_MISMATCH:{}", task.id));
-            }
-            if let Some(path) = task
-                .worktree_path
-                .as_deref()
-                .filter(|path| !is_layerfs_workspace(path))
-            {
-                let worktree = Path::new(path);
-                let worktree = if worktree.is_absolute() {
-                    worktree.to_path_buf()
-                } else {
-                    server
-                        .root
-                        .join(worktree.strip_prefix("./").unwrap_or(worktree))
-                };
-                if worktree.exists() {
-                    issues.push(format!("TASK_CLEANUP_INCOMPLETE:{}:{}", task.id, path));
-                }
-            }
-        }
-        if task.status == "available" {
-            issues.push(format!(
-                "task {} uses deprecated available/dispatch state and needs an explicit owner decision",
-                task.id
-            ));
-        }
-        if let Some(wait) = task.wait.as_ref() {
-            if task.status != "waiting" {
-                issues.push(format!(
-                    "task {} has wait metadata outside waiting",
-                    task.id
-                ));
-            }
-            if wait.waiter != task.owner || !state.workers.contains_key(&wait.waiter) {
-                issues.push(format!("task {} wait has no valid waiter", task.id));
-            }
-            if wait.responsible_actor.trim().is_empty()
-                || !state.workers.contains_key(&wait.responsible_actor)
-            {
-                issues.push(format!("task {} wait has no responsible actor", task.id));
-            }
-            match state.tasks.get(&wait.waiting_for) {
-                None => issues.push(format!(
-                    "task {} wait points to missing blocking task {}",
-                    task.id, wait.waiting_for
-                )),
-                Some(blocking) => {
-                    if !task_resource_active(&blocking.status) {
-                        issues.push(format!(
-                            "task {} wait points to inactive blocking task {}",
-                            task.id, blocking.id
-                        ));
-                    }
-                    if wait.responsible_actor != blocking.owner {
-                        issues.push(format!(
-                            "task {} wait responsible actor does not own blocking task {}",
-                            task.id, blocking.id
-                        ));
-                    }
-                    let same_feature =
-                        task.feature_id.is_some() && task.feature_id == blocking.feature_id;
-                    let same_worktree = task.worktree_path.is_some()
-                        && task.worktree_path == blocking.worktree_path;
-                    if !same_feature && !same_worktree {
-                        issues.push(format!(
-                            "task {} wait has no matching active resource on blocking task {}",
-                            task.id, blocking.id
-                        ));
-                    }
-                }
-            }
-            if wait.deadline_ms <= now_ms() {
-                issues.push(format!(
-                    "task {} wait deadline is missing or expired",
-                    task.id
-                ));
-            }
-            if wait.resume_on.is_empty() || wait.escalation.trim().is_empty() {
-                issues.push(format!(
-                    "task {} wait has no resume/escalation path",
-                    task.id
-                ));
-            }
-            if wait_cycle(&state.tasks, &task.id, &wait.waiting_for) {
-                issues.push(format!("task {} participates in a wait cycle", task.id));
-            }
-        } else if task.status == "waiting" {
-            issues.push(format!("task {} is waiting without WaitSpec", task.id));
-        }
-    }
-    issues.sort();
-    issues.dedup();
-    issues
-}
-
-fn snapshot_hash(state: &State) -> String {
-    let mut workers: Vec<_> = state
-        .workers
-        .values()
-        .map(|worker| worker.id.clone())
-        .collect();
-    workers.sort();
-    let mut tasks: Vec<_> = state.tasks.values().cloned().collect();
-    tasks.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut messages: Vec<_> = state.msgs.values().cloned().collect();
-    messages.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut delivery_modes: Vec<_> = state
-        .delivery_modes
-        .iter()
-        .map(|(id, mode)| (id.clone(), mode.clone()))
-        .collect();
-    delivery_modes.sort();
-    let bytes = serde_json::to_vec(&(workers, tasks, messages, delivery_modes))
-        .expect("serialize deterministic migration snapshot");
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
-}
-
-fn migration_peer(state: &State, worker_id: &str, token: &str) -> Result<WorkerRec, Resp> {
-    verify(state, worker_id, token)
-}
-
-fn verify_migration_lease(state: &State, worker_id: &str) -> Result<(), Resp> {
-    if let Some(migration) = state.migration.as_ref().filter(|migration| {
-        migration.operator != worker_id && matches!(migration.phase.as_str(), "planned" | "applied")
-    }) {
-        return Err(Resp::err_data(
-            "MIGRATION_TRANSACTION_HELD_BY_ANOTHER_PEER",
-            json!({
-                "migration": migration,
-                "holder": migration.operator,
-                "requester": worker_id,
-                "admission_frozen": state.admission_frozen(),
-                "retry_allowed": false,
-                "next": "do not retry plan/apply/verify; query collab migrate inspect, then let the holder complete the current migration or coordinate ownership transfer",
-            }),
-        ));
-    }
-    Ok(())
-}
-
-fn migration_state_rejection(state: &State, message: &str) -> Resp {
-    Resp::err_data(
-        message,
-        json!({
-            "migration": state.migration,
-            "admission_frozen": state.admission_frozen(),
-            "retry_allowed": false,
-            "next": "run collab migrate inspect; do not create a new migration until the current record is resolved",
-        }),
-    )
-}
-
-fn migration_view(state: &State, issues: Vec<String>) -> serde_json::Value {
-    json!({
-        "migration": state.migration,
-        "admissible": issues.is_empty(),
-        "issues": issues,
-        "state": {
-            "workers": state.workers.len(),
-            "tasks": state.tasks.len(),
-            "messages": state.msgs.len(),
-            "snapshot_hash": snapshot_hash(state),
-        },
-        "deprecated_paths": [
-            "delete .agent-collab",
-            "manual task/claim/journal JSON edits",
-            "clear mailbox",
-            "copy worker tokens",
-            "start a second daemon",
-            "mixed runtime writers",
-            "guess thread identity",
-        ],
-    })
-}
-
-fn handle_migration_inspect(server: &Server, worker_id: String, token: String) -> Resp {
-    let state = server.state.lock().unwrap();
-    if let Err(error) = migration_peer(&state, &worker_id, &token) {
-        return error;
-    }
-    let issues = migration_issues(server, &state);
-    Resp::data(migration_view(&state, issues))
-}
-
-fn handle_migration_plan(server: &Server, worker_id: String, token: String) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    if let Err(error) = migration_peer(&state, &worker_id, &token) {
-        return error;
-    }
-    if let Err(error) = verify_migration_lease(&state, &worker_id) {
-        return error;
-    }
-    if state.admission_frozen() {
-        return Resp::err("migration admission is already frozen");
-    }
-    let issues = migration_issues(server, &state);
-    let now = now_ms();
-    let migration = MigrationRecord {
-        id: format!("migration-{now}"),
-        from_version: "v1-legacy".into(),
-        to_version: "v1-low-intervention".into(),
-        phase: if issues.is_empty() {
-            "planned".into()
-        } else {
-            "migration_needs_operator".into()
-        },
-        admission_frozen: false,
-        snapshot_hash: None,
-        worker_count: state.workers.len(),
-        task_count: state.tasks.len(),
-        message_count: state.msgs.len(),
-        operator: worker_id,
-        issues: issues.clone(),
-        created_ms: now,
-        updated_ms: now,
-    };
-    if let Err(error) = server.commit_locked(
-        &mut state,
-        &[Event::MigrationUpdated {
-            migration: migration.clone(),
-        }],
-    ) {
-        return Resp::err(format!("MIGRATION_DURABILITY_FAILED: {error}"));
-    }
-    Resp::data(json!({
-        "migration": migration,
-        "admissible": issues.is_empty(),
-        "issues": issues,
-        "next": if state.migration.as_ref().is_some_and(|record| record.phase == "planned") {
-            "collab migrate apply"
-        } else {
-            "resolve every issue, then run collab migrate plan again"
-        },
-    }))
-}
-
-fn handle_migration_apply(server: &Server, worker_id: String, token: String) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    if let Err(error) = migration_peer(&state, &worker_id, &token) {
-        return error;
-    }
-    if let Err(error) = verify_migration_lease(&state, &worker_id) {
-        return error;
-    }
-    let Some(mut migration) = state.migration.clone() else {
-        return Resp::err("run collab migrate plan before apply");
-    };
-    if migration.phase != "planned" || !migration.issues.is_empty() {
-        return Resp::err("migration plan is not admissible");
-    }
-    let issues = migration_issues(server, &state);
-    if !issues.is_empty() {
-        return Resp::err(format!(
-            "migration admission changed: {}",
-            issues.join("; ")
-        ));
-    }
-    migration.phase = "applied".into();
-    migration.admission_frozen = true;
-    migration.snapshot_hash = Some(snapshot_hash(&state));
-    migration.worker_count = state.workers.len();
-    migration.task_count = state.tasks.len();
-    migration.message_count = state.msgs.len();
-    migration.updated_ms = now_ms();
-    if let Err(error) = server.commit_locked(
-        &mut state,
-        &[Event::MigrationUpdated {
-            migration: migration.clone(),
-        }],
-    ) {
-        return Resp::err(format!("MIGRATION_DURABILITY_FAILED: {error}"));
-    }
-    Resp::data(json!({
-        "migration": migration,
-        "admission_frozen": true,
-        "next": "verify the applied migration against the current service; identity restoration uses collab context and does not repeat registration",
-    }))
-}
-
-fn handle_migration_verify(server: &Server, worker_id: String, token: String) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    if let Err(error) = migration_peer(&state, &worker_id, &token) {
-        return error;
-    }
-    if let Err(error) = verify_migration_lease(&state, &worker_id) {
-        return error;
-    }
-    let Some(mut migration) = state.migration.clone() else {
-        return migration_state_rejection(&state, "no migration record to verify");
-    };
-    if migration.phase == "verified" && !migration.admission_frozen {
-        let current_snapshot_hash = snapshot_hash(&state);
-        return Resp::data(json!({
-            "migration": migration,
-            "verified": true,
-            "resumed": false,
-            "idempotent": true,
-            "issues": [],
-            "current_snapshot_hash": current_snapshot_hash,
-            "next": "migration already verified; continue task lifecycle; do not rerun plan or apply",
-        }));
-    }
-    if migration.phase != "applied" || !migration.admission_frozen {
-        return migration_state_rejection(
-            &state,
-            "migration must be applied and frozen before verify",
-        );
-    }
-    let mut issues = migration_issues(server, &state);
-    let current_hash = snapshot_hash(&state);
-    if migration.snapshot_hash.as_deref() != Some(current_hash.as_str()) {
-        issues.push("migration snapshot hash mismatch".into());
-    }
-    if migration.worker_count != state.workers.len()
-        || migration.task_count != state.tasks.len()
-        || migration.message_count != state.msgs.len()
-    {
-        issues.push("migration state counts changed during admission freeze".into());
-    }
-    issues.sort();
-    issues.dedup();
-    migration.updated_ms = now_ms();
-    migration.issues = issues.clone();
-    if issues.is_empty() {
-        migration.phase = "verified".into();
-        migration.admission_frozen = false;
-    } else {
-        migration.phase = "migration_needs_operator".into();
-    }
-    if let Err(error) = server.commit_locked(
-        &mut state,
-        &[Event::MigrationUpdated {
-            migration: migration.clone(),
-        }],
-    ) {
-        return Resp::err(format!("MIGRATION_DURABILITY_FAILED: {error}"));
-    }
-    Resp::data(json!({
-        "migration": migration,
-        "verified": issues.is_empty(),
-        "resumed": issues.is_empty(),
-        "issues": issues,
-        "current_snapshot_hash": current_hash,
-    }))
-}
-
-/// Prepare the exact Register envelope from one reducer snapshot without
-/// consuming it. The caller owns the following sequence: durable outer
-/// `Validating` with the returned nested IDs, then
-/// [`consume_prepared_register_typed`] with this same value.
 fn prepare_register_typed(
     server: &Server,
     worker_id: &str,
@@ -1688,60 +1317,42 @@ fn prepare_register_typed(
     }
 }
 
-/// Consume one prepared Register envelope and project its receipt. It never
-/// regenerates the nested identifiers.
-fn consume_prepared_register_typed(
-    server: &Server,
-    worker_id: &str,
-    transport: &SelectedTransport,
-    prepared: PreparedRegisterEnvelope,
-    approval: Option<&RegisterApprovalProof>,
-) -> Resp {
-    consume_register_typed(server, worker_id, transport, prepared, approval, None)
-}
-
 fn consume_register_typed(
     server: &Server,
     worker_id: &str,
     transport: &SelectedTransport,
     prepared: PreparedRegisterEnvelope,
-    approval: Option<&RegisterApprovalProof>,
+    name_tmux_session_name: Option<String>,
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
 ) -> Resp {
     let registered_at = match &prepared.typed.command {
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
     };
     let command = prepared.typed.command.clone();
-    let committed = server.consume_prepared_register_with_approval(prepared, approval);
+    let committed = server.consume_register(prepared);
     match committed {
         Ok(outcome) => {
-            // The context owner hands its live-observed pane+cwd here so the
-            // very first name decision anchors on the pane instead of taking a
-            // pool name that the later context resolution would then inherit.
-            let name_resolution = match name_resolution::resolve_registered_name_with_authorization(
-                server,
-                worker_id,
-                outcome.receipt.operation_id.as_str(),
-                "register",
-                None,
-                None,
-                name_pane_anchor,
-            ) {
-                Ok(resolution) => resolution,
-                Err(error) => {
-                    return Resp::err_data(
-                        error,
-                        json!({
-                            "command_id":outcome.receipt.command_id.as_str(),
-                            "operation_id":outcome.receipt.operation_id.as_str(),
-                            "registration_committed":true,
-                        }),
-                    )
-                }
+            // Map publication already chose the name. Registration never
+            // makes a second name or role decision after the business commit.
+            let name_resolution = (|| -> Result<(serde_json::Value, binding_slot::BindingControlSet), String> {
+                let map = crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
+                let TypedCommand::RegisterWorker { binding, .. } = &command;
+                let key = map.key_for_worker(&binding.project_scope, &binding.app_scope_id, worker_id)?
+                    .ok_or("IDENTITY_MAP_NOT_FOUND: registration has no published mapping")?;
+                let result = json!({"outcome":"registered", "name":key.name,"session_id":binding.session_id});
+                Ok((result, map))
+            })();
+            let (name_resolution, control) = match name_resolution {
+                Ok(value) => value,
+                Err(error) => return Resp::err_data(error, json!({"registration_committed":true,
+                    "command_id":outcome.receipt.command_id.as_str(),"operation_id":outcome.receipt.operation_id.as_str()})),
             };
             let (role_brief, _) = {
                 let st = server.state.lock().unwrap();
-                (role_brief(server, &st, worker_id), ())
+                let brief = match role_brief(server, &st, &control, worker_id) {
+                    Ok(brief) => brief, Err(error) => return Resp::err_data(error, json!({"registration_committed":true})),
+                };
+                (brief, ())
             };
             Resp::data(json!({
                 "worker_id": worker_id,
@@ -1765,54 +1376,6 @@ fn consume_register_typed(
     }
 }
 
-/// Read the existing scoped Register owner. This never prepares, consumes,
-/// probes, or projects an invented command from a receipt.
-fn committed_register_readback(
-    server: &Server,
-    binding: &RuntimeBinding,
-    worker_id: &str,
-    token: &str,
-) -> Result<(global_state::CommandReceipt, SelectedTransport), String> {
-    let state = server.state.lock().unwrap();
-    if binding.agent_id.as_str() != worker_id
-        || state
-            .global
-            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
-            != Some(binding)
-    {
-        return Err("RECOVERY_RECONCILE_REQUIRED: committed staged binding changed".into());
-    }
-    let worker = state
-        .workers
-        .get(worker_id)
-        .ok_or("RECOVERY_RECONCILE_REQUIRED: committed staged worker missing")?;
-    if worker.token != token {
-        return Err("TOKEN_MISMATCH: staged readback credential does not own worker".into());
-    }
-    let transport = selected_transport_for_worker(worker)
-        .ok_or("RECOVERY_RECONCILE_REQUIRED: committed selected adaptor missing")?;
-    if transport.kind != TransportKind::Tmux || transport.tmux_endpoint != binding.tmux_endpoint {
-        return Err(
-            "RECOVERY_RECONCILE_REQUIRED: committed selected adaptor differs from binding".into(),
-        );
-    }
-    let receipt = state
-        .global
-        .command_receipts
-        .values()
-        .filter(|receipt| register_receipt_names_binding(receipt, binding))
-        .max_by_key(|receipt| (receipt.revision, receipt.sequence))
-        .ok_or("RECOVERY_RECONCILE_REQUIRED: exact committed Register receipt missing")?;
-    if receipt.outcome.get("scope") != Some(&json!(binding.route_scope())) {
-        return Err(
-            "RECOVERY_RECONCILE_REQUIRED: committed Register receipt scope missing or different"
-                .into(),
-        );
-    }
-    Ok((receipt.clone(), transport))
-}
-include!("part_06/register_typed.rs");
-
 /// Prepare then, before consume, hand the exact prepared envelope to
 /// `before_consume`. A hook error aborts the operation without consuming, so a
 /// failed outer durable binding can never dispatch Register.
@@ -1825,7 +1388,7 @@ fn register_typed_observed(
     project_scope: Option<ProjectScopeId>,
     app_scope: Option<AppServerId>,
     reuse_existing: bool,
-    register_approval: Option<&RegisterApprovalProof>,
+    name_tmux_session_name: Option<String>,
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
 ) -> Resp {
@@ -1855,17 +1418,16 @@ fn register_typed_observed(
             worker_id,
             transport,
             prepared,
-            register_approval,
+            name_tmux_session_name,
             name_pane_anchor,
         );
-    clear_context_cancel_operation();
-    crate::server::clear_context_register_start_binding();
     response
 }
 
 /// Ordinary Create has already reserved an exact peer id. Its execution cwd
 /// may be a linked worktree; registration and route identity remain the main.
 pub(crate) fn register_created_peer(
+    manager: &ProjectRuntimeManager,
     server: &Server,
     worker_id: &str,
     token: &str,
@@ -1884,10 +1446,16 @@ pub(crate) fn register_created_peer(
         Ok(selected) => selected,
         Err(error) => return Resp::err(format!("APPSERVER_ENDPOINT_REJECTED: {error}")),
     };
+    let _identity = manager.identity_gate.lock().unwrap();
     if server.state.lock().unwrap().workers.contains_key(worker_id) {
         return Resp::err("PEER_LIFECYCLE_PEER_RESERVED");
     }
     let main = route.root.to_string_lossy().into_owned();
+    let mut effect_id = None;
+    let mut before_consume = |prepared: &PreparedRegisterEnvelope| {
+        manager.publish_register_control_before_consume(server, prepared, None, None, None)
+            .map(|id| { effect_id = Some(id); })
+    };
     let response = register_typed_observed(
         server,
         worker_id,
@@ -1899,69 +1467,13 @@ pub(crate) fn register_created_peer(
         false,
         None,
         None,
-        None,
+        Some(&mut before_consume),
     );
     if !response.ok {
         return response;
     }
-    if let Err(error) = commit_current_thread_route_for_runtime(
-        server,
-        server,
-        worker_id,
-        &main,
-        Some(&context.app_scope_id),
-    ) {
-        let cleanup = retire_runtime_binding_after_route_failure(
-            server,
-            worker_id,
-            &main,
-            Some(&context.app_scope_id),
-            worker_id,
-            "Create route publication failed",
-        );
-        return Resp::err(format!("{error}; route cleanup: {cleanup:?}"));
-    }
-    response
-}
-
-pub(crate) fn handle_register_with_app_scope(
-    server: &Server,
-    worker_id: String,
-    token: String,
-    cwd: String,
-    app_scope: Option<AppServerId>,
-    candidates: Option<TransportCandidates>,
-) -> Resp {
-    let route_worker_id = worker_id.clone();
-    let route_cwd = cwd.clone();
-    let route_app_scope = app_scope.clone();
-    let response = handle_register_with_app_scope_inner(
-        server, worker_id, token, cwd, app_scope, candidates, false,
-    );
-    if !response.ok {
-        return response;
-    }
-    if let Err(error) = commit_current_thread_route_for_runtime(
-        server,
-        server,
-        &route_worker_id,
-        &route_cwd,
-        route_app_scope.as_ref(),
-    ) {
-        let cleanup = retire_runtime_binding_after_route_failure(
-            server,
-            &route_worker_id,
-            &route_cwd,
-            route_app_scope.as_ref(),
-            &route_worker_id,
-            "registration route publication failed",
-        );
-        let cleanup_status = cleanup
-            .map(|_| "registration binding retired".to_owned())
-            .unwrap_or_else(|cleanup_error| {
-                format!("registration cleanup failed: {cleanup_error}")
-            });
-        return Resp::err(format!("{error}; {cleanup_status}"));
+    if let Err(error) = manager.consume_register_effect(effect_id.as_deref()) {
+        return Resp::err_data(format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"), response.data);
     }
     response
 }
@@ -2035,54 +1547,6 @@ pub(crate) fn commit_current_thread_route_for_runtime(
         .map_err(|error| format!("ROUTE_TRANSITION_DURABILITY_FAILED: {error}"))
 }
 
-pub(crate) fn retire_runtime_binding_after_route_failure(
-    runtime: &Server,
-    worker_id: &str,
-    cwd: &str,
-    app_scope: Option<&AppServerId>,
-    closed_by: &str,
-    reason: &str,
-) -> Result<(), String> {
-    let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
-        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
-    let route_scope = RouteScope {
-        app_scope_id: app_scope.cloned().unwrap_or_else(|| {
-            AppServerId::new("tui-default").expect("static App Server scope must be valid")
-        }),
-        project_scope_id: project_scope,
-    };
-    let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
-        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
-    let binding = runtime
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_binding_for(&route_scope, &binding_id)
-        .cloned()
-        .ok_or_else(|| format!("ROUTE_CLEANUP_INVALID: no binding exists for {worker_id}"))?;
-    let next_generation = binding.endpoint_generation.checked_add(1).ok_or_else(|| {
-        format!("ROUTE_CLEANUP_INVALID: endpoint generation overflow for {worker_id}")
-    })?;
-    let mut retired = binding;
-    retired.endpoint_generation = next_generation;
-    retired.native_thread_id = None;
-    retired.tmux_endpoint = None;
-    runtime
-        .commit_checked(&[
-            Event::GlobalRuntimeBound { binding: retired },
-            Event::WorkerClosed {
-                worker_id: worker_id.to_owned(),
-                closed_by: closed_by.to_owned(),
-                reason: reason.to_owned(),
-                snapshot_captured_ms: None,
-                at_ms: now_ms(),
-            },
-        ])
-        .map(|_| ())
-        .map_err(|error| format!("ROUTE_CLEANUP_DURABILITY_FAILED: {error}"))
-}
-
 pub(crate) fn retire_current_thread_route_after_launch_failure(
     route_owner: &Server,
     runtime: &Server,
@@ -2137,57 +1601,6 @@ fn handle_register_with_app_scope_inner(
     )
 }
 
-/// The daemon-issued approval proof may admit the approved target's Register
-/// even when its credential is stale, but only for the exact target and route
-/// scope the proof names. The proof never substitutes for the real binding the
-/// reducer commits; it only relaxes the ordinary token-ownership check.
-fn approved_register_authorized(
-    proof: Option<&RegisterApprovalProof>,
-    worker_id: &str,
-    project_scope: Option<&ProjectScopeId>,
-    app_scope: Option<&AppServerId>,
-) -> bool {
-    match (proof, project_scope, app_scope) {
-        (Some(proof), Some(project_scope), Some(app_scope)) => {
-            proof.authorizes(worker_id, project_scope.as_str(), app_scope.as_str())
-        }
-        _ => false,
-    }
-}
-
-/// Recheck the exact approved incumbent fence at the Register owner boundary,
-/// immediately before effects. The proof records the committed incumbent the
-/// identity owner validated; if the reducer has since moved to another binding
-/// or generation, the approval is stale and must fail closed with the accepted
-/// typed conflict instead of committing an unapproved replacement.
-fn approved_register_fence_current(
-    state: &State,
-    proof: &RegisterApprovalProof,
-    project_scope: &ProjectScopeId,
-    app_scope: &AppServerId,
-) -> bool {
-    if proof.incumbent_binding_id.is_empty() {
-        return true;
-    }
-    let route_scope = RouteScope {
-        app_scope_id: app_scope.clone(),
-        project_scope_id: project_scope.clone(),
-    };
-    let Ok(binding_id) = BindingId::new(proof.incumbent_binding_id.clone()) else {
-        return false;
-    };
-    state
-        .global
-        .lookup_binding_for(&route_scope, &binding_id)
-        .is_some_and(|binding| {
-            binding.binding_id.as_str() == proof.incumbent_binding_id
-                && binding.endpoint_generation == proof.incumbent_endpoint_generation
-        })
-}
-
-/// Register owner with an optional outer-operation binder. When the binder is
-/// present, the outer `Validating` phase with the exact nested IDs is synced
-/// before the same prepared envelope is consumed.
 fn handle_register_with_app_scope_inner_bound(
     server: &Server,
     worker_id: String,
@@ -2208,7 +1621,7 @@ fn handle_register_with_app_scope_inner_bound(
     };
     let st = server.state.lock().unwrap();
     if st.admission_frozen() && !st.workers.contains_key(&worker_id) {
-        return Resp::err("MIGRATION_ADMISSION_FROZEN: only an existing identity may rebind");
+        return Resp::err("PROJECT_RESET_PENDING: only an existing identity may rebind while the committed reset completes");
     }
     if let Some(existing) = st.workers.get(&worker_id).cloned() {
         let existing_route_scope = match existing_route_scope(&st, &worker_id) {
@@ -2275,53 +1688,11 @@ fn handle_register_with_app_scope_inner_bound(
                         && thread.as_deref() == selected.thread_id.as_deref()
                         && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
                 });
-        let approval = outer_binding.and_then(RegisterOuterBinding::approval);
-        let approved_register = approved_register_authorized(
-            approval,
-            &worker_id,
-            existing_project_scope.as_ref(),
-            app_scope.as_ref(),
-        );
-        if existing.token != token && !approved_register {
-            return Resp::err(format!(
-                "TOKEN_MISMATCH: worker {} is registered by another token",
-                worker_id
-            ));
-        }
-        // The proof only relaxes the token check. It must still name exactly
-        // the committed incumbent, or the approval is stale and the owner
-        // refuses before any prepare/consume.
         if existing.token != token {
-            let Some(proof) = approval else {
-                return Resp::err("APPROVAL_STALE_CONFLICT");
-            };
-            let (Some(project_scope), Some(app_scope)) =
-                (existing_project_scope.as_ref(), app_scope.as_ref())
-            else {
-                return Resp::err("APPROVAL_STALE_CONFLICT");
-            };
-            if !approved_register_fence_current(&st, proof, project_scope, app_scope) {
-                return Resp::err("APPROVAL_STALE_CONFLICT");
-            }
+            return Resp::err(format!("TOKEN_MISMATCH: worker {} is registered by another token", worker_id));
         }
-        let reuse_existing = same_runtime_key && !recover_existing && !approved_register;
+        let reuse_existing = same_runtime_key && !recover_existing;
         drop(st);
-        let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
-            Some(binding) => {
-                binding.bind_validating(prepared)?;
-                binding.arbitrate_owner_start()?;
-                binding.promote_after_start()
-            }
-            None => Ok(()),
-        };
-        let mut control_before = register_control_first;
-        let mut composed_before_consume = |prepared: &PreparedRegisterEnvelope| {
-            before_consume(prepared)?;
-            if let Some(control_before) = control_before.as_mut() {
-                control_before(prepared)?;
-            }
-            Ok(())
-        };
         let mut resp = register_typed_observed(
             server,
             &worker_id,
@@ -2331,9 +1702,10 @@ fn handle_register_with_app_scope_inner_bound(
             existing_project_scope,
             app_scope,
             reuse_existing,
-            outer_binding.and_then(RegisterOuterBinding::approval),
+            outer_binding
+                .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
-            Some(&mut composed_before_consume),
+            register_control_first,
         );
         if resp.ok {
             if reuse_existing {
@@ -2345,22 +1717,6 @@ fn handle_register_with_app_scope_inner_bound(
         return resp;
     }
     drop(st);
-    let mut before_consume = |prepared: &PreparedRegisterEnvelope| match outer_binding {
-        Some(binding) => {
-            binding.bind_validating(prepared)?;
-            binding.arbitrate_owner_start()?;
-            binding.promote_after_start()
-        }
-        None => Ok(()),
-    };
-    let mut control_before = register_control_first;
-    let mut composed_before_consume = |prepared: &PreparedRegisterEnvelope| {
-        before_consume(prepared)?;
-        if let Some(control_before) = control_before.as_mut() {
-            control_before(prepared)?;
-        }
-        Ok(())
-    };
     register_typed_observed(
         server,
         &worker_id,
@@ -2370,23 +1726,10 @@ fn handle_register_with_app_scope_inner_bound(
         None,
         app_scope,
         false,
-        outer_binding.and_then(RegisterOuterBinding::approval),
+        outer_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
         outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
-        Some(&mut composed_before_consume),
+        register_control_first,
     )
-}
-
-/// Compatibility entry point for direct in-process callers.  Wire requests
-/// use `handle_register_with_app_scope` so the app scope comes from their
-/// validated ProjectContext; this adapter retains the historical tui route
-/// only when no wire context exists.
-pub(crate) fn handle_register(
-    server: &Server,
-    worker_id: String,
-    token: String,
-    cwd: String,
-) -> Resp {
-    handle_register_with_app_scope(server, worker_id, token, cwd, None, None)
 }
 
 fn existing_route_scope(state: &State, worker_id: &str) -> Result<Option<RouteScope>, Resp> {

@@ -324,6 +324,9 @@ fn bootstrap_master(
     if !should_launch {
         return emit_value(prepare);
     }
+    let stable_session = prepare["operation"]["approved_session_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("CEO_BOOTSTRAP_STABLE_ENDPOINT_REQUIRED"))?;
 
     let shell_command =
         bootstrap_shell_command(&project, &approval, &profile, &operation_id, &codex)?;
@@ -331,7 +334,7 @@ fn bootstrap_master(
         .arg("-S")
         .arg(&tmux_socket)
         .args(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t"])
-        .arg(format!("{tmux_session}:"))
+        .arg(format!("{stable_session}:"))
         .arg("-c")
         .arg(&project)
         .arg(&shell_command)

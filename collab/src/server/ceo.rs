@@ -154,6 +154,7 @@ impl ProjectRuntimeManager {
         token: &str,
     ) -> Result<(Arc<Server>, String), Resp> {
         let runtime = self.select_runtime(context).map_err(Resp::err)?;
+        let control = self.binding_control_store().load().map_err(Resp::err)?;
         let name = {
             let state = runtime.state.lock().unwrap();
             verify(&state, id, token)?;
@@ -161,29 +162,14 @@ impl ProjectRuntimeManager {
                 .map_err(Resp::err)?
                 .ok_or_else(|| Resp::err("CEO_SOURCE_BINDING_REQUIRED"))?;
             authoritative_send_binding(&state, &scope, id).map_err(Resp::err)?;
-            let name = state
-                .worker_names
-                .get(id)
-                .cloned()
-                .ok_or_else(|| Resp::err("CEO_SOURCE_NAME_REQUIRED"))?;
-            if state
-                .name_occupancy(scope.project_scope_id.as_str(), &name)
-                .is_none_or(|owner| owner.worker_id != id)
-            {
-                return Err(Resp::err("CEO_SOURCE_NAME_NOT_CURRENT"));
-            }
-            name
+            control.current_for_worker(&scope.project_scope_id, &scope.app_scope_id, id).map_err(Resp::err)?
+                .map(|slot| slot.identity_key.name.clone()).ok_or_else(|| Resp::err("CEO_SOURCE_NAME_REQUIRED"))?
         };
         Ok((runtime, name))
     }
 
     fn ceo_grant(&self) -> Result<CeoGrant, Resp> {
         let state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(Resp::err(format!(
-                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
-            )));
-        }
         state
             .ceo_grant
             .clone()
@@ -210,13 +196,15 @@ impl ProjectRuntimeManager {
         let runtime = runtimes.remove(0);
         let id = {
             let state = runtime.state.lock().unwrap();
-            let holder = state
-                .name_occupancy(&grant.workspace, &grant.name)
-                .ok_or_else(|| Resp::err("CEO_HOLDER_UNAVAILABLE"))?;
-            if !state.workers.contains_key(&holder.worker_id) {
+            let control = self.binding_control_store().load().map_err(Resp::err)?;
+            let scope = server_route_scope(&runtime, &state).map_err(Resp::err)?
+                .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
+            let current = control.current_for_name(&scope.project_scope_id, &scope.app_scope_id, &grant.name).map_err(Resp::err)?
+                .and_then(|slot| slot.active_binding()).ok_or_else(|| Resp::err("CEO_HOLDER_UNAVAILABLE"))?;
+            if !state.workers.contains_key(current.binding.agent_id.as_str()) {
                 return Err(Resp::err("CEO_HOLDER_UNAVAILABLE"));
             }
-            holder.worker_id.clone()
+            current.binding.agent_id.as_str().to_owned()
         };
         Ok((runtime, id))
     }
@@ -240,14 +228,15 @@ impl ProjectRuntimeManager {
     }
 
     fn ceo_status(&self, context: Option<&ProjectContext>, actor: &str) -> Resp {
-        let (grant, authority_error) = {
+        let grant = {
             let state = self.host.state.lock().unwrap();
-            (state.ceo_grant.clone(), state.journal_poison.clone())
+            state.ceo_grant.clone()
         };
-        let holder = grant
-            .as_ref()
-            .and_then(|grant| self.ceo_holder(grant).ok())
-            .map(|(_, id)| id);
+        let (holder, authority_error) = match grant.as_ref().map(|grant| self.ceo_holder(grant)) {
+            Some(Ok((_, id))) => (Some(id), None),
+            Some(Err(error)) => (None, error.error),
+            None => (None, None),
+        };
         let is_current = authority_error.is_none()
             && grant.as_ref().is_some_and(|g| {
                 context.is_some_and(|c| {
@@ -299,7 +288,7 @@ impl ProjectRuntimeManager {
         if !matches!(command, CeoCommand::Progress { .. })
             && source.state.lock().unwrap().admission_frozen()
         {
-            return Err(Resp::err("MIGRATION_ADMISSION_FROZEN"));
+            return Err(Resp::err("PROJECT_RESET_PENDING"));
         }
         match command {
             CeoCommand::Promote {
@@ -352,13 +341,6 @@ impl ProjectRuntimeManager {
                 in_reply_to,
                 urgent,
             } => {
-                if current_master_holder(&source, &source.state.lock().unwrap())
-                    .map_err(Resp::err)?
-                    .as_deref()
-                    != Some(&actor)
-                {
-                    return Err(Resp::err("CEO_REPLY_PROJECT_MASTER_REQUIRED"));
-                }
                 if subject.trim().is_empty() || body.trim().is_empty() {
                     return Err(Resp::err("CEO_MESSAGE_CONTENT_REQUIRED"));
                 }
@@ -372,6 +354,10 @@ impl ProjectRuntimeManager {
                     // CEO holder must still resolve; a stale grant is not a
                     // destination.
                     None => {
+                        if current_master_holder(&source, &source.state.lock().unwrap())
+                            .map_err(Resp::err)?.as_deref() != Some(&actor) {
+                            return Err(Resp::err("CEO_REPLY_PROJECT_MASTER_REQUIRED"));
+                        }
                         let _ = self.ceo_holder(&grant)?;
                         self.ceo_record_unsolicited_progress(&source, subject, body, urgent)
                     }
@@ -394,7 +380,10 @@ impl ProjectRuntimeManager {
                             None,
                             None,
                         );
-                        self.attach_solicited_progress(delivered, &source, subject, body, urgent)
+                        if current_master_holder(&source, &source.state.lock().unwrap())
+                            .map_err(Resp::err)?.as_deref() == Some(&actor) {
+                            self.attach_solicited_progress(delivered, &source, subject, body, urgent)
+                        } else { delivered }
                     }
                 }
             }
@@ -404,15 +393,6 @@ impl ProjectRuntimeManager {
                 body,
             } => self.ceo_bootstrap_ready(&source, &actor, &name, operation_id, subject, body),
             CeoCommand::DirectMessage { subject, body } => {
-                if current_master_holder(&source, &source.state.lock().unwrap())
-                    .map_err(Resp::err)?
-                    .as_deref()
-                    != Some(&actor)
-                {
-                    return Err(Resp::err(
-                        "CEO_DIRECT_MESSAGE_PROJECT_MASTER_REQUIRED: only the current project master may send a direct message to the CEO",
-                    ));
-                }
                 let grant = self.ceo_grant()?;
                 let (target, to) = self.ceo_holder(&grant)?;
                 self.ceo_deliver(
@@ -433,7 +413,12 @@ impl ProjectRuntimeManager {
                         let (target, master) = self.ceo_target_master(&project)?;
                         if let Some(to) = to {
                             let state = target.state.lock().unwrap();
-                            if to != master && state.worker_names.get(&master) != Some(&to) {
+                            let control = self.binding_control_store().load().map_err(Resp::err)?;
+                            let route = server_route_scope(&target, &state).map_err(Resp::err)?
+                                .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
+                            let current_name = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &master)
+                                .map_err(Resp::err)?.map(|slot| slot.identity_key.name.as_str());
+                            if to != master && current_name != Some(to.as_str()) {
                                 return Err(Resp::err("CEO_TARGET_MUST_BE_CURRENT_MASTER"));
                             }
                         }
@@ -578,11 +563,11 @@ impl ProjectRuntimeManager {
         let target_project = target.root.to_string_lossy().into_owned();
         let target_name = {
             let state = target.state.lock().unwrap();
-            state
-                .worker_names
-                .get(to)
-                .cloned()
-                .ok_or_else(|| Resp::err("CEO_TARGET_NAME_REQUIRED"))?
+            let control = self.binding_control_store().load().map_err(Resp::err)?;
+            let route = server_route_scope(target, &state).map_err(Resp::err)?
+                .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
+            control.current_for_worker(&route.project_scope_id, &route.app_scope_id, to).map_err(Resp::err)?
+                .map(|slot| slot.identity_key.name.clone()).ok_or_else(|| Resp::err("CEO_TARGET_NAME_REQUIRED"))?
         };
         let from = format!("{}@{}", name, source_project);
         if let Some(id) = in_reply_to.as_deref() {
@@ -616,7 +601,7 @@ impl ProjectRuntimeManager {
             let sender_matches = if from_ceo {
                 destination_is_ceo
             } else {
-                original.from == expected_from
+                original.from == expected_from || original.from == format!("{}@{}", to, target_project)
             };
             if !recipient || (!sender_matches && !identical_reply_exists) {
                 return Err(Resp::err("CEO_REPLY_SCOPE_OR_RECIPIENT_REJECTED"));
@@ -634,14 +619,15 @@ impl ProjectRuntimeManager {
         let (mid, subscription, task_id, deduplicated) = {
             let mut state = target.state.lock().unwrap();
             if state.admission_frozen() {
-                return Err(Resp::err("MIGRATION_ADMISSION_FROZEN"));
+                return Err(Resp::err("PROJECT_RESET_PENDING"));
             }
-            if state
-                .name_occupancy(&target_project, &target_name)
-                .is_none_or(|o| o.worker_id != to)
-            {
-                return Err(Resp::err("CEO_TARGET_NAME_CHANGED"));
-            }
+            let control = self.binding_control_store().load().map_err(Resp::err)?;
+            let route = server_route_scope(target, &state).map_err(Resp::err)?
+                .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
+            let slot = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, to).map_err(Resp::err)?
+                .ok_or_else(|| Resp::err("CEO_TARGET_NAME_REQUIRED"))?;
+            if slot.identity_key.name != target_name { return Err(Resp::err("CEO_TARGET_NAME_CHANGED")); }
+            let target_session = slot.active_binding().unwrap().binding.session_id.as_ref().map(ToString::to_string);
             if let Some((new_task, _)) = &task {
                 if state.tasks.contains_key(&new_task.id) {
                     return Err(Resp::err("BOARD_TASK_ALREADY_EXISTS"));
@@ -692,10 +678,7 @@ impl ProjectRuntimeManager {
                 let mut events = Vec::new();
                 let task_id = if let Some((task, details)) = task {
                     let id = task.id.clone();
-                    let occupancy = state
-                        .name_occupancy(&target_project, &target_name)
-                        .cloned()
-                        .ok_or_else(|| Resp::err("CEO_TARGET_NAME_CHANGED"))?;
+                    let session = target_session.clone().ok_or_else(|| Resp::err("CEO_TARGET_SESSION_REQUIRED"))?;
                     events.push(Event::TaskCreated { task });
                     events.push(Event::BoardDetailsChanged {
                         task_id: id.clone(),
@@ -705,7 +688,7 @@ impl ProjectRuntimeManager {
                         assignment: name_state::TaskAssignment {
                             task_id: id.clone(),
                             name: target_name.clone(),
-                            session_id: occupancy.session_id,
+                            session_id: session,
                             assignment_revision: 1,
                             reflow: None,
                             updated_ms: now_ms(),
@@ -725,7 +708,7 @@ impl ProjectRuntimeManager {
                 });
                 if let Some(policy) = policy {
                     let mut obligation = reply_obligation::build_obligation(
-                        &state,
+                        Some(name.into()),
                         mid.clone(),
                         target_project.clone(),
                         actor.into(),
@@ -872,11 +855,6 @@ impl ProjectRuntimeManager {
         }
         let project = source.root.to_string_lossy().into_owned();
         let mut state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(Resp::err(format!(
-                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
-            )));
-        }
         // Probe the helper dedup on a clone so the response can state truthfully
         // whether this call created a meaningful revision.
         let mut probe = state.ceo_report_state.clone();
@@ -994,11 +972,6 @@ impl ProjectRuntimeManager {
         }
         let reported_ms = now_ms().max(0) as u64;
         let mut state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(Resp::err(format!(
-                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
-            )));
-        }
         if !state.ceo_report_state.batches.contains_key(&batch_id) {
             return Err(Resp::err(
                 "CEO_REPORT_BATCH_UNKNOWN: no unacknowledged batch has this id",
@@ -1033,11 +1006,6 @@ impl ProjectRuntimeManager {
             .map_err(|error| Resp::err(format!("CEO_REPORT_POLICY_INVALID: {error}")))?;
         let now = now_ms().max(0) as u64;
         let mut state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(Resp::err(format!(
-                "CEO_AUTHORITY_STORE_UNAVAILABLE: {error}"
-            )));
-        }
         let last = state.ceo_report_state.last_actual_report_ms();
         let decision = policy.evaluate(now, last, false);
         let pending: Vec<_> = state
@@ -1119,6 +1087,7 @@ impl ProjectRuntimeManager {
     }
 
     fn ceo_progress(&self, project: Option<String>) -> Result<Resp, Resp> {
+        let control = self.binding_control_store().load().map_err(Resp::err)?;
         let (roots, project_filter) = if let Some(project) = project {
             let root = std::fs::canonicalize(project)
                 .map_err(|e| Resp::err(format!("CEO_PROJECT_INVALID: {e}")))?;
@@ -1182,11 +1151,12 @@ impl ProjectRuntimeManager {
                 }) {
                     if let Some(view) = board_task_view_with_master(
                         &state,
+                        &control,
                         task,
                         None,
                         master.as_deref(),
                         scope.as_ref(),
-                    ) {
+                    ).map_err(Resp::err)? {
                         *counts.entry(view.status.clone()).or_default() += 1;
                         tasks.push(serde_json::to_value(view).expect("board view serializes"));
                     }

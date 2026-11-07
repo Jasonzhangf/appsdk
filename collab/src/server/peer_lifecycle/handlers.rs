@@ -80,7 +80,6 @@ fn handle_read(
                                 binding.project_scope.as_str(),
                                 binding.app_scope_id.as_str(),
                                 binding.binding_id.as_str(),
-                                binding.endpoint_generation,
                             )
                     }) {
                         read.outcome = PeerLifecycleOutcome::CleanupOpen;
@@ -109,14 +108,19 @@ fn handle_read(
     };
     // Reuse the public status/presence owner outside the reducer lock. The
     // narrow role projection excludes unrelated parent/master instructions.
-    let mut projection = worker_status_summary_with_maps(
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let projection = worker_status_summary_with_maps(
         server,
+        &control,
         &tasks,
         &msgs,
         &keepalives,
         json!({"role": "peer"}),
         &worker,
     );
+    let mut projection = match projection { Ok(projection) => projection, Err(error) => return Resp::err(error) };
     let (fenced, recorded_close) = {
         let state = server.state.lock().unwrap();
         if verify(&state, worker_id, token).is_err()
@@ -154,7 +158,6 @@ fn handle_read(
                     target.project_scope.as_str(),
                     target.app_scope_id.as_str(),
                     target.binding_id.as_str(),
-                    target.endpoint_generation,
                 )
         });
         // Any recorded Close that is not a clean refusal/cancellation keeps the
@@ -664,7 +667,6 @@ fn handle_close(
                             target.project_scope.as_str(),
                             target.app_scope_id.as_str(),
                             target.binding_id.as_str(),
-                            target.endpoint_generation,
                         )
                 });
                 if fenced {

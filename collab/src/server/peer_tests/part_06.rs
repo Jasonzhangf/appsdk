@@ -178,13 +178,21 @@ fn daemon_restart_does_not_restore_without_registered_transport() {
 }
 
 #[test]
-fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
+fn expired_messages_are_removed_and_current_payloads_and_tasks_survive_reload() {
     let (server, root) = test_server();
     assert!(register(&server, "peer", "%peer").ok);
     let now = now_ms();
     let old_id = "m-old".to_string();
     let fresh_id = "m-fresh".to_string();
+    let task = TaskRec {
+        id: "retained-task".into(), owner: "peer".into(), created_by: "sender".into(),
+        feature_id: Some("current-retention".into()), worktree_path: Some("/task/retention".into()),
+        branch: Some("codex/current-retention".into()), base_commit: Some("retention-base".into()),
+        priority: "p1".into(), status: "working".into(), next_step: Some("continue current task".into()),
+        wait: None, isolation_mode: None, created_ms: now - 100, updated_ms: now - 50,
+    };
     server.commit(&[
+        Event::TaskCreated { task: task.clone() },
         Event::Sent {
             msg: Message {
                 id: old_id.clone(),
@@ -223,13 +231,7 @@ fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
             source_thread_id: Some("thread-source".into()),
         },
     ]);
-    let mailbox = root.join(".agent-collab/mailbox");
-    assert!(mailbox.join("m-old.json").exists());
-    assert!(mailbox.join("m-fresh.json").exists());
-    let journal_before = std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-        .unwrap()
-        .lines()
-        .count();
+    let fresh = server.state.lock().unwrap().msgs[&fresh_id].clone();
 
     assert_eq!(purge_expired_storage(&server, now), 1);
     let state = server.state.lock().unwrap();
@@ -238,19 +240,13 @@ fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
     assert!(state.msgs.contains_key(&fresh_id));
     assert!(state.workers.contains_key("peer"));
     drop(state);
-    assert!(!mailbox.join("m-old.json").exists());
-    assert!(mailbox.join("m-fresh.json").exists());
-    let journal = std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
-    assert!(!journal.contains("m-old"));
-    assert!(journal.contains("m-fresh"));
-    assert!(journal.lines().count() < journal_before);
-
-    let replayed = replay(&root).unwrap();
-    assert!(!replayed.msgs.contains_key(&old_id));
-    assert!(!replayed.delivery_source_threads.contains_key(&old_id));
-    assert_eq!(replayed.msgs[&fresh_id].body, "fresh body");
+    let loaded = current_state::load(&server.state_path, false).unwrap();
+    assert!(!loaded.msgs.contains_key(&old_id));
+    assert!(!loaded.delivery_source_threads.contains_key(&old_id));
+    assert_eq!(serde_json::to_value(&loaded.msgs[&fresh_id]).unwrap(), serde_json::to_value(fresh).unwrap());
+    assert_eq!(serde_json::to_value(&loaded.tasks[&task.id]).unwrap(), serde_json::to_value(&task).unwrap());
     assert_eq!(
-        replayed.workers["peer"]
+        loaded.workers["peer"]
             .transport
             .as_ref()
             .and_then(|transport| transport.thread_id.as_deref()),
@@ -299,23 +295,12 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
             retry_attempted: false,
         },
     }]);
-    server.commit(&[Event::MigrationUpdated {
-        migration: MigrationRecord {
-            id: "migration".into(),
-            from_version: "v1".into(),
-            to_version: "v1".into(),
-            phase: "applied".into(),
-            admission_frozen: true,
-            snapshot_hash: None,
-            worker_count: 1,
-            task_count: 0,
-            message_count: 2,
-            operator: "peer".into(),
-            issues: Vec::new(),
-            created_ms: now,
-            updated_ms: now,
-        },
-    }]);
+    // Keep the retained messages while seeding an already-pending reset.
+    {
+        let mut state = server.state.lock().unwrap();
+        state.pending_project_resets.insert(root.display().to_string(), true);
+        current_state::save(&server.state_path, &state).unwrap();
+    }
     assert_eq!(purge_expired_storage(&server, now), 0);
     assert!(server
         .state
@@ -323,6 +308,7 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
         .unwrap()
         .msgs
         .contains_key("m-old-frozen"));
+    assert!(current_state::load(&server.state_path, false).unwrap().msgs.contains_key("m-old-frozen"));
     std::fs::remove_dir_all(root).ok();
 }
 

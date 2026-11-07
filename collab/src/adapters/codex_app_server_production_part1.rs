@@ -350,11 +350,15 @@ pub(crate) fn identity_facts_from_env() -> Result<IdentityFacts, AdapterError> {
 
     let host_facts = crate::host_runtime::host_runtime_facts();
     if let Some(agy_session) = host_facts.agy_session_id {
+        facts.agent_kind = Some("antigravity".into());
         facts.session_id = Some(agy_session);
         facts.thread_id = None;
         facts.endpoint = None;
         facts.namespace = None;
     } else {
+        if crate::host_runtime::nearest_agent_host() == Some(crate::host_runtime::AgentKind::Codex) {
+            facts.agent_kind = Some("codex".into());
+        }
         facts.session_id = std::env::var("CODEX_SESSION_ID")
             .ok()
             .filter(|value| !value.trim().is_empty());

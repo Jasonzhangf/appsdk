@@ -1,6 +1,26 @@
 // Durable bootstrap phases; the CLI owns process launch and the real master
 // owns registration. No agent identity is fabricated by this owner.
 impl ProjectRuntimeManager {
+    pub(super) fn verify_bootstrap_pane(record: &CeoBootstrapRecord, pane: &str) -> Result<(), Resp> {
+        let server_pid = record.approved_server_pid.ok_or_else(||
+            Resp::err("CEO_BOOTSTRAP_STABLE_ENDPOINT_REQUIRED"))?;
+        let session = record.approved_session_id.as_deref().ok_or_else(||
+            Resp::err("CEO_BOOTSTRAP_STABLE_ENDPOINT_REQUIRED"))?;
+        let probe = Command::new("tmux")
+            .args(["-S", &record.tmux_socket, "display-message", "-p", "-t", pane,
+                "#{pid}\t#{pane_id}\t#{session_id}"])
+            .output().map_err(|error| Resp::err(format!("CEO_BOOTSTRAP_ENDPOINT_UNAVAILABLE: {error}")))?;
+        let line = String::from_utf8_lossy(&probe.stdout);
+        let fields: Vec<_> = line.trim().split('\t').collect();
+        if !probe.status.success() || fields.len() != 3
+            || fields[0].parse::<u32>().ok() != Some(server_pid)
+            || fields[1] != pane || fields[2] != session
+        {
+            return Err(Resp::err("CEO_BOOTSTRAP_LAUNCHED_ENDPOINT_NOT_CURRENT"));
+        }
+        Ok(())
+    }
+
     fn ceo_bootstrap_cancel(&self, id: String, approval: String) -> Result<Resp, Resp> {
         if approval.trim().is_empty() {
             return Err(Resp::err("CEO_BOOTSTRAP_CANCELLATION_APPROVAL_REQUIRED"));
@@ -93,17 +113,22 @@ impl ProjectRuntimeManager {
                 &tmux_socket,
                 "list-sessions",
                 "-F",
-                "#{session_id}\t#{session_name}",
+                "#{pid}\t#{session_id}\t#{session_name}",
             ])
             .output()
             .map_err(|e| Resp::err(format!("TMUX_ENDPOINT_UNAVAILABLE: {e}")))?;
-        if !sessions.status.success()
-            || !String::from_utf8_lossy(&sessions.stdout)
-                .lines()
-                .any(|line| line.split('\t').any(|part| part == tmux_session))
-        {
+        let output = String::from_utf8_lossy(&sessions.stdout);
+        let approved = output.lines().find_map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            if fields.len() != 3 || (fields[1] != tmux_session && fields[2] != tmux_session) {
+                return None;
+            }
+            fields[0].parse::<u32>().ok().map(|pid| (pid, fields[1].to_owned()))
+        });
+        if !sessions.status.success() || approved.is_none() {
             return Err(Resp::err("TMUX_ENDPOINT_OR_SESSION_UNAVAILABLE"));
         }
+        let (approved_server_pid, approved_session_id) = approved.unwrap();
         let record = CeoBootstrapRecord {
             operation_id: operation_id.clone(),
             project: project.clone(),
@@ -111,6 +136,8 @@ impl ProjectRuntimeManager {
             profile,
             tmux_socket,
             tmux_session,
+            approved_server_pid: Some(approved_server_pid),
+            approved_session_id: Some(approved_session_id),
             requested_by: actor.name.clone(),
             requested_workspace: actor.workspace.clone(),
             requested_app_scope: actor.app_scope_id.clone(),
@@ -186,6 +213,9 @@ impl ProjectRuntimeManager {
         if outcome == "launched" && pane_id.as_ref().is_none_or(|id| id.trim().is_empty()) {
             return Err(Resp::err("CEO_BOOTSTRAP_PANE_RECEIPT_REQUIRED"));
         }
+        if outcome == "launched" {
+            Self::verify_bootstrap_pane(&record, pane_id.as_deref().unwrap())?;
+        }
         record.phase = outcome;
         record.pane_id = pane_id;
         record.error = error;
@@ -246,25 +276,9 @@ impl ProjectRuntimeManager {
         if endpoint.pane_id != expected_pane || actual_socket != approved_socket {
             return Err(Resp::err("CEO_BOOTSTRAP_LAUNCHED_PANE_REQUIRED"));
         }
-        let probe = Command::new("tmux")
-            .arg("-S")
-            .arg(&approved_socket)
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                expected_pane,
-                "#{pid}\t#{pane_id}\t#{session_name}",
-            ])
-            .output()
-            .map_err(|e| Resp::err(format!("CEO_BOOTSTRAP_ENDPOINT_UNAVAILABLE: {e}")))?;
-        let line = String::from_utf8_lossy(&probe.stdout);
-        let fields = line.trim().split('\t').collect::<Vec<_>>();
-        if !probe.status.success()
-            || fields.len() != 3
-            || fields[0] != endpoint.server_pid.to_string()
-            || fields[1] != expected_pane
-            || (fields[2] != record.tmux_session && endpoint.tmux_session_id != record.tmux_session)
+        Self::verify_bootstrap_pane(&record, expected_pane)?;
+        if Some(endpoint.server_pid) != record.approved_server_pid
+            || Some(endpoint.tmux_session_id.as_str()) != record.approved_session_id.as_deref()
         {
             return Err(Resp::err("CEO_BOOTSTRAP_LAUNCHED_ENDPOINT_NOT_CURRENT"));
         }

@@ -162,7 +162,7 @@ mod required_review_state_tests {
     }
 
     #[test]
-    fn changed_contract_invalidates_acceptance_and_compaction_preserves_subject() {
+    fn changed_contract_invalidates_acceptance_and_current_state_preserves_subject() {
         let mut state = reviewed_state();
         let task = state.tasks["task"].clone();
         let mut record = state.task_lifecycle["task"].clone();
@@ -170,10 +170,7 @@ mod required_review_state_tests {
         assert_eq!(record.review_subject_revision, 3);
         state.task_lifecycle.insert("task".into(), record);
         assert!(!work_review_valid(&state, "task"));
-        let mut replay = State::default();
-        for event in state.snapshot_events() {
-            replay.apply_checked(&event).unwrap();
-        }
+        let replay: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert_eq!(
             replay.task_lifecycle["task"]
                 .required_reviewer_name

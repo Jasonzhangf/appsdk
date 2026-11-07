@@ -151,17 +151,6 @@ fn project_patrol_subscriptions(status: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn project_patrol_suppressions(fixture: &AppFixture, subscription_id: &str) -> usize {
-    std::fs::read_to_string(fixture.name_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| {
-            event["ev"] == "NotificationSuppressed" && event["subscription_id"] == subscription_id
-        })
-        .count()
-}
-
 fn has_direct_message_subscription(status: &Value) -> bool {
     status["subscriptions"]
         .as_array()
@@ -360,7 +349,6 @@ fn current_master_cancel_projects_status_repeats_idempotently_and_exact_subscrib
         "{status}"
     );
     let cancelled_ms = projection["updated_ms"].as_i64().unwrap();
-    let suppressions_before = project_patrol_suppressions(&fixture, &patrol_id);
 
     let repeated = cancel_patrol(&fixture, THREAD_A);
     assert_eq!(
@@ -380,11 +368,6 @@ fn current_master_cancel_projects_status_repeats_idempotently_and_exact_subscrib
     assert_eq!(
         repeated_status["project_patrol"]["reason"], reason,
         "a repeated cancel must not overwrite the original reason: {repeated_status}"
-    );
-    assert_eq!(
-        project_patrol_suppressions(&fixture, &patrol_id),
-        suppressions_before,
-        "a repeated cancel must not write another suppression event"
     );
 
     let rearmed = subscribe_patrol(&fixture);
@@ -714,17 +697,22 @@ fn same_stable_name_new_session_retains_the_cancelled_project_patrol() {
     let patrol_id = armed["subscription"]["id"].as_str().unwrap().to_owned();
     cancel_patrol(&fixture, THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
-    fixture.append_name_events(&[json!({
-        "ev": "AgentPresenceObserved",
-        "presence": {
-            "project_scope": std::fs::canonicalize(&fixture.project).unwrap(),
-            "worker_id": old_worker.as_str(),
-            "session_id": THREAD_A,
-            "presence": "unknown",
-            "reason": "fixture old Jenny carrier stopped responding",
-            "observed_ms": 1
-        }
-    })]);
+    let project = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| {
+        state["agent_presence"][&project][&old_worker] = json!({
+                "project_scope": project,
+                "worker_id": old_worker.as_str(),
+                "session_id": THREAD_A,
+                "presence": "unknown",
+                "reason": "fixture old Jenny carrier stopped responding",
+                "observed_ms": 1
+        })
+    });
 
     let restored = fixture.run_public(
         &[
@@ -874,10 +862,8 @@ fn cancel_supersedes_a_pending_project_patrol_wake_without_delivery() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    fixture.append_name_events(&[
-        json!({
-            "ev": "Sent",
-            "msg": {
+    fixture.update_current_state(|state| {
+        state["msgs"][message_id] = json!({
                 "id": message_id,
                 "from": "collab-server",
                 "to": master_id,
@@ -889,20 +875,10 @@ fn cancel_supersedes_a_pending_project_patrol_wake_without_delivery() {
                 "wake_attempt_count": 1,
                 "last_wake_attempt_ms": 0,
                 "retry_attempted": true
-            }
-        }),
-        json!({
-            "ev": "DeliveryMode",
-            "msg_id": message_id,
-            "mode": "explicit-notification",
-            "source_thread_id": null
-        }),
-        json!({
-            "ev": "WakeBound",
-            "message_id": message_id,
-            "subscription_id": patrol_id
-        }),
-    ]);
+        });
+        state["delivery_modes"][message_id] = json!("explicit-notification");
+        state["wake_bindings"][message_id] = json!(patrol_id);
+    });
     assert_eq!(
         fixture.run_public(&["msg", message_id], THREAD_A)["state"],
         "pending",
@@ -916,44 +892,28 @@ fn cancel_supersedes_a_pending_project_patrol_wake_without_delivery() {
         "superseded",
         "cancel must end the pending wake's delivery eligibility"
     );
-    let events: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
     assert!(
-        events.iter().any(|event| {
-            event["ev"] == "Superseded"
-                && event["ids"]
-                    .as_array()
-                    .is_some_and(|ids| ids.iter().any(|id| id == message_id))
-        }),
-        "cancel must commit the existing supersede event"
-    );
-    assert!(
-        !events.iter().any(|event| {
-            event["ev"] == "NotificationDeliveryAccepted" && event["message_id"] == message_id
-        }),
+        fixture.current_state()["notification_delivery_accepted"][message_id].is_null(),
         "a superseded pending wake must never be accepted as a fresh patrol"
     );
 
-    // A daemon restart must replay the same terminal state, not a fresh wake.
+    assert!(!fixture
+        .state
+        .lock()
+        .unwrap()
+        .values()
+        .flat_map(|thread| &thread.inputs)
+        .any(|input| input.to_string().contains(message_id)));
+    // A daemon restart must retain the same terminal state, not a fresh wake.
     fixture.restart_daemon();
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(
         fixture.run_public(&["msg", message_id], THREAD_A)["state"],
         "superseded"
     );
-    let replay: Vec<Value> = std::fs::read_to_string(fixture.name_journal())
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
     assert!(
-        !replay.iter().any(|event| {
-            event["ev"] == "NotificationDeliveryAccepted" && event["message_id"] == message_id
-        }),
-        "replay must not deliver the superseded patrol wake"
+        fixture.current_state()["notification_delivery_accepted"][message_id].is_null(),
+        "restart must not deliver the superseded patrol wake"
     );
 }
 
@@ -967,27 +927,26 @@ fn expired_historical_patrol_does_not_shadow_the_current_control_record() {
         .unwrap()
         .as_millis() as i64;
     let expired_id = "project-patrol-expired";
-    fixture.append_name_events(&[json!({
-        "ev": "NotificationSubscribed",
-        "subscription": {
-            "id": expired_id,
-            "worker_id": master_id,
-            "event": "master-idle",
-            "subject": "project-patrol",
-            "target": THREAD_A,
-            "method": "appserver",
-            "trigger_ms": now - 7_200_000,
-            "trigger_times_ms": [],
-            "interval_ms": 900_000,
-            "repeat_count": 100,
-            "fired_count": 100,
-            "expires_ms": now - 3_600_000,
-            "status": "armed",
-            "created_ms": now - 86_400_000,
-            "updated_ms": now - 7_200_000,
-            "status_reason": null
-        }
-    })]);
+    fixture.update_current_state(|state| {
+        state["notification_subscriptions"][expired_id] = json!({
+                "id": expired_id,
+                "worker_id": master_id,
+                "event": "master-idle",
+                "subject": "project-patrol",
+                "target": THREAD_A,
+                "method": "appserver",
+                "trigger_ms": now - 7_200_000,
+                "trigger_times_ms": [],
+                "interval_ms": 900_000,
+                "repeat_count": 100,
+                "fired_count": 100,
+                "expires_ms": now - 3_600_000,
+                "status": "armed",
+                "created_ms": now - 86_400_000,
+                "updated_ms": now - 7_200_000,
+                "status_reason": null
+        })
+    });
 
     // The expired record is older, so an oldest-first selector without an
     // expiry filter would reuse it instead of ensuring the live record.

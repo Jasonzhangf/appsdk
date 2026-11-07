@@ -117,7 +117,7 @@ fn board_status(fixture: &AppFixture, id: &str) -> String {
 
 #[test]
 fn member_block_is_pending_until_master_approves() {
-    let (fixture, _master, peer, _third) = setup_block();
+    let (mut fixture, _master, peer, _third) = setup_block();
     publish_claim(&fixture, "approval-happy");
     let applied = fixture.run_public(
         &[
@@ -140,6 +140,15 @@ fn member_block_is_pending_until_master_approves() {
         "working",
         "a pending application never flips the board status"
     );
+    let pending = fixture.current_state()["task_block_requests"]["approval-happy"].clone();
+    assert_eq!(pending["state"], "pending", "{pending}");
+    fixture.restart_daemon();
+    assert_eq!(
+        fixture.current_state()["task_block_requests"]["approval-happy"],
+        pending,
+        "restart must retain the exact current pending request"
+    );
+    assert_eq!(board_status(&fixture, "approval-happy"), "working");
     let decided = fixture.run_public(
         &[
             "task",
@@ -154,6 +163,15 @@ fn member_block_is_pending_until_master_approves() {
     );
     assert_eq!(decided["block_request"]["state"], "approved", "{decided}");
     assert_eq!(decided["status"], "blocked", "{decided}");
+    assert_eq!(board_status(&fixture, "approval-happy"), "blocked");
+    let approved = fixture.current_state()["task_block_requests"]["approval-happy"].clone();
+    assert_eq!(approved["state"], "approved", "{approved}");
+    fixture.restart_daemon();
+    assert_eq!(
+        fixture.current_state()["task_block_requests"]["approval-happy"],
+        approved,
+        "restart must retain the exact approved decision"
+    );
     assert_eq!(board_status(&fixture, "approval-happy"), "blocked");
 }
 

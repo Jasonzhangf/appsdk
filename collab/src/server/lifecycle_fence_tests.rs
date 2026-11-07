@@ -14,7 +14,6 @@ fn exact_fence(worker_id: &str, operation_id: &str) -> state::ResponsibilityFenc
         project_scope: "/tmp/lifecycle-fence-project".into(),
         app_scope: "tui-default".into(),
         binding_id: format!("binding-{worker_id}"),
-        endpoint_generation: 1,
         snapshot: state::ResponsibilitySnapshot::default(),
         state: "closing".into(),
         created_ms: 1,
@@ -129,7 +128,6 @@ fn subagent(peer: &str, id: &str, status: &str) -> crate::subagent::Record {
         runtime: None,
         create_operation_id: None,
         binding_id: None,
-        endpoint_generation: None,
     }
 }
 
@@ -163,7 +161,6 @@ fn public_details() -> crate::board::BoardTaskDetails {
         invitation: Some(crate::board::BoardInvitation {
             peer_id: "invitee".into(),
             binding_id: "invite-binding".into(),
-            endpoint_generation: 13,
             message_id: "offer-message".into(),
             created_ms: 3,
             original_status: None,
@@ -204,13 +201,6 @@ fn assert_exact_public_details(state: &State, task_id: &str) {
         details
             .invitation
             .as_ref()
-            .map(|invite| invite.endpoint_generation),
-        Some(13)
-    );
-    assert_eq!(
-        details
-            .invitation
-            .as_ref()
             .map(|invite| invite.message_id.as_str()),
         Some("offer-message")
     );
@@ -229,23 +219,22 @@ fn fence(server: &Server, worker_id: &str, operation_id: &str) {
         .unwrap();
 }
 
-fn assert_rejected_before_bytes(server: &Server, root: &Path, events: &[Event]) -> String {
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    let before = std::fs::read(&journal_path).unwrap();
-    let sequence_before = server.state.lock().unwrap().sequence;
+fn assert_rejected_before_bytes(server: &Server, _root: &Path, events: &[Event]) -> String {
+    let before = std::fs::read(&server.state_path).unwrap();
+    let state_before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
     let error = server.commit_checked(events).unwrap_err().to_string();
     assert!(error.contains("target_closing"), "{error}");
     let state = server.state.lock().unwrap();
-    assert_eq!(state.sequence, sequence_before);
+    assert_eq!(serde_json::to_value(&*state).unwrap(), state_before);
     drop(state);
-    assert_eq!(std::fs::read(&journal_path).unwrap(), before);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
     error
 }
 
 /// Every writer class named by the accepted lifecycle contract must be refused
-/// before journal bytes change while the exact target is fenced.
+/// before current state changes while the exact target is fenced.
 #[test]
-fn fence_rejects_every_responsibility_writer_class_before_journal_bytes_change() {
+fn fence_rejects_every_responsibility_writer_class_before_current_state_changes() {
     let (server, root) = fence_server();
     fence(&server, TARGET, "close-op");
 
@@ -494,27 +483,19 @@ fn fence_batch_self_admission_rejects_own_target_additions() {
 }
 
 #[test]
-fn fence_survives_replay_and_compaction() {
+fn fence_survives_current_state_reload() {
     let (server, root) = fence_server();
     fence(&server, TARGET, "close-op");
-    {
-        let state = server.state.lock().unwrap();
-        let events = state.snapshot_events();
-        let mut checkpointed = State::default();
-        for (line, event) in events.iter().enumerate() {
-            apply_replayed_event(&mut checkpointed, event, line + 1).unwrap();
-        }
-        assert!(checkpointed.responsibility_fences["close-op"].is_active());
-    }
-    let replayed = replay(&root).unwrap();
-    assert!(replayed.responsibility_fences["close-op"].is_active());
+    let loaded = current_state::load(&server.state_path, false).unwrap();
+    assert!(loaded.responsibility_fences["close-op"].is_active());
+    assert_eq!(serde_json::to_value(&loaded.responsibility_fences["close-op"]).unwrap(),
+        serde_json::to_value(exact_fence(TARGET, "close-op")).unwrap());
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn close_admission_races_responsibility_writer_without_lost_snapshot() {
     let (server, root) = fence_server();
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
     let barrier = Arc::new(std::sync::Barrier::new(3));
 
     let close_server = Arc::clone(&server);
@@ -597,25 +578,14 @@ fn close_admission_races_responsibility_writer_without_lost_snapshot() {
         }
     };
 
-    assert_replayed(&replay(&root).unwrap(), "replay");
-    server
-        .rewrite_journal_locked(&server.state.lock().unwrap())
-        .unwrap();
-    assert_replayed(&replay(&root).unwrap(), "compaction replay");
-
-    let journal = std::fs::read_to_string(&journal_path).unwrap();
-    assert!(journal.contains("ResponsibilityFenceSet"), "{journal}");
-    if writer_error.is_some() {
-        assert!(!journal.contains("task-race"), "{journal}");
-    } else {
-        assert!(journal.contains("task-race"), "{journal}");
-    }
+    assert_replayed(&current_state::load(&server.state_path, false).unwrap(), "current reload");
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn close_writer_first_compaction_preserves_snapshot_and_checkpoint() {
+fn close_writer_first_current_state_preserves_responsibilities_and_versions() {
     let (server, root) = fence_server();
+    let initial = { let state = server.state.lock().unwrap(); (state.sequence, state.revision) };
     server
         .commit_checked(&[Event::TaskCreated {
             task: task(TARGET, "task-race", "pending"),
@@ -646,9 +616,9 @@ fn close_writer_first_compaction_preserves_snapshot_and_checkpoint() {
         let state = server.state.lock().unwrap();
         (state.sequence, state.revision)
     };
-    assert_eq!(version, (3, 3));
+    assert_eq!(version, (initial.0 + 2, initial.1 + 2));
 
-    let pre_rewrite = replay(&root).unwrap();
+    let pre_rewrite = current_state::load(&server.state_path, false).unwrap();
     let snapshot = pre_rewrite.responsibility_fences["close-op"]
         .snapshot
         .clone();
@@ -656,15 +626,11 @@ fn close_writer_first_compaction_preserves_snapshot_and_checkpoint() {
     assert!(snapshot.task_ids.contains(&task_id));
     assert!(pre_rewrite.worker_closures.contains_key(TARGET));
 
-    server
-        .rewrite_journal_locked(&server.state.lock().unwrap())
-        .unwrap();
-
-    let compacted = replay(&root).unwrap();
+    let compacted = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(
         (compacted.sequence, compacted.revision),
-        (3, 3),
-        "synthetic restoration rows must not advance the original checkpoint"
+        version,
+        "loading current state must preserve the committed versions"
     );
     assert_eq!(
         compacted.responsibility_fences["close-op"].snapshot,
@@ -684,12 +650,6 @@ fn close_writer_first_compaction_preserves_snapshot_and_checkpoint() {
     );
     assert!(compacted.worker_closures.contains_key(TARGET));
     assert!(!compacted.workers.contains_key(TARGET));
-    assert!(
-        !std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .contains("\"ev\":\"Registered\""),
-        "compaction must not register the closed public owner"
-    );
 
     server
         .commit_checked(&[Event::KeepaliveUpdated {
@@ -708,14 +668,11 @@ fn close_writer_first_compaction_preserves_snapshot_and_checkpoint() {
             serde_json::json!({"accepted": true}),
         )
         .unwrap();
-    server
-        .rewrite_journal_locked(&server.state.lock().unwrap())
-        .unwrap();
-    let recompacted = replay(&root).unwrap();
+    let recompacted = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(
         (recompacted.sequence, recompacted.revision),
-        (7, 7),
-        "ordinary and typed commits after compaction must keep one version axis"
+        (version.0 + 2, version.1 + 2),
+        "each successful current commit advances the version once"
     );
     assert!(recompacted
         .keepalives
@@ -724,7 +681,7 @@ fn close_writer_first_compaction_preserves_snapshot_and_checkpoint() {
         .keepalives
         .contains_key("after-compaction-typed"));
     assert_eq!(
-        recompacted.command_receipts["cmd-after-compaction"].operation_id,
+        recompacted.global.command_receipts["cmd-after-compaction"].operation_id.as_str(),
         "op-after-compaction"
     );
     assert_eq!(
@@ -737,8 +694,9 @@ fn close_writer_first_compaction_preserves_snapshot_and_checkpoint() {
 }
 
 #[test]
-fn close_compaction_preserves_closed_public_owner_details_and_versions() {
+fn current_reload_preserves_closed_public_owner_details_and_versions() {
     let (server, root) = fence_server();
+    let initial = server.state.lock().unwrap().sequence;
     server
         .commit_checked(&[
             Event::Registered {
@@ -770,7 +728,7 @@ fn close_compaction_preserves_closed_public_owner_details_and_versions() {
         ])
         .unwrap();
     let version = server.state.lock().unwrap().sequence;
-    assert_eq!(version, 5);
+    assert_eq!(version, initial + 1);
     {
         let state = server.state.lock().unwrap();
         assert_exact_public_details(&state, "public-race");
@@ -778,11 +736,7 @@ fn close_compaction_preserves_closed_public_owner_details_and_versions() {
         assert!(state.worker_closures.contains_key(TARGET));
     };
 
-    server
-        .rewrite_journal_locked(&server.state.lock().unwrap())
-        .unwrap();
-
-    let compacted = replay(&root).unwrap();
+    let compacted = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(
         (compacted.sequence, compacted.revision),
         (version, version),
@@ -795,11 +749,11 @@ fn close_compaction_preserves_closed_public_owner_details_and_versions() {
 }
 
 #[test]
-fn fence_command_batch_is_preflighted_before_command_started() {
+fn fence_command_batch_is_preflighted_before_current_state_publish() {
     let (server, root) = fence_server();
     fence(&server, TARGET, "close-op");
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    let before = std::fs::read(&journal_path).unwrap();
+    let before = std::fs::read(&server.state_path).unwrap();
+    let state_before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
 
     let error = match server.commit_command(
         "cmd-1",
@@ -813,7 +767,8 @@ fn fence_command_batch_is_preflighted_before_command_started() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("target_closing"), "{error}");
-    assert_eq!(std::fs::read(&journal_path).unwrap(), before);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
+    assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), state_before);
     assert!(!server
         .state
         .lock()
@@ -821,50 +776,6 @@ fn fence_command_batch_is_preflighted_before_command_started() {
         .global
         .command_receipts
         .contains_key("cmd-1"));
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn reducer_snapshot_writes_are_rejected_by_both_commit_paths_before_bytes_change() {
-    let (server, root) = fence_server();
-    let journal_path = root.join(".agent-collab/server/journal.jsonl");
-    let snapshot = Event::ReducerSnapshot {
-        sequence: 0,
-        revision: 0,
-        events: Vec::new(),
-    };
-
-    let before = std::fs::read(&journal_path).unwrap();
-    let sequence_before = server.state.lock().unwrap().sequence;
-    let error = server
-        .commit_checked(std::slice::from_ref(&snapshot))
-        .unwrap_err();
-    assert!(error.to_string().contains("replay-only"), "{error}");
-    {
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.sequence, sequence_before);
-        assert!(state.command_receipts.is_empty());
-    }
-    assert_eq!(std::fs::read(&journal_path).unwrap(), before);
-
-    let command_error = server
-        .commit_command(
-            "cmd-snapshot",
-            "op-snapshot",
-            &[snapshot],
-            serde_json::json!({}),
-        )
-        .unwrap_err();
-    assert!(
-        command_error.to_string().contains("replay-only"),
-        "{command_error}"
-    );
-    let state = server.state.lock().unwrap();
-    assert_eq!(state.sequence, sequence_before);
-    assert!(state.command_receipts.is_empty());
-    assert!(state.global.command_receipts.is_empty());
-    drop(state);
-    assert_eq!(std::fs::read(&journal_path).unwrap(), before);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -883,7 +794,6 @@ fn fence_allows_exact_route_retirement_but_rejects_live_rebinding() {
         crate::identity::AgentId::new(TARGET).unwrap(),
         crate::identity::RuntimeId::new("runtime-target").unwrap(),
         crate::identity::BindingId::new("binding-target").unwrap(),
-        1,
         Some(crate::identity::SessionId::new("session-target").unwrap()),
         Some(crate::identity::NativeThreadId::new("thread-target").unwrap()),
     )
@@ -899,7 +809,7 @@ fn fence_allows_exact_route_retirement_but_rejects_live_rebinding() {
         .unwrap();
     fence(&server, TARGET, "close-op");
 
-    // The retirement record for the exact generation has no live endpoint.
+    // The exact retirement record has no live endpoint.
     let mut retired = live.clone();
     retired.native_thread_id = None;
     retired.tmux_endpoint = None;
@@ -918,7 +828,7 @@ fn fence_allows_exact_route_retirement_but_rejects_live_rebinding() {
 }
 
 /// A `partial` or `unknown` close phase must keep the fence active across
-/// replay and keep rejecting new responsibility. B23-F never releases those
+/// reload and keep rejecting new responsibility. B23-F never releases those
 /// states; a later lifecycle owner must do so after exact readback.
 #[test]
 fn partial_and_unknown_phases_stay_fenced_and_block_writers() {
@@ -930,8 +840,9 @@ fn partial_and_unknown_phases_stay_fenced_and_block_writers() {
             .commit_checked(&[Event::ResponsibilityFenceSet { fence: record }])
             .unwrap();
 
-        let replayed = replay(&root).unwrap();
+        let replayed = current_state::load(&server.state_path, false).unwrap();
         assert!(replayed.responsibility_fences["close-op"].is_active());
+        assert_eq!(replayed.responsibility_fences["close-op"].state, phase);
 
         assert_rejected_before_bytes(
             &server,
@@ -945,7 +856,7 @@ fn partial_and_unknown_phases_stay_fenced_and_block_writers() {
 }
 
 #[test]
-fn ack_reactivating_retired_subscription_is_rejected_before_journal_bytes_change() {
+fn ack_reactivating_retired_subscription_is_rejected_before_current_state_change() {
     let (server, root) = fence_server();
     server
         .commit_checked(&[
@@ -991,7 +902,7 @@ fn ack_reactivating_retired_subscription_is_rejected_before_journal_bytes_change
 }
 
 #[test]
-fn receive_committed_reactivating_retired_subscription_is_rejected_before_journal_bytes_change() {
+fn receive_committed_reactivating_retired_subscription_is_rejected_before_current_state_change() {
     let (server, root) = fence_server();
     server
         .commit_checked(&[

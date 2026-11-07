@@ -394,13 +394,9 @@ use super::*;
                 .as_deref(),
             Some("goal-deadline-one-shot-already-fired")
         );
-        let snapshot = state.snapshot_events();
         drop(state);
-
-        let (replayed, replay_root) = test_server();
-        for event in &snapshot {
-            replayed.commit(std::slice::from_ref(event));
-        }
+        *server.state.lock().unwrap() = current_state::load(&server.state_path, false).unwrap();
+        let replayed = server.clone();
         tick_with_idle(&replayed, &|_| false);
         let replayed_state = replayed.state.lock().unwrap();
         assert!(subscription_messages(&replayed_state, &subscription_id).is_empty());
@@ -411,7 +407,6 @@ use super::*;
             Some("goal-deadline-one-shot-already-fired")
         );
         drop(replayed_state);
-        std::fs::remove_dir_all(replay_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -895,19 +890,15 @@ use super::*;
                     } if subscription.id == "sub-goal-lost")),
                 "a cancelled transport-lost goal must stay terminal: {retarget:?}"
             );
-            let snapshot = state.snapshot_events();
             drop(state);
-            let (replayed, replay_root) = test_server();
-            for event in &snapshot {
-                replayed.commit(std::slice::from_ref(event));
-            }
+            *server.state.lock().unwrap() = current_state::load(&server.state_path, false).unwrap();
+            let replayed = server.clone();
             let replay_state = replayed.state.lock().unwrap();
             assert_eq!(
                 replay_state.notification_subscriptions["sub-goal-lost"].status,
                 "cancelled"
             );
             drop(replay_state);
-            std::fs::remove_dir_all(replay_root).ok();
         }
 
         seed_lost("sub-goal-rearm-lost", "goal:shared");
@@ -1231,125 +1222,7 @@ use super::*;
     }
 
     #[test]
-    fn unknown_adjudication_does_not_rearm_cancelled_deadline_or_spend_idle_budget() {
-        use crate::server::name_state::{
-            AgentActivity, AgentActivityRecord, AgentPresence, NameRecoveryProgress,
-        };
-
-        let (server, root) = test_server();
-        register_master(&server);
-        let deadline = periodic_deadline_subscription(&server, "master", "goal:cancelled-unknown");
-        let cancelled = super::super::handle_goal_schedule_reconcile(
-            &server,
-            "master".into(),
-            "token-master".into(),
-            "cancelled-unknown".into(),
-            "Jenny".into(),
-            "ended".into(),
-            None,
-            None,
-            None,
-            Some("goal-finished".into()),
-        );
-        assert!(cancelled.ok, "{cancelled:?}");
-        let idle = master_idle_subscription(&server, 15 * 60 * 1000);
-        server.commit(&[Event::KeepaliveUpdated {
-            worker_id: "master".into(),
-            record: Record {
-                observed: "working".into(),
-                ..Record::default()
-            },
-        }]);
-
-        tick_with_idle(&server, &|_| false);
-        let adjudication_id = {
-            let state = server.state.lock().unwrap();
-            let recoveries: Vec<_> = state.name_recoveries.values().collect();
-            assert_eq!(recoveries.len(), 1);
-            let recovery = recoveries[0];
-            assert_eq!(recovery.target_name, "Jenny");
-            assert_eq!(
-                recovery.progress,
-                NameRecoveryProgress::AdjudicationRequested
-            );
-            assert_eq!(
-                state
-                    .agent_presence(&recovery.project_scope, "master")
-                    .unwrap()
-                    .presence,
-                AgentPresence::Unknown
-            );
-            let id = format!("name-adjudication-{}", recovery.operation_id);
-            let message = &state.msgs[&id];
-            assert_eq!(message.mtype, "notification");
-            assert_eq!(message.to, "master");
-            assert_eq!(
-                message.state, "pending",
-                "adapter acceptance is not consumption"
-            );
-            assert_eq!(state.wake_bindings[&id], "sub-default-direct-message-master");
-            assert!(subscription_messages(&state, &deadline).is_empty());
-            assert!(subscription_messages(&state, &idle).is_empty());
-            assert_eq!(state.keepalives["master"].idle_episode_notices, 0);
-            id
-        };
-
-        // Keepalive reads current typed activity. A bare KeepaliveUpdated
-        // cannot override the monitor's Unknown activity on the next tick.
-        // Presence adjudication remains pending while activity is now idle.
-        let activity = {
-            let state = server.state.lock().unwrap();
-            let recovery = state.name_recoveries.values().next().unwrap();
-            AgentActivityRecord {
-                project_scope: recovery.project_scope.clone(),
-                worker_id: "master".into(),
-                session_id: recovery.occupancy_ref.session_id.clone(),
-                activity: AgentActivity::Idle,
-                background: false,
-                reason: "controlled current idle observation after unknown".into(),
-                observed_ms: now_ms(),
-                idle_since_ms: Some(now_ms()),
-            }
-        };
-        let idle_at = activity.observed_ms + 1;
-        server.commit(&[Event::AgentActivityObserved { activity }]);
-        tick_with_idle_at(&server, idle_at, &|_| false);
-        let idle_message = {
-            let state = server.state.lock().unwrap();
-            let messages = subscription_messages(&state, &idle);
-            assert_eq!(
-                messages.len(), 1,
-                "adjudication must leave the idle episode budget available"
-            );
-            assert_eq!(state.keepalives["master"].idle_episode_notices, 1);
-            messages[0].id.clone()
-        };
-        server.commit(&[Event::NotificationConsumed {
-            subscription_id: idle.clone(),
-            message_id: idle_message,
-            consumed_ms: idle_at + 1,
-        }]);
-        tick_with_idle_at(&server, idle_at + 2, &|_| false);
-        tick_with_idle_at(&server, idle_at + 3, &|_| false);
-        let state = server.state.lock().unwrap();
-        assert_eq!(
-            state.msgs.len(), 2,
-            "one adjudication and one idle occurrence only"
-        );
-        assert_eq!(state.msgs[&adjudication_id].state, "pending");
-        assert_eq!(state.name_recoveries.len(), 1);
-        assert_eq!(state.keepalives["master"].idle_episode_notices, 1);
-        assert_eq!(subscription_messages(&state, &idle).len(), 1);
-        assert_eq!(state.notification_subscriptions[&idle].fired_count, 1);
-        assert!(subscription_messages(&state, &deadline).is_empty());
-        assert_eq!(state.notification_subscriptions[&deadline].status, "cancelled");
-        assert_eq!(state.notification_subscriptions[&deadline].fired_count, 0);
-        drop(state);
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn cancelled_master_idle_subscription_stays_cancelled_after_read_and_replay() {
+    fn cancelled_master_idle_subscription_stays_cancelled_after_read_and_current_reload() {
         let (server, root) = test_server();
         register_master(&server);
         let subscription_id = master_idle_subscription(&server, 15 * 60 * 1000);
@@ -1403,13 +1276,9 @@ use super::*;
             1,
             "a cancelled master idle subscription cannot create another wake"
         );
-        let snapshot = state.snapshot_events();
         drop(state);
-
-        let (replayed, replay_root) = test_server();
-        for event in &snapshot {
-            replayed.commit(std::slice::from_ref(event));
-        }
+        *server.state.lock().unwrap() = current_state::load(&server.state_path, false).unwrap();
+        let replayed = server.clone();
         tick_with_idle(&replayed, &|_| false);
         let replayed_state = replayed.state.lock().unwrap();
         assert_eq!(
@@ -1426,7 +1295,6 @@ use super::*;
             "cancellation must survive replay without re-arming the timer"
         );
         drop(replayed_state);
-        std::fs::remove_dir_all(replay_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -2002,20 +1870,19 @@ use super::*;
         assert_eq!(wait_timeout_messages(&state).len(), 1);
         drop(state);
 
-        // Snapshot replay retains the blocked task and its single mailbox
-        // reason; another timer tick still has no timeout transition to emit.
-        let snapshot = server.state.lock().unwrap().snapshot_events();
-        let (mut replayed, replay_root) = test_server();
-        for event in &snapshot {
-            replayed.commit(std::slice::from_ref(event));
-        }
+        // Current state retains the blocked task and its single reason.
+        *server.state.lock().unwrap() = current_state::load(&server.state_path, false).unwrap();
+        let replayed = server.clone();
         tick_with_idle(&replayed, &|_| false);
         let replayed_state = replayed.state.lock().unwrap();
         assert_eq!(replayed_state.tasks["task"].status, "blocked");
         assert_eq!(wait_timeout_messages(&replayed_state).len(), 1);
         assert_eq!(replayed_state.msgs[&message_id].to, "master");
+        assert_eq!(replayed_state.msgs[&message_id].subject, message.subject);
+        assert_eq!(replayed_state.msgs[&message_id].body, message.body);
+        assert_eq!(replayed_state.msgs[&message_id].state, "pending");
+        assert_eq!(replayed_state.msgs[&message_id].wake_attempt_count, 1);
         drop(replayed_state);
-        std::fs::remove_dir_all(replay_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -16,8 +16,8 @@ fn received_message_view(state: &State, message: &Message) -> serde_json::Value 
         "reply_obligation": state.reply_obligations.get(&message.id),
     });
     // Typed channel facts (QQBot sender, immutable reply route, attachments)
-    // are projected to the reader who can already read the message; old
-    // journals without an envelope simply omit the field.
+    // are projected to the reader who can already read the message; messages
+    // without an envelope simply omit the field.
     if let Some(channel) = state.channel_envelopes.get(&message.id) {
         if let Ok(value) = serde_json::to_value(channel) {
             view["channel"] = value;
@@ -323,12 +323,13 @@ fn handle_task_wait(
 
 fn worker_status_summary_with_maps(
     server: &Server,
+    control: &binding_slot::BindingControlSet,
     tasks: &std::collections::HashMap<String, TaskRec>,
     msgs: &std::collections::HashMap<String, Message>,
     keepalives: &std::collections::HashMap<String, crate::server::keepalive::Record>,
     role_brief: serde_json::Value,
     w: &WorkerRec,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
@@ -381,12 +382,11 @@ fn worker_status_summary_with_maps(
     };
     let (display_name, work_roles) = {
         let state = server.state.lock().unwrap();
-        let master = current_master_holder(server, &state).ok().flatten();
-        let route=server_route_scope(server,&state).ok().flatten();
-        (worker_display_name(&state, &w.id, master.as_deref() == Some(w.id.as_str())),
-         worker_work_roles(&state, route.as_ref().map_or("",|route|route.project_scope_id.as_str()), &w.id))
+        let route=server_route_scope(server,&state)?;
+        (worker_display_name(control, route.as_ref(), &w.id)?,
+         worker_work_roles(&state, control, route.as_ref(), &w.id)?)
     };
-    json!({
+    Ok(json!({
         "id": w.id,
         "display_name": display_name,
         "work_roles": work_roles,
@@ -419,81 +419,54 @@ fn worker_status_summary_with_maps(
         "diagnostic": diagnostic,
         "active_task": active.map(|task| task.id.as_str()),
         "active_status": active.map(|task| task.status.as_str()),
-    })
+    }))
 }
 
-fn directory_targets(server: &Server) -> Vec<crate::proto::DirectoryTarget> {
-    let (workers_rec, master) = {
+fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet) -> Result<Vec<crate::proto::DirectoryTarget>, String> {
+    let route = {
         let st = server.state.lock().unwrap();
-        let master = current_master_holder(server, &st).ok().flatten();
-        (st.workers.values().cloned().collect::<Vec<_>>(), master)
+        server_route_scope(server, &st)?
     };
+    let Some(route) = route else { return Ok(Vec::new()); };
     let project_key = canonical_project_key(&server.root);
-    let project_scope = GlobalState::canonical_project_scope(&server.root)
-        .ok()
-        .map(|scope| scope.as_str().to_owned());
     let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
-    for w in &workers_rec {
-        let (display_name, app_scope, identity_valid, stable_name) = {
-            let st = server.state.lock().unwrap();
-            let display_name =
-                worker_display_name(&st, &w.id, master.as_deref() == Some(w.id.as_str()));
-            let proj_scope = GlobalState::canonical_project_scope(&server.root).ok();
-            let binding = proj_scope
-                .as_ref()
-                .and_then(|ps| current_worker_binding(&st, ps, None, w));
-            let app_scope = binding.map(|b| b.app_scope_id.as_str().to_owned());
-            let identity_valid = if w.transport.is_none() {
-                Some(false)
-            } else if binding.is_some() {
-                Some(true)
-            } else {
-                None
-            };
-            let stable_name = project_scope
-                .as_deref()
-                .and_then(|scope| stable_name_for_worker(&st, scope, &w.id));
-            (display_name, app_scope, identity_valid, stable_name)
-        };
-        let session_id = w.transport.as_ref().and_then(|t| t.session_id.clone());
-        let transport = w.transport.as_ref().map(|t| crate::proto::DirectoryTransport {
-            kind: t.kind.as_str().to_owned(),
-            namespace: t.namespace.clone(),
+    for slot in control.slots().filter(|slot| slot.identity_key.project_scope == route.project_scope_id
+        && slot.identity_key.app_scope_id == route.app_scope_id) {
+        let Some(current) = slot.active_binding() else { continue; };
+        let binding = &current.binding;
+        control.current_for_worker(&route.project_scope_id, &route.app_scope_id, binding.agent_id.as_str())?;
+        let display_name = slot.identity_key.name.clone();
+        let address = project_key.as_ref().map(|project| format!("{project}.{display_name}"));
+        let transport = Some(crate::proto::DirectoryTransport {
+            kind: current.transport.kind.as_str().to_owned(),
+            namespace: current.transport.namespace.clone(),
         });
-        let channel_type = transport
-            .as_ref()
-            .map(|t| t.kind.clone())
-            .or_else(|| Some("unknown".to_owned()));
-        let deliverable = if identity_valid == Some(false) {
-            Some("unavailable".to_owned())
-        } else {
-            Some("unknown".to_owned())
-        };
-        let address = match (project_key.as_ref(), stable_name) {
-            (Some(project_key), Some(name)) => Some(format!("{project_key}.{name}")),
-            _ => None,
-        };
         targets.push(crate::proto::DirectoryTarget {
-            worker_id: w.id.clone(),
+            worker_id: binding.agent_id.as_str().to_owned(),
             display_name,
-            session_id,
-            app_scope,
+            session_id: binding.session_id.as_ref().map(ToString::to_string),
+            app_scope: Some(binding.app_scope_id.as_str().to_owned()),
             transport,
-            identity_valid,
+            identity_valid: Some(true),
             endpoint_live: None,
             project: project_key.clone(),
             address,
             project_root: Some(server.root.to_string_lossy().into_owned()),
-            channel_type,
-            deliverable,
+            channel_type: Some(current.transport.kind.as_str().to_owned()),
+            deliverable: Some("unknown".to_owned()),
         });
     }
     targets.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
-    targets
+    Ok(targets)
 }
 
 fn handle_directory(server: &Server) -> Resp {
-    let targets = directory_targets(server);
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
+    let targets = match directory_targets(server, &control) {
+        Ok(targets) => targets, Err(error) => return Resp::err(error),
+    };
     let count = targets.len();
     Resp::data(json!({
         "targets": targets,
@@ -507,6 +480,9 @@ impl ProjectRuntimeManager {
     /// Failed routes are reported in `errors` while remaining targets stay
     /// visible, so one stale route cannot hide the whole live directory.
     fn directory_all(&self) -> Resp {
+        let control = match self.binding_control_store().load() {
+            Ok(control) => control, Err(error) => return Resp::err(error),
+        };
         let routes = {
             let routes = self.routes.lock().unwrap();
             routes
@@ -533,7 +509,10 @@ impl ProjectRuntimeManager {
         }
         let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
         for runtime in runtimes {
-            targets.extend(directory_targets(&runtime));
+            match directory_targets(&runtime, &control) {
+                Ok(current) => targets.extend(current),
+                Err(error) => errors.push(format!("{}: {error}", runtime.root.display())),
+            }
         }
         // Prefer the CLI app scope for a worker that appears under more than
         // one app scope. `sendmessage` resolves through that scope, so a
@@ -604,9 +583,13 @@ fn handle_default_set(
         return Resp::err("token mismatch: identity does not own this worker_id");
     }
     // Resolve before any mutation: a failed switch must preserve the old target.
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control, Err(error) => return Resp::err(error),
+    };
     let (resolved_worker, name_address) = match resolve_send_name_address(
         server,
         &st,
+        &control,
         target_address.clone(),
     ) {
         Ok(resolved) => resolved,
@@ -678,7 +661,7 @@ fn handle_default_show(
 
 // ---------- dispatch ----------
 
-fn mutation_blocked_during_migration(req: &Req) -> bool {
+fn mutation_blocked_during_project_reset(req: &Req) -> bool {
     match req {
         Req::Ceo { command, .. } => !matches!(command, crate::ceo::CeoCommand::Status | crate::ceo::CeoCommand::Progress { .. }),
         Req::UnregisterSelf { .. } | Req::ProjectReset { .. } => false,
@@ -712,18 +695,14 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::TaskClose { .. }
         | Req::TaskFinalizeCleanup { .. }
         | Req::TaskDispatch { .. }
-        | Req::MigrationPlan { .. }
-        | Req::MigrationApply { .. }
         | Req::MasterPromote { .. }
         | Req::MasterClear { .. }
         | Req::MasterDelegate { .. }
         | Req::MasterWakeHold { .. }
         | Req::MasterWakeRelease { .. }
         | Req::TransferMaster { .. }
-        | Req::RemoveWorker { .. }
         | Req::WorkerSnapshot { .. }
         | Req::WorkerClose { .. }
-        | Req::WorkerName { .. }
         | Req::WorkRolesSet { .. }
         | Req::WorkflowTemplateSet { .. }
         | Req::DefaultSet { .. }
@@ -731,7 +710,6 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         Req::Register { .. }
         | Req::IdentityContext { .. }
         | Req::RouteResolve { .. }
-        | Req::RouteResolvePaneRecovery { .. }
         | Req::RouteResolveNative { .. }
         | Req::NotificationMethods
         | Req::NotificationStatus { .. }
@@ -740,8 +718,6 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::MsgStatus { .. }
         | Req::TaskStatus { .. }
         | Req::TaskConflicts { .. }
-        | Req::MigrationInspect { .. }
-        | Req::MigrationVerify { .. }
         | Req::MasterStatus
         | Req::Role { .. }
         | Req::Workers
@@ -755,7 +731,6 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::Ping
         | Req::StatusAll
         | Req::MailboxRead { .. } => false,
-        Req::RegisterReply { .. } => true,
     }
 }
 
@@ -780,7 +755,6 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             ..
         } if subagent_action_mutates(command) => Some((worker_id, token)),
         Req::Board { worker_id, token, .. }
-        | Req::WorkerName { worker_id, token, .. }
         | Req::WorkRolesSet { worker_id, token, .. }
         | Req::WorkflowTemplateSet {
             worker_id, token, ..
@@ -851,9 +825,6 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id, token, ..
         }
         | Req::TaskDispatch { worker_id, token }
-        | Req::MigrationPlan { worker_id, token }
-        | Req::MigrationApply { worker_id, token }
-        | Req::MigrationVerify { worker_id, token }
         | Req::MasterPromote {
             worker_id, token, ..
         }
@@ -872,9 +843,6 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
         | Req::TransferMaster {
             worker_id, token, ..
         }
-        | Req::RemoveWorker {
-            worker_id, token, ..
-        }
         | Req::WorkerClose {
             worker_id, token, ..
         }
@@ -889,7 +857,6 @@ fn validate_wire_runtime_binding(
     server: &Server,
     req: &Req,
     project_context: &ProjectContext,
-    register_approval: Option<&RegisterApprovalProof>,
 ) -> Result<(), String> {
     if let Req::Register { worker_id, .. } = req {
         let state = server.state.lock().unwrap();
@@ -927,20 +894,7 @@ fn validate_wire_runtime_binding(
                     .get(worker_id)
                     .is_some_and(|worker| worker.token != *token)
             };
-            let approved_register = register_approval.is_some_and(|proof| {
-                proof.authorizes(
-                    worker_id,
-                    project_context.project_scope.as_str(),
-                    project_context.app_scope_id.as_str(),
-                )
-            });
             if token_mismatch {
-                if approved_register {
-                    // This private proof may bypass only the wire preflight
-                    // credential check. The Register owner rechecks the exact
-                    // incumbent fence in the reducer immediately before commit.
-                    return Ok(());
-                }
                 return Err(format!("TOKEN_MISMATCH: worker {worker_id} is registered by another token"));
             }
             // A missing local runtime can be admitted only with the existing
@@ -1025,12 +979,6 @@ fn validate_cli_register_rebind(
                     .into(),
             );
         }
-        if binding.endpoint_generation == 0 {
-            return Err(
-                "RUNTIME_BINDING_REJECTED: authoritative runtime binding has no live endpoint generation"
-                    .into(),
-            );
-        }
         binding
             .validate()
             .map_err(|error| format!("RUNTIME_BINDING_REJECTED: {error}"))?;
@@ -1076,7 +1024,6 @@ fn validate_cli_register_rebind(
                 agent_id: binding.agent_id.clone(),
                 runtime_id: binding.runtime_id.clone(),
                 appserver_id: binding.app_scope_id.clone(),
-                endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
                 session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
@@ -1212,16 +1159,10 @@ fn project_route_actor(
             "RUNTIME_BINDING_REJECTED: authoritative runtime binding is ambiguous",
         ));
     }
-    if binding.endpoint_generation == 0 {
-        return Err(Resp::err(
-            "RUNTIME_BINDING_REJECTED: authoritative runtime binding has no live endpoint generation",
-        ));
-    }
     let registered = crate::identity::RuntimeIdentity {
         agent_id: binding.agent_id.clone(),
         runtime_id: binding.runtime_id.clone(),
         appserver_id: binding.app_scope_id.clone(),
-        endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id.clone(),
         session_id: binding.session_id.clone(),
         native_thread_id: binding.native_thread_id.clone(),

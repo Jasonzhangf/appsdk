@@ -23,37 +23,61 @@ pub(crate) fn resolve_scope(state: &State, from: &str, name_scope: Option<&str>)
 }
 
 /// The stable name currently bound to `worker_id`, if any.
-pub(crate) fn stable_name(state: &State, worker_id: &str) -> Option<String> {
-    state.worker_names.get(worker_id).cloned()
+pub(crate) fn stable_name(
+    control: &super::binding_slot::BindingControlSet,
+    project: &crate::scope::ProjectScopeId,
+    app: &crate::identity::AppServerId,
+    worker_id: &str,
+) -> Result<Option<String>, String> {
+    Ok(control
+        .current_for_worker(project, app, worker_id)?
+        .map(|slot| slot.identity_key.name.clone()))
 }
 
-fn name_holder<'a>(state: &'a State, project_scope: &str, name: &str) -> Option<&'a str> {
-    state
-        .name_occupancy(project_scope, name)
-        .map(|occupancy| occupancy.worker_id.as_str())
+fn name_holder<'a>(
+    control: &'a super::binding_slot::BindingControlSet,
+    project_scope: &str,
+    app: &crate::identity::AppServerId,
+    name: &str,
+) -> Result<Option<&'a str>, String> {
+    let project =
+        crate::scope::ProjectScopeId::new(project_scope).map_err(|error| error.to_string())?;
+    Ok(control
+        .current_for_name(&project, app, name)?
+        .and_then(|slot| slot.active_binding())
+        .map(|current| current.binding.agent_id.as_str()))
 }
 
 /// Verify that `from` is the original recipient (or the current carrier of the
 /// recipient name) replying to `to`, the original sender (or the current
 /// carrier of the sender name). Anything else must be rejected before enqueue.
 pub(crate) fn validate_reply(
-    state: &State,
+    control: &super::binding_slot::BindingControlSet,
+    app: &crate::identity::AppServerId,
     obligation: &ReplyObligation,
     from: &str,
     to: &str,
 ) -> Result<(), String> {
     let sender_ok = obligation.recipient_worker_id == from
-        || obligation
-            .recipient_name
-            .as_deref()
-            .and_then(|name| name_holder(state, &obligation.project, name))
-            .is_some_and(|holder| holder == from);
+        || match obligation.recipient_name.as_deref() {
+            Some(name) => name_holder(control, &obligation.project, app, name)? == Some(from),
+            None => false,
+        };
     let target_ok = obligation.from_worker_id == to
-        || obligation
-            .from_name
-            .as_deref()
-            .and_then(|name| name_holder(state, &obligation.project, name))
-            .is_some_and(|holder| holder == to);
+        || match obligation.from_name.as_deref() {
+            Some(name) => {
+                name_holder(
+                    control,
+                    obligation
+                        .from_project
+                        .as_deref()
+                        .unwrap_or(&obligation.project),
+                    app,
+                    name,
+                )? == Some(to)
+            }
+            None => false,
+        };
     if sender_ok && target_ok {
         Ok(())
     } else {
@@ -66,7 +90,7 @@ pub(crate) fn validate_reply(
 
 /// Build the durable record for a message that declared a reply policy.
 pub(crate) fn build_obligation(
-    state: &State,
+    from_name: Option<String>,
     message_id: String,
     project: String,
     from_worker_id: String,
@@ -74,7 +98,6 @@ pub(crate) fn build_obligation(
     recipient_name: Option<String>,
     policy: crate::proto::ReplyPolicy,
 ) -> ReplyObligation {
-    let from_name = stable_name(state, &from_worker_id);
     ReplyObligation {
         message_id,
         project,

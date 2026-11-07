@@ -371,7 +371,7 @@ mod close_endpoint_fence_tests {
     use super::*;
 
     #[test]
-    fn owner_fence_allows_unrelated_writes_but_rejects_token_transport_and_generation_changes() {
+    fn owner_fence_allows_unrelated_writes_but_rejects_current_token_transport_and_binding_changes() {
         let mut state = State::default();
         state.workers.insert(
             "peer".into(),
@@ -389,7 +389,6 @@ mod close_endpoint_fence_tests {
             AgentId::new("peer").unwrap(),
             RuntimeId::new("runtime").unwrap(),
             BindingId::new("binding-peer").unwrap(),
-            1,
             None,
         )
         .unwrap();
@@ -424,7 +423,7 @@ mod close_endpoint_fence_tests {
             .values_mut()
             .next()
             .unwrap()
-            .endpoint_generation += 1;
+            .runtime_id = RuntimeId::new("runtime-replacement").unwrap();
         assert!(close_endpoint_target(&state, "peer") != observed);
     }
 }
@@ -782,10 +781,6 @@ pub(crate) fn live_managed_subagent_count(server: &Server, parent: &str) -> usiz
 
 include!("ordinary_presence_edges.rs");
 
-fn record_scheduler_admission(server: &Server, admission: serde_json::Value) -> Result<(), Resp> {
-    ensure_scheduler_admission_audit(server, &admission).map(|_| ())
-}
-
 #[cfg(test)]
 fn scheduler_admit_subagent_start(
     _server: &Server,
@@ -797,97 +792,6 @@ fn scheduler_admit_subagent_start(
     Err(Resp::err(
         "MANAGED_SUBAGENT_UNSUPPORTED: start a peer in its own tmux pane",
     ))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SchedulerAdmissionAuditState {
-    Recorded,
-    Failed(String),
-}
-
-fn scheduler_admission_audit_state(
-    server: &Server,
-    request_id: &str,
-) -> Result<Option<SchedulerAdmissionAuditState>, Resp> {
-    let path = server
-        .storage_root
-        .join(".agent-collab/server/events.jsonl");
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(Resp::err(format!(
-                "scheduler admission audit failed: lookup {error}"
-            )))
-        }
-    };
-    for line in content.lines() {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if record.get("kind").and_then(serde_json::Value::as_str) != Some("scheduler_admission")
-            || record
-                .get("detail")
-                .and_then(|detail| detail.get("request_id"))
-                .and_then(serde_json::Value::as_str)
-                != Some(request_id)
-        {
-            continue;
-        }
-        let detail = record.get("detail").cloned().unwrap_or_else(|| json!({}));
-        if detail.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
-            let error = detail
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("scheduler admission audit failed")
-                .to_string();
-            return Ok(Some(SchedulerAdmissionAuditState::Failed(error)));
-        }
-        return Ok(Some(SchedulerAdmissionAuditState::Recorded));
-    }
-    Ok(None)
-}
-
-fn ensure_scheduler_admission_audit(
-    server: &Server,
-    admission: &serde_json::Value,
-) -> Result<SchedulerAdmissionAuditState, Resp> {
-    if let Some(request_id) = admission
-        .get("request_id")
-        .and_then(serde_json::Value::as_str)
-    {
-        if let Some(state) = scheduler_admission_audit_state(server, request_id)? {
-            return Ok(state);
-        }
-    }
-    if let Err(error) = record_activity(
-        &server.storage_root,
-        "scheduler_admission",
-        admission.clone(),
-    ) {
-        append_log(
-            &server.log_path(),
-            &format!("SCHEDULER_ADMISSION_RECORD_FAILED: {error}"),
-        );
-        return Err(Resp::err(format!(
-            "scheduler admission audit failed: {error}"
-        )));
-    }
-    Ok(SchedulerAdmissionAuditState::Recorded)
-}
-
-fn scheduler_admission_audit_error(
-    result: Result<SchedulerAdmissionAuditState, Resp>,
-) -> Option<String> {
-    match result {
-        Ok(SchedulerAdmissionAuditState::Recorded) => None,
-        Ok(SchedulerAdmissionAuditState::Failed(error)) => Some(error),
-        Err(error) => Some(
-            error
-                .error
-                .unwrap_or_else(|| "scheduler admission audit failed".into()),
-        ),
-    }
 }
 
 fn scheduler_admission_failed_response(
@@ -1035,9 +939,9 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             .cloned();
         (admission, task, subscription)
     };
-    let notification_attempt = subscription.as_ref().map(|subscription| {
+    let notification_attempt = match subscription.as_ref().map(|subscription| {
         attempt_scheduler_notification(server, request_id, &admission.message_id, &subscription.id)
-    });
+    }).transpose() { Ok(outcome) => outcome, Err(error) => return Some(error) };
     if notification_attempt == Some(SchedulerNotificationAttempt::InFlight) {
         return Some(Resp::err_data(
             "scheduler dispatch notification is already in flight; retry with the same request_id",
@@ -1051,7 +955,8 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
         ));
     }
     let notified = notification_attempt == Some(SchedulerNotificationAttempt::Accepted);
-    if subscription.is_some() && !notified {
+    let consumed = notification_attempt == Some(SchedulerNotificationAttempt::Consumed);
+    if subscription.is_some() && !notified && !consumed {
         let error =
             "scheduler dispatch notification was not accepted by the selected App Server route";
         return Some(scheduler_notification_failed_response(&admission, error));
@@ -1080,6 +985,8 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             .unwrap_or(serde_json::Value::Null),
         "notification": if subscription.is_none() {
             "mailbox-only-no-subscription"
+        } else if consumed {
+            "already-consumed"
         } else if notified {
             "sent"
         } else {
@@ -1414,38 +1321,10 @@ pub(crate) fn handle_scheduler_dispatch(
         if let Err(error) = server.commit_locked(&mut state, &events) {
             return Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}"));
         }
-        if let Some(error) =
-            scheduler_admission_audit_error(ensure_scheduler_admission_audit(server, &admission))
-        {
-            if let Err(commit_error) = server.commit_locked(
-                &mut state,
-                &[Event::SchedulerAdmissionStatus {
-                    request_id: request_id.clone(),
-                    status: "failed".into(),
-                    error: Some(error.clone()),
-                    updated_ms: now_ms(),
-                }],
-            ) {
-                server.report_journal_commit_error(&commit_error);
-            }
-            drop(state);
-            admission["status"] = json!("failed");
-            admission["error"] = json!(error.clone());
-            return Resp::err_data(
-                error,
-                json!({
-                    "request_id": request_id,
-                    "reservation": true,
-                    "message_id": message_id,
-                    "task_id": task_id,
-                    "admission": admission,
-                }),
-            );
-        }
         drop(state);
-        let notification_attempt = subscription.as_ref().map(|subscription| {
+        let notification_attempt = match subscription.as_ref().map(|subscription| {
             attempt_scheduler_notification(server, &request_id, &message_id, &subscription.id)
-        });
+        }).transpose() { Ok(outcome) => outcome, Err(error) => return error };
         if notification_attempt == Some(SchedulerNotificationAttempt::InFlight) {
             return Resp::err_data(
                 "scheduler dispatch notification is already in flight; retry with the same request_id",
@@ -1459,7 +1338,8 @@ pub(crate) fn handle_scheduler_dispatch(
             );
         }
         let notified = notification_attempt == Some(SchedulerNotificationAttempt::Accepted);
-        if subscription.is_some() && !notified {
+        let consumed = notification_attempt == Some(SchedulerNotificationAttempt::Consumed);
+        if subscription.is_some() && !notified && !consumed {
             let admission_record = crate::server::state::SchedulerAdmissionRecord {
                 request_id: request_id.clone(),
                 decision: decision.into(),
@@ -1493,6 +1373,8 @@ pub(crate) fn handle_scheduler_dispatch(
                 .unwrap_or(serde_json::Value::Null),
             "notification": if subscription.is_none() {
                 "mailbox-only-no-subscription"
+            } else if consumed {
+                "already-consumed"
             } else if notified {
                 "sent"
             } else {
@@ -1535,55 +1417,6 @@ fn verify_master_actor(
     }
 }
 
-fn handle_master_promote(
-    server: &Server,
-    worker_id: String,
-    token: String,
-    approval: String,
-) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    let Some(worker) = state.workers.get(&worker_id).cloned() else {
-        return Resp::err(format!("worker {} not registered", worker_id));
-    };
-    if worker.token != token {
-        return Resp::err("token mismatch: identity does not own this worker_id");
-    }
-    if approval.trim().is_empty() {
-        return Resp::err("master promotion requires explicit user approval");
-    }
-    drop(state);
-    let operation_id = format!("master-promote-{worker_id}-{}", now_ms());
-    let resolution = match name_resolution::resolve_registered_name_with_authorization(
-        server,
-        &worker_id,
-        &operation_id,
-        "master_promote",
-        Some(name_resolution::NameIntent {
-            requested_name: "Jenny".into(),
-            user_authorized: true,
-            moves_existing_names: true,
-            replace_confirmed: false,
-        }),
-        Some(&approval),
-        None,
-    ) {
-        Ok(resolution) => resolution,
-        Err(error) => return Resp::err(error),
-    };
-    if resolution["outcome"] != "committed" {
-        return Resp::err_data("NAME_RECOVERY_REQUIRED: continue through collab context --approve-grant with restore_master and the reported confirmation or pending operation", resolution);
-    }
-    let state = server.state.lock().unwrap();
-    let route_scope = server_route_scope(server, &state).ok().flatten();
-    Resp::data(json!({
-        "master": worker_id,
-        "scope": scope_view(route_scope.as_ref()),
-        "name_resolution": resolution,
-        "mode": "user_approved_self_promotion",
-        "role_brief": role_brief(server, &state, &worker_id)
-    }))
-}
-
 /// Clear the current typed grant for this route.
 ///
 /// Clear needs no incumbent probe and does not require the caller to be the
@@ -1592,161 +1425,6 @@ fn handle_master_promote(
 /// `project_route_actor`, and the approval text is the human authorization. The
 /// revoke set is the same scoped owner promote uses, minus the re-grant, so a
 /// cleared route cannot be resurrected by legacy authority state.
-fn handle_master_clear(
-    server: &Server,
-    worker_id: String,
-    token: String,
-    approval: String,
-) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    let Some(worker) = state.workers.get(&worker_id) else {
-        return Resp::err(format!("worker {} not registered", worker_id));
-    };
-    if worker.token != token {
-        return Resp::err("token mismatch: identity does not own this worker_id");
-    }
-    if approval.trim().is_empty() {
-        return Resp::err("master clear requires explicit user approval");
-    }
-    if approval.chars().any(char::is_control) {
-        return Resp::err("master clear approval must not contain control characters");
-    }
-    let route_scope = match server_route_scope(server, &state) {
-        Ok(Some(route_scope)) => route_scope,
-        Ok(None) => return Resp::err("master clear requires a registered project route"),
-        Err(error) => return Resp::err(error),
-    };
-    let previous = current_master_worker_id(&state, Some(&route_scope));
-    let mut events = master_authority_revoke_events(&state, &route_scope);
-    let was_empty = events.is_empty();
-    let mut resolution = serde_json::Value::Null;
-    if let Some(holder) = state.name_occupancy(route_scope.project_scope_id.as_str(), "Jenny") {
-        let name = match name_resolution::available_ordinary_name(
-            &state,
-            route_scope.project_scope_id.as_str(),
-            &holder.worker_id,
-        ) {
-            Ok(name) => name,
-            Err(error) => return Resp::err(error),
-        };
-        let occupancy = name_state::NameOccupancy {
-            occupancy_revision: state
-                .name_occupancy(route_scope.project_scope_id.as_str(), &name)
-                .map_or(1, |previous| previous.occupancy_revision + 1),
-            name,
-            worker_id: holder.worker_id.clone(),
-            session_id: holder.session_id.clone(),
-            updated_ms: now_ms(),
-            pane_anchor: None,
-        };
-        let rename_from = name_resolution::names_held_by_worker(
-            &state,
-            route_scope.project_scope_id.as_str(),
-            &holder.worker_id,
-        );
-        events.extend(name_resolution::build_name_resolution_events_with_rename_from(
-            &state,
-            route_scope.project_scope_id.as_str(),
-            &occupancy,
-            &rename_from,
-        ));
-        resolution = json!({"outcome":"committed", "name":occupancy.name,
-            "session_id":occupancy.session_id});
-    }
-    if !events.is_empty() {
-        if let Err(error) = server.commit_locked_checked(&mut state, &events) {
-            return Resp::err(format!("MASTER_CLEAR_DURABILITY_FAILED: {error}"));
-        }
-    }
-    Resp::data(json!({
-        "master": serde_json::Value::Null,
-        "previous_worker_id": previous,
-        "was_empty": was_empty,
-        "scope": scope_view(Some(&route_scope)),
-        "mode": "user_approved_clear",
-        "name_resolution": resolution,
-    }))
-}
-
-fn handle_master_delegate(
-    server: &Server,
-    worker_id: String,
-    token: String,
-    target_id: String,
-) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
-        return error;
-    }
-    if !state.workers.contains_key(&target_id) {
-        return Resp::err(format!("target worker {} not registered", target_id));
-    }
-    let route_scope = match server_route_scope(server, &state) {
-        Ok(Some(route_scope)) => route_scope,
-        Ok(None) => return Resp::err("master delegation requires a registered project route"),
-        Err(error) => return Resp::err(error),
-    };
-    // The target must already hold a current runtime binding in this exact
-    // scope. That binding supplies the address and endpoint generation the
-    // replacement grant records, so a registered target is sufficient. Native
-    // liveness is a separate communication fact and must not veto the transfer;
-    // a pane probe can only ever report that an address exists.
-    let grant = match master_grant_for_worker(
-        &state,
-        &route_scope,
-        &target_id,
-        &worker_id,
-        "delegated by the current master",
-    ) {
-        Ok(grant) => grant,
-        Err(error) => return Resp::err(error),
-    };
-    let session_id = state
-        .global
-        .lookup_project_for_route(&route_scope)
-        .and_then(|project| project.runtime_bindings.get(grant.binding_id.as_str()))
-        .and_then(|binding| binding.session_id.as_ref());
-    let Some(session_id) = session_id else {
-        return Resp::err(
-            "NAME_IDENTITY_REQUIRED: master delegation requires target agent session",
-        );
-    };
-    // The current master hands off its own work. Its typed authority admits
-    // this transfer without manufacturing a user name-recovery approval.
-    let occupancy = name_state::NameOccupancy {
-        name: "Jenny".into(),
-        worker_id: target_id.clone(),
-        session_id: session_id.to_string(),
-        occupancy_revision: state
-            .name_occupancy(route_scope.project_scope_id.as_str(), "Jenny")
-            .map_or(1, |previous| previous.occupancy_revision + 1),
-        updated_ms: now_ms(),
-        pane_anchor: None,
-    };
-    let mut events = master_authority_transfer_events(&state, &route_scope, grant);
-    let rename_from = name_resolution::names_held_by_worker(
-        &state,
-        route_scope.project_scope_id.as_str(),
-        &target_id,
-    );
-    events.extend(name_resolution::build_name_resolution_events_with_rename_from(
-        &state,
-        route_scope.project_scope_id.as_str(),
-        &occupancy,
-        &rename_from,
-    ));
-    if let Err(error) = server.commit_locked_checked(&mut state, &events) {
-        drop(state);
-        return Resp::err(format!("MASTER_DELEGATE_DURABILITY_FAILED: {error}"));
-    }
-    Resp::data(json!({
-        "master": target_id,
-        "scope": scope_view(Some(&route_scope)),
-        "delegated_by": worker_id,
-        "role_brief": role_brief(server, &state, &target_id)
-    }))
-}
-
 const MASTER_WAKE_HOLD_MAX_REASON_CHARS: usize = 2000;
 const MASTER_WAKE_HOLD_MAX_TTL_SECONDS: u64 = 604_800;
 
@@ -1843,11 +1521,6 @@ fn handle_master_wake_release(server: &Server, worker_id: String, token: String)
 }
 
 include!("part_07/worker_close.rs");
-
-#[cfg(test)]
-mod role_name_closure_tests {
-    include!("../role_name_closure_tests.rs");
-}
 
 fn handle_worker_snapshot(
     server: &Server,

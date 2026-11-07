@@ -1,12 +1,11 @@
-# Context-Owned Migration and User-Managed Daemon Boundary
+# Current Identity and User-Managed Daemon Boundary
 
-## Identity recovery includes legacy migration
+## Context uses the current identity map
 
-Use `collab context` in the current project. Context owns compatibility with
-historical identity records, current name/session selection, registration,
-credential persistence, stale route retirement and communication binding.
-Agents do not inspect archives to choose an identity, close historical workers,
-copy tokens, edit control files or run a separate migration before recovery.
+Use `collab context` in the current project. Identity selection reads only
+`identity-map.json`. Exact credentials and current grants serve that selected
+principal. Registration, name/session updates and communication bindings use
+the same map owner. Agents do not choose an archive, copy tokens or edit state.
 
 The stable name owns work. The agent sessionID is its current execution carrier.
 Pane, tmux session, socket and server PID only locate delivery and observation.
@@ -14,17 +13,14 @@ They do not establish identity ownership. A later committed registration for the
 same project, app and agent session replaces the previous carrier. It must not
 stop an old process or change another session's identity.
 
-An explicit approved recovery target is resolved before historical ambiguity.
-Historical bindings cannot veto that authorization. Context supplies its own
-current scope and incumbent facts; agents do not invent fences, timestamps or
-archive choices. Existing approval remains valid for the authorized operation.
-For commands and online takeover confirmation, see
-[stable-name recovery](stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理).
+An explicit authorized recovery target is applied through the current map.
+Old bindings and names cannot veto that authorization. Missing map rows permit
+first registration with current facts; a corrupt map returns its real error.
+For current intent commands, see [stable-name recovery](stable-name-recovery.md).
 
-Context must converge legacy duplicates itself. It preserves name-owned open
-tasks, resources and unconsumed messages and updates their execution binding.
-Consumed messages and closed-task history remain historical. Migration does not
-grant master authority without the user's explicit master restoration approval.
+Context preserves name-owned open tasks, resources and unread messages while
+updating their carrier. Consumed messages and closed-task records stay intact.
+Peer recovery does not grant master authority.
 
 Recovery does not change accepted goal ownership or require another human
 approval for authorized work. Reconcile finite goal/task schedules under
@@ -32,40 +28,32 @@ approval for authorized work. Reconcile finite goal/task schedules under
 project patrol and task-scoped cancellations remain owned by
 [board-idle patrol](board-idle-patrol.md), not by identity restoration.
 
-Every new AppServer context must carry current session/thread/endpoint/namespace
-from the calling host or this invocation's `--provide` (MCP: `provide` on each
-call). Desktop uses its current scoped bridge capability, including through
-CLI `--provide`; agent-side MCP calls are optional. The installed MCP bridge
-can obtain that capability from real executor metadata. Desktop does not
-require an AppServer endpoint or borrow the managed
-AppServer socket. Historical registration never supplies missing current facts. Missing
-facts preserve identity and work and return `missing_facts`. If user intent is required, supply that intent
-through the context approval interface. Query an existing operation with
-`collab context --query --op <operation_id>`; a query does not perform migration.
-Pending or requested-input results are not successful recovery. Completion must
-include a successful registration receipt and current communication binding.
+First registration requires the selected host's real current facts. Desktop
+uses its scoped bridge capability; it does not require tmux or borrow a managed
+AppServer socket. DSH uses its actual gateway session and enrolled transport.
+Supply only requested factual fields through `--provide` when necessary.
+`collab context --query` projects current persisted state without registration,
+consumption or recovery effects. Pending, missing facts and unknown communication
+do not mean completed recovery.
 
-A raw historical ambiguity after valid approval is a runtime defect. Preserve
-the operation result and report the missing implementation or inactive version.
-Do not reinterpret it as missing user authorization, ask the agent to choose an
-archive, or discard project state to make recovery succeed. Real persistence,
-I/O and current endpoint errors remain explicit.
+A rejection based only on old history after valid authorization is a runtime
+defect. Preserve the error and report the affected implementation or inactive
+version. Do not ask for an archive choice or discard current work. Real I/O,
+persistence and current endpoint errors stay explicit.
 
 ## Persistence owners
 
 The installed binary resolves host-wide Collab state under `$HOME/.collab`;
 `COLLAB_STATE_DIR` is for isolated tests. This owner includes identity, routes,
 mailboxes and daemon runtime state. Project-local `.agent-collab/` may provide
-project discovery. Its retired server journals and mailbox files are not imported
-or replayed into the current runtime and remain on disk. Historical identity
-compatibility within the current central store remains context-owned;
-project-local state is not a second host truth. AppSDK `.appsdk/` and `.appsdk-control/`
+project discovery. Identity comes only from the current identity-map.json;
+business state loads directly from current state.json. No journal reader,
+writer, replay, repair or migration maintenance API exists. Project-local
+state is not a second host truth. AppSDK `.appsdk/` and `.appsdk-control/`
 belong to AppSDK and are outside Collab recovery.
 
-Never manually delete journals, mailbox files, identity tokens or route state.
-Do not use `collab migrate inspect/plan/apply/verify` as an ordinary identity
-recovery sequence. Those operator storage-migration tools do not transfer
-context's migration responsibility to an agent.
+Never manually edit current identity, mailbox, token or route state. The removed
+`collab migrate` command and MCP tool are not recovery or maintenance options.
 
 ## Install and activate separately
 
@@ -74,6 +62,12 @@ Use the formal installer from the reviewed current source:
 ```sh
 scripts/install-global-collab.sh
 ```
+
+Obtain the user's approval for this installation before writing global runtime
+artifacts. Earlier approvals do not cover another installation. After approval,
+check for and handle the installer's blocking confirmation window. Do not leave
+it waiting unattended or bypass a denied action. Installation approval does not
+authorize an agent to activate or replace the running daemon.
 
 It builds and installs Collab and refreshes the embedded Skill. It does not
 activate the new global daemon or discard durable state. Verify the installed
@@ -158,7 +152,7 @@ without an identity takeover or stale-lock cleanup by the agent.
 
 If the runtime service cannot connect or Desktop refuses the thread/project,
 return that precise error and retain identity and messages. Do not ask the agent
-for an AppServer endpoint or an MCP invocation, guess a socket, delete a journal,
+for an AppServer endpoint or an MCP invocation, guess a socket, delete state,
 or edit identity state. Report source, global installation and actual Desktop
 delivery separately. Service restart restores persisted bindings after native
 verification; agents do not repeat registration to repair a bridge process.
@@ -174,9 +168,9 @@ Collab has one global user-managed daemon. Agents never start, stop, restart or
 kill it, request maintenance credentials, or create a second global runtime.
 User maintenance commands and credentials are outside the agent interface.
 When the service is unavailable, preserve durable state and report that fact.
-Project replay failure must not disable authenticated user maintenance: its
+Project state read failure must not disable authenticated user maintenance: its
 credential check and shutdown path belong to the host, independently of the
-project reducer. Agents report the failure and do not edit journals or acquire
+project state owner. Agents report the failure and do not edit control files or acquire
 maintenance authority to compensate.
 AppSDK/Collab maintenance never requires tmux server lifecycle operations or
 termination of the host pane.
@@ -192,8 +186,8 @@ collab reset --project
 
 It clears this project's messages, routes, tasks, assets and load. It preserves
 other projects, AppSDK state and the global daemon. It is not a prerequisite
-for context recovery, an identity-conflict remedy or a history-preserving
-migration. Do not imitate reset by editing files.
+for context recovery or an identity-conflict remedy. Do not imitate reset by
+editing files.
 
 ## Master and deprecated interfaces
 

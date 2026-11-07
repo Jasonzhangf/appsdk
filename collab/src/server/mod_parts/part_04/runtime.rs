@@ -75,7 +75,7 @@ impl ProjectRuntimeManager {
         let key = Self::route_key(context);
         let project_root = Path::new(&context.canonical_root);
         let reservation = select_central_runtime_storage(
-            &self.host.host_paths, &self.route_journal, &key, Some(&self.register_gate),
+            &self.host.host_paths, &self.route_file, &key, Some(&self.register_gate),
         ).map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
         let pending = self
             .routes
@@ -128,41 +128,17 @@ impl ProjectRuntimeManager {
                     .map_err(|error| format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: {error}"))?,
             )
         };
-        let journal_path = server_dir.join("journal.jsonl");
-        let proven_pending = proven_pending_operations(
-            self.host.host_paths.state_root(),
-            key.0.as_str(),
-            key.1.as_str(),
-        )
-        .map_err(|error| {
-            format!(
-                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: runtime control pending effects for {}: {error}",
-                root.display()
-            )
-        })?;
-        let state = replay_from_journal_with_proven(&root, &journal_path, &proven_pending).map_err(|error| {
-            format!(
-                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: runtime journal replay for {}: {error}",
-                root.display()
-            )
-        })?;
-        let journal_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&journal_path)
-            .map_err(|error| {
-                format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: open runtime journal: {error}")
-            })?;
+        let state_path = server_dir.join("state.json");
+        let state = current_state::load(&state_path, false)?;
         let runtime = Arc::new(Server {
             config: crate::config::load(&root).map_err(|error| {
                 format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: load project config: {error}")
             })?,
             root,
             storage_root,
-            journal_path,
+            state_path,
             host_paths: self.host.host_paths.clone(),
             state: Mutex::new(state),
-            journal: Mutex::new(journal_file),
             appserver_candidate_check: self.host.appserver_candidate_check.clone(),
             #[cfg(not(test))]
             tmux_notification_sink: self.host.tmux_notification_sink.clone(),
@@ -310,16 +286,14 @@ impl ProjectRuntimeManager {
             }
         }
         let record = HostRouteRecord {
-            version: 1,
-            op: "register".into(),
             app_scope_id: context.app_scope_id.as_str().into(),
             project_scope: context.project_scope.as_str().into(),
             canonical_root: context.canonical_root.clone(),
             storage_root: storage_root.to_string_lossy().into_owned(),
             registered_ms: now_ms(),
         };
-        let existing_records = load_host_route_records(&self.route_journal).map_err(|error| {
-            format!("HOST_ROUTE_DURABILITY_FAILED: validate route journal: {error}")
+        let existing_records = load_host_route_records(&self.route_file).map_err(|error| {
+            format!("HOST_ROUTE_DURABILITY_FAILED: validate current routes: {error}")
         })?;
         if allow_resident_storage {
             for existing in &existing_records {
@@ -352,7 +326,7 @@ impl ProjectRuntimeManager {
                 record.storage_root, owner
             ));
         }
-        append_host_route_record(&self.route_journal, &record)
+        append_host_route_record(&self.route_file, &record)
     }
 
     fn select_runtime(&self, context: &ProjectContext) -> Result<Arc<Server>, String> {
@@ -479,16 +453,9 @@ impl ProjectRuntimeManager {
         // host mutex serializes cross-project sends so source and target never
         // deadlock against each other. The same Arc is never locked twice.
         let mut host_state = self.host.state.lock().unwrap();
-        if let Some(error) = &host_state.journal_poison {
-            return (
-                target,
-                Resp::err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}")),
-            );
-        }
-        let ceo_grant = host_state.ceo_grant.clone();
         let committed = if Arc::ptr_eq(&self.host, &source) {
             let mut target_state = target.state.lock().unwrap();
-            authorize_and_commit_cross_project(
+            authenticate_and_commit_cross_project(
                 &self.host,
                 &host_state,
                 &target,
@@ -496,7 +463,6 @@ impl ProjectRuntimeManager {
                 &command,
                 &worker_id,
                 &token,
-                ceo_grant.as_ref(),
                 &to,
                 &subject,
                 &body,
@@ -504,7 +470,7 @@ impl ProjectRuntimeManager {
             )
         } else if Arc::ptr_eq(&self.host, &target) {
             let source_state = source.state.lock().unwrap();
-            authorize_and_commit_cross_project(
+            authenticate_and_commit_cross_project(
                 &source,
                 &source_state,
                 &self.host,
@@ -512,7 +478,6 @@ impl ProjectRuntimeManager {
                 &command,
                 &worker_id,
                 &token,
-                ceo_grant.as_ref(),
                 &to,
                 &subject,
                 &body,
@@ -521,7 +486,7 @@ impl ProjectRuntimeManager {
         } else {
             let source_state = source.state.lock().unwrap();
             let mut target_state = target.state.lock().unwrap();
-            authorize_and_commit_cross_project(
+            authenticate_and_commit_cross_project(
                 &source,
                 &source_state,
                 &target,
@@ -529,7 +494,6 @@ impl ProjectRuntimeManager {
                 &command,
                 &worker_id,
                 &token,
-                ceo_grant.as_ref(),
                 &to,
                 &subject,
                 &body,
@@ -549,9 +513,6 @@ impl ProjectRuntimeManager {
     /// happen again under the host state lock before durable commit.
     fn ceo_grant_snapshot(&self) -> Result<Option<crate::ceo::CeoGrant>, String> {
         let state = self.host.state.lock().unwrap();
-        if let Some(error) = &state.journal_poison {
-            return Err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}"));
-        }
         Ok(state.ceo_grant.clone())
     }
 
@@ -669,12 +630,6 @@ impl ProjectRuntimeManager {
         // otherwise the fixed host-then-target order avoids any double lock.
         let mut response = if Arc::ptr_eq(&target, &self.host) {
             let mut host_state = self.host.state.lock().unwrap();
-            if let Some(error) = &host_state.journal_poison {
-                return (
-                    caller,
-                    Resp::err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}")),
-                );
-            }
             let current_grant = host_state.ceo_grant.clone();
             channel_inbound_commit_with_state(
                 &target,
@@ -689,12 +644,6 @@ impl ProjectRuntimeManager {
             // Fixed lock order: host state first, then the target runtime. A
             // single mutex is never locked twice.
             let mut host_state = self.host.state.lock().unwrap();
-            if let Some(error) = &host_state.journal_poison {
-                return (
-                    caller,
-                    Resp::err(format!("HOST_AUTHORITY_STORE_UNAVAILABLE: {error}")),
-                );
-            }
             let current_grant = host_state.ceo_grant.clone();
             let mut target_state = target.state.lock().unwrap();
             channel_inbound_commit_with_state(
@@ -719,16 +668,16 @@ impl ProjectRuntimeManager {
         self.dispatch_sync_with_register_binding(project_context, req, None)
     }
 
-    /// `dispatch_sync` with an optional outer-operation binder. When present
-    /// and the request is a Register, the owner prepares the exact envelope,
-    /// appends+syncs the outer `Validating` nested IDs, and only then consumes
-    /// that same envelope. A sync failure returns an error and never consumes.
+    /// Context already holds identity_gate when supplying its internal binder.
+    /// Raw Register owns that same gate through publication and finalization.
     fn dispatch_sync_with_register_binding(
         &self,
         project_context: Option<ProjectContext>,
         req: Req,
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> (Arc<Server>, Resp) {
+        let _identity = (matches!(&req, Req::Register { .. }) && outer_binding.is_none())
+            .then(|| self.identity_gate.lock().unwrap());
         let decorate=matches!(&req,Req::Context {..}|Req::IdentityContext {..});
         let workspace_reset=matches!(&req,Req::ProjectReset{..});
         let context=project_context.clone();
@@ -793,9 +742,6 @@ impl ProjectRuntimeManager {
                             .as_deref()
                             .is_some_and(|key| intent.address.eq_ignore_ascii_case(key));
                     if is_ceo {
-                        if let Err(error) = self.same_pane_master_route_ready(&caller) {
-                            return (caller, Resp::err(error));
-                        }
                         if let Err(error) =
                             validate_request_context(&caller, &req, Some(&context))
                         {
@@ -815,6 +761,16 @@ impl ProjectRuntimeManager {
         if let Req::Ceo {worker_id,token,command} = req {
             return self.dispatch_ceo(Some(context),worker_id,token,command);
         }
+        if matches!(&req, Req::MasterPromote { .. } | Req::MasterClear { .. } | Req::MasterDelegate { .. }) {
+            if let Err(error) = self.recover_pending_effects_for_scope(&context) {
+                return (self.host.clone(), Resp::err(error));
+            }
+            let runtime = match self.select_runtime(&context) {
+                Ok(runtime) => runtime, Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let response = self.change_mapped_role(&runtime, &context, &req);
+            return (runtime, response);
+        }
         if let Req::UnregisterSelf { worker_id, token } = &req {
             let runtime = self
                 .routes
@@ -825,66 +781,15 @@ impl ProjectRuntimeManager {
             let Some(runtime) = runtime else {
                 return (self.host.clone(), Resp::err("SELF_ROUTE_UNAVAILABLE"));
             };
-            let control_binding = {
-                let state = runtime.state.lock().unwrap();
-                let route_scope = RouteScope {
-                    app_scope_id: context.app_scope_id.clone(),
-                    project_scope_id: context.project_scope.clone(),
-                };
-                state
-                    .global
-                    .lookup_project_for_route(&route_scope)
-                    .and_then(|project| {
-                        project
-                            .runtime_bindings
-                            .values()
-                            .filter(|binding| binding.agent_id.as_str() == worker_id)
-                            .max_by_key(|binding| binding.endpoint_generation)
-                    })
-                    .cloned()
+            let response = self.retire_mapped_self(&runtime, &context, worker_id, token);
+            return (runtime, response);
+        }
+        if let Req::WorkerClose { worker_id, token, target_id, reason } = &req {
+            let runtime = match self.select_runtime(&context) {
+                Ok(runtime) => runtime, Err(error) => return (self.host.clone(), Resp::err(error)),
             };
-            let owned_routes: Vec<_> = self
-                .host
-                .state
-                .lock()
-                .unwrap()
-                .global
-                .current_thread_routes
-                .values()
-                .filter(|binding| {
-                    binding.project_scope == context.project_scope
-                        && binding.app_scope_id == context.app_scope_id
-                        && binding.agent_id.as_str() == worker_id
-                })
-                .cloned()
-                .collect();
-            let mut response =
-                peer_lifecycle::unregister_self(&runtime, Some(&context), worker_id, token);
-            if response.ok {
-                if let Some(binding) = control_binding.as_ref() {
-                    match self.unregister_control_binding(&runtime, &context, worker_id, binding) {
-                        Ok(crate::server::binding_store::Durability::Confirmed) => {}
-                        Ok(crate::server::binding_store::Durability::Unknown) => {
-                            Self::mark_control_durability_unknown(&mut response);
-                        }
-                        Err(error) => {
-                            response.ok = false;
-                            response.error = Some(error);
-                        }
-                    }
-                }
-            }
-            if response.ok && !Arc::ptr_eq(&runtime, &self.host) {
-                for binding in owned_routes {
-                    if let Err(error) = self
-                        .host
-                        .commit_checked(&[Event::GlobalCurrentThreadRouteRetired { binding }])
-                    {
-                        response.ok = false;
-                        response.error = Some(format!("SELF_ROUTE_CLEANUP_FAILED: {error}"));
-                    }
-                }
-            }
+            let _register = self.register_gate.lock().unwrap();
+            let response = handle_worker_close(&runtime, worker_id.clone(), token.clone(), target_id.clone(), reason.clone());
             return (runtime, response);
         }
         if let Req::PeerLifecycle { ref request } = req {
@@ -904,14 +809,14 @@ impl ProjectRuntimeManager {
             };
             let response = match validate_request_context(&runtime, &req, Some(&context)) {
                 Ok(()) => {
-                    dispatch_with_route_context_bound(&runtime, req, Some(context), None, None)
+                    let Req::PeerLifecycle { request } = req else { unreachable!() };
+                    let _register = matches!(&request, crate::proto::PeerLifecycleRequest::Close { .. })
+                        .then(|| self.register_gate.lock().unwrap());
+                    peer_lifecycle::handle(&runtime, Some(&context), request, Some(self))
                 }
                 Err(error) => peer_lifecycle::unavailable(request, &error, true),
             };
             return (runtime, response);
-        }
-        if let Req::RegisterReply { reply } = req {
-            return self.participant_register_reply(context, reply);
         }
         if let Req::IdentityContext {
             facts,
@@ -920,55 +825,6 @@ impl ProjectRuntimeManager {
         {
             let identity_context =
                 identity_context.unwrap_or_else(|| IdentityContextRequest::legacy(facts));
-            if identity_context.action == "prepare_invocation" {
-                if let Err(error) = self.ensure_identity_context_route(&context, &identity_context)
-                {
-                    return (self.host.clone(), Resp::err(error));
-                }
-                return self.identity_context(context, identity_context);
-            }
-            if identity_context.action == "cancel" {
-                return self.identity_context(context, identity_context);
-            }
-            if is_identity_query_request(&identity_context) {
-                if !is_valid_identity_query_shape(&identity_context) {
-                    return (
-                        self.host.clone(),
-                        Resp::err("IDENTITY_OPERATION_QUERY_SHAPE_INVALID"),
-                    );
-                }
-                let response = self.operation_journal.query(
-                    &identity_context,
-                    &context.project_scope.as_str(),
-                    context.app_scope_id.as_str(),
-                );
-                return (
-                    self.host.clone(),
-                    match response {
-                        Ok(envelope) => {
-                            // Read the exact inner receipt from the already-loaded
-                            // runtime after outer authorization. This is a pure
-                            // projection and never mutates state.
-                            let nested_readback =
-                                self.inner_register_receipt_readback(&context, &envelope.result);
-                            let mut result = serde_json::to_value(&envelope.result)
-                                .unwrap_or(serde_json::Value::Null);
-                            if let Some(recovery) = self
-                                .name_recovery_readback(&context, &identity_context.operation_id)
-                            {
-                                result["name_resolution"] = recovery;
-                            }
-                            if let (Some(object), Some(readback)) =
-                                (result.as_object_mut(), nested_readback)
-                            {
-                                object.insert("nested_receipt".into(), readback);
-                            }
-                            Resp::data(json!({ "result": result }))
-                        }
-                        Err(error) => Resp::err(error),
-                    },
-                );
-            }
             return self.identity_context(context, identity_context);
         }
         let register_binding = outer_binding.filter(|_| matches!(req, Req::Register { .. }));
@@ -978,9 +834,6 @@ impl ProjectRuntimeManager {
             Req::Register { worker_id, .. } => Some(worker_id.clone()),
             _ => None,
         };
-        if let Err(error) = self.admit_committed_pane_register_retry(&mut context, &req) {
-            return (self.host.clone(), Resp::err(error));
-        }
         let superseded = match self.validate_current_thread_candidate(&context, &req) {
             Ok(superseded) => superseded,
             Err(error) => return (self.host.clone(), Resp::err(error)),
@@ -989,37 +842,23 @@ impl ProjectRuntimeManager {
             return self.dispatch_cross_project_send(&context, req);
         }
 
-        if let Some((runtime, _)) = self.routes.lock().unwrap().get(&key).and_then(|route| {
-            route
-                .runtime
-                .as_ref()
-                .map(|runtime| (runtime.clone(), false))
-        }) {
-            if !is_register {
-                if let Err(error) = self.same_pane_master_route_ready(&runtime) {
-                    return (runtime, Resp::err(error));
-                }
-            }
-            let rollback_state = match register_worker_id.as_deref() {
-                Some(worker_id) => {
-                    match self.registration_rollback_state(&runtime, &context, worker_id) {
-                        Ok(state) => state,
-                        Err(error) => return (runtime, Resp::err(error)),
-                    }
-                }
-                None => (None, None, None, Vec::new()),
-            };
+        let current_runtime = {
+            self.routes.lock().unwrap().get(&key).and_then(|route| route.runtime.clone())
+        };
+        if let Some(runtime) = current_runtime {
             let mut register_effect_id = None;
             let mut register_control_first = self.register_control_first_hook(
                 &runtime,
+                register_binding.and_then(|binding| binding.identity_facts().cloned()),
+                register_binding
+                    .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
                 &mut register_effect_id,
             );
-            let response = if let Err(error) = validate_request_context_with_register_approval(
+            let response = if let Err(error) = validate_request_context(
                 &runtime,
                 &req,
                 Some(&context),
-                register_binding.and_then(RegisterOuterBinding::approval),
             ) {
                 Resp::err(error)
             } else {
@@ -1034,12 +873,7 @@ impl ProjectRuntimeManager {
             drop(register_control_first);
             let (runtime, response) = self.finalize_registration(
                 runtime,
-                &context,
                 register_worker_id.as_deref(),
-                rollback_state.0,
-                rollback_state.1,
-                rollback_state.2,
-                rollback_state.3,
                 response,
                 register_effect_id.as_deref(),
             );
@@ -1060,31 +894,19 @@ impl ProjectRuntimeManager {
                 Ok(runtime) => runtime,
                 Err(error) => return (self.host.clone(), Resp::err(error)),
             };
-            if !is_register {
-                if let Err(error) = self.same_pane_master_route_ready(&runtime) {
-                    return (runtime, Resp::err(error));
-                }
-            }
-            let rollback_state = match register_worker_id.as_deref() {
-                Some(worker_id) => {
-                    match self.registration_rollback_state(&runtime, &context, worker_id) {
-                        Ok(state) => state,
-                        Err(error) => return (runtime, Resp::err(error)),
-                    }
-                }
-                None => (None, None, None, Vec::new()),
-            };
             let mut register_effect_id = None;
             let mut register_control_first = self.register_control_first_hook(
                 &runtime,
+                register_binding.and_then(|binding| binding.identity_facts().cloned()),
+                register_binding
+                    .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
                 &mut register_effect_id,
             );
-            let response = if let Err(error) = validate_request_context_with_register_approval(
+            let response = if let Err(error) = validate_request_context(
                 &runtime,
                 &req,
                 Some(&context),
-                register_binding.and_then(RegisterOuterBinding::approval),
             ) {
                 Resp::err(error)
             } else {
@@ -1099,12 +921,7 @@ impl ProjectRuntimeManager {
             drop(register_control_first);
             let (runtime, response) = self.finalize_registration(
                 runtime,
-                &context,
                 register_worker_id.as_deref(),
-                rollback_state.0,
-                rollback_state.1,
-                rollback_state.2,
-                rollback_state.3,
                 response,
                 register_effect_id.as_deref(),
             );
@@ -1130,26 +947,19 @@ impl ProjectRuntimeManager {
                 // participant gate; continuation must not append it again.
                 self.install_runtime(&key, self.host.clone(), None);
             }
-            let rollback_state = match register_worker_id.as_deref() {
-                Some(worker_id) => {
-                    match self.registration_rollback_state(&self.host, &context, worker_id) {
-                        Ok(state) => state,
-                        Err(error) => return (self.host.clone(), Resp::err(error)),
-                    }
-                }
-                None => (None, None, None, Vec::new()),
-            };
             let mut register_effect_id = None;
             let mut register_control_first = self.register_control_first_hook(
                 &self.host,
+                register_binding.and_then(|binding| binding.identity_facts().cloned()),
+                register_binding
+                    .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
                 &mut register_effect_id,
             );
-            let response = if let Err(error) = validate_request_context_with_register_approval(
+            let response = if let Err(error) = validate_request_context(
                 &self.host,
                 &req,
                 Some(&context),
-                register_binding.and_then(RegisterOuterBinding::approval),
             ) {
                 Resp::err(error)
             } else {
@@ -1167,12 +977,7 @@ impl ProjectRuntimeManager {
             }
             let (runtime, response) = self.finalize_registration(
                 self.host.clone(),
-                &context,
                 register_worker_id.as_deref(),
-                rollback_state.0,
-                rollback_state.1,
-                rollback_state.2,
-                rollback_state.3,
                 response,
                 register_effect_id.as_deref(),
             );
@@ -1210,33 +1015,24 @@ impl ProjectRuntimeManager {
             .map(|route| route.storage_root.clone())
             .unwrap_or(storage_root);
         // Admit the project route before opening or mutating its reducer. The
-        // host journal is the durable transaction boundary: if it cannot be
-        // published, this request must not create or mutate a project
-        // journal that would be unreachable after a restart.
+        // current control publication is the boundary: a failed publication
+        // must not create or mutate unreachable project state.
         let runtime = match self.ensure_runtime(&key, &context_root, &storage_root) {
             Ok(runtime) => runtime,
             Err(error) => return (self.host.clone(), Resp::err(error)),
         };
-        let rollback_state = match register_worker_id.as_deref() {
-            Some(worker_id) => {
-                match self.registration_rollback_state(&runtime, &context, worker_id) {
-                    Ok(state) => state,
-                    Err(error) => return (runtime, Resp::err(error)),
-                }
-            }
-            None => (None, None, None, Vec::new()),
-        };
         let mut register_effect_id = None;
         let mut register_control_first = self.register_control_first_hook(
             &runtime,
+            register_binding.and_then(|binding| binding.identity_facts().cloned()),
+            register_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
             &mut register_effect_id,
         );
-        let response = if let Err(error) = validate_request_context_with_register_approval(
+        let response = if let Err(error) = validate_request_context(
             &runtime,
             &req,
             Some(&context),
-            register_binding.and_then(RegisterOuterBinding::approval),
         ) {
             Resp::err(error)
         } else {
@@ -1251,12 +1047,7 @@ impl ProjectRuntimeManager {
         drop(register_control_first);
         let (runtime, response) = self.finalize_registration(
             runtime,
-            &context,
             register_worker_id.as_deref(),
-            rollback_state.0,
-            rollback_state.1,
-            rollback_state.2,
-            rollback_state.3,
             response,
             register_effect_id.as_deref(),
         );
@@ -1268,7 +1059,7 @@ impl ProjectRuntimeManager {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn authorize_and_commit_cross_project(
+fn authenticate_and_commit_cross_project(
     source: &Server,
     source_state: &State,
     target: &Server,
@@ -1276,7 +1067,6 @@ fn authorize_and_commit_cross_project(
     command: &crate::proto::CommandEnvelope,
     worker_id: &str,
     token: &str,
-    ceo_grant: Option<&crate::ceo::CeoGrant>,
     to: &str,
     subject: &str,
     body: &str,
@@ -1309,7 +1099,6 @@ fn authorize_and_commit_cross_project(
         agent_id: binding.agent_id.clone(),
         runtime_id: binding.runtime_id.clone(),
         appserver_id: binding.app_scope_id.clone(),
-        endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id.clone(),
         session_id: binding.session_id.clone(),
         native_thread_id: binding.native_thread_id.clone(),
@@ -1317,8 +1106,6 @@ fn authorize_and_commit_cross_project(
     if let Err(error) = command.validate_for(&runtime_identity, &registered_scope) {
         return Err(Resp::err(format!("CROSS_PROJECT_BINDING_REJECTED: {error}")));
     }
-    let sender_role = cross_project_role(source, source_state, ceo_grant, worker_id)
-        .map_err(Resp::err)?;
     let source_thread_id = source_state
         .workers
         .get(worker_id)
@@ -1330,8 +1117,6 @@ fn authorize_and_commit_cross_project(
         target_state,
         worker_id,
         &source_project,
-        sender_role,
-        ceo_grant,
         source_thread_id,
         to,
         subject,

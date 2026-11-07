@@ -300,8 +300,24 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 37] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 41] {
     [
+        (
+            "docs/dagpipe/collab-activation.graph.json",
+            include_str!("../../docs/dagpipe/collab-activation.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-task-block-approval.graph.json",
+            include_str!("../../docs/dagpipe/collab-task-block-approval.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-shutdown.graph.json",
+            include_str!("../../docs/dagpipe/collab-shutdown.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-identity-anchor.graph.json",
+            include_str!("../../docs/dagpipe/collab-identity-anchor.graph.json"),
+        ),
         (
             "docs/dagpipe/collab-send-message.graph.json",
             include_str!("../../docs/dagpipe/collab-send-message.graph.json"),
@@ -453,8 +469,12 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 37] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 35] {
+fn design_graph_ids() -> [&'static str; 39] {
     [
+        "appsdk-collab-activation",
+        "appsdk-collab-task-block-approval",
+        "appsdk-collab-shutdown",
+        "appsdk-collab-identity-anchor",
         "collab-send-message",
         "collab-qqbot-inbound",
         "collab-qqbot-outbound",
@@ -493,8 +513,44 @@ fn design_graph_ids() -> [&'static str; 35] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 182] {
+fn design_graph_operator_names() -> [&'static str; 219] {
     [
+        "appsdk.collab_activation.authorize",
+        "appsdk.collab_activation.prepare",
+        "appsdk.collab_activation.reload",
+        "appsdk.collab_activation.readiness",
+        "appsdk.collab_activation.emit",
+        "appsdk.collab_task_block_approval.receive_request",
+        "appsdk.collab_task_block_approval.admit_decision",
+        "appsdk.collab_task_block_approval.classify_request",
+        "appsdk.collab_task_block_approval.commit_decision",
+        "appsdk.collab_task_block_approval.emit_result",
+        "appsdk.collab_shutdown.authorize",
+        "appsdk.collab_shutdown.respond",
+        "appsdk.collab_shutdown.request_stop",
+        "appsdk.collab_shutdown.drain",
+        "appsdk.collab_shutdown.cleanup",
+        "appsdk.collab_shutdown.emit",
+        "appsdk.collab_identity.collect",
+        "appsdk.collab_identity.classify_intent",
+        "appsdk.collab_identity.reject_missing_facts",
+        "appsdk.collab_name.hold_pending",
+        "appsdk.collab_name.check_claimant",
+        "appsdk.collab_identity.anchor",
+        "appsdk.collab_identity.bind_native_session",
+        "appsdk.collab_identity.classify_anchor",
+        "appsdk.collab_identity.record_anchor_failure",
+        "appsdk.collab_binding.commit",
+        "appsdk.collab_binding.classify_commit",
+        "appsdk.collab_identity.rollback_name",
+        "appsdk.collab_identity.cancel_partial",
+        "appsdk.collab_identity.retire_claimant",
+        "appsdk.collab_master.handoff",
+        "appsdk.collab_name.migrate_legacy",
+        "appsdk.collab_identity.read_control_slot",
+        "appsdk.collab_identity.sync_carrier",
+        "appsdk.collab_identity.query_phase",
+        "appsdk.collab_identity.emit_outcome",
         "appsdk.collab_startup.read_state",
         "appsdk.collab_startup.resolve_storage",
         "appsdk.collab_startup.load_routes",
@@ -506,6 +562,7 @@ fn design_graph_operator_names() -> [&'static str; 182] {
         "appsdk.collab_install.location",
         "appsdk.collab_install.install",
         "appsdk.collab_install.result",
+        "appsdk.collab_send.authenticate_source",
         "appsdk.collab_send.classify_identity",
         "appsdk.collab_send.classify_address_form",
         "appsdk.collab_send.resolve_recipient_route",
@@ -525,7 +582,7 @@ fn design_graph_operator_names() -> [&'static str; 182] {
         "appsdk.qqbot.outbound.record_platform_result",
         "appsdk.qqbot.outbound.emit_send_result",
         "collab.reply.read",
-        "appsdk.collab_context.bootstrap_policy",
+        "appsdk.collab_context.communication",
         "collab.reply.classify",
         "collab.reply.commit",
         "collab.reply.notify",

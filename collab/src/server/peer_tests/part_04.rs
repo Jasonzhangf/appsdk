@@ -9,7 +9,7 @@ fn managed_subworker_cannot_create_a_patrol_deadline() {
         status: "idle".into(), thread_id: Some("thread-child".into()),
         profile: None, created_ms: now, ready_deadline_ms: now + 90_000,
         last_message: None, error: None, probe_failures: Vec::new(), runtime: None,
-        create_operation_id: None, binding_id: None, endpoint_generation: None,
+        create_operation_id: None, binding_id: None,
     });
     server.commit(&[Event::SubagentUpdated { subagent: record }]);
     let response = handle_notification_subscribe(
@@ -37,7 +37,7 @@ fn managed_direct_dispatch_accepts_master_and_continues_after_blocked() {
         status: "idle".into(), thread_id: Some("thread-child".into()),
         profile: None, created_ms: now, ready_deadline_ms: now + 90_000,
         last_message: None, error: None, probe_failures: Vec::new(), runtime: None,
-        create_operation_id: None, binding_id: None, endpoint_generation: None,
+        create_operation_id: None, binding_id: None,
     });
     server.commit(&[Event::SubagentUpdated { subagent: record }]);
     let send = |actor: &str, subject: &str| crate::subagent::handle(
@@ -66,12 +66,13 @@ fn managed_direct_dispatch_accepts_master_and_continues_after_blocked() {
 }
 
 #[test]
-fn master_name_uses_authority_when_read_projection_is_peer() {
+fn master_name_uses_current_map_when_read_projection_is_peer() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
     promote_master(&server, "master", "user approval");
     let worker = server.state.lock().unwrap().workers["master"].clone();
-    let summary = worker_status_summary_with_maps(&server, &Default::default(), &Default::default(), &Default::default(), json!({"role":"peer"}), &worker);
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+    let summary = worker_status_summary_with_maps(&server, &control, &Default::default(), &Default::default(), &Default::default(), json!({"role":"peer"}), &worker).unwrap();
     assert_eq!(summary["display_name"], "Jenny");
     assert_eq!(summary["role"], "peer");
     std::fs::remove_dir_all(root).unwrap();
@@ -148,7 +149,6 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
                 runtime: None,
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             }),
         },
         Event::SubagentUpdated {
@@ -167,7 +167,6 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
                 runtime: None,
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             }),
         },
     ]);
@@ -222,6 +221,12 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
         .last_message
         .clone()
         .unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks[&format!("task-{first_message}")].owner, "child-a");
+        assert!(state.subagents["managed-b"].last_message.is_none());
+        assert!(!state.tasks.values().any(|task| task.owner == "child-b"));
+    }
     let second = crate::subagent::handle(
         &server,
         "parent",
@@ -238,24 +243,6 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
         .clone()
         .unwrap();
 
-    let journal: Vec<serde_json::Value> =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-    let first_sent_index = journal
-        .iter()
-        .position(|event| event["ev"] == "Sent" && event["msg"]["id"] == first_message)
-        .unwrap();
-    let second_sent_index = journal
-        .iter()
-        .position(|event| event["ev"] == "Sent" && event["msg"]["id"] == second_message)
-        .unwrap();
-    assert!(!journal[first_sent_index..second_sent_index]
-        .iter()
-        .any(|event| event["ev"] == "SubagentUpdated" && event["subagent"]["id"] == "managed-b"),
-        "the selected child must be bound only in the message commit");
 
     let state = server.state.lock().unwrap();
     let first_message = state.subagents["managed-a"].last_message.clone().unwrap();
@@ -294,7 +281,7 @@ fn managed_subagent_send_binds_the_selected_child_when_multiple_children_are_ass
         )
         .ok
     );
-    let replayed = replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(replayed.subagents["managed-a"].status, "working");
     assert_eq!(replayed.subagents["managed-b"].status, "working");
     assert_eq!(
@@ -333,7 +320,6 @@ fn managed_subagent_send_reclaims_working_child_without_an_owned_task() {
             runtime: None,
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         }),
     }]);
 
@@ -448,7 +434,6 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                 runtime: None,
                 create_operation_id: None,
                 binding_id: None,
-                endpoint_generation: None,
             },
         }]);
         let result = crate::subagent::handle(
@@ -493,7 +478,6 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                     runtime: None,
                     create_operation_id: None,
                     binding_id: None,
-                    endpoint_generation: None,
                 },
             },
             Event::TaskCreated {
@@ -557,7 +541,6 @@ fn managed_subagent_working_requires_existing_owned_assigned_task() {
                     runtime: None,
                     create_operation_id: None,
                     binding_id: None,
-                    endpoint_generation: None,
                 },
             },
             Event::TaskCreated {
@@ -622,7 +605,6 @@ fn managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempoten
             runtime: None,
             create_operation_id: None,
             binding_id: None,
-            endpoint_generation: None,
         }),
     }]);
 
@@ -674,11 +656,11 @@ fn managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempoten
 
     // Once both durable records are working, a repeated claim is a harmless
     // replay of the same transition and must not append or create anything.
-    let journal_after_first =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .lines()
-            .count();
+    let before = {
+        let state = server.state.lock().unwrap();
+        (serde_json::to_value(&state.tasks).unwrap(), serde_json::to_value(&state.subagents).unwrap(),
+            serde_json::to_value(&state.msgs).unwrap())
+    };
     let second = crate::subagent::handle(
         &server,
         "child",
@@ -688,15 +670,14 @@ fn managed_subagent_working_accepts_assignment_after_probe_race_and_is_idempoten
         },
     );
     assert!(second.ok, "{}", second.error.unwrap_or_default());
-    let journal_after_second =
-        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl"))
-            .unwrap()
-            .lines()
-            .count();
-    assert_eq!(journal_after_second, journal_after_first);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!((serde_json::to_value(&state.tasks).unwrap(), serde_json::to_value(&state.subagents).unwrap(),
+            serde_json::to_value(&state.msgs).unwrap()), before);
+    }
     assert_eq!(server.state.lock().unwrap().tasks.len(), 1);
 
-    let replayed = replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(replayed.subagents["managed"].status, "working");
     assert_eq!(replayed.tasks[&task_id].status, "working");
     assert_eq!(replayed.tasks[&task_id].owner, "child");
@@ -709,15 +690,7 @@ fn worker_close_allows_definitively_missing_worker_without_snapshot() {
     let (server, root) = test_server();
     register(&server, "master", "thread-master");
     register(&server, "missing-peer", "thread-missing-peer");
-    assert!(
-        super::handle_master_promote(
-            &server,
-            "master".into(),
-            "token-master".into(),
-            "user approved master".into(),
-        )
-        .ok
-    );
+    promote_master(&server, "master", "user approved master");
 
     kill_registered_worker_pane(&server, "missing-peer");
     let target = server.state.lock().unwrap().workers["missing-peer"].clone();
@@ -737,7 +710,7 @@ fn worker_close_allows_definitively_missing_worker_without_snapshot() {
     assert!(closed.ok, "{}", closed.error.unwrap_or_default());
     assert!(closed.data["snapshot_captured_ms"].is_null());
 
-    let replayed = replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(!replayed.workers.contains_key("missing-peer"));
     assert_eq!(
         replayed.worker_closures["missing-peer"].reason,
@@ -750,251 +723,12 @@ fn worker_close_allows_definitively_missing_worker_without_snapshot() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn owned_missing_tmux_endpoint(label: &str) -> (PathBuf, crate::proto::TmuxEndpoint, String) {
-    let socket = std::env::temp_dir().join(format!(
-        "collab-route-less-close-{}-{label}.sock",
-        std::process::id()
-    ));
-    let run = |args: &[&str]| {
-        let output = Command::new("tmux")
-            .arg("-S")
-            .arg(&socket)
-            .args(args)
-            .output()
-            .expect("run owned tmux command");
-        assert!(
-            output.status.success(),
-            "owned tmux {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output
-    };
-    run(&["new-session", "-d", "-s", "route-less-keep", "sleep 60"]);
-    run(&["new-session", "-d", "-s", "route-less-gone", "sleep 60"]);
-    let server_pid = String::from_utf8(
-        run(&["display-message", "-p", "#{pid}"]).stdout,
-    )
-    .unwrap()
-    .trim()
-    .parse::<u32>()
-    .unwrap();
-    let fields = String::from_utf8(
-        run(&[
-            "display-message",
-            "-p",
-            "-t",
-            "route-less-gone",
-            "#{session_id}\t#{pane_id}\t#{pane_pid}",
-        ])
-        .stdout,
-    )
-    .unwrap();
-    let mut fields = fields.trim_end().split('\t');
-    let tmux_session_id = fields.next().unwrap().to_owned();
-    let pane_id = fields.next().unwrap().to_owned();
-    let pane_pid = fields.next().unwrap().parse::<u32>().unwrap();
-    run(&["kill-session", "-t", "route-less-gone"]);
-    let endpoint = crate::proto::TmuxEndpoint {
-        socket_path: socket.display().to_string(),
-        server_pid,
-        tmux_session_id,
-        pane_id,
-        pane_pid,
-        codex_session_id: None,
-        codex_thread_id: None,
-    };
-    (socket, endpoint, "route-less-keep".into())
-}
-
-#[test]
-fn lifecycle_close_retires_a_route_less_missing_tmux_target() {
-    use crate::proto::{PeerLifecycleRequest, PeerLifecycleTarget};
-
-    let (server, root) = test_server();
-    let app = AppServerId::new("tui-default").unwrap();
-    let cwd = root.display().to_string();
-    let master_transport = test_appserver_transport("thread-master");
-    let registered = seed_committed_owner(
-        &server,
-        "master",
-        "token-master",
-        &master_transport,
-        &cwd,
-        Some(app.clone()),
-    );
-    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
-    commit_current_thread_route_for_runtime(&server, &server, "master", &cwd, Some(&app)).unwrap();
-    promote_master(&server, "master", "user approved lifecycle close");
-
-    let (tmux_socket, endpoint, keep_session) = owned_missing_tmux_endpoint("target");
-    let stale_transport = SelectedTransport {
-        kind: TransportKind::Tmux,
-        endpoint: Some(endpoint.socket_path.clone()),
-        namespace: Some(endpoint.tmux_session_id.clone()),
-        session_id: Some("route-less-agent-session".into()),
-        thread_id: Some("route-less-agent-thread".into()),
-        tmux_endpoint: Some(endpoint),
-        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
-        self_check: "route-less missing tmux target".into(),
-    };
-    let registered = seed_committed_owner(
-        &server,
-        "stale-peer",
-        "token-stale-peer",
-        &stale_transport,
-        &cwd,
-        Some(app.clone()),
-    );
-    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
-    // Model a persisted legacy no-session binding explicitly. New registrations
-    // require an agent session; this case tests retirement of historical data.
-    let mut legacy_binding = registered_binding(&server, "stale-peer");
-    legacy_binding.endpoint_generation += 1;
-    legacy_binding.session_id = None;
-    legacy_binding.native_thread_id = None;
-    let mut legacy_worker = server.state.lock().unwrap().workers["stale-peer"].clone();
-    let legacy_transport = legacy_worker.transport.as_mut().unwrap();
-    legacy_transport.session_id = None;
-    legacy_transport.thread_id = None;
-    server
-        .commit_checked(&[
-            Event::GlobalRuntimeBound {
-                binding: legacy_binding,
-            },
-            Event::Registered {
-                worker: legacy_worker,
-            },
-        ])
-        .unwrap();
-    assert!(
-        server
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .current_thread_routes
-            .values()
-            .all(|route| route.agent_id.as_str() != "stale-peer"),
-        "fixture must leave the target route-less"
-    );
-    let now = now_ms();
-    server.commit(&[Event::NotificationSubscribed {
-        subscription: crate::server::state::NotificationSubscription {
-            id: "sub-stale-peer".into(),
-            worker_id: "stale-peer".into(),
-            target: "missing-pane".into(),
-            event: "direct-message".into(),
-            subject: None,
-            method: "tmux".into(),
-            status: "armed".into(),
-            status_reason: None,
-            patrol_idle_since_ms: None,
-            patrol_last_push_ms: 0,
-            periodic_declared: false,
-            created_ms: now,
-            updated_ms: now,
-            fired_count: 0,
-            trigger_ms: None,
-            trigger_times_ms: vec![],
-            repeat_count: 1,
-            interval_ms: None,
-            expires_ms: now + 60_000,
-        },
-    }]);
-
-    let context = ProjectContext::for_registered_root_with_app(&root, app).unwrap();
-    let read = super::peer_lifecycle::handle(
-        &server,
-        Some(&context),
-        PeerLifecycleRequest::Read {
-            worker_id: "master".into(),
-            token: "token-master".into(),
-            target_id: Some("stale-peer".into()),
-        },
-    );
-    assert!(read.ok, "{}", read.error.unwrap_or_default());
-    assert_eq!(
-        read.data["result"]["target"]["worker_id"],
-        "stale-peer",
-        "{}",
-        read.data
-    );
-    assert_eq!(read.data["result"]["projection"]["endpoint_live"], false);
-    assert!(
-        read.data["result"]["projection"]["transport_view"]["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("TMUX_CAPTURE_FAILED: can't find pane:"),
-        "{}",
-        read.data
-    );
-    let target: PeerLifecycleTarget =
-        serde_json::from_value(read.data["result"]["target"].clone()).unwrap();
-
-    let closed = super::peer_lifecycle::handle(
-        &server,
-        Some(&context),
-        PeerLifecycleRequest::Close {
-            worker_id: "master".into(),
-            token: "token-master".into(),
-            operation_id: "route-less-close-op".into(),
-            query_capability: "route-less-close-capability".into(),
-            target,
-            reason: "remove stale no-session binding causing tombstone poison".into(),
-        },
-    );
-    assert!(closed.ok, "{:?}", closed.error);
-    assert_eq!(closed.data["result"]["outcome"], "complete", "{}", closed.data);
-    assert_eq!(closed.data["result"]["phase"], "complete", "{}", closed.data);
-    assert_eq!(
-        closed.data["result"]["close"]["runtime_archive"]["state"],
-        "missing",
-        "{}",
-        closed.data
-    );
-    assert_eq!(
-        closed.data["result"]["close"]["worker_retirement"]["state"],
-        "verified",
-        "{}",
-        closed.data
-    );
-    assert_eq!(
-        closed.data["result"]["close"]["binding_retirement"]["state"],
-        "verified",
-        "{}",
-        closed.data
-    );
-    assert_eq!(
-        closed.data["result"]["close"]["subscription_retirement"]["state"],
-        "verified",
-        "{}",
-        closed.data
-    );
-    assert!(!server.state.lock().unwrap().workers.contains_key("stale-peer"));
-
-    let _ = Command::new("tmux")
-        .arg("-S")
-        .arg(&tmux_socket)
-        .args(["kill-session", "-t", &keep_session])
-        .output();
-    std::fs::remove_dir_all(root).unwrap();
-}
-
 #[test]
 fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
     let (server, root) = test_server();
     register(&server, "peer-a", "%a");
     register(&server, "peer-b", "%b");
-    assert!(
-        super::handle_master_promote(
-            &server,
-            "peer-a".into(),
-            "token-peer-a".into(),
-            "user approved peer-a as collab master".into(),
-        )
-        .ok
-    );
+    promote_master(&server, "peer-a", "user approved peer-a as collab master");
 
     // A non-master peer cannot retire another peer.
     let outsider = super::handle_worker_close(
@@ -1151,7 +885,7 @@ fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
     );
     drop(state);
 
-    let replayed = super::replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(replayed.worker_snapshots["peer-b"].thread_id, "thread-b");
     assert_eq!(
         replayed.worker_closures["peer-b"].reason,
@@ -1169,15 +903,7 @@ fn worker_close_refuses_every_unfinished_task_status() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
     register(&server, "peer-b", "%peer-b");
-    assert!(
-        super::handle_master_promote(
-            &server,
-            "master".into(),
-            "token-master".into(),
-            "user approved master".into(),
-        )
-        .ok
-    );
+    promote_master(&server, "master", "user approved master");
     server.commit(&[Event::WorkerSnapshotCaptured {
         worker_id: "peer-b".into(),
         thread_id: "thread-peer-b".into(),
@@ -1357,7 +1083,7 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
     }
 
     // Durable replay must keep both facts: lease armed, payload still owed.
-    let replayed = super::replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(
         replayed.notification_subscriptions["sub-default-direct-message-owner"].status,
         "armed"
@@ -1539,16 +1265,10 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
     assert!(register_tmux(&server, "snapshot-master", master_endpoint.clone()).ok);
     assert!(register_tmux(&server, "snapshot-peer", peer_endpoint.clone()).ok);
     register_appserver_worker(&server, &root, "snapshot-appserver", "thread-snapshot-appserver");
-    let promoted = super::handle_master_promote(
-        &server,
-        "snapshot-master".into(),
-        "token-snapshot-master".into(),
-        "approved for worker snapshot test".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+    promote_master(&server, "snapshot-master", "approved for worker snapshot test");
 
     let revision_before = server.state.lock().unwrap().revision;
-    let journal_before = std::fs::read(&server.journal_path).unwrap();
+    let state_before = std::fs::read(&server.state_path).unwrap();
     let response = super::handle_worker_snapshot(
         &server,
         "snapshot-master".into(),
@@ -1670,7 +1390,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
     assert!(!state.worker_snapshots.contains_key("snapshot-peer"));
     assert_eq!(state.revision, revision_before);
     drop(state);
-    assert_eq!(std::fs::read(&server.journal_path).unwrap(), journal_before);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), state_before);
 
     let killed = Command::new("tmux")
         .args([
@@ -1708,21 +1428,13 @@ fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
     let endpoints = tmux.endpoints();
     assert_eq!(endpoints.len(), 2);
     // The master must carry an explicit AppServer session and thread: a
-    // tmux-only binding is Unknown and therefore holds no live master authority.
+    // Transport observation does not change persistent master authority.
     let mut master_endpoint = endpoints[0].clone();
     master_endpoint.codex_session_id = Some("session-master".into());
     master_endpoint.codex_thread_id = Some("thread-master".into());
     assert!(register_tmux(&server, "master", master_endpoint).ok);
     assert!(register_tmux(&server, "ordinary", endpoints[1].clone()).ok);
-    assert!(
-        super::handle_master_promote(
-            &server,
-            "master".into(),
-            "token-master".into(),
-            "user approved master".into(),
-        )
-        .ok
-    );
+    promote_master(&server, "master", "user approved master");
 
     let missing = super::handle_worker_close(
         &server,
@@ -1797,7 +1509,7 @@ fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
     assert_eq!(repeated.data["reused"], true);
     assert_eq!(repeated.data["reason"], "confirmed offline after snapshot");
 
-    let replayed = replay(&root).unwrap();
+    let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(!replayed.workers.contains_key("ordinary"));
     assert_eq!(
         replayed.worker_closures["ordinary"].reason,
@@ -1812,166 +1524,11 @@ fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
 }
 
 #[test]
-fn master_promotion_requires_user_approval_and_existing_master_delegates() {
-    let (server, root) = test_server();
-    let server = Arc::new(server);
-    let worker_registration = register_synthetic_peer(&server, "peer-a", "%a");
-    let target_registration = register_synthetic_peer(&server, "peer-b", "%b");
-    assert_eq!(worker_registration.data["role_brief"]["role"], "worker");
-    assert_eq!(
-        worker_registration.data["role_brief"]["derivation"]["kind"],
-        "peer"
-    );
-    assert_eq!(target_registration.data["role_brief"]["role"], "worker");
-    let role_text = |brief: &Value| {
-        let mut text = vec![
-            brief["role_task"].as_str().unwrap_or_default(),
-            brief["next_action"].as_str().unwrap_or_default(),
-        ];
-        text.extend(
-            brief["responsibilities"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str),
-        );
-        text.join(" ").to_lowercase()
-    };
-    let ordinary_text = role_text(&worker_registration.data["role_brief"]);
-    assert!(ordinary_text.contains("long-horizon orchestrator"));
-    assert!(ordinary_text.contains("prefer assigning code implementation to subagents"));
-    assert!(ordinary_text.contains("orchestrate scheduling, acceptance, delivery"));
-    assert!(ordinary_text.contains("owned-resource closure"));
-    assert!(ordinary_text.contains("codex exec --profile gcm"));
-    assert!(ordinary_text.contains("regardless of whether other peers are busy"));
-    assert!(ordinary_text.contains("verify subworker evidence"));
-    assert!(ordinary_text.contains("contact the current master"));
-    assert!(ordinary_text.contains("finite patrol"));
-    assert!(ordinary_text.contains("subscription presence does not gate identity"));
-    assert!(ordinary_text.contains("do not invent a polling interval"));
-    assert!(ordinary_text.contains("tmux"));
-    assert!(!ordinary_text.contains("only when every eligible peer is busy"));
-    assert!(!ordinary_text.contains("capacity fallback"));
-    assert!(!ordinary_text.contains("do not claim master grants"));
-    assert_eq!(
-        worker_registration.data["role_brief"]["communication_recovery"]["close_only_when"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
-
-    let missing =
-        super::handle_master_promote(&server, "peer-a".into(), "token-peer-a".into(), "".into());
-    assert!(!missing.ok);
-    assert!(missing.error.unwrap().contains("approval"));
-
-    let promoted = super::handle_master_promote(
-        &server,
-        "peer-a".into(),
-        "token-peer-a".into(),
-        "user approved peer-a as collab master".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
-    assert_eq!(promoted.data["mode"], "user_approved_self_promotion");
-    assert_eq!(promoted.data["role_brief"]["role"], "master");
-    let master_text = role_text(&promoted.data["role_brief"]);
-    assert!(master_text.contains("long-horizon orchestrator"));
-    assert!(master_text.contains("prefer assigning code implementation to subagents"));
-    assert!(master_text.contains("orchestrate scheduling, acceptance, delivery"));
-    assert!(master_text.contains("owned-resource closure"));
-    assert!(master_text.contains("codex exec --profile gcm"));
-    assert!(master_text.contains("regardless of whether other peers are busy"));
-    assert!(master_text.contains("p0/p1"));
-    assert!(master_text.contains("peer work progress evidence"));
-    assert!(master_text.contains("finite patrol"));
-    assert!(master_text.contains("subscription presence does not gate identity"));
-    assert!(master_text.contains("do not invent a polling interval"));
-    assert!(master_text.contains("tmux"));
-    assert!(!master_text.contains("only when every eligible peer is busy"));
-    assert!(!master_text.contains("capacity fallback"));
-    assert!(!master_text.contains("saturate every live present peer first"));
-    let context = handle_context(&server, "peer-a".into(), "token-peer-a".into());
-    assert_eq!(context.data["master"]["worker_id"], "peer-a");
-    assert_eq!(context.data["role_brief"]["role"], "master");
-    assert_eq!(context.data["role_brief"], promoted.data["role_brief"]);
-    let status = super::handle_master_status(&server);
-    assert_eq!(status.data["master"]["worker_id"], "peer-a");
-    assert_eq!(
-        status.data["master"]["approval"],
-        "user approved peer-a as collab master"
-    );
-
-    // A peer cannot take the seat by itself. Only explicit user approval strips
-    // the recorded grant, so without approval the incumbent keeps it.
-    let unapproved = super::handle_master_promote(
-        &server,
-        "peer-b".into(),
-        "token-peer-b".into(),
-        "  ".into(),
-    );
-    assert!(!unapproved.ok, "{unapproved:?}");
-    assert_eq!(
-        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-a".into())
-    );
-
-    let outsider = super::handle_master_delegate(
-        &server,
-        "peer-b".into(),
-        "token-peer-b".into(),
-        "peer-a".into(),
-    );
-    assert!(!outsider.ok);
-    assert!(outsider.error.unwrap().contains("master authority"));
-
-    let delegated = super::handle_master_delegate(
-        &server,
-        "peer-a".into(),
-        "token-peer-a".into(),
-        "peer-b".into(),
-    );
-    assert!(delegated.ok, "{}", delegated.error.unwrap_or_default());
-    assert_eq!(
-        super::current_master_holder(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-b".into())
-    );
-    assert_eq!(delegated.data["role_brief"]["role"], "master");
-    let target_context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
-    assert_eq!(target_context.data["identity"]["role"], "master");
-    assert_eq!(target_context.data["role_brief"]["role"], "master");
-    let workers = dispatch_with_route_context(&server, Req::Workers, None);
-    let target_worker = workers.data["workers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|worker| worker["id"] == "peer-b")
-        .unwrap();
-    assert_eq!(target_worker["role_brief"]["role"], "master");
-    let status = dispatch_with_route_context(&server, Req::StatusAll, None);
-    let target_status = status.data["workers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|worker| worker["id"] == "peer-b")
-        .unwrap();
-    assert_eq!(target_status["role_brief"], target_worker["role_brief"]);
-    assert_eq!(target_registration.data["role_brief"]["role"], "worker");
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn master_wake_hold_requires_master_and_replaces_or_releases_the_gate() {
     let (server, root) = test_server();
-    register_synthetic_peer(&server, "gate-master", "thread-gate-master");
+    register(&server, "gate-master", "thread-gate-master");
     register_synthetic_peer(&server, "gate-peer", "thread-gate-peer");
-    let promoted = super::handle_master_promote(
-        &server,
-        "gate-master".into(),
-        "token-gate-master".into(),
-        "user approved gate-master as collab master".into(),
-    );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+    promote_master(&server, "gate-master", "user approved gate-master as collab master");
 
     let rejected = super::handle_master_wake_hold(
         &server,

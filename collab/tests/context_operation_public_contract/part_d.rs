@@ -1,22 +1,24 @@
 #[test]
+fn identity_map_reset_intent_finishes_before_startup_restoration() {
+    let (mut fixture, _host, identity) = lifecycle_native_fixture_effect("map-reset-cut", "ack_only");
+    fixture.stop_daemon();
+    let path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let scope = identity["project_scope"].as_str().unwrap();
+    map["pending_resets"] = json!([scope]);
+    fs::write(&path, serde_json::to_vec(&map).unwrap()).unwrap();
+    fixture.restart_after_external_stop();
+    let restored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(restored["pending_resets"].as_array().is_none_or(|items| items.is_empty()), "accepted reset must finish before restoring identities");
+    assert!(!restored["slots"].as_array().unwrap().iter().any(|slot| slot["identity_key"]["project_scope"] == scope));
+}
+
+#[test]
 fn peer_lifecycle_c1_unfinished_task_refuses_close_without_archive() {
-    let (mut fixture, _master_host, child_host, master, child) =
+    let (fixture, _master_host, child_host, master, child) =
         lifecycle_native_pair_fixture("peer-c1", "ack_only");
     let worker_id = child["worker_id"].as_str().unwrap().to_owned();
-    lifecycle_replay_events(
-        &mut fixture,
-        &child,
-        &[json!({
-            "ev": "TaskCreated",
-            "task": {
-                "id": "peer-c1-task",
-                "owner": worker_id,
-                "created_by": worker_id,
-                "created_ms": 1,
-                "updated_ms": 1
-            }
-        })],
-    );
+    lifecycle_register_task(&fixture, &child, "peer-c1-task");
     let target = lifecycle_read(&fixture, &master, Some(&worker_id))["result"]["target"].clone();
     let before = lifecycle_surfaces(&fixture, &master);
     let operation_id = "peer-c1-close";
@@ -124,27 +126,12 @@ fn peer_lifecycle_c7_current_master_can_unregister_itself() {
     );
 }
 
-// C7 responsibility counterexample: self-unregister uses the same durable
-// responsibility snapshot as host close. An owned task refuses the operation
-// before archive or control-plane retirement.
+// Self-unregister retires identity while preserving its current task record.
 #[test]
 fn peer_lifecycle_c7_self_unregister_with_task_retires_only_its_binding() {
-    let (mut fixture, master_host, master) = lifecycle_native_fixture("peer-c7-responsibility");
-    let worker_id = master["worker_id"].as_str().unwrap().to_owned();
-    lifecycle_replay_events(
-        &mut fixture,
-        &master,
-        &[json!({
-            "ev": "TaskCreated",
-            "task": {
-                "id": "peer-c7-self-task",
-                "owner": worker_id,
-                "created_by": worker_id,
-                "created_ms": 1,
-                "updated_ms": 1
-            }
-        })],
-    );
+    let (fixture, master_host, master) = lifecycle_native_fixture("peer-c7-responsibility");
+    let task = lifecycle_register_task(&fixture, &master, "peer-c7-self-task");
+    let state_path = fixture.project_state();
     let target = lifecycle_target(&fixture, &master);
     let completed = lifecycle_close(
         &fixture,
@@ -157,7 +144,11 @@ fn peer_lifecycle_c7_self_unregister_with_task_retires_only_its_binding() {
     assert_eq!(completed["ok"], true, "{completed}");
     assert_eq!(completed["result"]["outcome"], "complete", "{completed}");
     assert_eq!(master_host.archive_request_count(), 0);
-    assert!(std::fs::read_to_string(fixture.project_journal()).unwrap().contains("peer-c7-self-task"));
+    let state: Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
+    assert_eq!(state["state"]["tasks"]["peer-c7-self-task"], task);
+    let map: Value = serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap()).unwrap();
+    assert!(!map["slots"].as_array().unwrap().iter().any(|slot|
+        slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == master["worker_id"]));
 }
 
 // C3: an unavailable archive result stays unknown and an identical operation
@@ -533,66 +524,6 @@ fn peer_lifecycle_c9_restart_preserves_unknown_close_fence_and_query() {
     );
 }
 
-// C2: a verified host terminal does not close the operation when the exact
-// control binding cannot advance its generation; the unresolved fence remains.
-#[test]
-fn peer_lifecycle_c2_host_terminal_with_control_retirement_failure_stays_open() {
-    let (mut fixture, _master_host, child_host, master, child) =
-        lifecycle_native_pair_fixture("peer-c2", "ack_only");
-    let child_id = child["worker_id"].as_str().unwrap();
-    let mut binding = read_lines(&fixture.project_journal())
-        .into_iter()
-        .rev()
-        .find(|record| {
-            record["ev"] == "GlobalRuntimeBound" && record["binding"]["agent_id"] == child_id
-        })
-        .expect("the exact child's committed runtime binding");
-    let mut route = read_lines(&fixture.project_journal())
-        .into_iter()
-        .rev()
-        .find(|record| {
-            record["ev"] == "GlobalCurrentThreadRouteSet"
-                && record["binding"]["agent_id"] == child_id
-        })
-        .expect("the exact child's committed current route");
-    binding["binding"]["endpoint_generation"] = json!(u64::MAX);
-    route["binding"]["endpoint_generation"] = json!(u64::MAX);
-    lifecycle_replay_events(&mut fixture, &master, &[binding, route]);
-
-    let target = lifecycle_read(&fixture, &master, Some(child_id))["result"]["target"].clone();
-    assert_eq!(target["endpoint_generation"], json!(u64::MAX));
-    let closed = lifecycle_close(
-        &fixture,
-        &master,
-        "peer-c2-close",
-        "peer-c2-capability",
-        &target,
-        "close peer with unadvanceable control generation",
-    );
-    assert_eq!(
-        closed["result"]["close"]["runtime_archive"]["state"], "verified",
-        "{closed}"
-    );
-    assert_eq!(closed["result"]["outcome"], "cleanup-open", "{closed}");
-    assert_eq!(
-        closed["result"]["close"]["binding_retirement"]["state"], "failed",
-        "{closed}"
-    );
-    assert_eq!(
-        closed["result"]["close"]["route_retirement"]["state"], "failed",
-        "{closed}"
-    );
-    assert_eq!(
-        child_host.archive_request_count(),
-        1,
-        "host terminal was proven exactly once"
-    );
-    assert_eq!(
-        lifecycle_read(&fixture, &master, Some(child_id))["result"]["outcome"],
-        "cleanup-open",
-        "the control-plane fence remains visible after retirement fails"
-    );
-}
 #[test]
 fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
     let mut fixture = Fixture::without_tmux("desktop-thread-refresh");
@@ -660,30 +591,20 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         current_identity["runtime"]["native_thread_id"],
         "new-desktop-thread"
     );
-    assert!(
-        after["binding"]["endpoint_generation"].as_u64().unwrap()
-            > before["binding"]["endpoint_generation"].as_u64().unwrap()
-    );
+    assert!(after["binding"].get("endpoint_generation").is_none());
     let again = restore(&fixture, "desktop-repeat", "new-desktop-thread", &new_host);
     assert_eq!(again["result"]["snapshot"]["binding"], after["binding"]);
-    let host_events: Vec<Value> = fs::read_to_string(fixture.project_journal())
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert!(host_events
-        .iter()
-        .any(|e| e["ev"] == "GlobalCurrentThreadRouteRetired"
-            && e["binding"]["native_thread_id"] == "old-desktop-thread"));
-    assert!(host_events
-        .iter()
-        .any(|e| e["ev"] == "GlobalCurrentThreadRouteSet"
-            && e["binding"]["native_thread_id"] == "new-desktop-thread"));
+    let current = fixture.current_state();
+    let routes = current["global"]["current_thread_routes"].as_array().unwrap();
+    assert!(!routes.iter().any(|row| row[1]["native_thread_id"] == "old-desktop-thread"));
+    assert!(routes.iter().any(|row| row[1]["native_thread_id"] == "new-desktop-thread"));
 
     // A changed Desktop thread without current bridge enrollment must fail
     // on that capability. History cannot publish the saved endpoint and must
     // not retire or replace identity, binding, route or subscription state.
-    let missing_before_surfaces = fs::read_to_string(fixture.project_journal()).unwrap();
+    let missing_routes = current["global"]["current_thread_routes"].clone();
+    let missing_workers = current["workers"].clone();
+    let missing_map = fs::read(fixture.host_state.join("identity-map.json")).unwrap();
     let missing_facts =
         json!({"session_id":"stable-desktop-session","thread_id":"latest-desktop-thread"})
             .to_string();
@@ -727,25 +648,10 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         after["subscriptions"],
         "{unchanged}"
     );
-    let missing_after_surfaces = fs::read_to_string(fixture.project_journal()).unwrap();
-    assert_eq!(
-        missing_after_surfaces
-            .matches("GlobalCurrentThreadRouteRetired")
-            .count(),
-        missing_before_surfaces
-            .matches("GlobalCurrentThreadRouteRetired")
-            .count(),
-        "a missing-facts call must not retire a route"
-    );
-    assert_eq!(
-        missing_after_surfaces
-            .matches("GlobalCurrentThreadRouteSet")
-            .count(),
-        missing_before_surfaces
-            .matches("GlobalCurrentThreadRouteSet")
-            .count(),
-        "a missing-facts call must not publish a route"
-    );
+    let current = fixture.current_state();
+    assert_eq!(current["global"]["current_thread_routes"], missing_routes);
+    assert_eq!(current["workers"], missing_workers);
+    assert_eq!(fs::read(fixture.host_state.join("identity-map.json")).unwrap(), missing_map);
 
     // Complete current facts on the moved thread rebind through the same
     // identity and endpoint, then repeat idempotently.
@@ -760,13 +666,7 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         new_host.endpoint(),
         "{moved}"
     );
-    assert!(
-        moved["result"]["snapshot"]["binding"]["endpoint_generation"]
-            .as_u64()
-            .unwrap()
-            > after["binding"]["endpoint_generation"].as_u64().unwrap(),
-        "{moved}"
-    );
+    assert!(moved["result"]["snapshot"]["binding"].get("endpoint_generation").is_none());
     assert!(
         moved["result"]["snapshot"]["subscriptions"]
             .as_array()
@@ -788,32 +688,16 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
         moved_binding,
         "{moved_again}"
     );
-    let moved_events: Vec<Value> = fs::read_to_string(fixture.project_journal())
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert!(moved_events.iter().any(|e| {
-        e["ev"] == "GlobalCurrentThreadRouteRetired"
-            && e["binding"]["native_thread_id"] == "new-desktop-thread"
-    }));
-    assert!(moved_events.iter().any(|e| {
-        e["ev"] == "GlobalCurrentThreadRouteSet"
-            && e["binding"]["native_thread_id"] == "latest-desktop-thread"
-    }));
+    let current = fixture.current_state();
+    let routes = current["global"]["current_thread_routes"].as_array().unwrap();
+    assert!(!routes.iter().any(|row| row[1]["native_thread_id"] == "new-desktop-thread"));
+    assert!(routes.iter().any(|row| row[1]["native_thread_id"] == "latest-desktop-thread"));
 
-    // A fixture daemon replay must still carry the complete current endpoint.
-    // Queries remain read-only and never require the latest endpoint.
-    let before_replay = fs::read_to_string(fixture.project_journal()).unwrap();
+    // Restart retains the current endpoint, binding and credentials.
     fixture.restart_daemon();
     let replay = restore(&fixture, "desktop-replay", "latest-desktop-thread", &new_host);
     assert_eq!(replay["result"]["snapshot"]["binding"], moved_binding);
     assert_eq!(lifecycle_identity(&fixture, &replay), moved_identity);
-    let replay_journal = fs::read_to_string(fixture.project_journal()).unwrap();
-    assert_eq!(
-        replay_journal.matches("CommandStarted").count(),
-        before_replay.matches("CommandStarted").count()
-    );
     assert!(
         !fixture
             .host_state
@@ -821,21 +705,26 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
             .exists(),
         "ordinary restoration does not challenge"
     );
-    let queried = fixture.context_query("desktop-replay", None);
+    let before_query = lifecycle_surfaces(&fixture, &moved_identity);
+    let provided = json!({"session_id":"stable-desktop-session", "thread_id":"latest-desktop-thread",
+        "endpoint":new_host.endpoint(), "namespace":"codex_app"}).to_string();
+    let query = fixture.configured_command(&["context", "--query", "--provide", &provided], None)
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop").output().unwrap();
+    let queried = success_payload(&query);
     assert_eq!(queried["result"]["outcome"], "completed", "{queried}");
     assert_eq!(
-        queried["result"]["queried_operation"]["operation_id"],
-        "desktop-replay"
+        queried["result"]["snapshot"]["identity"]["worker_id"],
+        moved_identity["worker_id"]
     );
     assert_eq!(
-        queried["result"]["queried_operation"]["phase"],
-        "completed",
+        queried["result"]["snapshot"]["binding"],
+        moved_binding,
         "{queried}"
     );
     assert_eq!(
-        fs::read_to_string(fixture.project_journal()).unwrap(),
-        replay_journal,
-        "a read-only query must not mutate the durable operation history"
+        lifecycle_surfaces(&fixture, &moved_identity),
+        before_query,
+        "a current read-only query must not mutate identity or business state"
     );
 }
 

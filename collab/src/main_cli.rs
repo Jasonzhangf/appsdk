@@ -448,13 +448,6 @@ pub(crate) enum LiveClosureCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum WorkerCmd {
-    /// Set your display name, or restore the current role/pane default
-    Name {
-        #[arg(required_unless_present = "reset", conflicts_with = "reset")]
-        name: Option<String>,
-        #[arg(long)]
-        reset: bool,
-    },
     /// Master creates an ordinary peer with durable native-thread receipts
     Create {
         target_id: String,
@@ -522,18 +515,6 @@ pub(crate) enum WorkerCmd {
         #[arg(long = "op")]
         operation_id: String,
     },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum MigrateCmd {
-    /// Inspect current durable state and migration blockers
-    Inspect,
-    /// Create a migration plan; does not freeze admission
-    Plan,
-    /// Freeze task admission and persist a deterministic snapshot
-    Apply,
-    /// Verify replayed state and resume task admission
-    Verify,
 }
 
 #[derive(Subcommand)]
@@ -742,17 +723,14 @@ pub(crate) enum Cmd {
     /// user-managed service, then return the authoritative snapshot
     Context {
         /// Set comma-separated work specialties; an empty value clears them.
-        #[arg(long, conflicts_with_all = ["query", "return_challenge"])]
+        #[arg(long, conflicts_with = "query")]
         work_roles: Option<String>,
         /// Current master may set another stable name's work specialties.
-        #[arg(long, requires = "work_roles", conflicts_with_all = ["query", "return_challenge"])]
+        #[arg(long, requires = "work_roles", conflicts_with = "query")]
         for_name: Option<String>,
         /// Master-only workflow template target: `master`, `peer`, or
         /// `role:<normalized specialty>`.
-        #[arg(
-            long = "workflow-target",
-            conflicts_with_all = ["query", "return_challenge"]
-        )]
+        #[arg(long = "workflow-target", conflicts_with = "query")]
         workflow_target: Option<String>,
         /// JSON workflow template for --workflow-target; exactly one of this
         /// flag or --reset-workflow-template is required.
@@ -784,9 +762,6 @@ pub(crate) enum Cmd {
         provide: Option<String>,
         #[arg(long)]
         query: bool,
-        /// Return a registration challenge received in this participant pane.
-        #[arg(long, conflicts_with_all = ["query", "provide", "approve_identity", "approve_grant", "recover_communication"])]
-        return_challenge: Option<String>,
         /// Restore/verify communication; DSH uses current host facts and loop enrollment.
         #[arg(long, conflicts_with_all = ["query", "approve_identity", "approve_grant"])]
         recover_communication: bool,
@@ -804,11 +779,6 @@ pub(crate) enum Cmd {
     Task {
         #[command(subcommand)]
         cmd: TaskCmd,
-    },
-    /// Inspect, plan, apply, and verify an existing-project migration
-    Migrate {
-        #[command(subcommand)]
-        cmd: MigrateCmd,
     },
     /// Install the embedded collab skill bundle into a global skills
     /// directory. Default target is `~/.agents/skills/collab`; pass

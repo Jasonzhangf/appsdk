@@ -64,7 +64,7 @@ test('runtime admission rejects wrong project and unknown target without harming
   assert.equal((await f.request(a,{id:3,op:'send',session_id:'a',thread_id:'known',text:'valid'})).ok,true);
 });
 
-test('public CLI registers fresh sessions without MCP and ignores retired local journal',async t=>{
+test('public CLI restores current state and rejects corrupt current state without reading local legacy bytes',async t=>{
   const binary=process.env.COLLAB_TEST_BINARY;
   if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
   const f=await fixture(t);await fs.mkdir(path.join(f.root,'.agent-collab'));await fs.mkdir(path.join(f.root,'home'));
@@ -88,13 +88,19 @@ test('public CLI registers fresh sessions without MCP and ignores retired local 
   const restartEnd=Date.now()+5000;while(Date.now()<restartEnd){try{await fs.stat(path.join(f.state,'server.sock'));break;}catch{}await new Promise(r=>setTimeout(r,30));}
   const restored=await cli('fresh-a','thread-a');assert.match(restored,/completed/);
   await stopDaemon();
-  async function journals(dir){const result=[];for(const e of await fs.readdir(dir,{withFileTypes:true})){const p=path.join(dir,e.name);if(e.isDirectory())result.push(...await journals(p));else if(e.name==='journal.jsonl')result.push(p);}return result;}
-  const central=await journals(path.join(f.state,'projects'));assert.ok(central.length>0);
-  for(const journal of central)await fs.writeFile(journal,'invalid-current-central-journal\n');
+  const canonical=await fs.realpath(f.root),routes=JSON.parse(await fs.readFile(path.join(f.state,'routes.json'),'utf8'));
+  const matched=routes.filter(route=>route.project_scope===canonical&&route.app_scope_id==='appserver-cli');
+  assert.equal(matched.length,1);
+  const central=path.join(matched[0].storage_root,'.agent-collab','server','state.json');
+  const relative=path.relative(path.join(await fs.realpath(f.state),'projects'),central);
+  assert.ok(relative!==''&&!relative.startsWith('..')&&!path.isAbsolute(relative));
+  await fs.writeFile(central,'invalid-current-state\n');
   startDaemon();
-  const corruptEnd=Date.now()+5000;while(Date.now()<corruptEnd){try{await fs.stat(path.join(f.state,'server.sock'));break;}catch{}await new Promise(r=>setTimeout(r,30));}
-  await assert.rejects(cli('fresh-a','thread-a'),/journal|PROJECT_RUNTIME_UNAVAILABLE|degraded/i);
-  for(const journal of central)assert.equal(await fs.readFile(journal,'utf8'),'invalid-current-central-journal\n');
+  const code=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('corrupt current state did not fail startup')),5000);daemon.once('exit',code=>{clearTimeout(timer);resolve(code);});});
+  assert.equal(typeof code,'number');assert.notEqual(code,0);
+  assert.match(daemonLog,/CURRENT_STATE_DECODE_FAILED/);
+  await assert.rejects(fs.stat(path.join(f.state,'server.sock')),{code:'ENOENT'});
+  assert.equal(await fs.readFile(central,'utf8'),'invalid-current-state\n');
   assert.equal(await fs.readFile(legacy,'utf8'),'incompatible-retired-version\n');
 });
 

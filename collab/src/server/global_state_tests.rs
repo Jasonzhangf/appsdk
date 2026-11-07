@@ -2,8 +2,6 @@ use super::*;
 use serde_json::Value;
 use std::path::Path;
 
-include!("global_state_tests_part2.rs");
-
 fn project_scope() -> ProjectScopeId {
     GlobalState::canonical_project_scope(Path::new(env!("CARGO_MANIFEST_DIR")))
         .expect("repository root is canonical")
@@ -23,7 +21,6 @@ fn binding(
     agent: &str,
     runtime: &str,
     binding_id: &str,
-    generation: u64,
 ) -> RuntimeBinding {
     RuntimeBinding::new(
         scope.clone(),
@@ -31,19 +28,12 @@ fn binding(
         AgentId::new(agent).unwrap(),
         RuntimeId::new(runtime).unwrap(),
         BindingId::new(binding_id).unwrap(),
-        generation,
         None,
     )
     .expect("binding")
 }
 
-fn grant(
-    scope: &ProjectScopeId,
-    app: &str,
-    agent: &str,
-    binding_id: &str,
-    generation: u64,
-) -> MasterGrant {
+fn grant(scope: &ProjectScopeId, app: &str, agent: &str, binding_id: &str) -> MasterGrant {
     MasterGrant::new(
         scope.clone(),
         app_scope(app),
@@ -52,7 +42,6 @@ fn grant(
         "operator",
         "user approved",
         BindingId::new(binding_id).unwrap(),
-        generation,
         1,
     )
     .expect("master grant")
@@ -143,7 +132,6 @@ fn route_lookup_rejects_unknown_project_or_app_scope() {
         "agent-one",
         "runtime-one",
         "binding-one",
-        1,
     );
     let before = state.version();
     assert!(matches!(
@@ -171,7 +159,6 @@ fn same_project_different_app_scopes_keep_separate_registrations_and_bindings() 
             "agent-one",
             "runtime-one",
             "binding-one",
-            1,
         ))
         .unwrap();
     state
@@ -181,7 +168,6 @@ fn same_project_different_app_scopes_keep_separate_registrations_and_bindings() 
             "agent-two",
             "runtime-two",
             "binding-two",
-            1,
         ))
         .unwrap();
 
@@ -199,15 +185,8 @@ fn same_project_different_app_scopes_keep_separate_registrations_and_bindings() 
     assert_eq!(
         state
             .lookup_binding_for(
-                &binding(
-                    &scope,
-                    "app-two",
-                    "agent-two",
-                    "runtime-two",
-                    "binding-two",
-                    1
-                )
-                .route_scope(),
+                &binding(&scope, "app-two", "agent-two", "runtime-two", "binding-two",)
+                    .route_scope(),
                 &BindingId::new("binding-two").unwrap()
             )
             .unwrap()
@@ -237,7 +216,6 @@ fn same_binding_id_in_different_projects_is_route_scoped() {
         "agent-one",
         "runtime-one",
         "shared-binding",
-        1,
     );
     let second = binding(
         &second_scope,
@@ -245,7 +223,6 @@ fn same_binding_id_in_different_projects_is_route_scoped() {
         "agent-two",
         "runtime-two",
         "shared-binding",
-        1,
     );
     state.bind_runtime(first.clone()).unwrap();
     state.bind_runtime(second.clone()).unwrap();
@@ -266,7 +243,7 @@ fn same_binding_id_in_different_projects_is_route_scoped() {
 }
 
 #[test]
-fn master_grants_are_isolated_by_project_route_and_generation() {
+fn master_grants_are_isolated_by_project_route() {
     let first_scope = project_scope();
     let second_scope = ProjectScopeId::new(format!("{}/second", first_scope.as_str()))
         .expect("second project scope");
@@ -287,7 +264,6 @@ fn master_grants_are_isolated_by_project_route_and_generation() {
         "agent-one",
         "runtime-one",
         "shared-binding",
-        3,
     );
     let second_binding = binding(
         &second_scope,
@@ -295,7 +271,6 @@ fn master_grants_are_isolated_by_project_route_and_generation() {
         "agent-two",
         "runtime-two",
         "shared-binding",
-        4,
     );
     state.bind_runtime(first_binding.clone()).unwrap();
     state.bind_runtime(second_binding.clone()).unwrap();
@@ -305,7 +280,6 @@ fn master_grants_are_isolated_by_project_route_and_generation() {
             "app-one",
             "agent-one",
             "shared-binding",
-            3,
         ))
         .unwrap();
     state
@@ -314,7 +288,6 @@ fn master_grants_are_isolated_by_project_route_and_generation() {
             "app-one",
             "agent-two",
             "shared-binding",
-            4,
         ))
         .unwrap();
 
@@ -374,7 +347,6 @@ fn sequence_and_revision_advance_together_and_cas_is_fenced() {
             "agent-one",
             "runtime-one",
             "binding-one",
-            1,
         ))
         .unwrap();
     assert_eq!((first.sequence, first.revision), (1, 1));
@@ -404,71 +376,13 @@ fn sequence_and_revision_advance_together_and_cas_is_fenced() {
 }
 
 #[test]
-fn old_generation_is_rejected_without_mutating_state() {
-    let scope = project_scope();
-    let mut state = GlobalState::default();
-    state
-        .register_project(registration(&scope, "app-one"))
-        .unwrap();
-    let current = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        2,
-    );
-    state.bind_runtime(current.clone()).unwrap();
-    let before = state.version();
-    let stale = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        1,
-    );
-    assert!(matches!(
-        state.validate_binding(&stale),
-        Err(StateError::StaleBinding {
-            expected_generation: 2,
-            observed_generation: 1,
-            ..
-        })
-    ));
-    assert!(matches!(
-        state.bind_runtime(stale),
-        Err(StateError::StaleBinding {
-            expected_generation: 2,
-            observed_generation: 1,
-            ..
-        })
-    ));
-    assert_eq!(state.version(), before);
-    assert_eq!(
-        state
-            .lookup_binding(&current.binding_id)
-            .unwrap()
-            .endpoint_generation,
-        2
-    );
-}
-
-#[test]
 fn registration_defaults_to_peer_until_an_explicit_current_grant() {
     let scope = project_scope();
     let mut state = GlobalState::default();
     state
         .register_project(registration(&scope, "app-one"))
         .unwrap();
-    let runtime = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        4,
-    );
+    let runtime = binding(&scope, "app-one", "agent-one", "runtime-one", "binding-one");
     state.bind_runtime(runtime.clone()).unwrap();
     assert_eq!(
         state.role_for_binding(&scope, &runtime.binding_id),
@@ -476,7 +390,7 @@ fn registration_defaults_to_peer_until_an_explicit_current_grant() {
     );
 
     state
-        .grant_master(grant(&scope, "app-one", "agent-one", "binding-one", 4))
+        .grant_master(grant(&scope, "app-one", "agent-one", "binding-one"))
         .unwrap();
     assert_eq!(
         state.role_for_binding(&scope, &runtime.binding_id),
@@ -492,30 +406,16 @@ fn route_rejects_a_second_master_grant() {
     state
         .register_project(registration(&scope, "app-one"))
         .unwrap();
-    let first = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        1,
-    );
-    let second = binding(
-        &scope,
-        "app-one",
-        "agent-two",
-        "runtime-two",
-        "binding-two",
-        1,
-    );
+    let first = binding(&scope, "app-one", "agent-one", "runtime-one", "binding-one");
+    let second = binding(&scope, "app-one", "agent-two", "runtime-two", "binding-two");
     state.bind_runtime(first.clone()).unwrap();
     state.bind_runtime(second.clone()).unwrap();
     state
-        .grant_master(grant(&scope, "app-one", "agent-one", "binding-one", 1))
+        .grant_master(grant(&scope, "app-one", "agent-one", "binding-one"))
         .unwrap();
 
     assert!(matches!(
-        state.grant_master(grant(&scope, "app-one", "agent-two", "binding-two", 1,)),
+        state.grant_master(grant(&scope, "app-one", "agent-two", "binding-two")),
         Err(StateError::MasterGrantConflict(_))
     ));
     assert_eq!(
@@ -530,112 +430,54 @@ fn route_rejects_a_second_master_grant() {
 }
 
 #[test]
-fn reconnect_revokes_old_master_grant_and_explicit_revoke_is_idempotent() {
+fn explicit_master_revoke_is_idempotent() {
     let scope = project_scope();
     let mut state = GlobalState::default();
     state
         .register_project(registration(&scope, "app-one"))
         .unwrap();
-    let current = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        4,
-    );
+    let current = binding(&scope, "app-one", "agent-one", "runtime-one", "binding-one");
     state.bind_runtime(current.clone()).unwrap();
     state
-        .grant_master(grant(&scope, "app-one", "agent-one", "binding-one", 4))
+        .grant_master(grant(&scope, "app-one", "agent-one", "binding-one"))
         .unwrap();
     assert_eq!(
         state.role_for_binding(&scope, &current.binding_id),
         PeerRole::Master
     );
 
-    let reconnected = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        5,
-    );
-    state.bind_runtime(reconnected.clone()).unwrap();
-    assert!(state
-        .lookup_master_grant(&scope, &reconnected.binding_id)
-        .is_none());
-    assert_eq!(
-        state.role_for_binding(&scope, &reconnected.binding_id),
-        PeerRole::Peer
-    );
-    assert!(matches!(
-        state.grant_master(grant(&scope, "app-one", "agent-one", "binding-one", 4)),
-        Err(StateError::StaleBinding {
-            expected_generation: 5,
-            observed_generation: 4,
-            ..
-        })
-    ));
-    state
-        .grant_master(grant(&scope, "app-one", "agent-one", "binding-one", 5))
-        .unwrap();
-    assert_eq!(
-        state.role_for_binding(&scope, &reconnected.binding_id),
-        PeerRole::Master
-    );
-
     let before_revoke = state.version();
-    state
-        .revoke_master(&scope, &reconnected.binding_id)
-        .unwrap();
+    state.revoke_master(&scope, &current.binding_id).unwrap();
     assert_eq!(
-        state.role_for_binding(&scope, &reconnected.binding_id),
+        state.role_for_binding(&scope, &current.binding_id),
         PeerRole::Peer
     );
     assert!(state
-        .lookup_master_grant(&scope, &reconnected.binding_id)
+        .lookup_master_grant(&scope, &current.binding_id)
         .is_none());
     let after_revoke = state.version();
     assert!(after_revoke.revision > before_revoke.revision);
-    state
-        .revoke_master(&scope, &reconnected.binding_id)
-        .unwrap();
+    state.revoke_master(&scope, &current.binding_id).unwrap();
     assert_eq!(state.version(), after_revoke);
-    state.validate_binding(&reconnected).unwrap();
+    state.validate_binding(&current).unwrap();
     state.validate().unwrap();
 }
 
 #[test]
-fn runtime_binding_rollback_restores_only_the_exact_previous_generation_and_grant() {
+fn runtime_binding_rollback_restores_only_the_exact_previous_binding_and_grant() {
     let scope = project_scope();
     let mut state = GlobalState::default();
     state
         .register_project(registration(&scope, "app-one"))
         .unwrap();
-    let previous = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        4,
-    );
-    let previous_grant = grant(&scope, "app-one", "agent-one", "binding-one", 4);
+    let previous = binding(&scope, "app-one", "agent-one", "runtime-one", "binding-one");
+    let previous_grant = grant(&scope, "app-one", "agent-one", "binding-one");
     state.bind_runtime(previous.clone()).unwrap();
     state.grant_master(previous_grant.clone()).unwrap();
-    let failed = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-two",
-        "binding-one",
-        5,
-    );
+    let failed = binding(&scope, "app-one", "agent-one", "runtime-two", "binding-one");
     state.bind_runtime(failed.clone()).unwrap();
-    // A same-principal recovery reissues the grant for the new
-    // generation, which is exactly the transaction rollback must undo.
-    let failed_grant = grant(&scope, "app-one", "agent-one", "binding-one", 5);
+    // Rollback must restore the exact current binding and its grant.
+    let failed_grant = grant(&scope, "app-one", "agent-one", "binding-one");
     state.grant_master(failed_grant.clone()).unwrap();
     assert_eq!(
         state.lookup_master_grant(&scope, &failed.binding_id),
@@ -679,37 +521,20 @@ fn runtime_binding_rollback_rejects_a_grant_that_is_not_the_failed_transaction_s
     state
         .register_project(registration(&scope, "app-one"))
         .unwrap();
-    let previous = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-one",
-        "binding-one",
-        4,
-    );
+    let previous = binding(&scope, "app-one", "agent-one", "runtime-one", "binding-one");
     state.bind_runtime(previous.clone()).unwrap();
-    let failed = binding(
-        &scope,
-        "app-one",
-        "agent-one",
-        "runtime-two",
-        "binding-one",
-        5,
-    );
+    let failed = binding(&scope, "app-one", "agent-one", "runtime-two", "binding-one");
     state.bind_runtime(failed.clone()).unwrap();
 
-    // A grant on the same binding whose generation does not match the
-    // failed transaction is not this transaction's state, so rollback
-    // must still fail closed instead of silently restoring it.
+    // A grant for another actor is not this transaction's current state.
     let mismatched = MasterGrant::new(
         scope.clone(),
         app_scope("app-one"),
-        AgentId::new("agent-one").unwrap(),
+        AgentId::new("different-grant-actor").unwrap(),
         "project",
         "operator",
         "user approved",
         BindingId::new("binding-one").unwrap(),
-        failed.endpoint_generation + 1,
         1,
     )
     .unwrap();
@@ -742,7 +567,6 @@ fn legacy_thread_route_is_indexed_read_only_and_upgraded_by_a_strict_route() {
         AgentId::new("agent-legacy").unwrap(),
         RuntimeId::new("runtime-legacy").unwrap(),
         BindingId::new("binding-legacy").unwrap(),
-        1,
         None,
         Some(thread_id.clone()),
     )
@@ -767,7 +591,6 @@ fn legacy_thread_route_is_indexed_read_only_and_upgraded_by_a_strict_route() {
         AgentId::new("agent-legacy").unwrap(),
         RuntimeId::new("runtime-legacy").unwrap(),
         BindingId::new("binding-legacy").unwrap(),
-        2,
         Some(SessionId::new("session-legacy-upgrade").unwrap()),
         Some(thread_id.clone()),
     )
@@ -799,7 +622,6 @@ fn legacy_thread_route_keeps_distinct_bindings_for_one_thread_as_candidates() {
         AgentId::new("agent-one").unwrap(),
         RuntimeId::new("runtime-one").unwrap(),
         BindingId::new("binding-one").unwrap(),
-        1,
         None,
         Some(thread_id.clone()),
     )
@@ -810,7 +632,6 @@ fn legacy_thread_route_keeps_distinct_bindings_for_one_thread_as_candidates() {
         AgentId::new("agent-two").unwrap(),
         RuntimeId::new("runtime-two").unwrap(),
         BindingId::new("binding-two").unwrap(),
-        1,
         None,
         Some(thread_id.clone()),
     )
@@ -841,7 +662,6 @@ fn upgrading_one_legacy_binding_keeps_the_other_candidate_resolvable() {
             AgentId::new(agent).unwrap(),
             RuntimeId::new(runtime_id).unwrap(),
             BindingId::new(binding_id).unwrap(),
-            1,
             None,
             Some(thread_id.clone()),
         )
@@ -862,7 +682,6 @@ fn upgrading_one_legacy_binding_keeps_the_other_candidate_resolvable() {
         AgentId::new("agent-one").unwrap(),
         RuntimeId::new("runtime-one").unwrap(),
         BindingId::new("binding-one").unwrap(),
-        2,
         Some(SessionId::new("session-legacy-sibling").unwrap()),
         Some(thread_id.clone()),
     )
@@ -899,7 +718,6 @@ fn a_session_bound_thread_is_reported_as_strictly_owned() {
         AgentId::new("agent-legacy").unwrap(),
         RuntimeId::new("runtime-legacy").unwrap(),
         BindingId::new("binding-legacy").unwrap(),
-        1,
         None,
         Some(thread_id.clone()),
     )
@@ -910,7 +728,6 @@ fn a_session_bound_thread_is_reported_as_strictly_owned() {
         AgentId::new("agent-strict").unwrap(),
         RuntimeId::new("runtime-strict").unwrap(),
         BindingId::new("binding-strict").unwrap(),
-        1,
         Some(SessionId::new("session-strict-owner").unwrap()),
         Some(thread_id.clone()),
     )
@@ -928,38 +745,6 @@ fn a_session_bound_thread_is_reported_as_strictly_owned() {
 }
 
 #[test]
-fn legacy_thread_route_refresh_replaces_the_same_binding() {
-    let scope = project_scope();
-    let mut state = GlobalState::default();
-    state
-        .register_project(registration(&scope, "app-one"))
-        .unwrap();
-    let thread_id = NativeThreadId::new("thread-legacy-refresh").unwrap();
-    let binding = |generation: u64| {
-        RuntimeBinding::new_with_session(
-            scope.clone(),
-            app_scope("app-one"),
-            AgentId::new("agent-one").unwrap(),
-            RuntimeId::new("runtime-one").unwrap(),
-            BindingId::new("binding-one").unwrap(),
-            generation,
-            None,
-            Some(thread_id.clone()),
-        )
-        .unwrap()
-    };
-    state.set_legacy_thread_route(binding(1)).unwrap();
-    state.set_legacy_thread_route(binding(5)).unwrap();
-    // A lower or equal generation must not roll the record back.
-    state.set_legacy_thread_route(binding(3)).unwrap();
-
-    let matches = state.legacy_thread_route_matches(&thread_id);
-    assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0].endpoint_generation, 5);
-    state.validate().unwrap();
-}
-
-#[test]
 fn pane_only_lookup_finds_appserver_binding_by_pane_recovery_anchor() {
     let scope = project_scope();
     let mut state = GlobalState::default();
@@ -973,7 +758,6 @@ fn pane_only_lookup_finds_appserver_binding_by_pane_recovery_anchor() {
         AgentId::new("agent-pane-appserver").unwrap(),
         RuntimeId::new("runtime-pane-appserver").unwrap(),
         BindingId::new("binding-pane-appserver").unwrap(),
-        1,
         Some(SessionId::new("session-pane-appserver").unwrap()),
         Some(thread_id.clone()),
     )
@@ -1031,7 +815,6 @@ fn current_thread_routes_keep_distinct_sessions_for_one_native_thread() {
         AgentId::new("agent-one").unwrap(),
         RuntimeId::new("runtime-one").unwrap(),
         BindingId::new("binding-one").unwrap(),
-        1,
         Some(SessionId::new("session-one").unwrap()),
         Some(thread_id.clone()),
     )
@@ -1042,7 +825,6 @@ fn current_thread_routes_keep_distinct_sessions_for_one_native_thread() {
         AgentId::new("agent-two").unwrap(),
         RuntimeId::new("runtime-two").unwrap(),
         BindingId::new("binding-two").unwrap(),
-        1,
         Some(SessionId::new("session-two").unwrap()),
         Some(thread_id.clone()),
     )
@@ -1064,60 +846,12 @@ fn current_thread_routes_keep_distinct_sessions_for_one_native_thread() {
     state.validate().unwrap();
 }
 
-#[test]
-fn same_address_generation_refresh_replaces_the_route_without_a_tombstone() {
-    let scope = project_scope();
-    let mut state = GlobalState::default();
-    state
-        .register_project(registration(&scope, "app-one"))
-        .unwrap();
-    let thread_id = NativeThreadId::new("thread-refresh").unwrap();
-    let session_id = SessionId::new("session-refresh").unwrap();
-    let first = RuntimeBinding::new_with_session(
-        scope.clone(),
-        app_scope("app-one"),
-        AgentId::new("agent-one").unwrap(),
-        RuntimeId::new("runtime-one").unwrap(),
-        BindingId::new("binding-one").unwrap(),
-        1,
-        Some(session_id.clone()),
-        Some(thread_id.clone()),
-    )
-    .unwrap();
-    let refreshed = RuntimeBinding::new_with_session(
-        scope.clone(),
-        app_scope("app-one"),
-        AgentId::new("agent-one").unwrap(),
-        RuntimeId::new("runtime-one").unwrap(),
-        BindingId::new("binding-one").unwrap(),
-        2,
-        Some(session_id.clone()),
-        Some(thread_id.clone()),
-    )
-    .unwrap();
-
-    state.bind_runtime(first.clone()).unwrap();
-    state.set_current_thread_route(first).unwrap();
-    state.bind_runtime(refreshed.clone()).unwrap();
-    state.set_current_thread_route(refreshed.clone()).unwrap();
-
-    assert_eq!(
-        state.lookup_current_thread_route(&session_id, &thread_id),
-        Some(&refreshed)
-    );
-    assert!(state
-        .lookup_current_thread_route_tombstone(&session_id, &thread_id)
-        .is_none());
-    state.validate().unwrap();
-}
-
 /// Builds a route for `binding_id` at a distinct session/thread address.
 fn route_at(
     scope: &ProjectScopeId,
     app: &str,
     runtime: &str,
     binding_id: &str,
-    generation: u64,
     session: &str,
     thread: &str,
 ) -> RuntimeBinding {
@@ -1127,7 +861,6 @@ fn route_at(
         AgentId::new("agent-one").unwrap(),
         RuntimeId::new(runtime).unwrap(),
         BindingId::new(binding_id).unwrap(),
-        generation,
         Some(SessionId::new(session).unwrap()),
         Some(NativeThreadId::new(thread).unwrap()),
     )
@@ -1135,7 +868,7 @@ fn route_at(
 }
 
 #[test]
-fn an_orphan_incumbent_route_does_not_block_a_lower_generation_takeover() {
+fn an_orphan_incumbent_route_does_not_block_a_current_route() {
     // A host index can keep a pane route for a binding its project runtime
     // no longer holds.  Nothing can resolve that route, so it must not gate
     // a fresh registration: the daemon takes the pane by default.  Before
@@ -1151,7 +884,6 @@ fn an_orphan_incumbent_route_does_not_block_a_lower_generation_takeover() {
         "app-one",
         "runtime-old",
         "binding-orphan",
-        7,
         "session-orphan-old",
         "thread-orphan-old",
     );
@@ -1164,7 +896,6 @@ fn an_orphan_incumbent_route_does_not_block_a_lower_generation_takeover() {
         "app-one",
         "runtime-new",
         "binding-orphan",
-        1,
         "session-orphan-new",
         "thread-orphan-new",
     );
@@ -1189,48 +920,6 @@ fn an_orphan_incumbent_route_does_not_block_a_lower_generation_takeover() {
             &NativeThreadId::new("thread-orphan-old").unwrap(),
         )
         .is_none());
-    state.validate().unwrap();
-}
-
-#[test]
-fn a_live_incumbent_route_still_rejects_a_lower_generation_takeover() {
-    // The protection C8 must not weaken: when this reducer DOES hold the
-    // incumbent's runtime binding, the incumbent is live, so a lower
-    // generation still fails closed.
-    let scope = project_scope();
-    let mut state = GlobalState::default();
-    state
-        .register_project(registration(&scope, "app-one"))
-        .unwrap();
-    let live = route_at(
-        &scope,
-        "app-one",
-        "runtime-live",
-        "binding-live",
-        7,
-        "session-live-old",
-        "thread-live-old",
-    );
-    state.bind_runtime(live.clone()).unwrap();
-    state.set_current_thread_route(live).unwrap();
-
-    let takeover = route_at(
-        &scope,
-        "app-one",
-        "runtime-live-new",
-        "binding-live",
-        1,
-        "session-live-new",
-        "thread-live-new",
-    );
-    assert!(matches!(
-        state.set_current_thread_route(takeover),
-        Err(StateError::StaleBinding {
-            expected_generation: 7,
-            observed_generation: 1,
-            ..
-        })
-    ));
     state.validate().unwrap();
 }
 

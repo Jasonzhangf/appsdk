@@ -11,20 +11,16 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
     ));
     let server_dir = root.join(".agent-collab/server");
     std::fs::create_dir_all(&server_dir).unwrap();
-    let journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(server_dir.join("journal.jsonl"))
-        .unwrap();
+    let state_path = server_dir.join("state.json");
+    current_state::save(&state_path, &State::default()).unwrap();
     (
         Arc::new(Server {
             config: crate::config::Config::default(),
             root: root.clone(),
             storage_root: root.clone(),
-            journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            state_path,
             host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
-            journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(SelectedTransport {
                     kind: TransportKind::AppServer,
@@ -312,14 +308,14 @@ fn accepted_batch_is_not_overwritten_by_a_later_empty_batch_skip() {
             assert!(!state.notification_delivery_failures.contains_key(id));
         }
     }
-    let before = std::fs::read(&server.journal_path).unwrap();
+    let before = std::fs::read(&server.state_path).unwrap();
     let second = attempt_notification_detailed_with_at(&server, "notice-b", &subscription, now);
     assert!(
         matches!(second, NotificationAttempt::NotAttempted(_)),
         "{second:?}"
     );
     assert_eq!(
-        std::fs::read(&server.journal_path).unwrap(),
+        std::fs::read(&server.state_path).unwrap(),
         before,
         "a skipped second attempt must preserve both actual batch acceptance receipts"
     );
@@ -744,18 +740,18 @@ fn automatic_batch_does_not_cross_the_first_notice_window() {
     );
     assert!(
         !text.contains(&long_body),
-        "the batch wake carries a compact preview while full details stay in JSONL: {text}"
+        "the batch wake carries a compact preview while current state retains full details: {text}"
     );
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs["old-notice"].state, "pending");
     assert_eq!(state.msgs["old-notice"].wake_attempt_count, 1);
     assert_eq!(state.msgs["late-notice"].state, "pending");
+    assert_eq!(state.msgs["old-notice"].body, long_body);
+    assert_eq!(state.msgs["late-notice"].body, "DETAIL-late-notice");
     drop(state);
-    let mailbox =
-        std::fs::read_to_string(root.join(".agent-collab/mailbox/recipient-recipient.jsonl"))
-            .unwrap();
-    assert!(mailbox.contains(&long_body));
-    assert!(mailbox.contains("DETAIL-late-notice"));
+    let loaded = current_state::load(&server.state_path, false).unwrap();
+    assert_eq!(loaded.msgs["old-notice"].body, long_body);
+    assert_eq!(loaded.msgs["late-notice"].body, "DETAIL-late-notice");
     assert!(
         text.contains("old-notice:topic-old-notice=DETAIL-old-notice-"),
         "the batch wake must still carry the task summary preview: {text}"
@@ -877,44 +873,6 @@ fn explicit_notice_is_immediate_and_isolated_from_automatic_batching() {
     assert!(delivered
         .iter()
         .any(|(explicit, text)| { !explicit && text.contains("automatic-notice") }));
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn mailbox_status_reports_a_valid_but_incomplete_projection() {
-    let (mut server, root) = test_server();
-    let subscription_id = register_and_subscribe(&server, "recipient");
-    queue_message(
-        &server,
-        "recipient",
-        &subscription_id,
-        "projection-gap",
-        now_ms(),
-    );
-    std::fs::write(
-        root.join(".agent-collab/mailbox/recipient-recipient.jsonl"),
-        "",
-    )
-    .unwrap();
-
-    let response = dispatch(
-        &server,
-        Req::MailboxRead {
-            all: false,
-            sort: Some("time-asc".into()),
-            worker_id: Some("recipient".into()),
-        },
-    );
-    assert!(response.ok);
-    assert_eq!(response.data["recipient_jsonl"]["status"], "incomplete");
-    assert_eq!(
-        response.data["recipient_jsonl"]["missing_message_ids"],
-        serde_json::json!(["projection-gap"])
-    );
-    assert!(response.data["recipient_jsonl"]["exact_error"]
-        .as_str()
-        .unwrap()
-        .contains("projection-gap"));
     std::fs::remove_dir_all(root).unwrap();
 }
 

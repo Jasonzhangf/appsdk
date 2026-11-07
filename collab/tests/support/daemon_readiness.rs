@@ -24,7 +24,11 @@ pub fn wait_for_ping(child: &mut Child, socket: &Path, timeout: Duration) {
                 }
             }
         }
-        assert!(Instant::now() < deadline, "test daemon did not answer Ping at {}", socket.display());
+        assert!(
+            Instant::now() < deadline,
+            "test daemon did not answer Ping at {}",
+            socket.display()
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
 }

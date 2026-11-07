@@ -115,6 +115,177 @@ fn overlay_work_policy(base: &mut crate::board::WorkPolicy, patch: &crate::board
     }
 }
 
+/// Stable-name review capability used by the three-tier review route.
+pub(crate) fn ticket_review_group(
+    state: &State,
+    route: &RouteScope,
+    slot_name: &str,
+) -> Option<crate::server::ticket_state::ReviewRouteGroup> {
+    use crate::server::ticket_state::ReviewRouteGroup;
+    let roles = state.name_work_roles(route.project_scope_id.as_str(), slot_name);
+    if roles.iter().any(|role| role == "reviewer") {
+        return Some(ReviewRouteGroup::Reviewer);
+    }
+    if roles
+        .iter()
+        .any(|role| role == "architect" || role == "expert")
+    {
+        return Some(ReviewRouteGroup::ArchitectExpert);
+    }
+    Some(ReviewRouteGroup::IndependentPeer)
+}
+
+/// Phase-group queue key. Execute and plan use the work-kind group already
+/// persisted for rotation; reviews use one group per review subject.
+pub(crate) fn ticket_phase_group(
+    phase: crate::server::ticket_state::TicketPhaseKind,
+    work_kind: Option<&str>,
+) -> String {
+    use crate::server::ticket_state::TicketPhaseKind;
+    let kind = work_kind.unwrap_or("generic");
+    match phase {
+        TicketPhaseKind::Execute => format!("execute:{kind}"),
+        TicketPhaseKind::Plan => format!("plan:{kind}"),
+        TicketPhaseKind::PlanReview => "plan_review".into(),
+        TicketPhaseKind::FinalReview => "final_review".into(),
+    }
+}
+
+/// Eligible review receivers for one admitted ticket phase. A participating
+/// actor or stable name is excluded by the route itself; the caller only has to
+/// supply every bound, project-authorized peer.
+pub(crate) fn ticket_review_candidates(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    phases: &[crate::server::ticket_state::TicketPhaseRecord],
+) -> Vec<crate::server::ticket_state::ReviewCandidate> {
+    use crate::server::ticket_state::{ReviewCandidate, ReviewRouteGroup};
+    let master = current_master_worker_id(state, None);
+    let mut candidates = Vec::new();
+    for worker in state.workers.values() {
+        if is_managed_subagent(state, &worker.id)
+            || authoritative_send_binding(state, route, &worker.id).is_err()
+        {
+            continue;
+        }
+        if master.as_deref() == Some(worker.id.as_str()) {
+            continue;
+        }
+        let Ok(Some(slot)) = control.current_for_worker(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &worker.id,
+        ) else {
+            continue;
+        };
+        let name = slot.identity_key.name.clone();
+        let Some(group) = ticket_review_group(state, route, &name) else {
+            continue;
+        };
+        let participated = phases.iter().any(|phase| {
+            phase.slot_name.as_deref() == Some(name.as_str())
+                && phase
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result.submitted_by == worker.id)
+        }) || phases.iter().any(|phase| {
+            phase.slot_name.as_deref() == Some(name.as_str())
+                && matches!(
+                    phase.status,
+                    crate::server::ticket_state::TicketPhaseStatus::Claimed
+                        | crate::server::ticket_state::TicketPhaseStatus::Running
+                )
+        });
+        candidates.push(ReviewCandidate {
+            slot_name: name,
+            worker_id: worker.id.clone(),
+            group,
+            participated,
+        });
+    }
+    candidates.sort_by(|left, right| left.slot_name.cmp(&right.slot_name));
+    candidates.dedup_by(|left, right| left.slot_name == right.slot_name);
+    candidates
+}
+
+/// Eligible non-master slots for a plan or execute phase. Plan requires a
+/// `plan` or `planner` specialty. Execute is the project default for every
+/// valid peer. A specified executor pins only execute, never the plan phase.
+fn ticket_slot_candidates(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    policy: &crate::board::WorkPolicy,
+    phase: crate::server::ticket_state::TicketPhaseKind,
+) -> Result<Vec<crate::server::ticket_state::TicketCandidate>, Resp> {
+    use crate::server::ticket_state::{TicketCandidate, TicketPhaseKind};
+    let available = |worker: &WorkerRec| {
+        !is_managed_subagent(state, &worker.id)
+            && authoritative_send_binding(state, route, &worker.id).is_ok()
+            && !state
+                .agent_presence(route.project_scope_id.as_str(), &worker.id)
+                .is_some_and(|presence| presence.presence == name_state::AgentPresence::Offline)
+    };
+    let mut candidates = Vec::new();
+    if phase == TicketPhaseKind::Execute {
+        if let Some(name) = policy.executor_name.as_deref() {
+            let current = control
+                .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
+                .map_err(Resp::err)?;
+            if let Some(worker) = current
+                .and_then(|slot| slot.active_binding())
+                .and_then(|current| state.workers.get(current.binding.agent_id.as_str()))
+            {
+                if available(worker) {
+                    candidates.push(TicketCandidate {
+                        slot_name: name.to_owned(),
+                        worker_id: worker.id.clone(),
+                        matched_preferred_role: true,
+                    });
+                }
+            }
+            return Ok(candidates);
+        }
+    }
+    let master = current_master_worker_id(state, None);
+    for worker in state.workers.values().filter(|worker| available(worker)) {
+        if master.as_deref() == Some(worker.id.as_str()) {
+            continue;
+        }
+        let slot = control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
+            .map_err(Resp::err)?;
+        let Some(slot) = slot else { continue };
+        let name = slot.identity_key.name.clone();
+        let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
+        if phase == TicketPhaseKind::Plan
+            && !roles.iter().any(|role| role == "plan" || role == "planner")
+        {
+            continue;
+        }
+        let matched = policy
+            .preferred_roles
+            .as_ref()
+            .is_some_and(|preferred| preferred.iter().any(|role| roles.contains(role)));
+        candidates.push(TicketCandidate {
+            slot_name: name,
+            worker_id: worker.id.clone(),
+            matched_preferred_role: matched,
+        });
+    }
+    if phase == TicketPhaseKind::Execute {
+        if let Some(preferred) = policy.preferred_roles.as_ref() {
+            if !preferred.is_empty() {
+                candidates.retain(|candidate| candidate.matched_preferred_role);
+            }
+        }
+    }
+    candidates.sort_by(|left, right| left.slot_name.cmp(&right.slot_name));
+    candidates.dedup_by(|left, right| left.slot_name == right.slot_name);
+    Ok(candidates)
+}
+
 fn board_work_policy(
     server: &Server,
     actor: String,
@@ -427,6 +598,377 @@ pub(super) fn dispatch_eligible_worker_ids(
     }
     eligible.sort();
     Ok(eligible)
+}
+
+/// Ticket admission: create the first Execute phase for one public task and
+/// place it in the shortest eligible slot queue. Returns events for the same
+/// commit batch as task creation, so admission is atomic with publish.
+pub(crate) fn board_ticket_admission_events(
+    server: &Server,
+    state: &State,
+    task: &TaskRec,
+    details: &crate::board::BoardTaskDetails,
+    depends_on: Vec<String>,
+) -> Result<Vec<Event>, Resp> {
+    use crate::server::ticket_state::{
+        select_shortest_queue, slot_queue_len, TicketPhaseKind, TicketPhaseRecord,
+        TicketPhaseStatus,
+    };
+    let policy = &details.work_policy;
+
+    let route = match server_route_scope(server, state) {
+        Ok(Some(route)) => route,
+        _ => return Err(Resp::err("project route is not ready")),
+    };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control,
+        Err(error) => return Err(Resp::err(error)),
+    };
+
+    let first_phase = if details.requires_plan {
+        TicketPhaseKind::Plan
+    } else {
+        TicketPhaseKind::Execute
+    };
+    let candidates = ticket_slot_candidates(state, &control, &route, policy, first_phase)?;
+
+    let group = ticket_phase_group(first_phase, policy.work_kind.as_deref());
+    let cursor = state.ticket_rotation.get(&group).map(String::as_str);
+    let phases = state.ticket_phases.iter().map(|phase| phase).collect::<Vec<_>>();
+    let enqueue_seq = state
+        .ticket_phases
+        .iter()
+        .map(|phase| phase.enqueue_seq)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let selected = select_shortest_queue(&candidates, |slot| slot_queue_len(phases.iter().copied(), slot), cursor);
+
+    let mut events = Vec::new();
+    let (status, slot_name, wait_reason, selected_worker) = match selected {
+        Some(candidate) => {
+            events.push(Event::TicketRotationUpdated {
+                group: group.clone(),
+                slot: candidate.slot_name.clone(),
+            });
+            (
+                TicketPhaseStatus::Queued,
+                Some(candidate.slot_name.clone()),
+                None,
+                Some(candidate.worker_id.clone()),
+            )
+        }
+        None => {
+            let reason = if first_phase == crate::server::ticket_state::TicketPhaseKind::Plan {
+                "no plan-capable peer is available".to_owned()
+            } else if policy.executor_name.is_some() {
+                format!(
+                    "specified executor {} is unavailable",
+                    policy.executor_name.as_deref().unwrap_or_default()
+                )
+            } else if policy.preferred_roles.as_ref().is_some_and(|roles| !roles.is_empty()) {
+                "no peer matches the preferred work roles".to_owned()
+            } else {
+                "no eligible peer is available".to_owned()
+            };
+            (TicketPhaseStatus::WaitingAssignment, None, Some(reason), None)
+        }
+    };
+    let phase = TicketPhaseRecord {
+        task_id: task.id.clone(),
+        phase: first_phase,
+        batch: 0,
+        priority: task.priority.clone(),
+        status,
+        slot_name,
+        binding_generation: 0,
+        enqueue_seq,
+        attempt_generation: 0,
+        depends_on,
+        route_group: None,
+        wait_reason,
+        result: None,
+    };
+    events.push(Event::TicketPhaseRecorded { phase: phase.clone() });
+    // A publish that lands on an already-idle slot continues in the same
+    // transaction. The new phase is offered as a pending overlay because the
+    // reducer has not applied it yet.
+    if let Some(worker_id) = selected_worker.as_deref() {
+        events.extend(ticket_continuation_events_with_pending(
+            state,
+            &control,
+            &route,
+            worker_id,
+            std::slice::from_ref(&phase),
+            Some(task),
+            Some(details),
+            false,
+        ));
+    }
+    Ok(events)
+}
+
+/// The single internal continuation entry for admitted tickets.
+///
+/// Idle observation, a new enqueue to an already-idle slot, a released result
+/// slot and dependency or resource release all run this one planner so the
+/// queue rules live in one place. It is a pure function of the current state
+/// plus the pending batch overlay; callers own the commit.
+///
+/// `pending` overlays not-yet-committed phase records onto the state view.
+/// `trusted_idle` lets a caller that just observed an online-idle reading assert
+/// that fact before the observation is committed.
+pub(crate) fn ticket_continuation_events(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    worker_id: &str,
+    pending: &[crate::server::ticket_state::TicketPhaseRecord],
+    trusted_idle: bool,
+) -> Vec<Event> {
+    ticket_continuation_events_with_pending(
+        state, control, route, worker_id, pending, None, None, trusted_idle,
+    )
+}
+
+/// Same continuation planner for callers that hold an uncommitted publish
+/// batch. The new task and its board details exist only as pending events, so
+/// the planner must see them explicitly or the first enqueue can never claim.
+pub(crate) fn ticket_continuation_events_with_pending(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    worker_id: &str,
+    pending: &[crate::server::ticket_state::TicketPhaseRecord],
+    pending_task: Option<&TaskRec>,
+    pending_details: Option<&crate::board::BoardTaskDetails>,
+    trusted_idle: bool,
+) -> Vec<Event> {
+    use crate::server::ticket_state::{
+        next_queued_for_slot, TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus,
+    };
+
+    if current_master_worker_id(state, Some(route)).as_deref() == Some(worker_id) {
+        return Vec::new();
+    }
+    let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id) {
+        Ok(Some(slot)) => slot,
+        _ => return Vec::new(),
+    };
+    let Some(current) = slot.active_binding() else {
+        return Vec::new();
+    };
+    let Some(session_id) = current.binding.session_id.as_ref() else {
+        return Vec::new();
+    };
+    let slot_name = slot.identity_key.name.clone();
+    let binding_generation = slot.generation;
+
+    let owned;
+    let phases: &[TicketPhaseRecord] = if pending.is_empty() {
+        &state.ticket_phases
+    } else {
+        let mut overlay = state.ticket_phases.clone();
+        for record in pending {
+            match overlay
+                .iter_mut()
+                .find(|existing| {
+                    existing.task_id == record.task_id
+                        && existing.phase == record.phase
+                        && existing.batch == record.batch
+                }) {
+                Some(existing) => *existing = record.clone(),
+                None => overlay.push(record.clone()),
+            }
+        }
+        owned = overlay;
+        &owned
+    };
+
+    // One active claim per slot. A claimed or running phase already occupies
+    // the slot's execution capacity.
+    if phases.iter().any(|phase| {
+        phase.slot_name.as_deref() == Some(slot_name.as_str())
+            && matches!(
+                phase.status,
+                TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+            )
+    }) {
+        return Vec::new();
+    }
+
+    let idle = trusted_idle
+        || state
+            .agent_activity
+            .get(route.project_scope_id.as_str())
+            .and_then(|workers| workers.get(worker_id))
+            .is_some_and(|activity| {
+                activity.activity == name_state::AgentActivity::Idle
+                    && activity.idle_since_ms.is_some()
+            });
+    if !idle {
+        return Vec::new();
+    }
+
+    let dependency_satisfied = |dep: &str| {
+        state.tasks.get(dep).is_some_and(|task| {
+            matches!(
+                task.status.as_str(),
+                "delivered" | "accepted" | "merged" | "closed"
+            )
+        }) || phases.iter().any(|phase| {
+            phase.task_id == dep
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.status == TicketPhaseStatus::Completed
+        })
+    };
+    let Some(next) = next_queued_for_slot(phases, &slot_name, dependency_satisfied).cloned() else {
+        return Vec::new();
+    };
+    let pending_matches = pending_task.is_some_and(|task| task.id == next.task_id);
+    let Some(mut task) = pending_task
+        .filter(|_| pending_matches)
+        .cloned()
+        .or_else(|| state.tasks.get(&next.task_id).cloned())
+    else {
+        return Vec::new();
+    };
+    if task.status != "pending" || task.owner != task.created_by {
+        return Vec::new();
+    }
+    let Some(mut details) = pending_details
+        .filter(|_| pending_matches)
+        .cloned()
+        .or_else(|| state.board_details.get(&next.task_id).cloned())
+    else {
+        return Vec::new();
+    };
+
+    let mut claimed = next.clone();
+    claimed.status = TicketPhaseStatus::Claimed;
+    claimed.slot_name = Some(slot_name.clone());
+    claimed.binding_generation = binding_generation;
+    claimed.attempt_generation = claimed.attempt_generation.saturating_add(1);
+    claimed.wait_reason = None;
+
+    task.owner = worker_id.to_owned();
+    task.status = "working".into();
+    task.updated_ms = now_ms();
+    details.revision += 1;
+
+    let assignment = name_state::TaskAssignment {
+        task_id: next.task_id.clone(),
+        name: slot_name.clone(),
+        session_id: session_id.as_str().into(),
+        assignment_revision: state
+            .task_assignment(&next.task_id)
+            .map_or(1, |assignment| assignment.assignment_revision + 1),
+        reflow: None,
+        updated_ms: now_ms(),
+    };
+    let mut events = vec![
+        Event::TicketPhaseRecorded {
+            phase: claimed.clone(),
+        },
+        Event::TaskUpdated { task },
+        Event::BoardDetailsChanged {
+            task_id: next.task_id.clone(),
+            details,
+        },
+        Event::TaskAssignmentUpdated { assignment },
+    ];
+    // The execution contract message is saved in the same transaction as the
+    // claim, so a delivered wake always has a committed claim behind it.
+    let message_id = format!("ticket-claim-{}", rand::random::<u128>());
+    events.push(Event::Sent {
+        msg: Message {
+            id: message_id.clone(),
+            from: "daemon".into(),
+            to: worker_id.to_owned(),
+            mtype: "notification".into(),
+            subject: Some(format!("ticket-claimed:{}", next.task_id)),
+            body: format!(
+                "Ticket {} is queued on your slot and claimed for you at attempt {}. Run collab board start --attempt {} before working, then submit the result with the same attempt.",
+                next.task_id, claimed.attempt_generation, claimed.attempt_generation
+            ),
+            in_reply_to: None,
+            created_ms: now_ms(),
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        },
+    });
+    events.push(Event::DeliveryMode {
+        msg_id: message_id.clone(),
+        mode: "explicit-notification".into(),
+        source_thread_id: None,
+    });
+    events.push(Event::MailboxNameAddressed {
+        message_id: message_id.clone(),
+        address: name_mailbox::MailboxNameAddress {
+            project_scope: route.project_scope_id.as_str().into(),
+            name: slot_name.clone(),
+        },
+    });
+    if let Some(subscription) = state.matching_subscription(worker_id, "direct-message", None, now_ms())
+    {
+        events.push(Event::WakeBound {
+            message_id,
+            subscription_id: subscription.id.clone(),
+        });
+    }
+    events
+}
+
+/// Re-run the single continuation entry for every idle slot whose queued
+/// phases were waiting on this completed execute phase. The delivering actor's
+/// own slot is handled by its caller to avoid a duplicate claim in one batch.
+pub(crate) fn ticket_dependency_release_events(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    completed: &crate::server::ticket_state::TicketPhaseRecord,
+    exclude_worker: &str,
+) -> Vec<Event> {
+    use crate::server::ticket_state::TicketPhaseStatus;
+
+    let mut slots: Vec<String> = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.status == TicketPhaseStatus::Queued
+                && phase.depends_on.iter().any(|dep| dep == &completed.task_id)
+        })
+        .filter_map(|phase| phase.slot_name.clone())
+        .collect();
+    slots.sort();
+    slots.dedup();
+
+    let mut events = Vec::new();
+    for slot_name in slots {
+        let worker_id = control
+            .current_for_name(&route.project_scope_id, &route.app_scope_id, &slot_name)
+            .ok()
+            .flatten()
+            .and_then(|slot| {
+                slot.active_binding()
+                    .map(|current| current.binding.agent_id.as_str().to_owned())
+            });
+        let Some(worker_id) = worker_id else { continue };
+        if worker_id == exclude_worker {
+            continue;
+        }
+        events.extend(ticket_continuation_events(
+            state,
+            control,
+            route,
+            &worker_id,
+            std::slice::from_ref(completed),
+            false,
+        ));
+    }
+    events
 }
 
 #[cfg(test)]

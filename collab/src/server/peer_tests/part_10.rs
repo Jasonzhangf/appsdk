@@ -292,6 +292,9 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
             prefer_role: None,
             executor: None,
             reviewer: None,
+            requires_plan: false,
+            review_subjects: None,
+            depends_on: Vec::new(),
         },
     );
     assert!(published.ok, "{:?}", published.error);

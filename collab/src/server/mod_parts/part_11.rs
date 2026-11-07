@@ -493,6 +493,7 @@ fn dispatch_with_route_context_bound(
             token,
             task_id,
             evidence,
+            attempt,
             worktree,
             no_candidate,
         } => handle_task_deliver_with_intent(
@@ -501,6 +502,7 @@ fn dispatch_with_route_context_bound(
             token,
             task_id,
             evidence,
+            attempt,
             worktree,
             no_candidate,
         ),

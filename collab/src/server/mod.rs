@@ -25,6 +25,7 @@ pub mod presence;
 mod project_reset;
 pub(crate) mod reply_obligation;
 pub mod state;
+pub(crate) mod ticket_state;
 pub mod timers;
 pub(crate) mod tm_layout;
 

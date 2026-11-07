@@ -121,12 +121,30 @@ pub enum BoardCommand {
         executor: Option<String>,
         #[arg(long)]
         reviewer: Option<String>,
+        /// Require a plan phase to complete before the execute phase exists.
+        #[arg(long)]
+        requires_plan: bool,
+        /// Comma-separated review subjects that must pass before close:
+        /// `plan`, `delivery`, or both.
+        #[arg(long = "review-subjects")]
+        review_subjects: Option<String>,
+        /// Task ids that must complete before this ticket's execute phase may start.
+        #[arg(long = "depends-on", num_args(1..))]
+        depends_on: Vec<String>,
     },
     /// Atomically claim one pending task at the observed board revision.
     Claim {
         id: String,
         #[arg(long)]
         expected_revision: u64,
+    },
+    /// Start a claimed ticket execution phase at the current attempt/generation.
+    Start {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        attempt: u64,
     },
     /// Invite a current name or registered peer; ownership transfers only on accept.
     Invite {
@@ -240,8 +258,23 @@ pub struct BoardTaskDetails {
     pub test_condition: String,
     pub revision: u64,
     pub public_visibility: bool,
+    /// True only after ticket admission atomically created the ticket phases.
+    /// Legacy/public board records are not admitted tickets until this flag is set.
+    #[serde(default)]
+    pub admitted: bool,
     #[serde(default)]
     pub parent_task_id: Option<String>,
+    /// Explicit workflow gate: plan must complete before execute is created.
+    #[serde(default)]
+    pub requires_plan: bool,
+    /// Which subjects require review: "plan" and/or "delivery". A missing or
+    /// empty set means no review is contracted by the workflow itself.
+    #[serde(default)]
+    pub review_subjects: Vec<String>,
+    /// Master's durable close intent. It survives failed or missing review and
+    /// completes automatically once review and delivery conditions pass.
+    #[serde(default)]
+    pub close_intent: Option<String>,
     #[serde(default)]
     pub work_policy: WorkPolicy,
     #[serde(default)]
@@ -258,6 +291,8 @@ impl BoardTaskDetails {
     pub fn legacy(id: &str, public_visibility: bool) -> Self {
         Self {
             title: id.into(),
+            review_subjects: Vec::new(),
+            close_intent: None,
             revision: 1,
             public_visibility,
             ..Self::default()
@@ -288,6 +323,9 @@ pub struct BoardTaskView {
     pub next_step: Option<String>,
     pub work_kind: Option<String>,
     pub parent_task_id: Option<String>,
+    pub requires_plan: bool,
+    pub review_subjects: Vec<String>,
+    pub close_intent: Option<String>,
     pub child_work_policies: std::collections::BTreeMap<String, WorkPolicy>,
     pub preferred_roles: Vec<String>,
     pub executor_name: Option<String>,

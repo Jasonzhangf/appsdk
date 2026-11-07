@@ -117,6 +117,9 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         next_step: task.next_step.clone(),
         work_kind:policy.work_kind,
         parent_task_id:details.parent_task_id.clone(),
+        requires_plan:details.requires_plan,
+        review_subjects:details.review_subjects.clone(),
+        close_intent:details.close_intent.clone(),
         child_work_policies:details.child_work_policies.clone(),
         preferred_roles:policy.preferred_roles.unwrap_or_default(),
         executor_name:policy.executor_name,
@@ -278,6 +281,40 @@ fn board_check_revision(state: &State, task_id: &str, expected: u64) -> Result<B
     Ok(details.clone())
 }
 
+/// Read-only ticket projection over the same phase records. The publish
+/// response exposes this so callers can observe the admitted queue without a
+/// second writable queue source.
+fn ticket_projection(state: &State, task_id: &str) -> serde_json::Value {
+    let phases: Vec<serde_json::Value> = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| phase.task_id == task_id)
+        .map(|phase| {
+            json!({
+                "phase": phase.phase,
+                "batch": phase.batch,
+                "priority": phase.priority,
+                "status": phase.status,
+                "slot": phase.slot_name,
+                "binding_generation": phase.binding_generation,
+                "enqueue_seq": phase.enqueue_seq,
+                "attempt_generation": phase.attempt_generation,
+                "depends_on": phase.depends_on,
+                "route_group": phase.route_group,
+                "wait_reason": phase.wait_reason,
+            })
+        })
+        .collect();
+    let details = state.board_details.get(task_id);
+    json!({
+        "task_id": task_id,
+        "requires_plan": details.is_some_and(|details| details.requires_plan),
+        "review_subjects": details.map(|details| details.review_subjects.clone()).unwrap_or_default(),
+        "close_intent": details.and_then(|details| details.close_intent.clone()),
+        "phases": phases,
+    })
+}
+
 fn board_check_actor(state: &State, actor: &str, token: &str) -> Result<(), Resp> {
     verify(state, actor, token)?;
     Ok(())
@@ -298,7 +335,8 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         let task_id = match &command {
             BoardCommand::Show | BoardCommand::Publish { .. } => None,
             BoardCommand::Policy {id,..} => id.as_ref(),
-            BoardCommand::Claim { id, .. } | BoardCommand::Update { id, .. }
+            BoardCommand::Claim { id, .. } | BoardCommand::Start { id, .. }
+            | BoardCommand::Update { id, .. }
             | BoardCommand::Describe { id, .. } | BoardCommand::Invite { id, .. }
             | BoardCommand::Respond { id, .. } | BoardCommand::DeclineAssigned { id, .. }
             | BoardCommand::Withdraw { id, .. } | BoardCommand::Dispatch {id,..} => Some(id),
@@ -313,7 +351,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
     match command {
         BoardCommand::Show => handle_board_show(server, Some(&actor)),
         BoardCommand::Publish { id, title, description, delivery_condition, test_condition, priority,
-            work_kind,parent_task,prefer_role,executor,reviewer } => {
+            work_kind,parent_task,prefer_role,executor,reviewer,requires_plan,review_subjects,depends_on } => {
             if [&id, &title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) {
                 return Resp::err("BOARD_DESCRIPTION_REQUIRED: provide task id, title, description, delivery condition and test condition");
             }
@@ -328,9 +366,33 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
                 if !board_task_visible(&state,task,Some(&actor)) {return Resp::err("BOARD_PRIVATE_TASK");}
                 if parent==id {return Resp::err("WORK_PARENT_CYCLE");}
             }
+            for dep in depends_on.iter() {
+                if dep == &id { return Resp::err("BOARD_TICKET_SELF_DEPENDENCY: a ticket cannot depend on itself"); }
+                if !state.tasks.contains_key(dep) {
+                    return Resp::err_data("BOARD_TICKET_DEPENDENCY_NOT_FOUND: dependency task does not exist", json!({"task_id": id, "depends_on": dep}));
+                }
+            }
             let explicit=match parse_work_policy(work_kind,prefer_role,executor,reviewer,false,false,false) {
                 Ok(policy)=>policy,Err(error)=>return error,
             };
+            let mut normalized_review_subjects = Vec::new();
+            if let Some(list) = review_subjects.as_ref() {
+                for value in list.split(',') {
+                    let value = value.trim().to_lowercase();
+                    if value.is_empty() {
+                        continue;
+                    }
+                    if !matches!(value.as_str(), "plan" | "delivery") {
+                        return Resp::err_data(
+                            "BOARD_REVIEW_SUBJECT_INVALID: review subjects must be plan or delivery",
+                            json!({"task_id": id, "value": value}),
+                        );
+                    }
+                    normalized_review_subjects.push(value);
+                }
+            }
+            normalized_review_subjects.sort();
+            normalized_review_subjects.dedup();
             let work_policy=state.materialize_work_policy(explicit.work_kind.as_deref(),parent_task.as_deref(),&explicit);
             let public_visibility = !is_managed_subagent(&state, &actor);
             let now = now_ms();
@@ -344,14 +406,30 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             let details = BoardTaskDetails {
                 title, description, delivery_condition, test_condition,
                 parent_task_id:parent_task,work_policy,
-                revision: 1, public_visibility, ..BoardTaskDetails::default()
+                requires_plan,review_subjects: normalized_review_subjects,
+                revision: 1, public_visibility, admitted: public_visibility, ..BoardTaskDetails::default()
             };
-            if let Err(error) = server.commit_locked_checked(&mut state, &[Event::TaskCreated { task }, Event::BoardDetailsChanged { task_id: id.clone(), details }]) {
+            let mut events = vec![
+                Event::TaskCreated { task: task.clone() },
+                Event::BoardDetailsChanged { task_id: id.clone(), details: details.clone() },
+            ];
+            if details.public_visibility {
+                match board_ticket_admission_events(server, &state, &task, &details, depends_on) {
+                    Ok(admission) => events.extend(admission),
+                    Err(error) => return error,
+                }
+            }
+            if let Err(error) = server.commit_locked_checked(&mut state, &events) {
                 return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
             }
-            board_task_response(server, &state, &id, &actor)
+            let mut response = board_task_response(server, &state, &id, &actor);
+            if let Some(object) = response.data.as_object_mut() {
+                object.insert("ticket".into(), ticket_projection(&state, &id));
+            }
+            response
         },
         BoardCommand::Claim { id, expected_revision } => board_claim(server, actor, token, id, expected_revision),
+        BoardCommand::Start { id, expected_revision, attempt } => board_start(server, actor, token, id, expected_revision, attempt),
         BoardCommand::Update { id, expected_revision, status, next } => {
             let mut state = server.state.lock().unwrap();
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }

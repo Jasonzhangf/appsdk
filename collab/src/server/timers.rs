@@ -37,8 +37,10 @@ fn timer_due_commit_pause_hook(due_events: &[Event]) {
     }
 }
 
-/// Server-side scheduler for finite subscriptions and bounded waits. It never
-/// creates task continuations or infers that ordinary work needs a wake.
+/// Server-side scheduler for finite subscriptions and bounded waits. Ordinary
+/// work never gets a wake from elapsed time alone; the agent monitor may still
+/// continue an admitted ticket queue when it observes a trusted online-idle
+/// slot.
 pub fn tick(server: &Arc<Server>) {
     tick_at(server, now_ms());
 }

@@ -1,0 +1,76 @@
+{
+  "id": "collab-peer-stale-reclaim-design",
+  "version": "0.1.0",
+  "description": "设计草案。一次 peer 状态鉴别事件到一次鉴别及未结单回收结果。master 鉴别，TUI 快照后仍未知则直接 stale，DSH/Desktop 真实请求回复后 10 分钟无有效回复则 stale。daemon 撤销旧 attempt 代际并收回全部未结单，按接收范围立即进入新 slot 的最短 queue；未隔离的共享资源保持执行等待。等待和取证错误传递到唯一出口，后续事件使用新批次。算子为拟定接口，未绑定运行实现。",
+  "inputs": [{"id": "失联鉴别事件", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "核对鉴别范围与宿主类型",
+      "operator": "collab.peer_reclaim_design.admit",
+      "operator_version": "1",
+      "inputs": ["失联鉴别事件"],
+      "output": {"id": "鉴别准入结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "收集终端快照或回复证据",
+      "operator": "collab.peer_reclaim_design.collect_evidence",
+      "operator_version": "1",
+      "inputs": ["鉴别准入结果"],
+      "output": {"id": "宿主状态证据", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "负责人按宿主规则鉴别状态",
+      "operator": "collab.peer_reclaim_design.master_adjudicate",
+      "operator_version": "1",
+      "inputs": ["宿主状态证据"],
+      "output": {"id": "负责人鉴别结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "撤销失效承接并收回未结工单",
+      "operator": "collab.peer_reclaim_design.revoke_and_reclaim",
+      "operator_version": "1",
+      "inputs": ["负责人鉴别结果"],
+      "output": {"id": "未结工单回收结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "按接收范围重新进入最短队列",
+      "operator": "collab.peer_reclaim_design.redistribute",
+      "operator_version": "1",
+      "inputs": ["未结工单回收结果"],
+      "output": {"id": "未结工单重新分配结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "返回唯一鉴别与回收结果",
+      "operator": "collab.peer_reclaim_design.emit_result",
+      "operator_version": "1",
+      "inputs": ["未结工单重新分配结果"],
+      "output": {"id": "失联鉴别与回收结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "核对鉴别范围与宿主类型", "to": "收集终端快照或回复证据", "arc_id": "鉴别准入结果"},
+    {"from": "收集终端快照或回复证据", "to": "负责人按宿主规则鉴别状态", "arc_id": "宿主状态证据"},
+    {"from": "负责人按宿主规则鉴别状态", "to": "撤销失效承接并收回未结工单", "arc_id": "负责人鉴别结果"},
+    {"from": "撤销失效承接并收回未结工单", "to": "按接收范围重新进入最短队列", "arc_id": "未结工单回收结果"},
+    {"from": "按接收范围重新进入最短队列", "to": "返回唯一鉴别与回收结果", "arc_id": "未结工单重新分配结果"}
+  ],
+  "outputs": ["失联鉴别与回收结果"]
+}

@@ -2388,6 +2388,7 @@ fn handle_task_deliver(
         token,
         task_id,
         evidence,
+        None,
         worktree,
         false,
     )
@@ -2399,6 +2400,7 @@ fn handle_task_deliver_with_intent(
     token: String,
     task_id: String,
     evidence: Option<String>,
+    attempt: Option<u64>,
     worktree: Option<String>,
     no_candidate: bool,
 ) -> Resp {
@@ -2432,6 +2434,18 @@ fn handle_task_deliver_with_intent(
         );
     }
     if let Err(error)=work_executor_gate(server,&st,&task_id,&worker_id) {return error;}
+
+    let ticket_result_event = match board_ticket_result_event(
+        server,
+        &st,
+        &worker_id,
+        &task_id,
+        evidence.as_deref().unwrap_or(""),
+        attempt,
+    ) {
+        Ok(event) => event,
+        Err(error) => return error,
+    };
 
     let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) else {
         return Resp::err("task deliver requires non-empty --evidence");
@@ -2467,6 +2481,9 @@ fn handle_task_deliver_with_intent(
     let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
     let required_reviewer = required_work_reviewer(&st, &task_id);
     let mut events = invalidate_work_review(&st, &task, &mut lifecycle, required_reviewer.clone());
+    if let Some(ticket_event) = ticket_result_event.clone() {
+        events.push(ticket_event);
+    }
     lifecycle.delivery_kind = if no_candidate {
         state::TaskDeliveryKind::ReadOnly
     } else {
@@ -2513,6 +2530,31 @@ fn handle_task_deliver_with_intent(
             }
             review_notice = Some((message_id,subscription,notification_method_for_worker(&st,&recipient)));
         } else { reviewer_waiting = Some(format!("reviewer {name} is currently unavailable")); }
+    }
+    // A completed execute phase releases the slot. Run the same continuation
+    // entry so the next queued item for that slot is claimed in this batch.
+    if let Some(Event::TicketPhaseRecorded { phase: completed }) = ticket_result_event.as_ref() {
+        if let Ok(Some(route)) = server_route_scope(server, &st) {
+            if let Ok(control) =
+                binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+            {
+                events.extend(ticket_continuation_events(
+                    &st,
+                    &control,
+                    &route,
+                    &worker_id,
+                    std::slice::from_ref(completed),
+                    false,
+                ));
+                events.extend(ticket_dependency_release_events(
+                    &st,
+                    &control,
+                    &route,
+                    completed,
+                    &worker_id,
+                ));
+            }
+        }
     }
     events.extend([
             Event::TaskUpdated { task: task.clone() },

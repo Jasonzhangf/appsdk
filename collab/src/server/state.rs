@@ -1683,6 +1683,16 @@ pub enum Event {
     CeoReportStateRestored {
         report_state: crate::ceo_report_state::CeoReportState,
     },
+    /// Insert or replace one ticket phase batch. The (task_id, phase, batch)
+    /// key is unique; rework creates a new batch instead of overwriting.
+    TicketPhaseRecorded {
+        phase: crate::server::ticket_state::TicketPhaseRecord,
+    },
+    /// Advance the shortest-queue rotation cursor for one admission group.
+    TicketRotationUpdated {
+        group: String,
+        slot: String,
+    },
     #[serde(alias = "RootAssigned")]
     MasterAssigned {
         worker_id: String,

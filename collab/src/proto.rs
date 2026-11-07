@@ -864,6 +864,8 @@ pub enum Req {
         token: String,
         task_id: String,
         evidence: Option<String>,
+        #[serde(default)]
+        attempt: Option<u64>,
         worktree: Option<String>,
         #[serde(default)]
         no_candidate: bool,

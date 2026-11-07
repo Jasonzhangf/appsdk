@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 37] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 38] {
     [
         (
             "docs/dagpipe/collab-send-message.graph.json",
@@ -449,6 +449,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 37] {
         (
             "docs/dagpipe/collab-qqbot-outbound.graph.json",
             include_str!("../../docs/dagpipe/collab-qqbot-outbound.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-stale-identity-maintenance.graph.json",
+            include_str!("../../docs/dagpipe/collab-stale-identity-maintenance.graph.json"),
         ),
     ]
 }

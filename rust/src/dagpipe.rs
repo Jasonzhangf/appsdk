@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 42] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 44] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -361,6 +361,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 42] {
         (
             "docs/dagpipe/collab-context.graph.json",
             include_str!("../../docs/dagpipe/collab-context.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-role-context-projection.graph.json",
+            include_str!("../../docs/dagpipe/collab-role-context-projection.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-role-work-cycle.graph.json",
+            include_str!("../../docs/dagpipe/collab-role-work-cycle.graph.json"),
         ),
         (
             "docs/dagpipe/collab-desktop-bridge-service.graph.json",
@@ -473,7 +481,7 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 42] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 40] {
+fn design_graph_ids() -> [&'static str; 42] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -490,6 +498,8 @@ fn design_graph_ids() -> [&'static str; 40] {
         "collab-role-assignment",
         "collab-required-review",
         "appsdk-collab-context",
+        "appsdk-collab-role-context-projection",
+        "appsdk-collab-role-work-cycle",
         "appsdk-collab-desktop-bridge-service",
         "appsdk-collab-desktop-bridge-delivery",
         "appsdk-collab-name-ownership",
@@ -518,7 +528,7 @@ fn design_graph_ids() -> [&'static str; 40] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 225] {
+fn design_graph_operator_names() -> [&'static str; 240] {
     [
         "appsdk.collab_stale_identity.receive_tick",
         "appsdk.collab_stale_identity.scan_candidates",
@@ -626,6 +636,13 @@ fn design_graph_operator_names() -> [&'static str; 225] {
         "collab.ceo.notify",
         "collab.ceo.ack_user_report",
         "collab.ceo.receipt",
+        "collab.role_work_cycle.accept_trigger",
+        "collab.role_work_cycle.review_goal_and_scope",
+        "collab.role_work_cycle.select_duties",
+        "collab.role_work_cycle.execute_applicable_duties",
+        "collab.role_work_cycle.handoff_result_or_gap",
+        "collab.role_work_cycle.update_record_and_gap",
+        "collab.role_work_cycle.emit_cycle_result",
         "appsdk.collab.board.admit_request",
         "appsdk.collab.board.apply",
         "appsdk.collab.board.authorize",
@@ -648,6 +665,14 @@ fn design_graph_operator_names() -> [&'static str; 225] {
         "appsdk.collab_context.commit_control_resolution",
         "appsdk.collab_context.complete_pending_effects",
         "appsdk.collab_context.emit_snapshot",
+        "appsdk.collab_context.project_role_context",
+        "appsdk.collab_context.begin_role_projection",
+        "appsdk.collab_context.read_role_templates",
+        "appsdk.collab_context.classify_role_applicability",
+        "appsdk.collab_context.select_role_templates",
+        "appsdk.collab_context.compose_role_brief",
+        "appsdk.collab_context.decorate_ceo_brief",
+        "appsdk.collab_context.emit_role_projection",
         "appsdk.collab_context.env_view",
         "appsdk.collab_context.read_name_ownership",
         "appsdk.collab_context.require_daemon",

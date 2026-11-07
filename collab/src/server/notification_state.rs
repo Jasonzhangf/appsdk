@@ -38,6 +38,14 @@ pub struct MasterWakeAccumulator {
     pub scheduling_decision_revision: u64,
     pub first_pending_ms: i64,
     pub last_updated_ms: i64,
+    /// Idle set of the last notification actually generated for the master.
+    /// A repeated `WorkerIdle` signal for an already idle worker must not
+    /// rebuild the batch after [`mark_idle_batch_delivered`] clears
+    /// `newly_idle_workers`.
+    #[serde(default)]
+    pub last_notified_newly_idle: Vec<String>,
+    #[serde(default)]
+    pub last_notified_live_idle: Vec<String>,
     #[serde(default)]
     pub wake_hold: Option<WakeHold>,
     #[serde(default = "default_delivery_state")]
@@ -82,8 +90,16 @@ pub fn accumulate_master_wake(
             changed
         }
         MasterWakeSignal::WorkerIdle { worker_id } => {
+            let already_idle = accumulator.idle_workers.contains(worker_id);
             let added = add_unique(&mut accumulator.idle_workers, worker_id.clone());
-            let newly_added = add_unique(&mut accumulator.newly_idle_workers, worker_id.clone());
+            // A worker already in the live idle set is not a new idle edge.
+            // Rebuilding `newly_idle_workers` here would re-notify the same
+            // idle set after the previous batch was delivered.
+            let newly_added = if already_idle {
+                false
+            } else {
+                add_unique(&mut accumulator.newly_idle_workers, worker_id.clone())
+            };
             let recovered = accumulator
                 .unresponsive_workers
                 .iter()
@@ -190,7 +206,28 @@ pub fn mark_master_wake_skipped_busy(accumulator: &mut MasterWakeAccumulator) {
 }
 
 pub fn mark_idle_batch_delivered(accumulator: &mut MasterWakeAccumulator) {
+    accumulator.last_notified_newly_idle = accumulator.newly_idle_workers.clone();
+    accumulator.last_notified_live_idle = accumulator.idle_workers.clone();
     accumulator.newly_idle_workers.clear();
+}
+
+/// A message belongs to the master idle-notification contract when it is a
+/// typed `notification` or an idle batch subject. These share one idempotency
+/// and delivery-failure lifecycle, so unrelated `notify` traffic such as
+/// `reply-pending` stays outside.
+pub fn is_master_wake_notice(mtype: &str, subject: Option<&str>) -> bool {
+    mtype == "notification" || is_idle_batch_notice(mtype, subject)
+}
+
+/// Idle batch notices are selected purely by batch subject, regardless of the
+/// carrying mtype. This keeps unrelated typed `notification` traffic such as
+/// `goal:plan.md` out of idle-batch idempotency while preserving typed notice
+/// gating in state_impl.
+pub fn is_idle_batch_notice(_mtype: &str, subject: Option<&str>) -> bool {
+    matches!(
+        subject,
+        Some("worker-idle" | "master-wake-batch" | "subagent-status")
+    )
 }
 
 pub fn retain_live_idle_workers(

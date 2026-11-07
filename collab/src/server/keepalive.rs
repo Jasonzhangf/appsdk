@@ -716,6 +716,18 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     }) {
         return;
     }
+    // Require confirmed online presence for the master recipient before
+    // generating an idle batch. Unknown or offline presence keeps the pending
+    // batch in durable state; a repeated tick does not create another
+    // notification while the recipient is unreachable.
+    let master_online = state.workers.get(&master_id).is_some_and(|worker| {
+        super::worker_agent_facts(server, &state, worker)
+            .0
+            .is_some_and(|fact| matches!(fact.presence, super::name_state::AgentPresence::Online))
+    });
+    if !master_online {
+        return;
+    }
     if state.master_wake.newly_idle_workers.is_empty() {
         return;
     }
@@ -727,6 +739,24 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     };
     let newly_idle = state.master_wake.newly_idle_workers.clone();
     let live_idle = state.master_wake.idle_workers.clone();
+    // Idempotency for an unconsumed delivery: if the same idle set was already
+    // generated and its notification is still pending/delivered (not consumed
+    // by the recipient), do not generate another one. A new state (different
+    // idle set) or consumption re-opens the gate.
+    let same_notified_set = state.master_wake.last_notified_newly_idle == newly_idle
+        && state.master_wake.last_notified_live_idle == live_idle;
+    let unconsumed_server_notice = state.msgs.values().any(|message| {
+        message.from == "collab-server"
+            && message.to == master_id
+            && crate::server::notification_state::is_idle_batch_notice(
+                &message.mtype,
+                message.subject.as_deref(),
+            )
+            && !matches!(message.state.as_str(), "read" | "superseded")
+    });
+    if same_notified_set && unconsumed_server_notice {
+        return;
+    }
     let blocked = state.master_wake.blocked_or_timed_out_tasks.clone();
     let mut pending_merges: Vec<_> = state.pending_merges.keys().cloned().collect();
     pending_merges.sort();
@@ -943,6 +973,7 @@ fn native_thread_activity(raw: &serde_json::Value) -> super::name_state::AgentAc
 #[cfg(test)]
 mod tests {
     use super::super::peer_tests::{register, test_server};
+    use super::super::state::MasterWakeSignal;
     use super::*;
     use crate::subagent::Record as SubagentRecord;
 
@@ -1008,7 +1039,13 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn observe(server: &Server, activity: super::super::name_state::AgentActivity, session: &str) {
+    fn observe_agent(
+        server: &Server,
+        worker_id: &str,
+        presence: super::super::name_state::AgentPresence,
+        activity: super::super::name_state::AgentActivity,
+        session: &str,
+    ) {
         use super::super::name_state::*;
         let scope = server
             .root
@@ -1020,9 +1057,9 @@ mod tests {
             Event::AgentPresenceObserved {
                 presence: AgentPresenceRecord {
                     project_scope: scope.clone(),
-                    worker_id: "worker".into(),
+                    worker_id: worker_id.into(),
                     session_id: session.into(),
-                    presence: AgentPresence::Online,
+                    presence,
                     reason: "fixture".into(),
                     observed_ms: 1,
                 },
@@ -1030,7 +1067,7 @@ mod tests {
             Event::AgentActivityObserved {
                 activity: AgentActivityRecord {
                     project_scope: scope,
-                    worker_id: "worker".into(),
+                    worker_id: worker_id.into(),
                     session_id: session.into(),
                     activity,
                     background: false,
@@ -1040,6 +1077,81 @@ mod tests {
                 },
             },
         ]);
+    }
+
+    fn observe_master_online(server: &Server, session: &str) {
+        use super::super::name_state::{AgentPresence, AgentPresenceRecord};
+        let scope = server
+            .root
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        server.commit(&[Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: scope,
+                worker_id: "master".into(),
+                session_id: session.into(),
+                presence: AgentPresence::Online,
+                reason: "fixture".into(),
+                observed_ms: 1,
+            },
+        }]);
+    }
+
+    fn observe(server: &Server, activity: super::super::name_state::AgentActivity, session: &str) {
+        observe_agent(
+            server,
+            "worker",
+            super::super::name_state::AgentPresence::Online,
+            activity,
+            session,
+        );
+    }
+
+    fn set_master_idle(server: &Server) {
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record: Record {
+                observed: "idle".into(),
+                idle_since_ms: 1,
+                ..Default::default()
+            },
+        }]);
+    }
+
+    /// Align the registered transport with the session used by observe_agent
+    /// so worker_agent_facts binds presence/activity records to that worker.
+    fn bind_session(server: &Server, worker_id: &str, session: &str) {
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get_mut(worker_id)
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .session_id = Some(session.into());
+    }
+
+    fn idle_notice_count(server: &Server) -> usize {
+        server
+            .state
+            .lock()
+            .unwrap()
+            .msgs
+            .values()
+            .filter(|message| {
+                message.from == "collab-server"
+                    && message.to == "master"
+                    && crate::server::notification_state::is_idle_batch_notice(
+                        &message.mtype,
+                        message.subject.as_deref(),
+                    )
+            })
+            .count()
     }
 
     #[test]
@@ -1116,6 +1228,14 @@ mod tests {
         register_synthetic_peer(&server, "worker", "thread-worker");
         register(&server, "master", "thread-master");
         super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        // Idle wake requires a confirmed-online master recipient.
+        observe_agent(
+            &server,
+            "master",
+            super::super::name_state::AgentPresence::Online,
+            Idle,
+            "session-thread-master",
+        );
         server
             .state
             .lock()
@@ -1143,6 +1263,289 @@ mod tests {
         assert!(notices[0].body.contains("newly_idle=worker"));
         assert!(!state.subagents.values().any(|child| child.peer == "worker"));
         drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_idle_unknown_or_offline_master_keeps_pending_without_batch() {
+        use super::super::name_state::{AgentActivity::*, AgentPresence};
+        use super::super::peer_tests::register_synthetic_peer;
+        for presence in [AgentPresence::Unknown, AgentPresence::Offline] {
+            let (server, root) = test_server();
+            register_synthetic_peer(&server, "worker", "thread-worker");
+            register(&server, "master", "thread-master");
+            super::super::peer_tests::promote_master(&server, "master", "user approved master");
+            bind_session(&server, "worker", "current");
+            let now = super::super::state::now_ms();
+            observe_agent(&server, "worker", AgentPresence::Online, Busy, "current");
+            tick_at(&server, now);
+            set_master_idle(&server);
+            observe_agent(&server, "worker", AgentPresence::Online, Idle, "current");
+            tick_at(&server, now + 1);
+
+            observe_agent(&server, "master", presence, Idle, "session-thread-master");
+            tick_at(&server, now + 2);
+            assert_eq!(idle_notice_count(&server), 0, "{presence:?}");
+            {
+                let state = server.state.lock().unwrap();
+                assert_eq!(state.master_wake.newly_idle_workers, vec!["worker"]);
+                assert_eq!(state.master_wake.delivery_state, "pending");
+            }
+
+            observe_agent(
+                &server,
+                "master",
+                AgentPresence::Online,
+                Idle,
+                "session-thread-master",
+            );
+            tick_at(&server, now + 3);
+            assert_eq!(idle_notice_count(&server), 1, "{presence:?}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn ordinary_idle_same_set_is_not_regenerated_while_unconsumed() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        bind_session(&server, "worker", "current");
+        let now = super::super::state::now_ms();
+        observe_agent(
+            &server,
+            "master",
+            super::super::name_state::AgentPresence::Online,
+            Idle,
+            "session-thread-master",
+        );
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        set_master_idle(&server);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master" && message.subject.as_deref() == Some("worker-idle")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        server.commit(&[Event::MasterWakeSignal {
+            signal: MasterWakeSignal::WorkerIdle {
+                worker_id: "worker".into(),
+            },
+            at_ms: now + 2,
+        }]);
+        tick_at(&server, now + 2);
+        assert_eq!(idle_notice_count(&server), 1);
+
+        server.commit(&[Event::Delivered {
+            ids: vec![first_id.clone()],
+        }]);
+        tick_at(&server, now + 3);
+        assert_eq!(idle_notice_count(&server), 1);
+
+        server.commit(&[Event::Acked {
+            ids: vec![first_id],
+        }]);
+        tick_at(&server, now + 4);
+        assert_eq!(idle_notice_count(&server), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_idle_consumption_permits_one_new_idle_edge() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register_synthetic_peer(&server, "second-worker", "thread-second-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        bind_session(&server, "worker", "current");
+        bind_session(&server, "second-worker", "session-thread-second-worker");
+        let now = super::super::state::now_ms();
+        observe_agent(
+            &server,
+            "master",
+            super::super::name_state::AgentPresence::Online,
+            Idle,
+            "session-thread-master",
+        );
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        set_master_idle(&server);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master" && message.subject.as_deref() == Some("worker-idle")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        server.commit(&[Event::Acked {
+            ids: vec![first_id],
+        }]);
+
+        observe_agent(
+            &server,
+            "second-worker",
+            super::super::name_state::AgentPresence::Online,
+            Busy,
+            "session-thread-second-worker",
+        );
+        tick_at(&server, now + 2);
+        observe_agent(
+            &server,
+            "second-worker",
+            super::super::name_state::AgentPresence::Online,
+            Idle,
+            "session-thread-second-worker",
+        );
+        tick_at(&server, now + 3);
+        assert_eq!(idle_notice_count(&server), 2);
+        {
+            let state = server.state.lock().unwrap();
+            let latest = state
+                .msgs
+                .values()
+                .filter(|message| {
+                    message.to == "master"
+                        && crate::server::notification_state::is_idle_batch_notice(
+                            &message.mtype,
+                            message.subject.as_deref(),
+                        )
+                })
+                .max_by_key(|message| message.created_ms)
+                .unwrap();
+            assert!(latest.body.contains("newly_idle=second-worker"));
+            assert!(latest.body.contains("live_idle=second-worker,worker"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_idle_unrelated_server_notice_does_not_suppress_new_idle_edge() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
+        bind_session(&server, "worker", "current");
+        let now = super::super::state::now_ms();
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master" && message.subject.as_deref() == Some("worker-idle")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        server.commit(&[Event::Acked {
+            ids: vec![first_id],
+        }]);
+        server.commit(&[Event::Sent {
+            msg: Message {
+                id: "unrelated-server-notice".into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notification".into(),
+                subject: Some("goal:plan.md".into()),
+                body: "unrelated".into(),
+                in_reply_to: None,
+                created_ms: now + 2,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        }]);
+        observe(&server, Busy, "current");
+        tick_at(&server, now + 3);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 4);
+        assert_eq!(idle_notice_count(&server), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_idle_delivery_failure_does_not_regenerate_batch() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        bind_session(&server, "worker", "current");
+        let now = super::super::state::now_ms();
+        observe_agent(
+            &server,
+            "master",
+            super::super::name_state::AgentPresence::Online,
+            Idle,
+            "session-thread-master",
+        );
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        set_master_idle(&server);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master" && message.subject.as_deref() == Some("worker-idle")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        server.commit(&[Event::NotificationDeliveryFailed {
+            message_id: first_id.clone(),
+            operation: "send_message_to_pane".into(),
+            error: "ADAPTER_UNKNOWN".into(),
+            failed_ms: now + 2,
+            retryable: true,
+        }]);
+        assert_eq!(
+            server.state.lock().unwrap().master_wake.delivery_state,
+            "delivery_failed"
+        );
+        tick_at(&server, now + 2);
+        assert_eq!(idle_notice_count(&server), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1313,6 +1716,7 @@ mod tests {
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
         super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
         let now = super::super::state::now_ms();
         server.commit(&[
             Event::SubagentUpdated {
@@ -1458,6 +1862,7 @@ mod tests {
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
         super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
         let now = super::super::state::now_ms();
         server.commit(&[
             Event::SubagentUpdated {
@@ -1550,6 +1955,7 @@ mod tests {
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
         super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
         let now = super::super::state::now_ms();
         server.commit(&[
             Event::MergeRequested {

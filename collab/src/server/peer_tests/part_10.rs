@@ -1597,6 +1597,22 @@ fn worker_freed_transitions_notify_live_master() {
     register_synthetic_peer(&server, "task-worker", "thread-worker");
     let server_arc = std::sync::Arc::new(server);
     promote_master(&server_arc, "master-worker", "approved");
+    let scope = server_arc
+        .root
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    server_arc.commit(&[Event::AgentPresenceObserved {
+        presence: crate::server::name_state::AgentPresenceRecord {
+            project_scope: scope,
+            worker_id: "master-worker".into(),
+            session_id: "session-thread-master".into(),
+            presence: crate::server::name_state::AgentPresence::Online,
+            reason: "fixture".into(),
+            observed_ms: 1,
+        },
+    }]);
 
     let now = now_ms();
     server_arc.commit(&[

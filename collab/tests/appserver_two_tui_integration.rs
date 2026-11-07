@@ -1663,6 +1663,112 @@ fn two_tui_appserver_receipt_flow() {
     drop(app_fixture);
 }
 
+/// Count durable `worker-idle` notifications addressed to the master. The
+/// count is read from committed state, so it measures one effective delivery
+/// per idle state rather than transport attempts.
+fn idle_notifications_to(state: &Value, master: &str) -> usize {
+    state["msgs"].as_object().map_or(0, |msgs| {
+        msgs.values()
+            .filter(|message| {
+                message["to"].as_str() == Some(master)
+                    && message["subject"].as_str() == Some("worker-idle")
+            })
+            .count()
+    })
+}
+
+/// Public-entry idempotence and recipient-presence contract for the idle
+/// wake. An unknown-presence master keeps the batch pending; once the master
+/// is confirmed online the same idle set is delivered exactly once and is not
+/// regenerated while that notification stays unconsumed.
+#[test]
+fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
+    let fixture = AppFixture::new();
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    let context_b = fixture.run_public(&["context"], THREAD_B);
+    let worker_a = context_a["identity"]["worker_id"]
+        .as_str()
+        .expect("daemon receipt names TUI worker A")
+        .to_owned();
+    let worker_b = context_b["identity"]["worker_id"]
+        .as_str()
+        .expect("daemon receipt names TUI worker B")
+        .to_owned();
+    let mut app_fixture = fixture;
+    let promoted = app_fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"fixture keeps worker B as master"}"#,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(promoted["master"]["worker_id"], worker_b);
+    let project = std::fs::canonicalize(&app_fixture.project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let seed = |state: &mut Value, master_presence: &str| {
+        state["agent_presence"][&project][&worker_a] = json!({
+            "project_scope": project, "worker_id": worker_a, "session_id": THREAD_A,
+            "presence": "online", "reason": "fixture", "observed_ms": 1
+        });
+        state["agent_activity"][&project][&worker_a] = json!({
+            "project_scope": project, "worker_id": worker_a, "session_id": THREAD_A,
+            "activity": "idle", "background": false, "reason": "fixture",
+            "observed_ms": 1, "idle_since_ms": 1
+        });
+        state["agent_presence"][&project][&worker_b] = json!({
+            "project_scope": project, "worker_id": worker_b, "session_id": THREAD_B,
+            "presence": master_presence, "reason": "fixture", "observed_ms": 2
+        });
+        state["agent_activity"][&project][&worker_b] = json!({
+            "project_scope": project, "worker_id": worker_b, "session_id": THREAD_B,
+            "activity": "idle", "background": false, "reason": "fixture",
+            "observed_ms": 2, "idle_since_ms": 2
+        });
+        state["master_wake"]["idle_workers"] = json!([worker_a]);
+        state["master_wake"]["newly_idle_workers"] = json!([worker_a]);
+        state["master_wake"]["generation"] = json!(1);
+        state["master_wake"]["delivery_state"] = json!("pending");
+    };
+
+    // Unknown recipient presence must not deliver, and the pending idle set
+    // must survive repeated daemon ticks.
+    app_fixture.update_current_state(|state| seed(state, "unknown"));
+    thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        idle_notifications_to(&app_fixture.current_state(), &worker_b),
+        0,
+        "an unknown-presence master must not receive an idle wake"
+    );
+
+    // Confirming the master online delivers the same idle set exactly once.
+    app_fixture.update_current_state(|state| seed(state, "online"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if idle_notifications_to(&app_fixture.current_state(), &worker_b) >= 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "an online master must receive the idle wake"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // The still-unconsumed notification must not be regenerated on later ticks.
+    thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        idle_notifications_to(&app_fixture.current_state(), &worker_b),
+        1,
+        "the same unconsumed idle set must not be delivered twice"
+    );
+
+    drop(app_fixture);
+}
+
 fn native_input_texts(input: &Value) -> Vec<String> {
     let mut texts = Vec::new();
     if let Some(items) = input["input"].as_array() {

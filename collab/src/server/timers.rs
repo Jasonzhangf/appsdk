@@ -4,7 +4,12 @@ use crate::server::state::{
 };
 use crate::server::Server;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
+
+const STALE_IDENTITY_MAINTENANCE_INTERVAL_MS: i64 = 10 * 60 * 1000;
+static STALE_IDENTITY_MAINTENANCE_WATERMARKS: OnceLock<Mutex<HashMap<std::path::PathBuf, i64>>> =
+    OnceLock::new();
 
 /// Test-only pause between deriving a scheduler due batch and committing it.
 /// Regression tests use it to force the goal-reconcile interleaving that the
@@ -51,6 +56,22 @@ fn tick_at(server: &Arc<Server>, now: i64) {
     // outside this contract. Deadline wakeups use the normal notification
     // path; pane output is observation only, never a consumption receipt.
     tick_with_deadline_wake_at(server, now);
+    if stale_identity_maintenance_due(&server.root, now) {
+        super::peer_lifecycle::maintain_definitive_missing(server.as_ref(), now);
+    }
+}
+
+fn stale_identity_maintenance_due(root: &Path, now: i64) -> bool {
+    let watermarks =
+        STALE_IDENTITY_MAINTENANCE_WATERMARKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut watermarks = watermarks.lock().unwrap();
+    let due = watermarks
+        .get(root)
+        .is_none_or(|last| now >= last.saturating_add(STALE_IDENTITY_MAINTENANCE_INTERVAL_MS));
+    if due {
+        watermarks.insert(root.to_path_buf(), now);
+    }
+    due
 }
 
 /// Refresh daemon-owned default direct-message leases from ordinary
@@ -831,3 +852,7 @@ fn next_subscription_trigger(
 #[cfg(test)]
 #[path = "timers_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stale_identity_timer_tests.rs"]
+mod stale_identity_timer_tests;

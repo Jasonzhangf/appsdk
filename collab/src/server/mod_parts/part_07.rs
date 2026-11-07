@@ -289,6 +289,43 @@ pub(crate) fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPr
     worker_presence_with_view(server, worker).0
 }
 
+/// Presence for the automatic stale-identity maintenance decision.
+///
+/// Only the transport adapter's own result may grant definitive absence.
+/// Persisted agent presence/activity telemetry (including a stale `Offline`
+/// observation) is never consulted here, so it cannot retire an App Server
+/// thread that the adapter still reports as resident.
+pub(crate) fn maintenance_presence(
+    server: &Server,
+    target: &CloseEndpointTarget,
+) -> IdentityPresence {
+    let Some(worker) = target.worker.as_ref() else {
+        return IdentityPresence::Missing;
+    };
+    let Some(transport) = selected_transport_for_worker(worker) else {
+        return IdentityPresence::Unknown;
+    };
+    match transport.kind {
+        TransportKind::Tmux => close_endpoint_presence(server, target),
+        TransportKind::AppServer => {
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return IdentityPresence::Unknown;
+            };
+            thread_status_presence((server.appserver_thread_status)(&transport, thread_id))
+        }
+        TransportKind::DesktopBridge => {
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return IdentityPresence::Unknown;
+            };
+            // Maintenance presence must come from the DesktopBridge adapter's
+            // current thread fact, not from a persisted local projection. The
+            // default oracle routes DesktopBridge to read_thread_status.
+            thread_status_presence((server.appserver_thread_status)(&transport, thread_id))
+        }
+        TransportKind::Dsh => dsh_identity_presence(&transport),
+    }
+}
+
 // Pin only the observed owner and its bindings, not the reducer revision:
 // unrelated timer writes do not invalidate an endpoint observation.
 #[derive(Clone, PartialEq, Eq)]
@@ -328,6 +365,33 @@ pub(crate) fn close_endpoint_target(state: &State, worker_id: &str) -> CloseEndp
             .filter(|binding| binding.agent_id.as_str() == worker_id)
             .cloned()
             .collect(),
+    }
+}
+
+/// Classify one adapter-owned thread/status fact. Only an explicit statement
+/// that the exact thread is absent is definitive Missing; notSubmitted, target
+/// mismatch, system errors and other transport failures stay Unknown.
+fn thread_status_presence(result: Result<serde_json::Value, String>) -> IdentityPresence {
+    match result {
+        Ok(raw) => match raw
+            .pointer("/thread/status/type")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("notLoaded") => IdentityPresence::Cold,
+            // A resident thread in an error state is not definitively absent, so
+            // retain it instead of retiring its control plane.
+            Some("systemError") => IdentityPresence::Unknown,
+            Some(_) => IdentityPresence::Present,
+            None => IdentityPresence::Unknown,
+        },
+        Err(error)
+            if error.contains("not found")
+                || error.contains("MISSING")
+                || error.contains("GONE") =>
+        {
+            IdentityPresence::Missing
+        }
+        Err(_) => IdentityPresence::Unknown,
     }
 }
 

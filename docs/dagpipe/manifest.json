@@ -158,6 +158,10 @@
     {
       "id": "appsdk-collab-task-block-approval",
       "path": "docs/dagpipe/collab-task-block-approval.graph.json"
+    },
+    {
+      "id": "appsdk-collab-stale-identity-maintenance",
+      "path": "docs/dagpipe/collab-stale-identity-maintenance.graph.json"
     }
   ]
 }

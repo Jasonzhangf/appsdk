@@ -300,7 +300,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 41] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 42] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -466,10 +466,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 41] {
             "docs/dagpipe/collab-qqbot-outbound.graph.json",
             include_str!("../../docs/dagpipe/collab-qqbot-outbound.graph.json"),
         ),
+        (
+            "docs/dagpipe/collab-stale-identity-maintenance.graph.json",
+            include_str!("../../docs/dagpipe/collab-stale-identity-maintenance.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 39] {
+fn design_graph_ids() -> [&'static str; 40] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -506,6 +510,7 @@ fn design_graph_ids() -> [&'static str; 39] {
         "appsdk-collab-host-resource-recovery",
         "appsdk-collab-master-authority",
         "appsdk-collab-peer-lifecycle",
+        "appsdk-collab-stale-identity-maintenance",
         "appsdk-user-requirement-change",
         "appsdk-user-requirement-consumption",
         "appsdk-sdk-resource-refresh",
@@ -513,8 +518,14 @@ fn design_graph_ids() -> [&'static str; 39] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 219] {
+fn design_graph_operator_names() -> [&'static str; 225] {
     [
+        "appsdk.collab_stale_identity.receive_tick",
+        "appsdk.collab_stale_identity.scan_candidates",
+        "appsdk.collab_stale_identity.classify",
+        "appsdk.collab_stale_identity.retention_check",
+        "appsdk.collab_stale_identity.retire_definitive_missing",
+        "appsdk.collab_stale_identity.emit_result",
         "appsdk.collab_activation.authorize",
         "appsdk.collab_activation.prepare",
         "appsdk.collab_activation.reload",

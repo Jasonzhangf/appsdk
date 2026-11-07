@@ -1,0 +1,187 @@
+{
+  "id": "appsdk-collab-stale-identity-maintenance",
+  "version": "0.1.0",
+  "description": "一次 daemon 可用性维护到唯一结果。identity-map.json 独占身份与恢复，自动维护保持其 active 名字、角色、绑定和凭据。只有 adapter 明确证明缺席且无责任引用时，复用生命周期 Close owner 清理驻留 worker、投递 route 与订阅；显式注销另走既有控制入口。Present、Cold、Unknown、Timeout、AuthDenied 保留驻留状态。观测后重新核对当前 worker、完整 binding 和责任，在同一 State 锁内核对并准入 Close。唯一结果聚合 retained、retired 与 unknown 及具体原因，不回放历史、不构造第二恢复路径。",
+  "inputs": [
+    {
+      "id": "maintenance_tick",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "接收身份维护触发",
+      "operator": "appsdk.collab_stale_identity.receive_tick",
+      "operator_version": "1",
+      "description": "只接受 daemon 拥有的维护触发；触发本身不改变身份、绑定或消息状态，也不产生宿主动作。",
+      "inputs": [
+        "maintenance_tick"
+      ],
+      "output": {
+        "id": "maintenance_trigger",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "扫描当前候选身份绑定",
+      "operator": "appsdk.collab_stale_identity.scan_candidates",
+      "operator_version": "1",
+      "description": "只读取当前权威 control plane 中的注册 worker、当前 binding 和当前 route；不遍历历史 binding、legacy route 或宿主进程清单，不把 tmux session 名或 pane 当作身份来源。",
+      "inputs": [
+        "maintenance_trigger"
+      ],
+      "output": {
+        "id": "candidate_bindings",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "按证据分级当下可用性",
+      "operator": "appsdk.collab_stale_identity.classify",
+      "operator_version": "1",
+      "description": "按真实 adapter 证据分级为 Present、Cold、Missing 或 Unknown。明确不存在的 pane 或 thread 可以证明 Missing；连接失败、超时、权限拒绝和不完整回执均为 Unknown。观测不写持久身份状态，Cold 和 Unknown 均保留。",
+      "inputs": [
+        "candidate_bindings"
+      ],
+      "output": {
+        "id": "classified_candidates",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "核对责任与任务引用",
+      "operator": "appsdk.collab_stale_identity.retention_check",
+      "operator_version": "1",
+      "description": "观测后读取当前 worker、完整 RuntimeBinding 和目标，变更则保留。在同一 State 锁内核对任务、未读消息、有效用户订阅、激活 fence 与回复义务，再准入 Close。只有 mailbox owner 给出的精确默认收件订阅 ID 属于基础通信，保持完整 snapshot 与 fence，不视为用户待办。仅豁免精确复用操作自己的 fence，其他责任均保留。未完成操作只按完整目标复用，已完成操作不复用为新准入。",
+      "inputs": [
+        "classified_candidates"
+      ],
+      "output": {
+        "id": "maintenance_decisions",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "清理确定缺席的驻留执行绑定",
+      "operator": "appsdk.collab_stale_identity.retire_definitive_missing",
+      "operator_version": "1",
+      "description": "复用 Close owner 清理明确缺席且无待办责任的驻留 worker 与 route。私有 typed disposition 区分自动清理与显式注销。自动清理保持 active identity map、角色、凭据、消息和精确默认收件订阅，不归档宿主、不撤销 master。没有计划退役的订阅时回执为 NotApplicable。失败保留真实 cleanup-open 与对应 fence。普通 Context 随后按同一 identity map 补齐驻留执行关系。",
+      "inputs": [
+        "maintenance_decisions"
+      ],
+      "output": {
+        "id": "retirement_outcomes",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出唯一维护结果",
+      "operator": "appsdk.collab_stale_identity.emit_result",
+      "operator_version": "1",
+      "description": "每轮输出唯一结果对象，聚合 retained、retired 与 unknown 及各候选原因和当前操作引用。无候选时输出空批次。结果不重放、不驱动恢复，下一轮由既有 timer 触发。",
+      "inputs": [
+        "retirement_outcomes"
+      ],
+      "output": {
+        "id": "maintenance_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "接收身份维护触发",
+      "to": "扫描当前候选身份绑定",
+      "arc_id": "maintenance_trigger"
+    },
+    {
+      "from": "扫描当前候选身份绑定",
+      "to": "按证据分级当下可用性",
+      "arc_id": "candidate_bindings"
+    },
+    {
+      "from": "按证据分级当下可用性",
+      "to": "核对责任与任务引用",
+      "arc_id": "classified_candidates"
+    },
+    {
+      "from": "核对责任与任务引用",
+      "to": "清理确定缺席的驻留执行绑定",
+      "arc_id": "maintenance_decisions"
+    },
+    {
+      "from": "清理确定缺席的驻留执行绑定",
+      "to": "输出唯一维护结果",
+      "arc_id": "retirement_outcomes"
+    }
+  ],
+  "outputs": [
+    "maintenance_result"
+  ]
+}

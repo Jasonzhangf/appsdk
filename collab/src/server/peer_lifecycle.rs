@@ -992,6 +992,451 @@ fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifec
     }
 }
 
+/// Namespace for current maintenance Close operations.
+const MAINTENANCE_OPERATION_PREFIX: &str = "stale-identity-maintenance:";
+
+fn maintenance_operation_id(state: &State, target: &PeerLifecycleTarget) -> String {
+    format!(
+        "{MAINTENANCE_OPERATION_PREFIX}{}-{}",
+        target.binding_id.as_str(),
+        state.revision
+    )
+}
+
+fn unresolved_maintenance_operation<'a>(
+    state: &'a State,
+    target: &PeerLifecycleTarget,
+) -> Option<&'a state::PeerLifecycleOperationRecord> {
+    state.peer_lifecycle_operations.values().find(|operation| {
+        operation.action == PeerLifecycleAction::Close
+            && operation.actor_id == maintenance_actor(&target.worker_id)
+            && operation.target.as_ref() == Some(target)
+            && !matches!(
+                operation.phase,
+                PeerLifecyclePhase::Complete
+                    | PeerLifecyclePhase::Refused
+                    | PeerLifecyclePhase::Cancelled
+            )
+    })
+}
+
+fn maintenance_binding_for(state: &State, worker: &WorkerRec) -> Option<RuntimeBinding> {
+    let transport = worker.transport.as_ref()?;
+    let mut bindings = state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .filter(|binding| {
+            binding.agent_id.as_str() == worker.id
+                && binding.tmux_endpoint == transport.tmux_endpoint
+                && binding.session_id.as_ref().map(|id| id.as_str())
+                    == transport.session_id.as_deref()
+                && binding.native_thread_id.as_ref().map(|id| id.as_str())
+                    == transport.thread_id.as_deref()
+        });
+    let binding = bindings.next()?.clone();
+    bindings.next().is_none().then_some(binding)
+}
+
+fn maintenance_actor(target_worker_id: &str) -> String {
+    let actor = "daemon:stale-identity-maintenance".to_owned();
+    if actor == target_worker_id {
+        format!("{actor}:target-safe")
+    } else {
+        actor
+    }
+}
+
+fn identity_presence_label(presence: IdentityPresence) -> &'static str {
+    match presence {
+        IdentityPresence::Present => "present",
+        IdentityPresence::Cold => "cold",
+        IdentityPresence::Unknown => "unknown",
+        IdentityPresence::Missing => "missing",
+    }
+}
+
+struct DefinitiveMissingCandidate {
+    worker: WorkerRec,
+    binding: RuntimeBinding,
+    target: PeerLifecycleTarget,
+    snapshot: state::ResponsibilitySnapshot,
+    snapshot_captured_ms: Option<i64>,
+    active_fences: Vec<String>,
+    pending_reply_obligations: Vec<String>,
+    endpoint_target: super::CloseEndpointTarget,
+}
+
+/// Resample the exact responsibility and control-plane obligations for one
+/// candidate. Used both for the initial candidate set and for the fresh
+/// recheck after the host probe, so the two always use the same definition.
+fn sample_candidate(
+    state: &State,
+    worker: &WorkerRec,
+    binding: RuntimeBinding,
+) -> DefinitiveMissingCandidate {
+    let target = target_for_self_binding(state, &binding);
+    let snapshot = state::responsibility_snapshot(state, &worker.id);
+    let snapshot_captured_ms = target.transport.thread_id.as_deref().and_then(|thread_id| {
+        state
+            .worker_snapshots
+            .get(&worker.id)
+            .filter(|receipt| receipt.thread_id == thread_id)
+            .map(|receipt| receipt.captured_ms)
+    });
+    let mut active_fences = state
+        .responsibility_fences
+        .values()
+        .filter(|fence| {
+            fence.worker_id == worker.id
+                && fence.is_active()
+                && unresolved_maintenance_operation(state, &target)
+                    .is_none_or(|operation| operation.operation_id != fence.operation_id)
+        })
+        .map(|fence| fence.operation_id.clone())
+        .collect::<Vec<_>>();
+    active_fences.sort();
+    active_fences.dedup();
+    let mut pending_reply_obligations = state
+        .reply_obligations
+        .values()
+        .filter(|obligation| {
+            obligation.from_worker_id == worker.id || obligation.recipient_worker_id == worker.id
+        })
+        .map(|obligation| obligation.message_id.clone())
+        .collect::<Vec<_>>();
+    pending_reply_obligations.sort();
+    pending_reply_obligations.dedup();
+    DefinitiveMissingCandidate {
+        endpoint_target: close_endpoint_target(state, &worker.id),
+        worker: worker.clone(),
+        binding,
+        target,
+        snapshot,
+        snapshot_captured_ms,
+        active_fences,
+        pending_reply_obligations,
+    }
+}
+
+/// True when the fresh sample added responsibility the probe-time sample did
+/// not have. Disappeared responsibility is safe to ignore: the close may
+/// proceed with the fresher snapshot.
+fn responsibility_gained(
+    before: &DefinitiveMissingCandidate,
+    after: &DefinitiveMissingCandidate,
+) -> bool {
+    let gained = |old: &[String], new: &[String]| new.iter().any(|id| !old.contains(id));
+    let default_reception = mailbox::default_direct_message_id(&after.worker.id);
+    gained(&before.snapshot.task_ids, &after.snapshot.task_ids)
+        || gained(
+            &before.snapshot.scheduler_request_ids,
+            &after.snapshot.scheduler_request_ids,
+        )
+        || gained(
+            &before.snapshot.managed_subagent_ids,
+            &after.snapshot.managed_subagent_ids,
+        )
+        || gained(
+            &before.snapshot.worktree_binding_ids,
+            &after.snapshot.worktree_binding_ids,
+        )
+        || after
+            .snapshot
+            .subscription_ids
+            .iter()
+            .any(|id| id != &default_reception && !before.snapshot.subscription_ids.contains(id))
+        || gained(
+            &before.snapshot.unread_message_ids,
+            &after.snapshot.unread_message_ids,
+        )
+        || gained(&before.active_fences, &after.active_fences)
+        || gained(
+            &before.pending_reply_obligations,
+            &after.pending_reply_obligations,
+        )
+}
+
+fn maintenance_retained(
+    worker_id: &str,
+    binding_id: &str,
+    reason: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "worker_id": worker_id,
+        "binding_id": binding_id,
+        "reason": reason,
+    })
+}
+
+/// Admit one automatic close through the existing lifecycle operation owner.
+///
+/// The same reducer event installs the operation's exact-target responsibility
+/// fence, so any responsibility created after this admission is rejected until
+/// the operation settles. A surviving cleanup-open or crash window therefore
+/// retains the durable operation and fence instead of losing them in the
+/// per-round aggregate.
+#[derive(Debug)]
+enum MaintenanceAdmissionError {
+    Retained(serde_json::Value),
+    Failed(String),
+}
+
+/// Sample current responsibility and install its Close fence under one lock.
+fn admit_maintenance_close(
+    server: &Server,
+    state: &mut State,
+    candidate: &DefinitiveMissingCandidate,
+) -> Result<state::PeerLifecycleOperationRecord, MaintenanceAdmissionError> {
+    use MaintenanceAdmissionError::{Failed, Retained};
+    let worker = state
+        .workers
+        .get(&candidate.worker.id)
+        .ok_or_else(|| Retained(json!({"kind": "current_binding_changed_during_probe"})))?;
+    let binding = maintenance_binding_for(state, worker)
+        .ok_or_else(|| Retained(json!({"kind": "current_binding_changed_during_probe"})))?;
+    let fresh = sample_candidate(state, worker, binding);
+    if fresh.worker != candidate.worker
+        || fresh.binding != candidate.binding
+        || fresh.target != candidate.target
+    {
+        return Err(Retained(json!({"kind": "target_changed_during_probe"})));
+    }
+    if responsibility_gained(candidate, &fresh) {
+        return Err(Retained(
+            json!({"kind": "responsibility_added_during_probe"}),
+        ));
+    }
+    let mut requires = close_responsibility_requires(&fresh.snapshot).unwrap_or_default();
+    let default_reception = mailbox::default_direct_message_id(&fresh.worker.id);
+    let work_subscriptions: Vec<_> = fresh
+        .snapshot
+        .subscription_ids
+        .iter()
+        .filter(|id| *id != &default_reception)
+        .cloned()
+        .collect();
+    for (field, ids) in [
+        ("subscriptions", &work_subscriptions),
+        ("unread_messages", &fresh.snapshot.unread_message_ids),
+    ] {
+        if !ids.is_empty() {
+            requires.fields.push(field.into());
+            requires.sources.insert(field.into(), json!(ids));
+        }
+    }
+    if !requires.fields.is_empty() {
+        requires.kind = Some("peer_responsibility".into());
+        return Err(Retained(json!(requires)));
+    }
+    if !fresh.active_fences.is_empty() {
+        return Err(Retained(
+            json!({"kind": "active_responsibility_fence", "operation_ids": fresh.active_fences}),
+        ));
+    }
+    if !fresh.pending_reply_obligations.is_empty() {
+        return Err(Retained(
+            json!({"kind": "pending_reply_obligation", "message_ids": fresh.pending_reply_obligations}),
+        ));
+    }
+    let target = &fresh.target;
+    let existing = unresolved_maintenance_operation(state, target).cloned();
+    if let Some(existing) = existing {
+        if existing.phase == PeerLifecyclePhase::IntentPersisted {
+            let dispatched = advance_record_with_close(
+                &existing,
+                PeerLifecyclePhase::HostDispatched,
+                None,
+                existing.close.clone(),
+            );
+            server
+                .commit_locked(
+                    state,
+                    &[Event::PeerLifecycleOperationRecorded {
+                        operation: dispatched.clone(),
+                    }],
+                )
+                .map_err(Failed)?;
+            return Ok(dispatched);
+        }
+        return Ok(existing);
+    }
+    let operation_id = maintenance_operation_id(state, target);
+    let actor_id = maintenance_actor(&target.worker_id);
+    let created_ms = now_ms();
+    let mut close = close_readback("maintenance-intent-persisted");
+    close.runtime_archive.state = PeerLifecycleStage::Missing;
+    let record = state::PeerLifecycleOperationRecord {
+        operation_id: operation_id.clone(),
+        action: PeerLifecycleAction::Close,
+        actor_id,
+        project_scope: target.project_scope.clone(),
+        app_scope_id: target.app_scope_id.clone(),
+        target: Some(target.clone()),
+        intent_digest: close_intent_digest(&operation_id, target, "stale-identity-maintenance"),
+        query_capability_hash: capability_hash(""),
+        responsibility_snapshot: Some(fresh.snapshot),
+        phase: PeerLifecyclePhase::IntentPersisted,
+        update: None,
+        close: Some(close),
+        create: None,
+        created_ms,
+        updated_ms: created_ms,
+    };
+    server
+        .commit_locked(
+            state,
+            &[Event::PeerLifecycleOperationRecorded {
+                operation: record.clone(),
+            }],
+        )
+        .map_err(Failed)?;
+    let dispatched = advance_record_with_close(
+        &record,
+        PeerLifecyclePhase::HostDispatched,
+        None,
+        record.close.clone(),
+    );
+    server
+        .commit_locked(
+            state,
+            &[Event::PeerLifecycleOperationRecorded {
+                operation: dispatched.clone(),
+            }],
+        )
+        .map_err(Failed)?;
+    Ok(dispatched)
+}
+
+/// Run one bounded daemon-owned stale identity maintenance round.
+///
+/// Candidate and responsibility identities are captured under the reducer
+/// lock. Host probes run after that lock is released. Only definitive adapter
+/// absence enters retirement, and responsibility-bearing candidates remain
+/// untouched.
+pub(super) fn maintain_definitive_missing(server: &Server, _now: i64) -> serde_json::Value {
+    let (mut candidates, mut unknown) = {
+        let state = server.state.lock().unwrap();
+        let mut candidates = Vec::new();
+        let mut unknown = Vec::new();
+        let mut workers = state.workers.values().cloned().collect::<Vec<_>>();
+        workers.sort_by(|left, right| left.id.cmp(&right.id));
+        for worker in workers {
+            let Some(binding) = maintenance_binding_for(&state, &worker) else {
+                unknown.push(json!({
+                    "worker_id": worker.id,
+                    "reason": {
+                        "kind": "current_binding_missing_or_ambiguous"
+                    }
+                }));
+                continue;
+            };
+            let candidate = sample_candidate(&state, &worker, binding);
+            candidates.push(candidate);
+        }
+        (candidates, unknown)
+    };
+
+    let mut retired = Vec::new();
+    let mut retained = Vec::new();
+    for candidate in candidates.drain(..) {
+        let worker_id = candidate.target.worker_id.as_str();
+        let binding_id = candidate.target.binding_id.as_str();
+        let presence = maintenance_presence(server, &candidate.endpoint_target);
+        if presence != IdentityPresence::Missing {
+            retained.push(maintenance_retained(
+                worker_id,
+                binding_id,
+                json!({
+                    "kind": "identity_presence",
+                    "presence": identity_presence_label(presence),
+                }),
+            ));
+            continue;
+        }
+        let admission = {
+            let mut state = server.state.lock().unwrap();
+            admit_maintenance_close(server, &mut state, &candidate)
+        };
+        let record = match admission {
+            Ok(record) => record,
+            Err(MaintenanceAdmissionError::Retained(reason)) => {
+                retained.push(maintenance_retained(worker_id, binding_id, reason));
+                continue;
+            }
+            Err(MaintenanceAdmissionError::Failed(error)) => {
+                unknown.push(json!({
+                    "worker_id": candidate.target.worker_id,
+                    "binding_id": candidate.target.binding_id,
+                    "reason": {
+                        "kind": "maintenance_admission_failed",
+                        "detail": error,
+                    },
+                }));
+                continue;
+            }
+        };
+        let operation_id = &record.operation_id;
+        let close = retire_control_plane_target(
+            server,
+            &record.actor_id,
+            record.exact_target(),
+            operation_id,
+            record
+                .responsibility_snapshot
+                .as_ref()
+                .expect("maintenance Close has a snapshot"),
+            PeerLifecycleStage::Missing,
+            None,
+            candidate.snapshot_captured_ms,
+            IdentityCleanup::Preserve,
+        );
+        let phase = close_phase(&close);
+        let terminal = advance_record_with_close(&record, phase.clone(), None, Some(close.clone()));
+        if let Err(error) = commit_record(server, &terminal) {
+            // The durable HostDispatched admission and its fence remain, so
+            // the unresolved operation survives to a later maintenance round.
+            unknown.push(json!({
+                "worker_id": candidate.target.worker_id,
+                "binding_id": candidate.target.binding_id,
+                "operation_id": operation_id,
+                "reason": {
+                    "kind": "terminal_record_durability_failed",
+                    "detail": error,
+                },
+                "close": close,
+            }));
+            continue;
+        }
+        if phase == PeerLifecyclePhase::Complete {
+            retired.push(json!({
+                "worker_id": candidate.target.worker_id,
+                "binding_id": candidate.target.binding_id,
+                "operation_id": operation_id,
+                "close": close,
+            }));
+        } else {
+            unknown.push(json!({
+                "worker_id": candidate.target.worker_id,
+                "binding_id": candidate.target.binding_id,
+                "operation_id": operation_id,
+                "reason": {
+                    "kind": "retirement_incomplete",
+                    "detail": close.close_outcome,
+                },
+                "close": close,
+            }));
+        }
+    }
+
+    json!({
+        "retired": retired,
+        "retained": retained,
+        "unknown": unknown,
+    })
+}
+
 fn self_removal_failure(error: impl Into<String>, outcome: PeerLifecycleOutcome) -> Resp {
     let error = error.into();
     response(result(PeerLifecycleAction::Close, outcome), Some(&error))
@@ -1061,6 +1506,7 @@ pub(super) fn unregister_self(
         PeerLifecycleStage::NotApplicable,
         None,
         snapshot_captured_ms,
+        IdentityCleanup::Unregister,
     );
     let phase = close_phase(&close);
     let error = (phase != PeerLifecyclePhase::Complete).then(|| {
@@ -1101,7 +1547,14 @@ fn retire_control_plane(
         runtime_archive,
         runtime_archive_detail,
         snapshot_captured_ms,
+        IdentityCleanup::Unregister,
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IdentityCleanup {
+    Preserve,
+    Unregister,
 }
 
 fn retire_control_plane_target(
@@ -1113,13 +1566,39 @@ fn retire_control_plane_target(
     runtime_archive: PeerLifecycleStage,
     runtime_archive_detail: Option<String>,
     snapshot_captured_ms: Option<i64>,
+    identity_cleanup: IdentityCleanup,
 ) -> PeerLifecycleClose {
     let mut close = close_readback("cleanup-open");
     close.runtime_archive.state = runtime_archive.clone();
     let self_unregister = actor_id == target.worker_id;
+    let default_reception = mailbox::default_direct_message_id(&target.worker_id);
+    let subscription_ids: Vec<_> = snapshot
+        .subscription_ids
+        .iter()
+        .filter(|id| identity_cleanup == IdentityCleanup::Unregister || *id != &default_reception)
+        .cloned()
+        .collect();
     let now = now_ms();
     let (events, route_binding) = {
         let state = server.state.lock().unwrap();
+        let target_still_current = state.workers.get(&target.worker_id).is_some_and(|worker| {
+            worker.transport.as_ref().is_some_and(|transport| {
+                transport.kind == target.transport.kind
+                    && transport.endpoint == target.transport.endpoint
+                    && transport.namespace == target.transport.namespace
+                    && transport.session_id == target.transport.session_id
+                    && transport.thread_id == target.transport.thread_id
+                    && transport.tmux_endpoint == target.transport.tmux_endpoint
+            })
+        });
+        if !target_still_current {
+            close.worker_retirement.state = PeerLifecycleStage::Failed;
+            close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
+            close.route_retirement.state = PeerLifecycleStage::NotAttempted;
+            close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
+            close.close_outcome = "cleanup-open: PEER_LIFECYCLE_TARGET_CHANGED".into();
+            return close;
+        }
         let route_scope = RouteScope {
             app_scope_id: target.app_scope_id.clone(),
             project_scope_id: target.project_scope.clone(),
@@ -1140,7 +1619,7 @@ fn retire_control_plane_target(
         retired.native_thread_id = None;
         retired.tmux_endpoint = None;
         let mut events = Vec::new();
-        for subscription_id in &snapshot.subscription_ids {
+        for subscription_id in &subscription_ids {
             if state
                 .notification_subscriptions
                 .get(subscription_id)
@@ -1175,9 +1654,13 @@ fn retire_control_plane_target(
         }
         (events, binding)
     };
-    let retirement =
-        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
-            .retire_binding(&route_binding);
+    let retirement = match identity_cleanup {
+        IdentityCleanup::Preserve => Ok(()),
+        IdentityCleanup::Unregister => {
+            crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .retire_binding(&route_binding)
+        }
+    };
     if let Err(error) = retirement.and_then(|()| server.try_commit(&events)) {
         close.worker_retirement.state = PeerLifecycleStage::Unknown;
         close.binding_retirement.state = PeerLifecycleStage::Unknown;
@@ -1229,9 +1712,9 @@ fn retire_control_plane_target(
         }
         _ => PeerLifecycleStage::NotApplicable,
     };
-    close.subscription_retirement.state = if snapshot.subscription_ids.is_empty() {
+    close.subscription_retirement.state = if subscription_ids.is_empty() {
         PeerLifecycleStage::NotApplicable
-    } else if snapshot.subscription_ids.iter().all(|subscription_id| {
+    } else if subscription_ids.iter().all(|subscription_id| {
         state
             .notification_subscriptions
             .get(subscription_id)
@@ -1289,3 +1772,7 @@ include!("peer_lifecycle/create_query.rs");
 #[cfg(test)]
 #[path = "peer_lifecycle/self_removal_tests.rs"]
 mod self_removal_tests;
+
+#[cfg(test)]
+#[path = "peer_lifecycle/maintenance_tests.rs"]
+mod maintenance_tests;

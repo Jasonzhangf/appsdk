@@ -103,7 +103,7 @@ Ignore:
 
 消费者只使用全局安装的 AppSDK Bundle。Bundle 版本必须同时绑定 Rust CLI、machine contracts、文档、规则和 skills；不能让项目自行扫描一个不受版本控制的全局目录。Bundle manifest 是机器真源，`init`/`new` 将其中声明的 Skill、规则和文档安装到项目 `.appsdk/`，并生成 `.appsdk/sdk-resources.json`。
 
-项目中的手动合同（例如 `project.json`、records、maps）由项目维护，SDK 按相应入口校验结构、引用、owner 和 scope。`.appsdk/sdk-resources.json` 由资源 owner 写入。旧完整 Bundle 记录仍有其核心 `verify` 约束；下述 resource-only 刷新使用独立的 schema 2 读写路径，不运行旧摘要链，也不宣称核心版本迁移完成。
+项目中的手动合同（例如 `project.json`、records、maps）由项目维护，SDK 按相应入口校验结构、引用、owner 和 scope。`.appsdk/sdk-resources.json` 由资源 owner 写入，`schema_version: 1` 是 refresh、`init`/`new` 和 `verify` 共用的唯一契约。旧 schema 2 记录只作为 `resources refresh` 的一次性输入兼容，刷新后必须重写为 schema 1；`verify` 不接受 schema 2。
 
 `contracts/sdk-bundle.manifest.json` 声明当前 Bundle 的资源集合和安装位置；
 初始化后项目内的机器真源位于
@@ -148,14 +148,23 @@ It resolves every target through the existing source/class/path mapping and
 preflights all targets before the first resource write. The resource record is
 written last. This is not a cross-file transaction; a write failure returns an
 error and does not publish a successful result.
+The installed core version must already match the running binary's `SDK_VERSION`;
+refresh rejects an older or newer core pin before preflight and writing. Use the
+existing `pin-lock` migration path before refreshing a project pinned to another
+core version.
 
-The refreshed `.appsdk/sdk-resources.json` uses `schema_version: 2`.
-`version` retains the installed core Bundle version. `resource_version` records
-the embedded Bundle version that supplied the refreshed `docs`, `rules`, and
-`skills`. Contract entries remain tied to the retained installed manifest.
-This separates resource supply from the core project pin; it does not upgrade
-the core SDK, rewrite the lock, or relax ordinary core `verify` and `compile`
-pin checks.
+The refreshed `.appsdk/sdk-resources.json` stays on `schema_version: 1`.
+`version` retains the installed core Bundle version. `bundle_digest` and
+`manifest_digest` come from the embedded Bundle that supplied the refreshed
+`docs`, `rules`, and `skills`. Every resource entry carries the digest of its
+actual target content; contract entries remain tied to the retained installed
+manifest and are not overwritten by resource refresh. This separates resource
+supply from the core project pin; it does not upgrade the core SDK, rewrite the
+lock, or relax ordinary core `verify` and `compile` pin checks.
+
+Legacy schema 2 input is read only to migrate it. Refresh replaces that record
+with the schema 1 fields above and recomputes refreshed resource digests; it
+does not add a second schema 2 verifier path.
 
 Resource refresh does not write `.appsdk/guidance/compiled.json`. After the
 refresh, run the existing Guide compile command so the declared rule sources and

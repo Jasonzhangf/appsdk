@@ -309,25 +309,14 @@ fn child_notification_failure_result(
         child_cwd,
         app_scope,
     );
-    let binding_cleanup = crate::server::retire_runtime_binding_after_route_failure(
-        server,
-        worker_id,
-        child_cwd,
-        app_scope,
-        &record.parent,
-        "child notification failed",
-    );
     let archive_status = archive_result
         .map(|_| "archived".to_owned())
         .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
     let route_status = route_cleanup
         .map(|_| "route retired".to_owned())
         .unwrap_or_else(|cleanup_error| format!("route cleanup failed: {cleanup_error}"));
-    let binding_status = binding_cleanup
-        .map(|_| "binding retired".to_owned())
-        .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
     bail!(
-        "child notification failed: {error}; thread {archive_status}; {route_status}; {binding_status}"
+        "child notification failed: {error}; thread {archive_status}; {route_status}"
     );
 }
 
@@ -439,22 +428,11 @@ fn launch(
                 &parent_transport,
                 thread_id.as_str(),
             );
-            let cleanup_result = crate::server::retire_runtime_binding_after_route_failure(
-                server,
-                &ident.worker_id,
-                &child_cwd,
-                app_scope,
-                &record.parent,
-                "child registration receipt invalid",
-            );
             let archive_status = archive_result
                 .map(|_| "archived".to_owned())
                 .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
-            let cleanup_status = cleanup_result
-                .map(|_| "binding retired".to_owned())
-                .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
             bail!(
-                    "child registration receipt invalid: {error}; thread {archive_status}; {cleanup_status}"
+                    "child registration receipt invalid: {error}; thread {archive_status}"
             );
         }
     };
@@ -466,22 +444,11 @@ fn launch(
                 &parent_transport,
                 thread_id.as_str(),
             );
-            let cleanup_result = crate::server::retire_runtime_binding_after_route_failure(
-                server,
-                &ident.worker_id,
-                &child_cwd,
-                app_scope,
-                &record.parent,
-                "child registration role brief invalid",
-            );
             let archive_status = archive_result
                 .map(|_| "archived".to_owned())
                 .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
-            let cleanup_status = cleanup_result
-                .map(|_| "binding retired".to_owned())
-                .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
             bail!(
-                "child registration role brief invalid: {error}; thread {archive_status}; {cleanup_status}"
+                "child registration role brief invalid: {error}; thread {archive_status}"
             );
         }
     };
@@ -496,22 +463,11 @@ fn launch(
             &parent_transport,
             thread_id.as_str(),
         );
-        let cleanup_result = crate::server::retire_runtime_binding_after_route_failure(
-            server,
-            &ident.worker_id,
-            &child_cwd,
-            app_scope,
-            &record.parent,
-            "child runtime persistence failed",
-        );
         let archive_status = archive_result
             .map(|_| "archived".to_owned())
             .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
-        let cleanup_status = cleanup_result
-            .map(|_| "binding retired".to_owned())
-            .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
         bail!(
-            "cannot persist child runtime binding: {error}; thread {archive_status}; {cleanup_status}"
+            "cannot persist child runtime binding: {error}; thread {archive_status}"
         );
     }
     if let Err(route_error) = crate::server::commit_current_thread_route_for_runtime(
@@ -526,22 +482,11 @@ fn launch(
             &parent_transport,
             thread_id.as_str(),
         );
-        let cleanup_result = crate::server::retire_runtime_binding_after_route_failure(
-            server,
-            &ident.worker_id,
-            &child_cwd,
-            app_scope,
-            &record.parent,
-            "child route publication failed",
-        );
         let archive_status = archive_result
             .map(|_| "archived".to_owned())
             .unwrap_or_else(|error| format!("archive failed: {error}"));
-        let cleanup_status = cleanup_result
-            .map(|_| "binding retired".to_owned())
-            .unwrap_or_else(|error| format!("binding cleanup failed: {error}"));
         bail!(
-            "child route publication failed: {route_error}; thread {archive_status}; {cleanup_status}"
+            "child route publication failed: {route_error}; thread {archive_status}"
         );
     }
     if let Err(error) = crate::client::adapters::codex_app_server::immediate_notify(

@@ -1446,6 +1446,7 @@ pub(crate) fn register_created_peer(
         Ok(selected) => selected,
         Err(error) => return Resp::err(format!("APPSERVER_ENDPOINT_REJECTED: {error}")),
     };
+    let _identity = manager.identity_gate.lock().unwrap();
     if server.state.lock().unwrap().workers.contains_key(worker_id) {
         return Resp::err("PEER_LIFECYCLE_PEER_RESERVED");
     }
@@ -1473,48 +1474,6 @@ pub(crate) fn register_created_peer(
     }
     if let Err(error) = manager.consume_register_effect(effect_id.as_deref()) {
         return Resp::err_data(format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"), response.data);
-    }
-    response
-}
-
-pub(crate) fn handle_register_with_app_scope(
-    server: &Server,
-    worker_id: String,
-    token: String,
-    cwd: String,
-    app_scope: Option<AppServerId>,
-    candidates: Option<TransportCandidates>,
-) -> Resp {
-    let route_worker_id = worker_id.clone();
-    let route_cwd = cwd.clone();
-    let route_app_scope = app_scope.clone();
-    let response = handle_register_with_app_scope_inner(
-        server, worker_id, token, cwd, app_scope, candidates, false,
-    );
-    if !response.ok {
-        return response;
-    }
-    if let Err(error) = commit_current_thread_route_for_runtime(
-        server,
-        server,
-        &route_worker_id,
-        &route_cwd,
-        route_app_scope.as_ref(),
-    ) {
-        let cleanup = retire_runtime_binding_after_route_failure(
-            server,
-            &route_worker_id,
-            &route_cwd,
-            route_app_scope.as_ref(),
-            &route_worker_id,
-            "registration route publication failed",
-        );
-        let cleanup_status = cleanup
-            .map(|_| "registration binding retired".to_owned())
-            .unwrap_or_else(|cleanup_error| {
-                format!("registration cleanup failed: {cleanup_error}")
-            });
-        return Resp::err(format!("{error}; {cleanup_status}"));
     }
     response
 }
@@ -1586,50 +1545,6 @@ pub(crate) fn commit_current_thread_route_for_runtime(
         .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
         .map(|_| ())
         .map_err(|error| format!("ROUTE_TRANSITION_DURABILITY_FAILED: {error}"))
-}
-
-pub(crate) fn retire_runtime_binding_after_route_failure(
-    runtime: &Server,
-    worker_id: &str,
-    cwd: &str,
-    app_scope: Option<&AppServerId>,
-    closed_by: &str,
-    reason: &str,
-) -> Result<(), String> {
-    let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
-        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
-    let route_scope = RouteScope {
-        app_scope_id: app_scope.cloned().unwrap_or_else(|| {
-            AppServerId::new("tui-default").expect("static App Server scope must be valid")
-        }),
-        project_scope_id: project_scope,
-    };
-    let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
-        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
-    let binding = runtime
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_binding_for(&route_scope, &binding_id)
-        .cloned()
-        .ok_or_else(|| format!("ROUTE_CLEANUP_INVALID: no binding exists for {worker_id}"))?;
-    let mut retired = binding;
-    retired.native_thread_id = None;
-    retired.tmux_endpoint = None;
-    runtime
-        .commit_checked(&[
-            Event::GlobalRuntimeBound { binding: retired },
-            Event::WorkerClosed {
-                worker_id: worker_id.to_owned(),
-                closed_by: closed_by.to_owned(),
-                reason: reason.to_owned(),
-                snapshot_captured_ms: None,
-                at_ms: now_ms(),
-            },
-        ])
-        .map(|_| ())
-        .map_err(|error| format!("ROUTE_CLEANUP_DURABILITY_FAILED: {error}"))
 }
 
 pub(crate) fn retire_current_thread_route_after_launch_failure(
@@ -1815,19 +1730,6 @@ fn handle_register_with_app_scope_inner_bound(
         outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
         register_control_first,
     )
-}
-
-/// Compatibility entry point for direct in-process callers.  Wire requests
-/// use `handle_register_with_app_scope` so the app scope comes from their
-/// validated ProjectContext; this adapter retains the historical tui route
-/// only when no wire context exists.
-pub(crate) fn handle_register(
-    server: &Server,
-    worker_id: String,
-    token: String,
-    cwd: String,
-) -> Resp {
-    handle_register_with_app_scope(server, worker_id, token, cwd, None, None)
 }
 
 fn existing_route_scope(state: &State, worker_id: &str) -> Result<Option<RouteScope>, Resp> {

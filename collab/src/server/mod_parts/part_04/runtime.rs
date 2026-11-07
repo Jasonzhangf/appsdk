@@ -668,16 +668,16 @@ impl ProjectRuntimeManager {
         self.dispatch_sync_with_register_binding(project_context, req, None)
     }
 
-    /// `dispatch_sync` with an optional outer-operation binder. When present
-    /// and the request is a Register, the owner prepares the exact envelope,
-    /// appends+syncs the outer `Validating` nested IDs, and only then consumes
-    /// that same envelope. A sync failure returns an error and never consumes.
+    /// Context already holds identity_gate when supplying its internal binder.
+    /// Raw Register owns that same gate through publication and finalization.
     fn dispatch_sync_with_register_binding(
         &self,
         project_context: Option<ProjectContext>,
         req: Req,
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> (Arc<Server>, Resp) {
+        let _identity = (matches!(&req, Req::Register { .. }) && outer_binding.is_none())
+            .then(|| self.identity_gate.lock().unwrap());
         let decorate=matches!(&req,Req::Context {..}|Req::IdentityContext {..});
         let workspace_reset=matches!(&req,Req::ProjectReset{..});
         let context=project_context.clone();

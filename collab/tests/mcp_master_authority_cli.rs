@@ -61,7 +61,17 @@ impl Fixture {
             daemon: None,
             finished: false,
         };
-        fixture.tmux(&["new-session", "-d", "-s", &fixture.session, "sleep 600"]);
+        let created = fixture.tmux(&[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}",
+            "-s",
+            &fixture.session,
+            "sleep 600",
+        ]);
+        fixture.session = String::from_utf8(created.stdout).unwrap().trim().to_owned();
         let observation = fixture.tmux(&["display-message", "-p", "#{pid} #{pane_id}"]);
         let observation = String::from_utf8(observation.stdout).unwrap();
         let mut facts = observation.split_whitespace();
@@ -454,11 +464,11 @@ fn mcp_tools_call_clears_authority_and_refuses_invalid_approval() {
     mcp.send(json!({"jsonrpc":"2.0", "method":"notifications/initialized"}));
 
     for (id, approval, expected) in [
-        (2, "", "master clear requires explicit user approval"),
+        (2, "", "master change requires valid explicit user approval"),
         (
             3,
             "approved\nforged",
-            "master clear approval must not contain control characters",
+            "master change requires valid explicit user approval",
         ),
     ] {
         let rejected = mcp.clear(id, approval);

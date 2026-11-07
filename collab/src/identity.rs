@@ -559,12 +559,94 @@ fn identity_temp_path(path: &std::path::Path) -> PathBuf {
 }
 
 fn write_identity(path: &std::path::Path, ident: &Identity) -> anyhow::Result<()> {
+    write_identity_bytes(path, serde_json::to_string_pretty(ident)?.as_bytes())
+}
+
+fn read_identity_bytes(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_identity_bytes(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     let dir = path.parent().unwrap();
+    let mut missing = Vec::new();
+    let mut ancestor = dir;
+    while !ancestor.exists() {
+        missing.push(ancestor.to_path_buf());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("identity directory has no parent"))?;
+    }
     std::fs::create_dir_all(dir)?;
+    for created in missing.iter().rev() {
+        std::fs::File::open(created.parent().unwrap())?.sync_all()?;
+    }
     let tmp = identity_temp_path(path);
-    write_owner_only(&tmp, serde_json::to_string_pretty(ident)?.as_bytes())?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let result = (|| -> anyhow::Result<()> {
+        write_owner_only(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        return match std::fs::remove_file(&tmp) {
+            Ok(()) => Err(error),
+            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+            Err(cleanup) => Err(anyhow::anyhow!(
+                "{error:#}; credential temp cleanup failed: {cleanup}"
+            )),
+        };
+    }
+    result
+}
+
+/// Only this invocation's unpublished credential replacement can be undone.
+/// The rollback bytes are in memory; an unselected file is never an identity.
+pub(crate) struct StagedCredential {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+}
+
+impl StagedCredential {
+    pub(crate) fn rollback(self) -> anyhow::Result<()> {
+        if read_identity_bytes(&self.path)? == self.original {
+            return Ok(());
+        }
+        match self.original {
+            Some(bytes) => write_identity_bytes(&self.path, &bytes),
+            None => {
+                std::fs::remove_file(&self.path)?;
+                std::fs::File::open(self.path.parent().unwrap())?.sync_all()?;
+                Ok(())
+            }
+        }
+    }
+}
+
+pub(crate) fn stage_registration_credential(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    mut ident: Identity,
+    runtime: RuntimeIdentity,
+    transport: SelectedTransport,
+) -> anyhow::Result<StagedCredential> {
+    let path = identity_path_at(host_paths, &ident.worker_id)?;
+    let staged = StagedCredential {
+        original: read_identity_bytes(&path)?,
+        path,
+    };
+    if let Err(error) =
+        persist_current_binding_at(host_paths, scope, &mut ident, runtime, transport)
+    {
+        return Err(match staged.rollback() {
+            Ok(()) => anyhow::anyhow!("REGISTER_CREDENTIAL_STAGE_FAILED: {error:#}"),
+            Err(rollback) => anyhow::anyhow!("REGISTER_CREDENTIAL_STAGE_FAILED: {error:#}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"),
+        });
+    }
+    Ok(staged)
 }
 
 /// Write `bytes` to `path` with owner-only permissions (0600). Every durable

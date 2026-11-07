@@ -10,6 +10,8 @@ pub(crate) struct LayoutBinding {
     pub(crate) tab_id: String,
     pub(crate) pane_order: serde_json::Value,
     #[serde(default)]
+    cwd: String,
+    #[serde(default)]
     pub(crate) tmux_session: String,
 }
 
@@ -47,16 +49,39 @@ pub(crate) fn observe(value: &BindingValue) -> Result<Option<LayoutBinding>, Str
     };
     let entries: Vec<LayoutBinding> = serde_json::from_slice(&bytes)
         .map_err(|error| format!("TM_LAYOUT_DECODE_FAILED: {}: {error}", path.display()))?;
-    let mut matches =
-        entries
-            .into_iter()
-            .filter(|entry| match value.layout_binding_id.as_deref() {
-                Some(id) => entry.binding_id == id,
-                None => value
-                    .physical_name
-                    .as_deref()
-                    .is_some_and(|name| name == entry.tmux_session),
-            });
+    let project_entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.tab_id != "overview" && entry.belongs_to_project(value))
+        .collect();
+    let saved = if let Some(id) = value.layout_binding_id.as_deref() {
+        let mut exact = entries.iter().filter(|entry| entry.binding_id == id);
+        let Some(saved) = exact.next() else {
+            return Ok(None);
+        };
+        if exact.next().is_some() {
+            return Err("TM_LAYOUT_AMBIGUOUS: layout binding is not unique".into());
+        }
+        if saved.tab_id == "overview" {
+            None
+        } else if saved.belongs_to_project(value) {
+            Some(saved)
+        } else {
+            return Err(
+                "TM_LAYOUT_PROJECT_MISMATCH: layout binding belongs to another project".into(),
+            );
+        }
+    } else {
+        None
+    };
+    let mut matches = project_entries.into_iter().filter(|entry| {
+        saved.is_some_and(|saved| {
+            saved.binding_id == entry.binding_id
+                || (!saved.tmux_session.is_empty() && saved.tmux_session == entry.tmux_session)
+        }) || value
+            .physical_name
+            .as_deref()
+            .is_some_and(|name| name == entry.tmux_session)
+    });
     let Some(entry) = matches.next() else {
         return Ok(None);
     };
@@ -67,10 +92,25 @@ pub(crate) fn observe(value: &BindingValue) -> Result<Option<LayoutBinding>, Str
         return Err("TM_LAYOUT_INVALID: binding_id and tab_id are required".into());
     }
     entry.slot()?;
-    Ok(Some(entry))
+    Ok(Some(entry.clone()))
 }
 
 impl LayoutBinding {
+    fn belongs_to_project(&self, value: &BindingValue) -> bool {
+        if self.cwd.trim().is_empty() {
+            return false;
+        }
+        let Ok(cwd) = std::fs::canonicalize(&self.cwd) else {
+            return false;
+        };
+        [
+            value.binding.project_scope.as_str(),
+            value.invocation_cwd.as_str(),
+        ]
+        .into_iter()
+        .any(|root| std::fs::canonicalize(root).is_ok_and(|root| root == cwd))
+    }
+
     fn slot(&self) -> Result<u64, String> {
         self.pane_order
             .as_u64()
@@ -89,19 +129,18 @@ pub(crate) fn physical_name(
     cwd: &str,
     name: &str,
 ) -> Result<Option<String>, String> {
-    match observe(value) {
-        Ok(Some(layout)) => layout.physical_name(name).map(Some),
-        Ok(None) if value.layout_binding_id.is_none() => {
+    match observe(value)? {
+        Some(layout) => layout.physical_name(name).map(Some),
+        None if value.layout_binding_id.is_none() => {
             super::name_resolution::physical_tmux_name(cwd, name).map(Some)
         }
-        // A stale/malformed optional layout must not veto a valid identity or
-        // invent a new position. Its explicit status is projected separately.
-        Ok(None) | Err(_) => Ok(None),
+        // A stale fixed ID cannot invent a new position.
+        None => Ok(None),
     }
 }
 
 pub(crate) fn require_master_position(value: &BindingValue) -> Result<(), String> {
-    if let Ok(Some(layout)) = observe(value) {
+    if let Some(layout) = observe(value)? {
         if layout.slot()? != 1 {
             return Err(
                 "MASTER_SLOT_REQUIRED: only fixed layout position 1 may promote to Jenny".into(),

@@ -58,10 +58,6 @@ impl ProjectRuntimeManager {
         if request.query {
             return self.current_mapped_context(&context, &request);
         }
-        if let Err(error) = self.reconcile_current_dsh_session(&context, &facts) {
-            return (self.host.clone(), Resp::err(format!("{error:#}")));
-        }
-        let _identity = self.identity_gate.lock().unwrap();
         if let Some(approval) = request
             .grant_approval
             .as_ref()
@@ -104,6 +100,19 @@ impl ProjectRuntimeManager {
                 );
             }
         }
+        {
+            let _identity = self.identity_gate.lock().unwrap();
+            if let Err(error) = self.ensure_current_worker_for_context(
+                &context, &facts, request.invocation_cwd.as_deref(),
+            ) {
+                return (self.host.clone(), Resp::err(error));
+            }
+        }
+        // DSH convergence owns the gate when it changes the current binding.
+        if let Err(error) = self.reconcile_current_dsh_session(&context, &facts) {
+            return (self.host.clone(), Resp::err(format!("{error:#}")));
+        }
+        let _identity = self.identity_gate.lock().unwrap();
         let correlation = if request.operation_id.is_empty() {
             format!("context-{}-{}", std::process::id(), now_ms())
         } else {
@@ -456,11 +465,7 @@ impl ProjectRuntimeManager {
         if let Some(pane) = &pane {
             value.invocation_cwd = pane.cwd.clone();
         }
-        if let Some(endpoint) = &value.binding.tmux_endpoint {
-            value.physical_name = Some(crate::client::adapters::tmux::observe_session_name(
-                endpoint,
-            )?);
-        }
+        Self::prepare_control_value(&map, source, &mut value)?;
         let session = value
             .binding
             .session_id

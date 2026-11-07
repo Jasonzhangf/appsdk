@@ -50,6 +50,9 @@ fn identity_map_links_fixed_manifest_position_and_refuses_nonfirst_master_promot
         "binding_id":"tm_fixed_five", "tab_id":"project_alpha", "pane_order":"5",
         "cwd":fixture.root, "tmux_session":tmux_session_name(&fixture, &pane),
         "profile":"fixed-iterm-profile", "codex_session_id":"old-display-session"
+    }, {
+        "binding_id":"overview_five", "tab_id":"overview", "pane_order":"1",
+        "cwd":fixture.root, "tmux_session":tmux_session_name(&fixture, &pane)
     }]))
     .unwrap();
     fs::write(&path, &manifest).unwrap();
@@ -109,7 +112,7 @@ fn identity_map_links_fixed_manifest_position_and_refuses_nonfirst_master_promot
 #[test]
 fn identity_map_fixed_first_position_can_promote_without_changing_layout() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, pane) = Fixture::isolated("identity-map-layout-pane-one");
+    let (mut fixture, pane) = Fixture::isolated("identity-map-layout-pane-one");
     let path = fixture
         .root
         .join("home/.local/state/tm-iterm/manifest.json");
@@ -118,6 +121,10 @@ fn identity_map_fixed_first_position_can_promote_without_changing_layout() {
         "binding_id":"tm_fixed_one", "tab_id":"project_alpha", "pane_order":"1",
         "cwd":fixture.root, "tmux_session":tmux_session_name(&fixture, &pane),
         "profile":"fixed-iterm-profile"
+    }, {
+        "binding_id":"overview_project_alpha", "tab_id":"overview", "pane_order":"4",
+        "cwd":fixture.root, "tmux_session":tmux_session_name(&fixture, &pane),
+        "profile":"overview-display-only"
     }]))
     .unwrap();
     fs::write(&path, &manifest).unwrap();
@@ -139,6 +146,85 @@ fn identity_map_fixed_first_position_can_promote_without_changing_layout() {
         restored["result"]["snapshot"]["layout"]["binding_id"],
         "tm_fixed_one"
     );
+    let worker = restored["result"]["snapshot"]["identity"]["worker_id"].clone();
+    let session_id = String::from_utf8(tmux(&fixture.tmux_socket,
+        &["display-message", "-p", "-t", &pane.pane_id, "#{session_id}"]).stdout).unwrap();
+    tmux(&fixture.tmux_socket, &["rename-session", "-t", session_id.trim(), "unstructured-current-label"]);
+    let continued = fixture.registered_context("layout-mutable-name", &pane);
+    assert_eq!(continued["result"]["snapshot"]["identity"]["worker_id"], worker);
+    assert_eq!(continued["result"]["snapshot"]["layout"]["binding_id"], "tm_fixed_one");
+    assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_1_Jenny");
+
+    // Seed the actual legacy overview-ID condition in this isolated map.
+    // The manifest now references the current label, as in the live evidence.
+    let mut current_manifest: Value = serde_json::from_slice(&manifest).unwrap();
+    for entry in current_manifest.as_array_mut().unwrap() {
+        entry["tmux_session"] = json!(tmux_session_name(&fixture, &pane));
+    }
+    fs::write(&path, serde_json::to_vec(&current_manifest).unwrap()).unwrap();
+    fixture.stop_daemon();
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    for slot in map["slots"].as_array_mut().unwrap() {
+        if slot["current"]["binding"]["agent_id"] == worker {
+            slot["current"]["layout_binding_id"] = json!("overview_project_alpha");
+        }
+    }
+    fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+    fixture.restart_daemon();
+    let corrected = fixture.registered_context("layout-overview-id", &pane);
+    assert_eq!(corrected["result"]["snapshot"]["identity"]["worker_id"], worker);
+    assert_eq!(corrected["result"]["snapshot"]["name"], "Jenny");
+    assert_eq!(corrected["result"]["snapshot"]["layout"]["binding_id"], "tm_fixed_one");
+    let stable = fs::read(&map_path).unwrap();
+    fixture.registered_context("layout-overview-id-repeat", &pane);
+    assert_eq!(fs::read(&map_path).unwrap(), stable);
+    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(), current_manifest);
+}
+
+#[test]
+fn identity_map_rejects_duplicate_project_positions_with_or_without_saved_binding() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("identity-map-duplicate-layout");
+    let path = fixture.root.join("home/.local/state/tm-iterm/manifest.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::create_dir(fixture.root.join("foreign-project")).unwrap();
+    let mut manifest = json!([
+        {"binding_id":"project_one","tab_id":"project_alpha","pane_order":1,"cwd":fixture.root,"tmux_session":tmux_session_name(&fixture,&pane)},
+        {"binding_id":"overview_one","tab_id":"overview","pane_order":4,"cwd":fixture.root,"tmux_session":tmux_session_name(&fixture,&pane)},
+        {"binding_id":"foreign_one","tab_id":"foreign","pane_order":5,"cwd":fixture.root.join("foreign-project"),"tmux_session":tmux_session_name(&fixture,&pane)}
+    ]);
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let initial = fixture.registered_context("duplicate-layout-seed", &pane);
+    assert_eq!(initial["result"]["snapshot"]["layout"]["binding_id"], "project_one");
+    let worker = initial["result"]["snapshot"]["identity"]["worker_id"].clone();
+    let physical = tmux_session_name(&fixture,&pane);
+    for entry in manifest.as_array_mut().unwrap() { entry["tmux_session"] = json!(physical); }
+    let mut duplicate = manifest[0].clone();
+    duplicate["binding_id"] = json!("competing_project_five");
+    duplicate["pane_order"] = json!(5);
+    manifest.as_array_mut().unwrap().push(duplicate);
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let map_path = fixture.host_state.join("identity-map.json");
+    for saved in [true, false] {
+        if !saved {
+            fixture.stop_daemon();
+            let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+            for slot in map["slots"].as_array_mut().unwrap() {
+                if slot["current"]["binding"]["agent_id"] == worker {
+                    slot["current"]["layout_binding_id"] = Value::Null;
+                }
+            }
+            fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+            fixture.restart_daemon();
+        }
+        let before = fs::read(&map_path).unwrap();
+        let refused = fixture.command(&["master","promote","--approval","fixture user requests project master"],Some(&pane));
+        assert!(!refused.status.success());
+        assert!(text(&refused).contains("TM_LAYOUT_AMBIGUOUS"),"{}",text(&refused));
+        assert_eq!(fs::read(&map_path).unwrap(),before);
+        assert_eq!(tmux_session_name(&fixture,&pane),physical);
+    }
 }
 
 #[test]
@@ -1014,7 +1100,13 @@ fn public_context_rename_failure_keeps_the_original_session_and_name_uncommitted
     assert_eq!(tmux_session_name(&fixture, &pane), original);
     assert!(!fixture.host_state.join("identity-map.json").exists(),
         "a failed physical rename cannot publish the first identity");
-    assert!(!fixture.host_state.join("identities").exists(), "failed registration cannot create credentials");
+    let identities = fixture.host_state.join("identities");
+    if identities.exists() {
+        for directory in fs::read_dir(identities).unwrap() {
+            assert!(!directory.unwrap().path().join("identity.json").exists(),
+                "failed registration retained its staged credential");
+        }
+    }
     let state = fixture.current_state();
     for field in ["workers", "notification_subscriptions", "tasks", "msgs", "receive_receipts"] {
         assert!(state[field].as_object().unwrap().is_empty(), "rename refusal must leave {field} empty");

@@ -142,7 +142,6 @@
         assert_eq!(mailbox_snapshot(&mailbox_dir), before_mailbox);
         std::fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn repeated_registry_builds_do_not_duplicate_or_replace_route_owner() {
         let (server, root, _) = test_server();
@@ -1273,82 +1272,5 @@
             .filter(|binding| binding.agent_id.as_str() == "child")
             .all(|binding| binding.app_scope_id == app));
         drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn direct_registration_route_failure_reports_cleanup_failure() {
-        let (server, root, state_path) = test_server();
-        // This internal adapter repeats an already committed registration.
-        // Its route publication and cleanup both use the current state file.
-        let candidates = test_candidates_at("thread-route-failure-worker", &root);
-        let seeded = seed_committed_registration_fixture(&server, "route-failure-worker".into(),
-            "token-route-failure-worker".into(), root.display().to_string(),
-            Some(AppServerId::new("route-failure-app").unwrap()), candidates.clone());
-        assert!(seeded.ok, "{seeded:?}");
-        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
-        let app = AppServerId::new("route-failure-app").unwrap();
-        let map = binding_store::BindingControlStore::new(server.host_paths.state_root());
-        let control = map.load().unwrap();
-        let current = control.current_for_worker(&project_scope, &app, "route-failure-worker").unwrap().unwrap()
-            .active_binding().unwrap().binding.clone();
-        assert!(current.session_id.is_some());
-        assert!(current.native_thread_id.is_some());
-        assert!(current.tmux_endpoint.is_some());
-        let before_state = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
-        assert!(!server.state.lock().unwrap().global.command_receipts.is_empty());
-        assert!(server.state.lock().unwrap().global.lookup_current_thread_route(
-            current.session_id.as_ref().unwrap(), current.native_thread_id.as_ref().unwrap()).is_none());
-        let before_map = std::fs::read(map.path()).unwrap();
-        let before_file = std::fs::read(&state_path).unwrap();
-        let saved = root.join("state-before-publication-failure.json");
-        std::fs::rename(&state_path, &saved).unwrap();
-        std::fs::create_dir(&state_path).unwrap();
-        let registered = handle_register_with_app_scope(
-            &server,
-            "route-failure-worker".into(),
-            "token-route-failure-worker".into(),
-            root.display().to_string(),
-            Some(AppServerId::new("route-failure-app").unwrap()),
-            candidates,
-        );
-        std::fs::remove_dir(&state_path).unwrap();
-        std::fs::rename(&saved, &state_path).unwrap();
-        assert!(!registered.ok, "{registered:?}");
-        let error = registered.error.unwrap_or_default();
-        assert!(
-            error.contains("ROUTE_TRANSITION_DURABILITY_FAILED:")
-                && error.contains("registration cleanup failed:")
-                && error.contains("ROUTE_CLEANUP_DURABILITY_FAILED:"),
-            "{error}"
-        );
-
-        let state = server.state.lock().unwrap();
-        assert_eq!(serde_json::to_value(&*state).unwrap(), before_state);
-        assert!(state.workers.contains_key("route-failure-worker"));
-        let binding = state
-            .global
-            .lookup_binding_for(
-                &RouteScope {
-                    app_scope_id: AppServerId::new("route-failure-app").unwrap(),
-                    project_scope_id: project_scope,
-                },
-                &BindingId::new("binding-route-failure-worker").unwrap(),
-            )
-            .cloned()
-            .expect("failed cleanup persistence keeps the original binding");
-        assert_eq!(binding, current);
-        assert!(binding.native_thread_id.is_some());
-        assert!(state
-            .global
-            .lookup_current_thread_route(
-                &crate::identity::SessionId::new("session-thread-route-failure-worker").unwrap(),
-                &NativeThreadId::new("thread-route-failure-worker").unwrap()
-            )
-            .is_none());
-        drop(state);
-        assert_eq!(std::fs::read(map.path()).unwrap(), before_map);
-        assert_eq!(std::fs::read(&state_path).unwrap(), before_file);
-        assert_eq!(serde_json::to_value(current_state::load(&state_path, false).unwrap()).unwrap(), before_state);
         std::fs::remove_dir_all(root).unwrap();
     }

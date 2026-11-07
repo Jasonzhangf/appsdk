@@ -102,6 +102,13 @@ fn scoped_register_command_prefix(
     format!("register-{:x}", Sha256::digest(material))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegisterOrigin {
+    Registration,
+    CurrentPrincipal,
+    InitialCurrentContinuation { explicit_peer: bool },
+}
+
 impl Server {
     pub(crate) fn log_path_for(root: &Path) -> PathBuf {
         root.join(".agent-collab").join("server").join("log.txt")
@@ -175,8 +182,28 @@ impl Server {
         app_scope: AppServerId,
         reuse_existing: bool,
     ) -> Result<PreparedRegisterEnvelope, String> {
+        self.prepare_register_envelope_for_current(
+            worker_id, token, transport, project_scope, worker_cwd, app_scope,
+            reuse_existing, None, None,
+        )
+    }
+
+    fn prepare_register_envelope_for_current(
+        &self,
+        worker_id: &str,
+        token: &str,
+        transport: &SelectedTransport,
+        project_scope: ProjectScopeId,
+        worker_cwd: &str,
+        app_scope: AppServerId,
+        reuse_existing: bool,
+        current: Option<&RuntimeBinding>,
+        pending_operation: Option<&str>,
+    ) -> Result<PreparedRegisterEnvelope, String> {
         let binding_text = sanitize_identifier(&format!("binding-{worker_id}"));
-        let binding_id = BindingId::new(binding_text.clone()).map_err(|error| error.to_string())?;
+        let binding_id = current.map(|binding| binding.binding_id.clone())
+            .map(Ok).unwrap_or_else(|| BindingId::new(binding_text.clone()))
+            .map_err(|error| error.to_string())?;
         let route_scope = RouteScope {
             app_scope_id: app_scope.clone(),
             project_scope_id: project_scope.clone(),
@@ -191,9 +218,12 @@ impl Server {
             snapshot_revision,
             base_command,
             prior_attempt,
+            pending_attempt,
         ) = {
             let st = self.state.lock().unwrap();
-            let runtime_text =
+            let runtime_text = if let Some(current) = current {
+                current.runtime_id.as_str().to_owned()
+            } else {
                 match st.global.lookup_binding_for(&route_scope, &binding_id) {
                     Some(existing) if existing.agent_id.as_str() == worker_id => {
                         let runtime_text = existing.runtime_id.as_str().to_owned();
@@ -233,7 +263,8 @@ impl Server {
                             };
                         runtime_text
                     }
-                };
+                }
+            };
             let registration = st
                 .global
                 .lookup_registration(&project_scope, &app_scope)
@@ -270,6 +301,8 @@ impl Server {
                 st.revision,
                 base_command,
                 prior_attempt,
+                pending_operation.filter(|operation| !st.global.command_receipts.values()
+                    .any(|receipt| receipt.operation_id.as_str() == *operation)).map(str::to_owned),
             )
         };
         let agent_id = AgentId::new(worker_id.to_string()).map_err(|error| error.to_string())?;
@@ -300,10 +333,26 @@ impl Server {
         )
         .map_err(|error| error.to_string())?;
         binding.tmux_endpoint = transport.tmux_endpoint.clone();
+        if let Some(current) = current {
+            binding = current.clone();
+        }
         binding.validate().map_err(|error| error.to_string())?;
         let attempt_suffix = prior_attempt
             .then(|| format!("-retry-{snapshot_revision}"))
             .unwrap_or_default();
+        let attempt_suffix = if let Some(operation) = pending_attempt.as_deref() {
+            let prefix = format!("register-op-{}", base_command.strip_prefix("register-").unwrap());
+            let suffix = operation.strip_prefix(&prefix)
+                .ok_or("PENDING_EFFECT_REGISTER_OPERATION_MISMATCH")?;
+            if !suffix.is_empty() && !suffix.strip_prefix("-retry-")
+                .is_some_and(|revision| !revision.is_empty() && revision.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                return Err("PENDING_EFFECT_REGISTER_OPERATION_MISMATCH".into());
+            }
+            suffix.to_owned()
+        } else {
+            attempt_suffix
+        };
         let command_id = CommandId::new(format!("{base_command}{attempt_suffix}"))
             .map_err(|error| error.to_string())?;
         let operation_id = OperationId::new(format!(
@@ -366,6 +415,15 @@ impl Server {
         typed: TypedEnvelope,
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> Result<state::TypedOutcome, notification_contract::MutationError> {
+        self.typed_dispatch_register_with_origin(typed, outer_binding, RegisterOrigin::Registration)
+    }
+
+    fn typed_dispatch_register_with_origin(
+        &self,
+        typed: TypedEnvelope,
+        outer_binding: Option<&RegisterOuterBinding>,
+        origin: RegisterOrigin,
+    ) -> Result<state::TypedOutcome, notification_contract::MutationError> {
         typed.envelope.validate().map_err(|error| {
             notification_contract::MutationError::InvalidCommand(error.to_string())
         })?;
@@ -373,6 +431,16 @@ impl Server {
         self.validate_typed_register(&st, &typed)?;
         let mut events = Vec::new();
         let TypedCommand::RegisterWorker { worker, binding, .. } = &typed.command;
+        let first_business = match origin {
+            RegisterOrigin::Registration => true,
+            RegisterOrigin::CurrentPrincipal => false,
+            RegisterOrigin::InitialCurrentContinuation { .. } => {
+                !st.global.command_receipts.values().any(|receipt|
+                    receipt.operation_id == typed.envelope.operation_id)
+                    && !st.global.lookup_project(&binding.project_scope).is_some_and(|project|
+                        project.runtime_bindings.values().any(|current| current.same_principal(binding)))
+            }
+        };
         for global_event in typed.command.global_events() {
             match global_event {
                 GlobalEvent::ProjectRegistered { registration } => {
@@ -389,7 +457,9 @@ impl Server {
                         (String, String),
                         (RuntimeBinding, &'static str),
                     >::new();
-                    if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
+                    if let Some(endpoint) = binding.tmux_endpoint.as_ref()
+                        .filter(|_| origin == RegisterOrigin::Registration)
+                    {
                         let control = binding_store::BindingControlStore::new(self.host_paths.state_root())
                             .load().map_err(notification_contract::MutationError::InvalidCommand)?;
                         for claimant in pane_claimants(
@@ -419,7 +489,7 @@ impl Server {
                         &binding.binding_id,
                         &binding.route_scope(),
                         &binding,
-                    ) {
+                    ).into_iter().filter(|_| origin == RegisterOrigin::Registration) {
                         superseded
                             .entry((
                                 claimant.project_scope.as_str().to_owned(),
@@ -443,14 +513,19 @@ impl Server {
                     events.push(Event::GlobalRuntimeBound {
                         binding: binding.clone(),
                     });
-                    if let Some(project) = st.global.lookup_project(&binding.project_scope) {
+                    if let Some(project) = st.global.lookup_project(&binding.project_scope)
+                        .filter(|_| first_business)
+                    {
                         if let Some(mut policy) = project
                             .bootstrap_policies
                             .get(binding.app_scope_id.as_str())
                             .filter(|policy| policy.consumption.is_none())
                             .cloned()
                         {
-                            let explicit_peer = outer_binding.is_some_and(|outer| outer.explicit_peer);
+                            let explicit_peer = match origin {
+                                RegisterOrigin::InitialCurrentContinuation { explicit_peer } => explicit_peer,
+                                _ => outer_binding.is_some_and(|outer| outer.explicit_peer),
+                            };
                             let history = project
                                 .runtime_bindings
                                 .values()
@@ -526,7 +601,7 @@ impl Server {
             ));
         }
         let mut notices = Vec::new();
-        if !st.workers.contains_key(&worker.id) {
+        if first_business && !st.workers.contains_key(&worker.id) {
             let control = binding_store::BindingControlStore::new(self.host_paths.state_root()).load()
                 .map_err(notification_contract::MutationError::InvalidCommand)?;
             let route = binding.route_scope();
@@ -703,6 +778,41 @@ mod scoped_register_tests {
     }
 
     #[test]
+    fn raw_registration_waits_for_the_existing_identity_gate() {
+        let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
+        let TypedCommand::RegisterWorker { worker, binding, .. } = &prepared.typed.command;
+        let context = ProjectContext::for_registered_root_with_app(&root,binding.app_scope_id.clone()).unwrap();
+        let candidates = TransportCandidates {
+            tmux:Some(crate::proto::TmuxCandidate {
+                endpoint:worker.transport.as_ref().unwrap().tmux_endpoint.clone().unwrap(),
+                cwd:root.to_string_lossy().into_owned(),
+            }),..Default::default()
+        };
+        let request = Req::register(worker.id.clone(),worker.token.clone(),root.to_string_lossy().into_owned(),Some(candidates));
+        let manager = Arc::new(manager);
+        let guard = manager.identity_gate.lock().unwrap();
+        let (started_tx,started_rx) = std::sync::mpsc::channel();
+        let (tx,rx) = std::sync::mpsc::channel();
+        let target = manager.clone();
+        let child = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            tx.send(target.dispatch_sync(Some(context),request).1).unwrap();
+        });
+        started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let blocked = matches!(rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        drop(guard);
+        let response = if blocked { Some(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()) } else { None };
+        child.join().unwrap();
+        assert!(blocked,"raw Register bypassed the current identity transaction gate");
+        assert!(response.unwrap().ok);
+        drop(manager);
+        drop(server);
+        drop(tmux);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn register_control_publish_error_restores_the_actual_physical_name() {
         use std::os::unix::fs::PermissionsExt;
         let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
@@ -710,6 +820,8 @@ mod scoped_register_tests {
         let previous = crate::client::adapters::tmux::require_live_session_name(&endpoint).unwrap();
         let parent = server.host_paths.state_root();
         std::fs::create_dir_all(parent).unwrap();
+        let credential = parent.join("identities/rename-owner/identity.json");
+        std::fs::create_dir_all(credential.parent().unwrap()).unwrap();
         let permissions = std::fs::metadata(parent).unwrap().permissions();
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500)).unwrap();
         let result = manager.publish_register_control_before_consume(&server, &prepared, None, None, None);
@@ -718,9 +830,80 @@ mod scoped_register_tests {
         assert!(error.starts_with("BINDING_CONTROL_SAVE_FAILED: create temp"), "{error}");
         assert_eq!(crate::client::adapters::tmux::require_live_session_name(&endpoint).unwrap(), previous);
         assert!(!parent.join("identity-map.json").exists());
+        assert!(!credential.exists(), "unpublished Register retained its staged credential");
         assert!(server.state.lock().unwrap().workers.is_empty());
         drop(tmux);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn register_credential_failure_keeps_the_original_name_and_unpublished_map() {
+        use std::os::unix::fs::PermissionsExt;
+        let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
+        let endpoint = tmux.endpoints().remove(0);
+        let previous = crate::client::adapters::tmux::require_live_session_name(&endpoint).unwrap();
+        let parent = server.host_paths.state_root();
+        std::fs::create_dir_all(parent).unwrap();
+        let permissions = std::fs::metadata(parent).unwrap().permissions();
+        std::fs::set_permissions(parent,std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = manager.publish_register_control_before_consume(&server,&prepared,None,None,None);
+        std::fs::set_permissions(parent,permissions).unwrap();
+        let error = result.unwrap_err();
+        assert!(error.starts_with("REGISTER_CREDENTIAL_STAGE_FAILED:"),"{error}");
+        assert_eq!(crate::client::adapters::tmux::require_live_session_name(&endpoint).unwrap(),previous);
+        assert!(!parent.join("identity-map.json").exists());
+        assert!(!parent.join("identities/rename-owner/identity.json").exists());
+        assert!(server.state.lock().unwrap().workers.is_empty());
+        drop(tmux);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn foreign_current_agent_does_not_skip_target_credential_before_active_publication() {
+        for foreign_app in [false, true] {
+            let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
+            let TypedCommand::RegisterWorker { worker, binding, .. } = &prepared.typed.command;
+            let mut foreign = binding.clone();
+            let foreign_root = if foreign_app { root.clone() } else { root.join("foreign-project") };
+            std::fs::create_dir_all(&foreign_root).unwrap();
+            foreign.project_scope = GlobalState::canonical_project_scope(&foreign_root).unwrap();
+            if foreign_app { foreign.app_scope_id = AppServerId::new("foreign-app").unwrap(); }
+            let transport = worker.transport.clone().unwrap();
+            let key = crate::server::binding_slot::IdentityBindingKey::new(
+                foreign.project_scope.clone(), foreign.app_scope_id.clone(), "Alice",
+            );
+            let mut control = crate::server::binding_slot::BindingControlSet::new();
+            control.commit(&key, crate::server::binding_slot::BindingValue::new(
+                foreign.clone(), transport.clone()), None).unwrap();
+            manager.binding_control_store().save(&control).unwrap();
+            let mut credential = crate::identity::Identity {
+                worker_id:worker.id.clone(), token:"foreign-scope-token".into(),
+                project_scope:None, runtime:None, transport:None,
+            };
+            crate::identity::persist_current_binding_at(&server.host_paths,
+                &Scope { root:foreign_root }, &mut credential,
+                crate::identity::RuntimeIdentity {
+                    agent_id:foreign.agent_id.clone(), runtime_id:foreign.runtime_id.clone(),
+                    appserver_id:foreign.app_scope_id.clone(), binding_id:foreign.binding_id.clone(),
+                    session_id:foreign.session_id.clone(), native_thread_id:foreign.native_thread_id.clone(),
+                }, transport,
+            ).unwrap();
+            test_hooks::fail_next_parent_sync();
+            let error = manager.publish_register_control_before_consume(
+                &server, &prepared, None, None, None,
+            ).unwrap_err();
+            assert!(error.starts_with("BINDING_CONTROL_DURABILITY_UNKNOWN:"), "{error}");
+            let credential = crate::identity::read_persisted(&server.host_paths, &worker.id).unwrap().unwrap();
+            assert_eq!(credential.project_scope.as_ref(), Some(&binding.project_scope));
+            assert_eq!(credential.runtime.as_ref().unwrap().appserver_id, binding.app_scope_id);
+            assert!(credential.token == worker.token, "target credential did not retain the prepared token");
+            let control = manager.binding_control_store().load().unwrap();
+            assert_eq!(control.slot(&key).unwrap().active_binding().unwrap().binding, foreign);
+            assert_eq!(control.active_values().count(),2);
+            assert!(server.state.lock().unwrap().workers.is_empty());
+            drop(tmux);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -737,6 +920,10 @@ mod scoped_register_tests {
         assert!(name.ends_with("_2_Alice"), "{name}");
         assert_eq!(values[0].physical_name.as_deref(), Some(name.as_str()));
         assert_eq!(map.pending_effects().count(), 1);
+        let credential = crate::identity::read_persisted(
+            &server.host_paths, values[0].binding.agent_id.as_str(),
+        ).unwrap();
+        assert!(credential.is_some(), "active current was published before its exact credential");
         assert!(server.state.lock().unwrap().workers.is_empty(), "Unknown cannot consume business Register");
         drop(tmux);
         std::fs::remove_dir_all(root).unwrap();

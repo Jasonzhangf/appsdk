@@ -93,6 +93,43 @@ fn registration_persists_exact_scope_and_owner_only_credential() {
 }
 
 #[test]
+fn unpublished_registration_credential_restores_exact_original_bytes_or_absence() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = test_root("identity-staging-rollback");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = Scope { root: root.clone() };
+    let paths = HostPaths::for_state_root(&root.join("state")).unwrap();
+    let path = identity_path_at(&paths, "agent-1").unwrap();
+    for original in [
+        None,
+        Some(b"original unselected credential bytes\n".to_vec()),
+    ] {
+        if let Some(bytes) = original.as_ref() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let identity = draft_identity_with_id(&scope, "agent-1").unwrap();
+        let token = identity.token.clone();
+        let staged = stage_registration_credential(
+            &paths,
+            &scope,
+            identity,
+            runtime_identity("binding-1"),
+            selected(),
+        )
+        .unwrap();
+        assert_eq!(read_identity(&path).unwrap().unwrap().token, token);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        staged.rollback().unwrap();
+        assert_eq!(read_identity_bytes(&path).unwrap(), original);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn absent_map_never_recovers_a_credential_archive() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let root = test_root("identity-no-map");

@@ -889,6 +889,17 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
         .remove(child_id);
     fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     fixture.restart_daemon();
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            fixture.current_state()["notification_subscriptions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|subscription| subscription["worker_id"] == child_id)
+                .all(|subscription| subscription["status"] == "transport-lost")
+        }),
+        "missing worker's independent transport observation did not settle"
+    );
     let before = lifecycle_surfaces(&fixture, &parent);
     let read = lifecycle_read(&fixture, &parent, Some(child_id));
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");

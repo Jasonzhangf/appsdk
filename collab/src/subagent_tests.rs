@@ -663,7 +663,7 @@ fn missing_rollout_notification_failure_keeps_durable_child_route_binding() {
 }
 
 #[test]
-fn other_notification_failure_retires_durable_child_route_binding() {
+fn other_notification_failure_retires_only_the_child_delivery_route() {
     let (server, root) = crate::server::peer_tests::test_server();
     let child_id = "child-notification-rpc-failure";
     let (app_scope, session_id, native_thread_id, route_scope, binding_id) =
@@ -705,7 +705,6 @@ fn other_notification_failure_retires_durable_child_route_binding() {
     .to_string();
 
     assert!(result.contains("route retired"), "{result}");
-    assert!(result.contains("binding retired"), "{result}");
     assert_eq!(record.thread_id, None);
     let state = server.state.lock().unwrap();
     let binding = state
@@ -713,8 +712,9 @@ fn other_notification_failure_retires_durable_child_route_binding() {
         .lookup_binding_for(&route_scope, &binding_id)
         .unwrap();
     assert_eq!(
-        binding.native_thread_id, None,
-        "generic notification failures must retire the runtime binding"
+        binding.native_thread_id.as_ref(),
+        Some(&native_thread_id),
+        "retiring a delivery route must preserve its business identity binding"
     );
     assert!(
         state
@@ -723,7 +723,7 @@ fn other_notification_failure_retires_durable_child_route_binding() {
             .is_none(),
         "generic notification failures must retire the published child route"
     );
-    assert!(!state.workers.contains_key(child_id));
+    assert!(state.workers.contains_key(child_id));
 }
 
 #[test]

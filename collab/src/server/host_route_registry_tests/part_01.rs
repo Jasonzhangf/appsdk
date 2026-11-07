@@ -918,13 +918,12 @@ fn registration_reuses_the_registered_tmux_pane_identity() {
     );
     assert!(first.ok, "{first:?}");
 
-    let second = handle_register_with_app_scope(
-        &server,
-        "worker-1".into(),
-        "token-1".into(),
-        root.display().to_string(),
-        Some(app_scope),
-        test_candidates_for_registered(&server, &root, "worker-1", "app-a"),
+    let (runtime, _) = crate::identity::registration_from_receipt(&first.data,"worker-1",&root).unwrap();
+    let (_, second) = register_host_fixture(
+        &manager,
+        Some(context_with_runtime(&root, app_scope.as_str(), &runtime)),
+        Req::register("worker-1".into(), "token-1".into(), root.display().to_string(),
+            test_candidates_for_registered(&server, &root, "worker-1", "app-a")),
     );
     assert!(second.ok, "{second:?}");
     assert_eq!(second.data["transport_selected"]["kind"], "tmux");

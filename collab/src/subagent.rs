@@ -773,7 +773,6 @@ fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serd
         }
         _ => unreachable!(),
     }
-    Ok(json!({"subagent": record}))
 }
 
 /// A missing thread may retire only after its responsibility set is empty:

@@ -491,7 +491,12 @@ promise does not register a long-horizon goal. Do not report registration as
 complete without the goal control receipt.
 
 The AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`;
-inspect your own goal with `appsdk goal status --json` and
+a formal patrol defaults to one 100-delivery batch with the same entry and `--repeat 100`;
+when the user specifies another count, use that count. Reuse the valid batch while deliveries remain; do not re-register, reset
+the count, or create a duplicate after context recovery or a single delivered occurrence.
+After exhaustion, the owning role renews one whole batch only while the standing duty and
+its authorization remain. An ordinary one-shot goal or deadline outside the patrol batch
+keeps its own one-shot lifecycle. Inspect your own goal with `appsdk goal status --json` and
 `appsdk longhorizon show --json`. `appsdk longhorizon` is a read projection,
 not a register/subscribe command; `collab longhorizon` does not exist. The
 goal entry selects the authenticated caller's project and stable name. Master
@@ -576,11 +581,17 @@ or implementation details.
    deduplication before repair or dispatch. Record evidence according to the
    owning project contract; project-specific error codes, wire status, and
    response planes stay in the owning project Skill.
-6. Continuous patrol uses existing goal or deadline one-shot wakes, plus the
-   daemon `board-idle` patrol for held board tasks. Before a
-   turn ends while scheduling continues, explicitly re-arm a consumed one-shot
-   wake. A read, ACK, status summary, or dispatch receipt is not completion and
-   does not renew a wake. Do not invent a periodic polling loop.
+6. Continuous patrol uses the registered goal or deadline schedule, plus the
+   daemon `board-idle` patrol for held board tasks. The formal project patrol is
+   registered once as a default 100-delivery batch, or with the user-specified count,
+   and reuses that batch while deliveries
+   remain; context recovery, a single delivered occurrence, or an additional round
+   never re-registers it, resets its count, or creates a duplicate. After
+   exhaustion, the owning role renews one whole batch only while the standing duty
+   and its authorization remain. An ordinary consumed one-shot goal or deadline
+   wake is explicitly re-armed before ending only when that non-periodic schedule
+   must continue. A read, ACK, status summary, or dispatch receipt is not
+   completion and does not renew a wake. Do not invent a periodic polling loop.
 7. Every dispatch states the goal, scope, authorized actions, resource owner,
    delivery and test evidence, report channel, and stop conditions. The
    receiver checks the contract against current responsibility, then accepts,
@@ -604,7 +615,10 @@ or implementation details.
 10. 每个项目的 Jenny（当前获授权 master）默认承担本项目 worker 巡检。初始化或恢复
     本人 longhorizon 后，确保本项目常驻巡检已 armed；它是当前 master 的 `master-idle`
     订阅，subject `project-patrol`、目标 interval `1500000` 毫秒（20-30 分钟窗口，
-    默认 25 分钟），ensure/renew 复用同一订阅，不重复创建。`900000` 只兼容已存在的
+    默认 25 分钟），ensure/renew 复用同一订阅，不重复创建。该订阅默认登记 100 次；
+    用户明确指定其他次数时按指定次数执行。批次有剩余时继续复用，不逐轮续订，也不因 context/恢复、单次交付或新增轮次
+    重置计数或并排新建。批次耗尽后，仅当原巡检职责仍有效且获授权继续时，由原 owner
+    整批续订。`900000` 只兼容已存在的
     旧订阅；`collab notify status` 的 `project_patrol.cadence_runtime_gap` 为
     `PATROL_CADENCE_RUNTIME_GAP` 时，报告运行节奏未达目标，不声称已对齐。
     `appsdk longhorizon show` 是只读投影，读取成功不证明已 arm。
@@ -1269,11 +1283,14 @@ inputs only.
    new production issue requiring canonical intake. If any action is possible,
    continue it. Otherwise record what is blocked and the event or responsible
    actor needed to resume. Preserve dirty, active, shared, or unknown resources
-   as PROTECTED_HOLD. If continued scheduling is required, explicitly re-arm a
-   consumed one-shot goal or deadline wake before this cycle ends. Repeat this
-   check on the next message or supported notification. Consume applicable
-   messages with `collab recv` on non-DSH transports. DSH receives full messages
-   natively through its gateway and acts directly on them.
+   as PROTECTED_HOLD. Reuse a valid periodic patrol batch while it has remaining
+   deliveries; do not re-register or reset it. Explicitly re-arm only a consumed
+   ordinary one-shot goal or deadline wake when continued scheduling is required.
+   If a patrol batch is exhausted and the standing duty remains authorized, renew
+   it as a whole batch. Repeat this check on the next message or supported
+   notification. Consume applicable messages with `collab recv` on non-DSH
+   transports. DSH receives full messages natively through its gateway and acts
+   directly on them.
 
 These are agent actions within an activation. The board does not automatically
 claim, execute, or resume work. A peer holding an unclosed, uncancelled board
@@ -1722,8 +1739,10 @@ master must:
 2. If the main graph is clear, pull the highest-priority open issue from the
    bug backlog (`appsdk bug list --status open`), with P0 first; P0 blocks the
    affected project;
-3. Inspect owned worktrees and stale resources, preserve PROTECTED_HOLDs, and
-   re-arm a consumed one-shot wake if continued scheduling is required;
+3. Inspect owned worktrees and stale resources and preserve PROTECTED_HOLDs.
+   Reuse a valid patrol batch while it has remaining deliveries; explicitly
+   re-arm only a consumed ordinary one-shot wake if continued scheduling is
+   required, and renew an exhausted patrol batch as a whole when its duty remains;
 4. If all tasks and issues are closed, report evidence-backed completion and
    propose next steps to the user.
 

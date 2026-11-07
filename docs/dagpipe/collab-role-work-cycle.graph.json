@@ -1,0 +1,216 @@
+{
+  "id": "appsdk-collab-role-work-cycle",
+  "version": "1",
+  "description": "角色按合法触发完成一轮协作职责的SESE。输入为已授权触发或当前任务，输出为唯一本轮结果。master管理项目目标并派发协调，普通peer管理受托子目标，明确worker专长执行合同内工作，patrol独立检查，memory提炼修订，architect形成设计及准入文件。职责由已投影正文与当前任务合同共同限定，不是daemon强制的固定流水线。无工作、缺输入、取消和明确暂停也返回真实结果；下一轮由新的合法触发开启，不在图中形成循环或重试回边。",
+  "inputs": [
+    {
+      "id": "已授权触发或当前任务",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "接收已授权触发或当前任务",
+      "operator": "collab.role_work_cycle.accept_trigger",
+      "operator_version": "1",
+      "description": "接收用户授权、明确请求、已接受任务或本人目标触发。无合法触发时不制造任务；取消或暂停输入保留真实状态。",
+      "inputs": [
+        "已授权触发或当前任务"
+      ],
+      "output": {
+        "id": "本轮触发上下文",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "回看本人目标记录与职责范围",
+      "operator": "collab.role_work_cycle.review_goal_and_scope",
+      "operator_version": "1",
+      "description": "先读取本人长期目标、任务记录、当前身份和已投影职责，说明本轮目的与目标缺口。复用有效记录，不把笔记、board、提示词或timer冒充目标登记。",
+      "inputs": [
+        "本轮触发上下文"
+      ],
+      "output": {
+        "id": "职责执行上下文",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "选择本轮适用职责与真实依赖",
+      "operator": "collab.role_work_cycle.select_duties",
+      "operator_version": "1",
+      "description": "按当前身份、工作专长、任务合同和真实依赖选择本轮适用职责。计划与审查按任务需要选择，不把每种角色职责变成每轮必经步骤。",
+      "inputs": [
+        "职责执行上下文"
+      ],
+      "output": {
+        "id": "本轮职责计划",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "执行适用角色职责分支",
+      "operator": "collab.role_work_cycle.execute_applicable_duties",
+      "operator_version": "1",
+      "description": "按适用职责执行一条或多条允许的工作：master派发协调并核验证据；管理型peer编排受托目标并负责交付；worker执行合同内工作；patrol独立检查并提交有证据的发现；memory核对、提炼并交唯一owner；architect形成设计及准入文件。固定职责不被混合标签覆盖，实际冲突交原owner。所有执行、缺口、取消和暂停结果在节点内闭合到同一输出。",
+      "inputs": [
+        "本轮职责计划"
+      ],
+      "output": {
+        "id": "职责执行结果",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "交回结果或明确缺口",
+      "operator": "collab.role_work_cycle.handoff_result_or_gap",
+      "operator_version": "1",
+      "description": "向任务合同中的receiver交回实际结果、证据或明确缺口。成功、等待、取消、暂停和失败分别保留真实语义；不伪造成功，不把ACK当交付。",
+      "inputs": [
+        "职责执行结果"
+      ],
+      "output": {
+        "id": "角色结果事实",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "更新记录并核对目标缺口",
+      "operator": "collab.role_work_cycle.update_record_and_gap",
+      "operator_version": "1",
+      "description": "在原任务记录或本人目标文档增量写发现、证据、结论或未知，比较目标缺口和路径是否仍成立。细节变化保持长期目标一致，重大变化同步更新目标文档；目标状态仍由正式owner管理。",
+      "inputs": [
+        "角色结果事实"
+      ],
+      "output": {
+        "id": "本轮记录结果",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出本轮角色结果",
+      "operator": "collab.role_work_cycle.emit_cycle_result",
+      "operator_version": "1",
+      "description": "从唯一出口返回本轮实际结果、记录更新状态和下一动作或恢复条件。常驻职责由下一次合法触发开启新请求。",
+      "inputs": [
+        "本轮记录结果"
+      ],
+      "output": {
+        "id": "本轮角色结果",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "接收已授权触发或当前任务",
+      "to": "回看本人目标记录与职责范围",
+      "arc_id": "本轮触发上下文"
+    },
+    {
+      "from": "回看本人目标记录与职责范围",
+      "to": "选择本轮适用职责与真实依赖",
+      "arc_id": "职责执行上下文"
+    },
+    {
+      "from": "选择本轮适用职责与真实依赖",
+      "to": "执行适用角色职责分支",
+      "arc_id": "本轮职责计划"
+    },
+    {
+      "from": "执行适用角色职责分支",
+      "to": "交回结果或明确缺口",
+      "arc_id": "职责执行结果"
+    },
+    {
+      "from": "交回结果或明确缺口",
+      "to": "更新记录并核对目标缺口",
+      "arc_id": "角色结果事实"
+    },
+    {
+      "from": "更新记录并核对目标缺口",
+      "to": "输出本轮角色结果",
+      "arc_id": "本轮记录结果"
+    }
+  ],
+  "outputs": [
+    "本轮角色结果"
+  ]
+}

@@ -283,9 +283,21 @@ fn communication_recovery_brief() -> serde_json::Value {
     })
 }
 
-fn base_role_brief(state: &State, route_scope: &RouteScope, worker_id: &str) -> serde_json::Value {
+fn base_role_brief(
+    state: &State,
+    route_scope: &RouteScope,
+    worker_id: &str,
+    peer_orchestration: bool,
+) -> serde_json::Value {
     let active_progress_rule = "Patrol is a safety-net wake, never an execution dependency. After registering or rearming it, immediately continue ready authorized work: investigate, dispatch, verify, integrate and clean up. Never wait for the next wake while a next action exists; a future deadline or unavailable patrol service is not a blocker. Wait only for evidenced external dependencies or uncovered approvals, and continue independent work.";
-    let own_goal_rule = "Master and peer are goal orchestrators at different levels, not execution workers. Restore or register your own accepted goal with `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`; verify your own `appsdk goal status --json` receipt before dispatch. Read, update, rearm and cancel only your own goal. Never ask master to proxy-register a peer goal, and never register or hold another peer's goal as master. A task, board assignment, note or timer alone is not goal registration. Stable name owns the goal; sessionID is the current carrier, independent of Desktop/TUI or tmux placement. Use the current installed Collab Skill and this current role brief; an older worktree's skill-source copy is not another operating contract. Retire master-only goal, peer-as-executor and all-peers-busy-before-GCM instructions.";
+    // Goal ownership is shared by every identity. The "orchestrator, not an
+    // execution worker" framing applies only to an ordinary peer or a master,
+    // not to a peer that carries an explicit execution or standing specialty.
+    let own_goal_shared = "Restore or register your own accepted goal with `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`; verify your own `appsdk goal status --json` receipt before dispatch. Read, update, rearm and cancel only your own goal. Never ask master to proxy-register a peer goal, and never register or hold another peer's goal as master. A task, board assignment, note or timer alone is not goal registration. Stable name owns the goal; sessionID is the current carrier, independent of Desktop/TUI or tmux placement. Use the current installed Collab Skill and this current role brief; an older worktree's skill-source copy is not another operating contract.";
+    let own_goal_rule = format!(
+        "Master and peer are goal orchestrators at different levels, not execution workers. {own_goal_shared} Retire master-only goal, peer-as-executor and all-peers-busy-before-GCM instructions."
+    );
+    let goal_document_rule = workflow_template_rule("goal_document_rule");
     let idle_patrol_rule = workflow_template_rule("idle_patrol_rule");
     let collaboration_reply_rule = workflow_template_rule("collaboration_reply_rule");
     let work_role_assignment_rule = workflow_template_rule("work_role_assignment_rule");
@@ -300,6 +312,7 @@ fn base_role_brief(state: &State, route_scope: &RouteScope, worker_id: &str) -> 
             "responsibilities": [
                 "Start every cycle from the current board and goal: read open tasks, prioritize P0/P1 by urgency and dependency, then triage and dispatch. Managers do not debug, reproduce, investigate root cause, or implement the work themselves; verify evidence, decide scope and priority, and assign the affected peer or an independent GCM worker.",
                 own_goal_rule,
+                goal_document_rule,
                 work_role_assignment_rule,
                 work_role_execution_rule,
                 work_role_next_action_rule,
@@ -370,36 +383,48 @@ fn base_role_brief(state: &State, route_scope: &RouteScope, worker_id: &str) -> 
             "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
         });
     }
+    // Shared peer identity, authority, communication and delivery boundaries
+    // that every peer keeps regardless of its work specialty.
+    let mut peer_responsibilities: Vec<serde_json::Value> = vec![
+        serde_json::Value::String(if peer_orchestration {
+            own_goal_rule.clone()
+        } else {
+            own_goal_shared.to_owned()
+        }),
+        serde_json::Value::String(goal_document_rule.to_owned()),
+        serde_json::Value::String(work_role_assignment_rule.to_owned()),
+        serde_json::Value::String(work_role_execution_rule.to_owned()),
+        serde_json::Value::String(work_role_next_action_rule.to_owned()),
+        serde_json::Value::String(collaboration_reply_rule.to_owned()),
+        serde_json::Value::String("Any two registered identities may communicate directly across projects. Discover the exact current project.name address with collab list, then send from your own project using collab send --to '<project.name>' --subject '<topic>' --content '<result>'. Preserve the original message reference when replying; message permission does not grant task management or another identity.".to_owned()),
+        serde_json::Value::String("As a peer, report to the requester, delegator or project master by default, not routinely to the user. Report to the user only for a direct user question or reporting request, a decision only the user can make, or a material exception affecting the user.".to_owned()),
+        serde_json::Value::String("Collab/AppSDK and tmux have independent lifecycles. Do not run broad process kills or perform daemon or tmux lifecycle actions. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.".to_owned()),
+        serde_json::Value::String("Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.".to_owned()),
+        serde_json::Value::String("You are the sole delivery owner for your accepted scope. Delegation or asking for help does not transfer responsibility. Investigate failures, verify subworker limitations at the real entry, and pursue authorized remedies or another executor; do not wait for master or others to solve your task, exceed authority or repeat unchanged failures.".to_owned()),
+        serde_json::Value::String("For a scope, resource, conflict or external dependency blocker that needs master coordination, contact the current master promptly with task/affected acceptance, exact failing entry and original error or evidence path, attempted remedies/results, why authorized alternatives cannot proceed, external dependency, exact decision and resume condition. Separate facts from hypotheses; do not delay help until root cause is proven. This is not an approved stop: master must independently verify evidence before approving a scoped blocker. Continue independent work while awaiting a decision or if master is unavailable; preserve delivery ownership unless explicitly reassigned.".to_owned()),
+        serde_json::Value::String("Do not wait passively and do not stop on ACK/read/summary; continue the accepted goal and report verified progress at contract points.".to_owned()),
+    ];
+    if peer_orchestration {
+        peer_responsibilities.extend([
+            serde_json::Value::String(active_progress_rule.to_owned()),
+            serde_json::Value::String("Split the accepted goal into non-overlapping bounded scopes, then dispatch bounded one-shot execution or observation to independent `codex exec --profile gcm` subworkers; use autonomous peers only for subordinate long-horizon goals within the authorized scope.".to_owned()),
+            serde_json::Value::String("Own planning, execution, verification, unblocking, assigned integration, and resource closure for the accepted scope. Verify subworker evidence and deliver the goal to the sender.".to_owned()),
+            serde_json::Value::String("Keep the sender contract explicit: goal, scope, authorized actions, resource owner, delivery/test evidence, report channel, and stop conditions.".to_owned()),
+            serde_json::Value::String("Use a finite patrol for goal progress, blockers, subworker activity, worktree/runtime resources, and the need to re-arm consumed scheduling. Account for registration and context restoration in that scope, but do not repeat unrelated recovery checks.".to_owned()),
+            serde_json::Value::String("For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, and update existing patrol scope as part of that assessment; add only missing scope and retire obsolete owned scope without duplicating timers. Subscription housekeeping does not gate ready authorized work.".to_owned()),
+            serde_json::Value::String("Use Close-Before-Open/SESE for owned worktrees: close the old worktree before opening its replacement. Each patrol closes or explicitly parks open P0/P1 work, routes new production issues through the project's canonical intake, and reports all PROTECTED_HOLD resources.".to_owned()),
+            serde_json::Value::String("Send each new production issue through the project's canonical intake and deduplication. Record evidence according to the owning project contract; project-specific error codes, wire status, and response planes stay in the owning project Skill.".to_owned()),
+            serde_json::Value::String("Keep independent GCM workers busy for ready bounded work on this goal regardless of whether other peers are busy; do not treat master capacity or another peer's availability as a routing prerequisite.".to_owned()),
+            serde_json::Value::String("Before a patrol cycle ends, re-arm a consumed one-shot goal or deadline wake when continued scheduling is required.".to_owned()),
+            serde_json::Value::String(idle_patrol_rule.to_owned()),
+            serde_json::Value::String("Subscription presence does not gate identity; do not invent a polling interval. Use supported event subscriptions or explicit finite owner-scoped patrol deadlines with agreed timing, and do not claim project-wide master authority.".to_owned()),
+        ]);
+    }
     json!({
         "role": "worker",
         "orchestration_function": "goal_orchestrator",
         "goal_level": "delegated_goal",
-        "responsibilities": [
-            own_goal_rule,
-            work_role_assignment_rule,
-            work_role_execution_rule,
-            work_role_next_action_rule,
-            collaboration_reply_rule,
-            "Any two registered identities may communicate directly across projects. Discover the exact current project.name address with collab list, then send from your own project using collab send --to '<project.name>' --subject '<topic>' --content '<result>'. Preserve the original message reference when replying; message permission does not grant task management or another identity.",
-            "As a peer, report to the requester, delegator or project master by default, not routinely to the user. Report to the user only for a direct user question or reporting request, a decision only the user can make, or a material exception affecting the user.",
-            active_progress_rule,
-            "Split the accepted goal into non-overlapping bounded scopes, then dispatch bounded one-shot execution or observation to independent `codex exec --profile gcm` subworkers; use autonomous peers only for subordinate long-horizon goals within the authorized scope.",
-            "Own planning, execution, verification, unblocking, assigned integration, and resource closure for the accepted scope. Verify subworker evidence and deliver the goal to the sender.",
-            "Keep the sender contract explicit: goal, scope, authorized actions, resource owner, delivery/test evidence, report channel, and stop conditions.",
-            "Use a finite patrol for goal progress, blockers, subworker activity, worktree/runtime resources, and the need to re-arm consumed scheduling. Account for registration and context restoration in that scope, but do not repeat unrelated recovery checks.",
-            "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, and update existing patrol scope as part of that assessment; add only missing scope and retire obsolete owned scope without duplicating timers. Subscription housekeeping does not gate ready authorized work.",
-            "Use Close-Before-Open/SESE for owned worktrees: close the old worktree before opening its replacement. Each patrol closes or explicitly parks open P0/P1 work, routes new production issues through the project's canonical intake, and reports all PROTECTED_HOLD resources.",
-            "Send each new production issue through the project's canonical intake and deduplication. Record evidence according to the owning project contract; project-specific error codes, wire status, and response planes stay in the owning project Skill.",
-            "Keep independent GCM workers busy for ready bounded work on this goal regardless of whether other peers are busy; do not treat master capacity or another peer's availability as a routing prerequisite.",
-            "Before a patrol cycle ends, re-arm a consumed one-shot goal or deadline wake when continued scheduling is required.",
-            idle_patrol_rule,
-            "Subscription presence does not gate identity; do not invent a polling interval. Use supported event subscriptions or explicit finite owner-scoped patrol deadlines with agreed timing, and do not claim project-wide master authority.",
-            "Collab/AppSDK and tmux have independent lifecycles. Do not run broad process kills or perform daemon or tmux lifecycle actions. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.",
-            "Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.",
-            "You are the sole delivery owner for your accepted scope. Delegation or asking for help does not transfer responsibility. Investigate failures, verify subworker limitations at the real entry, and pursue authorized remedies or another executor; do not wait for master or others to solve your task, exceed authority or repeat unchanged failures.",
-            "For a scope, resource, conflict or external dependency blocker that needs master coordination, contact the current master promptly with task/affected acceptance, exact failing entry and original error or evidence path, attempted remedies/results, why authorized alternatives cannot proceed, external dependency, exact decision and resume condition. Separate facts from hypotheses; do not delay help until root cause is proven. This is not an approved stop: master must independently verify evidence before approving a scoped blocker. Continue independent work while awaiting a decision or if master is unavailable; preserve delivery ownership unless explicitly reassigned.",
-            "Do not wait passively and do not stop on ACK/read/summary; continue the accepted goal and report verified progress at contract points."
-        ],
+        "responsibilities": peer_responsibilities,
         "communication_recovery": communication_recovery_brief(),
         "authority": {
             "managed_subagent": false,
@@ -420,36 +445,67 @@ fn base_role_brief(state: &State, route_scope: &RouteScope, worker_id: &str) -> 
 /// `base_role_brief` remains the owner of identity, authority and mandatory
 /// runtime constraints. The selected identity template adds its workflow text,
 /// then configured specialty cards are appended in the current work-role order.
-fn role_brief(server: &Server, state: &State, control: &binding_slot::BindingControlSet, worker_id: &str) -> Result<serde_json::Value, String> {
-    let project_scope = GlobalState::canonical_project_scope(&server.root).map_err(|error| error.to_string())?;
-    let mut current = control.active_values().filter(|value|
-        value.binding.project_scope == project_scope && value.binding.agent_id.as_str() == worker_id);
-    let binding = current.next().ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping")?;
+fn role_brief(
+    server: &Server,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    worker_id: &str,
+) -> Result<serde_json::Value, String> {
+    let project_scope =
+        GlobalState::canonical_project_scope(&server.root).map_err(|error| error.to_string())?;
+    let mut current = control.active_values().filter(|value| {
+        value.binding.project_scope == project_scope && value.binding.agent_id.as_str() == worker_id
+    });
+    let binding = current
+        .next()
+        .ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping")?;
     if current.next().is_some() {
         return Err("IDENTITY_MAP_AMBIGUOUS: worker has several current app mappings".into());
     }
     let route_scope = binding.binding.route_scope();
-    let mut brief = base_role_brief(state, &route_scope, worker_id);
+    let roles = worker_work_roles(state, control, Some(&route_scope), worker_id)?;
+    // A peer that carries a built-in execution or standing specialty keeps the
+    // shared identity, authorization and communication duties, but must not
+    // inherit the ordinary peer's unconditional orchestration instructions.
+    let peer_specialty = roles
+        .iter()
+        .any(|role| workflow_default_specialty(role).is_some());
+    let mut brief = base_role_brief(state, &route_scope, worker_id, !peer_specialty);
     let base_role = match brief.get("role").and_then(serde_json::Value::as_str) {
         Some("master") => "master",
         Some("worker") => "peer",
         _ => return Ok(brief),
     };
-    let roles = worker_work_roles(state, control, Some(&route_scope), worker_id)?;
     let workflow = effective_workflow_templates(state, project_scope.as_str(), base_role, &roles);
-    apply_workflow_template(&mut brief, &workflow);
+    apply_workflow_template(&mut brief, &workflow, base_role == "peer" && peer_specialty);
     Ok(brief)
 }
 
-fn apply_workflow_template(brief: &mut serde_json::Value, workflow: &EffectiveWorkflow) {
-    let identity = &workflow.identity;
-    brief["role_task"] = serde_json::Value::String(identity.role_task.clone());
-    append_workflow_responsibilities(brief, &identity.responsibilities);
-    brief["next_action"] = serde_json::Value::String(identity.next_action.clone());
-    brief["completion_action"] = serde_json::Value::String(identity.completion_action.clone());
+fn apply_workflow_template(
+    brief: &mut serde_json::Value,
+    workflow: &EffectiveWorkflow,
+    peer_specialty: bool,
+) {
+    // A base peer identity describes an ordinary orchestrator. When the peer
+    // carries an explicit specialty, its specialty cards own the work text and
+    // its work specialty replaces the base orchestration workflow. An explicit
+    // master override of the peer identity stays authoritative.
+    let identity_override = workflow.projection["identity"]["source"] == "master_override";
+    if !peer_specialty || identity_override {
+        let identity = &workflow.identity;
+        brief["role_task"] = serde_json::Value::String(identity.role_task.clone());
+        append_workflow_responsibilities(brief, &identity.responsibilities);
+        brief["next_action"] = serde_json::Value::String(identity.next_action.clone());
+        brief["completion_action"] = serde_json::Value::String(identity.completion_action.clone());
+    }
     for specialty in &workflow.specialties {
         let template = &specialty.spec;
-        append_workflow_text(brief, "role_task", Some(&template.role_task), &specialty.target);
+        append_workflow_text(
+            brief,
+            "role_task",
+            Some(&template.role_task),
+            &specialty.target,
+        );
         append_workflow_responsibilities(brief, &template.responsibilities);
         append_workflow_text(
             brief,
@@ -489,10 +545,7 @@ fn append_workflow_text(
     });
 }
 
-fn append_workflow_responsibilities(
-    brief: &mut serde_json::Value,
-    responsibilities: &[String],
-) {
+fn append_workflow_responsibilities(brief: &mut serde_json::Value, responsibilities: &[String]) {
     let Some(current) = brief["responsibilities"].as_array_mut() else {
         return;
     };

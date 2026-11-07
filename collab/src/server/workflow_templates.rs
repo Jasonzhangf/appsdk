@@ -16,6 +16,13 @@ struct WorkflowTemplateAsset {
         String,
         crate::board::WorkflowTemplateSpec,
     >,
+    #[serde(default)]
+    specialty_templates: std::collections::BTreeMap<
+        String,
+        crate::board::WorkflowTemplateSpec,
+    >,
+    #[serde(default)]
+    specialty_aliases: std::collections::BTreeMap<String, Vec<String>>,
     coordination_rules: std::collections::BTreeMap<String, String>,
 }
 
@@ -49,6 +56,31 @@ fn workflow_base_card(target: &str) -> serde_json::Value {
     json!({
         "target": target,
         "source": "base",
+        "base_version": workflow_template_asset().base_version,
+        "revision": 0,
+    })
+}
+
+fn workflow_default_specialty(
+    role: &str,
+) -> Option<(&'static str, &'static crate::board::WorkflowTemplateSpec)> {
+    let normalized = role.trim().to_lowercase();
+    let asset = workflow_template_asset();
+    for (canonical, aliases) in &asset.specialty_aliases {
+        if aliases.iter().any(|alias| alias == &normalized) {
+            return asset
+                .specialty_templates
+                .get(canonical)
+                .map(|spec| (canonical.as_str(), spec));
+        }
+    }
+    None
+}
+
+fn workflow_default_specialty_card(target: &str) -> serde_json::Value {
+    json!({
+        "target": target,
+        "source": "builtin_default",
         "base_version": workflow_template_asset().base_version,
         "revision": 0,
     })
@@ -101,11 +133,16 @@ fn effective_workflow_templates(
         ),
     };
 
-    let mut roles = roles.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut roles = roles
+        .iter()
+        .map(|role| role.trim())
+        .filter(|role| !role.is_empty())
+        .collect::<Vec<_>>();
     roles.sort_unstable();
     roles.dedup();
     let mut specialties = Vec::new();
     let mut specialty_cards = Vec::new();
+    let mut selected_defaults = std::collections::BTreeSet::new();
     for role in roles {
         let target = format!("role:{role}");
         if let Some(entry) = configured.and_then(|targets| targets.get(&target)) {
@@ -114,6 +151,17 @@ fn effective_workflow_templates(
                 spec: entry.spec.clone(),
             });
             specialty_cards.push(workflow_override_card(&target, entry));
+            continue;
+        }
+        let Some((canonical, spec)) = workflow_default_specialty(role) else {
+            continue;
+        };
+        if selected_defaults.insert(canonical.to_owned()) {
+            specialties.push(EffectiveSpecialty {
+                target: canonical.to_owned(),
+                spec: spec.clone(),
+            });
+            specialty_cards.push(workflow_default_specialty_card(canonical));
         }
     }
 

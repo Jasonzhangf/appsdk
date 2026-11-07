@@ -10,8 +10,9 @@ Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独�
 安装产物；宿主入口链接到该安装目录。流程模板属于本 Skill 的资源，不是另一个 Skill。
 
 标准流程唯一资源为 [workflow-templates.json](references/workflow-templates.json)，
-基础版本为 1，只有 `master`、`peer` 两种身份模板。各自管理自己的目标、任务和执行
-流程，优先将有界执行交给独立 worker。peer 完工或停止前向现有 master 交回结果并申请
+基础版本为 1；身份流程和默认专长均从该源码资产编译。普通 peer 管理受托子目标，
+优先将有界执行交给独立 worker；明确 `worker`/`executor` 专长或任务合同指定直接
+执行时，该 peer 在合同边界内执行。peer 完工或停止前向现有 master 交回结果并申请
 下一步或 idle；reviewer/设计师同样适用。无 master 时不虚构审批者；master 不向自己申请。
 
 执行以本次 `collab context` 的 `role_brief` 为准：有效流程正文只在 `role_task`、
@@ -219,8 +220,11 @@ peer 默认向请求方、委托者或所属 master 回报，不向用户输出�
 工作角色是稳定名字的专长，例如 `designer`、`reviewer`。同一 peer 可有多个专长。
 它们不改变 master/peer 职责，也不增加项目权限。省略 `--work-roles` 保留原值，
 明确传空字符串清空。当前 master 可按用户指令为其他稳定名字设置角色。
-承担设计、规划或审查职责的角色另按
-[文件交接合同](#设计规划与审查角色的文件交接合同)产出并交接落盘文件，不直接执行实现。
+普通 peer 未带明确执行或固定专长时，保持受托目标编排职责。`worker`/`executor`
+只在已接受合同内执行；`patrol` 承担独立常驻检查，不接收 manager/master 的临时
+开发派单；`memory` 提炼事实和经验并修正失效结论；`architect` 按
+[文件交接合同](#设计规划与审查角色的文件交接合同)产出架构计划及代码准入文件。
+具体职责正文以当前 `collab context` 的 `role_brief` 为准。
 
 先判断用户要求：注册/恢复协作身份、设置工作角色、指派具体任务是三种独立操作，
 不是每次都要依次完成的检查表。“担任 iOS app 执行负责人”先按用户确认保存工作角色；
@@ -431,9 +435,10 @@ that recovery path; do not claim promotion or communication succeeded.
 ## Task routing and role responsibilities
 
 master 和 peer 的编排功能相同，区别是目标层级：master 管理项目大目标，peer
-管理受托子目标，两者都继续拆解、派发、资源管理、验收与交付。peer 不是直接执行
-worker；具体一次性编码、执行和观察由子 agent 承担。注册与恢复说明目标层级和
-职责，不用任务类型反推协作身份。
+管理受托子目标，两者都继续拆解、派发、资源管理、验收与交付。普通 peer 默认通过
+子 agent 完成具体一次性编码、执行和观察；明确 `worker`/`executor` 专长或任务合同
+指定直接执行时，peer 在合同边界内执行。注册与恢复说明目标层级和职责，不用任务
+类型反推协作身份。
 
 常规技术选择在授权内自行决定。事实问所属 peer，设计问设计师，范围、资源和协作
 冲突问 master。只有人类专属事实、未覆盖授权或显式硬约束变化才询问用户。复用已有
@@ -458,9 +463,17 @@ closure is a long-horizon goal.
 - An ordinary peer keeps the code-compatible wire role `worker` and derivation
   `peer`. It is the long-horizon orchestrator for an accepted goal: split and
   plan, run bounded work through independent `codex exec --profile gcm`
-  execution or observation workers, verify evidence, resolve blockers,
-  integrate assigned work, close owned resources, and report to the sender. It
-  does not inherit master authority.
+  execution or observation workers when it has no explicit execution specialty,
+  verify evidence, resolve blockers, integrate assigned work, close owned
+  resources, and report to the sender. It does not inherit master authority.
+  An explicit `worker` or `executor` specialty, or an assignment that names this
+  peer as the bounded executor, permits direct in-contract execution.
+- `patrol`, `memory`, and `architect` are work specialties, not new identity
+  authority. Patrol performs its authorized standing inspection and reports
+  evidenced findings, but does not take temporary implementation dispatch.
+  Memory refines source-backed facts and corrects stale conclusions through the
+  owning memory entry. Architect produces the on-disk design and code-admission
+  handoff; implementation and final review remain separate.
 - A managed-subagent record is legacy compatibility state. It preserves
   existing facts for diagnosis and grants no new production
   execution authority.

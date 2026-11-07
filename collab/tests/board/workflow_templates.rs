@@ -708,3 +708,538 @@ fn workflow_template_flag_conflicts_are_rejected_before_identity_side_effects() 
         "rejected workflow flags must not create an identity: {identities:?}"
     );
 }
+
+fn role_cards(snapshot: &Value) -> Vec<(String, String)> {
+    let mut cards: Vec<(String, String)> = snapshot["role_brief"]["workflow_template"]
+        ["specialties"]
+        .as_array()
+        .expect("workflow_template.specialties is an array")
+        .iter()
+        .map(|card| {
+            (
+                card["target"].as_str().unwrap_or("").to_owned(),
+                card["source"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect();
+    cards.sort();
+    cards
+}
+
+fn role_projection_text(snapshot: &Value) -> String {
+    let brief = &snapshot["role_brief"];
+    let mut parts: Vec<String> = Vec::new();
+    for field in ["role_task", "next_action", "completion_action"] {
+        if let Some(text) = brief[field].as_str() {
+            if !text.is_empty() {
+                parts.push(text.to_owned());
+            }
+        }
+    }
+    if let Some(responsibilities) = brief["responsibilities"].as_array() {
+        for item in responsibilities {
+            if let Some(text) = item.as_str() {
+                if !text.is_empty() {
+                    parts.push(text.to_owned());
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// Match a semantic marker in the projected role text without depending on the
+/// template's letter case. The assertions below check a few delivered duties,
+/// not a full copy of the template body.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+#[test]
+fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
+    let fixture = AppFixture::new();
+
+    let cases = [
+        (
+            "worker",
+            "worker",
+            ["task contract", "execute the actual work", "expand scope"],
+        ),
+        (
+            "patrol",
+            "patrol",
+            [
+                "temporary development or scheduling dispatch",
+                "Jenny",
+                "project memory",
+            ],
+        ),
+        (
+            "memory",
+            "memory",
+            [
+                "reusable facts",
+                "deduplicate",
+                "take over product development",
+            ],
+        ),
+        (
+            "architect",
+            "architect",
+            [
+                "effective requirements",
+                "single implementation owner",
+                "planning, implementation, and final review separate",
+            ],
+        ),
+    ];
+
+    for (role, target, phrases) in cases {
+        let snapshot = fixture.run_public(&["context", "--work-roles", role], THREAD_A);
+        assert_eq!(
+            snapshot["work_roles"],
+            json!([role]),
+            "{role}: work_roles should preserve the set value: {snapshot}"
+        );
+        assert_eq!(
+            role_cards(&snapshot),
+            vec![(target.to_owned(), "builtin_default".to_owned())],
+            "{role}: only the canonical default specialty card should project: {snapshot}"
+        );
+        let text = role_projection_text(&snapshot);
+        for phrase in phrases {
+            assert!(
+                contains_ci(&text, phrase),
+                "{role}: role_brief text must include {phrase:?}: {text}"
+            );
+        }
+        assert!(
+            text.contains("appsdk goal status --json") && text.contains("goal_path"),
+            "{role}: role_brief must explain the goal document entry without running it: {text}"
+        );
+    }
+
+    let last = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_A);
+    let repeated = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(
+        repeated["role_brief"], last["role_brief"],
+        "repeated context without role changes must not alter the role_brief: {repeated}"
+    );
+    assert_eq!(
+        role_cards(&repeated),
+        vec![("architect".to_owned(), "builtin_default".to_owned())],
+        "repeated context must keep the same built-in specialty card: {repeated}"
+    );
+}
+
+#[test]
+fn explicit_worker_peer_executes_directly_without_ordinary_peer_orchestration() {
+    let fixture = master_fixture();
+
+    // A peer with no execution specialty keeps the ordinary long-horizon
+    // orchestration contract.
+    let ordinary = fixture.run_public(&["context"], THREAD_B);
+    let ordinary_text = role_projection_text(&ordinary);
+    assert!(
+        contains_ci(
+            &ordinary_text,
+            "prefer assigning code implementation to subagents"
+        ),
+        "ordinary peer must keep the orchestrator workflow: {ordinary_text}"
+    );
+    assert!(
+        contains_ci(
+            &ordinary_text,
+            "split the accepted goal into non-overlapping bounded scopes"
+        ),
+        "ordinary peer must keep the delegated-goal dispatch duty: {ordinary_text}"
+    );
+
+    // The same peer with an explicit worker specialty performs the bounded work
+    // directly and must not inherit the unconditional dispatch instruction.
+    let worker = fixture.run_public(&["context", "--work-roles", "worker"], THREAD_B);
+    let worker_text = role_projection_text(&worker);
+    assert!(
+        !contains_ci(
+            &worker_text,
+            "split the accepted goal into non-overlapping bounded scopes"
+        ),
+        "worker specialty must not be told to dispatch subworkers first: {worker_text}"
+    );
+    assert!(
+        !contains_ci(&worker_text, "prefer assigning code implementation to subagents"),
+        "worker specialty must not inherit the ordinary peer's delegation-first identity: {worker_text}"
+    );
+    assert!(
+        contains_ci(&worker_text, "execute the actual work"),
+        "worker specialty must keep the direct execution duty: {worker_text}"
+    );
+    // The work specialty does not change identity, authority or goal level.
+    for field in ["role", "authority", "derivation", "goal_level"] {
+        assert_eq!(
+            worker["role_brief"][field], ordinary["role_brief"][field],
+            "worker specialty must not change role_brief.{field}: {worker}"
+        );
+    }
+}
+
+#[test]
+fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
+    let fixture = master_fixture();
+
+    // Fixed-duty and design specialties must not inherit the ordinary peer's
+    // unconditional dispatch and delegation-first instruction.
+    for role in ["patrol", "memory", "architect"] {
+        let snapshot = fixture.run_public(&["context", "--work-roles", role], THREAD_B);
+        let text = role_projection_text(&snapshot);
+        assert!(
+            !contains_ci(
+                &text,
+                "split the accepted goal into non-overlapping bounded scopes"
+            ),
+            "{role}: fixed or design specialty must not inherit dispatch duty: {text}"
+        );
+        assert!(
+            !contains_ci(&text, "prefer assigning code implementation to subagents"),
+            "{role}: fixed or design specialty must not inherit delegation-first identity: {text}"
+        );
+    }
+
+    // Mixing the architect with the worker keeps both work texts and keeps
+    // planning, implementation and final review separated.
+    let mixed = fixture.run_public(&["context", "--work-roles", "architect,worker"], THREAD_B);
+    let mixed_text = role_projection_text(&mixed);
+    assert!(
+        !contains_ci(&mixed_text, "temporary development or scheduling dispatch"),
+        "patrol specialization boundaries are unrelated to this mix"
+    );
+    for phrase in [
+        "planning, implementation, and final review separate",
+        "produce a detailed architecture or plan file on disk",
+        "execute the actual work",
+    ] {
+        assert!(
+            contains_ci(&mixed_text, phrase),
+            "mixed architect/worker must keep {phrase:?}: {mixed_text}"
+        );
+    }
+    assert!(
+        !contains_ci(
+            &mixed_text,
+            "split the accepted goal into non-overlapping bounded scopes"
+        ),
+        "mixed specialty roles must not restore the ordinary peer dispatch duty: {mixed_text}"
+    );
+}
+
+#[test]
+fn builtin_aliases_are_canonical_and_exact_overrides_are_not_swallowed() {
+    let fixture = master_fixture();
+    fixture.run_public(&["context"], THREAD_B);
+
+    let aliases = fixture.run_public(
+        &[
+            "context",
+            "--work-roles",
+            "worker,executor,巡察者,记忆 agent,架构师",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(
+        aliases["work_roles"],
+        json!(["executor", "worker", "巡察者", "架构师", "记忆 agent"]),
+        "stored specialty values must not be rewritten by alias matching: {aliases}"
+    );
+    let mut targets: Vec<String> = role_cards(&aliases)
+        .iter()
+        .map(|(target, _)| target.clone())
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![
+            "architect".to_owned(),
+            "memory".to_owned(),
+            "patrol".to_owned(),
+            "worker".to_owned()
+        ],
+        "同义角色必须按 canonical 去重，且不能出现多个 worker 正文: {aliases:?}"
+    );
+
+    let custom_worker = workflow_spec(
+        "Custom executor identity task",
+        "Custom executor responsibility",
+        "Custom executor next action",
+        "Custom executor completion",
+    );
+    let custom_executor = workflow_spec(
+        "Custom designer identity task",
+        "Custom designer responsibility",
+        "Custom designer next action",
+        "Custom designer completion",
+    );
+    fixture.run_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:worker",
+            "--workflow-template",
+            &custom_worker,
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:executor",
+            "--workflow-template",
+            &custom_executor,
+        ],
+        THREAD_A,
+    );
+
+    let exact = fixture.run_public(
+        &["context", "--work-roles", "worker,executor,巡察者"],
+        THREAD_B,
+    );
+    assert_eq!(
+        exact["work_roles"],
+        json!(["executor", "worker", "巡察者"]),
+        "exact stored role values must remain exact: {exact}"
+    );
+    assert_eq!(
+        role_cards(&exact),
+        vec![
+            ("patrol".to_owned(), "builtin_default".to_owned()),
+            ("role:executor".to_owned(), "master_override".to_owned()),
+            ("role:worker".to_owned(), "master_override".to_owned()),
+        ],
+        "exact overrides must win over canonical defaults and remain separate cards: {exact}"
+    );
+    let text = role_projection_text(&exact);
+    assert!(
+        text.contains("Custom executor identity task")
+            && text.contains("Custom designer identity task"),
+        "exact override text must be projected: {text}"
+    );
+    assert!(
+        text.contains("Jenny") || text.contains("patrol"),
+        "built-in default card for patrol must still appear alongside exact overrides: {text}"
+    );
+}
+
+#[test]
+fn specialty_reset_clear_and_role_labels_keep_authority_and_side_effects() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = master_fixture();
+    let baseline = fixture.run_public(&["context"], THREAD_B);
+
+    let worker = fixture.run_public(&["context", "--work-roles", "worker"], THREAD_B);
+    assert_eq!(
+        role_cards(&worker),
+        vec![("worker".to_owned(), "builtin_default".to_owned())]
+    );
+
+    let custom_worker = workflow_spec(
+        "Custom reset target task",
+        "Custom reset target responsibility",
+        "Custom reset target next action",
+        "Custom reset target completion",
+    );
+    fixture.run_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:worker",
+            "--workflow-template",
+            &custom_worker,
+        ],
+        THREAD_A,
+    );
+    // The override targets the worker role that the peer holds. Observe it
+    // through the peer's next projection, not the master's own role labels.
+    let overridden = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(
+        role_cards(&overridden),
+        vec![("role:worker".to_owned(), "master_override".to_owned())],
+        "exact override replaces built-in default for that target: {overridden}"
+    );
+
+    let reset_receipt = fixture.run_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:worker",
+            "--reset-workflow-template",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        reset_receipt["workflow_template_update"]["outcome"],
+        json!("reset"),
+        "reset must clear exact override for role:worker: {reset_receipt}"
+    );
+    let after_reset = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(
+        role_cards(&after_reset),
+        vec![("worker".to_owned(), "builtin_default".to_owned())],
+        "reset role with built-in specialty must return to the default card: {after_reset}"
+    );
+    let text = role_projection_text(&after_reset);
+    assert!(
+        !text.contains("Custom reset target task"),
+        "reset must not retain exact override text: {text}"
+    );
+
+    let translator = fixture.run_public(&["context", "--work-roles", "translator"], THREAD_B);
+    assert_eq!(
+        translator["work_roles"],
+        json!(["translator"]),
+        "unknown specialty is stored as given: {translator}"
+    );
+    let custom_translator = workflow_spec(
+        "Custom unknown target task",
+        "Custom unknown target responsibility",
+        "Custom unknown target next action",
+        "Custom unknown target completion",
+    );
+    fixture.run_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:translator",
+            "--workflow-template",
+            &custom_translator,
+        ],
+        THREAD_A,
+    );
+    let unknown = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(
+        role_cards(&unknown),
+        vec![("role:translator".to_owned(), "master_override".to_owned())],
+        "unknown exact override remains visible: {unknown}"
+    );
+    let reset_unknown = fixture.run_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:translator",
+            "--reset-workflow-template",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        reset_unknown["workflow_template_update"]["outcome"],
+        json!("reset"),
+        "reset unknown specialty must return to no specialty card: {reset_unknown}"
+    );
+    let after_reset_unknown = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(
+        role_cards(&after_reset_unknown),
+        vec![] as Vec<(String, String)>,
+        "reset unknown specialty must remove the specialty card: {after_reset_unknown}"
+    );
+    assert!(
+        !role_projection_text(&after_reset_unknown).contains("Custom unknown target task"),
+        "reset unknown specialty must remove its text: {after_reset_unknown}"
+    );
+
+    let labeled = fixture.run_public(&["context", "--work-roles", "master,ceo"], THREAD_B);
+    assert_eq!(
+        labeled["identity"]["role"], baseline["identity"]["role"],
+        "work-role labels must not change the wire identity: {labeled}"
+    );
+    assert_eq!(
+        labeled["role_brief"]["role"], baseline["role_brief"]["role"],
+        "work-role labels must not grant master/CEO role_brief: {labeled}"
+    );
+    assert_eq!(
+        labeled["role_brief"]["authority"], baseline["role_brief"]["authority"],
+        "work-role labels must not change authority fields: {labeled}"
+    );
+    let denied = fixture.command_public(
+        &[
+            "context",
+            "--workflow-target",
+            "role:worker",
+            "--workflow-template",
+            &custom_worker,
+        ],
+        THREAD_B,
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&denied.stdout),
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    assert!(
+        !denied.status.success(),
+        "a work-role label alone must not authorize workflow template mutation: {combined}"
+    );
+    assert!(
+        combined.contains("WORKFLOW_TEMPLATE_MASTER_REQUIRED"),
+        "mutation by non-master must keep the original error: {combined}"
+    );
+
+    let before = fixture.current_state();
+    let log_path = fixture.root.join("appsdk-calls.log");
+    let appsdk = fixture.path_prepend.join("appsdk");
+    std::fs::write(
+        &appsdk,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            log_path.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&appsdk).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&appsdk, permissions).unwrap();
+
+    let repeated_label = fixture.run_public(&["context"], THREAD_B);
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "notification_subscriptions",
+        "workflow_templates",
+        "name_work_roles",
+    ] {
+        assert_eq!(
+            before[field], after[field],
+            "context must not create task/subscription/template/role state: {field}"
+        );
+    }
+    assert_eq!(
+        repeated_label["role_brief"], labeled["role_brief"],
+        "repeated context must not alter projection: {repeated_label}"
+    );
+    assert!(
+        !log_path.exists() || std::fs::metadata(&log_path).unwrap().len() == 0,
+        "context must not invoke appsdk goal or any target-side command: {log_path:?}"
+    );
+
+    let cleared = fixture.run_public(&["context", "--work-roles", ""], THREAD_B);
+    assert_eq!(
+        cleared["work_roles"],
+        json!([]),
+        "clearing work roles must return an empty set: {cleared}"
+    );
+    assert_eq!(
+        role_cards(&cleared),
+        vec![] as Vec<(String, String)>,
+        "cleared roles must remove specialty projections: {cleared}"
+    );
+    let after_clear = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(
+        after_clear["work_roles"],
+        json!([]),
+        "repeated context after clearing must keep an empty role set: {after_clear}"
+    );
+    assert_eq!(
+        role_cards(&after_clear),
+        vec![] as Vec<(String, String)>,
+        "repeated context after clearing must keep no specialty card: {after_clear}"
+    );
+}

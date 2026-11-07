@@ -101,6 +101,14 @@ manager 核实下级对进度、完成、阻塞和验收的声明，检查相关
 [统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)。
 无可用 peer 时保留长程目标并拆分 worker，不等待注册。
 
+普通 peer 是受托子目标的编排者，wire role `worker` 不改变该身份。只有当前有效
+工作角色明确为 `worker`/`executor`，或任务合同明确指定直接执行时，peer 才在合同
+边界内直接执行，不得仅因 peer 身份强制先派子 worker。`patrol` 承担独立常驻检查，
+不接收 manager/master 的临时开发派单；`memory` 提炼事实和经验并修正失效结论；
+`architect` 产出架构计划及代码准入文件。默认职责正文由源码
+[workflow-templates.json](references/workflow-templates.json) 编译，`collab context`
+只按当前身份、角色、精确 override 和任务边界投影；本入口不复制默认正文。
+
 派单使用 [Worker 合同](../codex-orchestrator/references/worker-contract.md#任务合同模板)，
 明确允许/禁止、验收、升级与停止点；peer 另带任务 ID、稳定双方身份、目标层级和
 集成分工。范围内投入和预算边界不另设一套。Planner/Reviewer 模型、并发调度、接管
@@ -129,6 +137,10 @@ manager 核实下级对进度、完成、阻塞和验收的声明，检查相关
 [goal 登记与关闭](operations.md#register-the-long-horizon-goal-before-dispatch)。
 master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体缺口，不提升身份
 绕过。
+
+每个角色维护自己的目标文档。文档先写长期目标、范围、硬约束、交付和验收，再写当前
+增量及实现细节。更新细节前回看长期目标；重大细节变化同时修改长期目标。文档、board、
+笔记和角色投影不替代正式 goal 登记回执。
 
 ## Registered patrol duties
 

@@ -188,6 +188,38 @@ Jenny 行缺 layout_binding_id，旧 resolver 又把 overview 引用算成候选
 shell。它不能用作专用 server 项目 tab 的首位证据。HumanAgent 还有两个项目 scope
 指向同一 pane 的存量记录，精确项目 owner 归并尚未完成。
 
+## 任务交付与 daemon 可用性
+
+0.2.0436 曾通过正常 Context，之后公开 status/send 返回 DAEMON_UNKNOWN，进程仍存活。
+进程采样与诊断链接图把活动请求定位到 task deliver 的候选发现及子进程输出等待。
+现有实现持有业务 State 锁调用 Git/LayerFS。无关请求校验和后台名字观察随后等待该锁。
+外部命令持续等待的具体原因尚未确定，系统确认窗口也尚未得到用户确认。
+
+以下为已接受、待公开红绿验证的修正流。删除普通交付的自动候选发现，保留实际集成
+证据和当前任务的权限、审核、集成、资源及清理义务。
+
+```mermaid
+flowchart TD
+ S([一次 task deliver]):::boundary --> A[认证当前调用者并读取当前任务]:::action
+ A --> B{owner 状态 executor 和 block 审批均有效吗}:::decision
+ B -->|否| E[返回原有明确拒绝]:::action
+ B -->|是| C[校验交付证据和声明工作空间]:::action
+ C --> D[(原子保存当前交付及审核义务)]:::data
+ D --> N[提交必要审核通知 返回真实交付结果]:::action
+ C -->|无效| E
+ D -->|写入失败| E
+ E --> X([本次交付结果]):::boundary
+ N --> X
+ classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A
+ classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A
+ classDef decision fill:#FFF4CC,stroke:#D97706,color:#0F172A
+ classDef data fill:#F1EAFE,stroke:#7C3AED,color:#0F172A
+```
+
+代码交付继续要求审核、真实集成证据和清理。显式只读交付保留其当前生命周期。
+公开回归须让延迟 Git 命令或继承打开的输出管道保持未释放，同时确认交付、无关
+Ping 和另一个身份的 Context 都能完成。当前进程的后续恢复另行验收。
+
 ## 当前证据与 owner
 
 任务证据根：

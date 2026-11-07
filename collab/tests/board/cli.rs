@@ -43,6 +43,137 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
     )
 }
 
+fn delivery_without_candidate_probe(mode: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct ReleaseProbe(PathBuf);
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"release");
+        }
+    }
+
+    let fixture = AppFixture::new();
+    let other = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let project = fixture.project.canonicalize().unwrap();
+    let git_output = Command::new("which").arg("git").output().unwrap();
+    assert!(git_output.status.success());
+    let real_git = String::from_utf8(git_output.stdout).unwrap().trim().to_owned();
+    for arguments in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-q", "-m", "initial fixture"],
+    ] {
+        assert!(Command::new(&real_git).current_dir(&project).args(arguments).status().unwrap().success());
+    }
+    let worktree = fixture.root.join("delivery-worktree");
+    assert!(Command::new(&real_git).current_dir(&project)
+        .args(["worktree", "add", "-q", "-b", "delivery-liveness"])
+        .arg(&worktree).arg("main").status().unwrap().success());
+    let worktree = worktree.canonicalize().unwrap();
+    fixture.run_public(&["task", "register", "delivery-liveness"], THREAD_B);
+
+    let entered = fixture.root.join("candidate-entered");
+    let release = fixture.root.join("candidate-release");
+    let wrapper = fixture.path_prepend.join("git");
+    let script = format!(r#"#!/usr/bin/env python3
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+release = Path({release})
+if sys.argv[1:] == ["--hold-candidate-output"]:
+    while not release.exists():
+        time.sleep(0.01)
+    sys.exit(0)
+if os.getcwd() == {worktree} and sys.argv[1:] == ["rev-parse", "--verify", "HEAD^{{commit}}"]:
+    Path({entered}).write_text({mode})
+    if {mode} == "inherited-output":
+        subprocess.Popen([sys.executable, __file__, "--hold-candidate-output"])
+    else:
+        while not release.exists():
+            time.sleep(0.01)
+os.execv({real_git}, ["git"] + sys.argv[1:])
+"#,
+        release=serde_json::to_string(&release).unwrap(),
+        worktree=serde_json::to_string(&worktree).unwrap(),
+        entered=serde_json::to_string(&entered).unwrap(),
+        mode=serde_json::to_string(mode).unwrap(),
+        real_git=serde_json::to_string(&real_git).unwrap(),
+    );
+    std::fs::write(&wrapper, script).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (completed, before_release, results) = std::thread::scope(|scope| {
+        // Drop this before scoped threads are joined, even if an assertion fails.
+        let _release = ReleaseProbe(release.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let delivered = tx.clone();
+        let fixture_ref = &fixture;
+        let worktree_ref = &worktree;
+        scope.spawn(move || {
+            let output = fixture_ref.command_public(&["task", "deliver", "delivery-liveness",
+                "--worktree", worktree_ref.to_str().unwrap(), "--evidence", "real delivery evidence"], THREAD_B);
+            delivered.send(("delivery", output)).unwrap();
+        });
+        let mut results = HashMap::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !entered.exists() && results.is_empty() && Instant::now() < deadline {
+            if let Ok((name, output)) = rx.recv_timeout(Duration::from_millis(20)) {
+                results.insert(name, output);
+            }
+        }
+        for (name, arguments) in [("ping", vec!["status"]), ("context", vec!["context"])] {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                tx.send((name, fixture_ref.command_public(&arguments, THREAD_A))).unwrap();
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while results.len() < 3 && Instant::now() < deadline {
+            if let Ok((name, output)) = rx.recv_timeout(Duration::from_millis(20)) {
+                results.insert(name, output);
+            }
+        }
+        let completed = results.len() == 3 && results.values().all(|output| output.status.success());
+        let before_release = results.keys().copied().collect::<Vec<_>>();
+        std::fs::write(&release, b"release").unwrap();
+        while results.len() < 3 {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok((name, output)) => { results.insert(name, output); }
+                Err(_) => break,
+            }
+        }
+        (completed, before_release, results)
+    });
+    assert!(completed,
+        "{mode}: optional candidate probe entered={}, completed before release={:?}",
+        entered.exists(), before_release);
+    assert!(!entered.exists(), "delivery still queried an automatic candidate");
+    let delivered: Value = serde_json::from_slice(&results["delivery"].stdout).unwrap();
+    assert_eq!(delivered["delivery_kind"], "code");
+    assert_eq!(delivered["status"], "delivered");
+    assert_eq!(delivered["evidence"], "real delivery evidence");
+    assert_eq!(delivered["delivery_complete"], false);
+    let context: Value = serde_json::from_slice(&results["context"].stdout).unwrap();
+    assert_eq!(context["identity"]["worker_id"], other["identity"]["worker_id"]);
+    let status = fixture.run_public(&["task", "status", "delivery-liveness"], THREAD_B);
+    assert_eq!(status["status"], "delivered");
+}
+
+#[test]
+fn task_delivery_candidate_delay_cannot_freeze_context() {
+    delivery_without_candidate_probe("delayed-command");
+}
+
+#[test]
+fn task_delivery_inherited_output_cannot_freeze_context() {
+    delivery_without_candidate_probe("inherited-output");
+}
+
 #[test]
 fn layerfs_task_register_status_and_close_use_the_generic_layerfs_entry_only() {
     use std::os::unix::fs::PermissionsExt;

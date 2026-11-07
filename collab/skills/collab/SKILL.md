@@ -101,6 +101,22 @@ manager 核实下级对进度、完成、阻塞和验收的声明，检查相关
 [统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)。
 无可用 peer 时保留长程目标并拆分 worker，不等待注册。
 
+### 派单顺序与一 peer 一任务
+
+manager（master 与各层 peer）按固定顺序选择承接任务的 peer：默认优先 DSH peer 和
+Codex TUI peer，二者为同一优先层；该层没有合适且可用的承接者时，最后才选择 Codex
+Desktop peer。先按任务权限、能力、依赖和实际容量筛选，再应用此宿主顺序；用户明确
+指定承接者时按其指定执行。
+
+同一 peer 一次只持有一个未完成实现或主责任务。manager 不把多个并发实现任务叠给同一
+peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
+peer 与占用状态由 board 的真实任务视图计算。
+
+独立审查只由非本任务执行者的 peer 或独立 review subagent 承担。没有合适且可用的
+reviewer 时，manager 指定另一名未持有该任务的 peer（`architect` 或 `expert` 优先），
+或派独立 review subagent；不由执行同一任务的 peer 自查复核，也不为凑 review 让同一
+peer 叠加第二个任务。实现者、Planner 与最终 reviewer 保持分离。
+
 普通 peer 是受托子目标的编排者，wire role `worker` 不改变该身份。只有当前有效
 工作角色明确为 `worker`/`executor`，或任务合同明确指定直接执行时，peer 才在合同
 边界内直接执行，不得仅因 peer 身份强制先派子 worker。`patrol` 承担独立常驻检查，

@@ -311,13 +311,25 @@ fn prepare_held_git_integration() -> HeldGitIntegration {
         .trim()
         .to_owned();
 
+    let worktree = fixture.project.join("integration-worktree");
+    assert!(Command::new(&real_git)
+        .current_dir(&project)
+        .args(["worktree", "add", "-q", "-b", "integration-liveness"])
+        .arg(&worktree)
+        .arg("main")
+        .status()
+        .unwrap()
+        .success());
+    let worktree = worktree.canonicalize().unwrap();
+
     fixture.run_public(&["task", "register", "integration-liveness"], THREAD_B);
     let delivered = fixture.run_public(
         &[
             "task",
             "deliver",
             "integration-liveness",
-            "--no-candidate",
+            "--worktree",
+            worktree.to_str().unwrap(),
             "--evidence",
             "delivered for integration liveness",
         ],
@@ -408,11 +420,19 @@ fn wait_for_path(path: &Path, timeout: Duration) {
 fn parse_public_response(output: std::process::Output) -> (bool, Value) {
     let success = output.status.success();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
-        panic!(
-            "collab CLI did not emit JSON; stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let response = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("collab response: "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "collab CLI did not emit JSON; stdout={} stderr={stderr}",
+                    String::from_utf8_lossy(&output.stdout),
+                )
+            });
+        serde_json::from_str(response).unwrap_or_else(|error| {
+            panic!("collab CLI error response is not JSON: {error}; response={response}")
+        })
     });
     let value = value
         .get("result")
@@ -586,12 +606,14 @@ fn task_integration_held_git_rejects_changed_review_subject() {
                 THREAD_B,
             );
         }
+        let worktree = fixture.project.join("integration-worktree");
         fixture.run_public(
             &[
                 "task",
                 "deliver",
                 "integration-liveness",
-                "--no-candidate",
+                "--worktree",
+                worktree.to_str().unwrap(),
                 "--evidence",
                 "redelivered after held integration proof started",
             ],

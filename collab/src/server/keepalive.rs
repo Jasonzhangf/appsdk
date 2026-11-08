@@ -331,12 +331,46 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                     super::state::MasterWakeSignal::SubagentStatus {
                         subagent_id: child.id.clone(),
                     }
+                } else if task_revision_changed
+                    && record.idle_episode_notices == 0
+                    && record.idle_episode_stopped == false
+                {
+                    // A revision change qualifies a new idle notification even
+                    // when the worker stayed in the live idle set the whole
+                    // time; the generic WorkerIdle accumulator would otherwise
+                    // treat it as the already-notified same idle edge. The
+                    // same worker is intentionally allowed to enter
+                    // newly_idle_workers once per revision.
+                    super::state::MasterWakeSignal::WorkerIdleRequalify {
+                        worker_id: worker.id.clone(),
+                    }
                 } else {
                     super::state::MasterWakeSignal::WorkerIdle {
                         worker_id: worker.id.clone(),
                     }
                 };
                 events.push(Event::MasterWakeSignal { signal, at_ms: now });
+            } else if is_idle
+                && idle_record_ready
+                && record.idle_episode_notices > 0
+                && !is_live_master
+            {
+                // Same-episode return to idle: restore the truthful live idle
+                // projection without re-qualifying a notice. Managed children
+                // use their own `subagent:<id>` accumulator key. Only emit the
+                // signal when a transient Working edge actually removed the
+                // worker, so a continuously idle, already-notified worker does
+                // not produce a no-op durable event on every tick.
+                let key = match &managed {
+                    Some(child) => format!("subagent:{}", child.id),
+                    None => worker.id.clone(),
+                };
+                if !state.master_wake.idle_workers.contains(&key) {
+                    events.push(Event::MasterWakeSignal {
+                        signal: super::state::MasterWakeSignal::IdleMembership { key },
+                        at_ms: now,
+                    });
+                }
             } else if working_signal_due {
                 let signal = if let Some(child) = &managed {
                     super::state::MasterWakeSignal::SubagentWorking {
@@ -1760,6 +1794,20 @@ mod tests {
             1,
             "same task revision runtime flap must not re-notify"
         );
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                state
+                    .master_wake
+                    .idle_workers
+                    .contains(&"worker".to_string()),
+                "a same-revision return to idle must restore the live idle projection"
+            );
+            assert!(
+                state.master_wake.newly_idle_workers.is_empty(),
+                "restoring live idle membership must not re-qualify a notice"
+            );
+        }
         // A real actionable-status change is a new revision and re-notifies once.
         let mut changed = server.state.lock().unwrap().tasks["task-storm"].clone();
         changed.status = "rework".into();
@@ -1774,6 +1822,102 @@ mod tests {
             "a new task revision must re-notify once"
         );
         tick_at(&server, now + 32);
+        assert_eq!(idle_notice_count(&server), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A real actionable-task revision change must notify once while the
+    /// worker never leaves the idle state (no Busy transition), and must stay
+    /// quiet on later ticks with the same revision.
+    #[test]
+    fn idle_storm_still_idle_revision_change_notifies_once() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
+        bind_session(&server, "worker", "current");
+        let now = super::super::state::now_ms();
+        server.commit(&[Event::TaskCreated {
+            task: task("task-still", "worker", "working", now),
+        }]);
+        observe(&server, Idle, "current");
+        tick_at(&server, now);
+        set_master_idle(&server);
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+        // Consume so the gate under test is the episode budget, not the
+        // unconsumed same-set batch gate.
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master" && message.subject.as_deref() == Some("worker-idle")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        server.commit(&[Event::Acked {
+            ids: vec![first_id],
+        }]);
+        // Worker stays Idle; the actionable status change is a new revision.
+        let mut changed = server.state.lock().unwrap().tasks["task-still"].clone();
+        changed.status = "reviewed".into();
+        server.commit(&[Event::TaskUpdated { task: changed }]);
+        tick_at(&server, now + 2);
+        assert_eq!(
+            idle_notice_count(&server),
+            2,
+            "a real revision change while still idle must re-notify once"
+        );
+        tick_at(&server, now + 3);
+        tick_at(&server, now + 4);
+        assert_eq!(
+            idle_notice_count(&server),
+            2,
+            "later same-revision ticks must not add another notice"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A revision change must not be suppressed by an older idle notice that
+    /// the master has not consumed yet.
+    #[test]
+    fn idle_storm_still_idle_revision_change_notifies_with_unconsumed_notice() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
+        bind_session(&server, "worker", "current");
+        let now = super::super::state::now_ms();
+        server.commit(&[Event::TaskCreated {
+            task: task("task-still-unconsumed", "worker", "working", now),
+        }]);
+        observe(&server, Idle, "current");
+        tick_at(&server, now);
+        set_master_idle(&server);
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+        // Leave the first notice pending. The producer must still release the
+        // new revision qualification once.
+        let mut changed = server.state.lock().unwrap().tasks["task-still-unconsumed"].clone();
+        changed.status = "reviewed".into();
+        server.commit(&[Event::TaskUpdated { task: changed }]);
+        tick_at(&server, now + 2);
+        assert_eq!(
+            idle_notice_count(&server),
+            2,
+            "an unconsumed older notice must not suppress a new task revision"
+        );
+        tick_at(&server, now + 3);
         assert_eq!(idle_notice_count(&server), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2121,6 +2265,67 @@ mod tests {
         tick_at(&server, now + 2_700_000);
         assert_eq!(status_count(&server), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_storm_managed_same_revision_flap_restores_membership() {
+        let (server, root) = test_server();
+        register(&server, "master", "thread-master");
+        register(&server, "child", "thread-child");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
+        let now = super::super::state::now_ms();
+        server.commit(&[
+            Event::SubagentUpdated {
+                subagent: managed("managed", "master", "child", "working", now),
+            },
+            Event::TaskCreated {
+                task: task("task-child", "child", "working", now),
+            },
+        ]);
+        tick_at(&server, now + 900_000);
+        set_managed_status(&server, "idle");
+        tick_at(&server, now + 1_800_000);
+        assert_eq!(status_count(&server), 1);
+        // Same-revision flap: working removes live idle capacity, then the
+        // return to idle restores membership without a second notice.
+        set_managed_status(&server, "working");
+        tick_at(&server, now + 1_800_001);
+        assert!(
+            !server
+                .state
+                .lock()
+                .unwrap()
+                .master_wake
+                .idle_workers
+                .contains(&"subagent:managed".to_string()),
+            "a working managed child leaves live idle capacity"
+        );
+        set_managed_status(&server, "idle");
+        tick_at(&server, now + 1_900_000);
+        assert_eq!(
+            status_count(&server),
+            1,
+            "same-revision managed flap must not re-notify"
+        );
+        let state = server.state.lock().unwrap();
+        assert!(
+            state
+                .master_wake
+                .idle_workers
+                .contains(&"subagent:managed".to_string()),
+            "a same-revision return to idle must restore managed live idle membership"
+        );
+        assert!(state.master_wake.newly_idle_workers.is_empty());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn set_managed_status(server: &Server, status: &str) {
+        let mut state = server.state.lock().unwrap();
+        let mut child = state.subagents["managed"].clone();
+        child.status = status.into();
+        state.subagents.insert(child.id.clone(), child);
     }
 
     #[test]

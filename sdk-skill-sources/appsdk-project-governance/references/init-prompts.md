@@ -1,6 +1,10 @@
 # AppSDK initialization and optional Collab coordination
 
 Use [bootstrap-migration](bootstrap-migration.md) for AppSDK project admission.
+When admission must define a real business flow, use the existing preparation
+fields for its skeleton, Operations, operators, entrypoints, and acceptance.
+Follow [Skeleton, Operations and operators](bootstrap-migration.md#skeleton-operations-and-operators);
+do not create a second intake or a mandatory graph list.
 Enable Collab only when explicitly requested; independent work needs no registration.
 
 ## State ownership

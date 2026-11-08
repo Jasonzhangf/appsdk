@@ -61,6 +61,10 @@ current ledger version, and use the SDK review context for all applicable items.
 - AppSDK quality, safety and evidence gates are mandatory when applicable.
   Guidance and Memory are auxiliary; no plan or memory write is required by
   default. Select persistent Guidance when it helps the task.
+- For skeleton, Operation, reusable operator, or graph-configuration changes,
+  follow the installed `appsdk-project-governance` Skill's
+  `references/bootstrap-migration.md` section `Skeleton, Operations and operators`.
+  Do not add a parallel registry, schema, or approval checklist.
 - When using Guidance, bind plans to current goal, task, module, owner, scope
   and declared rule sources. Do not introduce candidate identity or freeze
   ceremonies for ordinary development.

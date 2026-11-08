@@ -217,6 +217,44 @@ pub fn next_queued_for_slot<'a>(
         })
 }
 
+/// True when one slot already carries a claim or running phase. A slot may
+/// hold at most one active execute claim; queued items are allowed to wait.
+pub fn slot_has_active_claim(
+    phases: &[TicketPhaseRecord],
+    slot_name: &str,
+    except: Option<(&str, u64)>,
+) -> bool {
+    phases.iter().any(|phase| {
+        phase.slot_name.as_deref() == Some(slot_name)
+            && matches!(
+                phase.status,
+                TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+            )
+            && !except.is_some_and(|(task_id, batch)| {
+                phase.task_id == task_id && phase.batch == batch
+            })
+    })
+}
+
+/// The latest execute phase of one task, regardless of status. Reopen and
+/// terminal transitions always use the newest batch so an older completed
+/// attempt can never be resurrected.
+pub fn latest_execute_phase<'a>(
+    phases: &'a [TicketPhaseRecord],
+    task_id: &str,
+) -> Option<&'a TicketPhaseRecord> {
+    phases
+        .iter()
+        .filter(|phase| phase.task_id == task_id && phase.phase == TicketPhaseKind::Execute)
+        .max_by_key(|phase| phase.batch)
+}
+
+/// Dependency completion is a task-level fact, independent of position in the
+/// queue. A cancelled task never satisfies a dependency.
+pub fn dependency_task_completed(status: &str) -> bool {
+    matches!(status, "delivered" | "accepted" | "merged" | "closed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

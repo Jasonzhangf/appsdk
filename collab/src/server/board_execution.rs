@@ -100,6 +100,33 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             json!({"task_id": id}),
         );
     }
+    if admitted_public {
+        let Some((target_slot, _, _)) = name_session.as_ref() else {
+            return Resp::err("TICKET_SLOT_MISSING: current identity has no execution slot");
+        };
+        if let Some(phase) = claimable.as_ref() {
+            if !phase
+                .depends_on
+                .iter()
+                .all(|dep| ticket_dependency_satisfied(&state, &state.ticket_phases, dep))
+            {
+                return Resp::err_data(
+                    "TICKET_DEPENDENCY_BLOCKED: dependencies are not complete",
+                    json!({"task_id": id, "depends_on": phase.depends_on}),
+                );
+            }
+            if crate::server::ticket_state::slot_has_active_claim(
+                &state.ticket_phases,
+                target_slot,
+                Some((phase.task_id.as_str(), phase.batch)),
+            ) {
+                return Resp::err_data(
+                    "TICKET_SLOT_BUSY: the slot already holds an active execute claim",
+                    json!({"task_id": id, "slot": target_slot}),
+                );
+            }
+        }
+    }
     task.owner = actor.clone();
     task.status = "working".into();
     task.updated_ms = now_ms();
@@ -114,13 +141,13 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     if let (Some(phase), Some((slot_name, _, binding_generation))) =
         (claimable, name_session.as_ref())
     {
-        let mut claimed = phase;
-        claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
-        claimed.slot_name = Some(slot_name.clone());
-        claimed.binding_generation = *binding_generation;
-        claimed.attempt_generation = claimed.attempt_generation.saturating_add(1);
-        claimed.wait_reason = None;
-        events.push(Event::TicketPhaseRecorded { phase: claimed });
+        events.push(Event::TicketPhaseRecorded {
+            phase: claim_ticket_phase(
+                phase,
+                slot_name,
+                *binding_generation,
+            ),
+        });
     }
     if let Some((name, session_id, _)) = name_session {
         events.push(Event::TaskAssignmentUpdated { assignment: name_state::TaskAssignment {

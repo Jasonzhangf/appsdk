@@ -115,6 +115,118 @@ fn overlay_work_policy(base: &mut crate::board::WorkPolicy, patch: &crate::board
     }
 }
 
+/// Roles whose names are reserved for patrol and memory duties. They do not
+/// receive ordinary development work unless a ticket explicitly pins them.
+pub(crate) fn protected_dispatch_roles(roles: &[String]) -> bool {
+    roles
+        .iter()
+        .any(|role| matches!(role.as_str(), "patrol" | "memory"))
+}
+
+/// Dependency completion is task-level, not queue-level. Reuse one predicate so
+/// manual claim, automatic continuation and start share the same edge.
+pub(crate) fn ticket_dependency_satisfied(
+    state: &State,
+    phases: &[crate::server::ticket_state::TicketPhaseRecord],
+    dep: &str,
+) -> bool {
+    use crate::server::ticket_state::{dependency_task_completed, TicketPhaseKind, TicketPhaseStatus};
+    state.tasks.get(dep).is_some_and(|task| {
+        dependency_task_completed(&task.status)
+    }) || phases.iter().any(|phase| {
+        phase.task_id == dep
+            && phase.phase == TicketPhaseKind::Execute
+            && phase.status == TicketPhaseStatus::Completed
+    })
+}
+
+/// Claim mutation shared by admission, continuation, invitation accept and
+/// manual claim. Keeping it in one place lets the active-attempt rules stay
+/// identical on every entry.
+pub(crate) fn claim_ticket_phase(
+    mut phase: crate::server::ticket_state::TicketPhaseRecord,
+    slot_name: &str,
+    binding_generation: u64,
+) -> crate::server::ticket_state::TicketPhaseRecord {
+    phase.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
+    phase.slot_name = Some(slot_name.to_owned());
+    phase.binding_generation = binding_generation;
+    phase.attempt_generation = phase.attempt_generation.saturating_add(1);
+    phase.wait_reason = None;
+    phase
+}
+
+/// Revoke every non-terminal phase of one task in the same commit as its task
+/// cancel or close. The returned phase records keep history and release the
+/// slot's active-claim reservation.
+pub(crate) fn ticket_terminal_phase_events(
+    state: &State,
+    task_id: &str,
+    reason: &str,
+) -> Vec<Event> {
+    use crate::server::ticket_state::TicketPhaseStatus;
+    state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.task_id == task_id
+                && !matches!(
+                    phase.status,
+                    TicketPhaseStatus::Completed | TicketPhaseStatus::Revoked
+                )
+        })
+        .map(|phase| {
+            let mut revoked = phase.clone();
+            revoked.status = TicketPhaseStatus::Revoked;
+            revoked.wait_reason = Some(reason.to_owned());
+            Event::TicketPhaseRecorded { phase: revoked }
+        })
+        .collect()
+}
+
+/// Reopen a completed execute phase after a contract or review rework. The new
+/// batch keeps the original slot when it is still occupied, so the same owner
+/// can start the new attempt; otherwise it becomes an unassigned phase.
+pub(crate) fn ticket_rework_phase_event(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    task_id: &str,
+) -> Option<Event> {
+    use crate::server::ticket_state::{latest_execute_phase, TicketPhaseStatus};
+    let latest = latest_execute_phase(&state.ticket_phases, task_id)?;
+    if !matches!(
+        latest.status,
+        TicketPhaseStatus::Completed | TicketPhaseStatus::Rework
+    ) {
+        return None;
+    }
+    let mut reopened = latest.clone();
+    reopened.batch = reopened.batch.saturating_add(1);
+    reopened.attempt_generation = reopened.attempt_generation.saturating_add(1);
+    reopened.result = None;
+    reopened.wait_reason = None;
+    let current = reopened
+        .slot_name
+        .as_deref()
+        .and_then(|name| {
+            control
+                .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
+                .ok()
+                .flatten()
+        });
+    if let Some(slot) = current.filter(|slot| slot.active_binding().is_some()) {
+        reopened.slot_name = Some(slot.identity_key.name.clone());
+        reopened.binding_generation = slot.generation;
+        reopened.status = TicketPhaseStatus::Claimed;
+    } else {
+        reopened.slot_name = None;
+        reopened.binding_generation = 0;
+        reopened.status = TicketPhaseStatus::WaitingAssignment;
+    }
+    Some(Event::TicketPhaseRecorded { phase: reopened })
+}
+
 /// Stable-name review capability used by the three-tier review route.
 pub(crate) fn ticket_review_group(
     state: &State,
@@ -259,6 +371,9 @@ fn ticket_slot_candidates(
         let Some(slot) = slot else { continue };
         let name = slot.identity_key.name.clone();
         let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
+        if phase == TicketPhaseKind::Execute && protected_dispatch_roles(&roles) {
+            continue;
+        }
         if phase == TicketPhaseKind::Plan
             && !roles.iter().any(|role| role == "plan" || role == "planner")
         {
@@ -593,7 +708,13 @@ pub(super) fn dispatch_eligible_worker_ids(
             .current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
             .map_err(Resp::err)?;
         if current.is_some() {
-            eligible.push(worker.id.clone());
+            let roles = current
+                .as_ref()
+                .map(|slot| state.name_work_roles(route.project_scope_id.as_str(), &slot.identity_key.name))
+                .unwrap_or_default();
+            if !protected_dispatch_roles(&roles) {
+                eligible.push(worker.id.clone());
+            }
         }
     }
     eligible.sort();
@@ -757,6 +878,13 @@ pub(crate) fn ticket_continuation_events_with_pending(
     };
     let slot_name = slot.identity_key.name.clone();
     let binding_generation = slot.generation;
+    if state
+        .name_work_roles(route.project_scope_id.as_str(), &slot_name)
+        .iter()
+        .any(|role| matches!(role.as_str(), "patrol" | "memory"))
+    {
+        return Vec::new();
+    }
 
     let owned;
     let phases: &[TicketPhaseRecord] = if pending.is_empty() {
@@ -804,18 +932,7 @@ pub(crate) fn ticket_continuation_events_with_pending(
         return Vec::new();
     }
 
-    let dependency_satisfied = |dep: &str| {
-        state.tasks.get(dep).is_some_and(|task| {
-            matches!(
-                task.status.as_str(),
-                "delivered" | "accepted" | "merged" | "closed"
-            )
-        }) || phases.iter().any(|phase| {
-            phase.task_id == dep
-                && phase.phase == TicketPhaseKind::Execute
-                && phase.status == TicketPhaseStatus::Completed
-        })
-    };
+    let dependency_satisfied = |dep: &str| ticket_dependency_satisfied(state, phases, dep);
     let Some(next) = next_queued_for_slot(phases, &slot_name, dependency_satisfied).cloned() else {
         return Vec::new();
     };
@@ -838,12 +955,7 @@ pub(crate) fn ticket_continuation_events_with_pending(
         return Vec::new();
     };
 
-    let mut claimed = next.clone();
-    claimed.status = TicketPhaseStatus::Claimed;
-    claimed.slot_name = Some(slot_name.clone());
-    claimed.binding_generation = binding_generation;
-    claimed.attempt_generation = claimed.attempt_generation.saturating_add(1);
-    claimed.wait_reason = None;
+    let claimed = claim_ticket_phase(next.clone(), &slot_name, binding_generation);
 
     task.owner = worker_id.to_owned();
     task.status = "working".into();
@@ -911,6 +1023,147 @@ pub(crate) fn ticket_continuation_events_with_pending(
             message_id,
             subscription_id: subscription.id.clone(),
         });
+    }
+    events
+}
+
+/// Re-match unassigned execute phases after the eligible peer set changes. A
+/// peer registration, resume, or work-role change runs this once; the planner
+/// still owns every later idle claim. Caller holds the state lock and commits.
+pub(crate) fn ticket_reassign_waiting_events(
+    server: &Server,
+    state: &State,
+) -> Vec<Event> {
+    let Some(route) = server_route_scope(server, state).ok().flatten() else {
+        return Vec::new();
+    };
+    let Ok(control) = binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    let waiting: Vec<crate::server::ticket_state::TicketPhaseRecord> = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
+                && phase.status == crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
+        })
+        .cloned()
+        .collect();
+    for phase in waiting {
+        let Some(task) = state.tasks.get(&phase.task_id) else {
+            continue;
+        };
+        if task.status != "pending" || task.owner != task.created_by {
+            continue;
+        }
+        let Some(details) = state.board_details.get(&phase.task_id) else {
+            continue;
+        };
+        let candidates = match ticket_slot_candidates(
+            state,
+            &control,
+            &route,
+            &details.work_policy,
+            phase.phase,
+        ) {
+            Ok(candidates) => candidates,
+            Err(_) => continue,
+        };
+        let group = ticket_phase_group(phase.phase, details.work_policy.work_kind.as_deref());
+        let cursor = state.ticket_rotation.get(&group).map(String::as_str);
+        let phases = state.ticket_phases.iter().collect::<Vec<_>>();
+        let selected = crate::server::ticket_state::select_shortest_queue(
+            &candidates,
+            |slot| crate::server::ticket_state::slot_queue_len(phases.iter().copied(), slot),
+            cursor,
+        );
+        let Some(candidate) = selected else { continue };
+        let mut queued = phase.clone();
+        queued.status = crate::server::ticket_state::TicketPhaseStatus::Queued;
+        queued.slot_name = Some(candidate.slot_name.clone());
+        queued.wait_reason = None;
+        events.push(Event::TicketPhaseRecorded { phase: queued.clone() });
+        events.push(Event::TicketRotationUpdated {
+            group,
+            slot: candidate.slot_name.clone(),
+        });
+        events.extend(ticket_continuation_events(
+            state,
+            &control,
+            &route,
+            &candidate.worker_id,
+            std::slice::from_ref(&queued),
+            false,
+        ));
+    }
+    events
+}
+
+/// Release a slot's stale claims after its binding generation changed. The
+/// old phase is retained as Revoked history; old attempts keep being refused
+/// because no phase with the old binding generation remains claimable.
+pub(crate) fn ticket_stale_claim_release_events(
+    server: &Server,
+    state: &State,
+) -> Vec<Event> {
+    let Some(route) = server_route_scope(server, state).ok().flatten() else {
+        return Vec::new();
+    };
+    let Ok(control) = binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    let mut released_slots = Vec::new();
+    for slot in control.slots() {
+        if slot.active_binding().is_none() {
+            continue;
+        }
+        let slot_name = slot.identity_key.name.clone();
+        for phase in state.ticket_phases.iter().filter(|phase| {
+            phase.slot_name.as_deref() == Some(slot_name.as_str())
+                && matches!(
+                    phase.status,
+                    crate::server::ticket_state::TicketPhaseStatus::Claimed
+                        | crate::server::ticket_state::TicketPhaseStatus::Running
+                )
+                && phase.binding_generation < slot.generation
+        }) {
+            let mut revoked = phase.clone();
+            revoked.status = crate::server::ticket_state::TicketPhaseStatus::Revoked;
+            revoked.wait_reason = Some("identity binding changed".into());
+            events.push(Event::TicketPhaseRecorded { phase: revoked });
+        }
+        if state.ticket_phases.iter().any(|phase| {
+            phase.slot_name.as_deref() == Some(slot_name.as_str())
+                && matches!(
+                    phase.status,
+                    crate::server::ticket_state::TicketPhaseStatus::Claimed
+                        | crate::server::ticket_state::TicketPhaseStatus::Running
+                )
+                && phase.binding_generation < slot.generation
+        }) {
+            released_slots.push(slot_name);
+        }
+    }
+    for slot_name in released_slots {
+        let worker_id = control
+            .current_for_name(&route.project_scope_id, &route.app_scope_id, &slot_name)
+            .ok()
+            .flatten()
+            .and_then(|slot| slot.active_binding())
+            .map(|current| current.binding.agent_id.as_str().to_owned());
+        let Some(worker_id) = worker_id else { continue };
+        events.extend(ticket_continuation_events(
+            state,
+            &control,
+            &route,
+            &worker_id,
+            &[],
+            false,
+        ));
     }
     events
 }

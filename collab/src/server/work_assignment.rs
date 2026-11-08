@@ -386,9 +386,8 @@ fn board_dispatch_work(
     )
 }
 
-/// The board dispatch/invite eligibility owner. Reminder observers must call
-/// this helper instead of duplicating its stable-name, binding, managed-child
-/// or activity reservation rules.
+/// The board dispatch/invite eligibility owner. Callers must not duplicate
+/// its stable-name, binding, managed-child or activity reservation rules.
 pub(super) fn dispatch_eligible_worker_ids(
     state: &State,
     route: &RouteScope,

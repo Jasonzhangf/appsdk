@@ -14,6 +14,94 @@ fn test_root(name: &str) -> PathBuf {
     root
 }
 
+#[test]
+fn retired_dispatch_gap_fields_load_without_losing_master_wake_facts() {
+    let root = test_root("retired-dispatch-gap-state");
+    let state_path = root.join(".agent-collab/server/state.json");
+    let legacy_state = serde_json::json!({
+        "schema_version": 1,
+        "state": {
+            "master_wake": {
+                "generation": 7,
+                "goal_due": true,
+                "idle_workers": ["peer-idle"],
+                "newly_idle_workers": ["peer-idle"],
+                "unresponsive_workers": ["peer-offline"],
+                "blocked_or_timed_out_tasks": ["task-blocked"],
+                "completed_or_freed_tasks": ["task-freed"],
+                "highest_bug_revision": 11,
+                "active_goal_revision": 13,
+                "scheduling_decision_revision": 17,
+                "first_pending_ms": 101,
+                "last_updated_ms": 202,
+                "last_notified_newly_idle": ["peer-idle"],
+                "last_notified_live_idle": ["peer-idle"],
+                "wake_hold": {
+                    "reason": "external gate",
+                    "held_by": "master",
+                    "held_ms": 303,
+                    "until_ms": 404
+                },
+                "delivery_state": "notified_unconsumed",
+                "dispatch_gap_task_ids": ["retired-task"],
+                "dispatch_gap_idle_peer_ids": ["retired-idle"],
+                "last_dispatch_gap_notice_key": "retired-key",
+                "last_dispatch_gap_notice_ms": 505,
+                "dispatch_gap_delivery_state": "delivered"
+            }
+        }
+    });
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&legacy_state).expect("encode legacy state"),
+    )
+    .expect("write legacy state");
+
+    let loaded = current_state::load(&state_path, false)
+        .expect("state with retired dispatch-gap fields must still load");
+    let wake = &loaded.master_wake;
+    assert_eq!(wake.generation, 7);
+    assert!(wake.goal_due);
+    assert_eq!(wake.idle_workers, vec!["peer-idle"]);
+    assert_eq!(wake.newly_idle_workers, vec!["peer-idle"]);
+    assert_eq!(wake.unresponsive_workers, vec!["peer-offline"]);
+    assert_eq!(wake.blocked_or_timed_out_tasks, vec!["task-blocked"]);
+    assert_eq!(wake.completed_or_freed_tasks, vec!["task-freed"]);
+    assert_eq!(wake.highest_bug_revision, Some(11));
+    assert_eq!(wake.active_goal_revision, Some(13));
+    assert_eq!(wake.scheduling_decision_revision, 17);
+    assert_eq!(wake.first_pending_ms, 101);
+    assert_eq!(wake.last_updated_ms, 202);
+    assert_eq!(wake.last_notified_newly_idle, vec!["peer-idle"]);
+    assert_eq!(wake.last_notified_live_idle, vec!["peer-idle"]);
+    assert_eq!(
+        wake.wake_hold,
+        Some(crate::server::notification_state::WakeHold {
+            reason: "external gate".into(),
+            held_by: "master".into(),
+            held_ms: 303,
+            until_ms: 404,
+        })
+    );
+    assert_eq!(wake.delivery_state, "notified_unconsumed");
+
+    let serialized = serde_json::to_value(wake).expect("serialize loaded master wake");
+    for retired in [
+        "dispatch_gap_task_ids",
+        "dispatch_gap_idle_peer_ids",
+        "last_dispatch_gap_notice_key",
+        "last_dispatch_gap_notice_ms",
+        "dispatch_gap_delivery_state",
+    ] {
+        assert!(
+            serialized.get(retired).is_none(),
+            "retired field {retired} must not be retained: {serialized}"
+        );
+    }
+
+    std::fs::remove_dir_all(root).expect("remove legacy state test root");
+}
+
 struct StartupRouteFixture {
     root: PathBuf,
     host: Arc<Server>,

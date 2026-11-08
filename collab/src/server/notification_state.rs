@@ -149,10 +149,12 @@ pub fn clear_dispatch_gap_condition(accumulator: &mut MasterWakeAccumulator) -> 
     let changed = !accumulator.dispatch_gap_task_ids.is_empty()
         || !accumulator.dispatch_gap_idle_peer_ids.is_empty()
         || accumulator.last_dispatch_gap_notice_key.is_some();
-    accumulator.dispatch_gap_task_ids.clear();
-    accumulator.dispatch_gap_idle_peer_ids.clear();
-    accumulator.last_dispatch_gap_notice_key = None;
-    accumulator.dispatch_gap_delivery_state = "clean".into();
+    if changed {
+        accumulator.dispatch_gap_task_ids.clear();
+        accumulator.dispatch_gap_idle_peer_ids.clear();
+        accumulator.last_dispatch_gap_notice_key = None;
+        accumulator.dispatch_gap_delivery_state = "clean".into();
+    }
     changed
 }
 

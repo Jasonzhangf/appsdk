@@ -1019,6 +1019,13 @@ pub enum Req {
         password: Option<MaintenancePassword>,
     },
     Ping,
+    /// Authenticated, read-only acceptance of the retained caller's context,
+    /// board, receive ownership and source-side send admission.
+    CapabilityReadiness {
+        worker_id: String,
+        token: String,
+        command: CommandEnvelope,
+    },
     StatusAll,
     MailboxRead {
         #[serde(default)]
@@ -1167,6 +1174,10 @@ pub const MSG_TYPES: [&str; 3] = ["notify", "request", "reply"];
 /// identity-context request. Older daemons omit it from the context-free Ping
 /// response, so the client must keep the legacy request shape for them.
 pub const IDENTITY_CONTEXT_CWD_PROTOCOL: &str = "identity-context-cwd-v1";
+
+/// Explicit support marker for the authenticated readiness request. Older
+/// daemons omit it from Ping and must not receive the new request.
+pub const CAPABILITY_READINESS_PROTOCOL: &str = "capability-readiness-v1";
 
 #[cfg(test)]
 mod tests {

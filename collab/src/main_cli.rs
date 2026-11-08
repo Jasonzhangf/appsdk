@@ -551,6 +551,12 @@ pub(crate) enum Cmd {
     Status {
         #[arg(long)]
         all: bool,
+        /// Run the read-only local and daemon capability acceptance check.
+        #[arg(long)]
+        check: bool,
+        /// With --check, validate only this binary and its sibling MCP.
+        #[arg(long, requires = "check", conflicts_with = "all")]
+        local: bool,
     },
     /// Open a read-only loopback Web observer for this project's task board
     Dashboard {

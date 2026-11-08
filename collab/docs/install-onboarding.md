@@ -44,6 +44,56 @@ running before the install, it keeps the old binary until the next user-managed
 maintenance window.
 Do not use `launchctl kickstart -k` for Collab as a normal install step.
 
+## Installation transaction outcomes
+
+The installer runs one bounded transaction. It captures the five installer-owned
+entries before publication: `collab`, `collab-mcp`, `collab-desktop-mcp`,
+`collab-desktop-mcp.mjs`, and the Collab Skill directory. On a handled
+failure, the installer restores the exact pre-invocation files, modes, symlinks,
+and absence, and reports the original error separately from the rollback
+result. An unfinished recovery remains explicit and refuses the next install.
+
+The installer uses a bounded local readiness check and a full `status --check`.
+A result is `success`, `pending_user_activation`, or `failure_with_rollback`.
+Pending activation returns exit 3 and retains the installed files. A full
+health failure keeps the original failure and triggers exact file
+compensation; it is not converted to pending activation.
+
+Only one previous release is retained, and only when the pre-install baseline
+is locally recoverable. An unverified, partial, debug, or development-link
+baseline is still eligible for installation, but it does not displace the
+existing previous release. Restoring an unverified baseline is file
+compensation only; it does not prove the product is healthy, permission-capable,
+or compatible with the resident daemon.
+
+Baseline executable inspection records the exact command exit and the first
+stderr line in `baseline_reason`. A silent nonzero exit is therefore still
+visible as an exit status. This diagnostic belongs to baseline classification;
+`original_exit` remains the installation result and does not change.
+
+## Independent debug entries and production rescue
+
+For direct development entry, define shell functions with the developer's
+actual worktree path. Keep development state isolated from the production
+state root:
+
+```sh
+collab-debug() {
+  /absolute/development-worktree/collab/target/debug/collab "$@"
+}
+collab-mcp-debug() {
+  /absolute/development-worktree/collab/target/debug/collab-mcp "$@"
+}
+```
+
+The canonical installer never creates or replaces `collab-debug`,
+`collab-mcp-debug`, or any independently maintained files with those names.
+A debug link does not by itself diagnose the current permission failure, and a
+path, symlink, or working-directory change does not solve permissions. If a
+canonical release remains unusable after a real installation, use the retained
+previous release with a compatible daemon only after confirming the current
+installer is no longer active.
+
 ## Install target must be on the system data volume
 
 On macOS the installer refuses to write the Collab binaries or the Skill bundle

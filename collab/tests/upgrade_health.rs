@@ -3,7 +3,6 @@ mod support;
 
 use serde_json::Value;
 use std::os::unix::net::UnixListener;
-use std::time::Duration;
 
 use support::*;
 
@@ -20,7 +19,7 @@ fn status_check_is_a_public_read_only_entry() {
     listener.set_nonblocking(true).unwrap();
     let state_before = snapshot(&state_root);
     let responder = std::thread::spawn(move || {
-        let mut stream = connect(&listener, Duration::from_secs(3));
+        let mut stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
         assert_eq!(request(&mut stream)["op"], "Ping");
         std::io::Write::write_all(
             &mut stream,
@@ -155,7 +154,7 @@ fn full_check_rejects_wrong_daemon_version() {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let responder = std::thread::spawn(move || {
-        let mut stream = connect(&listener, Duration::from_secs(3));
+        let mut stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
         assert_eq!(request(&mut stream)["op"], "Ping");
         std::io::Write::write_all(
             &mut stream,
@@ -191,7 +190,7 @@ fn full_check_rejects_unsupported_daemon() {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let responder = std::thread::spawn(move || {
-        let mut stream = connect(&listener, Duration::from_secs(3));
+        let mut stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
         assert_eq!(request(&mut stream)["op"], "Ping");
         std::io::Write::write_all(&mut stream, &ping_response(Some(VERSION), None)).unwrap();
     });
@@ -238,7 +237,7 @@ fn full_check_reports_malformed_daemon_response_as_error() {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let responder = std::thread::spawn(move || {
-        let mut stream = connect(&listener, Duration::from_secs(3));
+        let mut stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
         assert_eq!(request(&mut stream)["op"], "Ping");
         std::io::Write::write_all(&mut stream, b"not json\n").unwrap();
     });
@@ -251,6 +250,53 @@ fn full_check_reports_malformed_daemon_response_as_error() {
     }
     assert_ne!(output.status.code(), Some(0), "{}", text(&output));
     assert_ne!(output.status.code(), Some(3), "{}", text(&output));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn full_check_with_delayed_local_mcp_reports_malformed_response() {
+    let _test = test_guard();
+    let root = temp_root("delayed-mcp");
+    let project_root = create_project(&root);
+    let state_root = root.join("host-state");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let cli = copy_pair(&root);
+    scripted_mcp(
+        &cli,
+        "#!/bin/sh
+sleep 3.25
+printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"serverInfo\":{\"name\":\"collab\",\"version\":\"0.2.0000\"}}}'
+printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"collab_context\"},{\"name\":\"collab_recv\"},{\"name\":\"collab_sendmessage\"},{\"name\":\"collab_board_show\"}]}}'
+",
+    );
+    let socket = state_root.join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let state_before = snapshot(&state_root);
+    let responder = std::thread::spawn(move || {
+        let mut stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
+        assert_eq!(request(&mut stream)["op"], "Ping");
+        std::io::Write::write_all(&mut stream, b"not json\n").unwrap();
+    });
+    let output = run_check(&cli, &project_root, &state_root, false);
+    if let Err(error) = responder.join() {
+        panic!(
+            "controlled listener failed: {error:?}; child output: {}",
+            text(&output)
+        );
+    }
+    assert_ne!(output.status.code(), Some(0), "{}", text(&output));
+    assert_ne!(output.status.code(), Some(3), "{}", text(&output));
+    assert!(
+        text(&output).contains("malformed response"),
+        "{}",
+        text(&output)
+    );
+    assert_eq!(
+        snapshot(&state_root),
+        state_before,
+        "status --check mutated host state"
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -268,14 +314,14 @@ fn full_check_with_retained_dsh_caller_is_success_and_read_only() {
     listener.set_nonblocking(true).unwrap();
     let state_before = snapshot(&state_root);
     let responder = std::thread::spawn(move || {
-        let mut stream = connect(&listener, Duration::from_secs(3));
+        let mut stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
         assert_eq!(request(&mut stream)["op"], "Ping");
         std::io::Write::write_all(
             &mut stream,
             &ping_response(Some(VERSION), Some("capability-readiness-v1")),
         )
         .unwrap();
-        let mut readiness_stream = connect(&listener, Duration::from_secs(3));
+        let mut readiness_stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
         let request = request(&mut readiness_stream);
         assert_eq!(request["op"], "CapabilityReadiness", "{request}");
         assert_eq!(

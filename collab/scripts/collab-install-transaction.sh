@@ -35,6 +35,7 @@ TX_VERSION=unknown
 TX_PREVIOUS_RELEASE=none
 TX_PREVIOUS_QUALITY=none
 TX_LAST_ERROR=
+TX_ROTATION_INCOMPLETE=
 tx_capture_index=
 tx_capture_source=
 tx_capture_destination=
@@ -123,6 +124,22 @@ tx_mode() {
 
 tx_first_line() {
   awk 'NF { print; exit }' "$1" 2>/dev/null
+}
+
+tx_post_check_required_action() {
+  tx_post_check_required_action_value=$(
+    sed -n 's/.*"required_action"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$TX_SCRATCH/post-check.out" | head -1
+  )
+  case $tx_post_check_required_action_value in
+    ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+  esac
+  printf '%s\n' "$tx_post_check_required_action_value"
+}
+
+tx_emit_post_check_error() {
+  [ -s "$TX_SCRATCH/post-check.err" ] || return 0
+  sed 's/^/collab-install: /' "$TX_SCRATCH/post-check.err" >&2
 }
 
 tx_name() {
@@ -233,7 +250,10 @@ tx_replace() {
   tx_replace_destination=$2
   tx_replace_backup="$(dirname "$tx_replace_destination")/.collab-replace-old.$$"
   rm -rf "$tx_replace_backup"
-  if [ -d "$tx_replace_destination" ] && [ ! -L "$tx_replace_destination" ]; then
+  # A physical directory or a symlink that resolves to one must be swapped out
+  # as a path object. A plain mv would follow a directory symlink and move the
+  # staged object into its referent instead of replacing the link.
+  if [ -d "$tx_replace_destination" ]; then
     mv "$tx_replace_destination" "$tx_replace_backup" || return 1
     if ! mv "$tx_replace_temp" "$tx_replace_destination"; then
       mv "$tx_replace_backup" "$tx_replace_destination"
@@ -613,6 +633,9 @@ tx_restore() {
     }
     tx_restore_index=$((tx_restore_index + 1))
   done
+  if [ -n "$TX_ROTATION_INCOMPLETE" ]; then
+    TX_ROLLBACK_ERRORS="$TX_ROLLBACK_ERRORS restore:previous"
+  fi
   if [ -z "$TX_ROLLBACK_ERRORS" ]; then
     TX_ROLLBACK=restored
     rm -rf "$TX_SCRATCH"
@@ -649,16 +672,41 @@ tx_rotate_previous() {
     mv "$TX_PREVIOUS" "$tx_old_previous" || return 1
   fi
   if ! mv "$tx_rotation" "$TX_PREVIOUS"; then
-    [ ! -d "$tx_old_previous" ] || mv "$tx_old_previous" "$TX_PREVIOUS"
+    if [ ! -d "$tx_old_previous" ]; then
+      rm -rf "$tx_rotation"
+      return 1
+    fi
+    if mv "$tx_old_previous" "$TX_PREVIOUS"; then
+      rm -rf "$tx_rotation"
+      return 1
+    fi
+    # The retained release cannot be put back at the canonical address. Keep
+    # both predecessors where the recovery marker can point at them, and let
+    # compensation finish independently instead of claiming restoration.
+    TX_ROTATION_INCOMPLETE=1
+    TX_PREVIOUS_RELEASE=$tx_old_previous
+    TX_PREVIOUS_QUALITY=unverified
+    tx_error "cannot restore the retained previous release to $TX_PREVIOUS"
+    tx_error "previous release recovery material preserved at $tx_old_previous and $tx_rotation"
     return 1
   fi
   rm -rf "$tx_old_previous"
 }
 
 tx_resolve_version() {
-  if [ -x "$TX_BIN/collab" ]; then
-    "$TX_BIN/collab" --version 2>/dev/null | awk 'NR == 1 { print $2 }'
+  [ -x "$TX_BIN/collab" ] || return 0
+  tx_resolve_dir=$TX_BIN/.collab-final-version.$$
+  rm -rf "$tx_resolve_dir"
+  mkdir -p "$tx_resolve_dir" || return 1
+  tx_resolve_status=0
+  tx_bounded 5 "$tx_resolve_dir/out" "$tx_resolve_dir/err" \
+    "$TX_BIN/collab" --version
+  tx_resolve_status=$?
+  if [ "$tx_resolve_status" -eq 0 ]; then
+    awk 'NR == 1 { print $2 }' "$tx_resolve_dir/out"
   fi
+  rm -rf "$tx_resolve_dir"
+  return "$tx_resolve_status"
 }
 
 tx_emit() {
@@ -797,10 +845,17 @@ tx_main() {
   if [ "$tx_check_status" -eq 0 ]; then
     tx_finish success 0 none
   elif [ "$tx_check_status" -eq 3 ]; then
-    tx_finish pending_user_activation 3 activation
+    tx_pending_action=$(tx_post_check_required_action) || {
+      tx_check_error=$(tx_first_line "$TX_SCRATCH/post-check.err")
+      [ -n "$tx_check_error" ] || tx_check_error="candidate check was pending without a usable required action"
+      tx_emit_post_check_error
+      tx_fail check "$tx_check_error" "$tx_check_status"
+    }
+    tx_finish pending_user_activation 3 "$tx_pending_action"
   else
     tx_check_error=$(tx_first_line "$TX_SCRATCH/post-check.err")
     [ -n "$tx_check_error" ] || tx_check_error="candidate check failed with exit $tx_check_status"
+    tx_emit_post_check_error
     tx_fail check "$tx_check_error" "$tx_check_status"
   fi
 }

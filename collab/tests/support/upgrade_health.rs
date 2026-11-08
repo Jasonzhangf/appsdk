@@ -8,6 +8,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const VERSION: &str = env!("COLLAB_VERSION");
+/// Keep each controlled listener alive for the product's five-second check
+/// budget plus one second for host process startup.
+pub const LISTENER_ACCEPT_TIMEOUT: Duration = Duration::from_secs(6);
 
 static TEST_EXECUTION_LOCK: Mutex<()> = Mutex::new(());
 

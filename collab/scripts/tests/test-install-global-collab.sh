@@ -100,9 +100,15 @@ case "\$1" in
       : >"\${COLLAB_STUB_SLOW_MARKER:-/dev/null}"
       sleep 3
     fi
-    [ "\${COLLAB_STUB_FULL_EXIT:-0}" -eq 0 ] ||
-      { printf '%s\n' "\${COLLAB_STUB_FULL_MSG:-full check failed}" >&2; exit "\${COLLAB_STUB_FULL_EXIT}"; }
-    exit 0
+    if [ "\${COLLAB_STUB_FULL_EXIT:-0}" -eq 0 ]; then
+      exit 0
+    fi
+    [ -z "\${COLLAB_STUB_FULL_JSON:-}" ] || printf '%s\n' "\$COLLAB_STUB_FULL_JSON"
+    if [ -n "\${COLLAB_STUB_FULL_STDERR_FILE:-}" ] && [ -f "\$COLLAB_STUB_FULL_STDERR_FILE" ]; then
+      cat "\$COLLAB_STUB_FULL_STDERR_FILE" >&2
+    fi
+    [ -z "\${COLLAB_STUB_FULL_MSG:-}" ] || printf '%s\n' "\$COLLAB_STUB_FULL_MSG" >&2
+    exit "\${COLLAB_STUB_FULL_EXIT}"
     ;;
 esac
 exit 0
@@ -120,6 +126,26 @@ write_candidate() {
   write_pair "$F_REPO/target/release" "$1" "${2:-candidate skill}"
 }
 
+# Install a mixed baseline whose canonical collab is a symlink to an existing
+# directory. The referent directory must stay intact through rescue/rollback.
+write_directory_symlink_baseline() {
+  mkdir -p "$F/refdir" "$F_BIN" "$F_SKILLS"
+  printf 'referent keep\n' >"$F/refdir/keep.txt"
+  chmod 750 "$F/refdir"
+  ln -s "$F/refdir" "$F_BIN/collab"
+  write_pair "$F/swap" 0.2.8000 "mixed skill"
+  cp "$F/swap/collab-mcp" "$F_BIN/collab-mcp"
+  printf '# mixed skill\n' >"$F_SKILLS/SKILL.md"
+}
+
+assert_referent_intact() {
+  [ -d "$F/refdir" ] || fail "referent directory missing"
+  [ "$(cat "$F/refdir/keep.txt")" = "referent keep" ] || fail "referent contents changed"
+  assert_mode "$F/refdir" 750
+  [ "$(ls -1 "$F/refdir" | wc -l | tr -d ' ')" -eq 1 ] ||
+    fail "referent directory gained entries: $(ls -1 "$F/refdir")"
+}
+
 # Install a baseline directly into the canonical bin/skills paths.
 write_baseline() {
   local version="$1" launcher_mode="${2:-755}" js_mode="${3:-644}"
@@ -130,6 +156,55 @@ write_baseline() {
   printf '%s\n' "baseline skill $version" >"$F_SKILLS/SKILL.md"
   chmod "$launcher_mode" "$F_BIN/collab-desktop-mcp"
   chmod "$js_mode" "$F_BIN/collab-desktop-mcp.mjs"
+}
+
+# Install a baseline whose canonical CLI never completes --version. The
+# classifier must bound that probe and treat the baseline as unverified; the
+# final version projection must not run it without the same bound.
+write_hanging_version_baseline() {
+  local version="$1"
+  write_baseline "$version"
+  cat >"$F_BIN/collab" <<'HANG'
+#!/bin/sh
+case "$1" in
+  --version)
+    printf '%s\n' "$$" >"${COLLAB_VERSION_HANG_PIDFILE:?}"
+    exec sleep 30
+    ;;
+esac
+exit 0
+HANG
+  chmod 755 "$F_BIN/collab"
+}
+
+# Install a PATH 'mv' shim that fails replacement of the canonical retained
+# predecessor address. mode=once fails only the first such move, mode=always
+# fails every such move; all other moves pass through to the real mv.
+install_predecessor_mv_shim() {
+  local d="$1" mode="$2"
+  local real_mv state
+  real_mv="$(command -v mv)"
+  state="$d/logs/mv-rotation.state"
+  rm -f "$state"
+  cat >"$d/repo/tools/mv" <<SHIM
+#!/bin/sh
+last=
+for arg in "\$@"; do last="\$arg"; done
+case \$last in
+  */.collab-install-previous)
+    if [ "$mode" = always ]; then
+      exit 1
+    fi
+    if [ -e "$state" ]; then
+      exec "$real_mv" "\$@"
+    fi
+    : >"$state"
+    exit 1
+    ;;
+esac
+exec "$real_mv" "\$@"
+SHIM
+  chmod 755 "$d/repo/tools/mv"
 }
 
 run_installer() {
@@ -157,6 +232,61 @@ run_installer_ok() {
   local status
   status="$(cat "$d/exit")"
   [ "$status" -eq 0 ] || fail "$d: expected exit 0, got $status: $(cat "$d/err")"
+}
+
+# Run the public installer under a fixture-owned wall-clock bound. On timeout,
+# stop only the installer and the hanging version fixture recorded by the case,
+# and record the outer timeout instead of the installer result.
+run_installer_bounded() {
+  local d="$1" limit="$2"; shift 2
+  rm -f "$d/exit" "$d/timeout" "$d/installer.pid" "$d/version-hang.pid"
+  (
+    set +e
+    env -i \
+      PATH="$d/repo/tools:/usr/bin:/bin:/usr/sbin:/sbin" \
+      HOME="$d/home" \
+      CARGO_HOME="$d/home/.cargo" \
+      COLLAB_SKILLS_TARGET="$d/home/.agents/skills/collab" \
+      COLLAB_STATE_DIR="$d/state" \
+      COLLAB_BUILD_STATE_DIR="$d/build-state" \
+      TMPDIR="$d/tmp" \
+      COLLAB_STUB_LOG="$d/logs/stub.log" \
+      "$@" \
+      sh "$d/repo/scripts/install-global-collab.sh" >"$d/out" 2>"$d/err" &
+    installer_pid=$!
+    printf '%s\n' "$installer_pid" >"$d/installer.pid"
+    wait "$installer_pid"
+    printf '%s\n' "$?" >"$d/exit"
+  ) &
+  local runner_pid=$!
+  local ticks=$((limit * 10))
+  local tick=0
+  while [ "$tick" -lt "$ticks" ]; do
+    if [ -e "$d/exit" ]; then
+      break
+    fi
+    sleep 0.1
+    tick=$((tick + 1))
+  done
+  if [ -e "$d/exit" ]; then
+    wait "$runner_pid" 2>/dev/null || true
+    return 0
+  fi
+  local installer_pid hang_pid
+  installer_pid="$(cat "$d/installer.pid" 2>/dev/null || true)"
+  hang_pid="$(cat "$d/version-hang.pid" 2>/dev/null || true)"
+  [ -z "$installer_pid" ] || kill -TERM "$installer_pid" 2>/dev/null || true
+  [ -z "$hang_pid" ] || kill -TERM "$hang_pid" 2>/dev/null || true
+  sleep 1
+  installer_pid="$(cat "$d/installer.pid" 2>/dev/null || true)"
+  hang_pid="$(cat "$d/version-hang.pid" 2>/dev/null || true)"
+  [ -z "$installer_pid" ] || kill -KILL "$installer_pid" 2>/dev/null || true
+  [ -z "$hang_pid" ] || kill -KILL "$hang_pid" 2>/dev/null || true
+  kill -KILL "$runner_pid" 2>/dev/null || true
+  wait "$runner_pid" 2>/dev/null || true
+  printf '124\n' >"$d/exit"
+  : >"$d/timeout"
+  return 0
 }
 
 field() {
@@ -246,14 +376,32 @@ case_success_first_install() {
 case_pending_activation() {
   new_fixture pending
   write_candidate 0.2.9001
-  run_installer "$F" COLLAB_STUB_FULL_EXIT=3 COLLAB_STUB_FULL_MSG="daemon absent"
+  run_installer "$F" \
+    COLLAB_STUB_FULL_EXIT=3 \
+    COLLAB_STUB_FULL_JSON='{"outcome":"pending_user_activation","required_action":"caller_context_required"}'
   [ "$(cat "$F/exit")" -eq 3 ] || fail "pending: expected exit 3 got $(cat "$F/exit")"
   assert_field "$F/out" outcome pending_user_activation
-  assert_field "$F/out" required_action activation
+  assert_field "$F/out" required_action caller_context_required
   assert_field "$F/out" rollback not_needed
   assert_present "$F_BIN/collab"
   assert_present "$F_SKILLS/SKILL.md"
   assert_field "$F/out" previous_release none
+  assert_no_leftovers
+  assert_no_lifecycle "$F"
+}
+
+case_pending_without_typed_reason_fails() {
+  new_fixture pending_without_reason
+  write_candidate 0.2.9001
+  run_installer "$F" COLLAB_STUB_FULL_EXIT=3 COLLAB_STUB_FULL_MSG="pending reason missing"
+  [ "$(cat "$F/exit")" -eq 3 ] || fail "pending-without-reason: expected exit 3 got $(cat "$F/exit")"
+  assert_field "$F/out" outcome failure_with_rollback
+  assert_field "$F/out" failed_phase check
+  assert_field "$F/out" required_action none
+  assert_contains "$(field "$F/out" original_error)" "pending reason missing" "pending error"
+  assert_field "$F/out" rollback restored
+  assert_absent "$F_BIN/collab"
+  assert_absent "$F_SKILLS"
   assert_no_leftovers
   assert_no_lifecycle "$F"
 }
@@ -327,9 +475,79 @@ case_postcheck_failure_restores() {
   assert_contains "$(field "$F/out" original_error)" "tcc denied" "check error"
   assert_field "$F/out" rollback restored
   assert_field "$F/out" restored_baseline_quality recoverable_release
+  assert_field "$F/out" version 0.2.8000
   grep -q '0.2.8000' "$F_BIN/collab" || fail "baseline collab was not restored"
   grep -q 'baseline skill' "$F_SKILLS/SKILL.md" || fail "baseline skill was not restored"
   assert_no_leftovers
+  assert_no_lifecycle "$F"
+}
+
+case_postcheck_multiline_error_preserves_chain() {
+  new_fixture postcheck_multiline
+  write_baseline 0.2.8000
+  write_candidate 0.2.9001
+  printf 'health check failed\ncause: local MCP frame invalid\n' >"$F/logs/post-check.stderr"
+  run_installer "$F" \
+    COLLAB_STUB_FULL_EXIT=9 \
+    COLLAB_STUB_FULL_STDERR_FILE="$F/logs/post-check.stderr"
+  [ "$(cat "$F/exit")" -eq 9 ] || fail "postcheck-multiline: expected exit 9 got $(cat "$F/exit")"
+  assert_field "$F/out" failed_phase check
+  assert_field "$F/out" original_exit 9
+  assert_contains "$(field "$F/out" original_error)" "health check failed" "first line"
+  assert_contains "$(cat "$F/err")" "cause: local MCP frame invalid" "full stderr chain"
+  assert_field "$F/out" rollback restored
+  grep -q '0.2.8000' "$F_BIN/collab" || fail "postcheck-multiline: baseline collab not restored"
+  assert_no_lifecycle "$F"
+}
+
+# The optional final version projection must not bypass the installer's
+# bounded command helper after compensation. A hanging restored CLI would
+# otherwise block the original failure result and leave handled state behind.
+case_final_version_probe_is_bounded_after_restore() {
+  new_fixture final_version_bound
+  write_hanging_version_baseline 0.2.8000
+  mkdir -p "$F_BIN/.collab-install-previous/bin/skills"
+  printf 'retained previous\n' >"$F_BIN/.collab-install-previous/bin/collab"
+  cp -p "$F_BIN/collab" "$F/expected-collab"
+  write_candidate 0.2.9001
+  run_installer_bounded "$F" 15 \
+    COLLAB_VERSION_HANG_PIDFILE="$F/version-hang.pid" \
+    COLLAB_STUB_FULL_EXIT=9 \
+    COLLAB_STUB_FULL_MSG="forced post-check failure"
+  if [ -f "$F/version-hang.pid" ]; then
+    local hang_pid
+    hang_pid="$(cat "$F/version-hang.pid")"
+    if kill -0 "$hang_pid" 2>/dev/null; then
+      fail "final-version: owned hanging fixture $hang_pid is still running"
+    fi
+  fi
+  if [ -e "$F/timeout" ]; then
+    fail "final-version: outer fixture timeout fired before the original result (exit $(cat "$F/exit"), out [$(cat "$F/out")])"
+  fi
+  [ "$(cat "$F/exit")" -eq 9 ] || fail "final-version: expected exit 9 got $(cat "$F/exit")"
+  assert_field "$F/out" outcome failure_with_rollback
+  assert_field "$F/out" failed_phase check
+  assert_field "$F/out" original_exit 9
+  assert_contains "$(field "$F/out" original_error)" "forced post-check failure" "original health error"
+  assert_field "$F/out" rollback restored
+  assert_field "$F/out" restored_baseline_quality unverified
+  assert_field "$F/out" version unknown
+  assert_same_file "$F/expected-collab" "$F_BIN/collab"
+  assert_mode "$F_BIN/collab" 755
+  grep -q 'retained previous' "$F_BIN/.collab-install-previous/bin/collab" ||
+    fail "final-version: pre-existing previous release was not preserved"
+  assert_absent "$F_BIN/.collab-install.lock"
+  assert_absent "$F_BIN/.collab-install-recovery"
+  local leftover
+  for leftover in "$F_BIN"/.collab-install.* "$F_BIN"/.collab-final-version.*; do
+    [ -e "$leftover" ] || continue
+    [ "$leftover" = "$F_BIN/.collab-install-previous" ] && continue
+    fail "final-version: unexpected handled leftover $leftover"
+  done
+  for leftover in "$F/tmp"/.collab-bounded.*; do
+    [ -e "$leftover" ] || continue
+    fail "final-version: bounded timeout marker left behind: $leftover"
+  done
   assert_no_lifecycle "$F"
 }
 
@@ -419,6 +637,46 @@ case_rescue_unverified_success() {
   assert_no_lifecycle "$F"
 }
 
+# A canonical entry that is a symlink to an existing directory must be replaced
+# as a path object. The staged file must become the canonical binary instead of
+# being moved into the symlink target, and the referent must stay intact.
+case_rescue_symlink_to_directory_replaces_link() {
+  new_fixture rescue_dirlink
+  write_directory_symlink_baseline
+  write_candidate 0.2.9001
+  run_installer_ok "$F"
+  assert_field "$F/out" outcome success
+  assert_field "$F/out" baseline unverified
+  assert_field "$F/out" previous_release none
+  [ -f "$F_BIN/collab" ] || fail "canonical collab is not a regular file"
+  [ ! -L "$F_BIN/collab" ] || fail "canonical collab is still a symlink"
+  [ -f "$F_BIN/collab-mcp" ] && [ ! -L "$F_BIN/collab-mcp" ] ||
+    fail "canonical collab-mcp is not a regular file"
+  grep -q '0.2.9001' "$F_BIN/collab" || fail "candidate binary was not published"
+  grep -q 'candidate skill' "$F_SKILLS/SKILL.md" || fail "candidate skill not installed"
+  assert_referent_intact
+  assert_no_leftovers
+  assert_no_lifecycle "$F"
+}
+
+# If a later failure triggers compensation, the exact directory link must come
+# back while its referent keeps contents and modes.
+case_rescue_symlink_to_directory_restores_link() {
+  new_fixture rescue_dirlink_fail
+  write_directory_symlink_baseline
+  write_candidate 0.2.9001
+  run_installer "$F" COLLAB_STUB_FULL_EXIT=9 COLLAB_STUB_FULL_MSG="post fail"
+  [ "$(cat "$F/exit")" -eq 9 ] || fail "dirlink-fail: expected exit 9 got $(cat "$F/exit")"
+  assert_field "$F/out" baseline unverified
+  assert_field "$F/out" rollback restored
+  assert_field "$F/out" restored_baseline_quality unverified
+  assert_symlink_to "$F_BIN/collab" "$F/refdir"
+  assert_referent_intact
+  grep -q '0.2.8000' "$F_BIN/collab-mcp" || fail "baseline collab-mcp was not restored"
+  assert_no_leftovers
+  assert_no_lifecycle "$F"
+}
+
 case_predecessor_rotation() {
   new_fixture rotation
   write_baseline 0.2.8000
@@ -437,6 +695,78 @@ case_predecessor_rotation() {
   fi
   ls -d "$F_BIN"/.collab-install-stage.* >/dev/null 2>&1 &&
     fail "rotation left a staging directory" || true
+  assert_no_lifecycle "$F"
+}
+
+# A retained predecessor must return to the canonical address when only the
+# second rotation move fails. The transaction still reports the rotation error
+# and compensates the five active entries.
+case_rotation_second_move_failure_restores_predecessor() {
+  new_fixture rotation_second_move_fail
+  write_baseline 0.2.8000
+  mkdir -p "$F_BIN/.collab-install-previous/bin/skills"
+  printf 'retained predecessor\n' >"$F_BIN/.collab-install-previous/bin/collab"
+  write_candidate 0.2.9001
+  install_predecessor_mv_shim "$F" once
+  run_installer "$F"
+  [ "$(cat "$F/exit")" -eq 1 ] || fail "rotation-second-move: expected exit 1 got $(cat "$F/exit")"
+  assert_field "$F/out" outcome failure_with_rollback
+  assert_field "$F/out" failed_phase previous_rotation
+  assert_field "$F/out" original_exit 1
+  assert_contains "$(field "$F/out" original_error)" "previous release rotation failed" "rotation error"
+  assert_field "$F/out" rollback restored
+  assert_field "$F/out" restored_baseline_quality recoverable_release
+  grep -q 'retained predecessor' "$F_BIN/.collab-install-previous/bin/collab" ||
+    fail "displaced predecessor did not return to the canonical retained path"
+  grep -q '0.2.8000' "$F_BIN/collab" || fail "baseline collab was not compensated"
+  ls -d "$F_BIN"/.collab-install-stage.* >/dev/null 2>&1 &&
+    fail "recoverable rotation failure left a staging directory" || true
+  assert_no_lifecycle "$F"
+}
+
+# When the retained predecessor cannot be put back, the transaction must keep
+# both predecessors and the recovery marker, report an explicit location and
+# return rollback=incomplete instead of deleting the material.
+case_rotation_predecessor_restore_failure_reports_recovery() {
+  new_fixture rotation_restore_fail
+  write_baseline 0.2.8000
+  mkdir -p "$F_BIN/.collab-install-previous/bin/skills"
+  printf 'retained predecessor\n' >"$F_BIN/.collab-install-previous/bin/collab"
+  write_candidate 0.2.9001
+  install_predecessor_mv_shim "$F" always
+  run_installer "$F"
+  [ "$(cat "$F/exit")" -ne 0 ] || fail "rotation-restore-fail: expected failure"
+  assert_field "$F/out" outcome failure_with_rollback
+  assert_field "$F/out" failed_phase previous_rotation
+  assert_field "$F/out" original_exit 1
+  assert_contains "$(field "$F/out" original_error)" "previous release rotation failed" "rotation error"
+  assert_contains "$(cat "$F/err")" "cannot restore the retained previous release" \
+    "distinct predecessor rollback error"
+  assert_field "$F/out" rollback incomplete
+  assert_contains "$(field "$F/out" rollback_errors)" "restore:previous" "predecessor rollback error"
+  # Five active entries are still compensated even though the predecessor
+  # recovery is incomplete.
+  grep -q '0.2.8000' "$F_BIN/collab" || fail "active collab was not compensated"
+  grep -q '0.2.8000' "$F_BIN/collab-mcp" || fail "active collab-mcp was not compensated"
+  assert_present "$F_BIN/collab-desktop-mcp"
+  assert_present "$F_BIN/collab-desktop-mcp.mjs"
+  grep -q 'baseline skill' "$F_SKILLS/SKILL.md" || fail "active Skills were not compensated"
+  assert_absent "$F_BIN/.collab-install-previous"
+  assert_present "$F_BIN/.collab-install-recovery"
+  assert_present "$F_BIN/.collab-install.lock"
+  # Old and new predecessor material both remain for recovery.
+  local preserved preserved_new
+  preserved="$(ls -d "$F_BIN"/.collab-install-stage.old.*/bin/collab 2>/dev/null | head -1)"
+  [ -n "$preserved" ] || fail "displaced predecessor material was not preserved"
+  grep -q 'retained predecessor' "$preserved" || fail "preserved predecessor content is wrong"
+  preserved_new="$(ls -d "$F_BIN"/.collab-install-stage.*/bin/collab 2>/dev/null | grep -v '\.old\.' | head -1)"
+  [ -n "$preserved_new" ] || fail "new predecessor material was not preserved"
+  grep -q '0.2.8000' "$preserved_new" || fail "new predecessor material content is wrong"
+  assert_contains "$(cat "$F/err")" ".collab-install-stage.old" "explicit recovery location"
+  local old_dir
+  old_dir="$(dirname "$(dirname "$preserved")")"
+  assert_field "$F/out" previous_release "$old_dir"
+  assert_field "$F/out" previous_release_quality unverified
   assert_no_lifecycle "$F"
 }
 
@@ -646,16 +976,23 @@ run_case() {
 
 run_case case_success_first_install
 run_case case_pending_activation
+run_case case_pending_without_typed_reason_fails
 run_case case_build_failure_preserves_baseline
 run_case case_stage_skill_export_failure_no_mutation
 run_case case_local_check_failure_no_mutation
 run_case case_missing_artifact_no_mutation
 run_case case_postcheck_failure_restores
+run_case case_postcheck_multiline_error_preserves_chain
+run_case case_final_version_probe_is_bounded_after_restore
 run_case case_first_install_failure_restores_absence
 run_case case_exact_restore_modes_and_absence
 run_case case_rescue_symlink_and_restore_link
 run_case case_rescue_unverified_success
+run_case case_rescue_symlink_to_directory_replaces_link
+run_case case_rescue_symlink_to_directory_restores_link
 run_case case_predecessor_rotation
+run_case case_rotation_second_move_failure_restores_predecessor
+run_case case_rotation_predecessor_restore_failure_reports_recovery
 run_case case_unverified_preserves_previous
 run_case case_baseline_mcp_silent_failure_reports_exit
 run_case case_baseline_mcp_explicit_failure_reports_exit

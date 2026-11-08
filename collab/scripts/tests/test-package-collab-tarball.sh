@@ -59,7 +59,10 @@ case "\$1" in
       [ "\${STUB_LOCAL_EXIT:-0}" -eq 0 ] || exit "\${STUB_LOCAL_EXIT}"
       exit 0
     fi
-    [ "\${STUB_FULL_EXIT:-0}" -eq 0 ] || exit "\${STUB_FULL_EXIT}"
+    [ "\${STUB_FULL_EXIT:-0}" -eq 0 ] || {
+      [ -z "\${STUB_FULL_JSON:-}" ] || printf '%s\n' "\$STUB_FULL_JSON"
+      exit "\${STUB_FULL_EXIT}"
+    }
     exit 0
     ;;
   install-autostart)
@@ -189,7 +192,7 @@ package_transaction_cases() {
 
   local run_install
   run_install() {
-    local case_name="$1" home_dir="$2" full_exit="${3:-0}"
+    local case_name="$1" home_dir="$2" full_exit="${3:-0}" full_json="${4:-}"
     (
       set +e
       PATH="$stub:/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -200,13 +203,15 @@ package_transaction_cases() {
         COLLAB_BUILD_STATE_DIR="$work/build-state-$label-$case_name" \
         TMPDIR="$work/tmp-$label-$case_name" \
         STUB_FULL_EXIT="$full_exit" \
+        STUB_FULL_JSON="$full_json" \
         sh "$package/install.sh" >"$work/install-$label.out" 2>&1
       printf '%s\n' "$?" >"$work/install-$label.exit"
     )
   }
 
   # Pending activation: daemon absent, exit 3, files stay installed.
-  run_install pending "$home" 3
+  run_install pending "$home" 3 \
+    '{"outcome":"pending_user_activation","required_action":"daemon_absent"}'
   [[ "$(cat "$work/install-$label.exit")" -eq 3 ]] ||
     fail "package pending: expected exit 3 got $(cat "$work/install-$label.exit")"
   grep -q 'outcome=pending_user_activation' "$work/install-$label.out" ||
@@ -281,9 +286,34 @@ check_external_refused() {
   fi
 }
 
+# The debug sentinel is a valid local-health pair but not a release candidate.
+# Preparing it as a public release archive would install it over the canonical
+# release names, so the packager must reject it before any product is staged.
+package_debug_rejected() {
+  local label="$1"
+  local stub="$work/stub-$label" out="$work/out-$label"
+
+  write_stub "$stub"
+  sed -i '' 's/0\.2\.9001/0.2.0000/g' "$stub/collab" "$stub/collab-mcp"
+
+  local status=0
+  sh "$packager" --skip-build --bin-dir "$stub" --out "$out" \
+    >"$work/package-$label.out" 2>&1 || status=$?
+  [[ "$status" -ne 0 ]] ||
+    fail "packaging accepted debug build 0.2.0000: $(cat "$work/package-$label.out")"
+  grep -q '0\.2\.0000' "$work/package-$label.out" ||
+    fail "packaging did not report the debug sentinel: $(cat "$work/package-$label.out")"
+  [[ ! -e "$out/collab-0.2.0000-macos-$(uname -m).tar.gz" ]] ||
+    fail "packaging published a tarball for debug build 0.2.0000"
+  [[ ! -d "$out/collab-0.2.0000-macos-$(uname -m)" ]] ||
+    fail "packaging staged a release product for debug build 0.2.0000"
+}
+
 checks=0
 
 package_and_install ok "$work/invoke-ok.log"
+checks=$((checks + 1))
+package_debug_rejected debug
 checks=$((checks + 1))
 package_transaction_cases tx "$work/invoke-tx.log"
 checks=$((checks + 1))

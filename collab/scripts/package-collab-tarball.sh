@@ -73,6 +73,8 @@ fi
 
 version=$("$bin_dir/collab" --version | awk '{print $2}')
 case "$version" in
+  0.2.0000)
+    fail "refusing to package debug build version 0.2.0000 as a release candidate; allocate a release version with scripts/build-collab.sh" ;;
   0.2.[0-9]*) ;;
   *) fail "unexpected collab version: $version" ;;
 esac

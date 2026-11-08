@@ -26,11 +26,9 @@ pub(super) const COMMUNICATION_EVENT_SCHEMA: &str =
     include_str!("../../contracts/communication/communication-event.schema.json");
 
 pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>) {
-    let subcommand = args
-        .next()
-        .unwrap_or_else(|| {
-            fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project>")
-        });
+    let subcommand = args.next().unwrap_or_else(|| {
+        fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project> [--graph <path>]")
+    });
     if subcommand == "validate" {
         let result = validate_graph_contracts()
             .unwrap_or_else(|error| fail(format!("DAGPIPE_GRAPH_VALIDATION_FAILED:{error}")));
@@ -41,14 +39,42 @@ pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>
         return;
     }
     if subcommand == "validate-notifications" {
-        let root = std::path::PathBuf::from(
-            args.next()
-                .unwrap_or_else(|| fail("USAGE: appsdk dagpipe validate-notifications <project>")),
-        );
-        if args.next().is_some() {
-            fail("USAGE: appsdk dagpipe validate-notifications <project>");
+        let root = std::path::PathBuf::from(args.next().unwrap_or_else(|| {
+            fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]")
+        }));
+        let mut graph_path = None;
+        while let Some(option) = args.next() {
+            match option.as_str() {
+                "--graph" => {
+                    if graph_path.is_some() {
+                        fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]");
+                    }
+                    graph_path = Some(std::path::PathBuf::from(args.next().unwrap_or_else(|| {
+                        fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]")
+                    })));
+                }
+                _ => {
+                    fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]")
+                }
+            }
         }
-        let result = validate_notification_objects(&root)
+        assert_project_root_safe(&root);
+        let root = root
+            .canonicalize()
+            .unwrap_or_else(|error| fail(format!("PROJECT_ROOT_MISSING:{error}")));
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let started = std::time::Instant::now();
+        let result = validate_notification_objects(&root, graph_path.as_deref());
+        if let Err(error) = notification::append_notification_invocation(
+            &root,
+            &started_at,
+            started.elapsed().as_millis(),
+            graph_path.is_some(),
+            &result,
+        ) {
+            eprintln!("COMMAND_INVOCATION_LOG_WRITE_FAILED:{error}");
+        }
+        let result = result
             .unwrap_or_else(|error| fail(format!("DAGPIPE_NOTIFICATION_OBJECT_INVALID:{error}")));
         println!(
             "{}",
@@ -57,7 +83,7 @@ pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>
         return;
     }
     if subcommand != "fix" {
-        fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project>");
+        fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project> [--graph <path>]");
     }
 
     let mut root = std::path::PathBuf::from(".");
@@ -221,6 +247,11 @@ fn validate_graph_contracts_with_manifest(raw_manifest: &str) -> Result<Value, S
         graphs.push(json!({
             "id": id,
             "version": graph.version,
+            "binding_kind": if design_graph_ids().contains(&graph.id.as_str()) {
+                "design"
+            } else {
+                "executable"
+            },
             "single_source_single_sink": {"inputs": graph.inputs.len(), "outputs": graph.outputs.len()}
         }));
     }
@@ -246,7 +277,7 @@ fn validate_graph_registry(graph: &Graph) -> Result<(), String> {
     };
     let mut registry = Registry::default();
     register_fix_operators(&mut registry)?;
-    register_notification_operator(&mut registry)?;
+    register_notification_operators(&mut registry)?;
     for name in &design_operators {
         registry
             .register(DesignGraphOperator {
@@ -298,7 +329,7 @@ fn ensure_graph_nodes_use_registered_operators(
 
 #[path = "dagpipe_notification.rs"]
 mod notification;
-use notification::{register_notification_operator, validate_notification_objects};
+use notification::{register_notification_operators, validate_notification_objects};
 
 fn embedded_graph_paths() -> [(&'static str, &'static str); 45] {
     [

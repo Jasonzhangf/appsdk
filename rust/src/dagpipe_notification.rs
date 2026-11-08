@@ -1,18 +1,26 @@
 use super::*;
 
-pub(super) fn validate_notification_objects(root: &Path) -> Result<Value, String> {
-    assert_project_root_safe(root);
+pub(super) fn validate_notification_objects(
+    root: &Path,
+    graph_path: Option<&Path>,
+) -> Result<Value, String> {
     let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
-    assert_no_symlink_components(root, &mailbox, "communication_mailbox");
+    validate_notification_path(root, &mailbox, "communication_mailbox")?;
     let raw = fs::read_to_string(&mailbox)
         .map_err(|error| format!("COMMUNICATION_MAILBOX_READ_FAILED:{error}"))?;
     let events = mailbox_events(&raw)?;
     let groups = notification_object_groups(&events)?;
-    let graph = parse_graph_json(NOTIFICATION_LIFECYCLE_GRAPH)
+    let graph_source = notification_graph_source(root, graph_path)?;
+    let graph = parse_graph_json(&graph_source)
         .map_err(|error| format!("DAGPIPE_GRAPH_INVALID:{error}"))?;
-    ensure_single_source_single_sink(&graph)?;
+    if graph.inputs.len() != 1 || graph.inputs[0].id != "notification_object" {
+        return Err("DAGPIPE_NOTIFICATION_GRAPH_INPUT_INVALID".to_owned());
+    }
+    if graph.outputs.len() != 1 || graph.outputs[0] != "notification_terminal" {
+        return Err("DAGPIPE_NOTIFICATION_GRAPH_OUTPUT_INVALID".to_owned());
+    }
     let mut registry = Registry::default();
-    register_notification_operator(&mut registry)?;
+    register_notification_operators(&mut registry)?;
     let capabilities = BTreeSet::new();
     let compiled = compile(graph, &registry, &capabilities)
         .map_err(|error| format!("DAGPIPE_COMPILE_FAILED:{error}"))?;
@@ -41,24 +49,123 @@ pub(super) fn validate_notification_objects(root: &Path) -> Result<Value, String
             .get("terminal")
             .cloned()
             .ok_or_else(|| format!("DAGPIPE_NOTIFICATION_TERMINAL_MISSING:{key}"))?;
-        if terminal_requires_repair(&terminal) {
+        let output_key = output
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("DAGPIPE_NOTIFICATION_OBJECT_RESULT_INVALID:{key}"))?;
+        if output_key != key {
             return Err(format!(
-                "NOTIFICATION_OBJECT_TERMINAL_MISSING:{key}:{}",
-                terminal
+                "DAGPIPE_NOTIFICATION_OBJECT_RESULT_MISMATCH:{key}:{output_key}"
             ));
         }
-        objects.push(json!({
+        let mut object = json!({
             "key": key,
-            "single_source_single_sink": true,
             "terminal": terminal,
             "journal": result.journal,
-        }));
+        });
+        if let Some(single_source_single_sink) = output.get("single_source_single_sink") {
+            object["single_source_single_sink"] = single_source_single_sink.clone();
+        }
+        objects.push(object);
     }
+    let evidence_scope = if graph_path.is_some() {
+        "selected_project_program"
+    } else {
+        "sdk_default_contract"
+    };
     Ok(json!({
+        "evidence_scope": evidence_scope,
         "graph": {"id": compiled.id(), "version": compiled.version()},
         "single_source_single_sink": true,
         "objects": objects,
     }))
+}
+
+fn notification_graph_source(root: &Path, graph_path: Option<&Path>) -> Result<String, String> {
+    let Some(graph_path) = graph_path else {
+        return Ok(NOTIFICATION_LIFECYCLE_GRAPH.to_owned());
+    };
+    let selected_path = if graph_path.is_absolute() {
+        graph_path.to_path_buf()
+    } else {
+        root.join(graph_path)
+    };
+    let parent = selected_path
+        .parent()
+        .ok_or_else(|| "GOVERNANCE_PATH_ESCAPE:notification_graph".to_owned())?;
+    validate_notification_path(parent, &selected_path, "notification_graph")?;
+    let normalized_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("DAGPIPE_NOTIFICATION_GRAPH_READ_FAILED:{error}"))?;
+    let file_name = selected_path
+        .file_name()
+        .ok_or_else(|| "GOVERNANCE_PATH_ESCAPE:notification_graph".to_owned())?;
+    let selected_path = normalized_parent.join(file_name);
+    validate_notification_path(root, &selected_path, "notification_graph")?;
+    fs::read_to_string(&selected_path)
+        .map_err(|error| format!("DAGPIPE_NOTIFICATION_GRAPH_READ_FAILED:{error}"))
+}
+
+fn validate_notification_path(root: &Path, path: &Path, label: &str) -> Result<(), String> {
+    use crate::platform::PathBoundaryError;
+
+    crate::platform::validate_contained_path(root, path).map_err(|error| match error {
+        PathBoundaryError::Escape => format!("GOVERNANCE_PATH_ESCAPE:{label}"),
+        PathBoundaryError::BaseLink(_) | PathBoundaryError::ComponentLink(_) => {
+            format!("GOVERNANCE_PATH_SYMLINK:{label}")
+        }
+        error => format!("GOVERNANCE_PATH_INVALID:{label}:{error:?}"),
+    })
+}
+
+pub(super) fn append_notification_invocation(
+    root: &Path,
+    started_at: &str,
+    elapsed_ms: u128,
+    explicit_graph: bool,
+    result: &Result<Value, String>,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let path = root.join(".appsdk-control/command-invocations.jsonl");
+    crate::platform::validate_contained_path(root, &path)
+        .map_err(|_| "path:boundary".to_owned())?;
+    fs::create_dir_all(root.join(".appsdk-control"))
+        .map_err(|error| format!("mkdir:{:?}", error.kind()))?;
+    crate::platform::validate_contained_path(root, &path)
+        .map_err(|_| "path:boundary".to_owned())?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if !metadata.is_file() => return Err("path:not_regular_file".to_owned()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("path:{:?}", error.kind()));
+        }
+        _ => {}
+    }
+    let mut record = json!({
+        "command": "dagpipe.validate-notifications",
+        "started_at": started_at,
+        "elapsed_ms": elapsed_ms,
+        "graph_selection": if explicit_graph { "explicit" } else { "default" },
+        "outcome": if result.is_ok() { "success" } else { "error" },
+    });
+    if let Err(error) = result {
+        // Every error at this boundary starts with an owner-defined code.
+        record["error_code"] = json!(error.split(':').next().unwrap_or_default());
+    }
+    let mut line = serde_json::to_vec(&record).map_err(|_| "serialize:json".to_owned())?;
+    line.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("open:{:?}", error.kind()))?;
+    crate::platform::try_lock_exclusive(&file).map_err(|error| match error {
+        crate::platform::LockAttemptError::WouldBlock => "lock:would_block".to_owned(),
+        crate::platform::LockAttemptError::Io(error) => format!("lock:{:?}", error.kind()),
+    })?;
+    file.write_all(&line)
+        .map_err(|error| format!("append:{:?}", error.kind()))
 }
 
 fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
@@ -452,21 +559,35 @@ fn notification_input(key: &str, events: &[Value]) -> Result<Value, String> {
     }))
 }
 
-pub(super) fn register_notification_operator(registry: &mut Registry) -> Result<(), String> {
+pub(super) fn register_notification_operators(registry: &mut Registry) -> Result<(), String> {
     registry
-        .register(NotificationObjectValidateOperator)
+        .register(NotificationSourceValidateOperator)
+        .map_err(|error| format!("DAGPIPE_OPERATOR_REGISTER_FAILED:{error}"))?;
+    registry
+        .register(NotificationDeliveryValidateOperator)
+        .map_err(|error| format!("DAGPIPE_OPERATOR_REGISTER_FAILED:{error}"))?;
+    registry
+        .register(NotificationTerminalAcceptOperator)
         .map_err(|error| format!("DAGPIPE_OPERATOR_REGISTER_FAILED:{error}"))
 }
 
-struct NotificationObjectValidateOperator;
+struct NotificationSourceValidateOperator;
 
-impl Operator for NotificationObjectValidateOperator {
+impl Operator for NotificationSourceValidateOperator {
     fn name(&self) -> &'static str {
-        "appsdk.communication.notification_object_validate"
+        "appsdk.communication.notification_source_validate"
     }
 
     fn version(&self) -> &'static str {
         "1"
+    }
+
+    fn input_type(&self) -> ValueType {
+        ValueType::Object
+    }
+
+    fn output_type(&self) -> ValueType {
+        ValueType::Object
     }
 
     fn replay(&self) -> EffectReplay {
@@ -474,22 +595,7 @@ impl Operator for NotificationObjectValidateOperator {
     }
 
     fn execute(&self, input: Value, _: &OperatorContext) -> Result<Value, String> {
-        let key = input
-            .get("key")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "DAGPIPE_NOTIFICATION_KEY_MISSING".to_owned())?;
-        let message_id = input
-            .get("messageId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "DAGPIPE_NOTIFICATION_MESSAGE_MISSING".to_owned())?;
-        let notification_id = input
-            .get("notificationId")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let events = input
-            .get("events")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "DAGPIPE_NOTIFICATION_EVENTS_MISSING".to_owned())?;
+        let (key, message_id, _, events) = notification_envelope_parts(&input)?;
         let queues = events
             .iter()
             .filter(|event| event["kind"] == "notification.queued")
@@ -524,7 +630,36 @@ impl Operator for NotificationObjectValidateOperator {
         if !accepted {
             return Err(format!("NOTIFICATION_OBJECT_MESSAGE_ACCEPT_MISSING:{key}"));
         }
-        let terminal = events
+        Ok(input)
+    }
+}
+
+struct NotificationDeliveryValidateOperator;
+
+impl Operator for NotificationDeliveryValidateOperator {
+    fn name(&self) -> &'static str {
+        "appsdk.communication.notification_delivery_validate"
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn input_type(&self) -> ValueType {
+        ValueType::Object
+    }
+
+    fn output_type(&self) -> ValueType {
+        ValueType::Object
+    }
+
+    fn replay(&self) -> EffectReplay {
+        EffectReplay::NonReplayable
+    }
+
+    fn execute(&self, input: Value, _: &OperatorContext) -> Result<Value, String> {
+        let (key, message_id, notification_id, events) = notification_envelope_parts(&input)?;
+        let terminal_events = events
             .iter()
             .filter(|event| {
                 matches!(
@@ -558,13 +693,13 @@ impl Operator for NotificationObjectValidateOperator {
             })
             .cloned()
             .collect::<Vec<_>>();
-        if terminal.len() > 1 {
+        if terminal_events.len() > 1 {
             return Err(format!("NOTIFICATION_OBJECT_MULTIPLE_SINKS:{key}"));
         }
-        if let Some(event) = terminal.first() {
-            validate_terminal_event(&events, event, key, notification_id, message_id)?;
+        if let Some(event) = terminal_events.first() {
+            validate_terminal_event(&events, event, &key, &notification_id, &message_id)?;
         }
-        validate_delivery_failures(&events, key, notification_id, message_id)?;
+        validate_delivery_failures(&events, &key, &notification_id, &message_id)?;
         let failures = events
             .iter()
             .filter(|event| event["kind"] == "notification.delivery_failed")
@@ -574,7 +709,7 @@ impl Operator for NotificationObjectValidateOperator {
                     .is_some_and(|keys| keys.iter().any(|candidate| candidate == &json!(key)))
             })
             .count();
-        let terminal = if terminal.is_empty() {
+        let terminal = if terminal_events.is_empty() {
             let attempts = events
                 .iter()
                 .filter(|event| event["kind"] == "notification.delivery_attempt")
@@ -610,8 +745,49 @@ impl Operator for NotificationObjectValidateOperator {
                 })
             }
         } else {
-            terminal[0].clone()
+            terminal_events[0].clone()
         };
+        let mut output = input;
+        output["terminal"] = terminal;
+        Ok(output)
+    }
+}
+
+struct NotificationTerminalAcceptOperator;
+
+impl Operator for NotificationTerminalAcceptOperator {
+    fn name(&self) -> &'static str {
+        "appsdk.communication.notification_terminal_accept"
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn input_type(&self) -> ValueType {
+        ValueType::Object
+    }
+
+    fn output_type(&self) -> ValueType {
+        ValueType::Object
+    }
+
+    fn replay(&self) -> EffectReplay {
+        EffectReplay::NonReplayable
+    }
+
+    fn execute(&self, input: Value, _: &OperatorContext) -> Result<Value, String> {
+        let (key, message_id, _, _) = notification_envelope_parts(&input)?;
+        let terminal = input
+            .get("terminal")
+            .cloned()
+            .ok_or_else(|| format!("DAGPIPE_NOTIFICATION_TERMINAL_MISSING:{key}"))?;
+        if terminal_requires_repair(&terminal) {
+            return Err(format!(
+                "NOTIFICATION_OBJECT_TERMINAL_MISSING:{key}:{}",
+                terminal
+            ));
+        }
         Ok(json!({
             "key": key,
             "messageId": message_id,
@@ -619,6 +795,33 @@ impl Operator for NotificationObjectValidateOperator {
             "terminal": terminal,
         }))
     }
+}
+
+fn notification_envelope_parts(
+    input: &Value,
+) -> Result<(String, String, String, &[Value]), String> {
+    let key = input
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "DAGPIPE_NOTIFICATION_KEY_MISSING".to_owned())?;
+    let message_id = input
+        .get("messageId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "DAGPIPE_NOTIFICATION_MESSAGE_MISSING".to_owned())?;
+    let notification_id = input
+        .get("notificationId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let events = input
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "DAGPIPE_NOTIFICATION_EVENTS_MISSING".to_owned())?;
+    Ok((
+        key.to_owned(),
+        message_id.to_owned(),
+        notification_id.to_owned(),
+        events,
+    ))
 }
 
 fn terminal_requires_repair(terminal: &Value) -> bool {

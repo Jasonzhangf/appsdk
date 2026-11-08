@@ -212,6 +212,22 @@ fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_de
     assert!(graph_ids.contains(&"appsdk-collab-notification-consumption"));
     assert!(result["compiled_registry"].as_bool().unwrap());
     assert!(result["manifest"]["graphs"].as_array().unwrap().len() == embedded_graph_paths().len());
+    let graph = |id: &str| {
+        result["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|graph| graph["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(
+        graph("appsdk-notification-object")["binding_kind"],
+        "executable"
+    );
+    assert_eq!(
+        graph("appsdk-collab-name-ownership")["binding_kind"],
+        "design"
+    );
 }
 
 #[test]

@@ -207,6 +207,51 @@ SHIM
   chmod 755 "$d/repo/tools/mv"
 }
 
+# Install a GNU-shaped stat in the fixture PATH. GNU stat reports on the file
+# operand for -f %Lp, then exits nonzero because %Lp is treated as another
+# missing file. The -c %a path remains exact. System-volume device probes stay
+# on the native stat so the fixture still exercises the macOS volume guard.
+install_gnu_stat_shim() {
+  local d="$1" gnu_stat
+  gnu_stat="$(command -v gstat 2>/dev/null || true)"
+  cat >"$d/repo/tools/stat" <<SHIM
+#!/bin/sh
+if [ "\$1" = "-f" ] && [ "\$2" = "%d" ]; then
+  shift 2
+  command -p stat -f '%d' "\$@"
+  exit \$?
+fi
+if [ "\$1" = "-f" ] && [ "\$2" = "%Lp" ]; then
+  shift 2
+  if [ -n "$gnu_stat" ]; then
+    "$gnu_stat" -f '%Lp' "\$@"
+    exit \$?
+  fi
+  printf '  File: "%s"\n' "\$1"
+  printf '%s\n' '    ID: shim Namelen: 255 Type: shim'
+  printf '%s\n' 'Block size: 4096       Fundamental block size: 4096'
+  printf '%s\n' 'Blocks: Total: 1 Free: 0 Available: 0'
+  printf '%s\n' 'Inodes: Total: 1 Free: 0'
+  exit 1
+fi
+if [ "\$1" = "-c" ] && [ "\$2" = "%a" ]; then
+  shift 2
+  if [ -n "$gnu_stat" ]; then
+    "$gnu_stat" -c '%a' "\$@"
+    exit \$?
+  fi
+  if command -p stat -f '%Lp' "\$@" >/dev/null 2>&1; then
+    command -p stat -f '%Lp' "\$@"
+    exit \$?
+  fi
+  command -p stat -c '%a' "\$@"
+  exit \$?
+fi
+command -p stat "\$@"
+SHIM
+  chmod 755 "$d/repo/tools/stat"
+}
+
 run_installer() {
   local d="$1"; shift
   (
@@ -853,6 +898,22 @@ case_debug_entries_untouched() {
   assert_no_lifecycle "$F"
 }
 
+case_gnu_stat_partial_stdout_mode() {
+  new_fixture gnu_stat_mode
+  write_baseline 0.2.8000
+  install_gnu_stat_shim "$F"
+  write_candidate 0.2.9001
+  run_installer_ok "$F"
+  assert_field "$F/out" outcome success
+  assert_field "$F/out" baseline recoverable_release
+  assert_mode "$F_BIN/collab" 755
+  assert_mode "$F_BIN/collab-mcp" 755
+  assert_mode "$F_BIN/collab-desktop-mcp" 755
+  assert_mode "$F_BIN/collab-desktop-mcp.mjs" 644
+  assert_no_leftovers "$F"
+  assert_no_lifecycle "$F"
+}
+
 case_stale_lock_refusal() {
   new_fixture stale_lock
   mkdir -p "$F_BIN/.collab-install.lock"
@@ -997,6 +1058,7 @@ run_case case_unverified_preserves_previous
 run_case case_baseline_mcp_silent_failure_reports_exit
 run_case case_baseline_mcp_explicit_failure_reports_exit
 run_case case_debug_entries_untouched
+run_case case_gnu_stat_partial_stdout_mode
 run_case case_stale_lock_refusal
 run_case case_concurrent_second_refused_then_retry
 run_case case_recovery_marker_refusal

@@ -44,6 +44,24 @@ async function removeEnrollment(state,session,thread){
   try{await walk(root);}catch(e){if(e.code!=='ENOENT')throw e;}
 }
 
+async function mcpContext(command,args,{cwd,env}){
+  const child=spawn(command,args,{cwd,env,stdio:['pipe','pipe','pipe']});
+  let stdout='',stderr='';
+  child.stdout.on('data',chunk=>stdout+=chunk);
+  child.stderr.on('data',chunk=>stderr+=chunk);
+  child.stdin.end([
+    JSON.stringify({jsonrpc:'2.0',id:'initialize',method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'desktop-gate',version:'1'}}}),
+    JSON.stringify({jsonrpc:'2.0',id:'context',method:'tools/call',params:{name:'collab_context',arguments:{},_meta:{'x-codex-turn-metadata':{thread_id:'real-thread',turn_id:'real-origin-turn'}}}}),
+  ].join('\n')+'\n');
+  const timer=setTimeout(()=>child.kill('SIGTERM'),15000);
+  const code=await new Promise((resolve,reject)=>{child.on('error',reject);child.on('exit',resolve);});
+  clearTimeout(timer);
+  if(code!==0)throw Error(`MCP exited ${code}: ${stderr}`);
+  const response=stdout.trim().split('\n').map(line=>JSON.parse(line)).find(value=>value.id==='context');
+  if(!response)throw Error(`MCP context response missing: ${stdout}${stderr}`);
+  return response;
+}
+
 test('fresh sessions share one runtime service without MCP context or wrapper lifetime',async t=>{
   const f=await fixture(t);
   const [a,b]=await Promise.all([f.admit('session-a','thread-a'),f.admit('session-b','thread-b')]);
@@ -102,6 +120,32 @@ test('public CLI restores current state and rejects corrupt current state withou
   await assert.rejects(fs.stat(path.join(f.state,'server.sock')),{code:'ENOENT'});
   assert.equal(await fs.readFile(central,'utf8'),'invalid-current-state\n');
   assert.equal(await fs.readFile(legacy,'utf8'),'incompatible-retired-version\n');
+});
+
+test('direct MCP cannot supply a Desktop session while the formal wrapper admits the same isolated host',async t=>{
+  const binary=process.env.COLLAB_TEST_BINARY;
+  if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
+  const f=await fixture(t),home=path.join(f.root,'home');
+  await fs.mkdir(home);await fs.mkdir(path.join(f.root,'.agent-collab'));
+  const daemonEnv={...f.env,HOME:home,CODEX_HOME:home,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex TUI'};
+  delete daemonEnv.CODEX_APP_TOOLS_PIPE_PATH;delete daemonEnv.CODEX_MCP_NODE_PATH;
+  let daemon,daemonLog='';
+  function startDaemon(){daemon=spawn(binary,['serve'],{cwd:f.root,env:daemonEnv,stdio:['ignore','ignore','pipe']});daemon.stderr.on('data',chunk=>daemonLog+=chunk);}
+  startDaemon();
+  t.after(async()=>{if(daemon.exitCode===null){daemon.kill('SIGTERM');await new Promise(resolve=>daemon.once('exit',resolve));}});
+  const deadline=Date.now()+10000;
+  while(Date.now()<deadline){try{await fs.stat(path.join(f.state,'server.sock'));break;}catch{}if(daemon.exitCode!==null)throw Error('fixture daemon failed: '+daemonLog);await new Promise(resolve=>setTimeout(resolve,30));}
+  const mcp=process.env.COLLAB_TEST_MCP_BINARY??path.join(path.dirname(binary),'collab-mcp');
+  const baseEnv={...f.env,HOME:home,CODEX_HOME:home,COLLAB_BIN:binary};
+  delete baseEnv.CODEX_SESSION_ID;delete baseEnv.CODEX_THREAD_ID;
+  const direct=await mcpContext(mcp,[],{cwd:f.root,env:baseEnv});
+  assert.equal(direct.result.isError,true);
+  assert.match(direct.result.content[0].text,/DESKTOP_BRIDGE_SESSION_REQUIRED: current agent sessionID is missing/);
+  const wrapperEnv={...baseEnv,COLLAB_MCP_BIN:mcp,CODEX_SESSION_ID:'agent-session'};
+  const formal=await mcpContext(process.execPath,[script],{cwd:f.root,env:wrapperEnv});
+  assert.equal(formal.result.isError,false);
+  assert.match(formal.result.content[0].text,/committed|completed/);
+  assert.ok(f.calls.some(call=>call.params?.tool==='read_thread'&&call.params?.threadId==='real-thread'),'wrapper verifies the same isolated executor thread');
 });
 
 test('daemon admits a legacy Desktop binding through a live publisher without host or node environment',async t=>{

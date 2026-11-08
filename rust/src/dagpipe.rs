@@ -613,9 +613,9 @@ fn design_graph_operator_names() -> [&'static str; 252] {
         "appsdk.collab_install.capture",
         "appsdk.collab_install.prepare",
         "appsdk.collab_install.stage",
+        "appsdk.collab_install.install",
         "appsdk.collab_install.check",
         "appsdk.collab_install.resolve",
-        "appsdk.collab_install.install",
         "appsdk.collab_install.result",
         "appsdk.collab_send.authenticate_source",
         "appsdk.collab_send.classify_identity",
@@ -809,8 +809,10 @@ fn design_graph_operator_names() -> [&'static str; 252] {
 
 fn design_graph_operator_version(name: &str) -> &'static str {
     match name {
-        "appsdk.collab_context.env_view" | "appsdk.collab_context.emit_snapshot" => "2",
-        "appsdk.collab_install.install" | "appsdk.collab_install.result" => "2",
+        "appsdk.collab_context.env_view"
+        | "appsdk.collab_context.emit_snapshot"
+        | "appsdk.collab_install.install"
+        | "appsdk.collab_install.result" => "2",
         _ => "1",
     }
 }

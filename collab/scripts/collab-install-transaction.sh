@@ -119,7 +119,7 @@ tx_parse() {
 }
 
 tx_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 tx_first_line() {

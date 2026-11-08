@@ -123,6 +123,7 @@ pub enum BoardCommand {
         reviewer: Option<String>,
         /// Task ids that must complete before this ticket's execute phase may start.
         #[arg(long = "depends-on", num_args(1..))]
+        #[serde(default)]
         depends_on: Vec<String>,
     },
     /// Atomically claim one pending task at the observed board revision.

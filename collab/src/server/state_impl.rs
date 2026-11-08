@@ -1260,6 +1260,22 @@ impl State {
                 self.worktree_bindings
                     .insert(binding.binding_id.clone(), binding.clone());
             }
+            Event::TicketPhaseRecorded { phase } => {
+                // (task_id, phase, batch) is the unique key; overwrite in place
+                // so re-recording one batch never duplicates a queue item.
+                if let Some(existing) = self.ticket_phases.iter_mut().find(|existing| {
+                    existing.task_id == phase.task_id
+                        && existing.phase == phase.phase
+                        && existing.batch == phase.batch
+                }) {
+                    *existing = phase.clone();
+                } else {
+                    self.ticket_phases.push(phase.clone());
+                }
+            }
+            Event::TicketRotationUpdated { group, slot } => {
+                self.ticket_rotation.insert(group.clone(), slot.clone());
+            }
             Event::GlobalProjectRegistered { registration } => {
                 self.apply_global_event(&GlobalEvent::ProjectRegistered {
                     registration: registration.clone(),

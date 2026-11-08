@@ -374,12 +374,26 @@ fn named_reviewer_accepts_a_delivered_task_without_being_owner_or_master() {
     );
     fixture.run_public(
         &[
+            "board",
+            "start",
+            "named-review",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
             "task",
             "deliver",
             "named-review",
             "--no-candidate",
             "--evidence",
             "report ready",
+            "--attempt",
+            "1",
         ],
         THREAD_B,
     );
@@ -654,26 +668,22 @@ fn pinned_executor_and_reviewer_complete_a_read_only_task_through_public_cli() {
     fixture.run_public(
         &[
             "board",
-            "dispatch",
+            "claim",
             "role-delivery",
             "--expected-revision",
             "1",
         ],
-        THREAD_A,
+        THREAD_B,
     );
-    let board = fixture.run_public(&["board", "show"], THREAD_B);
-    let revision = task(&board, "role-delivery")["revision"]
-        .as_u64()
-        .unwrap()
-        .to_string();
     fixture.run_public(
         &[
             "board",
-            "respond",
+            "start",
             "role-delivery",
-            "--accept",
             "--expected-revision",
-            &revision,
+            "2",
+            "--attempt",
+            "1",
         ],
         THREAD_B,
     );
@@ -685,6 +695,8 @@ fn pinned_executor_and_reviewer_complete_a_read_only_task_through_public_cli() {
             "--evidence",
             "设计稿与公开验收通过",
             "--no-candidate",
+            "--attempt",
+            "1",
         ],
         THREAD_B,
     );
@@ -879,12 +891,26 @@ fn rework_contract_changes_and_manual_cleanup_do_not_reuse_review_acceptance() {
     );
     fixture.run_public(
         &[
+            "board",
+            "start",
+            "review-changes",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
             "task",
             "deliver",
             "review-changes",
             "--no-candidate",
             "--evidence",
             "first report",
+            "--attempt",
+            "1",
         ],
         THREAD_B,
     );
@@ -904,6 +930,23 @@ fn rework_contract_changes_and_manual_cleanup_do_not_reuse_review_acceptance() {
         &["task", "update", "review-changes", "--status", "accepted"],
         THREAD_B,
     );
+    let rework_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let rework_revision = task(&rework_board, "review-changes")["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "review-changes",
+            "--expected-revision",
+            &rework_revision,
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
     fixture.run_public(
         &[
             "task",
@@ -912,6 +955,8 @@ fn rework_contract_changes_and_manual_cleanup_do_not_reuse_review_acceptance() {
             "--no-candidate",
             "--evidence",
             "corrected report",
+            "--attempt",
+            "2",
         ],
         THREAD_B,
     );
@@ -995,4 +1040,853 @@ fn rework_contract_changes_and_manual_cleanup_do_not_reuse_review_acceptance() {
         .any(|row| row["id"] == "review-changes"));
     let history = fixture.run_public(&["task", "status", "review-changes"], THREAD_A);
     assert_eq!(history["delivery_complete"], false);
+}
+
+#[test]
+fn publish_admits_ticket_to_shortest_slot_queue_and_rotates_on_ties() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "ticket admission fixture",
+        ],
+        THREAD_A,
+    );
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let mut peers: Vec<String> = board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|worker| worker["role"] == "peer" && worker["status"] != "offline")
+        .map(|worker| worker["display_name"].as_str().unwrap().to_owned())
+        .collect();
+    peers.sort();
+    let n = peers.len();
+    assert!(
+        n >= 2,
+        "admission needs at least two eligible slots: {board}"
+    );
+
+    for (index, peer) in peers.iter().enumerate() {
+        let id = format!("ticket-empty-{index}");
+        let published = publish(&fixture, &id, &[]);
+        assert_eq!(published["ticket"]["phases"][0]["phase"], "execute");
+        assert_eq!(published["ticket"]["phases"][0]["status"], "queued");
+        assert_eq!(
+            published["ticket"]["phases"][0]["slot"], *peer,
+            "each empty slot must be chosen before any one-item queue: {published}"
+        );
+    }
+
+    let tied = publish(&fixture, "ticket-rotate", &[]);
+    assert_eq!(
+        tied["ticket"]["phases"][0]["slot"], peers[0],
+        "equal queue lengths must rotate past the last selected slot: {tied}"
+    );
+
+    let persisted = fixture.current_state();
+    let phases = persisted["ticket_phases"]
+        .as_array()
+        .expect("phase records persist");
+    assert_eq!(phases.len(), n + 1);
+    assert_eq!(
+        persisted["ticket_rotation"]["execute:generic"], peers[0],
+        "{persisted}"
+    );
+}
+
+#[test]
+fn board_claim_advances_the_admitted_execute_phase_once() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "ticket admission fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "ticket-claim", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker_id = board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["display_name"] == slot)
+        .map(|worker| worker["id"].as_str().unwrap().to_owned())
+        .expect("admitted slot must be one of the registered peers");
+    let thread = [THREAD_B, THREAD_C]
+        .iter()
+        .find(|thread| {
+            fixture.run_public(&["context"], thread)["identity"]["worker_id"] == worker_id
+        })
+        .copied()
+        .expect("admitted slot must map to one of the registered peer threads");
+    let claimed = fixture.run_public(
+        &["board", "claim", "ticket-claim", "--expected-revision", "1"],
+        thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+
+    let persisted = fixture.current_state();
+    let phase = persisted["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-claim")
+        .unwrap();
+    assert_eq!(phase["phase"], "execute");
+    assert_eq!(phase["status"], "claimed");
+    assert_eq!(phase["slot_name"], slot.as_str());
+    assert_eq!(phase["attempt_generation"], 1);
+}
+
+#[test]
+fn ticket_start_and_result_require_the_current_claimed_attempt() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &["master", "promote", "--approval", "ticket start fixture"],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "ticket-lifecycle", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker_id = board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["display_name"] == slot)
+        .map(|worker| worker["id"].as_str().unwrap().to_owned())
+        .expect("admitted slot must be one of the registered peers");
+    let thread = [THREAD_B, THREAD_C]
+        .iter()
+        .find(|thread| {
+            fixture.run_public(&["context"], thread)["identity"]["worker_id"] == worker_id
+        })
+        .copied()
+        .expect("admitted slot must map to one of the registered peer threads");
+    let other_thread = [THREAD_B, THREAD_C]
+        .into_iter()
+        .find(|candidate| *candidate != thread)
+        .expect("fixture must retain a non-owner peer");
+
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "ticket-lifecycle",
+            "--expected-revision",
+            "1",
+        ],
+        thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+
+    // Only the claim owner may start the claimed ticket.
+    let not_owner = rejected(
+        &fixture,
+        &[
+            "board",
+            "start",
+            "ticket-lifecycle",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        other_thread,
+    );
+    assert!(
+        not_owner.contains("TICKET_CLAIM_OWNER_MISMATCH"),
+        "{not_owner}"
+    );
+
+    // Result before Started is rejected and leaves the phase claimed.
+    let premature = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "ticket-lifecycle",
+            "--evidence",
+            "premature evidence",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        thread,
+    );
+    assert!(
+        premature.contains("TICKET_PHASE_NOT_RUNNING"),
+        "{premature}"
+    );
+
+    // Admitted ticket results must carry the claimed attempt.
+    let without_attempt = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "ticket-lifecycle",
+            "--evidence",
+            "missing attempt",
+            "--no-candidate",
+        ],
+        thread,
+    );
+    assert!(
+        without_attempt.contains("TICKET_ATTEMPT_REQUIRED"),
+        "{without_attempt}"
+    );
+
+    let after_rejections = fixture.current_state();
+    let phase = after_rejections["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-lifecycle")
+        .unwrap();
+    assert_eq!(phase["status"], "claimed");
+    assert_eq!(phase["attempt_generation"], 1);
+
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            "ticket-lifecycle",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        thread,
+    );
+    assert_eq!(started["task"]["status"], "working");
+    let phase_after_start = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-lifecycle")
+        .unwrap()
+        .clone();
+    assert_eq!(phase_after_start["status"], "running");
+
+    // A stale attempt on a running phase is rejected and leaves it running.
+    let stale = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "ticket-lifecycle",
+            "--evidence",
+            "stale attempt",
+            "--attempt",
+            "9",
+            "--no-candidate",
+        ],
+        thread,
+    );
+    assert!(stale.contains("TICKET_STALE_ATTEMPT"), "{stale}");
+    let phase_after_stale = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-lifecycle")
+        .unwrap()
+        .clone();
+    assert_eq!(phase_after_stale["status"], "running");
+
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "ticket-lifecycle",
+            "--evidence",
+            "real evidence",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        thread,
+    );
+    assert_eq!(delivered["status"], "delivered");
+    let phase_after_delivery = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-lifecycle")
+        .unwrap()
+        .clone();
+    assert_eq!(phase_after_delivery["status"], "completed");
+
+    // Repeated delivery must not complete the same phase twice.
+    let repeat = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "ticket-lifecycle",
+            "--evidence",
+            "repeat evidence",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        thread,
+    );
+    assert!(
+        repeat.contains("TICKET_RESULT_ALREADY_COMMITTED")
+            || repeat.contains("must be owned and working"),
+        "{repeat}"
+    );
+    let phase_after_repeat = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-lifecycle")
+        .unwrap()
+        .clone();
+    assert_eq!(phase_after_repeat["status"], "completed");
+}
+
+#[test]
+fn legacy_task_register_delivery_still_succeeds_without_attempt() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["task", "register", "legacy-register"], THREAD_A);
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "legacy-register",
+            "--evidence",
+            "legacy delivery evidence",
+            "--no-candidate",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(delivered["status"], "delivered");
+    let persisted = fixture.current_state();
+    assert!(!persisted["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|phase| phase["task_id"] == "legacy-register"));
+}
+
+#[test]
+fn admitted_ticket_missing_execute_phase_is_rejected_not_treated_as_legacy() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "ticket missing phase fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "ticket-missing-phase", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker_id = board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["display_name"] == slot)
+        .map(|worker| worker["id"].as_str().unwrap().to_owned())
+        .expect("admitted slot must be one of the registered peers");
+    let thread = [THREAD_B, THREAD_C]
+        .iter()
+        .find(|thread| {
+            fixture.run_public(&["context"], thread)["identity"]["worker_id"] == worker_id
+        })
+        .copied()
+        .expect("admitted slot must map to one of the registered peer threads");
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "ticket-missing-phase",
+            "--expected-revision",
+            "1",
+        ],
+        thread,
+    );
+    let state = fixture.current_state();
+    assert_eq!(
+        state["board_details"]["ticket-missing-phase"]["admitted"],
+        true
+    );
+    fixture.update_current_state(|state| {
+        let phases = state["ticket_phases"]
+            .as_array_mut()
+            .expect("phase records persist");
+        phases.retain(|phase| phase["task_id"] != "ticket-missing-phase");
+    });
+
+    let rejected = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "ticket-missing-phase",
+            "--evidence",
+            "missing phase",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        thread,
+    );
+    assert!(rejected.contains("TICKET_PHASE_MISSING"), "{rejected}");
+}
+
+fn seed_idle(fixture: &mut AppFixture, worker_id: &str, thread: &str) {
+    let project = std::fs::canonicalize(&fixture.project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let worker = worker_id.to_owned();
+    let session = thread.to_owned();
+    let scope = project.clone();
+    fixture.update_current_state(move |state| {
+        state["agent_presence"][scope.clone()][worker.clone()] = json!({
+            "project_scope": scope.clone(),
+            "worker_id": worker.clone(),
+            "session_id": session.clone(),
+            "presence": "online",
+            "reason": "fixture",
+            "observed_ms": 1
+        });
+        state["agent_activity"][scope.clone()][worker.clone()] = json!({
+            "project_scope": scope,
+            "worker_id": worker,
+            "session_id": session,
+            "activity": "idle",
+            "background": false,
+            "reason": "fixture",
+            "observed_ms": 1,
+            "idle_since_ms": 1
+        });
+    });
+}
+
+fn slot_worker_id(board: &Value, slot: &str) -> String {
+    board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["display_name"] == slot)
+        .and_then(|worker| worker["id"].as_str())
+        .expect("slot must be a registered worker")
+        .to_owned()
+}
+
+fn ticket_thread(fixture: &AppFixture, worker_id: &str) -> &'static str {
+    [THREAD_B, THREAD_C]
+        .into_iter()
+        .find(|thread| {
+            fixture.run_public(&["context"], thread)["identity"]["worker_id"] == worker_id
+        })
+        .expect("slot must map to a fixture thread")
+}
+
+#[test]
+fn idle_continuation_skips_dependency_blocked_priority_and_releases_on_completion() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "continuation dependency fixture",
+        ],
+        THREAD_A,
+    );
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let mut peers: Vec<String> = board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|worker| worker["role"] == "peer" && worker["status"] != "offline")
+        .map(|worker| worker["display_name"].as_str().unwrap().to_owned())
+        .collect();
+    peers.sort();
+    let (slot, helper) = (peers[0].clone(), peers[1].clone());
+    let slot_thread = ticket_thread(&fixture, &slot_worker_id(&board, &slot));
+    let helper_thread = ticket_thread(&fixture, &slot_worker_id(&board, &helper));
+    seed_idle(&mut fixture, &slot_worker_id(&board, &slot), slot_thread);
+
+    let dep = publish(&fixture, "ticket-dep", &["--executor", &helper]);
+    assert_eq!(dep["ticket"]["phases"][0]["status"], "queued");
+
+    let high = publish(
+        &fixture,
+        "ticket-high",
+        &[
+            "--executor",
+            &slot,
+            "--priority",
+            "p0",
+            "--depends-on",
+            "ticket-dep",
+        ],
+    );
+    assert_eq!(high["ticket"]["phases"][0]["status"], "queued");
+    assert_eq!(
+        high["ticket"]["phases"][0]["depends_on"],
+        json!(["ticket-dep"])
+    );
+
+    let low = publish(
+        &fixture,
+        "ticket-low",
+        &["--executor", &slot, "--priority", "p2"],
+    );
+    assert_eq!(
+        low["ticket"]["phases"][0]["status"], "claimed",
+        "the ready p2 ticket must claim an idle slot before a blocked p0"
+    );
+    assert_eq!(low["task"]["status"], "working");
+
+    let low_revision = low["task"]["revision"].as_u64().unwrap().to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "ticket-low",
+            "--expected-revision",
+            &low_revision,
+            "--attempt",
+            "1",
+        ],
+        slot_thread,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "ticket-low",
+            "--evidence",
+            "ready work",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        slot_thread,
+    );
+    let state = fixture.current_state();
+    let phase = |id: &str| {
+        state["ticket_phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["task_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(phase("ticket-low")["status"], "completed");
+    assert_eq!(
+        phase("ticket-high")["status"],
+        "queued",
+        "the blocked p0 must keep waiting after the ready ticket completes"
+    );
+
+    let dep_claimed = fixture.run_public(
+        &["board", "claim", "ticket-dep", "--expected-revision", "1"],
+        helper_thread,
+    );
+    let dep_revision = dep_claimed["task"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "ticket-dep",
+            "--expected-revision",
+            &dep_revision,
+            "--attempt",
+            "1",
+        ],
+        helper_thread,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "ticket-dep",
+            "--evidence",
+            "dependency complete",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        helper_thread,
+    );
+
+    let state = fixture.current_state();
+    let high = state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-high")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        high["status"], "claimed",
+        "a completed dependency must release another slot's idle queue: {state}"
+    );
+    assert_eq!(high["slot_name"], slot);
+    assert_eq!(high["attempt_generation"], 1);
+}
+
+#[test]
+fn idle_continuation_claims_fifo_within_same_priority_after_release() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "continuation fifo fixture",
+        ],
+        THREAD_A,
+    );
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let mut peers: Vec<String> = board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|worker| worker["role"] == "peer" && worker["status"] != "offline")
+        .map(|worker| worker["display_name"].as_str().unwrap().to_owned())
+        .collect();
+    peers.sort();
+    let slot = peers[0].clone();
+    let slot_thread = ticket_thread(&fixture, &slot_worker_id(&board, &slot));
+    seed_idle(&mut fixture, &slot_worker_id(&board, &slot), slot_thread);
+
+    let first = publish(&fixture, "ticket-fifo-first", &["--executor", &slot]);
+    assert_eq!(first["ticket"]["phases"][0]["status"], "claimed");
+    let second = publish(&fixture, "ticket-fifo-second", &["--executor", &slot]);
+    assert_eq!(second["ticket"]["phases"][0]["status"], "queued");
+
+    let first_revision = first["task"]["revision"].as_u64().unwrap().to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "ticket-fifo-first",
+            "--expected-revision",
+            &first_revision,
+            "--attempt",
+            "1",
+        ],
+        slot_thread,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "ticket-fifo-first",
+            "--evidence",
+            "first",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        slot_thread,
+    );
+
+    let state = fixture.current_state();
+    let second_phase = state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-fifo-second")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        second_phase["status"], "claimed",
+        "same-priority FIFO must claim the earlier ticket on release"
+    );
+    assert_eq!(second_phase["attempt_generation"], 1);
+}
+
+#[test]
+fn concurrent_claims_leave_one_effective_execute_claim() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "concurrent claim fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "ticket-race", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let owner_thread = ticket_thread(&fixture, &slot_worker_id(&board, &slot));
+    let other_thread = [THREAD_B, THREAD_C]
+        .into_iter()
+        .find(|thread| *thread != owner_thread)
+        .expect("fixture must retain a second peer thread");
+
+    let mut owner = fixture.spawn_public(
+        &["board", "claim", "ticket-race", "--expected-revision", "1"],
+        owner_thread,
+    );
+    let mut other = fixture.spawn_public(
+        &["board", "claim", "ticket-race", "--expected-revision", "1"],
+        other_thread,
+    );
+    let owner = owner.wait_with_output().unwrap();
+    let other = other.wait_with_output().unwrap();
+    assert!(
+        owner.status.success(),
+        "the queued slot must win its own claim: {}",
+        String::from_utf8_lossy(&owner.stderr)
+    );
+    assert!(
+        !other.status.success(),
+        "a different slot must not claim another slot's queued ticket"
+    );
+    // Two slots race one pending ticket. The daemon serializes claims on the
+    // state lock, so the loser is rejected either by the slot gate (it ran
+    // first) or by the revision guard (the winner committed first). Both are
+    // correct refusals; only the invariant below may be asserted.
+    let other_error = format!(
+        "{}{}",
+        String::from_utf8_lossy(&other.stdout),
+        String::from_utf8_lossy(&other.stderr)
+    );
+    assert!(
+        other_error.contains("TICKET_SLOT_MISMATCH") || other_error.contains("BOARD_STALE_REVISION"),
+        "the losing claim must be refused by the slot gate or the revision guard, got: {other_error}"
+    );
+
+    let state = fixture.current_state();
+    let claimed: Vec<&Value> = state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == "ticket-race" && phase["status"] == "claimed")
+        .collect();
+    assert_eq!(claimed.len(), 1, "only one execute phase may hold a claim");
+    assert_eq!(claimed[0]["slot_name"], slot.as_str());
+    assert_eq!(claimed[0]["attempt_generation"], 1);
+}
+
+#[test]
+fn claim_from_a_non_queued_slot_is_rejected_by_the_slot_gate() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "non-queued slot claim fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "ticket-slot-gate", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let owner_thread = ticket_thread(&fixture, &slot_worker_id(&board, &slot));
+    let other_thread = [THREAD_B, THREAD_C]
+        .into_iter()
+        .find(|thread| *thread != owner_thread)
+        .expect("fixture must retain a second peer thread");
+
+    // A peer that does not hold the queued slot claims with the still-current
+    // revision. There is no race here, so the slot gate must be the refusal.
+    let rejected = fixture.command_public(
+        &[
+            "board",
+            "claim",
+            "ticket-slot-gate",
+            "--expected-revision",
+            "1",
+        ],
+        other_thread,
+    );
+    assert!(
+        !rejected.status.success(),
+        "a non-queued slot must not claim another slot's queued ticket"
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("TICKET_SLOT_MISMATCH")
+            || String::from_utf8_lossy(&rejected.stdout).contains("TICKET_SLOT_MISMATCH"),
+        "the slot gate must refuse a non-queued slot: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let state = fixture.current_state();
+    let phase = state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-slot-gate")
+        .unwrap();
+    assert_eq!(phase["status"], "queued");
+    assert_eq!(phase["slot_name"], slot.as_str());
+    assert_eq!(phase["attempt_generation"], 0);
+    assert_eq!(state["tasks"]["ticket-slot-gate"]["status"], "pending");
 }

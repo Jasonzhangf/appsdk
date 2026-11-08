@@ -591,3 +591,25 @@ TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递�
   判断，未跟踪最新样本。上述 P2 不阻断当前源码候选，后续单独修复。
 - live 安装、共享 daemon 加载与真实会话激活未验证（UNVERIFIED）；未执行
   daemon 安装/重启或 tmux 生命周期操作。
+
+## 2026-11-07 ticket-system C/D-H 本轮巡检事实
+
+- 身份：`collab context` 在可读 cwd（`collab/src`）恢复成功，当前为 appsdk peer
+  `Kate`；daemon PID 43086 live，未重启。
+- Git/TCC 阻塞：`git` 在 appsdk 主树与全部 linked worktree 返回
+  `Operation not permitted (os error 1)`；`.git/objects/*` 与
+  `.git/worktrees/<name>` 不可读。已尝试 `--git-dir` 指定主 `.git` 与从
+  `/Volumes` 工作树执行，均失败。按 master 指示不提交、不合并、不推送、不安装。
+- 挂起处置：`appserver_two_tui_integration` PID 7599 运行 1h36m、CPU 0%。
+  sample 显示 38 条 fixture 线程停在 `appserver_two_tui_integration.rs:1003`
+  `UnixListener::accept()`，测试线停在 `command_public_with_session` 的
+  `.output()`；子进程 `collab task integrated ...` 阻塞在 daemon socket
+  `read_line`，测试 daemon 空闲不回包。已按显式 PID 终止 89193、87343、7599；
+  生产 daemon 43086 未动。测试未自然结束，无退出码。
+- GREEN 子集：`cargo test --test appserver_two_tui_integration
+  board_cli::peer_publication_can_be_claimed_by_self_or_master --
+  --test-threads=1` exit=0，1 passed，2.77s。仅证明 claim 入口之一，不等于完整 C。
+- 回执：已向 Jenny 发送 m1794076681219-6230、m1794076734918-6237、
+  m1794076734863-6236、m1794077141089-6260。
+- 下一步：修 fixture accept 收口与 CLI 读边界，重跑 held-git 与完整 C 子集，
+  再推进 D-H 最小增量；仅保持本任务。

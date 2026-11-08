@@ -934,6 +934,23 @@ fn board_pending_accept_nonpublisher_starts_and_delivers() {
         ],
         "agentB",
     );
+    // Accepting the invitation claims the admitted execute phase; the ticket
+    // contract still requires an explicit Start before a result.
+    let accepted_revision = accepted["task"]["revision"].to_string();
+    let started = command(
+        &fixture,
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            &accepted_revision,
+            "--attempt",
+            "1",
+        ],
+        "agentB",
+    );
+    assert_eq!(started["task"]["status"], "working");
     let delivered = fixture.dsh_command(
         &[
             "task",
@@ -942,6 +959,8 @@ fn board_pending_accept_nonpublisher_starts_and_delivers() {
             "--no-candidate",
             "--evidence",
             "isolated completed audit",
+            "--attempt",
+            "1",
         ],
         "agentB",
     );

@@ -568,8 +568,9 @@ pub fn responsibility_snapshot(state: &State, worker_id: &str) -> Responsibility
 }
 
 /// A task status that no longer carries responsibility for its owner. This
-/// matches [`responsibility_snapshot`], which keeps every other status.
-fn task_status_is_terminal(status: &str) -> bool {
+/// matches [`responsibility_snapshot`], which keeps every other status. It is
+/// the single terminal-status source for the crate.
+pub(crate) fn task_status_is_terminal(status: &str) -> bool {
     matches!(status, "closed" | "cancelled")
 }
 
@@ -1682,6 +1683,16 @@ pub enum Event {
     /// Snapshot replay baseline carrying the exact canonical helper state.
     CeoReportStateRestored {
         report_state: crate::ceo_report_state::CeoReportState,
+    },
+    /// Insert or replace one ticket phase batch. The (task_id, phase, batch)
+    /// key is unique; rework creates a new batch instead of overwriting.
+    TicketPhaseRecorded {
+        phase: crate::server::ticket_state::TicketPhaseRecord,
+    },
+    /// Advance the shortest-queue rotation cursor for one admission group.
+    TicketRotationUpdated {
+        group: String,
+        slot: String,
     },
     #[serde(alias = "RootAssigned")]
     MasterAssigned {

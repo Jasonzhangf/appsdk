@@ -1054,6 +1054,31 @@ impl AppFixture {
             .expect("run collab CLI")
     }
 
+    /// Start the public CLI without waiting so two real processes can race one
+    /// daemon request. The environment matches `command_public`.
+    fn spawn_public(&self, args: &[&str], thread: &str) -> std::process::Child {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&self.project)
+            .env("PATH", self.fixture_path())
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("HOME", self.root.join("home"))
+            .env("COLLAB_APPSERVER_SOCKET", &self.app_socket)
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+            .env("CODEX_SESSION_ID", thread)
+            .env("CODEX_THREAD_ID", thread)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_WORKER")
+            .env("CODEX_HOME", self.root.join("home"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn collab CLI")
+    }
+
     fn command_without_thread(&self, args: &[&str], session: &str) -> Output {
         Command::new(binary())
             .args(args)

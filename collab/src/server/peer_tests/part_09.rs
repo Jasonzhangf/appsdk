@@ -679,6 +679,7 @@ fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
             token: "token-owner".into(),
             task_id: "read-only-task".into(),
             evidence: Some("documentation and source audit complete".into()),
+            attempt: None,
             worktree: None,
             no_candidate: true,
         },
@@ -844,6 +845,7 @@ fn task_lifecycle_public_code_delivery_requires_integration_before_close() {
             token: "token-owner".into(),
             task_id: "unresolved-task".into(),
             evidence: Some("code delivery without a resolvable candidate".into()),
+            attempt: None,
             worktree: Some("/definitely-not-a-worktree".into()),
             no_candidate: false,
         },
@@ -1098,6 +1100,7 @@ fn publisher_claims_pending_task_and_non_publisher_cannot_reclaim() {
             prefer_role: None,
             executor: None,
             reviewer: None,
+            depends_on: Vec::new(),
         },
     );
     assert!(published.ok, "{published:?}");

@@ -101,6 +101,11 @@ pub struct State {
     pub master_approval: Option<String>,
     pub master_assigned_ms: Option<i64>,
     pub worktree_bindings: HashMap<String, WorktreeBinding>,
+    /// Ticket phase records keyed by phase batch. Derived queue projection has
+    /// no second writable source; consumers scan these records.
+    pub ticket_phases: Vec<super::ticket_state::TicketPhaseRecord>,
+    /// Shortest-queue rotation cursor per admission group -> last slot name.
+    pub ticket_rotation: std::collections::BTreeMap<String, String>,
 }
 
 fn has_current_master_grant(state: &State, worker_id: &str, target: &str) -> bool {

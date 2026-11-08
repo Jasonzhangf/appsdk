@@ -121,12 +121,24 @@ pub enum BoardCommand {
         executor: Option<String>,
         #[arg(long)]
         reviewer: Option<String>,
+        /// Task ids that must complete before this ticket's execute phase may start.
+        #[arg(long = "depends-on", num_args(1..))]
+        #[serde(default)]
+        depends_on: Vec<String>,
     },
     /// Atomically claim one pending task at the observed board revision.
     Claim {
         id: String,
         #[arg(long)]
         expected_revision: u64,
+    },
+    /// Start a claimed ticket execution phase at the current attempt/generation.
+    Start {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        attempt: u64,
     },
     /// Invite a current name or registered peer; ownership transfers only on accept.
     Invite {
@@ -240,6 +252,10 @@ pub struct BoardTaskDetails {
     pub test_condition: String,
     pub revision: u64,
     pub public_visibility: bool,
+    /// True only after ticket admission atomically created the ticket phases.
+    /// Legacy/public board records are not admitted tickets until this flag is set.
+    #[serde(default)]
+    pub admitted: bool,
     #[serde(default)]
     pub parent_task_id: Option<String>,
     #[serde(default)]

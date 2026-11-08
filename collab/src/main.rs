@@ -2014,6 +2014,19 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     blocker_action,
                     decision_reason,
                 },
+                TaskCmd::Start {
+                    id,
+                    expected_revision,
+                    attempt,
+                } => Req::Board {
+                    worker_id: worker_id.clone(),
+                    token: token.clone(),
+                    command: board::BoardCommand::Start {
+                        id,
+                        expected_revision,
+                        attempt,
+                    },
+                },
                 TaskCmd::Accept {
                     id,
                     expected_revision,
@@ -2081,6 +2094,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 TaskCmd::Deliver {
                     id,
                     evidence,
+                    attempt,
                     worktree,
                     no_candidate,
                 } => Req::TaskDeliver {
@@ -2088,6 +2102,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     token: token.clone(),
                     task_id: id,
                     evidence: Some(evidence),
+                    attempt,
                     worktree,
                     no_candidate,
                 },

@@ -131,6 +131,14 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         decision_reason: Option<String>,
     },
+    /// Confirm actual execution start for a claimed ticket attempt.
+    Start {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        attempt: u64,
+    },
     /// Accept a board invitation (with revision), or a legacy assigned task
     Accept {
         id: String,
@@ -159,6 +167,9 @@ pub(crate) enum TaskCmd {
         id: String,
         #[arg(long)]
         evidence: String,
+        /// Required when completing a claimed ticket phase; rejects stale attempts.
+        #[arg(long)]
+        attempt: Option<u64>,
         /// Legacy compatibility option; task delivery does not require a Git candidate.
         #[arg(long)]
         no_candidate: bool,

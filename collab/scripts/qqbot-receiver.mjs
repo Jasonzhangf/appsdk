@@ -2,6 +2,7 @@
 // QQBot receiver source. It resolves every route from the host-wide
 // `collab list`, then sends the original body through `collab sendmessage`.
 import fs from "node:fs";
+import os from "node:os";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -10,8 +11,22 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 const execFileAsync = promisify(execFile);
-const COLLAB = process.env.COLLAB_BIN ?? "/Users/fanzhang/.cargo/bin/collab";
-const HOME = process.env.HOME || "/Users/fanzhang";
+
+// Collab binary and working directory: explicit declaration wins; otherwise
+// derive from the current user's home instead of a machine-hardcoded path.
+// Missing home is an explicit failure, never a silent wrong binding.
+export const resolveCollabConfig = (env = process.env, homeDir = os.homedir) => {
+  const declaredHome = env.HOME ? String(env.HOME).trim() : null;
+  const home = declaredHome ?? homeDir();
+  if (!home) {
+    throw new Error("QQBOT_RECEIVER_HOME_MISSING: HOME is not set and home cannot be derived");
+  }
+  const declaredCollab = env.COLLAB_BIN ? String(env.COLLAB_BIN).trim() : null;
+  const collab = declaredCollab ?? path.join(home, ".cargo", "bin", "collab");
+  return { home, collab };
+};
+
+const { home: HOME, collab: COLLAB } = resolveCollabConfig();
 const MAX_INBOUND_ATTACHMENT_BYTES = 110 * 1024 * 1024;
 const INBOUND_DOWNLOAD_TIMEOUT_MS = 30000;
 const positiveDuration = (value, fallback) => {

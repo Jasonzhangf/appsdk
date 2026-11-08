@@ -578,6 +578,7 @@ pub(super) fn compact(root: &Path) -> Value {
 fn verify(root: &Path) -> Value {
     let mut scopes = Vec::new();
     let mut ok = true;
+    let mut project_schema_version = None;
     for global in [false, true] {
         if import_new_l3(root, global) {
             sync_index(root, global);
@@ -595,7 +596,7 @@ fn verify(root: &Path) -> Value {
         }) else {
             let empty_scope = expected_entries.is_empty();
             ok &= empty_scope;
-            scopes.push(json!({"scope":if global {"global"} else {"project"},"status":if empty_scope {"absent"} else {"missing"},"nodes":0,"fts_entries":0,"expected_nodes":expected_entries.len(),"source_consistent":empty_scope}));
+            scopes.push(json!({"scope":if global {"global"} else {"project"},"status":if empty_scope {"absent"} else {"missing"},"nodes":0,"fts_entries":0,"expected_nodes":expected_entries.len(),"source_consistent":empty_scope,"schema_version":Value::Null,"expected_schema_version":MEMORY_SCHEMA_VERSION,"schema_version_consistent":Value::Null}));
             continue;
         };
         init_schema(&connection);
@@ -613,6 +614,19 @@ fn verify(root: &Path) -> Value {
             )
             .optional()
             .unwrap();
+        let schema_version = connection
+            .query_row(
+                "SELECT value FROM index_profile WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+            .and_then(|value| value.parse::<i64>().ok());
+        let schema_version_consistent = schema_version == Some(MEMORY_SCHEMA_VERSION);
+        if !global {
+            project_schema_version = schema_version;
+        }
         let profile: Option<String> = connection
             .query_row(
                 "SELECT value FROM index_profile WHERE key='query_order'",
@@ -624,10 +638,10 @@ fn verify(root: &Path) -> Value {
         let source_consistent = recorded_digest.as_deref() == Some(expected_digest.as_str())
             && nodes == expected_entries.len() as i64
             && fts == expected_entries.len() as i64;
-        ok &= source_consistent;
-        scopes.push(json!({"scope":if global {"global"} else {"project"},"status":if source_consistent {"ready"} else {"stale"},"nodes":nodes,"fts_entries":fts,"expected_nodes":expected_entries.len(),"source_digest":expected_digest,"indexed_source_digest":recorded_digest,"source_consistent":source_consistent,"query_order":profile}));
+        ok &= source_consistent && schema_version_consistent;
+        scopes.push(json!({"scope":if global {"global"} else {"project"},"status":if source_consistent && schema_version_consistent {"ready"} else {"stale"},"nodes":nodes,"fts_entries":fts,"expected_nodes":expected_entries.len(),"source_digest":expected_digest,"indexed_source_digest":recorded_digest,"source_consistent":source_consistent,"schema_version":schema_version,"expected_schema_version":MEMORY_SCHEMA_VERSION,"schema_version_consistent":schema_version_consistent,"query_order":profile}));
     }
-    json!({"ok":ok,"schema_version":1,"scopes":scopes,"categories":CATEGORIES,"semantic_backend":"wemm-adapter","semantic_status":"candidate-only","vector_backend":"sqlite-vec-compatible schema"})
+    json!({"ok":ok,"schema_version":project_schema_version,"expected_schema_version":MEMORY_SCHEMA_VERSION,"scopes":scopes,"categories":CATEGORIES,"semantic_backend":"wemm-adapter","semantic_status":"candidate-only","vector_backend":"sqlite-vec-compatible schema"})
 }
 
 fn run_notes(_root: &Path, run_id: &str) -> (PathBuf, Vec<Value>) {
@@ -942,7 +956,7 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
             output(&verify(&root));
         }
         "help" | "--help" | "-h" => output(
-            &json!({"commands":["entry","query","get","review","promote","migrate","import","reentry","index","export","compact","verify"],"query_order":["level 1 titles","exact ID","node/function/resource","category/tag","declared relations/graph","lesson references","FTS5/tag","RAG candidates","importance","updated_at"],"query_hint":"project-memory query --tag <tag> [text] [project]; open detail_path directly; use export to render legacy/raw entries as Markdown; use import after intentionally editing an exported detail"}),
+            &json!({"commands":["entry","query","get","review","promote","migrate","import","reentry","index","export","compact","verify"],"query_order":["level 1 titles","exact ID","category/tag","declared relations/graph","lesson references","FTS5/tag","RAG candidates","importance","updated_at"],"query_hint":"project-memory query --tag <tag> [text] [project]; open detail_path directly; use export to render legacy/raw entries as Markdown; use import after intentionally editing an exported detail"}),
         ),
         _ => fail(
             "MEMORY_COMMAND_UNKNOWN",

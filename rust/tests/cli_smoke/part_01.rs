@@ -356,6 +356,170 @@ fn project_commands_default_to_cwd_and_help_never_resolves_a_project() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn project_memory_verify_checks_profile_schema_and_declares_implemented_query_order() {
+    let root = temp_root("project-memory-profile-schema");
+    let memory_home = temp_root("project-memory-profile-schema-home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+
+    let created = run_memory(
+        &root,
+        &[
+            "entry",
+            "--id",
+            "schema-contract",
+            "--category",
+            "knowledge",
+            "--text",
+            "profile schema contract",
+            "--tag",
+            "schema",
+        ],
+        &memory_home,
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let project_directories = fs::read_dir(memory_home.join("projects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(project_directories.len(), 1);
+    let database = project_directories[0].join("index.sqlite");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let stored_schema_version: String = connection
+        .query_row(
+            "SELECT value FROM index_profile WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_query_order: String = connection
+        .query_row(
+            "SELECT value FROM index_profile WHERE key='query_order'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_schema_version, "1");
+    assert!(!stored_query_order.contains("node"));
+    assert!(!stored_query_order.contains("function"));
+    assert!(!stored_query_order.contains("resource"));
+    drop(connection);
+
+    let verified = run_memory(&root, &["verify"], &memory_home);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let verified_json: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(verified_json["ok"], true);
+    assert_eq!(verified_json["schema_version"], 1);
+    assert_eq!(verified_json["expected_schema_version"], 1);
+    let project_scope = verified_json["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scope| scope["scope"] == "project")
+        .unwrap();
+    assert_eq!(project_scope["schema_version"], 1);
+    assert_eq!(project_scope["schema_version_consistent"], true);
+
+    let help = run_memory(&root, &["help"], &memory_home);
+    assert!(help.status.success());
+    let help_json: Value = serde_json::from_slice(&help.stdout).unwrap();
+    let help_order = help_json["query_order"].to_string();
+    assert!(!help_order.contains("node"));
+    assert!(!help_order.contains("function"));
+    assert!(!help_order.contains("resource"));
+
+    let queried = run_memory(&root, &["query", "schema-contract"], &memory_home);
+    assert!(
+        queried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queried.stderr)
+    );
+    let queried_json: Value = serde_json::from_slice(&queried.stdout).unwrap();
+    assert!(queried_json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == "schema-contract"));
+    assert!(queried_json.get("node_matches").is_none());
+
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE index_profile SET value='2' WHERE key='schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let tampered = run_memory(&root, &["verify"], &memory_home);
+    assert!(tampered.status.success());
+    let tampered_json: Value = serde_json::from_slice(&tampered.stdout).unwrap();
+    assert_eq!(tampered_json["ok"], false);
+    assert_eq!(tampered_json["schema_version"], 2);
+    let tampered_scope = tampered_json["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scope| scope["scope"] == "project")
+        .unwrap();
+    assert_eq!(tampered_scope["status"], "stale");
+    assert_eq!(tampered_scope["schema_version"], 2);
+    assert_eq!(tampered_scope["schema_version_consistent"], false);
+
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "DELETE FROM index_profile WHERE key='schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let missing_profile = run_memory(&root, &["verify"], &memory_home);
+    assert!(missing_profile.status.success());
+    let missing_profile_json: Value =
+        serde_json::from_slice(&missing_profile.stdout).unwrap();
+    assert_eq!(missing_profile_json["ok"], false);
+    assert!(missing_profile_json["schema_version"].is_null());
+    let missing_scope = missing_profile_json["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scope| scope["scope"] == "project")
+        .unwrap();
+    assert_eq!(missing_scope["status"], "stale");
+    assert!(missing_scope["schema_version"].is_null());
+    assert_eq!(missing_scope["schema_version_consistent"], false);
+
+    let empty_root = temp_root("project-memory-profile-schema-empty");
+    let empty_home = temp_root("project-memory-profile-schema-empty-home");
+    fs::create_dir_all(&empty_root).unwrap();
+    fs::create_dir_all(&empty_home).unwrap();
+    let absent = run_memory(&empty_root, &["verify"], &empty_home);
+    assert!(absent.status.success());
+    let absent_json: Value = serde_json::from_slice(&absent.stdout).unwrap();
+    assert_eq!(absent_json["ok"], true);
+    assert!(absent_json["schema_version"].is_null());
+    assert!(absent_json["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|scope| scope["status"] == "absent"));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+    fs::remove_dir_all(empty_root).unwrap();
+    fs::remove_dir_all(empty_home).unwrap();
+}
+
 fn sdk_source_registry_result(
     name: &str,
     modules: Value,

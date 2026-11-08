@@ -601,6 +601,35 @@ fn dagpipe_validate_notifications_empty_objects_compiles_and_reports_scope() {
 }
 
 #[test]
+fn dagpipe_validate_notifications_accepts_relative_project_and_graph_paths() {
+    let root = temp_root("dagpipe-notification-relative-project");
+    write_dagpipe_notification_fixture(&root, &[]);
+    let graph = dagpipe_notification_graph(
+        &["source_validate", "delivery_validate", "terminal_accept"],
+        false,
+    );
+    let relative_graph = write_dagpipe_notification_graph(&root, &graph);
+    let absolute_graph = root.join(&relative_graph);
+    for (project, graph_path) in [
+        (".", absolute_graph.to_str().unwrap()),
+        (root.to_str().unwrap(), "./notification.graph.json"),
+    ] {
+        let output = run_in(
+            &root,
+            &["dagpipe", "validate-notifications", project, "--graph", graph_path],
+        );
+        assert!(
+            output.status.success(),
+            "project={project} graph={graph_path} stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["evidence_scope"], "selected_project_program");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn dagpipe_validate_notifications_rejects_graph_path_escape() {
     let root = temp_root("dagpipe-notification-graph-path-escape");
     write_dagpipe_notification_fixture(&root, &[]);
@@ -614,8 +643,152 @@ fn dagpipe_validate_notifications_rejects_graph_path_escape() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("DAGPIPE_NOTIFICATION_GRAPH_PATH_INVALID")
+            .contains("GOVERNANCE_PATH_ESCAPE:notification_graph")
     );
+
+    let outside = temp_root("dagpipe-notification-outside-graph");
+    fs::create_dir_all(&outside).unwrap();
+    let graph = dagpipe_notification_graph(
+        &["source_validate", "delivery_validate", "terminal_accept"],
+        false,
+    );
+    write_dagpipe_notification_graph(&outside, &graph);
+    let escaped_graph = root
+        .join("..")
+        .join(outside.file_name().unwrap())
+        .join("notification.graph.json");
+    let escaped = run(&[
+        "dagpipe",
+        "validate-notifications",
+        root.to_str().unwrap(),
+        "--graph",
+        escaped_graph.to_str().unwrap(),
+    ]);
+    assert!(
+        !escaped.status.success(),
+        "absolute traversal must stay outside the project: stdout={}",
+        String::from_utf8_lossy(&escaped.stdout)
+    );
+    assert!(String::from_utf8_lossy(&escaped.stderr)
+        .contains("GOVERNANCE_PATH_ESCAPE:notification_graph"));
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_records_invocation_outcomes() {
+    let root = temp_root("dagpipe-notification-invocation-log");
+    let mut events = dagpipe_valid_notification_events();
+    write_dagpipe_notification_fixture(&root, &events);
+    let success = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(success.status.success());
+    let graph = dagpipe_notification_graph(
+        &["source_validate", "delivery_validate", "terminal_accept"],
+        false,
+    );
+    let graph_path = write_dagpipe_notification_graph(&root, &graph);
+    let explicit = run(&[
+        "dagpipe", "validate-notifications", root.to_str().unwrap(), "--graph", &graph_path,
+    ]);
+    assert!(explicit.status.success());
+
+    events.truncate(3);
+    write_dagpipe_notification_fixture(&root, &events);
+    let failure = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(!failure.status.success());
+    assert!(String::from_utf8_lossy(&failure.stderr)
+        .contains("NOTIFICATION_OBJECT_TERMINAL_MISSING"));
+
+    let raw = fs::read_to_string(root.join(".appsdk-control/command-invocations.jsonl"))
+        .expect("each parsed invocation must record its outcome");
+    let records: Vec<Value> = raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(records.len(), 3);
+    for record in &records {
+        assert_eq!(record["command"], "dagpipe.validate-notifications");
+        assert!(chrono::DateTime::parse_from_rfc3339(record["started_at"].as_str().unwrap()).is_ok());
+        assert!(record["elapsed_ms"].is_u64());
+    }
+    assert_eq!(records[0]["graph_selection"], "default");
+    assert_eq!(records[1]["graph_selection"], "explicit");
+    assert_eq!(records[0]["outcome"], "success");
+    assert!(records[0].get("error_code").is_none());
+    assert_eq!(records[2]["outcome"], "error");
+    assert_eq!(records[2]["error_code"], "DAGPIPE_EXECUTION_FAILED");
+    assert!(!raw.contains("notification-1"));
+    assert!(!raw.contains(root.to_str().unwrap()));
+    assert!(!raw.contains("notification.graph.json"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_isolates_invocation_log_failure() {
+    let root = temp_root("dagpipe-notification-invocation-log-failure");
+    let mut events = dagpipe_valid_notification_events();
+    write_dagpipe_notification_fixture(&root, &events);
+    let log = root.join(".appsdk-control/command-invocations.jsonl");
+    fs::create_dir(&log).unwrap();
+    let success = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(success.status.success());
+    assert!(String::from_utf8_lossy(&success.stderr)
+        .contains("COMMAND_INVOCATION_LOG_WRITE_FAILED"));
+    let result: Value = serde_json::from_slice(&success.stdout).unwrap();
+    assert_eq!(result["evidence_scope"], "sdk_default_contract");
+
+    events.truncate(3);
+    write_dagpipe_notification_fixture(&root, &events);
+    let failure = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(!failure.status.success());
+    let stderr = String::from_utf8_lossy(&failure.stderr);
+    assert!(stderr.contains("COMMAND_INVOCATION_LOG_WRITE_FAILED"));
+    assert!(stderr.contains("NOTIFICATION_OBJECT_TERMINAL_MISSING"));
+    assert!(failure.stdout.is_empty());
+    assert!(log.is_dir());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn dagpipe_validate_notifications_rejects_invocation_log_link() {
+    let root = temp_root("dagpipe-notification-invocation-log-link");
+    write_dagpipe_notification_fixture(&root, &dagpipe_valid_notification_events());
+    let outside = temp_root("dagpipe-notification-log-sentinel");
+    fs::create_dir_all(&outside).unwrap();
+    let sentinel = outside.join("sentinel.txt");
+    fs::write(&sentinel, "keep this content\n").unwrap();
+    symlink(&sentinel, root.join(".appsdk-control/command-invocations.jsonl")).unwrap();
+    let output = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("COMMAND_INVOCATION_LOG_WRITE_FAILED:path"));
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep this content\n");
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn dagpipe_validate_notifications_isolates_invocation_log_contention() {
+    let root = temp_root("dagpipe-notification-invocation-log-lock");
+    write_dagpipe_notification_fixture(&root, &dagpipe_valid_notification_events());
+    let log = root.join(".appsdk-control/command-invocations.jsonl");
+    let seed = "{\"seed\":true}\n";
+    fs::write(&log, seed).unwrap();
+    let held = OpenOptions::new().read(true).write(true).open(&log).unwrap();
+    hold_advisory_lock(&held);
+    let blocked = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr)
+        .contains("COMMAND_INVOCATION_LOG_WRITE_FAILED:lock:would_block"));
+    assert_eq!(fs::read_to_string(&log).unwrap(), seed);
+    drop(held);
+    let available = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(available.status.success());
+    let raw = fs::read_to_string(&log).unwrap();
+    assert_eq!(raw.lines().count(), 2);
+    for line in raw.lines() {
+        serde_json::from_str::<Value>(line).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

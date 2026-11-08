@@ -513,11 +513,11 @@ not repeat those checks at every layer. Do not add a per-item proof table, a
 second governance status, hashes, or frozen snapshots merely to record an
 ablation.
 
-### Notification pilot candidate contract
+### Notification configuration example
 
-The accepted plan defines a candidate extension for the existing notification
-validation chain. Treat it as a candidate design until the code owner supplies
-red-test, public-entrypoint, and comparison evidence.
+The notification validation chain demonstrates this composition pattern.
+Graph paths resolve within the project. Relative paths start at the project
+root; an absolute path must also name a file inside that project.
 
 ```sh
 appsdk dagpipe validate-notifications <project>
@@ -527,25 +527,40 @@ appsdk dagpipe validate-notifications <project> --graph <path>
 | CLI choice | Successful result meaning |
 | --- | --- |
 | no `--graph` | `evidence_scope: "sdk_default_contract"`; the input passed the SDK's complete default notification contract |
-| explicit `--graph` | `evidence_scope: "selected_project_program"`; the input passed the selected project program and entry-result consumption contract, not the SDK default completeness contract |
+| explicit `--graph` | `evidence_scope: "selected_project_program"`; the input passed the selected project program and entry-result consumption contract |
 
-The default candidate graph is
+The default graph is
 `source_validate -> delivery_validate -> terminal_accept`. A complete
 alternative graph may order `delivery_validate` before `source_validate`.
-Both graphs must keep the full validation semantics. On an object with both a
+These two complete graphs retain all validation stages. On an object with both a
 source error and a delivery error, the first reported business error follows
 the selected order.
 
 An explicit graph is a trusted project program. A legal graph that omits source
-or terminal acceptance may complete successfully, but its success remains
-`selected_project_program`; it must not be reported as SDK default acceptance.
+or terminal acceptance may complete successfully. Its success remains
+`selected_project_program`. SDK default acceptance uses the default command
+and `sdk_default_contract`.
 Derive `evidence_scope` only from the CLI default/explicit choice. Never infer
 it from Graph ID, version, path, node names, or output content.
 
 Default and explicit graph failures must fail explicitly. Do not fall back to
 another graph or an old implementation. Consume the actual Runtime output; do
-not rebuild a missing terminal from input state. Record these as candidate
-requirements until the code evidence is accepted.
+not rebuild a missing terminal from input state. Verify these behaviors
+through the public command when changing this Operation.
+
+After argument parsing and safe project-root resolution, this command appends
+one invocation and outcome to `.appsdk-control/command-invocations.jsonl`.
+The record contains the command, UTC start time, elapsed milliseconds, graph
+selection, outcome, and a fixed error code on failure. It excludes message
+content, graph content, paths, and business results.
+
+Mailbox, graph, and other business files remain read-only. The invocation log
+is the declared audit write. A log failure reports
+`COMMAND_INVOCATION_LOG_WRITE_FAILED` on stderr and preserves the original
+business result and exit status. Such a warning identifies an audit gap.
+Early usage or unsafe-root rejection writes no project log. This logging
+boundary covers the notification command; other CLI commands keep their own
+owners. The log supports review and has no role in validation or recovery.
 
 ## Existing project: remove old governance
 

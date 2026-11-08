@@ -58,7 +58,23 @@ pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>
                 }
             }
         }
-        let result = validate_notification_objects(&root, graph_path.as_deref())
+        assert_project_root_safe(&root);
+        let root = root
+            .canonicalize()
+            .unwrap_or_else(|error| fail(format!("PROJECT_ROOT_MISSING:{error}")));
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let started = std::time::Instant::now();
+        let result = validate_notification_objects(&root, graph_path.as_deref());
+        if let Err(error) = notification::append_notification_invocation(
+            &root,
+            &started_at,
+            started.elapsed().as_millis(),
+            graph_path.is_some(),
+            &result,
+        ) {
+            eprintln!("COMMAND_INVOCATION_LOG_WRITE_FAILED:{error}");
+        }
+        let result = result
             .unwrap_or_else(|error| fail(format!("DAGPIPE_NOTIFICATION_OBJECT_INVALID:{error}")));
         println!(
             "{}",

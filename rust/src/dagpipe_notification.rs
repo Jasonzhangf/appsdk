@@ -4,9 +4,8 @@ pub(super) fn validate_notification_objects(
     root: &Path,
     graph_path: Option<&Path>,
 ) -> Result<Value, String> {
-    assert_project_root_safe(root);
     let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
-    assert_no_symlink_components(root, &mailbox, "communication_mailbox");
+    validate_notification_path(root, &mailbox, "communication_mailbox")?;
     let raw = fs::read_to_string(&mailbox)
         .map_err(|error| format!("COMMUNICATION_MAILBOX_READ_FAILED:{error}"))?;
     let events = mailbox_events(&raw)?;
@@ -89,19 +88,84 @@ fn notification_graph_source(root: &Path, graph_path: Option<&Path>) -> Result<S
     let selected_path = if graph_path.is_absolute() {
         graph_path.to_path_buf()
     } else {
-        if graph_path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir | std::path::Component::CurDir
-            )
-        }) {
-            return Err("DAGPIPE_NOTIFICATION_GRAPH_PATH_INVALID".to_owned());
-        }
         root.join(graph_path)
     };
-    assert_no_symlink_components(root, &selected_path, "notification_graph");
+    let parent = selected_path
+        .parent()
+        .ok_or_else(|| "GOVERNANCE_PATH_ESCAPE:notification_graph".to_owned())?;
+    validate_notification_path(parent, &selected_path, "notification_graph")?;
+    let normalized_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("DAGPIPE_NOTIFICATION_GRAPH_READ_FAILED:{error}"))?;
+    let file_name = selected_path
+        .file_name()
+        .ok_or_else(|| "GOVERNANCE_PATH_ESCAPE:notification_graph".to_owned())?;
+    let selected_path = normalized_parent.join(file_name);
+    validate_notification_path(root, &selected_path, "notification_graph")?;
     fs::read_to_string(&selected_path)
         .map_err(|error| format!("DAGPIPE_NOTIFICATION_GRAPH_READ_FAILED:{error}"))
+}
+
+fn validate_notification_path(root: &Path, path: &Path, label: &str) -> Result<(), String> {
+    use crate::platform::PathBoundaryError;
+
+    crate::platform::validate_contained_path(root, path).map_err(|error| match error {
+        PathBoundaryError::Escape => format!("GOVERNANCE_PATH_ESCAPE:{label}"),
+        PathBoundaryError::BaseLink(_) | PathBoundaryError::ComponentLink(_) => {
+            format!("GOVERNANCE_PATH_SYMLINK:{label}")
+        }
+        error => format!("GOVERNANCE_PATH_INVALID:{label}:{error:?}"),
+    })
+}
+
+pub(super) fn append_notification_invocation(
+    root: &Path,
+    started_at: &str,
+    elapsed_ms: u128,
+    explicit_graph: bool,
+    result: &Result<Value, String>,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let path = root.join(".appsdk-control/command-invocations.jsonl");
+    crate::platform::validate_contained_path(root, &path)
+        .map_err(|_| "path:boundary".to_owned())?;
+    fs::create_dir_all(root.join(".appsdk-control"))
+        .map_err(|error| format!("mkdir:{:?}", error.kind()))?;
+    crate::platform::validate_contained_path(root, &path)
+        .map_err(|_| "path:boundary".to_owned())?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if !metadata.is_file() => return Err("path:not_regular_file".to_owned()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("path:{:?}", error.kind()));
+        }
+        _ => {}
+    }
+    let mut record = json!({
+        "command": "dagpipe.validate-notifications",
+        "started_at": started_at,
+        "elapsed_ms": elapsed_ms,
+        "graph_selection": if explicit_graph { "explicit" } else { "default" },
+        "outcome": if result.is_ok() { "success" } else { "error" },
+    });
+    if let Err(error) = result {
+        // Every error at this boundary starts with an owner-defined code.
+        record["error_code"] = json!(error.split(':').next().unwrap_or_default());
+    }
+    let mut line = serde_json::to_vec(&record).map_err(|_| "serialize:json".to_owned())?;
+    line.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("open:{:?}", error.kind()))?;
+    crate::platform::try_lock_exclusive(&file).map_err(|error| match error {
+        crate::platform::LockAttemptError::WouldBlock => "lock:would_block".to_owned(),
+        crate::platform::LockAttemptError::Io(error) => format!("lock:{:?}", error.kind()),
+    })?;
+    file.write_all(&line)
+        .map_err(|error| format!("append:{:?}", error.kind()))
 }
 
 fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {

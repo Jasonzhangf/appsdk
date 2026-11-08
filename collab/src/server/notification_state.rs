@@ -3,16 +3,50 @@ use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MasterWakeSignal {
-    GoalDue { revision: u64 },
-    WorkerIdle { worker_id: String },
-    MasterIdle { worker_id: String },
-    WorkerUnresponsive { worker_id: String },
-    WorkerRecovered { worker_id: String },
-    WorkerWorking { worker_id: String },
-    TaskBlocked { task_id: String },
-    TaskFreed { task_id: String },
-    SubagentStatus { subagent_id: String },
-    SubagentWorking { subagent_id: String },
+    GoalDue {
+        revision: u64,
+    },
+    WorkerIdle {
+        worker_id: String,
+    },
+    /// A scheduler-owned task revision change re-qualifies one idle notice for
+    /// a worker that stayed in the live idle set. Unlike `WorkerIdle`, it
+    /// enters `newly_idle_workers` even when the worker is already live idle,
+    /// so a genuine revision change is not suppressed by same-set idempotence.
+    WorkerIdleRequalify {
+        worker_id: String,
+    },
+    /// A same-episode return to idle after a transient Working flap. `key` is
+    /// the accumulator idle key (a worker id or `subagent:<id>`). It keeps the
+    /// live idle projection truthful (`idle_workers`) without qualifying a new
+    /// notice, so `newly_idle_workers` stays untouched.
+    IdleMembership {
+        key: String,
+    },
+    MasterIdle {
+        worker_id: String,
+    },
+    WorkerUnresponsive {
+        worker_id: String,
+    },
+    WorkerRecovered {
+        worker_id: String,
+    },
+    WorkerWorking {
+        worker_id: String,
+    },
+    TaskBlocked {
+        task_id: String,
+    },
+    TaskFreed {
+        task_id: String,
+    },
+    SubagentStatus {
+        subagent_id: String,
+    },
+    SubagentWorking {
+        subagent_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -183,6 +217,34 @@ pub fn accumulate_master_wake(
                 .map(|index| accumulator.unresponsive_workers.remove(index))
                 .is_some();
             added || newly_added || recovered
+        }
+        MasterWakeSignal::WorkerIdleRequalify { worker_id } => {
+            // A requalified revision is a new notification edge even when the
+            // worker's visible idle set is unchanged. Invalidate the prior
+            // same-set latch so an unconsumed older notice cannot suppress it.
+            let invalidated = !accumulator.last_notified_newly_idle.is_empty()
+                || !accumulator.last_notified_live_idle.is_empty();
+            accumulator.last_notified_newly_idle.clear();
+            accumulator.last_notified_live_idle.clear();
+            let added = add_unique(&mut accumulator.idle_workers, worker_id.clone());
+            let newly_added = add_unique(&mut accumulator.newly_idle_workers, worker_id.clone());
+            let recovered = accumulator
+                .unresponsive_workers
+                .iter()
+                .position(|id| id == worker_id)
+                .map(|index| accumulator.unresponsive_workers.remove(index))
+                .is_some();
+            added || newly_added || recovered || invalidated
+        }
+        MasterWakeSignal::IdleMembership { key } => {
+            let added = add_unique(&mut accumulator.idle_workers, key.clone());
+            let recovered = accumulator
+                .unresponsive_workers
+                .iter()
+                .position(|id| id == key)
+                .map(|index| accumulator.unresponsive_workers.remove(index))
+                .is_some();
+            added || recovered
         }
         MasterWakeSignal::MasterIdle { worker_id } => {
             // The master is the consumer, not idle worker capacity. Its idle

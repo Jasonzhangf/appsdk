@@ -32,6 +32,9 @@ and atomically regenerates the detail, title index, and rebuildable projection.
 SQLite may be deleted and rebuilt from raw events. `vec_entries` records the
 pinned WeMM adapter contract; until a local WeMM server is configured, RAG/
 semantic results are candidate-only and never change explicit relations.
+The SQLite `index_profile.schema_version` is written from the single
+`MEMORY_SCHEMA_VERSION` constant. `project-memory verify` reports the stored
+value and treats a missing or mismatched value as an unhealthy stale index.
 
 ## Review levels and retrieval
 
@@ -49,10 +52,9 @@ and relative detail path; the agent performs the one-time architecture
 deduplication and carries the selected lines into the Skill description.
 Ordinary Memory writes never mutate Skill text automatically.
 
-Query groups are stable: level-1 titles, exact ID, node/function/resource,
-category/tag, declared graph edges, lesson references, FTS5, RAG candidates,
-then importance and recency. Results return `detail_path`; an agent may open
-that Markdown file directly.
+Query groups are stable: level-1 titles, exact ID, category/tag, declared graph
+edges, lesson references, FTS5, RAG candidates, then importance and recency.
+Results return `detail_path`; an agent may open that Markdown file directly.
 
 ## Reviewed write-back
 

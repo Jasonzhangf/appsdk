@@ -94,7 +94,7 @@ impl CommunicationStore {
     ) -> CommResult<Value> {
         let current = self.recover_message_state(existing)?;
         let delivery_attempt = self.ensure_message_delivery_attempt(&current)?;
-        let notification = self.recover_message_notification(&current)?;
+        let notification = self.recover_message_notification_after_attempt(&current)?;
         let direct = notification
             .as_ref()
             .filter(|notification| notification.status == "emitted")
@@ -151,6 +151,15 @@ impl CommunicationStore {
         message: &MessageRecord,
     ) -> CommResult<Option<NotificationRecord>> {
         self.ensure_message_delivery_attempt(message)?;
+        self.recover_message_notification_after_attempt(message)
+    }
+
+    // Callers must ensure the message delivery attempt before entering this
+    // notification-only recovery body.
+    fn recover_message_notification_after_attempt(
+        &mut self,
+        message: &MessageRecord,
+    ) -> CommResult<Option<NotificationRecord>> {
         let immediate = matches!(message.delivery_mode, DeliveryMode::Direct)
             || message.priority.is_breakthrough();
         let existing = if immediate {

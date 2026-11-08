@@ -170,6 +170,10 @@
     {
       "id": "appsdk-collab-stale-identity-maintenance",
       "path": "docs/dagpipe/collab-stale-identity-maintenance.graph.json"
+    },
+    {
+      "id": "appsdk-collab-dispatch-gap-reminder-migration",
+      "path": "docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json"
     }
   ]
 }

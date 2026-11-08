@@ -155,6 +155,48 @@ fn communication_store_rejects_noncanonical_and_symlink_roots() {
     fs::remove_dir_all(target).unwrap();
 }
 
+#[test]
+fn communication_store_requires_existing_directory_root() {
+    let parent = temp_root("existing-directory-root").canonicalize().unwrap();
+    let host = parent.join("fixture-host");
+
+    let missing_root = parent.join("missing").join("nested");
+    let missing_error = call_error_with_host(&missing_root, &host, json!({ "op": "status" }));
+    assert!(
+        missing_error.contains("communication_root_canonicalize_failed"),
+        "{missing_error}"
+    );
+    assert!(
+        missing_error.contains(missing_root.to_str().unwrap()),
+        "{missing_error}"
+    );
+    assert!(!parent.join("missing").exists());
+
+    let file_root = parent.join("regular-file-root");
+    fs::write(&file_root, "sentinel").unwrap();
+    let file_error = call_error_with_host(&file_root, &host, json!({ "op": "status" }));
+    assert!(
+        file_error.contains("communication_root_not_directory"),
+        "{file_error}"
+    );
+    assert!(file_root.is_file());
+    assert_eq!(fs::read_to_string(&file_root).unwrap(), "sentinel");
+
+    let valid_root = parent.join("valid-root");
+    fs::create_dir(&valid_root).unwrap();
+    let opened = call(&valid_root, json!({ "op": "status" }));
+    assert_eq!(opened["protocol"], "appsdk-comm/v1");
+    assert!(valid_root.join(".appsdk-control/communication").is_dir());
+
+    register_scope(&valid_root, "scope", "app", "/project", &["master"]);
+    let mailbox = valid_root.join(".appsdk-control/communication/mailbox.jsonl");
+    assert!(mailbox.is_file());
+    let reopened = call(&valid_root, json!({ "op": "status" }));
+    assert_eq!(reopened["scopes"].as_array().unwrap().len(), 1);
+
+    fs::remove_dir_all(parent).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn communication_store_rejects_mailbox_lock_and_parent_symlinks() {
@@ -1129,6 +1171,7 @@ fn idempotent_message_retry_recovers_created_only_prefix() {
     let recovered = call(&root, request);
     assert_eq!(recovered["idempotent"], true);
     assert_eq!(recovered["message"]["state"], "accepted");
+    assert!(recovered["deliveryAttempt"]["attemptId"].is_string());
     let status = call(&root, json!({ "op": "status" }));
     assert_eq!(status["messages"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -1140,6 +1183,10 @@ fn idempotent_message_retry_recovers_created_only_prefix() {
     );
     let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
     assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(
+        raw.matches("\"kind\":\"message.delivery_attempt\"").count(),
+        1
+    );
     assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
     assert_eq!(
         raw.matches("\"kind\":\"notification.delivery_attempt\"")
@@ -1173,6 +1220,7 @@ fn idempotent_message_retry_recovers_state_prefix_without_notification() {
     let recovered = call(&root, request);
     assert_eq!(recovered["idempotent"], true);
     assert_eq!(recovered["message"]["state"], "accepted");
+    assert!(recovered["deliveryAttempt"]["attemptId"].is_string());
     let status = call(&root, json!({ "op": "status" }));
     assert_eq!(
         status["notificationProjection"]["emitted"]
@@ -1183,6 +1231,10 @@ fn idempotent_message_retry_recovers_state_prefix_without_notification() {
     );
     let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
     assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(
+        raw.matches("\"kind\":\"message.delivery_attempt\"").count(),
+        1
+    );
     assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
@@ -1222,6 +1274,7 @@ fn direct_retry_retries_known_failure_without_overwriting_identity() {
     let second = call(&root, request);
     assert_eq!(first["idempotent"], false);
     assert_eq!(second["idempotent"], true);
+    assert_eq!(first["deliveryAttempt"], second["deliveryAttempt"]);
 
     let status = call(&root, json!({ "op": "status" }));
     assert!(status["notificationProjection"]["pending"]
@@ -1233,6 +1286,10 @@ fn direct_retry_retries_known_failure_without_overwriting_identity() {
         .unwrap()
         .is_empty());
     let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(
+        raw.matches("\"kind\":\"message.delivery_attempt\"").count(),
+        1
+    );
     assert_eq!(
         raw.matches("\"kind\":\"notification.delivery_attempt\"")
             .count(),

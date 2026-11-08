@@ -4,15 +4,6 @@ use super::*;
 
 impl CommunicationStore {
     pub fn open(root: &Path) -> CommResult<Self> {
-        validate_communication_root_input(root)?;
-        if !root.exists() {
-            fs::create_dir_all(root).map_err(|error| {
-                CommError::new(
-                    "communication_root_create_failed",
-                    format!("{}: {error}", root.display()),
-                )
-            })?;
-        }
         let canonical_root = validate_communication_root(root)?;
         Self::open_mailbox(canonical_root.join(".appsdk-control/communication/mailbox.jsonl"))
     }

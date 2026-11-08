@@ -319,8 +319,8 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
     let Some(socket_path) = socket_candidate() else {
         return Ok(None);
     };
-    let cwd = std::env::current_dir()
-        .and_then(|path| path.canonicalize())
+    let cwd = crate::scope::process_cwd()
+        .and_then(|path| path.canonicalize().map_err(anyhow::Error::from))
         .map_err(|error| AdapterError::InvalidBinding {
             detail: format!("cannot resolve candidate cwd: {error}"),
         })?;

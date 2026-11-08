@@ -250,8 +250,8 @@ pub fn candidate_from_env() -> Result<TmuxCandidate, String> {
         endpoint.codex_session_id = Some(agy_session);
         endpoint.codex_thread_id = None;
     }
-    let cwd = std::env::current_dir()
-        .and_then(|path| path.canonicalize())
+    let cwd = crate::scope::process_cwd()
+        .and_then(|path| path.canonicalize().map_err(anyhow::Error::from))
         .map_err(|error| format!("TMUX_OBSERVATION_INVALID: resolve cwd: {error}"))?
         .to_str()
         .ok_or_else(|| "TMUX_OBSERVATION_INVALID: cwd is not UTF-8".to_owned())?

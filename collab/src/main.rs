@@ -1233,7 +1233,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Root { command } | Cmd::Master { command } => {
             if matches!(command, MasterCmd::Status) {
                 let host_paths = scope::HostPaths::resolve()?;
-                let cwd = std::env::current_dir()?;
+                let cwd = scope::process_cwd()?;
                 let route = scope::canonical_route_for_cwd(&host_paths, &cwd)?;
                 let scope = Scope { root: route.root };
                 let v: serde_json::Value = client::call_with_context(
@@ -1346,7 +1346,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     ..
                 }
             ) {
-                resolve_context_root(&scope::HostPaths::resolve()?, &std::env::current_dir()?)?.0
+                resolve_context_root(&scope::HostPaths::resolve()?, &scope::process_cwd()?)?.0
             } else {
                 Scope::resolve()?
             };
@@ -1458,8 +1458,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let level = reset::ResetLevel::select(project, host)?;
             if project {
                 let scope =
-                    resolve_context_root(&scope::HostPaths::resolve()?, &std::env::current_dir()?)?
-                        .0;
+                    resolve_context_root(&scope::HostPaths::resolve()?, &scope::process_cwd()?)?.0;
                 client::require_server(&scope.sock_path())?;
                 let ident = registered_project_identity(&scope)?;
                 let value: Value = call_project(

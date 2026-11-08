@@ -396,7 +396,7 @@ pub(crate) fn context_operation_with_intent(
         anyhow::bail!("IDENTITY_OPERATION_QUERY_SHAPE_INVALID: query cannot carry approvals");
     }
     let host_paths = scope::HostPaths::resolve()?;
-    let cwd = std::env::current_dir()?;
+    let cwd = scope::process_cwd()?;
     let (scope, bootstrap) = if query {
         let (scope, _project_root_resolution) = resolve_context_root(&host_paths, &cwd)?;
         (scope, None)

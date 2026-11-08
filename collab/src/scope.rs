@@ -563,12 +563,31 @@ pub fn project_root() -> anyhow::Result<PathBuf> {
     Ok(Scope::resolve()?.root)
 }
 
+/// Resolve the process cwd, using the shell's `PWD` when macOS refuses
+/// `getcwd` for a directory the process can stat but cannot traverse.
+pub fn process_cwd() -> anyhow::Result<PathBuf> {
+    process_cwd_from_result(std::env::current_dir())
+}
+
+fn process_cwd_from_result(current: std::io::Result<PathBuf>) -> anyhow::Result<PathBuf> {
+    match current {
+        Ok(cwd) => Ok(cwd),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            std::env::var_os("PWD")
+                .map(PathBuf::from)
+                .filter(|cwd| cwd.is_absolute())
+                .ok_or_else(|| anyhow::anyhow!("cannot read cwd: {error}; PWD is unavailable"))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Resolve the project rooted at the process cwd for lifecycle commands.
 ///
 /// Daemon start/stop and configuration commands own local lifecycle state.
 /// They must not follow `CODEX_THREAD_ID` to a different project route.
 pub fn lifecycle_project_root() -> anyhow::Result<PathBuf> {
-    validate_project_root(std::env::current_dir()?)
+    validate_project_root(process_cwd()?)
 }
 
 /// Read the canonical project root bound to the supervised host service.
@@ -612,7 +631,7 @@ pub fn service_default_root() -> anyhow::Result<PathBuf> {
 /// Resolve the exact destination for `collab init`. Initialization binds to
 /// the process cwd.
 pub fn project_root_for_init() -> anyhow::Result<PathBuf> {
-    init_project_root(std::env::current_dir()?)
+    init_project_root(process_cwd()?)
 }
 
 fn init_project_root(cwd: PathBuf) -> anyhow::Result<PathBuf> {
@@ -901,7 +920,7 @@ pub struct Scope {
 
 impl Scope {
     pub fn resolve() -> anyhow::Result<Self> {
-        let cwd = std::env::current_dir()?;
+        let cwd = process_cwd()?;
         Self::resolve_from_cwd(&cwd)
     }
 

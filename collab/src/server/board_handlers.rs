@@ -117,9 +117,6 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         next_step: task.next_step.clone(),
         work_kind:policy.work_kind,
         parent_task_id:details.parent_task_id.clone(),
-        requires_plan:details.requires_plan,
-        review_subjects:details.review_subjects.clone(),
-        close_intent:details.close_intent.clone(),
         child_work_policies:details.child_work_policies.clone(),
         preferred_roles:policy.preferred_roles.unwrap_or_default(),
         executor_name:policy.executor_name,
@@ -305,12 +302,8 @@ fn ticket_projection(state: &State, task_id: &str) -> serde_json::Value {
             })
         })
         .collect();
-    let details = state.board_details.get(task_id);
     json!({
         "task_id": task_id,
-        "requires_plan": details.is_some_and(|details| details.requires_plan),
-        "review_subjects": details.map(|details| details.review_subjects.clone()).unwrap_or_default(),
-        "close_intent": details.and_then(|details| details.close_intent.clone()),
         "phases": phases,
     })
 }
@@ -351,7 +344,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
     match command {
         BoardCommand::Show => handle_board_show(server, Some(&actor)),
         BoardCommand::Publish { id, title, description, delivery_condition, test_condition, priority,
-            work_kind,parent_task,prefer_role,executor,reviewer,requires_plan,review_subjects,depends_on } => {
+            work_kind,parent_task,prefer_role,executor,reviewer,depends_on } => {
             if [&id, &title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) {
                 return Resp::err("BOARD_DESCRIPTION_REQUIRED: provide task id, title, description, delivery condition and test condition");
             }
@@ -375,24 +368,6 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             let explicit=match parse_work_policy(work_kind,prefer_role,executor,reviewer,false,false,false) {
                 Ok(policy)=>policy,Err(error)=>return error,
             };
-            let mut normalized_review_subjects = Vec::new();
-            if let Some(list) = review_subjects.as_ref() {
-                for value in list.split(',') {
-                    let value = value.trim().to_lowercase();
-                    if value.is_empty() {
-                        continue;
-                    }
-                    if !matches!(value.as_str(), "plan" | "delivery") {
-                        return Resp::err_data(
-                            "BOARD_REVIEW_SUBJECT_INVALID: review subjects must be plan or delivery",
-                            json!({"task_id": id, "value": value}),
-                        );
-                    }
-                    normalized_review_subjects.push(value);
-                }
-            }
-            normalized_review_subjects.sort();
-            normalized_review_subjects.dedup();
             let work_policy=state.materialize_work_policy(explicit.work_kind.as_deref(),parent_task.as_deref(),&explicit);
             let public_visibility = !is_managed_subagent(&state, &actor);
             let now = now_ms();
@@ -406,7 +381,6 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             let details = BoardTaskDetails {
                 title, description, delivery_condition, test_condition,
                 parent_task_id:parent_task,work_policy,
-                requires_plan,review_subjects: normalized_review_subjects,
                 revision: 1, public_visibility, admitted: public_visibility, ..BoardTaskDetails::default()
             };
             let mut events = vec![

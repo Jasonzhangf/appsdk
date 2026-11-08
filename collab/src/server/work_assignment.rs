@@ -625,11 +625,7 @@ pub(crate) fn board_ticket_admission_events(
         Err(error) => return Err(Resp::err(error)),
     };
 
-    let first_phase = if details.requires_plan {
-        TicketPhaseKind::Plan
-    } else {
-        TicketPhaseKind::Execute
-    };
+    let first_phase = TicketPhaseKind::Execute;
     let candidates = ticket_slot_candidates(state, &control, &route, policy, first_phase)?;
 
     let group = ticket_phase_group(first_phase, policy.work_kind.as_deref());
@@ -659,9 +655,7 @@ pub(crate) fn board_ticket_admission_events(
             )
         }
         None => {
-            let reason = if first_phase == crate::server::ticket_state::TicketPhaseKind::Plan {
-                "no plan-capable peer is available".to_owned()
-            } else if policy.executor_name.is_some() {
+            let reason = if policy.executor_name.is_some() {
                 format!(
                     "specified executor {} is unavailable",
                     policy.executor_name.as_deref().unwrap_or_default()

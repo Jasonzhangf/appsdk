@@ -112,7 +112,7 @@ fn seed_peer_activity(
     });
 }
 
-fn publish_pending_public_task(
+fn publish_waiting_assignment_ticket(
     fixture: &AppFixture,
     id: &str,
     thread: &str,
@@ -139,15 +139,22 @@ fn publish_pending_public_task(
         .as_slice(),
         thread,
     );
-    let durable = fixture.current_state()["tasks"][id].clone();
-    assert_eq!(
-        durable["status"], "pending",
-        "publish created task: {output:?}"
-    );
-    let details = fixture.current_state()["board_details"][id].clone();
+    let state = fixture.current_state();
+    let details = state["board_details"][id].clone();
     assert_eq!(
         details["public_visibility"], true,
         "publish created a public task: {output:?}"
+    );
+    let phase = state["ticket_phases"]
+        .as_array()
+        .expect("state carries the ticket phase projection")
+        .iter()
+        .find(|phase| phase["task_id"] == id)
+        .cloned()
+        .expect("admitted public ticket carries an execute phase");
+    assert_eq!(
+        phase["status"], "waiting_assignment",
+        "an unavailable board must leave the execute phase waiting for a slot: {output:?}"
     );
 }
 
@@ -156,6 +163,27 @@ fn dispatch_gap_reminder_is_delivered_once_and_idempotent_for_600000ms() {
     let mut fixture = AppFixture::new();
     let facts = setup_master_and_peer(&mut fixture);
     let task_id = "dispatch-gap-task";
+    // The only peer is offline at publish, so admission cannot place a slot
+    // and the execute phase stays waiting_assignment: a real undispatched
+    // ticket rather than one the publish flow already claimed.
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
+        &facts.peer,
+        &facts.peer_session,
+        "offline",
+        "idle",
+    );
+    publish_waiting_assignment_ticket(&mut fixture, task_id, THREAD_B, &[]);
+
+    // An offline peer is not idle capacity, so the gap is not reportable yet.
+    thread::sleep(SETTLE);
+    assert!(
+        dispatch_gap_notices(&fixture.current_state(), &facts.master).is_empty(),
+        "an offline peer must not open a dispatch gap"
+    );
+
+    // Free the peer: the admitted ticket now has a real eligible idle peer.
     seed_peer_activity(
         &mut fixture,
         &facts.project,
@@ -164,8 +192,6 @@ fn dispatch_gap_reminder_is_delivered_once_and_idempotent_for_600000ms() {
         "online",
         "idle",
     );
-    publish_pending_public_task(&mut fixture, task_id, THREAD_B, &[]);
-
     let notices = wait_for_gap_notices(&fixture, &facts.master, 1);
     assert_eq!(notices.len(), 1, "one durable reminder per gap");
     assert_eq!(notices[0]["to"], facts.master);
@@ -178,7 +204,18 @@ fn dispatch_gap_reminder_is_delivered_once_and_idempotent_for_600000ms() {
     assert_eq!(wake["dispatch_gap_delivery_state"], "delivered");
 
     let durable = fixture.current_state()["tasks"][task_id].clone();
-    assert_eq!(durable["status"], "pending");
+    assert_eq!(durable["owner"], facts.master);
+    let phase = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == task_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        phase["status"], "waiting_assignment",
+        "the reminder must not auto-dispatch or mutate the phase"
+    );
     assert_eq!(durable["owner"], facts.master);
 
     thread::sleep(SETTLE);
@@ -210,7 +247,7 @@ fn dispatch_gap_reminder_is_delivered_once_and_idempotent_for_600000ms() {
 }
 
 #[test]
-fn dispatch_gap_reminder_skips_when_no_pending_public_task_exists() {
+fn dispatch_gap_reminder_skips_when_no_undispatched_ticket_exists() {
     let mut fixture = AppFixture::new();
     let facts = setup_master_and_peer(&mut fixture);
     seed_peer_activity(
@@ -226,10 +263,28 @@ fn dispatch_gap_reminder_skips_when_no_pending_public_task_exists() {
     let notices = dispatch_gap_notices(&fixture.current_state(), &facts.master);
     assert!(
         notices.is_empty(),
-        "no pending public task means no reminder: {notices:?}"
+        "no undispatched ticket means no reminder: {notices:?}"
     );
 
-    publish_pending_public_task(&mut fixture, "dispatch-gap-task", THREAD_B, &[]);
+    // Admit a ticket while the only peer is offline, then free it: this is a
+    // real undispatched ticket and must open the reminder.
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
+        &facts.peer,
+        &facts.peer_session,
+        "offline",
+        "idle",
+    );
+    publish_waiting_assignment_ticket(&mut fixture, "dispatch-gap-task", THREAD_B, &[]);
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
+        &facts.peer,
+        &facts.peer_session,
+        "online",
+        "idle",
+    );
     let notices = wait_for_gap_notices(&fixture, &facts.master, 1);
     assert_eq!(notices.len(), 1);
 
@@ -240,23 +295,6 @@ fn dispatch_gap_reminder_skips_when_no_pending_public_task_exists() {
 fn dispatch_gap_reminder_skips_busy_offline_and_waiting_peers() {
     let mut fixture = AppFixture::new();
     let facts = setup_master_and_peer(&mut fixture);
-    publish_pending_public_task(&mut fixture, "dispatch-gap-task", THREAD_B, &[]);
-
-    seed_peer_activity(
-        &mut fixture,
-        &facts.project,
-        &facts.peer,
-        &facts.peer_session,
-        "online",
-        "busy",
-    );
-    thread::sleep(SETTLE);
-    let notices = dispatch_gap_notices(&fixture.current_state(), &facts.master);
-    assert!(
-        notices.is_empty(),
-        "a busy peer is not idle capacity: {notices:?}"
-    );
-
     seed_peer_activity(
         &mut fixture,
         &facts.project,
@@ -265,27 +303,29 @@ fn dispatch_gap_reminder_skips_busy_offline_and_waiting_peers() {
         "offline",
         "idle",
     );
-    thread::sleep(SETTLE);
-    let notices = dispatch_gap_notices(&fixture.current_state(), &facts.master);
-    assert!(
-        notices.is_empty(),
-        "an offline peer is not idle capacity: {notices:?}"
-    );
+    publish_waiting_assignment_ticket(&mut fixture, "dispatch-gap-task", THREAD_B, &[]);
 
-    seed_peer_activity(
-        &mut fixture,
-        &facts.project,
-        &facts.peer,
-        &facts.peer_session,
-        "online",
-        "waiting_user",
-    );
-    thread::sleep(SETTLE);
-    let notices = dispatch_gap_notices(&fixture.current_state(), &facts.master);
-    assert!(
-        notices.is_empty(),
-        "a waiting_user peer is not idle capacity: {notices:?}"
-    );
+    for (presence, activity) in [
+        ("offline", "idle"),
+        ("online", "busy"),
+        ("online", "waiting_user"),
+        ("unknown", "idle"),
+    ] {
+        seed_peer_activity(
+            &mut fixture,
+            &facts.project,
+            &facts.peer,
+            &facts.peer_session,
+            presence,
+            activity,
+        );
+        thread::sleep(SETTLE);
+        let notices = dispatch_gap_notices(&fixture.current_state(), &facts.master);
+        assert!(
+            notices.is_empty(),
+            "{presence}/{activity} is not idle capacity: {notices:?}"
+        );
+    }
 
     seed_peer_activity(
         &mut fixture,
@@ -326,12 +366,22 @@ fn dispatch_gap_reminder_requires_pinned_executor_to_be_idle_and_available() {
     seed_peer_activity(
         &mut fixture,
         &facts.project,
+        &unrelated_worker,
+        &unrelated_session,
+        "online",
+        "idle",
+    );
+    // The pinned executor is offline at publish so admission cannot place the
+    // phase and the ticket is genuinely undispatched.
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
         &facts.peer,
         &facts.peer_session,
-        "online",
-        "busy",
+        "offline",
+        "idle",
     );
-    publish_pending_public_task(
+    publish_waiting_assignment_ticket(
         &mut fixture,
         "pinned-dispatch-gap",
         THREAD_B,

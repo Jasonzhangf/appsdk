@@ -1100,8 +1100,6 @@ fn publisher_claims_pending_task_and_non_publisher_cannot_reclaim() {
             prefer_role: None,
             executor: None,
             reviewer: None,
-            requires_plan: false,
-            review_subjects: None,
             depends_on: Vec::new(),
         },
     );

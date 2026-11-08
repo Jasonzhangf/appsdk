@@ -1,0 +1,144 @@
+{
+  "id": "appsdk-collab-dispatch-gap-reminder-migration",
+  "version": "0.1.0",
+  "description": "One dispatch-gap check reads the current master, public board tasks, direct one-layer peers, bindings and typed activity. It selects pending public tasks without an active invitation and direct peers that are online, idle, eligible for at least one task, and not managed children. It forms a sorted master+task+peer condition key, applies a 600000ms durable idempotence window, and delivers one direct-message reminder to the master or explicitly skips. A changed key is a new gap; resolving the gap clears the key. The reminder does not dispatch, change owners or change task status. A future auto-continuation queue must exclude peers with queued work; this graph does not invent that absent state.",
+  "inputs": [
+    {
+      "id": "dispatch_gap_check_trigger",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "read_master_scope_facts",
+      "operator": "appsdk.collab_master_dispatch.read_scope_facts",
+      "operator_version": "1",
+      "description": "Read the current project master, public board tasks, direct one-layer peers, their bindings and transport, and typed presence/activity. Do not recurse into managed children or infer activity from task status, tmux text or stale history.",
+      "inputs": ["dispatch_gap_check_trigger"],
+      "output": {
+        "id": "master_scope_facts",
+        "schema": "Object"
+      },
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "classify_undispatched_work",
+      "operator": "appsdk.collab_master_dispatch.classify_undispatched_work",
+      "operator_version": "1",
+      "description": "Select only pending public tasks owned or created by the current master with no active invitation. An invited task belongs to board dispatch. Auto-continuation is the primary path for queued work, but its ticket queue is not on origin/main yet; this graph adds no fallback queue projection.",
+      "inputs": ["master_scope_facts"],
+      "output": {
+        "id": "undispatched_tasks",
+        "schema": "Object"
+      },
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "evaluate_idle_peers",
+      "operator": "appsdk.collab_master_dispatch.evaluate_idle_peers",
+      "operator_version": "1",
+      "description": "Reuse dispatch_eligible_worker_ids for stable-name, binding, managed-child, transport and executor-pin rules. Keep only direct peers that are Online and Idle and eligible for at least one selected task. Unknown, cold, offline, waiting_user and the master itself are not capacity. When auto-continuation lands, exclude peers with queued work here.",
+      "inputs": ["undispatched_tasks"],
+      "output": {
+        "id": "dispatch_gap_condition",
+        "schema": "Object"
+      },
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "apply_idempotence_window",
+      "operator": "appsdk.collab_master_dispatch.apply_window",
+      "operator_version": "1",
+      "description": "If either set is empty, clear the condition key and return skip_no_gap. Otherwise form master plus sorted task IDs plus sorted peer IDs. Return skip_idempotent only when the key equals the last durable key and less than 600000ms has elapsed. A changed key or an elapsed window allows delivery.",
+      "inputs": ["dispatch_gap_condition"],
+      "output": {
+        "id": "reminder_decision",
+        "schema": "Object"
+      },
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "deliver_reminder_or_skip",
+      "operator": "appsdk.collab_master_dispatch.deliver_or_skip",
+      "operator_version": "1",
+      "description": "When the window allows and the master has a matching direct-message subscription, create one master-dispatch-gap message listing the tasks and idle peers. Skips create no message and never dispatch work, change task ownership or change peer activity.",
+      "inputs": ["reminder_decision"],
+      "output": {
+        "id": "delivery_outcome",
+        "schema": "Object"
+      },
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "persist_reminder_outcome",
+      "operator": "appsdk.collab_master_dispatch.persist_outcome",
+      "operator_version": "1",
+      "description": "Commit the message, wake binding and MasterWakeUpdated together. Advance the key and last notice time only after durable success. On failure record the condition snapshot and delivery_failed without advancing the window. On gap resolution clear the condition and key. MasterWakeAccumulator is the only state owner.",
+      "inputs": ["delivery_outcome"],
+      "output": {
+        "id": "persisted_dispatch_gap_state",
+        "schema": "Object"
+      },
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_check_result",
+      "operator": "appsdk.collab_master_dispatch.emit_result",
+      "operator_version": "1",
+      "description": "Return triggered, skip_no_gap, skip_idempotent or delivery_failed together with the condition key, message ID, next window time and unresolved gap. Success, skip and failure reach the same exit.",
+      "inputs": ["persisted_dispatch_gap_state"],
+      "output": {
+        "id": "dispatch_gap_check_result",
+        "schema": "Object"
+      },
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "read_master_scope_facts",
+      "to": "classify_undispatched_work",
+      "arc_id": "master_scope_facts"
+    },
+    {
+      "from": "classify_undispatched_work",
+      "to": "evaluate_idle_peers",
+      "arc_id": "undispatched_tasks"
+    },
+    {
+      "from": "evaluate_idle_peers",
+      "to": "apply_idempotence_window",
+      "arc_id": "dispatch_gap_condition"
+    },
+    {
+      "from": "apply_idempotence_window",
+      "to": "deliver_reminder_or_skip",
+      "arc_id": "reminder_decision"
+    },
+    {
+      "from": "deliver_reminder_or_skip",
+      "to": "persist_reminder_outcome",
+      "arc_id": "delivery_outcome"
+    },
+    {
+      "from": "persist_reminder_outcome",
+      "to": "emit_check_result",
+      "arc_id": "persisted_dispatch_gap_state"
+    }
+  ],
+  "outputs": ["dispatch_gap_check_result"]
+}

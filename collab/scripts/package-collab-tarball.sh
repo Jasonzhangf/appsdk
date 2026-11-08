@@ -73,6 +73,8 @@ fi
 
 version=$("$bin_dir/collab" --version | awk '{print $2}')
 case "$version" in
+  0.2.0000)
+    fail "refusing to package debug build version 0.2.0000 as a release candidate; allocate a release version with scripts/build-collab.sh" ;;
   0.2.[0-9]*) ;;
   *) fail "unexpected collab version: $version" ;;
 esac
@@ -103,6 +105,8 @@ chmod 644 "$stage/bin/collab-desktop-mcp.mjs"
   fail 'missing docs/install-onboarding.md'
 cp "$collab_root/docs/install-onboarding.md" "$stage/INSTALL-ONBOARDING.md"
 cp "$collab_root/scripts/require-system-volume.sh" "$stage/require-system-volume.sh"
+cp "$collab_root/scripts/collab-install-transaction.sh" \
+  "$stage/collab-install-transaction.sh"
 
 cat >"$stage/install.sh" <<'INSTALL'
 #!/bin/sh
@@ -111,42 +115,19 @@ set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$here/require-system-volume.sh"
+. "$here/collab-install-transaction.sh"
 cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
 bin_dir="$cargo_home/bin"
 skills_target=${COLLAB_SKILLS_TARGET:-"$HOME/.agents/skills/collab"}
 
-test -x "$here/bin/collab"
-test -x "$here/bin/collab-mcp"
-test -x "$here/bin/collab-desktop-mcp"
-
 require_system_volume "$bin_dir"
 require_system_volume "$skills_target"
 
-mkdir -p "$bin_dir"
-collab_tmp="$bin_dir/.collab.install.$$"
-mcp_tmp="$bin_dir/.collab-mcp.install.$$"
-desktop_tmp="$bin_dir/.collab-desktop-mcp.install.$$"
-desktop_js_tmp="$bin_dir/.collab-desktop-mcp.mjs.install.$$"
-trap 'rm -f "$collab_tmp" "$mcp_tmp" "$desktop_tmp" "$desktop_js_tmp"' EXIT HUP INT TERM
-
-cp "$here/bin/collab" "$collab_tmp"
-cp "$here/bin/collab-mcp" "$mcp_tmp"
-cp "$here/bin/collab-desktop-mcp" "$desktop_tmp"
-cp "$here/bin/collab-desktop-mcp.mjs" "$desktop_js_tmp"
-chmod 755 "$collab_tmp" "$mcp_tmp" "$desktop_tmp"
-mv "$collab_tmp" "$bin_dir/collab"
-mv "$mcp_tmp" "$bin_dir/collab-mcp"
-mv "$desktop_js_tmp" "$bin_dir/collab-desktop-mcp.mjs"
-mv "$desktop_tmp" "$bin_dir/collab-desktop-mcp"
-trap - EXIT HUP INT TERM
-
-"$bin_dir/collab" install-skills --target "$skills_target" --force
-
-printf 'version=%s\n' "$("$bin_dir/collab" --version)"
-printf 'collab=%s\n' "$bin_dir/collab"
-printf 'collab_mcp=%s\n' "$bin_dir/collab-mcp"
-printf 'skills=%s\n' "$skills_target"
-printf 'daemon_note=install only; run collab up from the project root to activate the daemon\n'
+tx_main \
+  --bin-dir "$bin_dir" \
+  --skills-dir "$skills_target" \
+  --helper-dir "$here/bin" \
+  --candidate-dir "$here/bin"
 INSTALL
 chmod 755 "$stage/install.sh"
 

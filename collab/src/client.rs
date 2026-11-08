@@ -332,6 +332,93 @@ pub fn call_with_stream_response(
     serde_json::from_str(buf.trim()).context("DAEMON_UNKNOWN: malformed response from server")
 }
 
+/// Round-trip one request under one caller-owned deadline. The explicit
+/// readiness check uses this path so no phase can extend the total window.
+pub fn call_with_deadline<T: DeserializeOwned>(
+    sock: &Path,
+    req: &Req,
+    project_context: Option<ProjectContext>,
+    deadline: Instant,
+) -> anyhow::Result<T> {
+    let stream = connect(sock).map_err(|error| connection_error(sock, error))?;
+    call_with_stream_deadline(sock, stream, req, project_context, deadline)
+}
+
+pub fn call_with_stream_deadline<T: DeserializeOwned>(
+    sock: &Path,
+    mut stream: UnixStream,
+    req: &Req,
+    project_context: Option<ProjectContext>,
+    deadline: Instant,
+) -> anyhow::Result<T> {
+    if let Some(project_context) = project_context.as_ref() {
+        project_context.validate()?;
+    }
+    let line = serde_json::to_string(&RequestEnvelope::new(req.clone(), project_context))?;
+    stream
+        .set_write_timeout(Some(remaining_before(deadline, "daemon request write")?))
+        .with_context(|| {
+            format!(
+                "DAEMON_UNKNOWN: failed to set write timeout for {}",
+                sock.display()
+            )
+        })?;
+    stream
+        .write_all(line.as_bytes())
+        .with_context(|| request_timeout_context(sock, "failed to send request"))?;
+    stream
+        .write_all(b"\n")
+        .with_context(|| request_timeout_context(sock, "failed to send request"))?;
+    stream
+        .flush()
+        .with_context(|| request_timeout_context(sock, "failed to flush request"))?;
+    stream
+        .set_read_timeout(Some(remaining_before(deadline, "daemon response read")?))
+        .with_context(|| {
+            format!(
+                "DAEMON_UNKNOWN: failed to set read timeout for {}",
+                sock.display()
+            )
+        })?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut buf = String::new();
+    let bytes_read = reader
+        .read_line(&mut buf)
+        .with_context(|| request_timeout_context(sock, "failed to read response"))?;
+    if bytes_read == 0 {
+        anyhow::bail!(
+            "DAEMON_UNKNOWN: daemon closed the connection before replying at {}",
+            sock.display()
+        );
+    }
+    let resp: Resp = serde_json::from_str(buf.trim())
+        .context("DAEMON_UNKNOWN: malformed response from server")?;
+    if !resp.ok {
+        return Err(ServerResponseError { response: resp }.into());
+    }
+    serde_json::from_value(resp.data).with_context(|| {
+        format!(
+            "DAEMON_UNKNOWN: unexpected response shape from {}",
+            sock.display()
+        )
+    })
+}
+
+pub(crate) fn remaining_before(deadline: Instant, phase: &str) -> anyhow::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "COLLAB_HEALTH_TIMEOUT: {phase} exceeded the five-second check deadline"
+            )
+        })
+}
+
+fn request_timeout_context(sock: &Path, operation: &str) -> String {
+    format!("DAEMON_UNKNOWN: {operation} at {}", sock.display())
+}
+
 /// Round-trip a request using the appserver identity registered by the
 /// caller.  The identity is typed and validated before it becomes route
 /// context; role labels and other user-provided strings are never consulted.

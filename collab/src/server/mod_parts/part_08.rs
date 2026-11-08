@@ -286,7 +286,7 @@ fn canonical_project_key(root: &std::path::Path) -> Option<String> {
         .map(|name| name.to_string_lossy().into_owned())
 }
 
-fn authoritative_send_binding<'a>(
+pub(crate) fn authoritative_send_binding<'a>(
     state: &'a State,
     route_scope: &RouteScope,
     worker_id: &str,
@@ -610,101 +610,16 @@ fn handle_authenticated_send_with_app_scope(
     target_session: Option<String>,
 ) -> Resp {
     let st = server.state.lock().unwrap();
-    let Some(worker) = st.workers.get(&worker_id).cloned() else {
-        return Resp::err(format!("worker {} not registered", worker_id));
-    };
-    if worker.token != token {
-        return Resp::err("token mismatch: identity does not own this worker_id");
-    }
     let Some(command) = command else {
         return Resp::err(
             "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
         );
     };
-    let (runtime, registered_scope) = match app_scope {
-        Some(context_app_scope) => {
-            if command.scope.app_scope_id != context_app_scope {
-                return Resp::err(
-                    "SEND_BINDING_REJECTED: command app scope does not match request context",
-                );
-            }
-            let worker_project_scope =
-                match GlobalState::canonical_project_scope(Path::new(&worker.cwd)) {
-                    Ok(scope) => scope,
-                    Err(error) => return Resp::err(format!("SEND_BINDING_REJECTED: {error}")),
-                };
-            if command.scope.project_scope_id != worker_project_scope {
-                return Resp::err(
-                    "SEND_BINDING_REJECTED: command project scope does not match registered worker cwd",
-                );
-            }
-            let Some(binding) = st
-                .global
-                .lookup_binding_for(&command.scope, &command.actor_binding_id)
-                .cloned()
-            else {
-                return Resp::err(
-                    "SEND_BINDING_REJECTED: authenticated sender binding is not registered for the request route",
-                );
-            };
-            if binding.agent_id.as_str() != worker.id {
-                return Resp::err(
-                    "SEND_BINDING_REJECTED: authenticated sender binding belongs to another worker",
-                );
-            }
-            let runtime = crate::identity::RuntimeIdentity {
-                agent_id: binding.agent_id.clone(),
-                runtime_id: binding.runtime_id.clone(),
-                appserver_id: binding.app_scope_id.clone(),
-                binding_id: binding.binding_id.clone(),
-                session_id: binding.session_id.clone(),
-                native_thread_id: binding.native_thread_id.clone(),
-            };
-            (runtime, binding.route_scope())
-        }
-        None => {
-            // Direct in-process callers predate the wire ProjectContext and
-            // are bound to the compatibility tui-default route established by
-            // handle_register. Wire requests never use this branch: they are
-            // admitted with an explicit app scope above.
-            let appserver_id = match crate::identity::AppServerId::new("tui-default") {
-                Ok(id) => id,
-                Err(error) => return Resp::err(error.to_string()),
-            };
-            let registered_scope =
-                match RouteScope::for_registered_project(appserver_id, Path::new(&worker.cwd)) {
-                    Ok(scope) => scope,
-                    Err(error) => return Resp::err(error.to_string()),
-                };
-            let binding = match authoritative_send_binding(&st, &registered_scope, &worker_id) {
-                Ok(binding) => binding.clone(),
-                Err(error) => return Resp::err(error),
-            };
-            if command.actor_binding_id != binding.binding_id {
-                return Resp::err(format!(
-                    "SEND_BINDING_REJECTED: actor binding mismatch: expected {}, observed {}",
-                    binding.binding_id, command.actor_binding_id
-                ));
-            }
-            if command.scope != registered_scope {
-                return Resp::err(
-                    "SEND_BINDING_REJECTED: envelope scope does not match authoritative route scope",
-                );
-            }
-            let runtime = crate::identity::RuntimeIdentity {
-                agent_id: binding.agent_id.clone(),
-                runtime_id: binding.runtime_id.clone(),
-                appserver_id: binding.app_scope_id.clone(),
-                binding_id: binding.binding_id.clone(),
-                session_id: binding.session_id.clone(),
-                native_thread_id: binding.native_thread_id.clone(),
-            };
-            (runtime, registered_scope)
-        }
-    };
-    if let Err(error) = command.validate_for(&runtime, &registered_scope) {
-        return Resp::err(format!("SEND_BINDING_REJECTED: {error}"));
-    }
+    let (worker, _runtime, _registered_scope) =
+        match authenticated_send_admission(&st, &worker_id, &token, &command, app_scope.as_ref()) {
+            Ok(values) => values,
+            Err(response) => return response,
+        };
     if raw_from != worker_id {
         return Resp::err("sender identity is derived from the authenticated binding");
     }
@@ -727,6 +642,108 @@ fn handle_authenticated_send_with_app_scope(
         target_session,
         None,
     )
+}
+
+/// Source-side send admission shared by the real send command and the
+/// read-only capability check. It stops before recipient resolution and any
+/// message, wake, notification, or adapter mutation.
+pub(crate) fn authenticated_send_admission(
+    state: &State,
+    worker_id: &str,
+    token: &str,
+    command: &crate::proto::CommandEnvelope,
+    app_scope: Option<&AppServerId>,
+) -> Result<(WorkerRec, crate::identity::RuntimeIdentity, RouteScope), Resp> {
+    let Some(worker) = state.workers.get(worker_id).cloned() else {
+        return Err(Resp::err(format!("worker {} not registered", worker_id)));
+    };
+    if worker.token != token {
+        return Err(Resp::err("token mismatch: identity does not own this worker_id"));
+    }
+    let (runtime, registered_scope) = match app_scope {
+        Some(context_app_scope) => {
+            if command.scope.app_scope_id != *context_app_scope {
+                return Err(Resp::err(
+                    "SEND_BINDING_REJECTED: command app scope does not match request context",
+                ));
+            }
+            let worker_project_scope =
+                match GlobalState::canonical_project_scope(Path::new(&worker.cwd)) {
+                    Ok(scope) => scope,
+                    Err(error) => return Err(Resp::err(format!("SEND_BINDING_REJECTED: {error}"))),
+                };
+            if command.scope.project_scope_id != worker_project_scope {
+                return Err(Resp::err(
+                    "SEND_BINDING_REJECTED: command project scope does not match registered worker cwd",
+                ));
+            }
+            let Some(binding) = state
+                .global
+                .lookup_binding_for(&command.scope, &command.actor_binding_id)
+                .cloned()
+            else {
+                return Err(Resp::err(
+                    "SEND_BINDING_REJECTED: authenticated sender binding is not registered for the request route",
+                ));
+            };
+            if binding.agent_id.as_str() != worker.id {
+                return Err(Resp::err(
+                    "SEND_BINDING_REJECTED: authenticated sender binding belongs to another worker",
+                ));
+            }
+            let runtime = crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            };
+            (runtime, binding.route_scope())
+        }
+        None => {
+            // Direct in-process callers predate the wire ProjectContext and
+            // are bound to the compatibility tui-default route established by
+            // handle_register. Wire requests never use this branch.
+            let appserver_id = match crate::identity::AppServerId::new("tui-default") {
+                Ok(id) => id,
+                Err(error) => return Err(Resp::err(error.to_string())),
+            };
+            let registered_scope =
+                match RouteScope::for_registered_project(appserver_id, Path::new(&worker.cwd)) {
+                    Ok(scope) => scope,
+                    Err(error) => return Err(Resp::err(error.to_string())),
+                };
+            let binding = match authoritative_send_binding(state, &registered_scope, worker_id) {
+                Ok(binding) => binding.clone(),
+                Err(error) => return Err(Resp::err(error)),
+            };
+            if command.actor_binding_id != binding.binding_id {
+                return Err(Resp::err(format!(
+                    "SEND_BINDING_REJECTED: actor binding mismatch: expected {}, observed {}",
+                    binding.binding_id, command.actor_binding_id
+                )));
+            }
+            if command.scope != registered_scope {
+                return Err(Resp::err(
+                    "SEND_BINDING_REJECTED: envelope scope does not match authoritative route scope",
+                ));
+            }
+            let runtime = crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            };
+            (runtime, registered_scope)
+        }
+    };
+    if let Err(error) = command.validate_for(&runtime, &registered_scope) {
+        return Err(Resp::err(format!("SEND_BINDING_REJECTED: {error}")));
+    }
+    Ok((worker, runtime, registered_scope))
 }
 
 /// Backwards-compatible entry for callers that do not declare a reply

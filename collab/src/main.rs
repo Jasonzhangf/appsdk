@@ -9,6 +9,7 @@ mod config;
 mod context_operation;
 mod dashboard;
 mod desktop_capability;
+mod health;
 pub(crate) mod host_runtime;
 mod identity;
 mod install_skills;
@@ -748,6 +749,10 @@ fn emit_lifecycle_response(response: proto::Resp) -> anyhow::Result<()> {
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli.cmd) {
+        if let Some(health_error) = e.downcast_ref::<health::HealthError>() {
+            health_error.emit();
+            std::process::exit(health_error.exit_code());
+        }
         eprintln!("collab: {}", format_cli_error(&e.to_string()));
         if let Some(server_error) = e.downcast_ref::<client::ServerResponseError>() {
             eprintln!(
@@ -1109,7 +1114,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             }));
             Ok(())
         }
-        Cmd::Status { all } => {
+        Cmd::Status { all, check, local } => {
+            if check {
+                health::status_check(local)?;
+                return Ok(());
+            }
             let scope = Scope::resolve()?;
             let v: serde_json::Value = if all {
                 client::call_with_context(

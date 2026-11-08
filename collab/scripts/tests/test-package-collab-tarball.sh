@@ -30,7 +30,7 @@ write_stub() {
   cat >"$dir/launchctl" <<'LAUNCH'
 #!/bin/sh
 printf '%s\n' "$*" >>"$LAUNCHCTL_LOG"
-exit 0
+exit 1
 LAUNCH
   cat >"$dir/collab" <<STUB
 #!/bin/sh
@@ -46,7 +46,24 @@ case "\$1" in
     done
     [ -n "\$target" ] || exit 2
     mkdir -p "\$target"
+    if [ "\${STUB_SKILLS_FAIL:-0}" -ne 0 ]; then
+      printf 'skill export denied\n' >&2
+      exit "\${STUB_SKILLS_FAIL}"
+    fi
     printf '# stub skill\n' >"\$target/SKILL.md"
+    ;;
+  status)
+    local_check=0
+    for argument in "\$@"; do [ "\$argument" = "--local" ] && local_check=1; done
+    if [ "\$local_check" -eq 1 ]; then
+      [ "\${STUB_LOCAL_EXIT:-0}" -eq 0 ] || exit "\${STUB_LOCAL_EXIT}"
+      exit 0
+    fi
+    [ "\${STUB_FULL_EXIT:-0}" -eq 0 ] || {
+      [ -z "\${STUB_FULL_JSON:-}" ] || printf '%s\n' "\$STUB_FULL_JSON"
+      exit "\${STUB_FULL_EXIT}"
+    }
+    exit 0
     ;;
   install-autostart)
     printf '%s\n' "\$*" >>"\${STUB_LOG:-/dev/null}"
@@ -55,10 +72,11 @@ case "\$1" in
   *) printf '%s\n' "\$*" >>"\${STUB_LOG:-/dev/null}" ;;
 esac
 STUB
-  cat >"$dir/collab-mcp" <<'STUB'
+  cat >"$dir/collab-mcp" <<'MCP'
 #!/bin/sh
-exit 0
-STUB
+read -r _line
+printf '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"collab-mcp","version":"%s"}}}\n' "0.2.9001"
+MCP
   chmod 755 "$dir/collab" "$dir/collab-mcp" "$dir/launchctl"
 }
 
@@ -96,6 +114,10 @@ package_and_install() {
     fail "INSTALL-ONBOARDING.md lacks the Git guidance in $name"
   grep -q 'tmux is placement, not identity' "$package/INSTALL-ONBOARDING.md" ||
     fail "INSTALL-ONBOARDING.md lacks the tmux guidance in $name"
+  grep -q 'Installation transaction outcomes' "$package/INSTALL-ONBOARDING.md" ||
+    fail "INSTALL-ONBOARDING.md lacks the transaction outcome guidance in $name"
+  grep -q 'collab-debug()' "$package/INSTALL-ONBOARDING.md" ||
+    fail "INSTALL-ONBOARDING.md lacks the independent debug entry guidance in $name"
   grep -q 'QQBot receiver and first bind' "$package/INSTALL-ONBOARDING.md" ||
     fail "INSTALL-ONBOARDING.md lacks the QQBot guidance in $name"
   grep -q '# stub skill' "$package/skills/collab/SKILL.md" ||
@@ -118,7 +140,7 @@ package_and_install() {
   mkdir -p "$home"
   local launchctl_log="$work/launchctl-$label.log"
   : >"$launchctl_log"
-  PATH="$stub:$PATH" STUB_LOG="$log" LAUNCHCTL_LOG="$launchctl_log" \
+  PATH="$stub:/usr/bin:/bin:/usr/sbin:/sbin" STUB_LOG="$log" LAUNCHCTL_LOG="$launchctl_log" \
     HOME="$home" CARGO_HOME="$home/.cargo" \
     COLLAB_SKILLS_TARGET="$home/.agents/skills/collab" \
     sh "$package/install.sh" >"$work/install-$label.out" 2>&1 || {
@@ -134,12 +156,91 @@ package_and_install() {
   [[ -f "$home/.cargo/bin/collab-desktop-mcp.mjs" ]] ||
     fail "collab-desktop-mcp.mjs not installed for $label"
   grep -q '^install-skills --target ' "$log" || fail "install-skills was not invoked for $label"
+  grep -q 'collab-install-transaction.sh' "$package/install.sh" ||
+    fail "packaged install.sh does not source the shared transaction owner"
+  cmp -s "$repo_root/collab/scripts/collab-install-transaction.sh" \
+    "$package/collab-install-transaction.sh" ||
+    fail "packaged transaction helper differs from the source owner"
   if grep -Eq '^(install-autostart|up|serve|daemon|start)\b' "$log"; then
     fail "install.sh activated or started the daemon for $label: $(grep -E '^(install-autostart|up|serve|daemon|start)\b' "$log" | head -1)"
   fi
   if [[ -s "$launchctl_log" ]]; then
     fail "install.sh invoked launchctl for $label: $(cat "$launchctl_log")"
   fi
+}
+
+# The packaged install.sh exercises the same transaction as the source
+# installer: pending activation keeps the new release, and a post-publication
+# health failure restores the exact baseline through the retained helper.
+package_transaction_cases() {
+  local label="$1" log="$2"
+  local stub="$work/stub-$label" out="$work/out-$label"
+
+  write_stub "$stub"
+  sh "$packager" --skip-build --bin-dir "$stub" --out "$out" >"$work/package-$label.out" 2>&1 ||
+    fail "packaging failed for $label: $(cat "$work/package-$label.out")"
+  local extract="$work/extract-$label"
+  mkdir -p "$extract"
+  tar -xzf "$out/collab-0.2.9001-macos-$(uname -m).tar.gz" -C "$extract"
+  local package
+  package="$(find "$extract" -maxdepth 1 -mindepth 1 -type d | head -1)"
+
+  local home="$work/home-$label" baseline_home="$work/baseline-$label"
+  mkdir -p "$home" "$baseline_home/.cargo/bin" "$baseline_home/.agents/skills/collab"
+  local launchctl_log="$work/launchctl-$label.log"
+  : >"$launchctl_log"
+
+  local run_install
+  run_install() {
+    local case_name="$1" home_dir="$2" full_exit="${3:-0}" full_json="${4:-}"
+    (
+      set +e
+      PATH="$stub:/usr/bin:/bin:/usr/sbin:/sbin" \
+        STUB_LOG="$log" LAUNCHCTL_LOG="$launchctl_log" \
+        HOME="$home_dir" CARGO_HOME="$home_dir/.cargo" \
+        COLLAB_SKILLS_TARGET="$home_dir/.agents/skills/collab" \
+        COLLAB_STATE_DIR="$work/state-$label-$case_name" \
+        COLLAB_BUILD_STATE_DIR="$work/build-state-$label-$case_name" \
+        TMPDIR="$work/tmp-$label-$case_name" \
+        STUB_FULL_EXIT="$full_exit" \
+        STUB_FULL_JSON="$full_json" \
+        sh "$package/install.sh" >"$work/install-$label.out" 2>&1
+      printf '%s\n' "$?" >"$work/install-$label.exit"
+    )
+  }
+
+  # Pending activation: daemon absent, exit 3, files stay installed.
+  run_install pending "$home" 3 \
+    '{"outcome":"pending_user_activation","required_action":"daemon_absent"}'
+  [[ "$(cat "$work/install-$label.exit")" -eq 3 ]] ||
+    fail "package pending: expected exit 3 got $(cat "$work/install-$label.exit")"
+  grep -q 'outcome=pending_user_activation' "$work/install-$label.out" ||
+    fail "package pending: missing pending receipt"
+  [[ -x "$home/.cargo/bin/collab" ]] || fail "package pending: collab not installed"
+
+  # Recoverable baseline: the packaged transaction must restore it after a check.
+  local bin="$baseline_home/.cargo/bin"
+  cp "$stub/collab" "$bin/collab"
+  cp "$stub/collab-mcp" "$bin/collab-mcp"
+  cp "$package/bin/collab-desktop-mcp" "$bin/collab-desktop-mcp"
+  cp "$package/bin/collab-desktop-mcp.mjs" "$bin/collab-desktop-mcp.mjs"
+  chmod 755 "$bin/collab" "$bin/collab-mcp" "$bin/collab-desktop-mcp"
+  chmod 644 "$bin/collab-desktop-mcp.mjs"
+  printf 'baseline skill\n' >"$baseline_home/.agents/skills/collab/SKILL.md"
+
+  run_install failure "$baseline_home" 9
+  [[ "$(cat "$work/install-$label.exit")" -eq 9 ]] ||
+    fail "package failure: expected exit 9 got $(cat "$work/install-$label.exit")"
+  grep -q 'outcome=failure_with_rollback' "$work/install-$label.out" ||
+    fail "package failure: missing failure receipt"
+  grep -q 'rollback=restored' "$work/install-$label.out" ||
+    fail "package failure: missing restored receipt"
+  grep -q 'baseline skill' "$baseline_home/.agents/skills/collab/SKILL.md" ||
+    fail "package failure: baseline skills were not restored"
+  [[ ! -e "$bin/.collab-install-previous" ]] ||
+    fail "package failure: previous release created for an unverified baseline"
+  [[ ! -s "$launchctl_log" ]] ||
+    fail "package: lifecycle spy was invoked: $(cat "$launchctl_log")"
 }
 
 # Run the packaged install.sh against a target that must be refused: it must
@@ -185,9 +286,36 @@ check_external_refused() {
   fi
 }
 
+# The debug sentinel is a valid local-health pair but not a release candidate.
+# Preparing it as a public release archive would install it over the canonical
+# release names, so the packager must reject it before any product is staged.
+package_debug_rejected() {
+  local label="$1"
+  local stub="$work/stub-$label" out="$work/out-$label"
+
+  write_stub "$stub"
+  sed -i '' 's/0\.2\.9001/0.2.0000/g' "$stub/collab" "$stub/collab-mcp"
+
+  local status=0
+  sh "$packager" --skip-build --bin-dir "$stub" --out "$out" \
+    >"$work/package-$label.out" 2>&1 || status=$?
+  [[ "$status" -ne 0 ]] ||
+    fail "packaging accepted debug build 0.2.0000: $(cat "$work/package-$label.out")"
+  grep -q '0\.2\.0000' "$work/package-$label.out" ||
+    fail "packaging did not report the debug sentinel: $(cat "$work/package-$label.out")"
+  [[ ! -e "$out/collab-0.2.0000-macos-$(uname -m).tar.gz" ]] ||
+    fail "packaging published a tarball for debug build 0.2.0000"
+  [[ ! -d "$out/collab-0.2.0000-macos-$(uname -m)" ]] ||
+    fail "packaging staged a release product for debug build 0.2.0000"
+}
+
 checks=0
 
 package_and_install ok "$work/invoke-ok.log"
+checks=$((checks + 1))
+package_debug_rejected debug
+checks=$((checks + 1))
+package_transaction_cases tx "$work/invoke-tx.log"
 checks=$((checks + 1))
 
 # macOS: a real external target and a system-volume symlink that points at an

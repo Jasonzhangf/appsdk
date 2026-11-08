@@ -91,30 +91,9 @@ fn handle_task_review(
             record: lifecycle,
         },
     ];
-    if rework
-        && st
-            .board_details
-            .get(&task_id)
-            .is_some_and(|details| details.admitted)
-    {
-        if let Some(phase) = st
-            .ticket_phases
-            .iter()
-            .filter(|phase| {
-                phase.task_id == task_id
-                    && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
-                    && phase.status != crate::server::ticket_state::TicketPhaseStatus::Revoked
-            })
-            .max_by_key(|phase| phase.batch)
-            .cloned()
-        {
-            let mut reopened = phase;
-            reopened.batch = reopened.batch.saturating_add(1);
-            reopened.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
-            reopened.attempt_generation = reopened.attempt_generation.saturating_add(1);
-            reopened.result = None;
-            reopened.wait_reason = None;
-            events.push(Event::TicketPhaseRecorded { phase: reopened });
+    if rework {
+        if let Some(event) = ticket_rework_phase_event(server, &st, &task_id) {
+            events.push(event);
         }
     }
     let review_notices = work_review_notice_ids(&st, &task_id);

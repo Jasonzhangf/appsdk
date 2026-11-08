@@ -410,6 +410,9 @@ fn board_work_policy(
             details,
         },
     ]);
+    if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
+        events.push(event);
+    }
     if let Err(error) = server.commit_locked_checked(&mut state, &events) {
         return Resp::err(format!("WORK_POLICY_DURABILITY_FAILED: {error}"));
     }
@@ -723,6 +726,74 @@ pub(crate) fn ticket_continuation_events(
     ticket_continuation_events_with_pending(
         state, control, route, worker_id, pending, None, None, trusted_idle,
     )
+}
+
+/// Reopen a completed execute phase when the task returns to an executing
+/// state. The reopened batch keeps the stable slot when its current binding is
+/// active; otherwise it becomes waiting-assignment and the existing matching
+/// scope owns the later transition.
+pub(crate) fn ticket_rework_phase_event(
+    server: &Server,
+    state: &State,
+    task_id: &str,
+) -> Option<Event> {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+
+    if !state
+        .board_details
+        .get(task_id)
+        .is_some_and(|details| details.admitted)
+    {
+        return None;
+    }
+    let latest = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.task_id == task_id
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.status != TicketPhaseStatus::Revoked
+        })
+        .max_by_key(|phase| phase.batch)
+        .cloned()?;
+    if !matches!(
+        latest.status,
+        TicketPhaseStatus::Completed | TicketPhaseStatus::Rework
+    ) {
+        return None;
+    }
+
+    let route = server_route_scope(server, state).ok().flatten()?;
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .ok()?;
+
+    let mut reopened = latest;
+    reopened.batch = reopened.batch.saturating_add(1);
+    reopened.attempt_generation = reopened.attempt_generation.saturating_add(1);
+    reopened.result = None;
+    reopened.wait_reason = None;
+
+    let current = reopened
+        .slot_name
+        .as_deref()
+        .and_then(|name| {
+            control
+                .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
+                .ok()
+                .flatten()
+        });
+    if let Some(slot) = current.filter(|slot| slot.active_binding().is_some()) {
+        reopened.slot_name = Some(slot.identity_key.name.clone());
+        reopened.binding_generation = slot.generation;
+        reopened.status = TicketPhaseStatus::Claimed;
+    } else {
+        reopened.slot_name = None;
+        reopened.binding_generation = 0;
+        reopened.status = TicketPhaseStatus::WaitingAssignment;
+    }
+
+    Some(Event::TicketPhaseRecorded { phase: reopened })
 }
 
 /// Same continuation planner for callers that hold an uncommitted publish

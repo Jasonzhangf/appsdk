@@ -414,3 +414,80 @@ fn dispatch_gap_reminder_requires_pinned_executor_to_be_idle_and_available() {
 
     drop(fixture);
 }
+
+#[test]
+fn dispatch_gap_reminder_ignores_non_execute_undispatched_phase() {
+    let mut fixture = AppFixture::new();
+    let facts = setup_master_and_peer(&mut fixture);
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
+        &facts.peer,
+        &facts.peer_session,
+        "offline",
+        "idle",
+    );
+    publish_waiting_assignment_ticket(&mut fixture, "non-execute-gap", THREAD_B, &[]);
+    fixture.update_current_state(|state| {
+        let phases = state["ticket_phases"]
+            .as_array_mut()
+            .expect("state carries the ticket phase projection");
+        for phase in phases.iter_mut() {
+            if phase["task_id"].as_str() == Some("non-execute-gap") {
+                phase["phase"] = json!("plan");
+            }
+        }
+    });
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
+        &facts.peer,
+        &facts.peer_session,
+        "online",
+        "idle",
+    );
+
+    thread::sleep(SETTLE);
+    let notices = dispatch_gap_notices(&fixture.current_state(), &facts.master);
+    assert!(
+        notices.is_empty(),
+        "a non-Execute waiting_assignment phase must not open a dispatch gap: {notices:?}"
+    );
+
+    drop(fixture);
+}
+
+#[test]
+fn dispatch_gap_reminder_ignores_cancelled_ticket_with_undispatched_execute_phase() {
+    let mut fixture = AppFixture::new();
+    let facts = setup_master_and_peer(&mut fixture);
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
+        &facts.peer,
+        &facts.peer_session,
+        "offline",
+        "idle",
+    );
+    publish_waiting_assignment_ticket(&mut fixture, "cancelled-gap", THREAD_B, &[]);
+    fixture.update_current_state(|state| {
+        state["tasks"]["cancelled-gap"]["status"] = json!("cancelled");
+    });
+    seed_peer_activity(
+        &mut fixture,
+        &facts.project,
+        &facts.peer,
+        &facts.peer_session,
+        "online",
+        "idle",
+    );
+
+    thread::sleep(SETTLE);
+    let notices = dispatch_gap_notices(&fixture.current_state(), &facts.master);
+    assert!(
+        notices.is_empty(),
+        "a cancelled public ticket must not open a dispatch gap: {notices:?}"
+    );
+
+    drop(fixture);
+}

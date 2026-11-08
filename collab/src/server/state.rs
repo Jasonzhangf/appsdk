@@ -568,8 +568,9 @@ pub fn responsibility_snapshot(state: &State, worker_id: &str) -> Responsibility
 }
 
 /// A task status that no longer carries responsibility for its owner. This
-/// matches [`responsibility_snapshot`], which keeps every other status.
-fn task_status_is_terminal(status: &str) -> bool {
+/// matches [`responsibility_snapshot`], which keeps every other status. It is
+/// the single terminal-status source for the crate.
+pub(crate) fn task_status_is_terminal(status: &str) -> bool {
     matches!(status, "closed" | "cancelled")
 }
 

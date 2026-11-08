@@ -952,20 +952,22 @@ pub(crate) fn dispatch_gap_check_at(server: &Server, now: i64) {
 /// The ticket state machine replaced the legacy `task.status == "pending"`
 /// launch flag, so the reminder reads the real phase instead of that flag.
 fn dispatch_gap_undispatched_task_ids(state: &State, master_id: &str) -> Vec<String> {
-    use crate::server::ticket_state::TicketPhaseStatus;
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
     let mut task_ids: Vec<String> = state
         .ticket_phases
         .iter()
         .filter(|phase| {
-            matches!(
-                phase.status,
-                TicketPhaseStatus::WaitingAssignment | TicketPhaseStatus::Queued
-            )
+            phase.phase == TicketPhaseKind::Execute
+                && matches!(
+                    phase.status,
+                    TicketPhaseStatus::WaitingAssignment | TicketPhaseStatus::Queued
+                )
         })
         .map(|phase| phase.task_id.clone())
         .filter(|task_id| {
             state.tasks.get(task_id).is_some_and(|task| {
-                task.status != "closed" && (task.owner == master_id || task.created_by == master_id)
+                !crate::server::state::task_status_is_terminal(&task.status)
+                    && (task.owner == master_id || task.created_by == master_id)
             })
         })
         .filter(|task_id| {
@@ -3310,6 +3312,77 @@ mod tests {
 
         seed_undispatched_public_ticket(&server, "T1", "master", true);
         super::dispatch_gap_check_at(&server, now + 3);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_requires_execute_kind_undispatched_phase() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        use crate::server::ticket_state::TicketPhaseKind;
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        let now = super::super::state::now_ms();
+
+        // A non-Execute phase waiting for a slot must not count as a dispatch gap.
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
+        {
+            let mut state = server.state.lock().unwrap();
+            let phase = state
+                .ticket_phases
+                .iter_mut()
+                .find(|phase| phase.task_id == "T1")
+                .unwrap();
+            phase.phase = TicketPhaseKind::Plan;
+        }
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            0,
+            "a non-Execute waiting_assignment phase must not open a dispatch gap"
+        );
+
+        // Only an undispatched Execute phase is the actionable gap.
+        {
+            let mut state = server.state.lock().unwrap();
+            let phase = state
+                .ticket_phases
+                .iter_mut()
+                .find(|phase| phase.task_id == "T1")
+                .unwrap();
+            phase.phase = TicketPhaseKind::Execute;
+        }
+        super::dispatch_gap_check_at(&server, now + 1);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_ignores_cancelled_ticket_with_undispatched_phase() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
+        {
+            let mut state = server.state.lock().unwrap();
+            state.tasks.get_mut("T1").unwrap().status = "cancelled".into();
+        }
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            0,
+            "a cancelled ticket carries no dispatchable responsibility"
+        );
+
+        // A non-terminal status reopens the real gap.
+        {
+            let mut state = server.state.lock().unwrap();
+            state.tasks.get_mut("T1").unwrap().status = "working".into();
+        }
+        super::dispatch_gap_check_at(&server, now + 1);
         assert_eq!(dispatch_gap_notice_count(&server), 1);
         std::fs::remove_dir_all(root).unwrap();
     }

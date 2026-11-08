@@ -39,13 +39,14 @@ struct EnvVarGuard {
 fn process_cwd_uses_absolute_pwd_when_getcwd_is_permission_denied() {
     let _env_guard = TEST_ENV_LOCK.lock().unwrap();
     let _pwd_guard = EnvVarGuard::without("PWD");
-    std::env::set_var("PWD", "/Users/fanzhang/Documents/github/appsdk");
+    let dir = test_root("process-cwd-absolute");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("PWD", &dir);
 
     let cwd = process_cwd_from_result(Err(std::io::Error::from_raw_os_error(1))).unwrap();
-    assert_eq!(
-        cwd,
-        PathBuf::from("/Users/fanzhang/Documents/github/appsdk")
-    );
+
+    assert_eq!(cwd, dir.canonicalize().unwrap());
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]

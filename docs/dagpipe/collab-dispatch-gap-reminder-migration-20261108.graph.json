@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-dispatch-gap-reminder-migration",
   "version": "0.1.0",
-  "description": "One dispatch-gap check reads the current master, public board tasks, direct one-layer peers, bindings and typed activity. It selects pending public tasks without an active invitation and direct peers that are online, idle, eligible for at least one task, and not managed children. It forms a sorted master+task+peer condition key, applies a 600000ms durable idempotence window, and delivers one direct-message reminder to the master or explicitly skips. A changed key is a new gap; resolving the gap clears the key. The reminder does not dispatch, change owners or change task status. A future auto-continuation queue must exclude peers with queued work; this graph does not invent that absent state.",
+  "description": "[Historical, retired 2026-11-08; not a registered production graph] One dispatch-gap check reads the current master, public board tasks, direct one-layer peers, bindings and typed activity. It selects pending public tasks without an active invitation and direct peers that are online, idle, eligible for at least one task, and not managed children. It forms a sorted master+task+peer condition key, applies a 600000ms durable idempotence window, and delivers one direct-message reminder to the master or explicitly skips. A changed key is a new gap; resolving the gap clears the key. The reminder does not dispatch, change owners or change task status. A future auto-continuation queue must exclude peers with queued work; this graph does not invent that absent state.",
   "inputs": [
     {
       "id": "dispatch_gap_check_trigger",

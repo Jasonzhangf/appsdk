@@ -51,12 +51,11 @@ and `collab-work-role-registration` under `docs/dagpipe/`.
 | Cross-project ordinary messaging | `cross_project_stale_identity_cli` | Any registered role pair, including peer/CEO, can send directly. Preserve project isolation, exact address resolution, authenticated source and correlated reply routing. |
 | Delivery versus consumption | `appserver_two_tui_integration`; `desktop_bridge_public_contract`; `dsh_master_authority_cli`; notification batch units | Durable enqueue, native acceptance, actual receive receipt and reply are separate facts. Context/inbox/status do not consume. Unknown native outcomes do not trigger blind resubmission or transport switching. |
 | Subscription and patrol persistence | AppServer integration `patrol_runtime`, `patrol_subscriptions`, `project_patrol_subscribe`, `ceo_patrol_runtime`; `goal_periodic_blackbox`; timer units | Preserve the current subscription and finite schedule. Explicit periodic declaration controls repetition; ordinary Context invents no schedule. Cancelled patrols do not remove direct-message reception. |
-| Master dispatch-gap reminder | AppServer integration `dispatch_gap_reminder`; `server::keepalive::tests::dispatch_gap_*` | A pending public task owned or created by the current master and a direct peer that is online, idle and eligible for that task form one gap. A sorted master+task+peer key stays silent for 600000ms after durable delivery; a changed key notifies immediately; resolution clears the key. Unknown, offline, waiting_user, busy and managed-child peers are not capacity. The reminder never dispatches or changes task state. Auto-continuation's queued-peer exclusion belongs to the same eligibility owner when that queue lands on main. |
+| Board dispatch and auto-continuation | AppServer integration `work_roles_cli`; `board_cli` | Board admission, public claims, queued work and dependency-blocked skipping continue through the existing ticket path. No master dispatch-gap reminder is produced or persisted. The retired design graph remains a historical document, not a registered production graph. |
 
 `collab-send-message`, `collab-board-assignment-lifecycle`,
 `collab-dsh-channel`, `collab-dsh-delivery` and the notification-consumption
-graph bind these owners. `collab-dispatch-gap-reminder-migration` binds the
-master dispatch-gap reminder. DSH first registration, delivery acceptance,
+graph bind these owners. DSH first registration, delivery acceptance,
 consumption and reply have distinct endpoints; they are not one graph with a
 recovery back edge.
 

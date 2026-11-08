@@ -331,7 +331,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 45] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 44] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -509,16 +509,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 45] {
             "docs/dagpipe/collab-stale-identity-maintenance.graph.json",
             include_str!("../../docs/dagpipe/collab-stale-identity-maintenance.graph.json"),
         ),
-        (
-            "docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json",
-            include_str!(
-                "../../docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json"
-            ),
-        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 43] {
+fn design_graph_ids() -> [&'static str; 42] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -558,7 +552,6 @@ fn design_graph_ids() -> [&'static str; 43] {
         "appsdk-collab-master-authority",
         "appsdk-collab-peer-lifecycle",
         "appsdk-collab-stale-identity-maintenance",
-        "appsdk-collab-dispatch-gap-reminder-migration",
         "appsdk-user-requirement-change",
         "appsdk-user-requirement-consumption",
         "appsdk-sdk-resource-refresh",
@@ -566,15 +559,8 @@ fn design_graph_ids() -> [&'static str; 43] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 252] {
+fn design_graph_operator_names() -> [&'static str; 245] {
     [
-        "appsdk.collab_master_dispatch.read_scope_facts",
-        "appsdk.collab_master_dispatch.classify_undispatched_work",
-        "appsdk.collab_master_dispatch.evaluate_idle_peers",
-        "appsdk.collab_master_dispatch.apply_window",
-        "appsdk.collab_master_dispatch.deliver_or_skip",
-        "appsdk.collab_master_dispatch.persist_outcome",
-        "appsdk.collab_master_dispatch.emit_result",
         "appsdk.collab_stale_identity.receive_tick",
         "appsdk.collab_stale_identity.scan_candidates",
         "appsdk.collab_stale_identity.classify",

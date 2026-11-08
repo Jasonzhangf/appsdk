@@ -1472,14 +1472,14 @@ pub(super) fn sync_index(root: &Path, global: bool) -> Value {
     let index_path = write_memory_index(root, global, &entries);
     connection
         .execute(
-            "INSERT OR REPLACE INTO index_profile (key,value) VALUES ('schema_version','2')",
-            [],
+            "INSERT OR REPLACE INTO index_profile (key,value) VALUES ('schema_version',?1)",
+            params![MEMORY_SCHEMA_VERSION],
         )
         .unwrap();
     connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('semantic_backend','wemm-adapter')", []).unwrap();
     connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('vector_backend','sqlite-vec-compatible schema; extension optional')", []).unwrap();
     connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('semantic_status','candidate-only; inference-not-configured')", []).unwrap();
-    connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('query_order','anchors,exact,node,category,declared,lesson,fts,semantic,importance,updated_at')", []).unwrap();
+    connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('query_order','anchors,exact,category,declared,lesson,fts,semantic,importance,updated_at')", []).unwrap();
     connection
         .execute(
             "INSERT OR REPLACE INTO index_profile (key,value) VALUES ('source_digest',?1)",

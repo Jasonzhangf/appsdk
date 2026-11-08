@@ -38,6 +38,7 @@
       "id": "按范围选择最短队列并推进执行",
       "operator": "collab.ticket_design.advance_execution",
       "operator_version": "1",
+      "description": "名字代际更新时，已有业务候选状态撤销旧claimed或running阶段并创建queued新batch，与任务会话和阶段变化同批提交；原任务的working状态及资源责任保持。当前授权载体可重新领取并使用当前代际的新attempt；旧代际start/result拒绝并保留原错。处于claimed阶段的任务跨名字改派时保留撤销历史，为新执行者建立新batch和attempt；running阶段的跨名字改派未在本次验证。失败沿既有结果出口传递，不宣称终止旧外部执行。",
       "inputs": ["规划阶段结果"],
       "output": {"id": "执行验证结果", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

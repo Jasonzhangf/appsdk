@@ -151,6 +151,165 @@ pub(crate) fn ticket_phase_group(
     }
 }
 
+/// Revoke execute attempts whose binding generation was replaced by the
+/// current stable-name carrier and queue one fresh attempt batch for each
+/// affected task. The caller must already hold the register gate and the
+/// runtime state lock, and must commit the returned events with the same
+/// business transaction.
+pub(crate) fn ticket_binding_recovery_events(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    slot_name: &str,
+) -> Result<Vec<Event>, Resp> {
+    use crate::server::ticket_state::{
+        stale_binding_execute_phases, TicketPhaseKind, TicketPhaseStatus,
+    };
+
+    let Some(current_slot) = control
+        .current_for_name(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            slot_name,
+        )
+        .map_err(Resp::err)?
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(current) = current_slot.active_binding() else {
+        return Ok(Vec::new());
+    };
+    let current_worker_id = current.binding.agent_id.as_str();
+    let Some(current_session) = current.binding.session_id.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let current_generation = current_slot.generation;
+    let stale = stale_binding_execute_phases(
+        state.ticket_phases.iter(),
+        slot_name,
+        current_generation,
+    );
+
+    let mut events = Vec::new();
+    let mut recovered_tasks = std::collections::BTreeSet::new();
+    for phase in stale {
+        if !recovered_tasks.insert(phase.task_id.clone()) {
+            continue;
+        }
+        let Some(task) = state.tasks.get(&phase.task_id) else {
+            continue;
+        };
+        if matches!(task.status.as_str(), "closed" | "cancelled") {
+            continue;
+        }
+        if task.status != "working" || task.owner != current_worker_id {
+            // The approved recovery model keeps accepted responsibility with
+            // the current stable-name carrier.
+            continue;
+        }
+        let Some(assignment) = state.task_assignment(&phase.task_id) else {
+            continue;
+        };
+        if assignment.name != slot_name || assignment.session_id != current_session.as_str() {
+            continue;
+        }
+        // A newer execute batch already owns this task. This also makes replay
+        // of the same handoff effect idempotent after the first recovery commit.
+        if state.ticket_phases.iter().any(|candidate| {
+            candidate.task_id == phase.task_id
+                && candidate.phase == TicketPhaseKind::Execute
+                && candidate.batch > phase.batch
+        }) {
+            continue;
+        }
+        let Some(next_batch) = phase.batch.checked_add(1) else {
+            return Err(Resp::err_data(
+                "TICKET_BATCH_EXHAUSTED: cannot allocate a recovery batch",
+                json!({"task_id": phase.task_id, "batch": phase.batch}),
+            ));
+        };
+
+        let mut revoked = phase.clone();
+        revoked.status = TicketPhaseStatus::Revoked;
+
+        let mut queued = phase.clone();
+        queued.batch = next_batch;
+        queued.status = TicketPhaseStatus::Queued;
+        queued.binding_generation = 0;
+        queued.result = None;
+        queued.wait_reason = None;
+
+        events.push(Event::TicketPhaseRecorded { phase: revoked });
+        events.push(Event::TicketPhaseRecorded { phase: queued });
+    }
+    Ok(events)
+}
+
+/// Exact eligibility for a recovered re-claim. A task may be re-claimed only
+/// when it was already accepted by the current stable name, its assignment
+/// still points at the current session, an older claimed execute attempt was
+/// revoked, and the newest execute batch is still queued with no overlapping
+/// active attempt. This is shared by the manual claim and continuation paths.
+pub(crate) fn ticket_recovery_claim_phase(
+    state: &State,
+    slot_name: &str,
+    current_session: &str,
+    task_id: &str,
+    current_worker_id: &str,
+    current_generation: u64,
+) -> Option<crate::server::ticket_state::TicketPhaseRecord> {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+
+    if !state
+        .board_details
+        .get(task_id)
+        .is_some_and(|details| details.admitted)
+    {
+        return None;
+    }
+    let task = state.tasks.get(task_id)?;
+    if task.status != "working" || task.owner != current_worker_id {
+        return None;
+    }
+    let assignment = state.task_assignment(task_id)?;
+    if assignment.name != slot_name || assignment.session_id != current_session {
+        return None;
+    }
+    let mut execute: Vec<_> = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.task_id == task_id
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.slot_name.as_deref() == Some(slot_name)
+        })
+        .collect();
+    execute.sort_by_key(|phase| phase.batch);
+    if execute.iter().any(|phase| {
+        matches!(
+            phase.status,
+            TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+        )
+    }) {
+        return None;
+    }
+    let queued = execute.last()?;
+    if queued.status != TicketPhaseStatus::Queued {
+        return None;
+    }
+    let has_old_claim = execute.iter().any(|phase| {
+        phase.batch < queued.batch
+            && phase.binding_generation > 0
+            && phase.binding_generation < current_generation
+            && phase.attempt_generation == queued.attempt_generation
+            && phase.status == TicketPhaseStatus::Revoked
+    });
+    if !has_old_claim {
+        return None;
+    }
+    Some((*queued).clone())
+}
+
 /// Eligible review receivers for one admitted ticket phase. A participating
 /// actor or stable name is excluded by the route itself; the caller only has to
 /// supply every bound, project-authorized peer.
@@ -898,8 +1057,45 @@ pub(crate) fn ticket_continuation_events_with_pending(
     else {
         return Vec::new();
     };
-    if task.status != "pending" || task.owner != task.created_by {
+    let recovered_phase = ticket_recovery_claim_phase(
+        state,
+        &slot_name,
+        session_id.as_str(),
+        &next.task_id,
+        worker_id,
+        binding_generation,
+    )
+    .filter(|phase| {
+        phase.batch == next.batch
+            && phase.phase == TicketPhaseKind::Execute
+            && phase.status == TicketPhaseStatus::Queued
+    });
+    let recovered = recovered_phase.is_some();
+    if !recovered && (task.status != "pending" || task.owner != task.created_by) {
         return Vec::new();
+    }
+    if recovered {
+        // Reuse the same executor and resource admission as the manual claim
+        // path. The planner has no error channel, so an unsafe claim simply
+        // emits no events and leaves the queued responsibility intact.
+        if let Some(executor_name) = state.effective_work_policy(&next.task_id).executor_name {
+            let matches = control
+                .current_for_name(
+                    &route.project_scope_id,
+                    &route.app_scope_id,
+                    &executor_name,
+                )
+                .ok()
+                .flatten()
+                .and_then(|slot| slot.active_binding())
+                .is_some_and(|current| current.binding.agent_id.as_str() == worker_id);
+            if !matches {
+                return Vec::new();
+            }
+        }
+        if board_resume_gate(state, worker_id, &next.task_id).is_err() {
+            return Vec::new();
+        }
     }
     let Some(mut details) = pending_details
         .filter(|_| pending_matches)
@@ -909,16 +1105,21 @@ pub(crate) fn ticket_continuation_events_with_pending(
         return Vec::new();
     };
 
-    let mut claimed = next.clone();
+    let mut claimed = recovered_phase.unwrap_or_else(|| next.clone());
     claimed.status = TicketPhaseStatus::Claimed;
     claimed.slot_name = Some(slot_name.clone());
     claimed.binding_generation = binding_generation;
-    claimed.attempt_generation = claimed.attempt_generation.saturating_add(1);
+    claimed.attempt_generation = match claimed.attempt_generation.checked_add(1) {
+        Some(attempt) => attempt,
+        None => return Vec::new(),
+    };
     claimed.wait_reason = None;
 
-    task.owner = worker_id.to_owned();
-    task.status = "working".into();
-    task.updated_ms = now_ms();
+    if !recovered {
+        task.owner = worker_id.to_owned();
+        task.status = "working".into();
+        task.updated_ms = now_ms();
+    }
     details.revision += 1;
 
     let assignment = name_state::TaskAssignment {
@@ -931,17 +1132,19 @@ pub(crate) fn ticket_continuation_events_with_pending(
         reflow: None,
         updated_ms: now_ms(),
     };
-    let mut events = vec![
-        Event::TicketPhaseRecorded {
-            phase: claimed.clone(),
-        },
-        Event::TaskUpdated { task },
+    let mut events = vec![Event::TicketPhaseRecorded {
+        phase: claimed.clone(),
+    }];
+    if !recovered {
+        events.push(Event::TaskUpdated { task });
+    }
+    events.extend([
         Event::BoardDetailsChanged {
             task_id: next.task_id.clone(),
             details,
         },
         Event::TaskAssignmentUpdated { assignment },
-    ];
+    ]);
     // The execution contract message is saved in the same transaction as the
     // claim, so a delivered wake always has a committed claim behind it.
     let message_id = format!("ticket-claim-{}", rand::random::<u128>());

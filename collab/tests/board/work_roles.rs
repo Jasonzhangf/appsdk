@@ -1,6 +1,72 @@
 use super::*;
 
 const THREAD_C: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fdd";
+const THREAD_HANDOFF: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fde";
+
+fn transport_refreshed(fixture: &AppFixture, session: &str, thread: &str) -> Value {
+    public_snapshot_with_session(fixture, &["context"], session, thread)
+}
+
+fn public_snapshot_with_session(
+    fixture: &AppFixture,
+    args: &[&str],
+    session: &str,
+    thread: &str,
+) -> Value {
+    let output = fixture.command_public_with_session(args, session, thread);
+    assert!(
+        output.status.success(),
+        "public command {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("public response is JSON");
+    value
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .cloned()
+        .unwrap_or(value)
+}
+
+fn raw_public_response(fixture: &AppFixture, request: &Value) -> Value {
+    let mut stream = UnixStream::connect(fixture.host_state.join("server.sock")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let line = serde_json::to_string(request).unwrap();
+    std::io::Write::write_all(&mut stream, line.as_bytes()).unwrap();
+    std::io::Write::write_all(&mut stream, b"\n").unwrap();
+    let mut reader = std::io::BufReader::new(stream);
+    let mut response = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut response).unwrap();
+    serde_json::from_str(&response).unwrap()
+}
+
+fn active_slot(state: &Value, worker_id: &str) -> Value {
+    state["slots"]
+        .as_array()
+        .unwrap_or_else(|| panic!("state has no binding slots: {state}"))
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == worker_id
+        })
+        .unwrap_or_else(|| panic!("worker has no active slot: {state}"))
+        .clone()
+}
+
+fn identity_map(fixture: &AppFixture) -> Value {
+    serde_json::from_slice(&std::fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+        .unwrap()
+}
+
+fn slot_generation(fixture: &AppFixture, worker_id: &str) -> u64 {
+    let state = identity_map(fixture);
+    active_slot(&state, worker_id)["generation"]
+        .as_u64()
+        .expect("active slot has a generation")
+}
 
 fn relationship_fixture() -> AppFixture {
     let fixture = AppFixture::new();
@@ -1760,6 +1826,428 @@ fn ticket_thread(fixture: &AppFixture, worker_id: &str) -> &'static str {
 }
 
 #[test]
+fn claimed_binding_handoff_reclaims_slot_after_transport_refresh() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "claimed binding handoff fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "claimed-handoff", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"].as_str().unwrap();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker = slot_worker_id(&board, slot);
+    let owner_thread = ticket_thread(&fixture, &worker);
+
+    let before = fixture.run_public(&["context"], owner_thread);
+    assert_eq!(before["identity"]["worker_id"], worker);
+    assert_eq!(before["binding"]["native_thread_id"], owner_thread);
+
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "claimed-handoff",
+            "--expected-revision",
+            "1",
+        ],
+        owner_thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+
+    let mut new_thread = ThreadState::new();
+    new_thread.session_id = Some(owner_thread.to_owned());
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .insert(THREAD_HANDOFF.into(), new_thread);
+
+    let old_generation = slot_generation(&fixture, &worker);
+    let refreshed = transport_refreshed(&fixture, owner_thread, THREAD_HANDOFF);
+    let new_generation = slot_generation(&fixture, &worker);
+    let revision = fixture.current_state()["board_details"]["claimed-handoff"]["revision"]
+        .as_u64()
+        .expect("board details revision")
+        .to_string();
+
+    assert_eq!(refreshed["identity"]["worker_id"], worker);
+    assert_eq!(refreshed["binding"]["native_thread_id"], THREAD_HANDOFF);
+    assert_eq!(refreshed["binding"]["session_id"], owner_thread);
+    assert!(
+        new_generation > old_generation,
+        "transport refresh must advance binding generation: old={old_generation} new={new_generation}"
+    );
+
+    let old_start = fixture.command_public_with_session(
+        &[
+            "board",
+            "start",
+            "claimed-handoff",
+            "--expected-revision",
+            revision.as_str(),
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+        THREAD_HANDOFF,
+    );
+    let old_start_error = format!(
+        "{} {}",
+        String::from_utf8_lossy(&old_start.stdout),
+        String::from_utf8_lossy(&old_start.stderr)
+    );
+    assert!(
+        !old_start.status.success() && old_start_error.contains("TICKET_STALE_BINDING"),
+        "old attempt must be rejected as stale binding after refresh: {old_start_error}"
+    );
+
+    let output = fixture.command_public_with_session(
+        &[
+            "board",
+            "claim",
+            "claimed-handoff",
+            "--expected-revision",
+            revision.as_str(),
+        ],
+        owner_thread,
+        THREAD_HANDOFF,
+    );
+    assert!(
+        output.status.success(),
+        "same-name ticket must be re-claimable after transport refresh; old start={old_start_error}; claim stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn running_binding_handoff_reclaims_slot_after_transport_refresh() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "running binding handoff fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "running-handoff", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"].as_str().unwrap();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker = slot_worker_id(&board, slot);
+    let owner_thread = ticket_thread(&fixture, &worker);
+
+    let before = fixture.run_public(&["context"], owner_thread);
+    assert_eq!(before["identity"]["worker_id"], worker);
+    assert_eq!(before["binding"]["native_thread_id"], owner_thread);
+
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "running-handoff",
+            "--expected-revision",
+            "1",
+        ],
+        owner_thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            "running-handoff",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+    assert_eq!(started["task"]["status"], "working");
+
+    let mut new_thread = ThreadState::new();
+    new_thread.session_id = Some(owner_thread.to_owned());
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .insert(THREAD_HANDOFF.into(), new_thread);
+
+    let old_generation = slot_generation(&fixture, &worker);
+    let refreshed = transport_refreshed(&fixture, owner_thread, THREAD_HANDOFF);
+    let new_generation = slot_generation(&fixture, &worker);
+    let revision = fixture.current_state()["board_details"]["running-handoff"]["revision"]
+        .as_u64()
+        .expect("board details revision")
+        .to_string();
+
+    assert_eq!(refreshed["identity"]["worker_id"], worker);
+    assert_eq!(refreshed["binding"]["native_thread_id"], THREAD_HANDOFF);
+    assert_eq!(refreshed["binding"]["session_id"], owner_thread);
+    assert!(
+        new_generation > old_generation,
+        "transport refresh must advance binding generation: old={old_generation} new={new_generation}"
+    );
+
+    let before_rejection = fixture.current_state();
+    let old_result = fixture.command_public_with_session(
+        &[
+            "task",
+            "deliver",
+            "running-handoff",
+            "--evidence",
+            "old result after refresh",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        owner_thread,
+        THREAD_HANDOFF,
+    );
+    let old_result_error = format!(
+        "{} {}",
+        String::from_utf8_lossy(&old_result.stdout),
+        String::from_utf8_lossy(&old_result.stderr)
+    );
+    assert!(
+        !old_result.status.success() && old_result_error.contains("TICKET_STALE_BINDING"),
+        "old attempt must be rejected as stale binding after refresh: {old_result_error}"
+    );
+    let after_rejection = fixture.current_state();
+    assert_eq!(
+        after_rejection["tasks"]["running-handoff"], before_rejection["tasks"]["running-handoff"],
+        "stale result rejection must not change the business task"
+    );
+    assert_eq!(
+        after_rejection["board_details"]["running-handoff"],
+        before_rejection["board_details"]["running-handoff"],
+        "stale result rejection must not change board evidence"
+    );
+    assert_eq!(
+        after_rejection["ticket_phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|phase| phase["task_id"] == "running-handoff")
+            .collect::<Vec<_>>(),
+        before_rejection["ticket_phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|phase| phase["task_id"] == "running-handoff")
+            .collect::<Vec<_>>(),
+        "stale result rejection must not change ticket phases"
+    );
+    assert!(
+        after_rejection["task_lifecycle"]["running-handoff"].is_null(),
+        "stale result rejection must not create lifecycle evidence: {after_rejection}"
+    );
+
+    let output = fixture.command_public_with_session(
+        &[
+            "board",
+            "claim",
+            "running-handoff",
+            "--expected-revision",
+            revision.as_str(),
+        ],
+        owner_thread,
+        THREAD_HANDOFF,
+    );
+    assert!(
+        output.status.success(),
+        "same-name running ticket must be re-claimable after transport refresh; old result={old_result_error}; claim stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn pending_deliver_without_or_wrong_attempt_stays_rejected() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "pending stale gate fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "pending-stale-gate", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker = slot_worker_id(&board, &slot);
+    let owner_thread = ticket_thread(&fixture, &worker);
+
+    let without_attempt = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "pending-stale-gate",
+            "--evidence",
+            "missing attempt",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    assert!(
+        without_attempt.contains("BOARD_ACCEPT_REQUIRED"),
+        "{without_attempt}"
+    );
+
+    let wrong_attempt = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "pending-stale-gate",
+            "--evidence",
+            "wrong attempt",
+            "--attempt",
+            "9",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    assert!(
+        wrong_attempt.contains("BOARD_ACCEPT_REQUIRED")
+            && !wrong_attempt.contains("TICKET_STALE_BINDING"),
+        "{wrong_attempt}"
+    );
+
+    let after_controls = fixture.current_state();
+    let phase = after_controls["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "pending-stale-gate")
+        .unwrap();
+    assert_eq!(phase["status"], "queued");
+}
+
+#[test]
+fn stale_deliver_bad_token_does_not_leak_ticket() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "bad token stale gate fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "bad-token-stale", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker = slot_worker_id(&board, &slot);
+    let owner_thread = ticket_thread(&fixture, &worker);
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "bad-token-stale",
+            "--expected-revision",
+            "1",
+        ],
+        owner_thread,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "bad-token-stale",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+
+    let mut new_thread = ThreadState::new();
+    new_thread.session_id = Some(owner_thread.to_owned());
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .insert(THREAD_HANDOFF.into(), new_thread);
+    let refreshed = transport_refreshed(&fixture, owner_thread, THREAD_HANDOFF);
+    assert_eq!(refreshed["binding"]["native_thread_id"], THREAD_HANDOFF);
+
+    let scope = std::fs::canonicalize(&fixture.project).unwrap();
+    let scope_text = scope.to_string_lossy();
+    let binding = &refreshed["binding"];
+    let request = json!({
+        "op": "TaskDeliver",
+        "worker_id": worker,
+        "token": "not-the-recorded-token",
+        "task_id": "bad-token-stale",
+        "evidence": "bad token probe",
+        "attempt": 1,
+        "worktree": null,
+        "no_candidate": true,
+        "project_context": {
+            "app_scope_id": binding["app_scope_id"],
+            "project_scope": scope_text,
+            "canonical_root": scope_text,
+            "runtime_context": {
+                "agent_id": binding["agent_id"],
+                "runtime_id": binding["runtime_id"],
+                "appserver_id": binding["app_scope_id"],
+                "binding_id": binding["binding_id"],
+                "session_id": binding["session_id"],
+                "native_thread_id": binding["native_thread_id"],
+            }
+        }
+    });
+    let response = raw_public_response(&fixture, &request);
+    assert_eq!(response["ok"], json!(false), "{response}");
+    let error = response["error"].as_str().unwrap();
+    assert!(error.contains("token mismatch"), "{response}");
+    assert!(
+        !error.contains("TICKET_STALE_BINDING")
+            && !error.contains("claimed_generation")
+            && !error.contains("current_generation")
+            && !error.contains("bad-token-stale"),
+        "{response}"
+    );
+}
+
+#[test]
 fn idle_continuation_skips_dependency_blocked_priority_and_releases_on_completion() {
     let mut fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
@@ -2125,4 +2613,1279 @@ fn claim_from_a_non_queued_slot_is_rejected_by_the_slot_gate() {
     assert_eq!(phase["slot_name"], slot.as_str());
     assert_eq!(phase["attempt_generation"], 0);
     assert_eq!(state["tasks"]["ticket-slot-gate"]["status"], "pending");
+}
+
+fn resource_output_json(output: &Output) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let json = serde_json::from_str::<Value>(&stdout).unwrap_or(Value::Null);
+    json!({
+        "exit_code": output.status.code(),
+        "stdout": stdout,
+        "stderr": stderr,
+        "json": json,
+    })
+}
+
+fn resource_context_snapshot(output: &Output) -> Value {
+    let receipt = resource_output_json(output);
+    let snapshot = &receipt["json"]["result"]["snapshot"];
+    json!({
+        "exit_code": receipt["exit_code"],
+        "name": snapshot["name"],
+        "worker_id": snapshot["identity"]["worker_id"],
+        "session_id": snapshot["binding"]["session_id"],
+        "transport": snapshot["identity"]["transport"],
+    })
+}
+
+fn resource_slot_snapshot(fixture: &AppFixture, name: &str) -> Value {
+    let map = identity_map(fixture);
+    map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == name)
+        .map(|slot| {
+            json!({
+                "generation": slot["generation"],
+                "identity_status": slot["identity_status"],
+                "worker_id": slot["current"]["binding"]["agent_id"],
+                "session_id": slot["current"]["binding"]["session_id"],
+                "thread_id": slot["current"]["transport"]["thread_id"],
+            })
+        })
+        .unwrap_or_else(|| panic!("missing name slot {name}: {map}"))
+}
+
+fn resource_task_phases(state: &Value, task_id: &str) -> Value {
+    state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == task_id)
+        .cloned()
+        .collect()
+}
+
+fn resource_task_snapshot(state: &Value, task_id: &str) -> Value {
+    json!({
+        "task": state["tasks"][task_id],
+        "worktree_bindings": state["worktree_bindings"]
+            .as_object()
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .filter(|(_, value)| value["task_id"] == task_id)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<serde_json::Map<String, Value>>()
+            })
+            .unwrap_or_default(),
+        "ticket_phases": resource_task_phases(state, task_id),
+        "pending_merges": state["pending_merges"][task_id],
+        "task_lifecycle": state["task_lifecycle"][task_id],
+    })
+}
+
+fn resource_find_revision(value: &Value, task_id: &str) -> Option<u64> {
+    match value {
+        Value::Object(map) => {
+            if map.get("id").and_then(Value::as_str) == Some(task_id) {
+                if let Some(revision) = map.get("revision").and_then(Value::as_u64) {
+                    return Some(revision);
+                }
+            }
+            map.values()
+                .find_map(|child| resource_find_revision(child, task_id))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|child| resource_find_revision(child, task_id)),
+        _ => None,
+    }
+}
+
+fn write_json_evidence_log(report: &Value, env_var: &str) {
+    let Some(path) = std::env::var_os(env_var).map(PathBuf::from) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(report).unwrap()).unwrap();
+    eprintln!("{env_var}={}", path.display());
+}
+
+struct ResourceBoundScenario {
+    worktree_text: String,
+    bob_worker: String,
+    new_thread: String,
+    before_slot: Value,
+    after_slot: Value,
+    rebound_snapshot: Value,
+    publish_receipt: Value,
+    claim_receipt: Value,
+    relocate_receipt: Value,
+}
+
+fn resource_prepare_bound_task(
+    fixture: &mut AppFixture,
+    task_id: &str,
+    label: &str,
+) -> ResourceBoundScenario {
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    let approval = format!("resource red {label}");
+    fixture.run_public(
+        &["master", "promote", "--approval", approval.as_str()],
+        THREAD_A,
+    );
+    assert_eq!(alice["name"], "Alice");
+    assert_eq!(bob["name"], "Bob");
+    let bob_worker = bob["identity"]["worker_id"]
+        .as_str()
+        .expect("bob context has worker id")
+        .to_owned();
+
+    let base = worktree_fixture_base(fixture, "initial fixture");
+    let worktree_text = add_git_worktree(fixture, &base, "resource-wt", "codex/resource");
+
+    let title = format!("resource red {label}");
+    let description = format!("resource red {label}");
+    let delivery_condition = format!("{label} evidence");
+    let test_condition = format!("{label} receipt");
+    let published = fixture.command_public(
+        &[
+            "board",
+            "publish",
+            task_id,
+            "--title",
+            title.as_str(),
+            "--description",
+            description.as_str(),
+            "--delivery-condition",
+            delivery_condition.as_str(),
+            "--test-condition",
+            test_condition.as_str(),
+            "--executor",
+            "Bob",
+        ],
+        THREAD_A,
+    );
+    let claimed = fixture.command_public(
+        &["board", "claim", task_id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    let relocated = fixture.command_public(
+        &[
+            "task",
+            "relocate",
+            task_id,
+            "--worktree",
+            &worktree_text,
+            "--branch",
+            "codex/resource",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        published.status.success(),
+        "publish must succeed: {}",
+        resource_output_json(&published)
+    );
+    assert!(
+        claimed.status.success(),
+        "claim must succeed: {}",
+        resource_output_json(&claimed)
+    );
+    assert!(
+        relocated.status.success(),
+        "relocate must succeed: {}",
+        resource_output_json(&relocated)
+    );
+    let mut publish_receipt = resource_output_json(&published);
+    publish_receipt["command"] = json!(format!(
+        "collab board publish {task_id} --title {title} --executor Bob"
+    ));
+    let mut claim_receipt = resource_output_json(&claimed);
+    claim_receipt["command"] = json!(format!(
+        "collab board claim {task_id} --expected-revision 1"
+    ));
+    let mut relocate_receipt = resource_output_json(&relocated);
+    relocate_receipt["command"] = json!(format!(
+        "collab task relocate {task_id} --worktree {worktree_text} --branch codex/resource"
+    ));
+
+    let before_slot = resource_slot_snapshot(fixture, "Bob");
+    let new_thread = format!("{}-resource-new-native-thread", THREAD_B);
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .entry(new_thread.clone())
+        .or_insert_with(ThreadState::new)
+        .session_id = Some(THREAD_B.to_owned());
+    let rebound = fixture.command_public_with_session(&["context"], THREAD_B, &new_thread);
+    assert!(
+        rebound.status.success(),
+        "rebind context: {}",
+        resource_output_json(&rebound)
+    );
+    let rebound_snapshot = resource_context_snapshot(&rebound);
+    assert_eq!(
+        rebound_snapshot["worker_id"],
+        json!(bob_worker),
+        "same-session thread refresh must preserve the logical worker"
+    );
+    assert_eq!(
+        rebound_snapshot["session_id"],
+        json!(THREAD_B),
+        "same-session thread refresh must preserve the session id"
+    );
+    let after_slot = resource_slot_snapshot(fixture, "Bob");
+    assert!(
+        after_slot["generation"].as_u64().unwrap() > before_slot["generation"].as_u64().unwrap(),
+        "same-session thread refresh must advance binding generation: before={before_slot} after={after_slot}"
+    );
+
+    ResourceBoundScenario {
+        worktree_text,
+        bob_worker,
+        new_thread,
+        before_slot,
+        after_slot,
+        rebound_snapshot,
+        publish_receipt,
+        claim_receipt,
+        relocate_receipt,
+    }
+}
+
+fn worktree_fixture_base(fixture: &mut AppFixture, commit_message: &str) -> PathBuf {
+    let config_path = fixture.root.join("home/.appsdk/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let base = fixture.root.join("wtbase");
+    std::fs::create_dir_all(&base).unwrap();
+    let base = base.canonicalize().unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            "[worktree]\nbase = {:?}\nlayout = \"{{project-key}}/{{task-slug}}\"\n",
+            base.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    fixture.restart_daemon();
+
+    let project = fixture.project.canonicalize().unwrap();
+    let git_init = Command::new("git")
+        .current_dir(&project)
+        .args(["init", "-q", "-b", "main"])
+        .output()
+        .expect("run git init");
+    assert!(
+        git_init.status.success(),
+        "git init failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&git_init.stdout),
+        String::from_utf8_lossy(&git_init.stderr)
+    );
+    let git_commit = Command::new("git")
+        .current_dir(&project)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            commit_message,
+        ])
+        .output()
+        .expect("run git commit");
+    assert!(
+        git_commit.status.success(),
+        "git commit failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&git_commit.stdout),
+        String::from_utf8_lossy(&git_commit.stderr)
+    );
+    base
+}
+
+fn add_git_worktree(fixture: &AppFixture, base: &Path, slug: &str, branch: &str) -> String {
+    let project = fixture.project.canonicalize().unwrap();
+    let worktree_path = base.join("project").join(slug);
+    std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+    let git_worktree = Command::new("git")
+        .current_dir(&project)
+        .args(["worktree", "add", "-q", "-b", branch])
+        .arg(&worktree_path)
+        .arg("main")
+        .output()
+        .expect("run git worktree add");
+    assert!(
+        git_worktree.status.success(),
+        "git worktree add failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&git_worktree.stdout),
+        String::from_utf8_lossy(&git_worktree.stderr)
+    );
+    worktree_path
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn resource_reclaim_after_rebind_keeps_worktree() {
+    let mut fixture = AppFixture::new();
+    let task_id = "resource-persistent-a-reclaim-task";
+    let scenario = resource_prepare_bound_task(&mut fixture, task_id, "red-a");
+    let state_after_rebind = fixture.current_state();
+    let resources_after_rebind = resource_task_snapshot(&state_after_rebind, task_id);
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let revision = resource_find_revision(&board, task_id)
+        .unwrap_or_else(|| panic!("board view has no revision for {task_id}: {board}"));
+    let reclaim = fixture.command_public_with_session(
+        &[
+            "board",
+            "claim",
+            task_id,
+            "--expected-revision",
+            &revision.to_string(),
+        ],
+        THREAD_B,
+        &scenario.new_thread,
+    );
+    let mut reclaim_receipt = resource_output_json(&reclaim);
+    reclaim_receipt["command"] = json!(format!(
+        "collab board claim {task_id} --expected-revision {revision} (current carrier after same-session new-thread rebind)"
+    ));
+    let resources_after_claim = resource_task_snapshot(&fixture.current_state(), task_id);
+    let report = json!({
+        "label": "RED A",
+        "task_id": task_id,
+        "worktree_path": scenario.worktree_text,
+        "bob_worker": scenario.bob_worker,
+        "public_sequence": [scenario.publish_receipt, scenario.claim_receipt, scenario.relocate_receipt],
+        "rebind": {
+            "command": "collab context (same worker, same session, new native thread)",
+            "snapshot": scenario.rebound_snapshot,
+            "before_slot": scenario.before_slot,
+            "after_slot": scenario.after_slot,
+        },
+        "resources_after_rebind": resources_after_rebind,
+        "board_revision_for_reclaim": revision,
+        "reclaim_command": reclaim_receipt["command"],
+        "reclaim": reclaim_receipt,
+        "reclaim_succeeded": reclaim.status.success(),
+        "resources_after_reclaim": resources_after_claim,
+    });
+    write_json_evidence_log(&report, "RESOURCE_PERSISTENT_A_LOG");
+
+    if !reclaim.status.success() {
+        let text = format!(
+            "{}{}",
+            reclaim_receipt["stderr"].as_str().unwrap_or_default(),
+            reclaim_receipt["stdout"].as_str().unwrap_or_default()
+        );
+        assert!(
+            text.contains("BOARD_RESOURCE_OWNER_CONFLICT"),
+            "reclaim failed without the resource gate: {reclaim_receipt}"
+        );
+    }
+    assert!(
+        reclaim.status.success(),
+        "RED A target: claim after same-name rebind must succeed and keep the original worktree; actual: {}",
+        reclaim_receipt
+    );
+}
+
+#[test]
+fn resource_other_task_cannot_relocate_to_kept_worktree() {
+    let mut fixture = AppFixture::new();
+    let first_id = "resource-persistent-b-reclaim-task";
+    let second_id = "resource-persistent-b-second-task";
+    let scenario = resource_prepare_bound_task(&mut fixture, first_id, "red-b");
+    let first_after_rebind = resource_task_snapshot(&fixture.current_state(), first_id);
+    assert_eq!(
+        first_after_rebind["worktree_bindings"]
+            .as_object()
+            .map(|bindings| bindings.len())
+            .unwrap_or(0),
+        1,
+        "original worktree binding must be retained by the original task"
+    );
+
+    let published = fixture.command_public(
+        &[
+            "board",
+            "publish",
+            second_id,
+            "--title",
+            "resource second",
+            "--description",
+            "resource second",
+            "--delivery-condition",
+            "second evidence",
+            "--test-condition",
+            "second test",
+            "--executor",
+            "Bob",
+        ],
+        THREAD_A,
+    );
+    let second_claim = fixture.command_public_with_session(
+        &["board", "claim", second_id, "--expected-revision", "1"],
+        THREAD_B,
+        &scenario.new_thread,
+    );
+    assert!(
+        published.status.success(),
+        "second publish must succeed: {}",
+        resource_output_json(&published)
+    );
+    assert!(
+        second_claim.status.success(),
+        "second claim must succeed to reach the relocate contract: {}",
+        resource_output_json(&second_claim)
+    );
+    let second_relocate = fixture.command_public_with_session(
+        &[
+            "task",
+            "relocate",
+            second_id,
+            "--worktree",
+            &scenario.worktree_text,
+            "--branch",
+            "codex/resource",
+        ],
+        THREAD_B,
+        &scenario.new_thread,
+    );
+    let mut relocate_receipt = resource_output_json(&second_relocate);
+    relocate_receipt["command"] = json!(format!(
+        "collab task relocate {second_id} --worktree {} --branch codex/resource",
+        scenario.worktree_text
+    ));
+    let mut publish_receipt = resource_output_json(&published);
+    publish_receipt["command"] = json!(format!("collab board publish {second_id} --executor Bob"));
+    let mut claim_receipt = resource_output_json(&second_claim);
+    claim_receipt["command"] = json!(format!(
+        "collab board claim {second_id} --expected-revision 1"
+    ));
+    let state_after = fixture.current_state();
+    let first_after = resource_task_snapshot(&state_after, first_id);
+    let second_after = resource_task_snapshot(&state_after, second_id);
+    let binding_count = state_after["worktree_bindings"]
+        .as_object()
+        .map(|bindings| {
+            bindings
+                .values()
+                .filter(|binding| binding["worktree_root"] == scenario.worktree_text)
+                .count()
+        })
+        .unwrap_or(0);
+    let report = json!({
+        "label": "RED B",
+        "first_task_id": first_id,
+        "second_task_id": second_id,
+        "worktree_path": scenario.worktree_text,
+        "bob_worker": scenario.bob_worker,
+        "original_task_public_sequence": [scenario.publish_receipt, scenario.claim_receipt, scenario.relocate_receipt],
+        "rebind": {
+            "command": "collab context (same worker, same session, new native thread)",
+            "snapshot": scenario.rebound_snapshot,
+            "before_slot": scenario.before_slot,
+            "after_slot": scenario.after_slot,
+        },
+        "first_after_rebind": first_after_rebind,
+        "second_publish": publish_receipt,
+        "second_claim": claim_receipt,
+        "second_relocate": relocate_receipt,
+        "second_relocate_succeeded": second_relocate.status.success(),
+        "first_after_relocate_attempt": first_after,
+        "second_after_relocate_attempt": second_after,
+        "same_path_binding_count": binding_count,
+    });
+    write_json_evidence_log(&report, "RESOURCE_PERSISTENT_B_LOG");
+
+    if !second_relocate.status.success() {
+        let text = format!(
+            "{}{}",
+            relocate_receipt["stderr"].as_str().unwrap_or_default(),
+            relocate_receipt["stdout"].as_str().unwrap_or_default()
+        );
+        assert!(
+            text.contains("TASK_RESOURCE_CONFLICT")
+                || text.contains("worktree is already declared by task")
+                || text.contains("BOARD_RESOURCE_OWNER_CONFLICT"),
+            "relocate was rejected without resource conflict: {relocate_receipt}"
+        );
+    }
+    assert!(
+        !second_relocate.status.success(),
+        "RED B target: another task must not bind the kept worktree; relocate succeeded and added binding {}",
+        relocate_receipt
+    );
+}
+
+#[test]
+fn claimed_executor_reassignment_lets_new_slot_start_and_deliver() {
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    let carol = fixture.run_public(&["context"], THREAD_C);
+    assert_eq!(alice["name"], "Alice");
+    assert_eq!(bob["name"], "Bob");
+    assert_eq!(carol["name"], "Carol");
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "executor reassignment fixture",
+        ],
+        THREAD_A,
+    );
+    let carol_worker = carol["identity"]["worker_id"]
+        .as_str()
+        .expect("Carol worker id")
+        .to_owned();
+
+    let id = "executor-reassignment";
+    publish(&fixture, id, &["--executor", "Bob"]);
+    let claimed = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+
+    let before = fixture.current_state();
+    let old_phase = before["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .find(|phase| {
+            phase["task_id"] == id
+                && phase["phase"] == "execute"
+                && phase["slot_name"] == "Bob"
+                && phase["status"] == "claimed"
+        })
+        .cloned()
+        .expect("Bob must hold the original claimed execute phase");
+    let old_attempt = old_phase["attempt_generation"]
+        .as_u64()
+        .expect("original attempt is visible");
+    let bob_generation = slot_generation(
+        &fixture,
+        bob["identity"]["worker_id"]
+            .as_str()
+            .expect("Bob worker id"),
+    );
+
+    fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            id,
+            "--executor",
+            "Carol",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_A,
+    );
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            "Carol",
+            "--expected-revision",
+            "3",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["task"]["invited_peer"], carol_worker);
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            "4",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(accepted["task"]["owner"], carol_worker);
+
+    let duplicate_accept = fixture.command_public(
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            "4",
+        ],
+        THREAD_C,
+    );
+    assert!(
+        !duplicate_accept.status.success(),
+        "the consumed invitation must not be accepted twice"
+    );
+    let phases_after_accept: Vec<Value> = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| phase["task_id"] == id && phase["phase"] == "execute")
+        .cloned()
+        .collect();
+    let accepted_revision = accepted["task"]["revision"]
+        .as_u64()
+        .expect("accepted task revision")
+        .to_string();
+    let reinvited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            "Carol",
+            "--expected-revision",
+            &accepted_revision,
+        ],
+        THREAD_A,
+    );
+    let reinvited_revision = reinvited["task"]["revision"]
+        .as_u64()
+        .expect("reinvitation revision")
+        .to_string();
+    let reaccepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            &reinvited_revision,
+        ],
+        THREAD_C,
+    );
+    let phases_after_reaccept: Vec<Value> = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| phase["task_id"] == id && phase["phase"] == "execute")
+        .cloned()
+        .collect();
+    assert_eq!(
+        phases_after_reaccept, phases_after_accept,
+        "same-slot reacceptance must keep the active attempt and create no duplicate batch"
+    );
+
+    let after_accept = fixture.current_state();
+    let new_phase = after_accept["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| {
+            phase["task_id"] == id && phase["phase"] == "execute" && phase["status"] != "revoked"
+        })
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap_or_default())
+        .cloned()
+        .expect("accept must leave a current execute phase");
+    let new_attempt = new_phase["attempt_generation"]
+        .as_u64()
+        .expect("the current execute attempt is visible");
+    let carol_generation = slot_generation(&fixture, &carol_worker);
+
+    let revision = reaccepted["task"]["revision"]
+        .as_u64()
+        .expect("reaccepted task revision")
+        .to_string();
+
+    // This is the target RED point: Carol must start with the attempt exposed by
+    // the current visible ticket projection, not a hard-coded old attempt.
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &new_attempt.to_string(),
+        ],
+        THREAD_C,
+    );
+    assert_eq!(started["task"]["status"], "working");
+    assert!(
+        new_attempt > old_attempt,
+        "the reassignment must allocate a fresh attempt: old={old_attempt} new={new_attempt}"
+    );
+    assert_eq!(new_phase["slot_name"], "Carol");
+    assert_eq!(
+        new_phase["binding_generation"],
+        json!(carol_generation),
+        "the new phase must use Carol's current binding generation"
+    );
+    let running = started["ticket"]["phases"]
+        .as_array()
+        .expect("start returns ticket phases")
+        .iter()
+        .find(|phase| phase["status"] == "running")
+        .cloned()
+        .expect("Carol's phase must be running");
+    assert_eq!(running["slot"], "Carol");
+    assert_eq!(running["attempt_generation"], json!(new_attempt));
+
+    // The displaced executor loses both execution operations before Carol
+    // delivers, so the rejection is not hidden by a completed task.
+    let old_start = fixture.command_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &old_attempt.to_string(),
+        ],
+        THREAD_B,
+    );
+    assert!(
+        !old_start.status.success(),
+        "Bob's old claim must not start after reassignment: {} {}",
+        String::from_utf8_lossy(&old_start.stdout),
+        String::from_utf8_lossy(&old_start.stderr)
+    );
+    let old_deliver = fixture.command_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--evidence",
+            "old executor result",
+            "--attempt",
+            &old_attempt.to_string(),
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        !old_deliver.status.success(),
+        "Bob's old claim must not deliver after reassignment: {} {}",
+        String::from_utf8_lossy(&old_deliver.stdout),
+        String::from_utf8_lossy(&old_deliver.stderr)
+    );
+
+    let active_after_rejections = fixture.current_state()["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| {
+            phase["task_id"] == id
+                && phase["phase"] == "execute"
+                && matches!(phase["status"].as_str(), Some("claimed" | "running"))
+        })
+        .count();
+    assert_eq!(
+        active_after_rejections, 1,
+        "only Carol's current attempt may be active"
+    );
+
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--evidence",
+            "Carol completed the reassigned ticket",
+            "--attempt",
+            &new_attempt.to_string(),
+            "--no-candidate",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(delivered["status"], "delivered");
+
+    let completed_state = fixture.current_state();
+    let revoked = completed_state["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .find(|phase| {
+            phase["task_id"] == id
+                && phase["phase"] == "execute"
+                && phase["status"] == "revoked"
+                && phase["slot_name"] == "Bob"
+        })
+        .cloned()
+        .expect("Bob's original phase must remain as history");
+    assert_eq!(revoked["attempt_generation"], json!(old_attempt));
+    assert_eq!(revoked["binding_generation"], json!(bob_generation));
+    assert!(revoked["result"].is_null());
+
+    let revision = completed_state["board_details"][id]["revision"]
+        .as_u64()
+        .expect("completed board revision")
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            "Carol",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    let completed_revision = fixture.current_state()["board_details"][id]["revision"]
+        .as_u64()
+        .expect("invitation revision")
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            &completed_revision,
+        ],
+        THREAD_C,
+    );
+    let repeated = fixture.command_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            &completed_revision,
+            "--attempt",
+            &new_attempt.to_string(),
+        ],
+        THREAD_C,
+    );
+    assert!(
+        !repeated.status.success(),
+        "a completed ticket must not be reopened by another invitation: {} {}",
+        String::from_utf8_lossy(&repeated.stdout),
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+}
+
+fn busy_receipt(name: &str, output: &Output) -> Value {
+    let mut receipt = resource_output_json(output);
+    receipt["name"] = json!(name);
+    receipt
+}
+
+fn busy_active_carol_phases(state: &Value) -> Vec<Value> {
+    state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| {
+            phase["slot_name"] == "Carol"
+                && matches!(phase["status"].as_str(), Some("claimed" | "running"))
+        })
+        .cloned()
+        .collect()
+}
+
+/// A-013 busy-slot observation: Bob's claimed ticket is reassigned to Carol
+/// while Carol already owns a Running execute attempt on a different ticket.
+/// This records, rather than invents, what the current accept gate does with a
+/// second active attempt on the target slot.
+#[test]
+fn reassignment_accept_while_executor_slot_already_running_leaves_two_active_execute_attempts() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    let carol = fixture.run_public(&["context"], THREAD_C);
+    assert_eq!(alice["name"], "Alice");
+    assert_eq!(bob["name"], "Bob");
+    assert_eq!(carol["name"], "Carol");
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "busy-slot reassignment observation",
+        ],
+        THREAD_A,
+    );
+    let carol_worker = carol["identity"]["worker_id"]
+        .as_str()
+        .expect("Carol worker id")
+        .to_owned();
+    let bob_worker = bob["identity"]["worker_id"]
+        .as_str()
+        .expect("Bob worker id")
+        .to_owned();
+
+    // Two real worktrees let the observation read the resource-owner side
+    // effects of reassigning a bound, claimed ticket to a busy slot.
+    let base = worktree_fixture_base(&mut fixture, "busy observation fixture");
+    let carol_worktree = add_git_worktree(&fixture, &base, "busy-carol", "codex/busy-carol");
+    let bob_worktree = add_git_worktree(&fixture, &base, "busy-bob", "codex/busy-bob");
+
+    let first_id = "busy-carol-current";
+    let second_id = "busy-bob-reassigned";
+    let mut sequence = Vec::new();
+
+    let first_publish = fixture.command_public(
+        &[
+            "board",
+            "publish",
+            first_id,
+            "--title",
+            "carol current ticket",
+            "--description",
+            "carol current ticket",
+            "--delivery-condition",
+            "carol current evidence",
+            "--test-condition",
+            "carol current receipt",
+            "--executor",
+            "Carol",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        first_publish.status.success(),
+        "first publish must succeed: {}",
+        busy_receipt("publish-first", &first_publish)
+    );
+    sequence.push(busy_receipt("publish-first", &first_publish));
+
+    let first_claim = fixture.command_public(
+        &["board", "claim", first_id, "--expected-revision", "1"],
+        THREAD_C,
+    );
+    assert!(
+        first_claim.status.success(),
+        "first claim must succeed: {}",
+        busy_receipt("claim-first", &first_claim)
+    );
+    sequence.push(busy_receipt("claim-first", &first_claim));
+
+    let first_relocate = fixture.command_public(
+        &[
+            "task",
+            "relocate",
+            first_id,
+            "--worktree",
+            &carol_worktree,
+            "--branch",
+            "codex/busy-carol",
+        ],
+        THREAD_C,
+    );
+    assert!(
+        first_relocate.status.success(),
+        "first relocate must succeed: {}",
+        busy_receipt("relocate-first", &first_relocate)
+    );
+    sequence.push(busy_receipt("relocate-first", &first_relocate));
+
+    let first_revision = fixture.current_state()["board_details"][first_id]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    let first_start = fixture.command_public(
+        &[
+            "board",
+            "start",
+            first_id,
+            "--expected-revision",
+            &first_revision,
+            "--attempt",
+            "1",
+        ],
+        THREAD_C,
+    );
+    assert!(
+        first_start.status.success(),
+        "first start must succeed: {}",
+        busy_receipt("start-first", &first_start)
+    );
+    sequence.push(busy_receipt("start-first", &first_start));
+
+    let second_publish = fixture.command_public(
+        &[
+            "board",
+            "publish",
+            second_id,
+            "--title",
+            "bob reassigned ticket",
+            "--description",
+            "bob reassigned ticket",
+            "--delivery-condition",
+            "bob reassigned evidence",
+            "--test-condition",
+            "bob reassigned receipt",
+            "--executor",
+            "Bob",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        second_publish.status.success(),
+        "second publish must succeed: {}",
+        busy_receipt("publish-second", &second_publish)
+    );
+    sequence.push(busy_receipt("publish-second", &second_publish));
+
+    let second_claim = fixture.command_public(
+        &["board", "claim", second_id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    assert!(
+        second_claim.status.success(),
+        "second claim must succeed: {}",
+        busy_receipt("claim-second", &second_claim)
+    );
+    sequence.push(busy_receipt("claim-second", &second_claim));
+
+    let second_relocate = fixture.command_public(
+        &[
+            "task",
+            "relocate",
+            second_id,
+            "--worktree",
+            &bob_worktree,
+            "--branch",
+            "codex/busy-bob",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        second_relocate.status.success(),
+        "second relocate must succeed: {}",
+        busy_receipt("relocate-second", &second_relocate)
+    );
+    sequence.push(busy_receipt("relocate-second", &second_relocate));
+
+    let before_accept = fixture.current_state();
+    let bob_old_phase = before_accept["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .find(|phase| {
+            phase["task_id"] == second_id
+                && phase["phase"] == "execute"
+                && phase["status"] == "claimed"
+                && phase["slot_name"] == "Bob"
+        })
+        .cloned()
+        .expect("Bob must hold the original claimed execute phase");
+    let bob_old_attempt = bob_old_phase["attempt_generation"]
+        .as_u64()
+        .expect("original attempt is visible");
+    let bob_generation = slot_generation(&fixture, &bob_worker);
+    let carol_generation = slot_generation(&fixture, &carol_worker);
+    let policy_revision = before_accept["board_details"][second_id]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    let policy = fixture.command_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            second_id,
+            "--executor",
+            "Carol",
+            "--expected-revision",
+            &policy_revision,
+        ],
+        THREAD_A,
+    );
+    assert!(
+        policy.status.success(),
+        "policy must succeed: {}",
+        busy_receipt("policy-executor-carol", &policy)
+    );
+    sequence.push(busy_receipt("policy-executor-carol", &policy));
+
+    let invite_revision = fixture.current_state()["board_details"][second_id]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    let invited = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            second_id,
+            "--to",
+            "Carol",
+            "--expected-revision",
+            &invite_revision,
+        ],
+        THREAD_A,
+    );
+    assert!(
+        invited.status.success(),
+        "invite must succeed: {}",
+        busy_receipt("invite-carol", &invited)
+    );
+    sequence.push(busy_receipt("invite-carol", &invited));
+
+    let accept_revision = fixture.current_state()["board_details"][second_id]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    let accepted = fixture.command_public(
+        &[
+            "board",
+            "respond",
+            second_id,
+            "--accept",
+            "--expected-revision",
+            &accept_revision,
+        ],
+        THREAD_C,
+    );
+    let accepted_receipt = busy_receipt("accept-second", &accepted);
+    sequence.push(accepted_receipt.clone());
+    assert!(
+        accepted.status.success(),
+        "reassignment accept succeeded with the second active attempt: {accepted_receipt}"
+    );
+
+    let after_accept = fixture.current_state();
+    let second_current_phase = after_accept["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| {
+            phase["task_id"] == second_id
+                && phase["phase"] == "execute"
+                && phase["status"] != "revoked"
+        })
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap_or_default())
+        .cloned()
+        .expect("accept must leave a current execute phase on the reassigned ticket");
+    let new_attempt = second_current_phase["attempt_generation"]
+        .as_u64()
+        .expect("the reassignment must expose the new attempt");
+    let active_after_accept = busy_active_carol_phases(&after_accept);
+
+    let second_revision = after_accept["board_details"][second_id]["revision"]
+        .as_u64()
+        .expect("reassigned board revision")
+        .to_string();
+    let second_start = fixture.command_public(
+        &[
+            "board",
+            "start",
+            second_id,
+            "--expected-revision",
+            &second_revision,
+            "--attempt",
+            &new_attempt.to_string(),
+        ],
+        THREAD_C,
+    );
+    let second_start_receipt = busy_receipt("start-second", &second_start);
+    sequence.push(second_start_receipt.clone());
+    assert!(
+        second_start.status.success(),
+        "Carol must be able to start the reassigned ticket while the first stays running: {second_start_receipt}"
+    );
+
+    let after_start = fixture.current_state();
+    let active_after_start = busy_active_carol_phases(&after_start);
+
+    let report = json!({
+        "label": "A-013 busy slot observation",
+        "first_task_id": first_id,
+        "second_task_id": second_id,
+        "carol_worker": carol_worker,
+        "bob_worker": bob_worker,
+        "carol_generation": carol_generation,
+        "bob_generation": bob_generation,
+        "bob_old_phase": bob_old_phase,
+        "bob_old_attempt": bob_old_attempt,
+        "new_attempt": new_attempt,
+        "public_sequence": sequence,
+        "first_resources_before_accept": resource_task_snapshot(&before_accept, first_id),
+        "second_resources_before_accept": resource_task_snapshot(&before_accept, second_id),
+        "second_current_phase_after_accept": second_current_phase,
+        "active_carol_execute_attempts_after_accept": active_after_accept.len(),
+        "first_resources_after_accept": resource_task_snapshot(&after_accept, first_id),
+        "second_resources_after_accept": resource_task_snapshot(&after_accept, second_id),
+        "active_carol_execute_attempts_after_start": active_after_start.len(),
+        "first_resources_after_start": resource_task_snapshot(&after_start, first_id),
+        "second_resources_after_start": resource_task_snapshot(&after_start, second_id),
+    });
+    write_json_evidence_log(&report, "BUSY_ACCEPT_OBSERVATION_LOG");
+
+    // The current candidate admits two valid execute attempts on Carol's slot:
+    // one Running phase for the first ticket and one freshly Claimed phase for
+    // the reassigned ticket. Starting the reassigned ticket while the first
+    // stays running confirms the accept gate does not reject or wait.
+    assert_eq!(
+        active_after_accept.len(),
+        2,
+        "Carol must hold two active execute attempts after accept: {active_after_accept:#?}"
+    );
+    assert_eq!(
+        second_current_phase["slot_name"], "Carol",
+        "the reassigned phase must belong to Carol: {second_current_phase:#?}"
+    );
+    assert_eq!(
+        second_current_phase["status"], "claimed",
+        "the reassigned phase must be claimed: {second_current_phase:#?}"
+    );
+    assert!(
+        new_attempt > bob_old_attempt,
+        "the reassignment must allocate a fresh attempt: old={bob_old_attempt} new={new_attempt}"
+    );
+    assert_eq!(
+        second_current_phase["binding_generation"],
+        json!(carol_generation),
+        "the reassigned phase must use Carol's current binding generation"
+    );
+    assert_eq!(
+        active_after_start.len(),
+        2,
+        "Carol must hold two running/claimed execute attempts after start: {active_after_start:#?}"
+    );
+    let first_after_start = after_start["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .find(|phase| {
+            phase["task_id"] == first_id
+                && phase["phase"] == "execute"
+                && phase["status"] != "revoked"
+        })
+        .cloned()
+        .expect("the first ticket keeps its execute phase");
+    assert_eq!(
+        first_after_start["status"], "running",
+        "the first ticket stays running while the reassigned ticket starts: {first_after_start:#?}"
+    );
 }

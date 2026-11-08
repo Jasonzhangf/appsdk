@@ -263,12 +263,10 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                 record.idle_since_ms = now;
                 if agent == AgentState::Working {
                     record.activity_ms = now;
-                    if !is_live_master {
-                        record.idle_episode_notices = 0;
-                        record.idle_episode_reason.clear();
-                        record.idle_episode_stopped = false;
-                        record.working_seen = true;
-                    }
+                    // Runtime busy/idle flaps within one scheduler-owned task
+                    // revision are not a new idle episode. `working_seen` is
+                    // already set above; re-arming here let the same notice be
+                    // re-sent every time the worker briefly flipped to busy.
                 }
             }
             record.unacked = 0;
@@ -1698,11 +1696,186 @@ mod tests {
                 retry_attempted: false,
             },
         }]);
+        // A new scheduler-owned task revision, not a bare runtime flap or the
+        // unrelated server notice, opens the next idle edge.
+        server.commit(&[Event::TaskCreated {
+            task: task("task-new-edge", "worker", "working", now + 2),
+        }]);
         observe(&server, Busy, "current");
         tick_at(&server, now + 3);
         observe(&server, Idle, "current");
         tick_at(&server, now + 4);
         assert_eq!(idle_notice_count(&server), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One idle episode for one scheduler-owned task revision must produce a
+    /// single idle notice even when the worker flaps idle<->busy around it.
+    /// A real task revision change opens exactly one more notice.
+    #[test]
+    fn idle_storm_same_revision_flap_notifies_once() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
+        bind_session(&server, "worker", "current");
+        let now = super::super::state::now_ms();
+        server.commit(&[Event::TaskCreated {
+            task: task("task-storm", "worker", "working", now),
+        }]);
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        set_master_idle(&server);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master" && message.subject.as_deref() == Some("worker-idle")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        // Consume the first notice so the suspend proof is the episode budget,
+        // not merely the unconsumed-batch gate.
+        server.commit(&[Event::Acked {
+            ids: vec![first_id],
+        }]);
+        for i in 0..3 {
+            observe(&server, Busy, "current");
+            tick_at(&server, now + 10 + i * 2);
+            observe(&server, Idle, "current");
+            tick_at(&server, now + 11 + i * 2);
+        }
+        assert_eq!(
+            idle_notice_count(&server),
+            1,
+            "same task revision runtime flap must not re-notify"
+        );
+        // A real actionable-status change is a new revision and re-notifies once.
+        let mut changed = server.state.lock().unwrap().tasks["task-storm"].clone();
+        changed.status = "rework".into();
+        server.commit(&[Event::TaskUpdated { task: changed }]);
+        observe(&server, Busy, "current");
+        tick_at(&server, now + 30);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 31);
+        assert_eq!(
+            idle_notice_count(&server),
+            2,
+            "a new task revision must re-notify once"
+        );
+        tick_at(&server, now + 32);
+        assert_eq!(idle_notice_count(&server), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The merged `master-wake-batch` path must not re-generate for the same
+    /// task revision when the contributing workers flap idle<->busy.
+    #[test]
+    fn idle_storm_batch_same_revision_flap_notifies_once() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker-a", "thread-a");
+        register_synthetic_peer(&server, "worker-b", "thread-b");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
+        bind_session(&server, "worker-a", "session-a");
+        bind_session(&server, "worker-b", "session-b");
+        let now = super::super::state::now_ms();
+        server.commit(&[
+            Event::TaskCreated {
+                task: task("task-a", "worker-a", "working", now),
+            },
+            Event::TaskCreated {
+                task: task("task-b", "worker-b", "working", now),
+            },
+        ]);
+        observe_agent(
+            &server,
+            "worker-a",
+            super::super::name_state::AgentPresence::Online,
+            Busy,
+            "session-a",
+        );
+        observe_agent(
+            &server,
+            "worker-b",
+            super::super::name_state::AgentPresence::Online,
+            Busy,
+            "session-b",
+        );
+        tick_at(&server, now);
+        set_master_idle(&server);
+        observe_agent(
+            &server,
+            "worker-a",
+            super::super::name_state::AgentPresence::Online,
+            Idle,
+            "session-a",
+        );
+        observe_agent(
+            &server,
+            "worker-b",
+            super::super::name_state::AgentPresence::Online,
+            Idle,
+            "session-b",
+        );
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master"
+                        && message.subject.as_deref() == Some("master-wake-batch")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        server.commit(&[Event::Acked {
+            ids: vec![first_id],
+        }]);
+        for i in 0..3 {
+            for (worker, session) in [("worker-a", "session-a"), ("worker-b", "session-b")] {
+                observe_agent(
+                    &server,
+                    worker,
+                    super::super::name_state::AgentPresence::Online,
+                    Busy,
+                    session,
+                );
+            }
+            tick_at(&server, now + 10 + i * 2);
+            for (worker, session) in [("worker-a", "session-a"), ("worker-b", "session-b")] {
+                observe_agent(
+                    &server,
+                    worker,
+                    super::super::name_state::AgentPresence::Online,
+                    Idle,
+                    session,
+                );
+            }
+            tick_at(&server, now + 11 + i * 2);
+        }
+        assert_eq!(
+            idle_notice_count(&server),
+            1,
+            "same task revision batch flap must not re-notify"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

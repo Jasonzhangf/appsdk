@@ -573,9 +573,10 @@ or implementation details.
    peer, retain it and split ready bounded work for subworkers.
    Each accepted peer partitions the goal into non-overlapping bounded scopes
    and orchestrates independent `codex exec --profile gcm` workers. Planner and
-   Reviewer remain independent roles. Dispatch bounded one-shot execution or
-   observation directly to independent GCM workers regardless of whether other
-   peers are busy.
+   Reviewer remain independent roles. Check idle, suitable authorized peers and
+   available capacity first; use peer capacity that can take the ready work.
+   Direct-dispatch independent GCM workers only when no suitable authorized peer
+   can take the work.
 3. A peer owns planning, execution, verification, unblocking, integration, and
    resource closure for its accepted scope. Master verifies returned evidence,
    coordinates cross-peer dependencies, integrates the delivery, and closes
@@ -1038,8 +1039,9 @@ maintain a separate role prompt:
 
 - `master`: orchestrate the project goal, offer delegated long-horizon goals
   through the public board, own blockers and drive verify/merge/cleanup/close.
-  Send one-shot execution or observation directly to independent GCM workers.
-  Peer availability does not gate this routing.
+  Check idle, suitable authorized peers and available capacity first; use peer
+  capacity that can take the ready work. Direct-dispatch independent GCM workers
+  only when no suitable authorized peer can take the work.
 - `worker` with derivation `peer`: orchestrate the accepted long-horizon goal,
   run bounded work through independent `codex exec --profile gcm` workers,
   verify evidence, resolve blockers, integrate assigned work, and report to the
@@ -1715,9 +1717,11 @@ Master operates under two prime directives:
    without serial bottlenecks. Offer long-horizon goals through the public
    board to suitable, consenting peers. Each peer orchestrates independent
    `codex exec --profile gcm` workers for bounded execution or observation.
-   Master and peer send one-shot execution or observation directly to GCM
-   workers, regardless of peer availability. Before ending each scheduling turn, inspect ready work, peer
-   capacity, protected holds, P0/P1 work, and the active issue backlog.
+   Check idle, suitable authorized peers and available capacity first; use peer
+   capacity that can take the ready work. Direct-dispatch independent GCM
+   workers only when no suitable authorized peer can take the work. Before
+   ending each scheduling turn, inspect ready work, peer capacity, protected
+   holds, P0/P1 work, and the active issue backlog.
    Delivery, merge, review, task close, and cleanup are lifecycle steps, never
    reasons to leave eligible work undispatched.
 

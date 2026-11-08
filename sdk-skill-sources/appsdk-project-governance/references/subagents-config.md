@@ -11,8 +11,10 @@ independent `codex exec --profile gcm` workers. Use the documented fallback only
 when GCM is unavailable. Do not use Codex built-in spawn/fork/session Agent
 slots or managed subagents as the production concurrency path.
 
-One-shot execution and observation go directly to independent GCM workers,
-regardless of peer availability. Master and peer each retain their goal's
+For one-shot execution or observation, check idle, suitable authorized peers
+and available capacity first; use peer capacity that can take the ready work.
+Direct-dispatch independent GCM workers only when no suitable authorized peer
+can take the work. Master and peer each retain their goal's
 planning, verification, integration, acceptance and resource closure. Each
 registers and manages its own goal; neither substitutes for another goal owner.
 

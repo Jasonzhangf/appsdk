@@ -3029,4 +3029,66 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         "{}",
         text(&forged_real)
     );
+
+    let foreign = fixture.root.join("restricted-cwd-foreign");
+    seed_baseline(&foreign);
+    let foreign_canonical = fs::canonicalize(&foreign)
+        .expect("foreign project exists")
+        .to_string_lossy()
+        .into_owned();
+    let foreign_pane = second_pane(&fixture, "restricted-cwd-foreign-pane", pane.server_pid);
+    let foreign_registered = registered_context_in(
+        &fixture,
+        &foreign,
+        "ctxop-restricted-foreign-register",
+        &foreign_pane,
+    );
+    assert_eq!(
+        foreign_registered["result"]["snapshot"]["binding"]["project_scope"].as_str(),
+        Some(foreign_canonical.as_str()),
+        "the foreign project must register under its own canonical root: {foreign_registered}"
+    );
+    let foreign_worker = foreign_registered["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("foreign registered identity")
+        .to_owned();
+    assert_ne!(
+        foreign_worker, seed_worker,
+        "the foreign registered project must own a different worker"
+    );
+
+    let before_routes = fs::read(fixture.host_routes()).unwrap();
+    let before_map = fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let forged_foreign = restricted_cwd_context_in_pane(
+        &fixture,
+        &pane,
+        &restricted,
+        "ctxop-restricted-forged-foreign-pwd",
+        "ctxop-restricted-forged-foreign-pwd",
+        Some(&foreign_canonical),
+    );
+    assert!(
+        !forged_foreign.status.success(),
+        "PWD of another registered project must not authorize the original binding: {}",
+        text(&forged_foreign)
+    );
+    let rejected = text(&forged_foreign);
+    assert!(
+        rejected.contains("IDENTITY_MAP_NOT_FOUND"),
+        "forged foreign PWD must surface the typed caller mapping rejection: {rejected}"
+    );
+    assert!(
+        !rejected.contains(&foreign_worker),
+        "forged foreign PWD must not publish the foreign identity snapshot: {rejected}"
+    );
+    assert_eq!(
+        fs::read(fixture.host_routes()).unwrap(),
+        before_routes,
+        "forged foreign PWD must not re-route the original binding"
+    );
+    assert_eq!(
+        fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        before_map,
+        "forged foreign PWD must not re-map the original binding"
+    );
 }

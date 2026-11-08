@@ -54,6 +54,14 @@ pub(super) fn binding_route_address(binding: &RuntimeBinding) -> Option<(String,
     if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
         return Some(tmux_route_address(endpoint));
     }
+    if binding.native_thread_id.is_none() {
+        let session = binding.session_id.as_ref()?;
+        return Some((
+            "\0session".to_owned(),
+            serde_json::to_string(&(&binding.project_scope, &binding.app_scope_id, session))
+                .expect("session route contains only typed strings"),
+        ));
+    }
     Some(current_thread_route_address(
         binding.session_id.as_ref()?,
         binding.native_thread_id.as_ref()?,

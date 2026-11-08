@@ -23,6 +23,14 @@ fn received_message_view(state: &State, message: &Message) -> serde_json::Value 
             view["channel"] = value;
         }
     }
+    // Project the daemon-owned federation facts for a typed linked reply.
+    // The reader sees the original origin/message references and authenticated
+    // sender; no control data is reconstructed from message prose.
+    if let Some(meta) = state.federation.messages.get(&message.id) {
+        if let Ok(value) = serde_json::to_value(meta) {
+            view["federation"] = value;
+        }
+    }
     view
 }
 
@@ -454,6 +462,9 @@ fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet)
             project_root: Some(server.root.to_string_lossy().into_owned()),
             channel_type: Some(current.transport.kind.as_str().to_owned()),
             deliverable: Some("unknown".to_owned()),
+            machine: None,
+            qualified_address: None,
+            route: None,
         });
     }
     targets.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
@@ -598,11 +609,32 @@ fn handle_default_set(
     // Inbound routing re-resolves the stored address through the same shared
     // owner. A raw worker id has no stable inbound meaning, so it is rejected
     // here instead of persisting a default that later fails.
-    if name_address.is_none() {
-        return Resp::err(format!(
-            "DEFAULT_TARGET_UNRESOLVED: {target_address} is not a stable name or typed CEO address"
-        ));
-    }
+    let project_key = match canonical_project_key(&server.root) {
+        Some(project_key) => project_key,
+        None => {
+            return Resp::err(
+                "DEFAULT_PROJECT_SCOPE_MISSING: the current project key is unavailable",
+            )
+        }
+    };
+    let resolved_target = match name_address {
+        Some(_) if target_address.eq_ignore_ascii_case("ceo")
+            || target_address.eq_ignore_ascii_case(&project_key) =>
+        {
+            Some(crate::address::ResolvedAddress::LocalLegacy(target_address.clone()))
+        }
+        Some(address) => Some(crate::address::ResolvedAddress::LocalName(
+            crate::proto::LocalNameAddress {
+                project: project_key,
+                name: address.name,
+            },
+        )),
+        None => {
+            return Resp::err(format!(
+                "DEFAULT_TARGET_UNRESOLVED: {target_address} is not a stable name or typed CEO address"
+            ))
+        }
+    };
     if !st.workers.contains_key(&resolved_worker) {
         return Resp::err(format!(
             "DEFAULT_TARGET_UNRESOLVED: {target_address} does not resolve to a registered worker"
@@ -633,6 +665,7 @@ fn handle_default_set(
         conversation: conversation.clone(),
         project_scope,
         target_address,
+        resolved_target,
         revision: revision + 1,
         updated_ms: now_ms(),
     };
@@ -669,6 +702,9 @@ fn mutation_blocked_during_project_reset(req: &Req) -> bool {
         Req::BoardShow => false,
         Req::Board { command, .. } => !matches!(command, crate::board::BoardCommand::Show),
         Req::SubagentObserve { .. } => false,
+        Req::AddressSend { .. }
+        | Req::FederationDirectory { .. }
+        | Req::MessageRefStatus { .. } => true,
         Req::Subagent { command, .. } => !matches!(
             command,
             crate::subagent::Action::List | crate::subagent::Action::Status { .. }

@@ -26,11 +26,9 @@ pub(super) const COMMUNICATION_EVENT_SCHEMA: &str =
     include_str!("../../contracts/communication/communication-event.schema.json");
 
 pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>) {
-    let subcommand = args
-        .next()
-        .unwrap_or_else(|| {
-            fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project>")
-        });
+    let subcommand = args.next().unwrap_or_else(|| {
+        fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project> [--graph <path>]")
+    });
     if subcommand == "validate" {
         let result = validate_graph_contracts()
             .unwrap_or_else(|error| fail(format!("DAGPIPE_GRAPH_VALIDATION_FAILED:{error}")));
@@ -41,14 +39,42 @@ pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>
         return;
     }
     if subcommand == "validate-notifications" {
-        let root = std::path::PathBuf::from(
-            args.next()
-                .unwrap_or_else(|| fail("USAGE: appsdk dagpipe validate-notifications <project>")),
-        );
-        if args.next().is_some() {
-            fail("USAGE: appsdk dagpipe validate-notifications <project>");
+        let root = std::path::PathBuf::from(args.next().unwrap_or_else(|| {
+            fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]")
+        }));
+        let mut graph_path = None;
+        while let Some(option) = args.next() {
+            match option.as_str() {
+                "--graph" => {
+                    if graph_path.is_some() {
+                        fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]");
+                    }
+                    graph_path = Some(std::path::PathBuf::from(args.next().unwrap_or_else(|| {
+                        fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]")
+                    })));
+                }
+                _ => {
+                    fail("USAGE: appsdk dagpipe validate-notifications <project> [--graph <path>]")
+                }
+            }
         }
-        let result = validate_notification_objects(&root)
+        assert_project_root_safe(&root);
+        let root = root
+            .canonicalize()
+            .unwrap_or_else(|error| fail(format!("PROJECT_ROOT_MISSING:{error}")));
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let started = std::time::Instant::now();
+        let result = validate_notification_objects(&root, graph_path.as_deref());
+        if let Err(error) = notification::append_notification_invocation(
+            &root,
+            &started_at,
+            started.elapsed().as_millis(),
+            graph_path.is_some(),
+            &result,
+        ) {
+            eprintln!("COMMAND_INVOCATION_LOG_WRITE_FAILED:{error}");
+        }
+        let result = result
             .unwrap_or_else(|error| fail(format!("DAGPIPE_NOTIFICATION_OBJECT_INVALID:{error}")));
         println!(
             "{}",
@@ -57,7 +83,7 @@ pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>
         return;
     }
     if subcommand != "fix" {
-        fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project>");
+        fail("USAGE: appsdk dagpipe fix [project] [--module <id>] | validate | validate-notifications <project> [--graph <path>]");
     }
 
     let mut root = std::path::PathBuf::from(".");
@@ -221,6 +247,11 @@ fn validate_graph_contracts_with_manifest(raw_manifest: &str) -> Result<Value, S
         graphs.push(json!({
             "id": id,
             "version": graph.version,
+            "binding_kind": if design_graph_ids().contains(&graph.id.as_str()) {
+                "design"
+            } else {
+                "executable"
+            },
             "single_source_single_sink": {"inputs": graph.inputs.len(), "outputs": graph.outputs.len()}
         }));
     }
@@ -246,7 +277,7 @@ fn validate_graph_registry(graph: &Graph) -> Result<(), String> {
     };
     let mut registry = Registry::default();
     register_fix_operators(&mut registry)?;
-    register_notification_operator(&mut registry)?;
+    register_notification_operators(&mut registry)?;
     for name in &design_operators {
         registry
             .register(DesignGraphOperator {
@@ -298,9 +329,9 @@ fn ensure_graph_nodes_use_registered_operators(
 
 #[path = "dagpipe_notification.rs"]
 mod notification;
-use notification::{register_notification_operator, validate_notification_objects};
+use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 45] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -407,6 +438,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 45] {
             include_str!("../../docs/dagpipe/collab-notification-consumption.graph.json"),
         ),
         (
+            "docs/dagpipe/collab-rex-adaptor.graph.json",
+            include_str!("../../docs/dagpipe/collab-rex-adaptor.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-federation.graph.json",
+            include_str!("../../docs/dagpipe/collab-federation.graph.json"),
+        ),
+        (
             "docs/dagpipe/merge-pending.graph.json",
             include_str!("../../docs/dagpipe/merge-pending.graph.json"),
         ),
@@ -487,7 +526,7 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 45] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 43] {
+fn design_graph_ids() -> [&'static str; 45] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -515,6 +554,8 @@ fn design_graph_ids() -> [&'static str; 43] {
         "appsdk-collab-appserver-route-repair",
         "appsdk-collab-subscription-lifecycle",
         "appsdk-collab-notification-consumption",
+        "appsdk-collab-rex-adaptor",
+        "appsdk-collab-federation",
         "appsdk-collab-merge-pending",
         "appsdk-collab-dsh-channel",
         "appsdk-collab-dsh-delivery",
@@ -535,7 +576,7 @@ fn design_graph_ids() -> [&'static str; 43] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 247] {
+fn design_graph_operator_names() -> [&'static str; 266] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -595,7 +636,12 @@ fn design_graph_operator_names() -> [&'static str; 247] {
         "appsdk.collab_startup.emit_result",
         "appsdk.collab_install.select",
         "appsdk.collab_install.location",
+        "appsdk.collab_install.capture",
+        "appsdk.collab_install.prepare",
+        "appsdk.collab_install.stage",
         "appsdk.collab_install.install",
+        "appsdk.collab_install.check",
+        "appsdk.collab_install.resolve",
         "appsdk.collab_install.result",
         "appsdk.collab_send.authenticate_source",
         "appsdk.collab_send.classify_identity",
@@ -730,6 +776,20 @@ fn design_graph_operator_names() -> [&'static str; 247] {
         "appsdk.collab_notification_consume.commit_receipt",
         "appsdk.collab_notification_consume.read_payloads",
         "appsdk.collab_notification_consume.verify_owner",
+        "appsdk.collab_rex.read_binding",
+        "appsdk.collab_rex.validate_facts",
+        "appsdk.collab_rex.verify_target",
+        "appsdk.collab_rex.execute",
+        "appsdk.collab_rex.classify",
+        "appsdk.collab_rex.commit",
+        "appsdk.collab_rex.emit_receipt",
+        "appsdk.collab_federation.admit_request",
+        "appsdk.collab_federation.resolve_address",
+        "appsdk.collab_federation.resolve_route",
+        "appsdk.collab_federation.authenticate_source",
+        "appsdk.collab_federation.commit_batch",
+        "appsdk.collab_federation.deliver_channel_reply",
+        "appsdk.collab_federation.emit_receipt",
         "appsdk.collab_pane_route.classify_claimants",
         "appsdk.collab_pane_route.publish_owner_route",
         "appsdk.collab_pane_route.resolve_pane_owner",
@@ -789,7 +849,10 @@ fn design_graph_operator_names() -> [&'static str; 247] {
 
 fn design_graph_operator_version(name: &str) -> &'static str {
     match name {
-        "appsdk.collab_context.env_view" | "appsdk.collab_context.emit_snapshot" => "2",
+        "appsdk.collab_context.env_view"
+        | "appsdk.collab_context.emit_snapshot"
+        | "appsdk.collab_install.install"
+        | "appsdk.collab_install.result" => "2",
         _ => "1",
     }
 }

@@ -1,0 +1,98 @@
+{
+  "id": "collab-ticket-event-flow-design",
+  "version": "0.1.0",
+  "description": "待独立审查的实现设计。一次工单事件到一次流转结果。入 daemon 立即按接收范围进入合格 slot 的最短 queue，busy 及等待依赖也可入队，依赖满足且 slot 空闲后按优先级开始。每个阶段仅推进当前适用状态，等待、拒绝和失败结果传递到唯一出口。审查顺位为独立 Reviewer、独立 architect 或 expert、另一独立 peer，组内 busy 排队，无合格接收者才检查下一组。返工与恢复由同一工单的新批次处理，无回边。算子为拟定接口，未绑定运行实现。互斥分支与权限见同名 Markdown。",
+  "inputs": [{"id": "工单事件", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "接收并标准化工单事件",
+      "operator": "collab.ticket_design.admit",
+      "operator_version": "1",
+      "inputs": ["工单事件"],
+      "output": {"id": "标准工单意图", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "校验权限与工单合同",
+      "operator": "collab.ticket_design.authorize",
+      "operator_version": "1",
+      "inputs": ["标准工单意图"],
+      "output": {"id": "工单准入结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "自动推进适用规划阶段",
+      "operator": "collab.ticket_design.advance_plan",
+      "operator_version": "1",
+      "inputs": ["工单准入结果"],
+      "output": {"id": "规划阶段结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "按范围选择最短队列并推进执行",
+      "operator": "collab.ticket_design.advance_execution",
+      "operator_version": "1",
+      "inputs": ["规划阶段结果"],
+      "output": {"id": "执行验证结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "自动转交并推进独立审查",
+      "operator": "collab.ticket_design.advance_review",
+      "operator_version": "1",
+      "inputs": ["执行验证结果"],
+      "output": {"id": "审查阶段结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "按负责人意图检查关闭条件",
+      "operator": "collab.ticket_design.apply_master_close_intent",
+      "operator_version": "1",
+      "inputs": ["审查阶段结果"],
+      "output": {"id": "工单关闭判定", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "保存未结责任或关闭结果",
+      "operator": "collab.ticket_design.persist_outcome",
+      "operator_version": "1",
+      "inputs": ["工单关闭判定"],
+      "output": {"id": "已持久化流转结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出本批唯一流转结果",
+      "operator": "collab.ticket_design.emit_result",
+      "operator_version": "1",
+      "inputs": ["已持久化流转结果"],
+      "output": {"id": "工单流转结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "接收并标准化工单事件", "to": "校验权限与工单合同", "arc_id": "标准工单意图"},
+    {"from": "校验权限与工单合同", "to": "自动推进适用规划阶段", "arc_id": "工单准入结果"},
+    {"from": "自动推进适用规划阶段", "to": "按范围选择最短队列并推进执行", "arc_id": "规划阶段结果"},
+    {"from": "按范围选择最短队列并推进执行", "to": "自动转交并推进独立审查", "arc_id": "执行验证结果"},
+    {"from": "自动转交并推进独立审查", "to": "按负责人意图检查关闭条件", "arc_id": "审查阶段结果"},
+    {"from": "按负责人意图检查关闭条件", "to": "保存未结责任或关闭结果", "arc_id": "工单关闭判定"},
+    {"from": "保存未结责任或关闭结果", "to": "输出本批唯一流转结果", "arc_id": "已持久化流转结果"}
+  ],
+  "outputs": ["工单流转结果"]
+}

@@ -1,0 +1,54 @@
+{
+  "id": "collab-ticket-notification-design",
+  "version": "0.1.0",
+  "description": "目标设计。一次队列或可信运行状态事件到一次处理结果。入队只做内部调度且不提醒，idle 自动接续。运行任务变更直接提醒执行者，worker idle 提醒 manager，manager idle 提醒巡检员，worker 同一 idle 阶段严格超过 10 分钟提醒双方。事件去重及阈值状态由 daemon 持久状态 owner 处理。算子尚未绑定运行实现。",
+  "inputs": [{"id": "队列或运行状态事件", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "核对事件来源及当前执行绑定",
+      "operator": "collab.ticket_notification_design.admit",
+      "operator_version": "1",
+      "inputs": ["队列或运行状态事件"],
+      "output": {"id": "提醒事件准入结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "分类事件并核对本次空闲阶段",
+      "operator": "collab.ticket_notification_design.classify",
+      "operator_version": "1",
+      "inputs": ["提醒事件准入结果"],
+      "output": {"id": "接续与提醒决策", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "执行自动接续或对应对象提醒",
+      "operator": "collab.ticket_notification_design.dispatch",
+      "operator_version": "1",
+      "inputs": ["接续与提醒决策"],
+      "output": {"id": "接续与提醒处理结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "持久化并返回唯一处理结果",
+      "operator": "collab.ticket_notification_design.emit_result",
+      "operator_version": "1",
+      "inputs": ["接续与提醒处理结果"],
+      "output": {"id": "队列及提醒事件结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "核对事件来源及当前执行绑定", "to": "分类事件并核对本次空闲阶段", "arc_id": "提醒事件准入结果"},
+    {"from": "分类事件并核对本次空闲阶段", "to": "执行自动接续或对应对象提醒", "arc_id": "接续与提醒决策"},
+    {"from": "执行自动接续或对应对象提醒", "to": "持久化并返回唯一处理结果", "arc_id": "接续与提醒处理结果"}
+  ],
+  "outputs": ["队列及提醒事件结果"]
+}

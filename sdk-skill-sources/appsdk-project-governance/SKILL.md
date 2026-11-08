@@ -36,6 +36,7 @@ Read only the reference matching the current action; do not preload all files:
 | Scenario | Reference |
 | --- | --- |
 | Existing project SHA/ceremony ablation, `appsdk prepare/init`, or legacy governance removal | [references/bootstrap-migration.md](references/bootstrap-migration.md) |
+| New, existing, or mid-development skeleton, Operation, operator, and graph-configuration changes | [references/bootstrap-migration.md](references/bootstrap-migration.md#skeleton-operations-and-operators) |
 | Authoritative requirement review packet & milestone delivery/cleanup boundaries | [references/review-delivery.md](references/review-delivery.md) & [references/authoritative-review-template.md](references/authoritative-review-template.md) |
 | AppSDK vs. Collab directory ownership (`.appsdk`, `.appsdk-control`, `.agent-collab`, `~/.collab`) | [references/state-paths.md](references/state-paths.md) |
 | `appsdk` CLI command surface and exit semantics | [references/command-surface.md](references/command-surface.md) |

@@ -1,3 +1,4 @@
+mod address;
 mod board;
 pub mod board_patrol_policy;
 mod ceo;
@@ -9,6 +10,7 @@ mod config;
 mod context_operation;
 mod dashboard;
 mod desktop_capability;
+mod federation;
 mod health;
 pub(crate) mod host_runtime;
 mod identity;
@@ -36,6 +38,7 @@ use main_cli::*;
 
 mod main_context;
 use main_context::*;
+mod machine_cli;
 mod main_autostart;
 mod main_maintenance;
 
@@ -295,6 +298,28 @@ fn registered_runtime_projection(
     }
     let project_root = std::fs::canonicalize(&scope.root)?;
     match transport.kind {
+        crate::proto::TransportKind::Rex => {
+            let endpoint = transport.rex_endpoint.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("registered Rex transport is missing its endpoint")
+            })?;
+            if runtime.session_id.as_ref().map(identity::SessionId::as_str)
+                != transport.session_id.as_deref()
+                || runtime.native_thread_id.is_some()
+                || transport.thread_id.is_some()
+            {
+                anyhow::bail!("registered Rex transport does not match its agent session route");
+            }
+            Ok(json!({
+                "runtimeId": runtime.runtime_id,
+                "appserverId": runtime.appserver_id,
+                "transport": "rex",
+                "rexEndpoint": endpoint,
+                "sessionId": transport.session_id,
+                "projectRoot": project_root,
+                "capabilities": transport.capabilities,
+                "processId": daemon_pid,
+            }))
+        }
         crate::proto::TransportKind::Tmux => {
             let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("registered tmux transport is missing its endpoint")
@@ -545,6 +570,19 @@ struct SendTargetResolution {
 }
 
 fn resolve_send_target(scope: &Scope, requested: &str) -> anyhow::Result<SendTargetResolution> {
+    let directory = host_directory()?;
+    resolve_send_target_from_directory(scope, requested, &directory)
+}
+
+/// Resolve a legacy local send target against an already-read host directory.
+/// A qualified-looking miss is an error, never a fallback to a same-named
+/// local target. Typed and explicit federation sends use `AddressSend`, where
+/// the local daemon owns address grammar and route selection.
+fn resolve_send_target_from_directory(
+    scope: &Scope,
+    requested: &str,
+    directory: &[GlobalDeliveryTarget],
+) -> anyhow::Result<SendTargetResolution> {
     let wanted = requested.trim();
     if wanted.is_empty() {
         return Ok(SendTargetResolution {
@@ -552,9 +590,8 @@ fn resolve_send_target(scope: &Scope, requested: &str) -> anyhow::Result<SendTar
             cross_project: None,
         });
     }
-    let directory = host_directory()?;
     if wanted.eq_ignore_ascii_case("ceo") {
-        let target = resolve_ceo_delivery_target(scope, &directory)?;
+        let target = resolve_ceo_delivery_target(scope, directory)?;
         let cross = if path_eq(&target.project_root, &scope.root.to_string_lossy()) {
             None
         } else {
@@ -565,16 +602,11 @@ fn resolve_send_target(scope: &Scope, requested: &str) -> anyhow::Result<SendTar
             cross_project: cross,
         });
     }
-    if !wanted.contains('.') {
-        return Ok(SendTargetResolution {
-            to: wanted.to_owned(),
-            cross_project: None,
-        });
-    }
     let matches = unique_directory_targets(
         directory
-            .into_iter()
+            .iter()
             .filter(|target| target.address.eq_ignore_ascii_case(wanted))
+            .cloned()
             .collect(),
     );
     match matches.len() {
@@ -590,14 +622,78 @@ fn resolve_send_target(scope: &Scope, requested: &str) -> anyhow::Result<SendTar
                 cross_project: cross,
             })
         }
-        0 => Ok(SendTargetResolution {
+        0 if !wanted.contains('.') && !wanted.contains('%') => Ok(SendTargetResolution {
             to: wanted.to_owned(),
             cross_project: None,
         }),
+        0 => anyhow::bail!(
+            "ADDRESS_UNKNOWN: {} is not a current local delivery address; use a collab-ref or a daemon-resolved federation address",
+            wanted
+        ),
         _ => anyhow::bail!(
             "ADDRESS_AMBIGUOUS: {} folds to multiple current holders",
             wanted
         ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplyInput {
+    Typed(crate::proto::MessageRef),
+    Legacy(String),
+}
+
+fn parse_reply_input(raw: Option<String>) -> anyhow::Result<Option<ReplyInput>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.starts_with(crate::proto::COLLAB_REF_PREFIX) {
+        let reference = crate::proto::parse_collab_ref(&raw)
+            .map_err(|error| anyhow::anyhow!("IN_REPLY_TO_REF_INVALID: {error}"))?;
+        return match reference {
+            crate::proto::MessageReference::Message(reference) => {
+                Ok(Some(ReplyInput::Typed(reference)))
+            }
+            crate::proto::MessageReference::Origin(_) => anyhow::bail!(
+                "IN_REPLY_TO_REF_INVALID: in_reply_to must reference a message, not an origin operation"
+            ),
+        };
+    }
+    Ok(Some(ReplyInput::Legacy(raw)))
+}
+
+fn parse_message_reference(raw: &str) -> anyhow::Result<crate::proto::MessageReference> {
+    crate::proto::parse_collab_ref(raw)
+        .map_err(|error| anyhow::anyhow!("MESSAGE_REF_INVALID: {error}"))
+}
+
+fn address_send_request(
+    worker_id: impl Into<String>,
+    token: impl Into<String>,
+    command: Option<crate::proto::CommandEnvelope>,
+    to: impl Into<String>,
+    operation_id: Option<identity::OperationId>,
+    mtype: impl Into<String>,
+    subject: impl Into<String>,
+    body: impl Into<String>,
+    in_reply_to: Option<crate::proto::MessageRef>,
+    delivery: impl Into<String>,
+    reply_policy: Option<ReplyPolicy>,
+    target_session: Option<String>,
+) -> Req {
+    Req::AddressSend {
+        worker_id: worker_id.into(),
+        token: token.into(),
+        command,
+        to: crate::proto::AddressInput::Legacy(to.into()),
+        operation_id,
+        mtype: mtype.into(),
+        subject: subject.into(),
+        body: body.into(),
+        in_reply_to,
+        delivery: delivery.into(),
+        reply_policy,
+        target_session,
     }
 }
 
@@ -773,6 +869,10 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&crate::config::load(&scope::lifecycle_project_root()?)?);
             Ok(())
         }
+        Cmd::Machine { command } => {
+            out(&crate::machine_cli::execute(command)?);
+            Ok(())
+        }
         Cmd::Subagent { command } => {
             if matches!(&command, subagent::Action::Start { .. }) {
                 anyhow::bail!("MANAGED_SUBAGENT_UNSUPPORTED: tmux cannot create a Codex thread; start the peer in its own tmux pane and register that pane");
@@ -809,7 +909,16 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
-        Cmd::Directory => {
+        Cmd::Directory { machine, project } => {
+            if machine.is_some() || project.is_some() {
+                let host = crate::scope::HostPaths::resolve()?;
+                let v: serde_json::Value = client::call(
+                    &host.socket_path(),
+                    &Req::FederationDirectory { machine, project },
+                )?;
+                out(&v);
+                return Ok(());
+            }
             let scope = Scope::resolve()?;
             let v: serde_json::Value = client::call_with_context(
                 &scope.sock_path(),
@@ -1504,6 +1613,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             content,
             r#type,
             in_reply_to,
+            operation_id,
             delivery,
             channel_envelope,
             reply_required,
@@ -1608,47 +1718,95 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             } else {
                 None
             };
-            // One address owner for local and cross-project delivery. A
-            // project-qualified address that names another project is routed
-            // through the host-wide cross-project path; a target the caller
-            // is not authorized to send to gets an explicit permission error
-            // naming the current master.
-            let resolved = resolve_send_target(&scope, &target)?;
-            if let Some(cross) = resolved.cross_project {
-                if reply_policy.is_some() {
-                    anyhow::bail!(
-                        "SEND_REPLY_POLICY_UNSUPPORTED: cross-project send has no reply obligation; ask the target project's master to assign the work"
-                    );
-                }
-                if target_session.is_some() {
-                    anyhow::bail!(
-                        "SEND_TARGET_SESSION_UNSUPPORTED: cross-project send cannot pin a local session"
-                    );
-                }
-                if target.eq_ignore_ascii_case("ceo") {
-                    return send_to_ceo(&scope, &ident, subject, body, in_reply_to);
-                }
-                return send_cross_project(&scope, &ident, &cross, subject, body, in_reply_to);
+            let reply_input = parse_reply_input(in_reply_to)?;
+            if target.eq_ignore_ascii_case("ceo") {
+                let legacy_reply = match reply_input {
+                    Some(ReplyInput::Legacy(reply)) => Some(reply),
+                    Some(ReplyInput::Typed(_)) => anyhow::bail!(
+                        "CEO_REPLY_REF_UNSUPPORTED: the CEO control path accepts only its existing local reply ID"
+                    ),
+                    None => None,
+                };
+                return send_to_ceo(&scope, &ident, subject, body, legacy_reply);
             }
+            let typed_reply = match reply_input {
+                Some(ReplyInput::Legacy(reply)) => {
+                    if operation_id.is_some() {
+                        anyhow::bail!(
+                            "OPERATION_ID_REF_UNSUPPORTED: stable recovery currently requires a typed collab-ref reply or no legacy reply ID"
+                        );
+                    }
+                    // A raw local reply ID is not representable in AddressSend's
+                    // typed MessageRef. Keep this local/cross-project path explicit
+                    // until the shared wire carries a typed-or-legacy reply input.
+                    let resolved = resolve_send_target(&scope, &target)?;
+                    if let Some(cross) = resolved.cross_project {
+                        if reply_policy.is_some() {
+                            anyhow::bail!(
+                                "SEND_REPLY_POLICY_UNSUPPORTED: cross-project send has no reply obligation; ask the target project's master to assign the work"
+                            );
+                        }
+                        if target_session.is_some() {
+                            anyhow::bail!(
+                                "SEND_TARGET_SESSION_UNSUPPORTED: cross-project send cannot pin a local session"
+                            );
+                        }
+                        return send_cross_project(
+                            &scope,
+                            &ident,
+                            &cross,
+                            subject,
+                            body,
+                            Some(reply),
+                        );
+                    }
+                    let command = command_envelope(&scope, &ident)?;
+                    let v: serde_json::Value = call_project(
+                        &scope,
+                        &ident,
+                        &Req::Send {
+                            from: ident.worker_id.clone(),
+                            worker_id: Some(ident.worker_id.clone()),
+                            token: Some(ident.token.clone()),
+                            command: Some(command),
+                            to: resolved.to,
+                            mtype: r#type,
+                            subject: Some(subject),
+                            body,
+                            in_reply_to: Some(reply),
+                            delivery,
+                            reply_policy,
+                            target_session,
+                        },
+                    )?;
+                    out(&v);
+                    return Ok(());
+                }
+                Some(ReplyInput::Typed(reference)) => Some(reference),
+                None => None,
+            };
+            let operation_id = operation_id
+                .map(|value| {
+                    identity::OperationId::new(value)
+                        .map_err(|error| anyhow::anyhow!("OPERATION_ID_INVALID: {error}"))
+                })
+                .transpose()?;
             let command = command_envelope(&scope, &ident)?;
-            let v: serde_json::Value = call_project(
-                &scope,
-                &ident,
-                &Req::Send {
-                    from: ident.worker_id.clone(),
-                    worker_id: Some(ident.worker_id.clone()),
-                    token: Some(ident.token.clone()),
-                    command: Some(command),
-                    to: resolved.to,
-                    mtype: r#type,
-                    subject: Some(subject),
-                    body,
-                    in_reply_to,
-                    delivery,
-                    reply_policy,
-                    target_session,
-                },
-            )?;
+            let request = address_send_request(
+                ident.worker_id.clone(),
+                ident.token.clone(),
+                Some(command),
+                target,
+                operation_id,
+                r#type,
+                subject,
+                body,
+                typed_reply,
+                delivery,
+                reply_policy,
+                target_session,
+            );
+            let v: serde_json::Value = call_project(&scope, &ident, &request)?;
             out(&v);
             Ok(())
         }
@@ -1942,7 +2100,19 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Msg { msg_id } => {
             let scope = Scope::resolve()?;
             let ident = msg_caller(&scope)?;
-            let v: serde_json::Value = call_project(&scope, &ident, &Req::MsgStatus { msg_id })?;
+            let request = if msg_id.starts_with(crate::proto::COLLAB_REF_PREFIX) {
+                let reference = parse_message_reference(&msg_id)?;
+                let command = command_envelope(&scope, &ident)?;
+                Req::MessageRefStatus {
+                    worker_id: ident.worker_id.clone(),
+                    token: ident.token.clone(),
+                    command: Some(command),
+                    reference,
+                }
+            } else {
+                Req::MsgStatus { msg_id }
+            };
+            let v: serde_json::Value = call_project(&scope, &ident, &request)?;
             out(&v);
             Ok(())
         }
@@ -2014,6 +2184,19 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     blocker_action,
                     decision_reason,
                 },
+                TaskCmd::Start {
+                    id,
+                    expected_revision,
+                    attempt,
+                } => Req::Board {
+                    worker_id: worker_id.clone(),
+                    token: token.clone(),
+                    command: board::BoardCommand::Start {
+                        id,
+                        expected_revision,
+                        attempt,
+                    },
+                },
                 TaskCmd::Accept {
                     id,
                     expected_revision,
@@ -2081,6 +2264,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 TaskCmd::Deliver {
                     id,
                     evidence,
+                    attempt,
                     worktree,
                     no_candidate,
                 } => Req::TaskDeliver {
@@ -2088,6 +2272,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     token: token.clone(),
                     task_id: id,
                     evidence: Some(evidence),
+                    attempt,
                     worktree,
                     no_candidate,
                 },
@@ -2175,6 +2360,165 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             }));
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod federation_entry_tests {
+    use super::*;
+    use crate::proto::{
+        format_collab_ref, AddressInput, MessageRef, MessageReference, OriginMessageRef,
+    };
+
+    #[test]
+    fn legacy_send_target_does_not_fall_back_to_local_on_directory_miss() {
+        let scope = Scope {
+            root: std::path::PathBuf::from("/tmp/collab-remote-regression"),
+        };
+        let error = resolve_send_target_from_directory(&scope, "remote.appsdk.Alice", &[])
+            .err()
+            .expect("a qualified address missing from the local directory must fail");
+        assert!(
+            error.to_string().starts_with("ADDRESS_UNKNOWN:"),
+            "unexpected miss result: {error:#}"
+        );
+
+        let local = resolve_send_target_from_directory(&scope, "Alice", &[])
+            .expect("bare legacy names stay local");
+        assert_eq!(local.to, "Alice");
+        assert!(local.cross_project.is_none());
+    }
+
+    #[test]
+    fn address_send_request_preserves_typed_reply_and_recovery_operation() {
+        let reply = MessageRef {
+            machine: "remote".into(),
+            project_scope: crate::scope::ProjectScopeId::new("/projects/alpha").unwrap(),
+            app_scope_id: identity::AppServerId::new("appserver-alpha").unwrap(),
+            msg_id: identity::MessageId::new("collab-msg-remote-1").unwrap(),
+        };
+        let request = address_send_request(
+            "worker-1",
+            "token-1",
+            None,
+            "remote.appsdk.Alice",
+            Some(identity::OperationId::new("operation-recovery-1").unwrap()),
+            "request",
+            "federated",
+            "body",
+            Some(reply.clone()),
+            "immediate",
+            Some(ReplyPolicy::Required),
+            Some("session-1".to_owned()),
+        );
+        let Req::AddressSend {
+            to,
+            operation_id,
+            mtype,
+            subject,
+            body,
+            in_reply_to,
+            delivery,
+            reply_policy,
+            target_session,
+            ..
+        } = request
+        else {
+            panic!("expected the daemon-owned AddressSend request");
+        };
+        assert_eq!(to, AddressInput::Legacy("remote.appsdk.Alice".into()));
+        assert_eq!(
+            operation_id,
+            Some(identity::OperationId::new("operation-recovery-1").unwrap())
+        );
+        assert_eq!(mtype, "request");
+        assert_eq!(subject, "federated");
+        assert_eq!(body, "body");
+        assert_eq!(in_reply_to, Some(reply));
+        assert_eq!(delivery, "immediate");
+        assert_eq!(reply_policy, Some(ReplyPolicy::Required));
+        assert_eq!(target_session, Some("session-1".to_owned()));
+    }
+
+    #[test]
+    fn reply_input_preserves_collab_ref_and_legacy_raw_ids() {
+        let typed = MessageRef {
+            machine: "remote".into(),
+            project_scope: crate::scope::ProjectScopeId::new("/projects/alpha").unwrap(),
+            app_scope_id: identity::AppServerId::new("appserver-alpha").unwrap(),
+            msg_id: identity::MessageId::new("collab-msg-remote-1").unwrap(),
+        };
+        let encoded = format_collab_ref(&MessageReference::Message(typed.clone())).unwrap();
+        assert_eq!(
+            parse_reply_input(Some(encoded)).unwrap(),
+            Some(ReplyInput::Typed(typed))
+        );
+        assert_eq!(
+            parse_reply_input(Some("legacy-local-id".into())).unwrap(),
+            Some(ReplyInput::Legacy("legacy-local-id".into()))
+        );
+        assert_eq!(parse_reply_input(None).unwrap(), None);
+        assert!(parse_reply_input(Some("collab-ref:{invalid".into()))
+            .unwrap_err()
+            .to_string()
+            .starts_with("IN_REPLY_TO_REF_INVALID:"));
+    }
+
+    #[test]
+    fn message_status_accepts_typed_collab_references() {
+        let origin = OriginMessageRef {
+            machine: "remote".into(),
+            project_scope: crate::scope::ProjectScopeId::new("/projects/alpha").unwrap(),
+            app_scope_id: identity::AppServerId::new("appserver-alpha").unwrap(),
+            operation_id: identity::OperationId::new("operation-recovery-1").unwrap(),
+        };
+        let reference = MessageReference::Origin(origin);
+        let encoded = format_collab_ref(&reference).unwrap();
+        assert_eq!(parse_message_reference(&encoded).unwrap(), reference);
+        assert!(parse_message_reference("collab-ref:{invalid")
+            .unwrap_err()
+            .to_string()
+            .starts_with("MESSAGE_REF_INVALID:"));
+    }
+
+    #[test]
+    fn federation_directory_and_send_options_parse_from_the_cli() {
+        let cli = Cli::try_parse_from([
+            "collab",
+            "directory",
+            "--machine",
+            "remote",
+            "--project",
+            "appsdk",
+        ])
+        .unwrap();
+        let Cmd::Directory { machine, project } = cli.cmd else {
+            panic!("expected directory");
+        };
+        assert_eq!(machine.as_deref(), Some("remote"));
+        assert_eq!(project.as_deref(), Some("appsdk"));
+
+        let cli = Cli::try_parse_from([
+            "collab",
+            "sendmessage",
+            "--to",
+            "remote.appsdk.Alice",
+            "--operation-id",
+            "operation-recovery-1",
+            "--subject",
+            "federated",
+            "--content",
+            "body",
+        ])
+        .unwrap();
+        let Cmd::Send {
+            to, operation_id, ..
+        } = cli.cmd
+        else {
+            panic!("expected send");
+        };
+        assert_eq!(to.as_deref(), Some("remote.appsdk.Alice"));
+        assert_eq!(operation_id.as_deref(), Some("operation-recovery-1"));
     }
 }
 

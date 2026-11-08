@@ -1,0 +1,54 @@
+{
+  "id": "collab-ticket-context-snapshot-design",
+  "version": "0.1.0",
+  "description": "设计草案。master 的一次 collab context 请求到一次下属工单快照或明确错误。读取 daemon 同一一致性视图中的下属身份、当前任务和优先级队列，附源版本及采集时间。算子为拟定接口，未绑定运行实现。",
+  "inputs": [{"id": "负责人快照请求", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "接收并核对负责人查看范围",
+      "operator": "collab.ticket_snapshot_design.authorize",
+      "operator_version": "1",
+      "inputs": ["负责人快照请求"],
+      "output": {"id": "快照查看准入结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "读取下属工单与队列一致性视图",
+      "operator": "collab.ticket_snapshot_design.read_consistent_view",
+      "operator_version": "1",
+      "inputs": ["快照查看准入结果"],
+      "output": {"id": "下属工单读取结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "投影当前任务与优先级队列",
+      "operator": "collab.ticket_snapshot_design.project",
+      "operator_version": "1",
+      "inputs": ["下属工单读取结果"],
+      "output": {"id": "下属任务快照或错误", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "返回唯一快照结果",
+      "operator": "collab.ticket_snapshot_design.emit_result",
+      "operator_version": "1",
+      "inputs": ["下属任务快照或错误"],
+      "output": {"id": "负责人快照结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "接收并核对负责人查看范围", "to": "读取下属工单与队列一致性视图", "arc_id": "快照查看准入结果"},
+    {"from": "读取下属工单与队列一致性视图", "to": "投影当前任务与优先级队列", "arc_id": "下属工单读取结果"},
+    {"from": "投影当前任务与优先级队列", "to": "返回唯一快照结果", "arc_id": "下属任务快照或错误"}
+  ],
+  "outputs": ["负责人快照结果"]
+}

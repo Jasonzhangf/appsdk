@@ -614,7 +614,9 @@ impl ProjectRuntimeManager {
                 .workers
                 .get(actor)
                 .and_then(selected_transport_for_worker)
-                .and_then(|transport| notification_target(&transport).map(str::to_owned))
+                .and_then(|transport| {
+                    notification_target(&transport).map(|target| target.into_owned())
+                })
         };
         let (mid, subscription, task_id, deduplicated) = {
             let mut state = target.state.lock().unwrap();

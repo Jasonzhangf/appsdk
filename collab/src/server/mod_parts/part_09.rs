@@ -91,6 +91,11 @@ fn handle_task_review(
             record: lifecycle,
         },
     ];
+    if rework {
+        if let Some(event) = ticket_rework_phase_event(server, &st, &task_id) {
+            events.push(event);
+        }
+    }
     let review_notices = work_review_notice_ids(&st, &task_id);
     if !review_notices.is_empty() {
         events.push(Event::Superseded {

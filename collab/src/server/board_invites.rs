@@ -124,6 +124,35 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
                 assignment_revision: state.task_assignment(&id).map_or(1, |assignment| assignment.assignment_revision + 1),
                 reflow: None, updated_ms: now_ms(),
             } });
+            // An invitation accept on an admitted ticket is the compat
+            // "specified receiver" entry. Claim the queued execute phase onto
+            // the accepting slot exactly like `board claim`; otherwise the
+            // phase stays queued and the accepted peer could never start or
+            // deliver it.
+            if state.board_details.get(&id).is_some_and(|details| details.admitted) {
+                if let Some(phase) = state
+                    .ticket_phases
+                    .iter()
+                    .find(|phase| {
+                        phase.task_id == id
+                            && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
+                            && matches!(
+                                phase.status,
+                                crate::server::ticket_state::TicketPhaseStatus::Queued
+                                    | crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
+                            )
+                    })
+                    .cloned()
+                {
+                    let mut claimed = phase;
+                    claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
+                    claimed.slot_name = Some(slot.identity_key.name.clone());
+                    claimed.binding_generation = slot.generation;
+                    claimed.attempt_generation = claimed.attempt_generation.saturating_add(1);
+                    claimed.wait_reason = None;
+                    events.push(Event::TicketPhaseRecorded { phase: claimed });
+                }
+            }
         } else if state.task_assignment(&id).is_some() {
             return Resp::err("BOARD_TARGET_NAME_REQUIRED: named work requires a current recipient name");
         }

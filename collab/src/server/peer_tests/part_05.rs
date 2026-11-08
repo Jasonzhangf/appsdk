@@ -595,7 +595,10 @@ fn registration_creates_one_finite_default_direct_message_subscription() {
     assert_eq!(subscriptions[0].event, "direct-message");
     let transport = selected_transport_for_worker(&state.workers["peer"]).unwrap();
     assert_eq!(subscriptions[0].method, transport.kind.as_str());
-    assert_eq!(subscriptions[0].target, notification_target(&transport).unwrap());
+    assert_eq!(
+        subscriptions[0].target,
+        notification_target(&transport).unwrap().as_ref()
+    );
     assert_eq!(subscriptions[0].status, "armed");
     assert!(subscriptions[0].expires_ms > now_ms());
     drop(state);

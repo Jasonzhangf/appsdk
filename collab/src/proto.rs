@@ -6,6 +6,10 @@ use crate::identity::{
 };
 use crate::scope::{ProjectScopeId, RouteScope};
 
+#[path = "proto/federation.rs"]
+mod federation;
+pub use federation::*;
+
 /// User maintenance credential for the hidden daemon lifecycle command. It is
 /// serialized only into the authenticated wire request; `Debug` is redacted so
 /// diagnostics cannot expose the value.
@@ -39,6 +43,8 @@ pub enum TransportKind {
     Tmux,
     #[serde(rename = "dsh")]
     Dsh,
+    #[serde(rename = "rex")]
+    Rex,
 }
 
 impl TransportKind {
@@ -48,13 +54,19 @@ impl TransportKind {
             Self::AppServer => "appserver",
             Self::Tmux => "tmux",
             Self::Dsh => "dsh",
+            Self::Rex => "rex",
         }
     }
 
     /// Every kind, so callers that must accept "any known transport" can ask
     /// the enum instead of keeping their own list of strings.
-    pub const ALL: [TransportKind; 4] =
-        [Self::DesktopBridge, Self::AppServer, Self::Tmux, Self::Dsh];
+    pub const ALL: [TransportKind; 5] = [
+        Self::DesktopBridge,
+        Self::AppServer,
+        Self::Tmux,
+        Self::Dsh,
+        Self::Rex,
+    ];
 
     /// Parses the `as_str` form. Kept next to `as_str` on purpose: the two are
     /// one contract, and a subscription whose `method` is a string was the
@@ -102,6 +114,26 @@ pub struct DshCandidate {
     pub cwd: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RexCandidate {
+    pub server: String,
+    pub session_id: String,
+    pub block_id: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RexEndpoint {
+    pub server: String,
+    pub session_id: String,
+    pub block_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    pub instance_id: String,
+    pub cwd: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportCandidates {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +144,8 @@ pub struct TransportCandidates {
     pub tmux: Option<TmuxCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<DshCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rex: Option<RexCandidate>,
 }
 
 /// Observed caller facts for host-local identity reconciliation. The daemon
@@ -126,6 +160,8 @@ pub struct IdentityFacts {
     /// Current gateway API and target reported by a DSH caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<DshCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rex: Option<RexCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_bridge: Option<AppServerCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +289,8 @@ pub struct SelectedTransport {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux_endpoint: Option<TmuxEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rex_endpoint: Option<RexEndpoint>,
     pub capabilities: Vec<String>,
     pub self_check: String,
 }
@@ -294,6 +332,15 @@ pub struct DirectoryTarget {
     /// liveness, `unavailable` when the identity is known to be invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable: Option<String>,
+    /// 远端机器名；联邦目录返回时填充，其余目录保持缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<MachineName>,
+    /// 限定名地址；可解析机器名时填充，其余缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualified_address: Option<String>,
+    /// 限定路由；联邦目标的 typed route 描述，其余缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<QualifiedNameAddress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -864,6 +911,8 @@ pub enum Req {
         token: String,
         task_id: String,
         evidence: Option<String>,
+        #[serde(default)]
+        attempt: Option<u64>,
         worktree: Option<String>,
         #[serde(default)]
         no_candidate: bool,
@@ -945,6 +994,44 @@ pub enum Req {
     Directory,
     /// Host-wide, read-only directory across every registered project.
     DirectoryAll,
+    /// 本机联邦发送：向限定名或旧字符串地址发送一条联邦消息，保留现有
+    /// sender token 认证，不增加权限层级。
+    AddressSend {
+        worker_id: String,
+        token: String,
+        #[serde(default)]
+        command: Option<CommandEnvelope>,
+        to: AddressInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
+        #[serde(rename = "type")]
+        mtype: String,
+        subject: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_reply_to: Option<MessageRef>,
+        #[serde(default = "default_delivery_mode")]
+        delivery: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_policy: Option<ReplyPolicy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_session: Option<String>,
+    },
+    /// 联邦目录：不与已有 Directory/DirectoryAll 冲突。
+    FederationDirectory {
+        #[serde(default)]
+        machine: Option<MachineName>,
+        #[serde(default)]
+        project: Option<String>,
+    },
+    /// 消息引用状态查询。
+    MessageRefStatus {
+        worker_id: String,
+        token: String,
+        #[serde(default)]
+        command: Option<CommandEnvelope>,
+        reference: MessageReference,
+    },
     /// Persist the default delivery target for one external conversation.
     /// The conversation key is owned by the channel adapter, so a plain
     /// terminal without a trusted QQ conversation context cannot mutate it.
@@ -1603,5 +1690,66 @@ mod tests {
                 "removed raw request must fail closed: {op}"
             );
         }
+    }
+
+    #[test]
+    fn rex_wire_types_roundtrip_and_old_json_stays_compatible() {
+        let candidate = RexCandidate {
+            server: "unix:///tmp/rex.sock".into(),
+            session_id: "session:s1".into(),
+            block_id: "block:b1".into(),
+            cwd: "/remote/project".into(),
+        };
+        let value = serde_json::to_value(&candidate).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RexCandidate>(value).unwrap(),
+            candidate
+        );
+
+        let endpoint = RexEndpoint {
+            server: candidate.server.clone(),
+            session_id: candidate.session_id.clone(),
+            block_id: candidate.block_id.clone(),
+            host_id: Some("host-1".into()),
+            instance_id: "instance-1".into(),
+            cwd: candidate.cwd.clone(),
+        };
+        let value = serde_json::to_value(&endpoint).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RexEndpoint>(value).unwrap(),
+            endpoint
+        );
+
+        let endpoint_without_host = serde_json::json!({
+            "server": "unix:///tmp/rex.sock",
+            "session_id": "session:s1",
+            "block_id": "block:b1",
+            "instance_id": "instance-1",
+            "cwd": "/remote/project"
+        });
+        let endpoint: RexEndpoint = serde_json::from_value(endpoint_without_host).unwrap();
+        assert_eq!(endpoint.host_id, None);
+
+        // Old JSON without Rex fields must still decode and re-encode unchanged.
+        let old = serde_json::json!({
+            "kind": "dsh",
+            "session_id": "agent-session-1",
+            "capabilities": ["notify"],
+            "self_check": "checked"
+        });
+        let transport: SelectedTransport = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(transport.kind, TransportKind::Dsh);
+        assert_eq!(transport.rex_endpoint, None);
+        assert_eq!(serde_json::to_value(&transport).unwrap(), old);
+
+        let old_candidates: TransportCandidates =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(old_candidates.rex, None);
+
+        let old_facts: IdentityFacts = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(old_facts.rex, None);
+
+        assert_eq!(TransportKind::Rex.as_str(), "rex");
+        assert_eq!(TransportKind::from_method("rex"), Some(TransportKind::Rex));
     }
 }

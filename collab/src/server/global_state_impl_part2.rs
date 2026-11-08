@@ -125,7 +125,7 @@ impl GlobalState {
         let route_address = binding_route_address(&binding).ok_or_else(|| {
             StateError::invalid(
                 "current thread route",
-                "requires a pane or native session/thread address",
+                "requires a pane or agent session address",
             )
         })?;
         let app_scope_key = binding.app_scope_id.as_str().to_owned();

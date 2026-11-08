@@ -110,8 +110,21 @@ async fn dispatch_wire_routed(
     req: Req,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> (Arc<Server>, Resp) {
-    match req {
+    let is_reply = matches!(&req, Req::Send { in_reply_to: Some(_), .. }
+        | Req::AddressSend { in_reply_to: Some(_), .. });
+    let local_machine = manager.host.config.federation.as_ref()
+        .map(|configuration| configuration.machine.clone()).unwrap_or_else(|| "local".into());
+    let (server, mut response) = match req {
         Req::DirectoryAll => (manager.host.clone(), manager.directory_all()),
+        req @ Req::DefaultSet { .. } => {
+            federation_defaults::dispatch(manager, project_context, req).await
+        }
+        req @ Req::ChannelInbound { .. } => {
+            federation_runtime::channel_dispatch(manager, project_context, req).await
+        }
+        req @ (Req::AddressSend { .. } | Req::FederationDirectory { .. } | Req::MessageRefStatus { .. }) => {
+            federation_runtime::dispatch(manager, project_context, req).await
+        }
         Req::ProjectReset { worker_id, token } => {
             let reset_manager = manager.clone();
             let response = tokio::task::spawn_blocking(move || match project_context {
@@ -253,7 +266,26 @@ async fn dispatch_wire_routed(
                 ),
             }
         }
+    };
+    let local_receipt = response.data.get("reference").and_then(|reference| reference.get("machine"))
+        .and_then(serde_json::Value::as_str).is_none_or(|machine| machine.eq_ignore_ascii_case(&local_machine));
+    if is_reply && response.ok && local_receipt {
+        let message_id = response.data.get("msg_id").and_then(serde_json::Value::as_str).map(str::to_owned);
+        if let Some(message_id) = message_id {
+            let has_channel_route = server.state.lock().unwrap().channel_reply_routes.contains_key(&message_id);
+            if has_channel_route {
+                match channel_delivery::deliver_committed_reply(server.clone(), message_id.clone()).await {
+                    Ok(result) => response.data["channel_delivery"] = json!(result),
+                    Err(error) => {
+                        response.data["channel_delivery_error"] = json!(error);
+                        response.data["channel_delivery"] = json!(channel_delivery::current_result(
+                            &server.state.lock().unwrap(), &message_id));
+                    }
+                }
+            }
+        }
     }
+    (server, response)
 }
 
 async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {
@@ -706,13 +738,37 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         appserver_thread_archive: default_appserver_thread_archive(),
         #[cfg(not(test))]
         tmux_notification_sink: default_tmux_notification_sink(),
+        rex_monitor: Default::default(),
         mailbox_notify: Notify::new(),
     });
     restore_registered_peer_default_leases(&server);
     reconcile_master_goal_due(&server);
+    server
+        .rex_monitor
+        .install_runtime_handle(tokio::runtime::Handle::current());
+    // The monitor creates each Rex events task through `Handle::block_on`,
+    // matching the timer path, so the initial reconcile must also run off the
+    // async worker thread.
+    let initial_monitor = Arc::clone(&server);
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        crate::server::rex_monitor::reconcile(&initial_monitor, now_ms());
+    })
+    .await
+    {
+        append_log(
+            &host_paths.log_path(),
+            &format!("REX_MONITOR_RECONCILE_FAILED: {error}"),
+        );
+    }
     purge_expired_storage(&server, now_ms());
     let runtime_manager = ProjectRuntimeManager::new(server.clone(), &host_paths)
     .map_err(|error| anyhow::anyhow!(error))?;
+    let federation_ingress = match server.config.federation.clone() {
+        Some(configuration) => Some(federation_listener::Ingress::open(
+            host_paths.state_root().join("federation").join("rpc.sock"), configuration,
+        ).map_err(anyhow::Error::msg)?),
+        None => None,
+    };
     // Startup convergence is background work: a slow or unreachable gateway
     // must not delay the listener or the first request.
     crate::server::binding_lifecycle::kick(&runtime_manager);
@@ -798,8 +854,28 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         _ = state_root_removed.as_mut() => {}
         result = async {
             loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
+                while let Some(result) = connection_tasks.try_join_next() {
+                    if let Err(error) = result {
+                        append_log(&host_paths.log_path(), &format!("connection task failed: {error}"));
+                    }
+                }
+                let (federated, accepted) = tokio::select! {
+                    accepted = listener.accept() => (false, accepted.map(|(stream, _)| stream)),
+                    accepted = async {
+                        match federation_ingress.as_ref() {
+                            Some(ingress) => ingress.accept().await,
+                            None => std::future::pending().await,
+                        }
+                    } => (true, accepted),
+                };
+                match accepted {
+                    Ok(stream) if federated => {
+                        let ingress = federation_ingress.as_ref().expect("federated acceptance has an ingress");
+                        connection_tasks.spawn(federation_listener::connection(
+                            runtime_manager.clone(), stream, ingress.configuration(), connection_shutdown_rx.clone(),
+                        ));
+                    }
+                    Ok(stream) => {
                         let manager = runtime_manager.clone();
                         connection_tasks.spawn(conn_task_routed(
                             manager,
@@ -808,7 +884,10 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
                             Some(user_shutdown_tx.clone()),
                         ));
                     }
-                    Err(e) => append_log(&host_paths.log_path(), &format!("accept error: {}", e)),
+                    Err(error) => {
+                        append_log(&host_paths.log_path(), &format!("accept error: {error}"));
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                 }
             }
         } => result,
@@ -818,6 +897,9 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     let _ = scheduler.await;
     connection_shutdown.send_replace(true);
     while connection_tasks.join_next().await.is_some() {}
+    for runtime in runtime_manager.runtimes() {
+        runtime.rex_monitor.shutdown().await;
+    }
 
     let _ = remove_listener_socket(&sock_path, &socket_metadata);
     if std::fs::symlink_metadata(&pid_path).is_ok_and(|current| same_inode(&pid_metadata, &current))

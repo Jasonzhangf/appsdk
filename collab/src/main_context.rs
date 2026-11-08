@@ -175,6 +175,8 @@ struct IdentitySupplement {
     dsh: Option<proto::DshCandidate>,
     #[serde(default)]
     desktop_bridge: Option<proto::AppServerCandidate>,
+    #[serde(default)]
+    rex: Option<proto::RexCandidate>,
     #[serde(default, deserialize_with = "provided_string")]
     session_id: Option<String>,
     #[serde(default, deserialize_with = "provided_string")]
@@ -215,7 +217,8 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
             validate_supplement_string(field, value)?;
         }
     }
-    if supplement.session_id.is_none()
+    if supplement.rex.is_none()
+        && supplement.session_id.is_none()
         && supplement.thread_id.is_none()
         && supplement.endpoint.is_none()
         && supplement.namespace.is_none()
@@ -229,6 +232,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         profile: None,
         dsh_session_id: supplement.dsh.as_ref().map(|dsh| dsh.session_id.clone()),
         dsh: supplement.dsh,
+        rex: supplement.rex,
         desktop_bridge: supplement.desktop_bridge,
         session_id: supplement.session_id,
         thread_id: supplement.thread_id,
@@ -275,6 +279,35 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     let Some(supplied) = supplied else {
         return Ok(facts);
     };
+    if let Some(candidate) = supplied.rex {
+        if supplied.dsh.is_some()
+            || supplied.desktop_bridge.is_some()
+            || supplied.thread_id.is_some()
+            || supplied.endpoint.is_some()
+            || supplied.namespace.is_some()
+        {
+            anyhow::bail!(
+                "IDENTITY_FACT_INVALID: Rex candidate cannot be mixed with DSH, Desktop or AppServer facts"
+            );
+        }
+        for (field, value) in [
+            ("server", candidate.server.as_str()),
+            ("session_id", candidate.session_id.as_str()),
+            ("block_id", candidate.block_id.as_str()),
+            ("cwd", candidate.cwd.as_str()),
+        ] {
+            validate_supplement_string(&format!("rex.{field}"), value)?;
+        }
+        merge_supplied_fact("session_id", &mut facts.session_id, supplied.session_id)?;
+        facts.thread_id = None;
+        facts.endpoint = None;
+        facts.namespace = None;
+        facts.desktop_bridge = None;
+        facts.dsh = None;
+        facts.dsh_session_id = None;
+        facts.rex = Some(candidate);
+        return Ok(facts);
+    }
     if let Some(candidate) = supplied.dsh {
         if supplied.desktop_bridge.is_some()
             || supplied.session_id.is_some()

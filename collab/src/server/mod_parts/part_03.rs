@@ -5,6 +5,15 @@ fn validate_transport_candidates(
     candidates: &TransportCandidates,
     registration_cwd: &str,
 ) -> Result<SelectedTransport, String> {
+    validate_transport_candidates_for_session(server, candidates, registration_cwd, None)
+}
+
+fn validate_transport_candidates_for_session(
+    server: &Server,
+    candidates: &TransportCandidates,
+    registration_cwd: &str,
+    agent_session: Option<&str>,
+) -> Result<SelectedTransport, String> {
     let requested_root = std::fs::canonicalize(registration_cwd)
         .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
     let candidate_root = std::fs::canonicalize(&server.root)
@@ -15,6 +24,21 @@ fn validate_transport_candidates(
             requested_root.display(),
             candidate_root.display()
         ));
+    }
+    if let Some(candidate) = candidates.rex.as_ref() {
+        if candidates.tmux.is_some() || candidates.dsh.is_some()
+            || candidates.desktop_bridge.is_some() || candidates.appserver.is_some()
+        {
+            return Err("REX_ENDPOINT_REJECTED: Rex must be the sole selected transport candidate".into());
+        }
+        if !Path::new(&candidate.cwd).is_absolute() {
+            return Err("REX_ENDPOINT_REJECTED: Rex cwd must be an absolute host path".into());
+        }
+        let session = agent_session.ok_or("REX_AGENT_SESSION_REQUIRED: use context --provide with the current agent session_id")?;
+        return tokio::runtime::Handle::try_current()
+            .map_err(|_| "REX_ENDPOINT_REJECTED: daemon runtime is unavailable".to_owned())?
+            .block_on(crate::client::adapters::rex::verify_candidate(candidate, session))
+            .map_err(|error| error.to_string());
     }
     // A daemon-confirmed current pane wins over all unselected native facts.
     if let Some(candidate) = candidates.tmux.as_ref() {
@@ -28,6 +52,7 @@ fn validate_transport_candidates(
                     session_id: candidate.endpoint.codex_session_id.clone(),
                     thread_id: candidate.endpoint.codex_thread_id.clone(),
                     tmux_endpoint: Some(candidate.endpoint.clone()),
+                    rex_endpoint: None,
                     capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
                     self_check: "daemon verified current pane".into(),
                 })
@@ -170,6 +195,7 @@ fn admit_dsh_candidate(
         session_id: Some(candidate.session_id.clone()),
         thread_id: Some(candidate.agent_id.clone()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["enqueue_wake".into(), "agent_facts".into()],
         self_check: format!(
             "gateway control socket answered a single-use nonce challenge; runtime, agent, session and cwd verified; reported status {}",
@@ -216,6 +242,7 @@ fn materialized_runtime_budget_error(materialized_external: usize, cap: usize) -
 /// reducers behind it.  The existing handler surface remains unchanged: a
 /// request is first routed here, then dispatched to the selected `Server`.
 struct ProjectRuntimeManager {
+    federation_accept_gate: Mutex<()>,
     host: Arc<Server>,
     host_root: PathBuf,
     route_file: PathBuf,

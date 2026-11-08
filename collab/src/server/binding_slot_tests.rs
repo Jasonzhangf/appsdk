@@ -46,6 +46,7 @@ fn value(key: &IdentityBindingKey, agent: &str, runtime: &str, endpoint: &str) -
             session_id: Some(session_id.as_str().to_owned()),
             thread_id: Some(native_thread_id.as_str().to_owned()),
             tmux_endpoint: None,
+            rex_endpoint: None,
             capabilities: vec!["test".to_owned()],
             self_check: "ok".to_owned(),
         },

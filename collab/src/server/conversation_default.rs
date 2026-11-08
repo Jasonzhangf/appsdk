@@ -24,8 +24,14 @@ pub struct ConversationDefault {
     #[serde(default)]
     pub project_scope: String,
     /// Project-qualified or stable-name target address the inbound message
-    /// resolves to when the sender gives no explicit address.
+    /// resolves to when the sender gives no explicit address. This remains the
+    /// display/legacy input; the authoritative routing decision is in
+    /// `resolved_target`.
     pub target_address: String,
+    /// Address-owner classification persisted by the setter. Old defaults
+    /// before federation have no value and keep their local legacy meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_target: Option<crate::address::ResolvedAddress>,
     /// Monotonic revision, advanced on every accepted switch.
     pub revision: u64,
     pub updated_ms: i64,
@@ -61,4 +67,102 @@ pub fn lookup_default<'a>(
         channel_instance,
         conversation,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn typed_default(target_address: &str) -> ConversationDefault {
+        ConversationDefault {
+            channel: "qqbot".into(),
+            channel_instance: "qqbot@host".into(),
+            conversation: "u1:session".into(),
+            project_scope: "/project".into(),
+            target_address: target_address.into(),
+            resolved_target: None,
+            revision: 1,
+            updated_ms: 0,
+        }
+    }
+
+    #[test]
+    fn typed_machine_address_is_preserved_across_current_state_roundtrip() {
+        let mut state = super::super::state::State::default();
+        let default = typed_default("macbookair.appsdk.Alice");
+        state
+            .conversation_defaults
+            .insert(default.key(), default.clone());
+
+        let replayed: super::super::state::State =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            lookup_default(&replayed, "qqbot", "qqbot@host", "u1:session"),
+            Some(&default),
+        );
+        assert_eq!(
+            lookup_default(&replayed, "qqbot", "qqbot@host", "u1:session")
+                .unwrap()
+                .target_address,
+            "macbookair.appsdk.Alice"
+        );
+        assert_eq!(
+            lookup_default(&replayed, "qqbot", "qqbot@host", "u1:session")
+                .unwrap()
+                .resolved_target,
+            None,
+            "an untyped historical default must not gain federation meaning",
+        );
+    }
+
+    #[test]
+    fn typed_remote_default_is_restored_across_state_roundtrip() {
+        let mut state = super::super::state::State::default();
+        let mut default = typed_default("macbookair.appsdk.Alice");
+        default.resolved_target = Some(crate::address::ResolvedAddress::Remote {
+            machine: "macbookair".into(),
+            target: crate::proto::LocalNameAddress {
+                project: "appsdk".into(),
+                name: "Alice".into(),
+            },
+        });
+        state
+            .conversation_defaults
+            .insert(default.key(), default.clone());
+
+        let replayed: super::super::state::State =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            lookup_default(&replayed, "qqbot", "qqbot@host", "u1:session"),
+            Some(&default),
+        );
+    }
+
+    #[test]
+    fn channel_instance_isolation_keeps_typed_defaults_separate() {
+        let mut state = super::super::state::State::default();
+        let first = ConversationDefault {
+            channel_instance: "qqbot@a".into(),
+            ..typed_default("macbookair.appsdk.Alice")
+        };
+        let second = ConversationDefault {
+            channel_instance: "qqbot@b".into(),
+            ..typed_default("coder1.appsdk.Alice")
+        };
+        state.conversation_defaults.insert(first.key(), first);
+        state.conversation_defaults.insert(second.key(), second);
+
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@a", "u1:session")
+                .unwrap()
+                .target_address,
+            "macbookair.appsdk.Alice"
+        );
+        assert_eq!(
+            lookup_default(&state, "qqbot", "qqbot@b", "u1:session")
+                .unwrap()
+                .target_address,
+            "coder1.appsdk.Alice"
+        );
+    }
 }

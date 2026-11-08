@@ -69,6 +69,7 @@ fn typed_token_rotation_rejects_dual_key_session_mismatch() {
         session_id: Some(format!("session-{shared_thread}")),
         thread_id: Some(shared_thread.into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };
@@ -97,6 +98,7 @@ fn typed_token_rotation_rejects_dual_key_session_mismatch() {
         session_id: Some(other_session.into()),
         thread_id: Some(shared_thread.into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };

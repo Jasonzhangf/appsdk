@@ -1,3 +1,5 @@
+use crate::proto::FederationResponse;
+
 /// The single daemon-owned scope projection shared by `status`, `context`, the
 /// board, the panel and the authority-change receipts. It reports the exact
 /// route scope as `{ "project_scope", "app_scope_id" }`, or `null` when no
@@ -255,6 +257,22 @@ fn resolve_send_name_address(
     let current_key = canonical_project_key(&server.root).ok_or_else(|| {
         "NAME_ADDRESS_SCOPE_MISSING: current project key is unavailable".to_string()
     })?;
+    if target.contains('%') {
+        let projects = [current_key.clone()];
+        let context = crate::address::AddressContext { local_projects: &projects, ..Default::default() };
+        let resolved = crate::address::resolve_address(&crate::proto::AddressInput::Legacy(target.clone()), &context)
+            .map_err(|error| error.to_string())?;
+        if let crate::address::ResolvedAddress::LocalName(address) = resolved {
+            if !address.project.eq_ignore_ascii_case(&current_key) {
+                return Err("CROSS_PROJECT_ADDRESS_UNSUPPORTED: the encoded address is outside the current project".into());
+            }
+            let resolved = resolve_name_case_insensitive(control, &route, &address.name)?;
+            authoritative_send_binding(state, &route, &resolved.worker_id).map_err(str::to_owned)?;
+            return Ok((resolved.worker_id, Some(name_mailbox::MailboxNameAddress {
+                project_scope: route.project_scope_id.as_str().into(), name: resolved.name,
+            })));
+        }
+    }
     // `sendmessage`, `default` and channel-inbound routing share one address
     // owner. It resolves `ceo`/bare project keys through the typed grant and
     // rejects case-folded ambiguity instead of selecting the first holder.
@@ -1416,6 +1434,417 @@ fn notify_cross_project_committed(
     )
 }
 
+fn federation_error_response(error: crate::server::federation::FederationError) -> FederationResponse {
+    FederationResponse::Error {
+        code: error.code.to_owned(),
+        detail: error.detail,
+    }
+}
+
+fn verify_federation_connection(
+    connection: &crate::server::federation::AuthenticatedMachine,
+    local_machine: &crate::proto::MachineName,
+    source_machine: &crate::proto::MachineName,
+) -> Result<(), crate::server::federation::FederationError> {
+    use crate::server::federation::FederationError;
+    if &connection.target != local_machine {
+        return Err(FederationError::new(
+            "MACHINE_IDENTITY_MISMATCH",
+            format!(
+                "connection targets {} but this daemon is {local_machine}",
+                connection.target
+            ),
+        ));
+    }
+    if source_machine != &connection.source {
+        return Err(FederationError::new(
+            "FEDERATION_SOURCE_MISMATCH",
+            format!(
+                "request source {source_machine} does not match authenticated source {}",
+                connection.source
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn federation_consumption_facts(
+    st: &State,
+    message_id: &str,
+) -> crate::server::federation::ConsumptionFacts {
+    let consumed = st
+        .msgs
+        .get(message_id)
+        .is_some_and(|message| message.state == "read");
+    let accepted = st
+        .notification_delivery_accepted
+        .contains_key(message_id);
+    let known_not_delivered = st
+        .notification_delivery_failures
+        .contains_key(message_id);
+    let attempted = accepted
+        || known_not_delivered
+        || st.notification_delivery_bindings.contains_key(message_id)
+        || st.wake_bindings.contains_key(message_id);
+    crate::server::federation::notification_facts(
+        consumed,
+        accepted,
+        known_not_delivered,
+        attempted,
+    )
+}
+
+fn federation_receipt_response(
+    st: &State,
+    reference: &crate::proto::MessageRef,
+    requester: &crate::proto::FederationActor,
+) -> FederationResponse {
+    let Some(message_id) = st.federation.message_id_for_reference(reference) else {
+        if st.federation.expired_origins.values().any(|expired| &expired.reference == reference) {
+            return FederationResponse::Expired { reference: reference.clone() };
+        }
+        return FederationResponse::Error {
+            code: "NOT_SEEN".into(),
+            detail: "no accepted message for this reference".into(),
+        };
+    };
+    let facts = federation_consumption_facts(st, message_id);
+    match crate::server::federation::project_receipt(&st.federation, reference, requester, &facts)
+    {
+        Ok(mut receipt) => {
+            receipt.channel_delivery = channel_delivery::current_result(st, message_id);
+            FederationResponse::Message { receipt }
+        }
+        Err(error) => federation_error_response(error),
+    }
+}
+
+/// Resolve the exact local target for a federation address before acceptance.
+/// It uses the same current stable-name owner as local sends and never caches a
+/// remote identity. The returned worker id is the current mailbox carrier.
+pub(crate) fn resolve_federated_local_recipient(
+    server: &Server,
+    state: &State,
+    local_machine: &crate::proto::MachineName,
+    target: &crate::proto::LocalNameAddress,
+) -> Result<crate::server::federation::ResolvedRecipient, crate::server::federation::FederationError>
+{
+    use crate::server::federation::FederationError;
+    let route = server_route_scope(server, state)
+        .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error))?
+        .ok_or_else(|| {
+            FederationError::new("NAME_ADDRESS_SCOPE_MISSING", "current project route is unavailable")
+        })?;
+    let project_key = canonical_project_key(&server.root).ok_or_else(|| {
+        FederationError::new("NAME_ADDRESS_SCOPE_MISSING", "current project key is unavailable")
+    })?;
+    if !target.project.eq_ignore_ascii_case(&project_key) {
+        return Err(FederationError::new(
+            "ADDRESS_PROJECT_MISMATCH",
+            format!("{:?} is not the current project key {project_key}", target),
+        ));
+    }
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error.to_string()))?;
+    let resolved = crate::server::resolve_named_target(
+        state,
+        &control,
+        &route,
+        &project_key,
+        &target.name,
+    )
+    .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error))?
+    .ok_or_else(|| {
+        FederationError::new(
+            "FEDERATION_LOCAL_NAME_UNRESOLVED",
+            format!("{} in project {}", target.name, target.project),
+        )
+    })?;
+    if !state.workers.contains_key(&resolved.worker_id) {
+        return Err(FederationError::new(
+            "FEDERATION_LOCAL_NAME_UNRESOLVED",
+            format!("resolved worker {} is not registered", resolved.worker_id),
+        ));
+    }
+    authoritative_send_binding(state, &route, &resolved.worker_id)
+        .map_err(|error| FederationError::new("SEND_BINDING_REJECTED", error))?;
+    Ok(crate::server::federation::ResolvedRecipient {
+        worker_id: resolved.worker_id.clone(),
+        principal: crate::proto::FederationPrincipal {
+            address: crate::proto::QualifiedNameAddress {
+                machine: local_machine.clone(),
+                local: crate::proto::LocalNameAddress {
+                    project: target.project.clone(),
+                    name: resolved.name.clone(),
+                },
+            },
+            project_scope: route.project_scope_id.clone(),
+            app_scope_id: route.app_scope_id.clone(),
+            stable_name: resolved.name.clone(),
+        },
+        address: crate::proto::LocalNameAddress {
+            project: target.project.clone(),
+            name: resolved.name,
+        },
+    })
+}
+
+/// Atomic target-side federation acceptance. The caller passes the typed source
+/// fact from the auth owner and a local target already resolved by
+/// `resolve_federated_local_recipient`. The mailbox row and exact dedup index
+/// commit in one current-state batch.
+pub(crate) fn accept_federated_message(
+    server: &Server,
+    local_machine: &crate::proto::MachineName,
+    connection: &crate::server::federation::AuthenticatedMachine,
+    request: &crate::proto::FederationPut,
+    recipient: &crate::server::federation::ResolvedRecipient,
+    now: i64,
+) -> FederationResponse {
+    use crate::server::federation::{AcceptDisposition, FederatedMessageMeta, FederationError};
+    let sender_display = crate::server::federation::display_sender(&request.sender);
+    let crate::proto::FederationDestination::Named(target) = &request.target else {
+        return federation_error_response(FederationError::new(
+            "ADDRESS_MISMATCH",
+            "external channel inbound cannot declare a channel-owner destination",
+        ));
+    };
+    if &connection.target != local_machine
+        || &recipient.principal.address.machine != local_machine
+        || !recipient
+            .address
+            .project
+            .eq_ignore_ascii_case(&target.project)
+        || !recipient.address.name.eq_ignore_ascii_case(&target.name)
+    {
+        return federation_error_response(FederationError::new(
+            "ADDRESS_MISMATCH",
+            "resolved target does not match the federation request target",
+        ));
+    }
+
+    let mut st = server.state.lock().unwrap();
+    let existing_body = st
+        .federation
+        .message_id_for_origin(&request.origin)
+        .and_then(|message_id| st.msgs.get(message_id))
+        .map(|message| message.body.as_str());
+    let existing_target_session = st
+        .federation
+        .message_id_for_origin(&request.origin)
+        .and_then(|message_id| st.target_sessions.get(message_id))
+        .map(String::as_str);
+    let disposition = match crate::server::federation::plan_accept(
+        &st.federation,
+        connection,
+        local_machine,
+        request,
+        existing_body,
+        existing_target_session,
+    ) {
+        Ok(disposition) => disposition,
+        Err(error) => return federation_error_response(error),
+    };
+    match disposition {
+        AcceptDisposition::Reuse(reference) => {
+            federation_receipt_response(&st, &reference, &request.sender)
+        }
+        AcceptDisposition::Expired(reference) => FederationResponse::Expired { reference },
+        AcceptDisposition::New => {
+            let mid = gen_msg_id();
+            let msg_id = match crate::identity::MessageId::new(mid.clone()) {
+                Ok(msg_id) => msg_id,
+                Err(error) => {
+                    return federation_error_response(FederationError::new(
+                        "MESSAGE_ID_INVALID",
+                        error.to_string(),
+                    ));
+                }
+            };
+            let reference = crate::proto::MessageRef {
+                machine: local_machine.clone(),
+                project_scope: recipient.principal.project_scope.clone(),
+                app_scope_id: recipient.principal.app_scope_id.clone(),
+                msg_id,
+            };
+            let meta = FederatedMessageMeta {
+                origin: request.origin.clone(),
+                sender: request.sender.clone(),
+                target: request.target.clone(),
+                recipient: crate::proto::FederationActor::Peer(recipient.principal.clone()),
+                reference: reference.clone(),
+                mtype: request.mtype.clone(),
+                subject: request.subject.clone(),
+                delivery: request.delivery.clone(),
+                in_reply_to: request.in_reply_to.clone(),
+                original_origin: request.original_origin.clone(),
+                reply_policy: request.reply_policy,
+                channel: request.channel.clone(),
+                accepted_ms: now,
+            };
+            let msg = Message {
+                id: mid.clone(),
+                from: sender_display.clone(),
+                to: recipient.worker_id.clone(),
+                mtype: request.mtype.clone(),
+                subject: Some(request.subject.clone()),
+                body: request.body.clone(),
+                in_reply_to: None,
+                created_ms: now,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            };
+            let subscription = st
+                .matching_subscription(&recipient.worker_id, "direct-message", None, now)
+                .cloned();
+            let mut events = vec![
+                Event::Sent { msg },
+                Event::DeliveryMode {
+                    msg_id: mid.clone(),
+                    mode: request.delivery.clone(),
+                    source_thread_id: None,
+                },
+                Event::MailboxNameAddressed {
+                    message_id: mid.clone(),
+                    address: name_mailbox::MailboxNameAddress {
+                        project_scope: recipient.principal.project_scope.as_str().into(),
+                        name: recipient.principal.stable_name.clone(),
+                    },
+                },
+            ];
+            if let Some(policy) = request.reply_policy {
+                events.push(Event::ReplyObligationSet {
+                    obligation: reply_obligation::build_obligation(
+                        None, mid.clone(), recipient.principal.project_scope.as_str().into(),
+                        sender_display.clone(), recipient.worker_id.clone(),
+                        Some(recipient.principal.stable_name.clone()), policy,
+                    ),
+                });
+            }
+            if let Some(target_session) = request.target_session.as_ref() {
+                events.push(Event::TargetSessionBound {
+                    message_id: mid.clone(),
+                    target_session: target_session.clone(),
+                });
+            }
+            if let Some(subscription) = &subscription {
+                events.push(Event::WakeBound {
+                    message_id: mid.clone(),
+                    subscription_id: subscription.id.clone(),
+                });
+            }
+            events.push(Event::FederationAccepted {
+                message_id: mid.clone(),
+                meta,
+            });
+            if let Err(error) = server.commit_locked(&mut st, &events) {
+                return federation_error_response(FederationError::new(
+                    "FEDERATION_ACCEPT_DURABILITY_FAILED",
+                    error,
+                ));
+            }
+            drop(st);
+            notify_cross_project_committed(
+                server,
+                CrossProjectCommitted {
+                    msg_id: mid,
+                    subscription,
+                },
+                &sender_display,
+                &recipient.worker_id,
+            );
+            let st = server.state.lock().unwrap();
+            federation_receipt_response(&st, &reference, &request.sender)
+        }
+    }
+}
+
+/// Same-origin `Lookup` recovery. It never creates a new operation id and
+/// never invents a mailbox fact.
+pub(crate) fn lookup_federated_message(
+    server: &Server,
+    local_machine: &crate::proto::MachineName,
+    connection: &crate::server::federation::AuthenticatedMachine,
+    origin: &crate::proto::OriginMessageRef,
+    requester: &crate::proto::FederationActor,
+    compare: Option<&crate::proto::FederationPut>,
+) -> FederationResponse {
+    use crate::server::federation::FederationError;
+    if let Err(error) = verify_federation_connection(connection, local_machine, &origin.machine) {
+        return federation_error_response(error);
+    }
+    if requester.machine() != connection.source.as_str() {
+        return federation_error_response(FederationError::new(
+            "FEDERATION_SOURCE_MISMATCH",
+            "requester is not the authenticated source machine",
+        ));
+    }
+    let st = server.state.lock().unwrap();
+    if let Some(expired) = st
+        .federation
+        .expired_origins
+        .get(&crate::server::federation::origin_key(origin))
+    {
+        return FederationResponse::Expired {
+            reference: expired.reference.clone(),
+        };
+    }
+    let Some(meta) = st.federation.message_for_origin(origin) else {
+        return FederationResponse::NotSeen;
+    };
+    let Some(compare) = compare else {
+        return federation_receipt_response(&st, &meta.reference, requester);
+    };
+    let existing_body = st
+        .federation
+        .message_id_for_origin(origin)
+        .and_then(|message_id| st.msgs.get(message_id))
+        .map(|message| message.body.as_str());
+    let existing_target_session = st
+        .federation
+        .message_id_for_origin(origin)
+        .and_then(|message_id| st.target_sessions.get(message_id))
+        .map(String::as_str);
+    match crate::server::federation::compare_accepted_intent(
+        &st.federation,
+        origin,
+        requester,
+        compare,
+        existing_body,
+        existing_target_session,
+    ) {
+        Ok(reference) => federation_receipt_response(&st, &reference, requester),
+        Err(error) => federation_error_response(error),
+    }
+}
+
+/// Formal receipt query for a target-owned `MessageRef`. Only a participant of
+/// the referenced message may read it.
+pub(crate) fn federated_message_receipt(
+    server: &Server,
+    local_machine: &crate::proto::MachineName,
+    connection: &crate::server::federation::AuthenticatedMachine,
+    reference: &crate::proto::MessageRef,
+    requester: &crate::proto::FederationActor,
+) -> FederationResponse {
+    use crate::server::federation::FederationError;
+    let requester_machine = requester.machine().to_owned();
+    if let Err(error) = verify_federation_connection(connection, local_machine, &requester_machine) {
+        return federation_error_response(error);
+    }
+    if &reference.machine != local_machine {
+        return federation_error_response(FederationError::new(
+            "FEDERATION_REFERENCE_MISMATCH",
+            "this daemon does not own the requested reference",
+        ));
+    }
+    let st = server.state.lock().unwrap();
+    federation_receipt_response(&st, reference, requester)
+}
+
 /// Target-side handler kept for direct reducer tests. It checks endpoint
 /// reachability outside the state lock and commits the
 /// message under one target guard.
@@ -1965,6 +2394,13 @@ fn task_update_locked(
         events.extend(invalidate_work_review(st, &task, &mut record, reviewer));
         events.push(Event::TaskLifecycleUpdated { task_id:task_id.clone(),record });
     }
+    if original_status != task.status
+        && matches!(task.status.as_str(), "working" | "verifying" | "rework")
+    {
+        if let Some(event) = ticket_rework_phase_event(server, &st, &task_id) {
+            events.push(event);
+        }
+    }
     if task.status != "accepted" && st.pending_merges.contains_key(&task_id) {
         let stale_notices = pending_merge_notice_ids(&st, &task_id);
         events.push(Event::MergeResolved {
@@ -2405,6 +2841,7 @@ fn handle_task_deliver(
         token,
         task_id,
         evidence,
+        None,
         worktree,
         false,
     )
@@ -2416,6 +2853,7 @@ fn handle_task_deliver_with_intent(
     token: String,
     task_id: String,
     evidence: Option<String>,
+    attempt: Option<u64>,
     worktree: Option<String>,
     no_candidate: bool,
 ) -> Resp {
@@ -2449,6 +2887,18 @@ fn handle_task_deliver_with_intent(
         );
     }
     if let Err(error)=work_executor_gate(server,&st,&task_id,&worker_id) {return error;}
+
+    let ticket_result_event = match board_ticket_result_event(
+        server,
+        &st,
+        &worker_id,
+        &task_id,
+        evidence.as_deref().unwrap_or(""),
+        attempt,
+    ) {
+        Ok(event) => event,
+        Err(error) => return error,
+    };
 
     let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) else {
         return Resp::err("task deliver requires non-empty --evidence");
@@ -2484,6 +2934,9 @@ fn handle_task_deliver_with_intent(
     let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
     let required_reviewer = required_work_reviewer(&st, &task_id);
     let mut events = invalidate_work_review(&st, &task, &mut lifecycle, required_reviewer.clone());
+    if let Some(ticket_event) = ticket_result_event.clone() {
+        events.push(ticket_event);
+    }
     lifecycle.delivery_kind = if no_candidate {
         state::TaskDeliveryKind::ReadOnly
     } else {
@@ -2530,6 +2983,31 @@ fn handle_task_deliver_with_intent(
             }
             review_notice = Some((message_id,subscription,notification_method_for_worker(&st,&recipient)));
         } else { reviewer_waiting = Some(format!("reviewer {name} is currently unavailable")); }
+    }
+    // A completed execute phase releases the slot. Run the same continuation
+    // entry so the next queued item for that slot is claimed in this batch.
+    if let Some(Event::TicketPhaseRecorded { phase: completed }) = ticket_result_event.as_ref() {
+        if let Ok(Some(route)) = server_route_scope(server, &st) {
+            if let Ok(control) =
+                binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+            {
+                events.extend(ticket_continuation_events(
+                    &st,
+                    &control,
+                    &route,
+                    &worker_id,
+                    std::slice::from_ref(completed),
+                    false,
+                ));
+                events.extend(ticket_dependency_release_events(
+                    &st,
+                    &control,
+                    &route,
+                    completed,
+                    &worker_id,
+                ));
+            }
+        }
     }
     events.extend([
             Event::TaskUpdated { task: task.clone() },

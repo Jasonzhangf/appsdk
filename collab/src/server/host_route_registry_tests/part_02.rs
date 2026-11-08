@@ -63,6 +63,7 @@ fn reload_owned_test_server(server: &Arc<Server>) -> Arc<Server> {
         appserver_notification_sink: server.appserver_notification_sink.clone(),
         appserver_thread_status: server.appserver_thread_status.clone(),
         appserver_thread_archive: server.appserver_thread_archive.clone(),
+        rex_monitor: Default::default(),
         mailbox_notify: Notify::new(),
     })
 }

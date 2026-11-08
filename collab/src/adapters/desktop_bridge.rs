@@ -138,6 +138,7 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
         session_id: Some(candidate.session_id.clone()),
         thread_id: Some(candidate.thread_id.clone()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
         self_check: "Desktop bridge verified registered thread and project".into(),
     };

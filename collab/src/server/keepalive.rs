@@ -873,9 +873,10 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
 pub(crate) const DISPATCH_GAP_IDEMPOTENCE_MS: i64 = 600_000;
 
 /// One durable reminder to the current project master while its own board
-/// still has a pending, undispatched public task and a direct, typed-idle peer
-/// can take it. Runs on the periodic tick with its own idempotence window; it
-/// never dispatches work, changes task owner/status, or treats
+/// still has an admitted public ticket with an undispatched phase (waiting for
+/// a slot or queued on a slot that has not started it) and a direct, typed-idle
+/// peer can take it. Runs on the periodic tick with its own idempotence window;
+/// it never dispatches work, changes task owner/status, or treats
 /// unknown/cold/offline/waiting_user and managed children as idle capacity.
 pub(crate) fn dispatch_gap_check_at(server: &Server, now: i64) {
     if !server.config.notifications.enabled {
@@ -890,7 +891,7 @@ pub(crate) fn dispatch_gap_check_at(server: &Server, now: i64) {
     let Some(master_id) = super::current_master_holder(server, &state).ok().flatten() else {
         return;
     };
-    let task_ids = dispatch_gap_pending_task_ids(&state, &master_id);
+    let task_ids = dispatch_gap_undispatched_task_ids(&state, &master_id);
     let idle_peer_ids = if task_ids.is_empty() {
         Vec::new()
     } else {
@@ -977,21 +978,36 @@ pub(crate) fn dispatch_gap_check_at(server: &Server, now: i64) {
     }
 }
 
-/// Pending, undispatched public board tasks still held by the publisher or the
-/// current master and carrying no active invitation.
-fn dispatch_gap_pending_task_ids(state: &State, master_id: &str) -> Vec<String> {
+/// Admitted public tickets still held by the publisher or the current master
+/// whose next executable phase is undispatched: the phase is waiting for a slot
+/// (`WaitingAssignment`) or queued on a slot that has not started it (`Queued`).
+/// The ticket state machine replaced the legacy `task.status == "pending"`
+/// launch flag, so the reminder reads the real phase instead of that flag.
+fn dispatch_gap_undispatched_task_ids(state: &State, master_id: &str) -> Vec<String> {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
     let mut task_ids: Vec<String> = state
-        .tasks
-        .values()
-        .filter(|task| task.status == "pending")
-        .filter(|task| task.owner == master_id || task.created_by == master_id)
-        .filter(|task| {
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.phase == TicketPhaseKind::Execute
+                && matches!(
+                    phase.status,
+                    TicketPhaseStatus::WaitingAssignment | TicketPhaseStatus::Queued
+                )
+        })
+        .map(|phase| phase.task_id.clone())
+        .filter(|task_id| {
+            state.tasks.get(task_id).is_some_and(|task| {
+                !crate::server::state::task_status_is_terminal(&task.status)
+                    && (task.owner == master_id || task.created_by == master_id)
+            })
+        })
+        .filter(|task_id| {
             state
                 .board_details
-                .get(&task.id)
+                .get(task_id)
                 .is_some_and(|details| details.public_visibility && details.invitation.is_none())
         })
-        .map(|task| task.id.clone())
         .collect();
     task_ids.sort();
     task_ids.dedup();
@@ -1000,8 +1016,9 @@ fn dispatch_gap_pending_task_ids(state: &State, master_id: &str) -> Vec<String> 
 
 /// Direct one-layer peers able to take work, reusing the board dispatch
 /// stable-name/binding/managed-child/transport rules plus positive typed idle
-/// activity. Eligibility is evaluated per pending task so an executor pin
-/// cannot be satisfied by an unrelated idle peer.
+/// activity. Eligibility is evaluated per undispatched task so an executor pin
+/// cannot be satisfied by an unrelated idle peer. A peer that already holds
+/// queued work of its own is not free capacity and is excluded.
 fn dispatch_gap_idle_peer_ids(
     server: &Server,
     state: &State,
@@ -1039,10 +1056,35 @@ fn dispatch_gap_idle_peer_ids(
                     && activity.is_some_and(|fact| fact.activity == AgentActivity::Idle)
             })
         })
+        .filter(|worker_id| {
+            !dispatch_gap_peer_holds_queued_work(state, &control, &route, worker_id)
+        })
         .collect();
     peers.sort();
     peers.dedup();
     peers
+}
+
+/// True when the peer's stable slot already holds a `Queued` phase. Its typed
+/// idle activity then reflects not-yet-started assigned work, not free
+/// capacity for the dispatch-gap reminder.
+fn dispatch_gap_peer_holds_queued_work(
+    state: &State,
+    control: &crate::server::binding_slot::BindingControlSet,
+    route: &crate::scope::RouteScope,
+    worker_id: &str,
+) -> bool {
+    use crate::server::ticket_state::TicketPhaseStatus;
+    let Ok(Some(slot)) =
+        control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)
+    else {
+        return false;
+    };
+    let name = &slot.identity_key.name;
+    state.ticket_phases.iter().any(|phase| {
+        phase.status == TicketPhaseStatus::Queued
+            && phase.slot_name.as_deref() == Some(name.as_str())
+    })
 }
 
 /// Sorted condition key. A change in task set, idle peer set or master
@@ -1061,7 +1103,7 @@ fn dispatch_gap_condition_key(
 
 fn dispatch_gap_body(task_ids: &[String], idle_peer_ids: &[String]) -> String {
     format!(
-        "Dispatch gap: {} public board task(s) are pending undispatched while {} direct peer(s) are typed idle. tasks={}; idle_peers={}. Use the existing board dispatch/invite entry to assign suitable work. This reminder does not dispatch, change owners, or change task status, and the same condition stays silent for {}ms.",
+        "Dispatch gap: {} admitted public ticket(s) still have an undispatched phase (waiting_assignment/queued) while {} direct peer(s) are typed idle. tasks={}; idle_peers={}. Use the existing board dispatch/invite entry to assign suitable work. This reminder does not dispatch, change owners, or change task status, and the same condition stays silent for {}ms.",
         task_ids.len(),
         idle_peer_ids.len(),
         task_ids.join(", "),
@@ -1130,6 +1172,24 @@ pub(super) fn current_board_patrol_activity(
                     "running" => AgentActivity::Busy,
                     _ => AgentActivity::Unknown,
                 }
+            })
+        }
+        crate::proto::TransportKind::Rex => {
+            // Rex self-report does not carry a trusted idle interval. Report
+            // the current non-idle projection, and never synthesize Idle.
+            let Ok(scope) = super::GlobalState::canonical_project_scope(&server.root) else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let state = server.state.lock().unwrap();
+            let activity = state
+                .agent_activity
+                .get(scope.as_str())
+                .and_then(|workers| workers.get(&worker.id))
+                .map(|record| record.activity)
+                .unwrap_or(AgentActivity::Unknown);
+            Ok(match activity {
+                AgentActivity::Idle => AgentActivity::Unknown,
+                other => other,
             })
         }
     }
@@ -3484,16 +3544,37 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn seed_pending_public_task(server: &Server, task_id: &str, master_id: &str, public: bool) {
+    fn seed_undispatched_public_ticket(
+        server: &Server,
+        task_id: &str,
+        master_id: &str,
+        public: bool,
+    ) {
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
         let mut state = server.state.lock().unwrap();
         let now = super::super::state::now_ms();
         state
             .tasks
-            .insert(task_id.to_owned(), task(task_id, master_id, "pending", now));
+            .insert(task_id.to_owned(), task(task_id, master_id, "working", now));
         state.board_details.insert(
             task_id.to_owned(),
             crate::board::BoardTaskDetails::legacy(task_id, public),
         );
+        state.ticket_phases.push(TicketPhaseRecord {
+            task_id: task_id.to_owned(),
+            phase: TicketPhaseKind::Execute,
+            batch: 0,
+            priority: "p2".into(),
+            status: TicketPhaseStatus::WaitingAssignment,
+            slot_name: None,
+            binding_generation: 0,
+            enqueue_seq: 1,
+            attempt_generation: 0,
+            depends_on: Vec::new(),
+            route_group: None,
+            wait_reason: Some("fixture waiting for a slot".into()),
+            result: None,
+        });
     }
 
     fn dispatch_gap_notice_count(server: &Server) -> usize {
@@ -3528,13 +3609,31 @@ mod tests {
         super::super::peer_tests::promote_master(server, "master", "user approved master");
     }
 
+    fn peer_stable_name(server: &Server, worker_id: &str) -> String {
+        let state = server.state.lock().unwrap();
+        let route = super::super::server_route_scope(server, &state)
+            .unwrap()
+            .unwrap();
+        let control =
+            crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .unwrap();
+        control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)
+            .unwrap()
+            .unwrap()
+            .identity_key
+            .name
+            .clone()
+    }
+
     #[test]
-    fn dispatch_gap_pending_task_and_idle_peer_delivers_one_durable_reminder() {
+    fn dispatch_gap_undispatched_phase_and_idle_peer_delivers_one_durable_reminder() {
         use super::super::name_state::{AgentActivity, AgentPresence};
         let (server, root) = test_server();
         seed_master(&server);
         seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
-        seed_pending_public_task(&server, "T1", "master", true);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
         let now = super::super::state::now_ms();
         super::dispatch_gap_check_at(&server, now);
         {
@@ -3555,7 +3654,7 @@ mod tests {
             assert_eq!(state.master_wake.dispatch_gap_delivery_state, "delivered");
             // The reminder must not auto-dispatch or mutate task ownership.
             assert_eq!(state.tasks["T1"].owner, "master");
-            assert_eq!(state.tasks["T1"].status, "pending");
+            assert_eq!(state.tasks["T1"].status, "working");
         }
         super::dispatch_gap_check_at(&server, now + 1);
         super::dispatch_gap_check_at(&server, now + super::DISPATCH_GAP_IDEMPOTENCE_MS - 1);
@@ -3577,7 +3676,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_gap_requires_pending_undispatched_public_task() {
+    fn dispatch_gap_requires_undispatched_ticket_phase() {
         use super::super::name_state::{AgentActivity, AgentPresence};
         let (server, root) = test_server();
         seed_master(&server);
@@ -3587,12 +3686,12 @@ mod tests {
         assert_eq!(dispatch_gap_notice_count(&server), 0);
 
         // A non-public task is not dispatchable board work.
-        seed_pending_public_task(&server, "private", "master", false);
+        seed_undispatched_public_ticket(&server, "private", "master", false);
         super::dispatch_gap_check_at(&server, now + 1);
         assert_eq!(dispatch_gap_notice_count(&server), 0);
 
         // A task already carrying an active invitation is no longer undispatched.
-        seed_pending_public_task(&server, "invited", "master", true);
+        seed_undispatched_public_ticket(&server, "invited", "master", true);
         let mut state = server.state.lock().unwrap();
         state.board_details.get_mut("invited").unwrap().invitation =
             Some(crate::board::BoardInvitation {
@@ -3607,8 +3706,79 @@ mod tests {
         super::dispatch_gap_check_at(&server, now + 2);
         assert_eq!(dispatch_gap_notice_count(&server), 0);
 
-        seed_pending_public_task(&server, "T1", "master", true);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
         super::dispatch_gap_check_at(&server, now + 3);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_requires_execute_kind_undispatched_phase() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        use crate::server::ticket_state::TicketPhaseKind;
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        let now = super::super::state::now_ms();
+
+        // A non-Execute phase waiting for a slot must not count as a dispatch gap.
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
+        {
+            let mut state = server.state.lock().unwrap();
+            let phase = state
+                .ticket_phases
+                .iter_mut()
+                .find(|phase| phase.task_id == "T1")
+                .unwrap();
+            phase.phase = TicketPhaseKind::Plan;
+        }
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            0,
+            "a non-Execute waiting_assignment phase must not open a dispatch gap"
+        );
+
+        // Only an undispatched Execute phase is the actionable gap.
+        {
+            let mut state = server.state.lock().unwrap();
+            let phase = state
+                .ticket_phases
+                .iter_mut()
+                .find(|phase| phase.task_id == "T1")
+                .unwrap();
+            phase.phase = TicketPhaseKind::Execute;
+        }
+        super::dispatch_gap_check_at(&server, now + 1);
+        assert_eq!(dispatch_gap_notice_count(&server), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_ignores_cancelled_ticket_with_undispatched_phase() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
+        {
+            let mut state = server.state.lock().unwrap();
+            state.tasks.get_mut("T1").unwrap().status = "cancelled".into();
+        }
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            0,
+            "a cancelled ticket carries no dispatchable responsibility"
+        );
+
+        // A non-terminal status reopens the real gap.
+        {
+            let mut state = server.state.lock().unwrap();
+            state.tasks.get_mut("T1").unwrap().status = "working".into();
+        }
+        super::dispatch_gap_check_at(&server, now + 1);
         assert_eq!(dispatch_gap_notice_count(&server), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3619,7 +3789,7 @@ mod tests {
         let (server, root) = test_server();
         seed_master(&server);
         seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Busy);
-        seed_pending_public_task(&server, "T1", "master", true);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
         let now = super::super::state::now_ms();
         for (index, (presence, activity)) in [
             (AgentPresence::Online, AgentActivity::Busy),
@@ -3664,7 +3834,7 @@ mod tests {
                 managed("child-record", "master", "child", "status", 1),
             );
         }
-        seed_pending_public_task(&server, "T1", "master", true);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
         let now = super::super::state::now_ms();
         super::dispatch_gap_check_at(&server, now);
         assert_eq!(
@@ -3688,12 +3858,12 @@ mod tests {
         let (server, root) = test_server();
         seed_master(&server);
         seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
-        seed_pending_public_task(&server, "T1", "master", true);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
         let now = super::super::state::now_ms();
         super::dispatch_gap_check_at(&server, now);
         assert_eq!(dispatch_gap_notice_count(&server), 1);
 
-        seed_pending_public_task(&server, "T2", "master", true);
+        seed_undispatched_public_ticket(&server, "T2", "master", true);
         super::dispatch_gap_check_at(&server, now + 1);
         assert_eq!(
             dispatch_gap_notice_count(&server),
@@ -3712,7 +3882,7 @@ mod tests {
         let (server, root) = test_server();
         seed_master(&server);
         seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
-        seed_pending_public_task(&server, "T1", "master", true);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
         let now = super::super::state::now_ms();
         super::dispatch_gap_check_at(&server, now);
         assert_eq!(dispatch_gap_notice_count(&server), 1);
@@ -3729,12 +3899,49 @@ mod tests {
         assert!(state.master_wake.last_dispatch_gap_notice_key.is_none());
         drop(state);
 
-        seed_pending_public_task(&server, "T2", "master", true);
+        seed_undispatched_public_ticket(&server, "T2", "master", true);
         super::dispatch_gap_check_at(&server, now + 2);
         assert_eq!(
             dispatch_gap_notice_count(&server),
             2,
             "a resolved gap does not hold the old window"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gap_excludes_peers_holding_queued_own_work() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+        let (server, root) = test_server();
+        seed_master(&server);
+        seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+        seed_undispatched_public_ticket(&server, "T1", "master", true);
+        let slot = peer_stable_name(&server, "peer");
+        {
+            let mut state = server.state.lock().unwrap();
+            state.ticket_phases.push(TicketPhaseRecord {
+                task_id: "T1".into(),
+                phase: TicketPhaseKind::Execute,
+                batch: 1,
+                priority: "p2".into(),
+                status: TicketPhaseStatus::Queued,
+                slot_name: Some(slot),
+                binding_generation: 0,
+                enqueue_seq: 2,
+                attempt_generation: 0,
+                depends_on: Vec::new(),
+                route_group: None,
+                wait_reason: Some("fixture queued on the slot".into()),
+                result: None,
+            });
+        }
+        let now = super::super::state::now_ms();
+        super::dispatch_gap_check_at(&server, now);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
+            0,
+            "a peer holding queued own work is not free capacity"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

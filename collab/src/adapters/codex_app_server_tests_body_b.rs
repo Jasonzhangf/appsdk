@@ -934,6 +934,7 @@
             session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
             tmux_endpoint: None,
+            rex_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test".into(),
         }

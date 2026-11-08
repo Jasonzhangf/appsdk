@@ -116,7 +116,7 @@ impl ProjectRuntimeManager {
         facts: &IdentityFacts,
     ) -> anyhow::Result<(IdentityFacts, Option<crate::proto::TmuxPaneAnchor>)> {
         let mut facts = facts.clone();
-        if facts.dsh.is_some() || facts.dsh_session_id.is_some() {
+        if facts.rex.is_some() || facts.dsh.is_some() || facts.dsh_session_id.is_some() {
             // DSH owns its gateway anchor. The process may still be launched
             // from a tmux pane, but that ancestry is observation only and
             // cannot become a competing transport candidate.
@@ -265,16 +265,7 @@ impl ProjectRuntimeManager {
 
     pub(super) fn binding_publication_matches(&self, binding: &RuntimeBinding) -> bool {
         let state = self.host.state.lock().unwrap();
-        match binding.tmux_endpoint.as_ref() {
-            Some(endpoint) => state.global.lookup_unique_tmux_pane_route(endpoint) == Some(binding),
-            None => binding
-                .session_id
-                .as_ref()
-                .zip(binding.native_thread_id.as_ref())
-                .is_some_and(|(session, thread)| {
-                    state.global.lookup_current_thread_route(session, thread) == Some(binding)
-                }),
-        }
+        state.global.current_thread_routes.values().any(|current| current == binding)
     }
 
     fn refresh_session_endpoint(
@@ -553,6 +544,14 @@ impl ProjectRuntimeManager {
                             current = Some(self.refresh_session_transport(
                                 &runtime, saved, transport, &mut ident, &scope,
                             )?);
+                        } else if let Some(candidate) = facts.rex.as_ref() {
+                            let candidates = TransportCandidates { rex: Some(candidate.clone()), ..Default::default() };
+                            transport = validate_transport_candidates_for_session(
+                                &runtime, &candidates, &context.canonical_root, facts.session_id.as_deref(),
+                            ).map_err(anyhow::Error::msg)?;
+                            current = Some(self.refresh_session_transport(
+                                &runtime, saved, transport, &mut ident, &scope,
+                            )?);
                         } else if facts.desktop_bridge.is_some()
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
                                 == facts.session_id.as_deref()
@@ -726,6 +725,7 @@ impl ProjectRuntimeManager {
                 },
                 tmux: facts.tmux,
                 dsh: facts.dsh,
+                rex: facts.rex,
             };
             let provisional = RuntimeIdentity::cli_adapter(&ident.worker_id)?;
             let register_runtime = ident.runtime.as_ref().unwrap_or(&provisional);

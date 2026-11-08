@@ -32,6 +32,12 @@ pub(super) fn tick_with_observer(
         .values()
         .cloned()
         .collect();
+    // Loaded before the reducer lock: ticket continuation must never take the
+    // binding control store while the state lock is already held.
+    let control =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .ok();
     for worker in workers {
         let Some(transport) = worker.transport.as_ref() else {
             continue;
@@ -144,6 +150,22 @@ pub(super) fn tick_with_observer(
                 || old.idle_since_ms != activity.idle_since_ms
         }) {
             events.push(Event::AgentActivityObserved { activity });
+        }
+        // A trusted online-idle observation runs the same continuation entry
+        // used by enqueue and result release.
+        if positive_online_idle {
+            if let Some(control) = control.as_ref() {
+                if let Ok(Some(route)) = super::server_route_scope(server, &state) {
+                    events.extend(super::ticket_continuation_events(
+                        &state,
+                        control,
+                        &route,
+                        &worker.id,
+                        &[],
+                        true,
+                    ));
+                }
+            }
         }
         if !events.is_empty() {
             server.commit_locked_reporting(&mut state, &events);

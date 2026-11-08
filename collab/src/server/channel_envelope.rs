@@ -5,6 +5,47 @@
 //! and attachment publication never need to be reconstructed from text.
 use serde::{Deserialize, Serialize};
 
+/// One platform event has one local mailbox or one federated origin. Legacy
+/// local ids keep their original string representation on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PlatformEventTarget {
+    LocalMessage(String),
+    FederatedOrigin(crate::proto::OriginMessageRef),
+}
+
+impl PlatformEventTarget {
+    pub fn local_message_id(&self) -> Option<&str> {
+        match self {
+            Self::LocalMessage(id) => Some(id),
+            Self::FederatedOrigin(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod federation_index_tests {
+    #[test]
+    fn platform_index_roundtrips_a_remote_origin_and_legacy_local_id() {
+        let mut value = serde_json::to_value(super::super::state::State::default()).unwrap();
+        let origin = serde_json::json!({
+            "machine": "studio", "project_scope": "/projects/channel",
+            "app_scope_id": "appserver-channel", "operation_id": "channel-event-1"
+        });
+        value["platform_event_index"] = serde_json::json!({
+            "local-event": "message-1",
+            "remote-event": origin,
+        });
+        let restored: super::super::state::State = serde_json::from_value(value).unwrap();
+        let persisted = serde_json::to_value(restored).unwrap();
+        assert_eq!(
+            persisted["platform_event_index"]["local-event"],
+            "message-1"
+        );
+        assert_eq!(persisted["platform_event_index"]["remote-event"], origin);
+    }
+}
+
 /// One inbound attachment after it has been safely saved to local storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentDescriptor {

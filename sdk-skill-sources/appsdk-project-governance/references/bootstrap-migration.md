@@ -145,6 +145,12 @@ or reset path. Only an explicitly authorized control-plane discard uses
 [Existing project: remove old governance](#existing-project-remove-old-governance),
 with AppSDK and Collab transactions kept separate.
 
+The existing preparation fields also bind the skeleton and operator plan. Use
+`objective`, `boundary`, `acceptance_criteria`, `non_goals`, and `change_kind`
+directly. When the project has a real business flow, also follow
+[Skeleton, Operations and operators](#skeleton-operations-and-operators).
+Do not add a parallel intake, schema, registry, or approval checklist.
+
 AppSDK preserves the launching environment and does not pass a project path to
 Collab. The daemon resolves project scope from the exact process cwd. Without a
 live registered App Server transport, AppSDK initializes governance and
@@ -415,6 +421,146 @@ read current effective source and task state
 
 Untouched legacy gaps are warnings unless safety, source ownership, evidence
 truth, or current delivery is affected.
+
+For changes to the project skeleton, Operations, operators, or graph
+configuration, use [Skeleton, Operations and operators](#skeleton-operations-and-operators)
+after placing the task at its real phase. Do not repeat that procedure here.
+
+## Skeleton, Operations and operators
+
+This section owns the project procedure for turning a business flow into a
+skeleton, Operations, reusable operators, and graph configuration. Other
+references route here; do not copy the procedure.
+
+### Shape the skeleton
+
+1. Bind the user goal, accepted behavior, acceptance criteria, non-goals,
+   owners, and allowed/forbidden paths first. For a new project, reuse the
+   existing `appsdk prepare` fields. Do not add a second preparation record.
+2. Define modules, public entrypoints, external ARCs, success and failure
+   endpoints, and observable side effects. Keep the skeleton only as detailed
+   as the current contract requires.
+3. Split a node only at a stable capability boundary. Do not turn ordinary
+   functions into nodes mechanically. A function stays in the owner that
+   provides the capability.
+4. Keep configuration and control truth separate from business payloads,
+   metadata, debug logs, and implicit context.
+5. A missing required capability returns an explicit error on the affected
+   path. An optional capability may be skipped only when its contract permits
+   the skip. Preserve the actual result and error.
+
+An Operation is one user-visible business action with an input, result, error
+boundary, and declared side effects. It can compose several graph nodes. A
+node invokes one capability in that flow. An operator is the versioned
+implementation bound by the node. Operator ownership follows the capability
+owner.
+
+### Define and verify capabilities
+
+```text
+declare Operation and node contract
+-> reuse the existing operator or shared capability
+-> define black-box success, failure, and side-effect assertions
+-> implement or extend only the missing capability
+-> verify the base capability
+-> compile the graph and bind the real entrypoint
+-> run the public acceptance path
+```
+
+Define the acceptance before implementing a new operator. A graph-only change
+may reuse an already verified operator. A capability change updates its unique
+operator owner and only the affected bindings.
+
+### New project
+
+Use the existing preparation fields to bind the modules, Operation, entrypoint,
+external ARCs, operator owners, and acceptance. Add a graph only when the
+actual business flow needs composition. A new project does not need a general
+operation scheduler, a second registry, or a generated business graph that has
+no real consumer.
+
+### Existing project or mid-development change
+
+Read the current behavior and affected graph first. Record the original
+entrypoint, candidate entrypoint, and the terminal for switching or deleting
+the old implementation.
+
+```text
+current behavior and affected graph
+-> candidate implementation
+-> same-input white-box and black-box comparison
+-> switch the public entrypoint
+-> delete the old implementation, call sites, dedicated tests, and dependencies
+-> unique-entrypoint regression
+```
+
+Reuse valid evidence and recheck only the affected guarantees. A combination
+change updates the graph. A capability change updates the owning operator.
+Do not keep the old production path as a fallback.
+
+One invocation keeps one compiled graph. A later invocation may select a new
+configuration. Do not add in-flight hot switching unless a later contract
+requires it. Arrange state migration only when the state contract changes.
+
+### Ablation and evidence
+
+Physically remove an implementation, call site, dedicated test, or dependency
+when no current consumer or independent guarantee needs it. Keep safety,
+data-correctness, and public black-box checks.
+
+Use `compile` for graph structure, types, bindings, and capability checks. Do
+not repeat those checks at every layer. Do not add a per-item proof table, a
+second governance status, hashes, or frozen snapshots merely to record an
+ablation.
+
+### Notification configuration example
+
+The notification validation chain demonstrates this composition pattern.
+Graph paths resolve within the project. Relative paths start at the project
+root; an absolute path must also name a file inside that project.
+
+```sh
+appsdk dagpipe validate-notifications <project>
+appsdk dagpipe validate-notifications <project> --graph <path>
+```
+
+| CLI choice | Successful result meaning |
+| --- | --- |
+| no `--graph` | `evidence_scope: "sdk_default_contract"`; the input passed the SDK's complete default notification contract |
+| explicit `--graph` | `evidence_scope: "selected_project_program"`; the input passed the selected project program and entry-result consumption contract |
+
+The default graph is
+`source_validate -> delivery_validate -> terminal_accept`. A complete
+alternative graph may order `delivery_validate` before `source_validate`.
+These two complete graphs retain all validation stages. On an object with both a
+source error and a delivery error, the first reported business error follows
+the selected order.
+
+An explicit graph is a trusted project program. A legal graph that omits source
+or terminal acceptance may complete successfully. Its success remains
+`selected_project_program`. SDK default acceptance uses the default command
+and `sdk_default_contract`.
+Derive `evidence_scope` only from the CLI default/explicit choice. Never infer
+it from Graph ID, version, path, node names, or output content.
+
+Default and explicit graph failures must fail explicitly. Do not fall back to
+another graph or an old implementation. Consume the actual Runtime output; do
+not rebuild a missing terminal from input state. Verify these behaviors
+through the public command when changing this Operation.
+
+After argument parsing and safe project-root resolution, this command appends
+one invocation and outcome to `.appsdk-control/command-invocations.jsonl`.
+The record contains the command, UTC start time, elapsed milliseconds, graph
+selection, outcome, and a fixed error code on failure. It excludes message
+content, graph content, paths, and business results.
+
+Mailbox, graph, and other business files remain read-only. The invocation log
+is the declared audit write. A log failure reports
+`COMMAND_INVOCATION_LOG_WRITE_FAILED` on stderr and preserves the original
+business result and exit status. Such a warning identifies an audit gap.
+Early usage or unsafe-root rejection writes no project log. This logging
+boundary covers the notification command; other CLI commands keep their own
+owners. The log supports review and has no role in validation or recovery.
 
 ## Existing project: remove old governance
 

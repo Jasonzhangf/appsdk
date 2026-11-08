@@ -1501,6 +1501,176 @@ fn peer_publication_can_be_claimed_by_self_or_master() {
 }
 
 #[test]
+fn admitted_ticket_reviewer_change_reopens_execute_phase_for_rework() {
+    let (fixture, _, peer) = setup();
+    let id = "reviewer-change-rework";
+    publish(&fixture, id);
+    let claimed = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["owner"], peer);
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "initial delivery",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(delivered["status"], "delivered");
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let revision = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let policy = fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            id,
+            "--reviewer",
+            "ReviewerX",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(policy["task"]["status"], "rework");
+    let rework_revision = policy["task"]["revision"].as_u64().unwrap().to_string();
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            &rework_revision,
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(started["task"]["status"], "rework");
+    let redelivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "redelivery after reviewer change",
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(redelivered["status"], "delivered");
+}
+
+#[test]
+fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
+    let (fixture, _, peer) = setup();
+    let id = "owner-rework-cycle";
+    publish(&fixture, id);
+    fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "first delivery",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(delivered["status"], "delivered");
+    let reworked = fixture.run_public(&["task", "update", id, "--status", "rework"], THREAD_B);
+    assert_eq!(reworked["status"], "rework");
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let rework_revision = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            &rework_revision,
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    let redelivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "redelivery after owner rework",
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(redelivered["status"], "delivered");
+    assert_eq!(redelivered["evidence"], "redelivery after owner rework");
+    let status = fixture.run_public(&["task", "status", id], THREAD_B);
+    assert_eq!(status["status"], "delivered");
+}
+
+#[test]
 fn concurrent_claims_admit_exactly_one_and_stale_claim_preserves_state() {
     let (fixture, master, peer) = setup();
     publish(&fixture, "claim-race");

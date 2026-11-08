@@ -254,6 +254,7 @@ pub(super) fn register_tmux(
             .clone()
             .or_else(|| Some(endpoint.pane_id.clone())),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "prior committed peer fixture".into(),
     };
@@ -720,6 +721,7 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
                 }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            rex_monitor: Default::default(),
             mailbox_notify: tokio::sync::Notify::new(),
         },
         root,
@@ -745,6 +747,7 @@ pub(crate) fn test_appserver_transport(thread_id: &str) -> SelectedTransport {
         session_id: Some(format!("session-{thread_id}")),
         thread_id: Some(thread_id.into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     }
@@ -767,6 +770,7 @@ fn test_tmux_transport(thread_id: &str) -> SelectedTransport {
         session_id: endpoint.codex_session_id.clone(),
         thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "test tmux transport".into(),
     }
@@ -873,6 +877,7 @@ fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
                 desktop_bridge: None,
                 appserver: None,
                 dsh: None,
+                rex: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint,
                     cwd: server.root.display().to_string(),

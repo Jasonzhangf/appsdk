@@ -30,6 +30,7 @@ fn task_register_preserves_current_worktree_binding() {
         appserver_notification_sink: default_appserver_notification_sink(),
         appserver_thread_status: default_appserver_thread_status(),
         appserver_thread_archive: default_appserver_thread_archive(),
+        rex_monitor: Default::default(),
         mailbox_notify: tokio::sync::Notify::new(),
     };
     peer_tests::register(&server, "worker", "thread-worker");

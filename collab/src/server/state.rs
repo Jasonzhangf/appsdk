@@ -568,8 +568,9 @@ pub fn responsibility_snapshot(state: &State, worker_id: &str) -> Responsibility
 }
 
 /// A task status that no longer carries responsibility for its owner. This
-/// matches [`responsibility_snapshot`], which keeps every other status.
-fn task_status_is_terminal(status: &str) -> bool {
+/// matches [`responsibility_snapshot`], which keeps every other status. It is
+/// the single terminal-status source for the crate.
+pub(crate) fn task_status_is_terminal(status: &str) -> bool {
     matches!(status, "closed" | "cancelled")
 }
 
@@ -794,6 +795,12 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         // Replies, acks, and system notifications still land in the target's
         // mailbox, so all of them are additions for the receiving peer.
         Event::Sent { msg } => ResponsibilityEffect::Mutates(msg.to.as_str()),
+        Event::FederationOutboundPrepared { .. }
+        | Event::FederationOutboundResulted { .. }
+        | Event::FederationExpired { .. } => ResponsibilityEffect::Safe,
+        // The accepted federation index rides in the same batch as the target
+        // `Sent`; that `Sent` already owns the target's mailbox responsibility.
+        Event::FederationAccepted { .. } => ResponsibilityEffect::Safe,
         Event::TargetSessionBound { message_id, .. } => match state.msgs.get(message_id) {
             Some(msg) => ResponsibilityEffect::Mutates(msg.to.as_str()),
             None => ResponsibilityEffect::Safe,
@@ -1434,6 +1441,28 @@ pub enum Event {
     Sent {
         msg: Message,
     },
+    /// Durable origin-side request before any network send. It is recovery
+    /// state only, never a second consumable mailbox.
+    FederationOutboundPrepared {
+        record: crate::server::federation::FederatedOutboundRecord,
+    },
+    /// Durable origin-side send/lookup result. It must keep the same immutable
+    /// request as the prepared record; an accepted result releases the body.
+    FederationOutboundResulted {
+        record: crate::server::federation::FederatedOutboundRecord,
+    },
+    /// Durable target-side acceptance metadata. It commits with the target
+    /// `Sent` so the message and exact dedup index are atomic.
+    FederationAccepted {
+        message_id: String,
+        meta: crate::server::federation::FederatedMessageMeta,
+    },
+    /// Durable retention tombstone. The mailbox body is dropped separately by
+    /// the same single cleanup owner.
+    FederationExpired {
+        message_id: String,
+        expired_ms: i64,
+    },
     /// Target session constraint bound to a message.
     TargetSessionBound {
         message_id: String,
@@ -1683,6 +1712,16 @@ pub enum Event {
     CeoReportStateRestored {
         report_state: crate::ceo_report_state::CeoReportState,
     },
+    /// Insert or replace one ticket phase batch. The (task_id, phase, batch)
+    /// key is unique; rework creates a new batch instead of overwriting.
+    TicketPhaseRecorded {
+        phase: crate::server::ticket_state::TicketPhaseRecord,
+    },
+    /// Advance the shortest-queue rotation cursor for one admission group.
+    TicketRotationUpdated {
+        group: String,
+        slot: String,
+    },
     #[serde(alias = "RootAssigned")]
     MasterAssigned {
         worker_id: String,
@@ -1744,6 +1783,12 @@ pub enum Event {
     /// resolves to the same Collab message instead of enqueuing a new one.
     ChannelEnvelopeRecorded {
         message_id: String,
+        idempotency_key: String,
+        envelope: crate::server::channel_envelope::ChannelEnvelope,
+    },
+    FederatedChannelInboundRecorded {
+        origin: crate::proto::OriginMessageRef,
+        inbound_id: String,
         idempotency_key: String,
         envelope: crate::server::channel_envelope::ChannelEnvelope,
     },

@@ -131,6 +131,14 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         decision_reason: Option<String>,
     },
+    /// Confirm actual execution start for a claimed ticket attempt.
+    Start {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        attempt: u64,
+    },
     /// Accept a board invitation (with revision), or a legacy assigned task
     Accept {
         id: String,
@@ -159,6 +167,9 @@ pub(crate) enum TaskCmd {
         id: String,
         #[arg(long)]
         evidence: String,
+        /// Required when completing a claimed ticket phase; rejects stale attempts.
+        #[arg(long)]
+        attempt: Option<u64>,
         /// Legacy compatibility option; task delivery does not require a Git candidate.
         #[arg(long)]
         no_candidate: bool,
@@ -526,6 +537,11 @@ pub(crate) enum Cmd {
     },
     /// Show the effective policy from ~/.appsdk/config.toml
     Config,
+    /// Inspect or modify host-only machine declarations
+    Machine {
+        #[command(subcommand)]
+        command: crate::machine_cli::MachineCommand,
+    },
     /// Hidden: create .agent-collab skeleton for internal AppSDK initialization
     #[command(hide = true)]
     Init,
@@ -577,8 +593,15 @@ pub(crate) enum Cmd {
     /// List registered peers and their local activity projection
     /// (does not report master authority; use `collab master status`)
     Who,
-    /// Read-only communication directory for current project (does not require authentication)
-    Directory,
+    /// Read-only communication directory for the current project
+    Directory {
+        /// Explicit machine whose daemon directory should be queried
+        #[arg(long)]
+        machine: Option<String>,
+        /// Restrict a federation directory query to one declared project key
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// List copyable project-qualified delivery addresses with channel and
     /// honest deliverability. Same read-only source as `collab directory`.
     List,
@@ -668,6 +691,9 @@ pub(crate) enum Cmd {
         r#type: String,
         #[arg(long)]
         in_reply_to: Option<String>,
+        /// Stable operation identity for same-operation recovery
+        #[arg(long = "operation-id", visible_alias = "op")]
+        operation_id: Option<String>,
         #[arg(long, default_value = "immediate")]
         delivery: String,
         /// Adapter-only typed channel envelope. Requires --unknown-sender and
@@ -779,7 +805,7 @@ pub(crate) enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Query message status (wake attempts, answered)
+    /// Query local message status or a full collab-ref receipt
     Msg { msg_id: String },
     /// Task registration and lifecycle (task owner owns feature/worktree)
     Task {

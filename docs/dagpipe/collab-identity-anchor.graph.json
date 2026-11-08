@@ -1,7 +1,7 @@
 {
   "id":"appsdk-collab-identity-anchor",
   "version":"1.0.0",
-  "description":"统一身份映射恢复设计。所有宿主只从identity-map.json选择身份；注册、sessionID换绑、名字/角色变化、注销及启动恢复共用唯一writer。先删除旧archive/occupancy/route历史选择与fallback，再实现新路径。单链承载本次typed结果，条件不适用原样传递，终止结果不触发后续成功副作用；不复制控制真源。完整业务分支见docs/design/collab-unified-identity-map.md。图不证明运行验收。",
+  "description":"统一身份映射恢复设计。所有宿主只从identity-map.json选择身份；注册、sessionID换绑、名字/角色变化、注销及启动恢复共用唯一writer。先删除旧archive/occupancy/route历史选择与fallback，再实现新路径。Rex 只作为已核实 typed transport 候选参与选择，Rex session/block 不写入 agent sessionID/native thread 身份锚点；真实 agent sessionID 仍由当前宿主事实决定，Rex 地址是独立投递地址。单链承载本次typed结果，条件不适用原样传递，终止结果不触发后续成功副作用；不复制控制真源。完整业务分支见docs/design/collab-unified-identity-map.md。图不证明运行验收。",
   "inputs":[{"id":"context_request","schema":"Object"}],
   "nodes":[
     {"id":"读取四类宿主当前事实","operator":"appsdk.collab_identity.collect","operator_version":"1","description":"按真实Codex/AGY TUI、Desktop或DSH收集当前sessionID和对应端点。TUI仅观察现有tmux；Desktop/DSH不要求tmux。profile可缺省。iTerm布局和manifest不参与身份选择。","inputs":["context_request"],"output":{"id":"host_facts","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},

@@ -1,5 +1,9 @@
 # Development and Debug
 
+For skeleton, Operation, operator, or graph-configuration changes, follow
+[Bootstrap and Migration: Skeleton, Operations and operators](bootstrap-migration.md#skeleton-operations-and-operators).
+Keep the composition procedure in that section.
+
 ## Feature or new project
 
 When persistent Guidance is selected, project the task-specific intake:

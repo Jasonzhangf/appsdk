@@ -1,6 +1,7 @@
 {
   "id": "appsdk-notification-object",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "Default SDK notification contract: source validation, delivery validation and terminal acceptance run in this order.",
   "inputs": [
     {
       "id": "notification_object",
@@ -9,16 +10,39 @@
   ],
   "nodes": [
     {
-      "id": "notification_object_validate",
-      "operator": "appsdk.communication.notification_object_validate",
+      "id": "source_validate",
+      "operator": "appsdk.communication.notification_source_validate",
       "operator_version": "1",
       "inputs": ["notification_object"],
+      "output": {"id": "notification_source_checked", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "delivery_validate",
+      "operator": "appsdk.communication.notification_delivery_validate",
+      "operator_version": "1",
+      "inputs": ["notification_source_checked"],
+      "output": {"id": "notification_delivery_checked", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "terminal_accept",
+      "operator": "appsdk.communication.notification_terminal_accept",
+      "operator_version": "1",
+      "inputs": ["notification_delivery_checked"],
       "output": {"id": "notification_terminal", "schema": "Any"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
     }
   ],
-  "edges": [],
+  "edges": [
+    {"from": "source_validate", "to": "delivery_validate", "arc_id": "notification_source_checked"},
+    {"from": "delivery_validate", "to": "terminal_accept", "arc_id": "notification_delivery_checked"}
+  ],
   "outputs": ["notification_terminal"]
 }

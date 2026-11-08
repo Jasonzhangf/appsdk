@@ -444,6 +444,9 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             details.public_visibility |= !is_managed_subagent(&state, &actor); details.revision += 1;
             task.updated_ms=now_ms();
             events.extend([Event::TaskUpdated {task},Event::BoardDetailsChanged { task_id: id.clone(), details }]);
+            if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
+                events.push(event);
+            }
             if let Err(error) = server.commit_locked_checked(&mut state, &events) {
                 return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
             }

@@ -1043,6 +1043,242 @@ fn rework_contract_changes_and_manual_cleanup_do_not_reuse_review_acceptance() {
 }
 
 #[test]
+fn contract_change_reopens_admitted_execute_phase_for_redelivery() {
+    let fixture = setup_roles();
+    publish(
+        &fixture,
+        "contract-rework",
+        &["--executor", "Alice", "--reviewer", "Bob"],
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "contract-rework",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "contract-rework",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "contract-rework",
+            "--no-candidate",
+            "--evidence",
+            "first report",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    let delivered = fixture.current_state();
+    let phase = delivered["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "contract-rework")
+        .unwrap();
+    assert_eq!(phase["status"], "completed");
+    assert_eq!(phase["attempt_generation"], 1);
+
+    let delivered_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let delivered_revision = task(&delivered_board, "contract-rework")["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "describe",
+            "contract-rework",
+            "--expected-revision",
+            &delivered_revision,
+            "--title",
+            "前端页面",
+            "--description",
+            "角色分工公开消费者",
+            "--delivery-condition",
+            "新验收条件",
+            "--test-condition",
+            "公开入口断言",
+        ],
+        THREAD_B,
+    );
+    let changed = fixture.run_public(&["task", "status", "contract-rework"], THREAD_B);
+    assert_eq!(changed["status"], "rework");
+    assert_eq!(changed["review"]["valid"], false);
+
+    let changed_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let changed_revision = task(&changed_board, "contract-rework")["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "contract-rework",
+            "--expected-revision",
+            &changed_revision,
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "contract-rework",
+            "--no-candidate",
+            "--evidence",
+            "corrected report",
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    let reviewed = fixture.run_public(
+        &[
+            "task",
+            "review",
+            "contract-rework",
+            "--accept",
+            "--evidence",
+            "corrected report passed",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(reviewed["status"], "accepted");
+    assert_eq!(reviewed["disposition"], "no_merge_required");
+    fixture.run_public(&["task", "close", "contract-rework"], THREAD_B);
+    let history = fixture.run_public(&["task", "status", "contract-rework"], THREAD_B);
+    assert_eq!(history["status"], "closed");
+    assert_eq!(history["delivery_complete"], true);
+}
+
+#[test]
+fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
+    let fixture = setup_roles();
+    publish(
+        &fixture,
+        "direct-rework",
+        &["--executor", "Alice", "--reviewer", "Bob"],
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "direct-rework",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "direct-rework",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "direct-rework",
+            "--no-candidate",
+            "--evidence",
+            "first report",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "update",
+            "direct-rework",
+            "--status",
+            "rework",
+            "--next",
+            "rework the first report",
+        ],
+        THREAD_B,
+    );
+    let changed = fixture.run_public(&["task", "status", "direct-rework"], THREAD_B);
+    assert_eq!(changed["status"], "rework");
+
+    let changed_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let changed_revision = task(&changed_board, "direct-rework")["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "direct-rework",
+            "--expected-revision",
+            &changed_revision,
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "direct-rework",
+            "--no-candidate",
+            "--evidence",
+            "corrected report",
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    let reviewed = fixture.run_public(
+        &[
+            "task",
+            "review",
+            "direct-rework",
+            "--accept",
+            "--evidence",
+            "corrected report passed",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(reviewed["status"], "accepted");
+    assert_eq!(reviewed["disposition"], "no_merge_required");
+    fixture.run_public(&["task", "close", "direct-rework"], THREAD_B);
+    let history = fixture.run_public(&["task", "status", "direct-rework"], THREAD_B);
+    assert_eq!(history["status"], "closed");
+    assert_eq!(history["delivery_complete"], true);
+}
+
+#[test]
 fn publish_admits_ticket_to_shortest_slot_queue_and_rotates_on_ties() {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);

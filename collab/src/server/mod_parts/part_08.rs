@@ -1965,6 +1965,13 @@ fn task_update_locked(
         events.extend(invalidate_work_review(st, &task, &mut record, reviewer));
         events.push(Event::TaskLifecycleUpdated { task_id:task_id.clone(),record });
     }
+    if original_status != task.status
+        && matches!(task.status.as_str(), "working" | "verifying" | "rework")
+    {
+        if let Some(event) = ticket_rework_phase_event(server, &st, &task_id) {
+            events.push(event);
+        }
+    }
     if task.status != "accepted" && st.pending_merges.contains_key(&task_id) {
         let stale_notices = pending_merge_notice_ids(&st, &task_id);
         events.push(Event::MergeResolved {

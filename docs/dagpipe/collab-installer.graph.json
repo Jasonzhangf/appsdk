@@ -1,18 +1,28 @@
 {
   "id": "appsdk-collab-installer",
-  "version": "1.0.0",
-  "description": "一次 Collab 安装从目标选择到结果；外置盘目标在写入前明确失败，安装不重启现有 daemon。",
+  "version": "1.1.0",
+  "description": "一次 Collab 安装事务。失败随对象向后传播，后续发布步骤跳过；统一恢复或提交，再返回成功、等待用户激活或原错及回退结果。安装不操作 daemon 或 tmux 生命周期。",
   "inputs": [{"id":"install_request","schema":"Object"}],
   "nodes": [
     {"id":"选择安装位置","operator":"appsdk.collab_install.select","operator_version":"1","inputs":["install_request"],"output":{"id":"install_targets","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
     {"id":"确认系统盘目标","operator":"appsdk.collab_install.location","operator_version":"1","description":"macOS 安装目标必须位于系统数据卷，外置路径或无法解析的位置在写入前返回错误。","inputs":["install_targets"],"output":{"id":"location_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
-    {"id":"安装产品与启动入口","operator":"appsdk.collab_install.install","operator_version":"1","description":"写入产品和技能并配置启动入口；不重启正在运行的 daemon。","inputs":["location_result"],"output":{"id":"install_outcome","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
-    {"id":"返回安装结果","operator":"appsdk.collab_install.result","operator_version":"1","description":"返回成功或实际失败阶段，不把安装成功当作运行切换。","inputs":["install_outcome"],"output":{"id":"install_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
+    {"id":"核对原安装并准备候选","operator":"appsdk.collab_install.prepare","operator_version":"1","description":"保留调用目录，排除并发安装，记录原安装可恢复性。开发或失效基线允许救援，真实基线完整保存后方可发布。","inputs":["location_result"],"output":{"id":"candidate_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"暂存完整产品并验证本地能力","operator":"appsdk.collab_install.stage","operator_version":"1","inputs":["candidate_result"],"output":{"id":"staging_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"保存安装前的恢复资料","operator":"appsdk.collab_install.capture","operator_version":"1","description":"保存两个二进制、Desktop 启动器及脚本、Collab Skill 的内容或缺失状态。","inputs":["staging_result"],"output":{"id":"recovery_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"发布完整产品","operator":"appsdk.collab_install.install","operator_version":"2","inputs":["recovery_result"],"output":{"id":"publication_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"只读检查固定入口与当前能力","operator":"appsdk.collab_install.check","operator_version":"1","description":"检查版本、MCP、context、board、收件准入与发送准入，无消息消费、投递或生命周期动作。缺激活条件单独标记。","inputs":["publication_result"],"output":{"id":"health_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"确认安装或恢复原有产品","operator":"appsdk.collab_install.resolve","operator_version":"1","description":"成功或等待用户激活时保留一份前版；失败时恢复完整集合，保留原错与恢复失败证据。","inputs":["health_result"],"output":{"id":"resolved_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"},
+    {"id":"返回安装结果","operator":"appsdk.collab_install.result","operator_version":"2","description":"返回成功、等待用户激活或原始失败与回退结果，并释放安装资源。","inputs":["resolved_result"],"output":{"id":"install_result","schema":"Object"},"input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"}
   ],
   "edges": [
     {"from":"选择安装位置","to":"确认系统盘目标","arc_id":"install_targets"},
-    {"from":"确认系统盘目标","to":"安装产品与启动入口","arc_id":"location_result"},
-    {"from":"安装产品与启动入口","to":"返回安装结果","arc_id":"install_outcome"}
+    {"from":"确认系统盘目标","to":"核对原安装并准备候选","arc_id":"location_result"},
+    {"from":"核对原安装并准备候选","to":"暂存完整产品并验证本地能力","arc_id":"candidate_result"},
+    {"from":"暂存完整产品并验证本地能力","to":"保存安装前的恢复资料","arc_id":"staging_result"},
+    {"from":"保存安装前的恢复资料","to":"发布完整产品","arc_id":"recovery_result"},
+    {"from":"发布完整产品","to":"只读检查固定入口与当前能力","arc_id":"publication_result"},
+    {"from":"只读检查固定入口与当前能力","to":"确认安装或恢复原有产品","arc_id":"health_result"},
+    {"from":"确认安装或恢复原有产品","to":"返回安装结果","arc_id":"resolved_result"}
   ],
   "outputs": ["install_result"]
 }

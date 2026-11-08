@@ -1352,7 +1352,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
 }
 
 /// The current Context serializer without lease rearm or presence-edge writes.
-fn context_projection(server: &Server, worker_id: String, token: String) -> Resp {
+pub(crate) fn context_projection(server: &Server, worker_id: String, token: String) -> Resp {
     let control =
         match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
             Ok(control) => control,

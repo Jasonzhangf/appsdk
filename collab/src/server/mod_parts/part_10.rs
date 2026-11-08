@@ -729,6 +729,7 @@ fn mutation_blocked_during_project_reset(req: &Req) -> bool {
         | Req::MasterRecover { .. }
         | Req::Shutdown { .. }
         | Req::Ping
+        | Req::CapabilityReadiness { .. }
         | Req::StatusAll
         | Req::MailboxRead { .. } => false,
     }
@@ -1109,11 +1110,32 @@ fn validate_cli_register_rebind(
     Ok(())
 }
 
-fn project_route_actor(
+pub(crate) fn project_route_actor(
     state: &State,
     context: &ProjectContext,
     worker_id: &str,
     token: &str,
+) -> Result<WorkerRec, Resp> {
+    project_route_actor_for(state, context, worker_id, token, false)
+}
+
+/// Poll's route admission also requires the typed runtime context, but unlike
+/// a mutating project operation it does not repeat the binding comparison.
+pub(crate) fn project_route_actor_for_poll(
+    state: &State,
+    context: &ProjectContext,
+    worker_id: &str,
+    token: &str,
+) -> Result<WorkerRec, Resp> {
+    project_route_actor_for(state, context, worker_id, token, true)
+}
+
+fn project_route_actor_for(
+    state: &State,
+    context: &ProjectContext,
+    worker_id: &str,
+    token: &str,
+    poll_admission: bool,
 ) -> Result<WorkerRec, Resp> {
     context
         .validate()
@@ -1170,10 +1192,12 @@ fn project_route_actor(
     registered
         .validate()
         .map_err(|error| Resp::err(format!("RUNTIME_BINDING_REJECTED: {error}")))?;
-    crate::identity::validate_binding(&registered, runtime).map_err(|error| {
-        Resp::err(format!(
-            "SESSION_THREAD_BINDING_MISMATCH: {error}; preserve the registered binding and use `collab context` as the only repair entry; do not edit or infer the binding"
-        ))
-    })?;
+    if !poll_admission {
+        crate::identity::validate_binding(&registered, runtime).map_err(|error| {
+            Resp::err(format!(
+                "SESSION_THREAD_BINDING_MISMATCH: {error}; preserve the registered binding and use `collab context` as the only repair entry; do not edit or infer the binding"
+            ))
+        })?;
+    }
     Ok(worker)
 }

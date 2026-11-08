@@ -729,8 +729,21 @@ fn dispatch_with_route_context_bound(
                 "tasks": st.tasks.len(),
                 "now": iso(now_ms()),
                 "protocol_version": crate::proto::IDENTITY_CONTEXT_CWD_PROTOCOL,
+                "daemon_version": env!("COLLAB_VERSION"),
+                "capabilities": [crate::proto::CAPABILITY_READINESS_PROTOCOL],
             }))
         }
+        Req::CapabilityReadiness {
+            worker_id,
+            token,
+            command,
+        } => handle_capability_readiness(
+            server,
+            worker_id,
+            token,
+            command,
+            project_context.as_ref(),
+        ),
         Req::StatusAll => {
             let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
                 Ok(control) => control, Err(error) => return Resp::err(error),
@@ -1058,6 +1071,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::Poll { worker_id, .. }
         | Req::Ack { worker_id, .. }
         | Req::Inbox { worker_id, .. }
+        | Req::CapabilityReadiness { worker_id, .. }
         | Req::Context { worker_id, .. }
         | Req::TaskRegister { worker_id, .. }
         | Req::TaskRelocate { worker_id, .. }

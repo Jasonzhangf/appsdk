@@ -480,7 +480,9 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 45] {
         ),
         (
             "docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json",
-            include_str!("../../docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json"),
+            include_str!(
+                "../../docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json"
+            ),
         ),
     ]
 }

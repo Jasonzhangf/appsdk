@@ -205,6 +205,7 @@ fn child_appserver_candidate_binds_child_session_and_thread() {
         session_id: None,
         thread_id: Some("01a0c48b-parent-thread".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec![],
         self_check: "parent verified".into(),
     };

@@ -19,8 +19,8 @@ master 权限。只有用户要求注册时才初始化；未注册或初始化�
 已注册身份、角色、任务、消息和订阅以当前 `collab context` 为真源。项目由本次真实
 cwd 确定，名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递与任务锚点；
 sessionID 只承载当前执行。第一次绑定分配固定名字，后续绑定与恢复可显式继承名字，
-新注册为新会话新增名字，旧名字在旧持有者离线或获得用户授权时可顶替。TUI 的固定
-tmux session 名字为 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
+新注册为新会话新增名字，旧名字在旧持有者离线或获得用户授权时可顶替。选择 tmux
+适配器的 TUI 使用固定 session 名字 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
 `appsdk_1_Jenny`；只有固定位置 1 可升 Jenny。布局读取共享 manifest，正常改名由
 Collab 负责。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
 恢复链已删除。tmux `$N`、pane、thread 和 socket 仅定位通信。不得猜身份、
@@ -65,6 +65,38 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 | 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+
+### 跨机器地址与 Rex
+
+每台机器保留自己的 daemon、身份、任务和 mailbox。机器配置由该机的
+`collab machine` 入口管理。`machine status/list` 只读声明，`machine check <machine>`
+验证已声明对端。连接使用定向凭据和 SSH 私有 Unix socket。
+
+| 使用路径 | 正式入口 |
+|---|---|
+| 查远端可投递地址 | `collab directory --machine '<machine>' [--project '<project>']`，复制其中的 `qualified_address` |
+| 发远端消息 | `collab send --to '<machine.project.name>' --subject '<主题>' --content '<正文>'` |
+| 远端关联回复 | 使用原消息的完整 `collab-ref:` message reference 作为 `--in-reply-to`，目标使用原真实发送者地址 |
+| 恢复不确定发送 | 保留原 `--operation-id`、正文、地址和关联字段，用原引用查询，或提交同一操作恢复请求 |
+| 查接受和消费 | `collab msg '<collab-ref:...>'`，分别读取接受、通知、正式消费和 channel 平台结果 |
+
+省略 machine 的短名和 `project.name` 保持本机语义。机器必须预先声明。
+名字中的点和百分号由目录编码，直接复制地址。消息过期后保留过期结果。
+同操作修改意图会返回 conflict。不确定结果不能换操作号盲发。
+显式恢复操作号当前用于远端发送。
+
+Rex 注册通过 `collab context --op '<operation>' --provide '<真实 facts JSON>'`。
+facts 的 `session_id` 是 agent 会话。`rex` 对象提供实际 `server`、完整
+`session_id`、`block_id` 和 `cwd`。终端地址与 agent 会话分别绑定。
+Rex 的 working、blocked/question 和断连事件投影到 activity。
+输入 ACK、Enter 接受和 activity 都不能代替正式 `collab recv` 消费。
+服务 instance 变化后刷新绑定，再继续输入。
+
+QQ 跨机器入站由原 channel owner 保留可信 envelope。远端收件使用返回的
+`collab-channel:` 发送者地址和完整 message reference 关联回复。
+原 owner 通过配置的 `qqbot.delivery` helper 返回原会话，并保存平台结果。
+重复投递沿用原引用。平台 uncertain 保留原发送 claim。
+远端 channel 入站当前支持文本，附件返回明确的本地路径不可用错误。
 
 ### 未注册脚本自通知
 

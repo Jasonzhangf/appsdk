@@ -275,7 +275,7 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
                 for mut subscription in subscriptions {
                     subscription.worker_id = occupancy.worker_id.clone();
                     subscription.method = transport.kind.as_str().into();
-                    subscription.target = target.into();
+                    subscription.target = target.as_ref().to_owned();
                     subscription.updated_ms = occupancy.updated_ms;
                     if subscription.status == "transport-lost" {
                         subscription.status = "armed".into();

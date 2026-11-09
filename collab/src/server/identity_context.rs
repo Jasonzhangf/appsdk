@@ -20,6 +20,33 @@ fn add_optional_master_choice(snapshot: &mut serde_json::Value) {
 }
 
 fn validate_facts(facts: &IdentityFacts) -> anyhow::Result<()> {
+    if let Some(candidate) = facts.rex.as_ref() {
+        if facts.dsh.is_some()
+            || facts.desktop_bridge.is_some()
+            || facts.tmux.is_some()
+            || facts.thread_id.is_some()
+            || facts.endpoint.is_some()
+            || facts.namespace.is_some()
+        {
+            anyhow::bail!(
+                "IDENTITY_FACT_INVALID: Rex facts cannot be combined with another transport"
+            );
+        }
+        for (field, value) in [
+            ("server", &candidate.server),
+            ("session_id", &candidate.session_id),
+            ("block_id", &candidate.block_id),
+            ("cwd", &candidate.cwd),
+        ] {
+            if value.trim().is_empty() || value.chars().any(char::is_control) {
+                anyhow::bail!("IDENTITY_FACT_INVALID: rex.{field} must be non-empty without control characters");
+            }
+        }
+        if let Some(session) = facts.session_id.as_ref() {
+            identity::validate_id_for_protocol(session)?;
+        }
+        return Ok(());
+    }
     if facts.caller_pid == Some(0) {
         anyhow::bail!("IDENTITY_FACT_INVALID: caller_pid must be non-zero");
     }
@@ -198,6 +225,7 @@ fn required_fields(facts: &IdentityFacts) -> Vec<&'static str> {
         required.push("session_id");
     }
     if facts.dsh.is_some()
+        || facts.rex.is_some()
         || facts.desktop_bridge.is_some()
         || facts.tmux.is_some()
         || (facts.dsh_session_id.is_some() && facts.endpoint.is_none())

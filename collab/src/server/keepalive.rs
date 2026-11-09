@@ -1177,6 +1177,24 @@ pub(super) fn current_board_patrol_activity(
                 }
             })
         }
+        crate::proto::TransportKind::Rex => {
+            // Rex self-report does not carry a trusted idle interval. Report
+            // the current non-idle projection, and never synthesize Idle.
+            let Ok(scope) = super::GlobalState::canonical_project_scope(&server.root) else {
+                return Ok(AgentActivity::Unknown);
+            };
+            let state = server.state.lock().unwrap();
+            let activity = state
+                .agent_activity
+                .get(scope.as_str())
+                .and_then(|workers| workers.get(&worker.id))
+                .map(|record| record.activity)
+                .unwrap_or(AgentActivity::Unknown);
+            Ok(match activity {
+                AgentActivity::Idle => AgentActivity::Unknown,
+                other => other,
+            })
+        }
     }
 }
 

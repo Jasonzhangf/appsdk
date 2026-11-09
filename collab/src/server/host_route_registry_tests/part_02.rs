@@ -55,6 +55,9 @@ fn register_participant_fixture(
             break;
         }
         std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
     }
     dispatch(context, request)
 }
@@ -91,7 +94,7 @@ fn fixture_registration_waits_for_the_actual_project_directory() {
         &manager, Some(context_with_app(&root, "app-cwd-ready")),
         Req::register("cwd-ready".into(), "token-cwd-ready".into(), root.display().to_string(),
             Some(TransportCandidates {
-                desktop_bridge: None, appserver: None, dsh: None,
+                desktop_bridge: None, appserver: None, dsh: None, rex: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint, cwd: root.display().to_string(),
                 }),
@@ -129,7 +132,7 @@ fn fixture_registration_rejects_a_persistent_foreign_directory() {
         &manager, Some(context_with_app(&root, "app-cwd-foreign")),
         Req::register("cwd-foreign".into(), "token-cwd-foreign".into(), root.display().to_string(),
             Some(TransportCandidates {
-                desktop_bridge: None, appserver: None, dsh: None,
+                desktop_bridge: None, appserver: None, dsh: None, rex: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint, cwd: root.display().to_string(),
                 }),
@@ -159,6 +162,7 @@ fn reload_owned_test_server(server: &Arc<Server>) -> Arc<Server> {
         appserver_notification_sink: server.appserver_notification_sink.clone(),
         appserver_thread_status: server.appserver_thread_status.clone(),
         appserver_thread_archive: server.appserver_thread_archive.clone(),
+        rex_monitor: Default::default(),
         mailbox_notify: Notify::new(),
     })
 }

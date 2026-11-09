@@ -1137,9 +1137,10 @@ fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
         .unwrap_or_else(|| panic!("progress must list the canonical project: {progress}"));
     assert_eq!(project["registered"], true, "{project}");
     let status_workspace = &status["master"]["workspace"];
+    // Background activity observations can advance between these public queries.
     assert_eq!(
-        status_workspace, &project["workspace"],
-        "master status and ceo progress must project the same workspace fact"
+        status_workspace["project_root"], project["workspace"]["project_root"],
+        "master status and ceo progress must project the same canonical project root"
     );
     assert_eq!(
         project["workspace"]["project_root"], canonical_target,

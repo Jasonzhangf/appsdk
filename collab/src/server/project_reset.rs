@@ -153,7 +153,7 @@ pub(super) fn clear_project(
         .collect();
     let dropped_messages: HashSet<String> = messages.iter().cloned().collect();
     for id in messages {
-        state.drop_message(&id);
+        state.expire_federated_message(&id, now_ms());
     }
     // Obligations are project-owned control state. A reset removes only this
     // scope's markers, plus any whose original message was just dropped.
@@ -165,11 +165,29 @@ pub(super) fn clear_project(
         .retain(|_, default| default.project_scope != scope);
     let remaining_messages: HashSet<String> = state.msgs.keys().cloned().collect();
     state
-        .channel_envelopes
-        .retain(|message_id, _| remaining_messages.contains(message_id));
+        .federation
+        .outbound
+        .retain(|_, record| record.origin.project_scope.as_str() != scope);
+    let retained_channel_envelopes: HashSet<String> = remaining_messages
+        .iter()
+        .cloned()
+        .chain(state.federation.outbound.values().filter_map(|record| {
+            record
+                .channel
+                .as_ref()
+                .map(|channel| channel.inbound_id.clone())
+        }))
+        .collect();
     state
-        .platform_event_index
-        .retain(|_, message_id| remaining_messages.contains(message_id));
+        .channel_envelopes
+        .retain(|message_id, _| retained_channel_envelopes.contains(message_id));
+    state.platform_event_index.retain(|_, target| match target {
+        channel_envelope::PlatformEventTarget::LocalMessage(id) => remaining_messages.contains(id),
+        channel_envelope::PlatformEventTarget::FederatedOrigin(origin) => state
+            .federation
+            .outbound
+            .contains_key(&federation::origin_key(origin)),
+    });
     state
         .channel_reply_routes
         .retain(|message_id, _| remaining_messages.contains(message_id));

@@ -25,6 +25,8 @@ pub struct Config {
     pub worktree: Worktree,
     pub tmux: Tmux,
     pub qqbot: QqBot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federation: Option<crate::federation::FederationConfig>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -39,6 +41,7 @@ impl Default for Config {
             worktree: Worktree::default(),
             tmux: Tmux::default(),
             qqbot: QqBot::default(),
+            federation: None,
         }
     }
 }
@@ -103,11 +106,16 @@ impl Default for Tmux {
 pub struct QqBot {
     /// Single authorized root for files that the daemon may read and upload.
     pub attachments_root: Option<PathBuf>,
+    /// Explicit outbound helper. Absence is an unavailable delivery path, not
+    /// permission to scan the host for another QQ installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<QqBotDelivery>,
 }
 impl Default for QqBot {
     fn default() -> Self {
         Self {
             attachments_root: None,
+            delivery: None,
         }
     }
 }
@@ -130,6 +138,54 @@ impl QqBot {
             return Err("qqbot.attachments_root must be a directory".into());
         }
         Ok(Some(canonical))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(delivery) = self.delivery.as_ref() {
+            delivery.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// QQ outbound helper configuration. The daemon only executes these declared
+/// absolute paths and never derives them from message content or host scans.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QqBotDelivery {
+    pub node_program: PathBuf,
+    pub helper_path: PathBuf,
+    pub runtime_root: PathBuf,
+    pub state_root: PathBuf,
+    pub deadline_ms: u64,
+}
+impl Default for QqBotDelivery {
+    fn default() -> Self {
+        Self {
+            node_program: PathBuf::new(),
+            helper_path: PathBuf::new(),
+            runtime_root: PathBuf::new(),
+            state_root: PathBuf::new(),
+            deadline_ms: 15_000,
+        }
+    }
+}
+impl QqBotDelivery {
+    fn validate(&self) -> Result<(), String> {
+        for (name, path) in [
+            ("node_program", &self.node_program),
+            ("helper_path", &self.helper_path),
+            ("runtime_root", &self.runtime_root),
+            ("state_root", &self.state_root),
+        ] {
+            if !path.is_absolute() {
+                return Err(format!("qqbot.delivery.{name} must be an absolute path"));
+            }
+        }
+        if !(1..=300_000).contains(&self.deadline_ms) {
+            return Err("qqbot.delivery.deadline_ms must be 1..300000".into());
+        }
+        Ok(())
     }
 }
 
@@ -606,6 +662,7 @@ pub fn parse(text: &str, root: &Path) -> Result<Config> {
         .as_table_mut()
         .context("config must be a table")?
         .remove("projects");
+    crate::federation::config::ensure_host_only(projects.as_ref()).map_err(anyhow::Error::msg)?;
     let mut merged = toml::Value::try_from(Config::default())?;
     merge(&mut merged, input);
     if let Some(projects) = projects {
@@ -670,9 +727,13 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if let Some(configuration) = &self.federation {
+            configuration.validate().map_err(anyhow::Error::msg)?;
+        }
         if self.maintenance.password.is_empty() {
             bail!("maintenance.password must not be empty");
         }
+        self.qqbot.validate().map_err(anyhow::Error::msg)?;
         self.ceo_report_policy()?;
         for endpoint in &self.tmux.endpoints {
             validate_tmux_endpoint(endpoint)?;
@@ -1048,6 +1109,40 @@ projects = [
             .worktree
             .render_relative("project-a", "bad/slug")
             .is_err());
+    }
+
+    #[test]
+    fn qqbot_delivery_requires_declared_absolute_paths_and_defaults_deadline() {
+        let config = parse(
+            r#"
+[qqbot.delivery]
+node_program = "/usr/local/bin/node"
+helper_path = "/opt/collab/qqbot-send.mjs"
+runtime_root = "/opt/qqbot/runtime"
+state_root = "/opt/qqbot/state"
+"#,
+            Path::new("/project"),
+        )
+        .unwrap();
+        assert_eq!(config.qqbot.delivery.unwrap().deadline_ms, 15_000);
+
+        let relative = parse(
+            r#"
+[qqbot.delivery]
+node_program = "node"
+helper_path = "/opt/collab/qqbot-send.mjs"
+runtime_root = "/opt/qqbot/runtime"
+state_root = "/opt/qqbot/state"
+"#,
+            Path::new("/project"),
+        )
+        .unwrap_err();
+        assert!(
+            relative
+                .to_string()
+                .contains("qqbot.delivery.node_program must be an absolute path"),
+            "{relative}"
+        );
     }
 
     #[test]

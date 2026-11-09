@@ -47,6 +47,7 @@ fn startup_pane_conflict_transport(
         session_id: endpoint.codex_session_id.clone(),
         thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint.clone()),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "startup pane conflict fixture".into(),
     }
@@ -271,6 +272,7 @@ fn startup_route_fixture(name: &str) -> StartupRouteFixture {
         appserver_notification_sink: default_appserver_notification_sink(),
         appserver_thread_status: default_appserver_thread_status(),
         appserver_thread_archive: default_appserver_thread_archive(),
+        rex_monitor: Default::default(),
         mailbox_notify: Notify::new(),
     });
 

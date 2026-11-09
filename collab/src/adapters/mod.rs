@@ -5,9 +5,16 @@ pub mod codex_app_server;
 pub mod desktop_bridge;
 pub mod dsh;
 pub mod qqbot;
+pub mod rex;
 pub mod tmux;
 
+pub use crate::proto::RexEndpoint as RexAdapterEndpoint;
 pub use codex_app_server::verify_candidate;
+pub use rex::{
+    RexError, RexEvent, RexEventBatch, RexEventStream, RexInputStage, RexObservation,
+    RexProcessObservation, RexProgramStatusRecord, RexWriteReceipt,
+    NOT_DELIVERED_PREFIX as REX_NOT_DELIVERED_PREFIX,
+};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -136,7 +143,7 @@ impl AdapterError {
     }
 }
 
-const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 10] = [
+const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 11] = [
     desktop_bridge::NOT_SUBMITTED_PREFIX,
     "ADAPTER_ROUTE_UNAVAILABLE:",
     "ADAPTER_ENDPOINT_UNAVAILABLE:",
@@ -148,6 +155,7 @@ const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 10] = [
     // A gateway timeout or malformed reply leaves its enqueue outcome unknown.
     "DSH_ENDPOINT_REJECTED:",
     "DSH_ENDPOINT_BLOCKED:",
+    rex::NOT_DELIVERED_PREFIX,
 ];
 
 /// Classify a sink error by the exact AdapterError display contract.

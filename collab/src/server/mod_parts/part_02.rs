@@ -133,6 +133,7 @@ impl Server {
             session_id: Some(format!("session-{worker_id}")),
             thread_id: Some(thread_id.to_string()),
             tmux_endpoint: None,
+            rex_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver transport".into(),
         };
@@ -242,6 +243,9 @@ impl Server {
                             ) {
                                 _ if transport.kind == TransportKind::Tmux => {
                                     format!("runtime-tmux-{}", sanitize_identifier(worker_id))
+                                }
+                                _ if transport.kind == TransportKind::Rex => {
+                                    format!("runtime-rex-{}", sanitize_identifier(worker_id))
                                 }
                                 (Some(session_id), Some(thread_id)) => format!(
                                     "runtime-{}-{}-{}",
@@ -766,6 +770,7 @@ mod scoped_register_tests {
             namespace: Some(endpoint.tmux_session_id.clone()),
             session_id: endpoint.codex_session_id.clone(), thread_id: endpoint.codex_thread_id.clone(),
             tmux_endpoint: Some(endpoint), capabilities: vec!["send_message_to_pane".into()],
+            rex_endpoint: None,
             self_check: "test-owned existing pane".into(),
         };
         let prepared = server.prepare_register_envelope_for_scope(
@@ -1026,6 +1031,7 @@ mod scoped_register_tests {
             session_id: Some(format!("session-{worker}")),
             thread_id: Some(format!("thread-{worker}")),
             tmux_endpoint: None,
+            rex_endpoint: None,
             capabilities: Vec::new(),
             self_check: "owner test".into(),
         };

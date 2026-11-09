@@ -62,6 +62,73 @@ fn sendmessage_places_reply_flags_before_the_trailing_body() {
 }
 
 #[test]
+fn sendmessage_preserves_machine_address_typed_ref_and_recovery_operation() {
+    let reference = "collab-ref:{\"kind\":\"message\",\"value\":{\"machine\":\"remote\",\"project_scope\":\"/projects/alpha\",\"app_scope_id\":\"appserver-alpha\",\"msg_id\":\"collab-msg-remote-1\"}}";
+    assert_eq!(
+        build_argv(
+            "collab_sendmessage",
+            &json!({
+                "to":"remote.appsdk.Alice",
+                "subject":"federated",
+                "body":"body",
+                "in_reply_to":reference,
+                "operation_id":"operation-recovery-1"
+            })
+        )
+        .unwrap(),
+        [
+            "sendmessage",
+            "--to",
+            "remote.appsdk.Alice",
+            "--subject",
+            "federated",
+            "--in-reply-to",
+            reference,
+            "--operation-id",
+            "operation-recovery-1",
+            "body",
+        ]
+    );
+}
+
+#[test]
+fn collab_msg_accepts_a_full_collab_reference_without_rewriting_it() {
+    let reference = "collab-ref:{\"kind\":\"origin\",\"value\":{\"machine\":\"remote\",\"project_scope\":\"/projects/alpha\",\"app_scope_id\":\"appserver-alpha\",\"operation_id\":\"operation-recovery-1\"}}";
+    assert_eq!(
+        build_argv("collab_msg", &json!({"id": reference})).unwrap(),
+        ["msg", reference]
+    );
+}
+
+#[test]
+fn federation_mcp_schema_exposes_only_the_shared_send_and_ref_fields() {
+    let definitions = tools();
+    let send = definitions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "collab_sendmessage")
+        .unwrap();
+    let properties = send["inputSchema"]["properties"].as_object().unwrap();
+    for field in ["to", "in_reply_to", "operation_id"] {
+        assert!(properties.contains_key(field), "missing {field}");
+    }
+    for forbidden in [
+        "credential",
+        "password",
+        "ssh_host",
+        "remote_socket",
+        "allow_inbound",
+        "allow_outbound",
+    ] {
+        assert!(
+            !properties.contains_key(forbidden),
+            "unexpected {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn sendmessage_defaults_to_no_reply_obligation_and_rejects_non_boolean_flags() {
     assert_eq!(
         build_argv(

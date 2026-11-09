@@ -46,7 +46,7 @@ pub struct State {
     pub channel_envelopes:
         std::collections::HashMap<String, crate::server::channel_envelope::ChannelEnvelope>,
     /// Platform event idempotency index: event key -> Collab message id.
-    pub platform_event_index: std::collections::HashMap<String, String>,
+    pub platform_event_index: std::collections::HashMap<String, crate::server::channel_envelope::PlatformEventTarget>,
     /// Immutable QQ route for each committed agent reply, keyed by the Collab
     /// outbound message id.
     pub channel_reply_routes:
@@ -106,6 +106,12 @@ pub struct State {
     pub ticket_phases: Vec<super::ticket_state::TicketPhaseRecord>,
     /// Shortest-queue rotation cursor per admission group -> last slot name.
     pub ticket_rotation: std::collections::BTreeMap<String, String>,
+    /// Typed federation message core: outbound recovery, accepted mailbox
+    /// metadata, exact origin dedup index and retention tombstones. It is one
+    /// owner so the accept reducer, retention cleanup and receipt projection
+    /// share one definition. Empty for legacy state and absent for local-only
+    /// daemons.
+    pub federation: crate::server::federation::FederationStore,
 }
 
 fn has_current_master_grant(state: &State, worker_id: &str, target: &str) -> bool {

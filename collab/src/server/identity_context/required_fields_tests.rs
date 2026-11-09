@@ -1,6 +1,31 @@
 use super::*;
 use crate::proto::{DshCandidate, TmuxCandidate};
 
+#[test]
+fn rex_requires_the_agent_session_without_native_thread_fields() {
+    let facts = IdentityFacts {
+        rex: Some(crate::proto::RexCandidate {
+            server: "unix:///tmp/rex.sock".into(),
+            session_id: "session:11111111-1111-1111-1111-111111111111".into(),
+            block_id: "block:22222222-2222-2222-2222-222222222222".into(),
+            cwd: "/remote/project".into(),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(required_fields(&facts), vec!["session_id"]);
+    let facts = IdentityFacts {
+        session_id: Some("agent-session".into()),
+        ..facts
+    };
+    assert!(required_fields(&facts).is_empty());
+    validate_facts(&facts).unwrap();
+    let mixed = IdentityFacts {
+        endpoint: Some("unix:///tmp/other.sock".into()),
+        ..facts
+    };
+    assert!(validate_facts(&mixed).is_err());
+}
+
 fn tmux_anchor() -> TmuxCandidate {
     TmuxCandidate {
         endpoint: crate::proto::TmuxEndpoint {

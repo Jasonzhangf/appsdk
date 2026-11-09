@@ -25,9 +25,18 @@ owner 是 core 实现与项目 DAG。
   巡检义务。若项目巡检被显式取消，按已实现控制保持取消，不由 ensure 自动恢复；
   当前 master 可用 `collab notify cancel --event master-idle` 显式取消，详见下文
   「Master 取消与恢复项目巡检」。
-- Jenny 每次巡检提醒都先检查四项：未解决的 P0/P1；未完成任务或 ready 工作；自有
-  worktree 与资源释放；peer/worker 的 busy/idle 及 idle 原因是否合理。随后检查本
-  项目 worker 的活动状态、未关闭 board 任务、当前绑定及按任务取消状态。busy 的
+- Jenny 每次巡检提醒都先执行两个强制步骤：第一，运行 `collab board show` 与
+  `collab who`，列出全部 live idle peer（包括没有当前任务的成员）及通道来源；
+  第二，按当前优先级把 ready 的非重叠 P0/P1 派给每个 idle eligible peer。不得
+  先做实现、debug、merge 或资源清理。Planner/Reviewer 缺位不是等待理由：独立
+  reviewer 先用独立 Codex OAuth/`codex-auto-review`，不可用则改派普通空闲 peer；
+  只有无 idle worker、subagent review 入口真实失效且无其他 peer 时，Jenny 才临时
+  代审并记录独立性缺口。随后核对非 live peer：cold、offline、unknown 不进入派发
+  容量；对未响应 peer 使用最长 15 分钟的有界等待，到期再核对状态。可用者进入派发
+  队列；仍不可用者从当前派发队列排除，记录 owner 和恢复条件，继续其他可独立派发
+  工作，不因这些 peer 未响应而停工。再检查未解决的 P0/P1、未完成任务或 ready 工作、自有
+  worktree 与资源释放、peer/worker 的 busy/idle 及 idle 原因是否合理。同时检查
+  本项目 worker 的活动状态、未关闭 board 任务、当前绑定及按任务取消状态。busy 的
   worker 跳过；idle 且仍持有未取消任务的 worker 应收到继续本人任务的提醒。没有
   未关闭任务时不发 board idle 提醒。
 - board 任务的持有关系由任务板 owner 决定，不依赖 `active_task` 单个投影字段。
@@ -56,6 +65,38 @@ owner 是 core 实现与项目 DAG。
   `waiting_user` 不当作 idle 自动确认；cold、offline、unknown 显式报告观测或绑定
   缺口，不盲目输入。发送前刷新状态；使用既有绑定适配器，不切换传输绕过失败。
   事件能力不等于常驻事件订阅；没有真实当前状态时用周期 tick 检查，不用缓存推断。
+
+## 非 live peer 的主动核实流程
+
+`collab who` 或 `collab worker status` 返回 `identity-mismatch`、`cold`、`offline`、
+`unknown` 或 `presence=missing`，且该 peer 仍在派发候选或仍持有未关闭任务的，由当前
+master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不长期滞留在派发队列。
+每轮巡检先做一次真实核实，再走有界等待与终判：
+
+1. 主动核实：先对 Codex TUI/tmux peer 运行
+   `collab worker snapshot <id> --lines 80`，检查真实 pane 当前状态；再对该稳定名字
+   发一条 `collab send --to '<peer>' --subject '<核实事由>' --type request '<请运行 collab context 并回复真实结果>'`
+   核实消息，要求对方运行 `collab context` 恢复身份并回一条真实结果，同时读取
+   `collab worker status <id>` 的当前投影。pane snapshot 是观察证据，不是身份或消费回执。
+   `identity-mismatch` 只以 `collab context`
+   为修复入口，不编辑、推断或复制绑定。
+2. 有界等待：对方未响应时使用最长 15 分钟的有界等待（`board-idle` 兜底 tick 即
+   `900000` 毫秒），不循环催报、不叠加同批提醒。等待期间这些 peer 不计入派发容量。
+3. 终判：到期运行一次 `collab worker status <id>` 做最终状态核实。仍为
+   `identity-mismatch`/`cold`/`offline`/`unknown`/`missing` 且无真实回执的判为当前
+   不可用，从派发队列排除；已恢复 `online` 的按优先级放入派发队列，用
+   `collab board publish --executor <peer>` 入队或 `collab board dispatch`/`invite` 派单。
+   仍未关闭任务且离线或未知的，同时通知 Jenny 任务 id、缺失完成项和请求处置。
+4. 移除：确认不可用、且不再持有未关闭任务、未交付内容或受保护资源时，尝试
+   `collab worker close <id> --reason '<auditable reason>'` 显式退休该 peer。
+   `worker close` 需要可证明的 lifecycle target；`identity-mismatch`、`cold`、
+   `offline`、`missing` 目标通常返回 `PEER_LIFECYCLE_TARGET_UNPROVEN`。此时不得强删，
+   改由该 peer 自己的 pane 运行 `collab context` 修复，或由 owner/用户授权退休。
+   仍持有未关闭责任、dirty/active/shared/unknown 资源或身份冲突的同样不得强删。
+   无论能否退休，先把 peer 从派发队列排除并记录 owner 与恢复条件；移除只针对本
+   owner 有权处置的 peer，不动他人资源，也不操作 daemon 或 tmux 生命周期。
+5. 记录：每步记录真实时间、命令、回执与判定，分开记录核实尝试、投递、消费和终判结果；
+   不得以发消息或超时代替状态核实，也不得把等待写成已完成核实。
 
 ## Peer 何时与如何取消
 
@@ -166,8 +207,12 @@ daemon 负责产生真实的合格唤醒：按 owner、按任务取消状态和�
 Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒循环，也不替 peer 重新 arm
 其取消。
 
-1. 读取当前项目未关闭 board 任务与 owner，结合按任务取消状态得出待巡检集合。
-2. 读取每个 owner 的当前宿主状态；busy 跳过，unknown/offline/cold 记录缺口。
+1. 先运行 `collab board show` 与 `collab who`，列出全部 live idle peer（包括无
+   当前任务者），再读取当前项目未关闭 board 任务与 owner，结合按任务取消状态得出
+   待巡检和待派集合；Planner/Reviewer 缺位按角色后备继续，不空等。
+2. 读取每个 owner 的当前宿主状态；busy 跳过，cold、offline、unknown 不进入派发
+   容量。未响应 peer 使用最长 15 分钟有界等待，到期再核对；可用者进入派发队列，
+   仍不可用者从当前派发队列排除并记录 owner 与恢复条件，不因此停工。
 3. 对正态 idle 且仍有未取消任务的 owner，daemon 会产出继续提醒；Jenny 核对任务与
    取消入口，不重复 arm，也不覆盖 peer 的取消。
 4. 存在 CEO 且本项目有实质进展或阻塞变化时，向 CEO 回报项目进度。

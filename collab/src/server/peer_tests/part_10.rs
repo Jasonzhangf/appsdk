@@ -151,11 +151,11 @@ fn idle_master_keeps_static_guidance_in_role_brief_without_fake_task_actions() {
         .expect("master next action");
     let next_action_lower = next_action.to_ascii_lowercase();
     assert!(
-        next_action_lower.contains("long-horizon goals"),
+        next_action_lower.contains("invite suitable, available and authorized peers first"),
         "{next_action}"
     );
     assert!(
-        next_action_lower.contains("regardless of whether other peers are busy"),
+        next_action_lower.contains("only after confirming none can take the work"),
         "{next_action}"
     );
     assert!(
@@ -163,7 +163,7 @@ fn idle_master_keeps_static_guidance_in_role_brief_without_fake_task_actions() {
         "{next_action}"
     );
     assert!(
-        next_action_lower.contains("re-arm"),
+        next_action_lower.contains("reusing a valid patrol batch"),
         "{next_action}"
     );
     let operations = context.data["operations"].as_array().expect("operations");
@@ -223,7 +223,8 @@ fn master_context_routes_work_by_task_kind() {
         .to_lowercase();
     assert!(responsibilities.contains("long-horizon goals"));
     assert!(responsibilities.contains("bounded subagent tasks"));
-    assert!(responsibilities.contains("regardless of whether other peers are busy"));
+    assert!(responsibilities.contains("first inviting suitable, available and authorized peers"));
+    assert!(responsibilities.contains("only after confirming no peer can take the remaining work"));
     assert!(responsibilities.contains("codex exec --profile gcm"));
     assert!(!responsibilities.contains("saturate every live present peer first"));
     assert!(!context
@@ -336,7 +337,7 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         accepted_context.data["role_brief"]["next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("accepted goal's long-horizon orchestrator"),
+            .contains("Resume your authorized owned goal from the current board."),
         "{}",
         accepted_context.data["role_brief"]
     );
@@ -1685,11 +1686,17 @@ fn worker_freed_transitions_notify_live_master() {
     let alert = idle_alert.unwrap();
     assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
     assert!(alert.body.contains("live_idle=subagent:managed-worker"));
-    assert!(alert.body.contains("long-horizon goals"));
-    assert!(alert.body.contains("one-shot execution or observation"));
+    assert!(alert.body.contains("Long-horizon orchestration"));
+    assert!(alert
+        .body
+        .contains("invite suitable, available and authorized peers"));
+    assert!(alert
+        .body
+        .contains("only after confirming no peer can take it"));
+    assert!(alert.body.contains("worker assignments"));
     assert!(alert.body.contains("codex exec --profile gcm"));
     assert!(alert.body.contains("authorized peers"));
-    assert!(alert
+    assert!(!alert
         .body
         .contains("regardless of whether other peers are busy"));
     assert!(!alert.body.contains("saturate live present peers first"));

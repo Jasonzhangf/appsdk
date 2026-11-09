@@ -297,7 +297,17 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
     );
     let next_action_lower = next_action.to_lowercase();
     assert!(
-        next_action_lower.contains("long-horizon goals to authorized peers"),
+        next_action_lower.contains("invite suitable, available and authorized peers first"),
+        "{next_action}"
+    );
+    assert!(
+        next_action_lower.contains("only after confirming none can take the work"),
+        "{next_action}"
+    );
+    assert!(
+        next_action_lower.contains(
+            "retain the goal and route the remaining bounded work through the existing independent"
+        ),
         "{next_action}"
     );
     assert!(
@@ -312,7 +322,16 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         next_action_lower.contains("protected_holds"),
         "{next_action}"
     );
-    assert!(next_action_lower.contains("re-arm"), "{next_action}");
+    assert!(
+        next_action_lower.contains(
+            "reusing a valid patrol batch and renewing it only per the applicable duties"
+        ),
+        "{next_action}"
+    );
+    assert!(
+        next_action_lower.contains("do not re-register or reset it per round"),
+        "{next_action}"
+    );
     // The fixture runner provides a reachable pane, but no confirmed agent.
     assert_eq!(context["liveness"]["presence"], "unknown");
     assert_eq!(

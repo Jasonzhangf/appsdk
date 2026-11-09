@@ -882,6 +882,133 @@ fn patrol_batch_reuse_replaces_unconditional_one_shot_rearm() {
 }
 
 #[test]
+fn master_role_brief_routes_through_peers_before_independent_workers() {
+    let fixture = master_fixture();
+    let master = fixture.run_public(&["context"], THREAD_A);
+    let text = role_projection_text(&master);
+
+    // The old fixed master text unconditionally bypassed suitable peers for
+    // one-shot work and asked the reader to retire a peer-first policy. The
+    // effective master brief must drop both and lead with peer selection.
+    assert!(
+        !contains_ci(&text, "regardless of whether other peers are busy"),
+        "master role_brief must not bypass suitable peers: {text}"
+    );
+    assert!(
+        !contains_ci(&text, "one-shot execution or observation directly"),
+        "master role_brief must not route one-shot work directly past peers: {text}"
+    );
+    assert!(
+        !contains_ci(&text, "all-peers-busy-before-gcm"),
+        "master role_brief must not carry the retired peer-bypass instruction: {text}"
+    );
+    assert!(
+        !contains_ci(&text, "retire master-only goal"),
+        "master role_brief must not carry the retired master-only-goal instruction: {text}"
+    );
+
+    assert!(
+        contains_ci(&text, "invite suitable, available and authorized peers"),
+        "master role_brief must invite suitable peers first: {text}"
+    );
+    assert!(
+        contains_ci(&text, "only after"),
+        "master role_brief must fall back to independent workers only after peers: {text}"
+    );
+    assert!(
+        contains_ci(&text, "codex exec --profile gcm"),
+        "master role_brief must preserve the independent GCM fallback route: {text}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "actively verify identity-mismatch, cold, offline, unknown or missing workers"
+        ),
+        "master role_brief must require active non-live peer verification: {text}"
+    );
+    assert!(
+        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
+        "master role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+    );
+    assert!(
+        contains_ci(&text, "wait at most 15 minutes"),
+        "master role_brief must bound non-live peer verification: {text}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "remove the still-unavailable from the dispatch queue and enqueue the available"
+        ),
+        "master role_brief must resolve non-live peers into unavailable or dispatchable state: {text}"
+    );
+
+    // The current installed wording requires a complete idle-peer inventory
+    // with explicit host channels and eligible capacity, then a customizable
+    // prompt priority. Assert the actual public role_task field, not an asset
+    // copy.
+    let role_task = master["role_brief"]["role_task"]
+        .as_str()
+        .expect("master role_brief.role_task is a string");
+    assert!(
+        contains_ci(role_task, "complete project idle-peer inventory"),
+        "master role_task must inspect the complete project idle-peer inventory: {role_task}"
+    );
+    assert!(
+        contains_ci(role_task, "explicit host channels")
+            && contains_ci(role_task, "eligible capacity"),
+        "master role_task must carry explicit host channels and eligible capacity: {role_task}"
+    );
+    assert!(
+        contains_ci(role_task, "customizable priority"),
+        "master role_task must allow a customizable prompt priority: {role_task}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "without waiting for Jenny's routine approval or merge"
+        ),
+        "master role_brief must preserve authorized peer integration: {text}"
+    );
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let peer_next = peer["role_brief"]["next_action"]
+        .as_str()
+        .expect("peer role_brief.next_action is a string");
+    assert!(
+        contains_ci(peer_next, "without waiting for Jenny's routine approval"),
+        "peer role_brief must preserve authorized independent delivery: {peer_next}"
+    );
+}
+
+#[test]
+fn master_role_brief_defaults_to_independent_review_with_three_condition_exception() {
+    let fixture = master_fixture();
+    let master = fixture.run_public(&["context"], THREAD_A);
+    let text = role_projection_text(&master);
+
+    assert!(
+        contains_ci(
+            &text,
+            "Treat reviewer as a duty, not a required agent name or specialty label. Default to the task's own independent Codex OAuth reviewer using codex-auto-review. If that independent entry is unavailable, assign an available ordinary peer; use an available reviewer when one can take the work. Combine related release issues into one architecture review. Master Jenny is not the default reviewer and does not perform routine review. Only when no idle worker exists, the subagent review entry has actually failed and no other peer can take the review may master temporarily stand in."
+        ),
+        "master role_brief must carry the current independent-review default and three-condition exception: {text}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "Use the independent-review default and three-condition exceptional master-review rule defined by the master review responsibility"
+        ),
+        "master role_brief must reference the single reviewer policy owner: {text}"
+    );
+    assert!(
+        !contains_ci(
+            &text,
+            "Only when no idle worker exists and the subagent review entry has actually failed"
+        ),
+        "master role_brief must not retain the obsolete two-condition reviewer exception: {text}"
+    );
+}
+
+#[test]
 fn patrol_default_batch_preserves_explicit_user_count() {
     let fixture = AppFixture::new();
 
@@ -915,6 +1042,34 @@ fn patrol_default_batch_preserves_explicit_user_count() {
             "{label}: role_brief must not convert non-patrol one-shot schedules to 100 deliveries: {text}"
         );
     }
+}
+
+#[test]
+fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
+    let fixture = AppFixture::new();
+    let patrol = fixture.run_public(&["context", "--work-roles", "patrol"], THREAD_B);
+    let text = role_projection_text(&patrol);
+
+    assert!(
+        contains_ci(
+            &text,
+            "identity-mismatch, cold, offline, unknown or missing peers"
+        ),
+        "patrol role_brief must name the non-live peer states: {text}"
+    );
+    assert!(
+        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
+        "patrol role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+    );
+    assert!(
+        contains_ci(&text, "wait at most 15 minutes"),
+        "patrol role_brief must bound non-live peer verification: {text}"
+    );
+    assert!(
+        contains_ci(&text, "remove the still-unavailable from the dispatch queue")
+            && contains_ci(&text, "enqueue the available"),
+        "patrol role_brief must resolve non-live peers into unavailable or dispatchable state: {text}"
+    );
 }
 
 #[test]

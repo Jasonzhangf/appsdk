@@ -30,6 +30,10 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         include_str!("../skills/collab/references/notifications.md"),
     ),
     (
+        "references/orchestration.md",
+        include_str!("../skills/collab/references/orchestration.md"),
+    ),
+    (
         "references/resource-waits.md",
         include_str!("../skills/collab/references/resource-waits.md"),
     ),

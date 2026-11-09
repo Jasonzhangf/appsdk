@@ -125,29 +125,44 @@ collab sendmessage --unknown-sender --to 'my-peer-id' \
 
 ## Task routing and role responsibilities
 
-master 管项目目标，peer 管已接受的子目标，两者均负责拆分、解阻、验收和资源收口。
+master 是项目唯一负责人，负责持续推进、验收、集成和汇报项目进度；peer 缺位或失联不改变 master 的进度责任。peer 管已接受的子目标，两者均负责拆分、解阻、验收和资源收口。
 manager 核实下级对进度、完成、阻塞和验收的声明，检查相关原始回执或产物，判断证据
 是否支持结论。worker 报告的权限、环境、失败或无法执行也是待核查的声明；manager
 检查原错，区分沙箱限制与系统拒绝，并在已有授权内解阻。不把局部限制扩大为全局结论。
-长程目标经任务板邀请可用且同意接收的 peer；一次性执行或观察沿
-[统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)。
-无可用 peer 时保留长程目标并拆分 worker，不等待注册。
+master 先按下节当前提示词中的优先级，通过任务板邀请合适、可用且获授权的 peer。
+无可承接 peer 时，master 保留目标并按
+[统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)直接派独立
+`codex exec --profile gcm` execution/observation worker，不等待注册，也不把角色缺位
+当作停工理由。
 
 ### 派单顺序与一 peer 一任务
 
-manager（master 与各层 peer）按固定顺序选择承接任务的 peer：默认优先 DSH peer 和
-Codex TUI peer，二者为同一优先层；该层没有合适且可用的承接者时，最后才选择 Codex
-Desktop peer。先按任务权限、能力、依赖和实际容量筛选，再应用此宿主顺序；用户明确
-指定承接者时按其指定执行。
+manager（master 与各层 peer）每轮派单先查看 board 的当前项目成员与容量，列出全部
+idle peer，包括没有当前任务的成员，并显式显示各自通道来源（Codex TUI、DSH、Codex
+Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
+`identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
+[非 live peer 主动核实流程](references/board-idle-patrol.md#非-live-peer-的主动核实流程)
+处理：一次主动核实、最长 15 分钟有界等待、终判后不可用者移除、可用者进入派发队列；
+等待期间不计入容量，也不因这些 peer 未响应停工。
+先按任务权限、能力、依赖和实际容量筛选，再按当前用户或任务提示词中的优先级选择。
+派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
+默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，
+不得跳过 idle 列表直接新开 Desktop peer；没有可承接 peer 时沿已有独立 worker 路由，
+直接派 `codex exec --profile gcm` execution/observation worker 推进。
 
 同一 peer 一次只持有一个未完成实现或主责任务。manager 不把多个并发实现任务叠给同一
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-独立审查只由非本任务执行者的 peer 或独立 review subagent 承担。没有合适且可用的
-reviewer 时，manager 指定另一名未持有该任务的 peer（`architect` 或 `expert` 优先），
-或派独立 review subagent；不由执行同一任务的 peer 自查复核，也不为凑 review 让同一
-peer 叠加第二个任务。实现者、Planner 与最终 reviewer 保持分离。
+reviewer、planner、裁判等是职责，不要求存在同名 agent 或固定角色标签。
+独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review`/独立
+Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 peer 承接 review，
+若仍有 reviewer 空闲就让它 review。每个任务默认用自己的独立 reviewer 验收；
+发布时多个问题统一给 reviewer 做架构 review。master（Jenny）不是默认 review 对象，
+不承担常规评审。角色缺位时按[负责人承接规则](../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进)
+改派，并更新原 board 与合同。极端条件下的 master 临时代审、实际审查者与独立性
+缺口记录均由该规则和现有 Review 合同统一维护。角色缺位本身不得成为停工理由；
+负责人继续解阻、派发和推进其他可执行工作。
 
 普通 peer 是受托子目标的编排者，wire role `worker` 不改变该身份。只有当前有效
 工作角色明确为 `worker`/`executor`，或任务合同明确指定直接执行时，peer 才在合同
@@ -198,6 +213,9 @@ master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体
 合同或 board；同一巡检任务各轮续写同一文件，开头长期目标，后续记录本轮目的、来源、
 结果、相对前次进展、缺口、阻塞和下一步。文档、board、笔记和角色投影不替代正式 goal
 登记回执。
+
+每轮编排循环、board 对齐、优先级与 bottleneck 拆分细节见
+[Collab 编排与长程目标](references/orchestration.md)。
 
 ## Registered patrol duties
 

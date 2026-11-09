@@ -47,6 +47,8 @@ pub struct Record {
 /// before it is worth one scheduling notification.
 const SUBAGENT_STATE_SETTLE_MS: i64 = 60_000;
 
+const NON_LIVE_PEER_DISPATCH_RULE: &str = "For identity-mismatch, cold, offline, unknown or missing peers, first inspect a Codex TUI/tmux pane with `collab worker snapshot <id> --lines 80`, send one context-recovery request, wait at most 15 minutes for an unresponsive peer, then run a final status check; remove the still-unavailable from the dispatch queue and enqueue the available. Keep waiting out of dispatch capacity and keep other ready work moving.";
+
 pub(crate) fn actionable(status: &str) -> bool {
     matches!(
         status,
@@ -806,12 +808,13 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Long-horizon orchestration: assign suitable long-horizon goals through the public board to authorized peers; if no peer is available, retain and split the goal. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. Dispatch one-shot execution or observation directly to independent `codex exec --profile gcm` workers regardless of whether other peers are busy. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Master finite patrol: inspect open P0/P1 work, actual peer progress, owned worktrees and runtime resources, project-canonical issue intake, and required rearm. Subscription presence does not gate identity; do not invent a polling interval. A peer-owned goal patrols goal progress, blockers, and owned resources, and asks the current master first when blocked. Remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. AppSDK/Collab and tmux lifecycles remain independent; never stop or restart a tmux server or terminate host panes during patrol or cleanup. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, finish the patrol and keep the reusable direct-message subscription for new assignments; cancel only finite timed patrol or deadline subscriptions. If the goal is complete, report the evidence to the user.",
+        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Long-horizon orchestration: invite suitable, available and authorized peers for each goal; only after confirming no peer can take it, retain the goal and split the remaining work into bounded independent `codex exec --profile gcm` worker assignments along the existing worker route. Prefer assigning code implementation to subagents; orchestrate scheduling, acceptance, delivery, integration, and owned-resource closure instead of implementing the mainline yourself. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Master finite patrol: inspect open P0/P1 work, actual peer progress, owned worktrees and runtime resources, project-canonical issue intake, and required rearm. {} Subscription presence does not gate identity; do not invent a polling interval. A peer-owned goal patrols goal progress, blockers, and owned resources, and asks the current master first when blocked. Remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. AppSDK/Collab and tmux lifecycles remain independent; never stop or restart a tmux server or terminate host panes during patrol or cleanup. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, finish the patrol and keep the reusable direct-message subscription for new assignments; cancel only finite timed patrol or deadline subscriptions. If the goal is complete, report the evidence to the user.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
         pending_merges.join(","),
-        state.master_wake.goal_due
+        state.master_wake.goal_due,
+        NON_LIVE_PEER_DISPATCH_RULE
     );
     let alert_id = super::gen_msg_id();
     let mut events = vec![
@@ -2574,7 +2577,23 @@ mod tests {
         assert!(body.contains("newly_idle=subagent:managed"), "{body}");
         assert!(body.contains("live_idle=subagent:managed"), "{body}");
         assert!(
-            body.contains("regardless of whether other peers are busy"),
+            body.contains("invite suitable, available and authorized peers"),
+            "{body}"
+        );
+        assert!(body.contains("codex exec --profile gcm"), "{body}");
+        assert!(
+            body.contains("collab worker snapshot <id> --lines 80"),
+            "{body}"
+        );
+        assert!(body.contains("wait at most 15 minutes"), "{body}");
+        assert!(
+            body.contains(
+                "remove the still-unavailable from the dispatch queue and enqueue the available"
+            ),
+            "{body}"
+        );
+        assert!(
+            !body.contains("regardless of whether other peers are busy"),
             "{body}"
         );
         assert!(body.contains("protected holds"), "{body}");

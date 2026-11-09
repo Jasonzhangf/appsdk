@@ -95,6 +95,16 @@ fn validate_tmux_candidate(
     let cwd = std::fs::canonicalize(&candidate.cwd)
         .map_err(|error| format!("RUNTIME_BINDING_REJECTED: tmux candidate cwd: {error}"))?;
     if !Path::new(&candidate.cwd).is_absolute() || cwd != root {
+        eprintln!(
+            "CI_CWD_INSTR candidate.cwd={} canonical_cwd={} root={} socket_path={} pane_id={} tmux_session_id={} is_absolute={}",
+            candidate.cwd,
+            cwd.display(),
+            root.display(),
+            candidate.endpoint.socket_path,
+            candidate.endpoint.pane_id,
+            candidate.endpoint.tmux_session_id,
+            Path::new(&candidate.cwd).is_absolute(),
+        );
         return Err(
             "RUNTIME_BINDING_REJECTED: tmux candidate cwd does not match project root".into(),
         );

@@ -83,13 +83,14 @@ esac
     // Charter, fleet rules and notification rules all travel with the wake.
     assert!(text.contains("不要空转，不要假装完成"));
     assert!(text.contains("Peer-first"));
-    assert!(text.contains("不以 peer 忙闲为前提"));
+    assert!(text.contains("master在派发任务单填写完整长程内容与明确周期"));
+    assert!(text.contains("派发原子开启目标peer订阅"));
     assert!(!text.contains("`[subagent].max_concurrent`（默认 8）"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
     assert!(text.contains("collab subagent"));
     assert!(text.contains("旧状态诊断"));
     assert!(text.contains("PROTECTED_HOLD"));
-    assert!(text.contains("重新武装"));
+    assert!(text.contains("复用仍有效的周期长程批次"));
 
     // Goal objective is read out of the markdown, past the frontmatter.
     assert!(text.contains("# Ship It"));
@@ -117,11 +118,11 @@ esac
     assert!(payload["charter"]
         .as_str()
         .unwrap()
-        .contains("不以 peer 忙闲为前提"));
+        .contains("派发原子开启目标peer订阅"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()
-        .contains("重新武装"));
+        .contains("复用仍有效的周期长程批次"));
     assert!(payload["fleet_rules"]
         .as_str()
         .unwrap()

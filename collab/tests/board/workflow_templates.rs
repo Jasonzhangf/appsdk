@@ -545,6 +545,10 @@ fn workflow_template_update_preserves_active_task_pins() {
             &peer_name,
             "--reviewer",
             &master_name,
+            "--long-horizon-content",
+            "Complete the pinned task while preserving its executor and reviewer contract",
+            "--long-horizon-every-ms",
+            "3600000",
         ],
         THREAD_A,
     );
@@ -814,7 +818,9 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
             );
         }
         assert!(
-            text.contains("appsdk goal status --json") && text.contains("goal_path"),
+            text.contains("appsdk goal status")
+                && text.contains("goal_path")
+                && text.contains("authoritative dispatched task form"),
             "{role}: role_brief must explain the goal document entry without running it: {text}"
         );
         assert!(
@@ -824,9 +830,9 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
             "{role}: role_brief must require a Markdown log for every patrol and long-horizon task: {text}"
         );
         assert!(
-            contains_ci(&text, "default patrol batch is 100 deliveries")
-                && contains_ci(&text, "reuse a valid patrol batch")
-                && contains_ci(&text, "do not re-register"),
+            contains_ci(&text, "Periodic long-horizon batches default to100 deliveries")
+                && contains_ci(&text, "Reuse a valid batch's legal period and remaining deliveries")
+                && contains_ci(&text, "A role change alone does not authorize a new goal or reset a schedule"),
             "{role}: role_brief must carry the default 100-delivery patrol batch without per-round re-registration: {text}"
         );
     }
@@ -868,14 +874,17 @@ fn patrol_batch_reuse_replaces_unconditional_one_shot_rearm() {
         );
         // 替换为批次语义：批次有效且有剩余时复用；耗尽且职责授权继续才整批续订
         assert!(
-            contains_ci(text, "reuse a valid patrol batch")
+            contains_ci(text, "Reuse a valid batch's legal period")
                 && contains_ci(text, "remaining deliveries")
-                && contains_ci(text, "renew the applicable complete patrol batch"),
+                && contains_ci(
+                    text,
+                    "Renew an exhausted batch only while its goal and authorization remain valid"
+                ),
             "{label}: role_brief must carry patrol batch reuse and whole-batch renewal: {text}"
         );
         // 非巡检单次 deadline 的合法续订保留：一射 goal 生命周期语句仍在 role_brief 中
         assert!(
-            contains_ci(text, "rearm and cancel"),
+            contains_ci(text, "Explicit one-shot deadlines and old persisted one-shots retain their own lifecycle"),
             "{label}: role_brief must retain ordinary one-shot rearm lifecycle: {text}"
         );
     }
@@ -1024,21 +1033,17 @@ fn patrol_default_batch_preserves_explicit_user_count() {
     for (label, snapshot) in cases {
         let text = role_projection_text(&snapshot);
         assert!(
-            contains_ci(&text, "default patrol batch is 100 deliveries")
-                && contains_ci(&text, "explicitly specifies a delivery count")
-                && contains_ci(&text, "that count takes priority"),
+            contains_ci(&text, "Periodic long-horizon batches default to100 deliveries")
+                && contains_ci(&text, "explicit counts taking priority"),
             "{label}: role_brief must let an explicit user count override the default 100-delivery patrol batch: {text}"
         );
         assert!(
-            contains_ci(&text, "reuse a valid patrol batch")
-                && contains_ci(&text, "existing legal period")
-                && contains_ci(&text, "applicable complete patrol batch")
-                && contains_ci(&text, "standing duty remains authorized"),
+            contains_ci(&text, "Reuse a valid batch's legal period and remaining deliveries")
+                && contains_ci(&text, "Renew an exhausted batch only while its goal and authorization remain valid"),
             "{label}: role_brief must preserve batch reuse and authorized whole-batch renewal: {text}"
         );
         assert!(
-            contains_ci(&text, "ordinary non-patrol one-shot")
-                && contains_ci(&text, "keeps its own lifecycle"),
+            contains_ci(&text, "Explicit one-shot deadlines and old persisted one-shots retain their own lifecycle"),
             "{label}: role_brief must not convert non-patrol one-shot schedules to 100 deliveries: {text}"
         );
     }

@@ -14,7 +14,7 @@ impl IsolatedTmux {
         Self::start_with_spare_pane(root, false, "sleep 60")
     }
 
-    fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool, pane_command: &str) -> Self {
+    pub(super) fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool, pane_command: &str) -> Self {
         static SOCKET_SEQ: AtomicU64 = AtomicU64::new(0);
         let socket = std::env::temp_dir().join(format!(
             "ctmux-{}-{}.sock",

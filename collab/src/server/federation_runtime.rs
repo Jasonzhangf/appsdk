@@ -438,7 +438,7 @@ fn local_send(
         destination.project_scope != context.project_scope
             || destination.app_scope_id != context.app_scope_id
     }) {
-        if mtype != "message" || delivery != "immediate" {
+        if mtype != "notify" || delivery != "immediate" {
             return Err("CROSS_PROJECT_MODE_UNSUPPORTED: the current local cross-project owner accepts immediate messages".into());
         }
         return Ok(manager.dispatch_sync(

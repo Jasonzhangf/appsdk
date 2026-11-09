@@ -2876,3 +2876,277 @@ fn public_goal_schedule_and_pending_wake_move_across_agent_session_to_new_jenny(
         .expect("the retired goal occurrence remains observable");
     assert_eq!(successor_goal["status"], "cancelled", "{successor_goal}");
 }
+
+fn restricted_cwd_context_in_pane(
+    fixture: &Fixture,
+    pane: &Pane,
+    restricted: &Path,
+    label: &str,
+    operation_id: &str,
+    pwd: Option<&str>,
+) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    let done = fixture.root.join(format!("{label}.exit"));
+    let result = fixture.root.join(format!("{label}.result"));
+    let stderr = fixture.root.join(format!("{label}.stderr"));
+    fs::remove_file(&done).ok();
+    let pwd_step = match pwd {
+        Some(pwd) => format!("export PWD={}", shell_quote(pwd)),
+        None => "unset PWD".into(),
+    };
+    // The caller stays inside the real fixture pane so the daemon observes the
+    // same session/thread ancestry as the seed registration, while the denied
+    // `getcwd` is the exact degraded path the fallback must resolve.
+    let script = format!(
+        "cd {}\nchmod 000 .\n{}\n\"$COLLAB_BINARY\" context --query --op {} >{} 2>{}\nstatus=$?\nchmod 700 {}\nprintf '%s' \"$status\" >{}\nsleep 600\n",
+        shell_quote(&restricted.to_string_lossy()),
+        pwd_step,
+        shell_quote(operation_id),
+        shell_quote(&result.to_string_lossy()),
+        shell_quote(&stderr.to_string_lossy()),
+        shell_quote(&restricted.to_string_lossy()),
+        shell_quote(&done.to_string_lossy()),
+    );
+    let consumer = fixture.run_in_pane(pane, label, &script);
+    assert!(
+        wait_until(Duration::from_secs(20), || {
+            fs::read_to_string(&done).is_ok_and(|value| !value.is_empty())
+        }),
+        "restricted cwd context did not finish in its own pane: {}",
+        consumer.output()
+    );
+    let code: i32 = fs::read_to_string(&done).unwrap().parse().unwrap();
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: fs::read(&result).unwrap_or_default(),
+        stderr: fs::read(&stderr).unwrap_or_default(),
+    }
+}
+
+/// Return the exit status of a real `getcwd` call inside `restricted`. The
+/// denied-cwd fallback only applies when the kernel refuses `getcwd` for a
+/// permission reason; a privileged runner (for example GitHub's root CI user)
+/// reads the directory regardless of mode, so the degraded path is not
+/// reachable there and the assertions must not be faked against the normal
+/// `getcwd` path. A non-zero status means the denial is real and reproducible.
+fn restricted_cwd_getcwd_probe_status(fixture: &Fixture, pane: &Pane, restricted: &Path) -> i32 {
+    let done = fixture.root.join("ctxop-restricted-getcwd-probe.exit");
+    fs::remove_file(&done).ok();
+    let script = format!(
+        "cd {}\nchmod 000 .\nunset PWD\nsh -c 'pwd -P >/dev/null 2>&1'\nstatus=$?\nchmod 700 {}\nprintf '%s' \"$status\" >{}\nsleep 600\n",
+        shell_quote(&restricted.to_string_lossy()),
+        shell_quote(&restricted.to_string_lossy()),
+        shell_quote(&done.to_string_lossy()),
+    );
+    let consumer = fixture.run_in_pane(pane, "ctxop-restricted-getcwd-probe", &script);
+    assert!(
+        wait_until(Duration::from_secs(20), || fs::read_to_string(&done)
+            .is_ok_and(|value| !value.is_empty())),
+        "restricted cwd getcwd probe did not finish in its own pane: {}",
+        consumer.output()
+    );
+    fs::read_to_string(&done)
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .expect("getcwd probe writes a numeric status")
+}
+
+#[test]
+fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("restricted-cwd-resolution");
+    let seed = fixture.registered_context("restricted-cwd-seed", &pane);
+    assert_eq!(seed["ok"], true, "{seed}");
+
+    let restricted = fixture.root.join("restricted-cwd");
+    fs::create_dir(&restricted).expect("create restricted cwd");
+    let root = canonical_root(&fixture);
+    let forged = fixture.root.join("forged-cwd-path");
+    fs::remove_dir_all(&forged).ok();
+    let seed_worker = seed["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The fallback only exists for a real `getcwd` permission denial. On a
+    // privileged runner the mode change does not deny `getcwd`, so the degraded
+    // path is unreachable and the denial assertions below would test the normal
+    // path by accident. The probe status and branch decision are printed so a
+    // `--nocapture` receipt proves which branch this candidate executed.
+    let getcwd_probe = restricted_cwd_getcwd_probe_status(&fixture, &pane, &restricted);
+    eprintln!("denied-cwd guard: restricted_cwd getcwd probe exit status = {getcwd_probe}");
+    if getcwd_probe == 0 {
+        eprintln!(
+            "denied-cwd guard: getcwd readable on mode-000 cwd; skipping fallback assertions (supported-runtime limitation)"
+        );
+        return;
+    }
+    eprintln!(
+        "denied-cwd guard: real PermissionDenied on mode-000 cwd; executing the complete fallback assertions"
+    );
+
+    eprintln!("denied-cwd assertion 1/6: valid absolute PWD resolves to the registered identity and project");
+    let valid = restricted_cwd_context_in_pane(
+        &fixture,
+        &pane,
+        &restricted,
+        "ctxop-restricted-valid-pwd",
+        "ctxop-restricted-valid-pwd",
+        Some(&root),
+    );
+    assert!(
+        valid.status.success(),
+        "valid authenticated PWD must resolve: {}",
+        text(&valid)
+    );
+    let valid_payload = json_stdout(&valid);
+    assert_eq!(
+        valid_payload.pointer("/result/snapshot/identity/worker_id")
+            .and_then(Value::as_str),
+        Some(seed_worker.as_str()),
+        "restricted cwd must resolve to the same registered identity: {valid_payload}"
+    );
+    assert_eq!(
+        valid_payload.pointer("/result/snapshot/binding/project_scope")
+            .and_then(Value::as_str),
+        Some(root.as_str()),
+        "authenticated PWD must resolve to the same registered project: {valid_payload}"
+    );
+    eprintln!("denied-cwd assertion 1/6 passed: valid PWD resolved to the seed worker and project");
+
+    eprintln!("denied-cwd assertion 2/6: missing PWD is rejected with PWD is unavailable");
+    let missing = restricted_cwd_context_in_pane(
+        &fixture,
+        &pane,
+        &restricted,
+        "ctxop-restricted-missing-pwd",
+        "ctxop-restricted-missing-pwd",
+        None,
+    );
+    assert!(!missing.status.success(), "{}", text(&missing));
+    assert!(
+        text(&missing).contains("PWD is unavailable"),
+        "{}",
+        text(&missing)
+    );
+    eprintln!("denied-cwd assertion 2/6 passed: missing PWD rejected");
+
+    eprintln!("denied-cwd assertion 3/6: relative PWD is rejected with PWD is unavailable");
+    let relative = restricted_cwd_context_in_pane(
+        &fixture,
+        &pane,
+        &restricted,
+        "ctxop-restricted-relative-pwd",
+        "ctxop-restricted-relative-pwd",
+        Some("relative"),
+    );
+    assert!(!relative.status.success(), "{}", text(&relative));
+    assert!(
+        text(&relative).contains("PWD is unavailable"),
+        "{}",
+        text(&relative)
+    );
+    eprintln!("denied-cwd assertion 3/6 passed: relative PWD rejected");
+
+    eprintln!("denied-cwd assertion 4/6: nonexistent absolute PWD is rejected with PWD cannot be canonicalized");
+    let forged = restricted_cwd_context_in_pane(
+        &fixture,
+        &pane,
+        &restricted,
+        "ctxop-restricted-forged-pwd",
+        "ctxop-restricted-forged-pwd",
+        Some(forged.to_str().expect("forged path is UTF-8")),
+    );
+    assert!(!forged.status.success(), "{}", text(&forged));
+    assert!(
+        text(&forged).contains("PWD cannot be canonicalized"),
+        "{}",
+        text(&forged)
+    );
+    eprintln!("denied-cwd assertion 4/6 passed: nonexistent PWD rejected");
+
+    eprintln!("denied-cwd assertion 5/6: real but unregistered PWD is rejected with COLLAB_CONTEXT_UNRESOLVED");
+    let unregistered = unique_root("restricted-cwd-unregistered");
+    fs::create_dir_all(&unregistered).expect("create forged but real PWD target");
+    let forged_real = restricted_cwd_context_in_pane(
+        &fixture,
+        &pane,
+        &restricted,
+        "ctxop-restricted-forged-real-pwd",
+        "ctxop-restricted-forged-real-pwd",
+        Some(unregistered.to_str().expect("unregistered PWD is UTF-8")),
+    );
+    fs::remove_dir_all(&unregistered).ok();
+    assert!(!forged_real.status.success(), "{}", text(&forged_real));
+    assert!(
+        text(&forged_real).contains("COLLAB_CONTEXT_UNRESOLVED"),
+        "{}",
+        text(&forged_real)
+    );
+    eprintln!("denied-cwd assertion 5/6 passed: unregistered real PWD rejected");
+
+    eprintln!("denied-cwd assertion 6/6: foreign registered PWD is rejected with IDENTITY_MAP_NOT_FOUND and leaves identity-map/routes unchanged");
+    let foreign = fixture.root.join("restricted-cwd-foreign");
+    seed_baseline(&foreign);
+    let foreign_canonical = fs::canonicalize(&foreign)
+        .expect("foreign project exists")
+        .to_string_lossy()
+        .into_owned();
+    let foreign_pane = second_pane(&fixture, "restricted-cwd-foreign-pane", pane.server_pid);
+    let foreign_registered = registered_context_in(
+        &fixture,
+        &foreign,
+        "ctxop-restricted-foreign-register",
+        &foreign_pane,
+    );
+    assert_eq!(
+        foreign_registered["result"]["snapshot"]["binding"]["project_scope"].as_str(),
+        Some(foreign_canonical.as_str()),
+        "the foreign project must register under its own canonical root: {foreign_registered}"
+    );
+    let foreign_worker = foreign_registered["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("foreign registered identity")
+        .to_owned();
+    assert_ne!(
+        foreign_worker, seed_worker,
+        "the foreign registered project must own a different worker"
+    );
+
+    let before_routes = fs::read(fixture.host_routes()).unwrap();
+    let before_map = fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let forged_foreign = restricted_cwd_context_in_pane(
+        &fixture,
+        &pane,
+        &restricted,
+        "ctxop-restricted-forged-foreign-pwd",
+        "ctxop-restricted-forged-foreign-pwd",
+        Some(&foreign_canonical),
+    );
+    assert!(
+        !forged_foreign.status.success(),
+        "PWD of another registered project must not authorize the original binding: {}",
+        text(&forged_foreign)
+    );
+    let rejected = text(&forged_foreign);
+    assert!(
+        rejected.contains("IDENTITY_MAP_NOT_FOUND"),
+        "forged foreign PWD must surface the typed caller mapping rejection: {rejected}"
+    );
+    assert!(
+        !rejected.contains(&foreign_worker),
+        "forged foreign PWD must not publish the foreign identity snapshot: {rejected}"
+    );
+    assert_eq!(
+        fs::read(fixture.host_routes()).unwrap(),
+        before_routes,
+        "forged foreign PWD must not re-route the original binding"
+    );
+    assert_eq!(
+        fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        before_map,
+        "forged foreign PWD must not re-map the original binding"
+    );
+    eprintln!("denied-cwd assertion 6/6 passed: foreign PWD rejected without identity-map or route mutation");
+    eprintln!("denied-cwd assertions: all six public degraded-path groups executed and passed");
+}

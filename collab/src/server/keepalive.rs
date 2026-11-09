@@ -1889,6 +1889,78 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A same-revision flap through WaitingUser/Unknown (not merely Busy) must
+    /// not re-arm the episode. The keepalive producer removes such a worker
+    /// from the live idle projection, so the return to idle exercises the
+    /// membership-restore path, not the same-set batch latch.
+    #[test]
+    fn idle_storm_same_revision_waiting_user_flap_notifies_once() {
+        use super::super::name_state::AgentActivity::*;
+        use super::super::peer_tests::register_synthetic_peer;
+        let (server, root) = test_server();
+        register_synthetic_peer(&server, "worker", "thread-worker");
+        register(&server, "master", "thread-master");
+        super::super::peer_tests::promote_master(&server, "master", "user approved master");
+        observe_master_online(&server, "session-thread-master");
+        bind_session(&server, "worker", "current");
+        let now = super::super::state::now_ms();
+        server.commit(&[Event::TaskCreated {
+            task: task("task-waiting-flap", "worker", "working", now),
+        }]);
+        observe(&server, Busy, "current");
+        tick_at(&server, now);
+        set_master_idle(&server);
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 1);
+        assert_eq!(idle_notice_count(&server), 1);
+
+        // Consume the first notice so the remaining proof is the episode budget,
+        // not the unconsumed same-set latch.
+        let first_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .msgs
+                .values()
+                .find(|message| {
+                    message.to == "master" && message.subject.as_deref() == Some("worker-idle")
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        server.commit(&[Event::Acked {
+            ids: vec![first_id],
+        }]);
+
+        for activity in [WaitingUser, Unknown] {
+            observe(&server, activity, "current");
+            tick_at(&server, now + 10);
+        }
+        observe(&server, Idle, "current");
+        tick_at(&server, now + 11);
+        tick_at(&server, now + 12);
+        assert_eq!(
+            idle_notice_count(&server),
+            1,
+            "same task revision waiting-user/unknown flap must not re-notify"
+        );
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                state
+                    .master_wake
+                    .idle_workers
+                    .contains(&"worker".to_string()),
+                "return to idle must restore the live idle projection"
+            );
+            assert!(
+                state.master_wake.newly_idle_workers.is_empty(),
+                "return to idle must not re-qualify a notice"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A real actionable-task revision change must notify once while the
     /// worker never leaves the idle state (no Busy transition), and must stay
     /// quiet on later ticks with the same revision.

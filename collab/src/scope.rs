@@ -572,10 +572,16 @@ fn process_cwd_from_result(current: std::io::Result<PathBuf>) -> anyhow::Result<
     match current {
         Ok(cwd) => Ok(cwd),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            std::env::var_os("PWD")
+            let pwd = std::env::var_os("PWD")
                 .map(PathBuf::from)
                 .filter(|cwd| cwd.is_absolute())
-                .ok_or_else(|| anyhow::anyhow!("cannot read cwd: {error}; PWD is unavailable"))
+                .ok_or_else(|| anyhow::anyhow!("cannot read cwd: {error}; PWD is unavailable"))?;
+            std::fs::canonicalize(&pwd).map_err(|_| {
+                anyhow::anyhow!(
+                    "cannot resolve current directory ({error}); PWD cannot be canonicalized: {}",
+                    pwd.display()
+                )
+            })
         }
         Err(error) => Err(error.into()),
     }

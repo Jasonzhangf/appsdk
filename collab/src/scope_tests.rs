@@ -39,13 +39,14 @@ struct EnvVarGuard {
 fn process_cwd_uses_absolute_pwd_when_getcwd_is_permission_denied() {
     let _env_guard = TEST_ENV_LOCK.lock().unwrap();
     let _pwd_guard = EnvVarGuard::without("PWD");
-    std::env::set_var("PWD", "/Users/fanzhang/Documents/github/appsdk");
+    let dir = test_root("process-cwd-absolute");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("PWD", &dir);
 
     let cwd = process_cwd_from_result(Err(std::io::Error::from_raw_os_error(1))).unwrap();
-    assert_eq!(
-        cwd,
-        PathBuf::from("/Users/fanzhang/Documents/github/appsdk")
-    );
+
+    assert_eq!(cwd, dir.canonicalize().unwrap());
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
@@ -59,6 +60,42 @@ fn process_cwd_rejects_relative_or_missing_pwd_when_getcwd_is_permission_denied(
 
     std::env::remove_var("PWD");
     assert!(process_cwd_from_result(denied()).is_err());
+}
+
+#[test]
+fn process_cwd_rejects_uncanonical_pwd_when_getcwd_is_permission_denied() {
+    let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+    let _pwd_guard = EnvVarGuard::without("PWD");
+    let missing = test_root("process-cwd-uncanonical");
+    std::env::set_var("PWD", &missing);
+    assert!(process_cwd_from_result(Err(std::io::Error::from_raw_os_error(1))).is_err());
+}
+
+#[test]
+fn process_cwd_canonicalizes_absolute_pwd_when_getcwd_is_permission_denied() {
+    let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+    let _pwd_guard = EnvVarGuard::without("PWD");
+    let dir = test_root("process-cwd-canonical");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("PWD", &dir);
+
+    let cwd = process_cwd_from_result(Err(std::io::Error::from_raw_os_error(1))).unwrap();
+
+    assert_eq!(cwd, dir.canonicalize().unwrap());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn process_cwd_preserves_non_permission_denied_error() {
+    let error = process_cwd_from_result(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+        .expect_err("non-permission-denied cwd errors must not fall back to PWD");
+
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::NotFound)
+    );
 }
 
 impl EnvVarGuard {

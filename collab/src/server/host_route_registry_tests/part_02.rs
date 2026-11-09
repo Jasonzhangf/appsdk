@@ -38,12 +38,31 @@ fn register_participant_fixture(
             facts.tmux.as_mut().expect("selected context participant"),
         _ => panic!("initial fixture requires selected Register or context"),
     };
+    let declared_cwd = candidate.cwd.clone();
     let observed = std::process::Command::new("tmux").args([
         "-S", &candidate.endpoint.socket_path, "display-message", "-p", "-t",
         &candidate.endpoint.pane_id, "#{pane_current_path}",
     ]).output().unwrap();
     assert!(observed.status.success(), "inspect selected participant");
     candidate.cwd = String::from_utf8(observed.stdout).unwrap().trim().to_owned();
+    if candidate.cwd != context.canonical_root {
+        eprintln!(
+            "FIXTURE_CWD initial declared={} observed={} expected={} pane={}",
+            declared_cwd, candidate.cwd, context.canonical_root, candidate.endpoint.pane_id,
+        );
+        for delay_ms in [50, 200, 500] {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            let later = std::process::Command::new("tmux").args([
+                "-S", &candidate.endpoint.socket_path, "display-message", "-p", "-t",
+                &candidate.endpoint.pane_id,
+                "#{pid}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}|#{pane_start_path}",
+            ]).output().unwrap();
+            eprintln!(
+                "FIXTURE_CWD after_ms={delay_ms} success={} facts={}",
+                later.status.success(), String::from_utf8_lossy(&later.stdout).trim(),
+            );
+        }
+    }
     dispatch(context, request)
 }
 

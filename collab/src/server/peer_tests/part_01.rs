@@ -43,6 +43,18 @@ impl IsolatedTmux {
             "start isolated tmux: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let initial_session = String::from_utf8(output.stdout.clone())
+            .unwrap()
+            .trim()
+            .to_owned();
+        eprintln!(
+            "COLLAB_CI_FIXTURE peer_start root={} socket={} session={initial_session} spare_pane={spare_pane} exit_code={:?} stdout={:?} stderr={:?}",
+            root.display(),
+            socket.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
         if spare_pane {
             let split = Command::new("tmux")
                 .args([
@@ -63,15 +75,20 @@ impl IsolatedTmux {
                 "split isolated tmux: {}",
                 String::from_utf8_lossy(&split.stderr)
             );
+            eprintln!(
+                "COLLAB_CI_FIXTURE peer_split root={} socket={} session={initial_session} exit_code={:?} stdout={:?} stderr={:?}",
+                root.display(),
+                socket.display(),
+                split.status.code(),
+                String::from_utf8_lossy(&split.stdout),
+                String::from_utf8_lossy(&split.stderr),
+            );
         }
         Self {
             socket,
             owner_root: root.to_path_buf(),
             pane_command: pane_command.into(),
-            sessions: RefCell::new(vec![String::from_utf8(output.stdout)
-                .unwrap()
-                .trim()
-                .to_owned()]),
+            sessions: RefCell::new(vec![initial_session]),
         }
     }
 
@@ -100,14 +117,23 @@ impl IsolatedTmux {
                         "-p",
                         "-t",
                         pane_id,
-                        "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+                        "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}",
                     ])
                     .output()
                     .unwrap();
+                eprintln!(
+                    "COLLAB_CI_FIXTURE peer_endpoint_query socket={} pane={} exit_code={:?} success={} stdout={:?} stderr={:?}",
+                    self.socket.display(),
+                    pane_id,
+                    output.status.code(),
+                    output.status.success(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
                 assert!(output.status.success());
                 let line = String::from_utf8(output.stdout).unwrap();
                 let fields = line.trim_end().split('\t').collect::<Vec<_>>();
-                assert_eq!(fields.len(), 4);
+                assert_eq!(fields.len(), 5);
                 crate::proto::TmuxEndpoint {
                     socket_path: self.socket.to_string_lossy().into_owned(),
                     server_pid: fields[0].parse().unwrap(),
@@ -151,6 +177,14 @@ impl IsolatedTmux {
             "add isolated tmux session: {}",
             String::from_utf8_lossy(&created.stderr)
         );
+        eprintln!(
+            "COLLAB_CI_FIXTURE peer_add_session root={} socket={} session={session} exit_code={:?} stdout={:?} stderr={:?}",
+            root.display(),
+            self.socket.display(),
+            created.status.code(),
+            String::from_utf8_lossy(&created.stdout),
+            String::from_utf8_lossy(&created.stderr),
+        );
         let output = Command::new("tmux")
             .args([
                 "-S",
@@ -159,10 +193,19 @@ impl IsolatedTmux {
                 "-p",
                 "-t",
                 &format!("{session}:0"),
-                "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+                "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}",
             ])
             .output()
             .unwrap();
+        eprintln!(
+            "COLLAB_CI_FIXTURE peer_add_session_query root={} socket={} session={session} exit_code={:?} success={} stdout={:?} stderr={:?}",
+            root.display(),
+            self.socket.display(),
+            output.status.code(),
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
         assert!(
             output.status.success(),
             "inspect isolated tmux session: {}",
@@ -174,7 +217,7 @@ impl IsolatedTmux {
             .split('\t')
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        assert_eq!(fields.len(), 4);
+        assert_eq!(fields.len(), 5);
         self.sessions.borrow_mut().push(fields[1].clone());
         crate::proto::TmuxEndpoint {
             socket_path: self.socket.to_string_lossy().into_owned(),
@@ -777,8 +820,12 @@ fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::Tmux
         .strip_prefix('%')
         .map(|legacy_fixture| format!("thread-{legacy_fixture}"))
         .unwrap_or_else(|| thread_id.to_string());
-    let mut endpoint = REGISTERED_TEST_TMUX.with(|fixture| {
+    let (previous_owner_root, selected_branch, fixture_owner_root, mut endpoint) =
+        REGISTERED_TEST_TMUX.with(|fixture| {
         let mut fixture = fixture.borrow_mut();
+        let previous_owner_root = fixture
+            .as_ref()
+            .map(|(tmux, _)| tmux.owner_root.clone());
         // A test can create multiple owned roots. The participant script and
         // pane cwd belong to one root and must not outlive its fixture.
         if fixture
@@ -789,14 +836,33 @@ fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::Tmux
         }
         let (tmux, endpoint_index) =
             fixture.get_or_insert_with(|| (IsolatedTmux::start(&server.root), 0));
-        let endpoint = if *endpoint_index == 0 {
+        let selected_branch = if *endpoint_index == 0 {
+            "initial_endpoint"
+        } else {
+            "added_session"
+        };
+        let endpoint = if selected_branch == "initial_endpoint" {
             tmux.endpoints().remove(0)
         } else {
             tmux.add_session()
         };
         *endpoint_index += 1;
-        endpoint
+        (
+            previous_owner_root,
+            selected_branch,
+            tmux.owner_root.clone(),
+            endpoint,
+        )
     });
+    eprintln!(
+        "COLLAB_CI_FIXTURE peer_endpoint server_root={} thread_id={thread_id} create_root={} fixture_owner_root={} previous_owner_root={previous_owner_root:?} selected_branch={selected_branch} socket={} session={} pane={}",
+        server.root.display(),
+        server.root.display(),
+        fixture_owner_root.display(),
+        endpoint.socket_path,
+        endpoint.tmux_session_id,
+        endpoint.pane_id,
+    );
     endpoint.codex_session_id = Some(format!("session-{thread_id}"));
     endpoint.codex_thread_id = Some(thread_id);
     endpoint

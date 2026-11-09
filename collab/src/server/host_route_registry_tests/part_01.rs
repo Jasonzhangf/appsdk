@@ -177,25 +177,42 @@ fn committed_native_scope_fixture(
 fn test_candidates_at(thread_id: &str, cwd: &Path) -> Option<TransportCandidates> {
     let mut endpoint = TEST_TMUX.with(|fixture| {
         let mut fixture = fixture.borrow_mut();
+        let previous_owner_root = fixture
+            .as_ref()
+            .map(|(owner_root, _, _)| owner_root.clone());
         if fixture
             .as_ref()
             .is_some_and(|(owner_root, _, _)| owner_root != cwd)
         {
             *fixture = None;
         }
-        let (_, tmux, endpoint_index) = fixture.get_or_insert_with(|| {
+        let (fixture_owner_root, tmux, endpoint_index) = fixture.get_or_insert_with(|| {
             (
                 cwd.to_path_buf(),
                 super::peer_tests::IsolatedTmux::start(cwd),
                 0,
             )
         });
-        let endpoint = if *endpoint_index == 0 {
+        let selected_branch = if *endpoint_index == 0 {
+            "initial_endpoint"
+        } else {
+            "added_session"
+        };
+        let endpoint = if selected_branch == "initial_endpoint" {
             tmux.endpoints().remove(0)
         } else {
             tmux.add_session_at(cwd)
         };
         *endpoint_index += 1;
+        eprintln!(
+            "COLLAB_CI_FIXTURE host_endpoint thread_id={thread_id} create_root={} fixture_owner_root={} previous_owner_root={:?} selected_branch={selected_branch} socket={} session={} pane={}",
+            cwd.display(),
+            fixture_owner_root.display(),
+            previous_owner_root,
+            endpoint.socket_path,
+            endpoint.tmux_session_id,
+            endpoint.pane_id,
+        );
         endpoint
     });
     endpoint.codex_session_id = Some(format!("session-{thread_id}"));

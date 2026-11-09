@@ -6,7 +6,7 @@
 #
 # Every fixture repository is an independent, disposable `git init` repository
 # under a test-owned temporary directory. They are not linked worktrees of
-# AppSDK, so their intentional 11-worktree cases do not change AppSDK's own
+# AppSDK, so their intentional 15/16-worktree cases do not change AppSDK's own
 # registered count. Only fixture-local hooks and fixture-local author identity
 # are used. No hook-disabling flags, no core.hooksPath changes, no host clock
 # changes.
@@ -97,7 +97,7 @@ add_worktrees() {
     elif [[ "$special" == 'worktreeline' && "$i" -eq "$extra" ]]; then
       # A valid registered path whose embedded newline is followed by a
       # literal "worktree " token. A line-based count would treat the tail of
-      # this path as an extra record and reject a legal ten-tree repository.
+      # this path as an extra record and reject a legal fifteen-tree repository.
       wt="$repo"$'-wt special\nworktree x'
     fi
     git -C "$repo" worktree add -q -b "wt-$i" "$wt"
@@ -166,131 +166,150 @@ attempt_commit() {
   return 1
 }
 
-# --- A. 11 registered worktrees (one path contains a space and a newline) ---
+# --- A. 16 registered worktrees (one path contains a space and a newline) ---
 
-scenario='grace-11-allows'
-repo_eleven="$work_root/eleven"
-init_repo "$repo_eleven"
-add_worktrees "$repo_eleven" 10 newline
-special_path="$repo_eleven"$'-wt with\nnewline'
+scenario='grace-16-allows'
+repo_sixteen="$work_root/sixteen"
+init_repo "$repo_sixteen"
+add_worktrees "$repo_sixteen" 15 newline
+special_path="$repo_sixteen"$'-wt with\nnewline'
 if [[ ! -d "$special_path" ]]; then
   fail 'worktree path with a space and a newline was not created'
 fi
-n="$(count_trees "$repo_eleven")"
-if [[ "$n" -ne 11 ]]; then
-  fail "eleven fixture registered $n worktrees, expected 11"
+n="$(count_trees "$repo_sixteen")"
+if [[ "$n" -ne 16 ]]; then
+  fail "sixteen fixture registered $n worktrees, expected 16"
 fi
-install_adapter "$repo_eleven" 1793334959
-if ! attempt_commit "$repo_eleven" grace.txt 'grace before deadline' "$work_root/grace.log"; then
+install_adapter "$repo_sixteen" 1793334959
+if ! attempt_commit "$repo_sixteen" grace.txt 'grace before deadline' "$work_root/grace.log"; then
   fail "grace-before-deadline commit was rejected: $(cat "$work_root/grace.log")"
 else
-  if ! git -C "$repo_eleven" log -1 --format=%s | grep -qx 'grace before deadline'; then
+  if ! git -C "$repo_sixteen" log -1 --format=%s | grep -qx 'grace before deadline'; then
     fail 'grace commit did not create the expected commit'
   fi
 fi
 
-scenario='deadline-11-rejects'
-install_adapter "$repo_eleven" 1793334960
-git -C "$repo_eleven" reset -q
-head_before="$(git -C "$repo_eleven" rev-parse HEAD)"
-if attempt_commit "$repo_eleven" boundary.txt 'at deadline' "$work_root/deadline.log"; then
-  fail 'commit at the exact deadline with 11 worktrees was allowed'
+scenario='deadline-16-rejects'
+install_adapter "$repo_sixteen" 1793334960
+git -C "$repo_sixteen" reset -q
+head_before="$(git -C "$repo_sixteen" rev-parse HEAD)"
+if attempt_commit "$repo_sixteen" boundary.txt 'at deadline' "$work_root/deadline.log"; then
+  fail 'commit at the exact deadline with 16 worktrees was allowed'
 else
   if ! grep -q 'AppSDK commit blocked' "$work_root/deadline.log"; then
     fail 'deadline rejection is missing the blocked diagnostic'
   fi
-  if ! grep -q '11 registered worktrees' "$work_root/deadline.log"; then
+  if ! grep -q '16 registered worktrees' "$work_root/deadline.log"; then
     fail 'deadline rejection is missing the count'
   fi
-  if ! grep -q 'maximum of 10' "$work_root/deadline.log"; then
+  if ! grep -q 'maximum of 15' "$work_root/deadline.log"; then
     fail 'deadline rejection is missing the maximum'
   fi
   if ! grep -q '2026-10-30 04:36 UTC' "$work_root/deadline.log"; then
     fail 'deadline rejection is missing the UTC deadline'
   fi
 fi
-head_after="$(git -C "$repo_eleven" rev-parse HEAD)"
+head_after="$(git -C "$repo_sixteen" rev-parse HEAD)"
 if [[ "$head_before" != "$head_after" ]]; then
   fail 'a rejected commit created a commit'
 fi
-if ! git -C "$repo_eleven" diff --cached --name-only | grep -qx 'boundary.txt'; then
+if ! git -C "$repo_sixteen" diff --cached --name-only | grep -qx 'boundary.txt'; then
   fail 'a rejected commit did not keep the staged change staged'
 fi
 
-scenario='after-deadline-11-rejects'
-install_adapter "$repo_eleven" 1793334961
-git -C "$repo_eleven" reset -q
-if attempt_commit "$repo_eleven" after.txt 'after deadline' "$work_root/after.log"; then
-  fail 'commit after the deadline with 11 worktrees was allowed'
+scenario='after-deadline-16-rejects'
+install_adapter "$repo_sixteen" 1793334961
+git -C "$repo_sixteen" reset -q
+if attempt_commit "$repo_sixteen" after.txt 'after deadline' "$work_root/after.log"; then
+  fail 'commit after the deadline with 16 worktrees was allowed'
 else
   if ! grep -q 'AppSDK commit blocked' "$work_root/after.log"; then
     fail 'post-deadline rejection is missing the blocked diagnostic'
   fi
 fi
 
-scenario='linked-worktree-11-rejects'
-install_adapter "$repo_eleven" 1793334960
-git -C "$repo_eleven" reset -q
-linked="$repo_eleven-wt1"
+scenario='linked-worktree-16-rejects'
+install_adapter "$repo_sixteen" 1793334960
+git -C "$repo_sixteen" reset -q
+linked="$repo_sixteen-wt1"
 if [[ ! -d "$linked" ]]; then
   fail 'linked worktree for the commit test is missing'
 elif attempt_commit "$linked" linked.txt 'from linked worktree' "$work_root/linked.log"; then
-  fail 'commit from a linked worktree with 11 total worktrees was allowed'
+  fail 'commit from a linked worktree with 16 total worktrees was allowed'
 else
-  if ! grep -q '11 registered worktrees' "$work_root/linked.log"; then
+  if ! grep -q '16 registered worktrees' "$work_root/linked.log"; then
     fail 'linked-worktree rejection did not report the repository-wide count'
   fi
 fi
 
-# --- B. 10 registered worktrees -------------------------------------------
+# --- A2. 11 registered worktrees (legal under the 15-tree limit) -----------
 
-scenario='deadline-10-allows'
-repo_ten="$work_root/ten"
-init_repo "$repo_ten"
-add_worktrees "$repo_ten" 9 plain
-n="$(count_trees "$repo_ten")"
-if [[ "$n" -ne 10 ]]; then
-  fail "ten fixture registered $n worktrees, expected 10"
+scenario='deadline-11-allows'
+repo_eleven="$work_root/eleven"
+init_repo "$repo_eleven"
+add_worktrees "$repo_eleven" 10 plain
+n="$(count_trees "$repo_eleven")"
+if [[ "$n" -ne 11 ]]; then
+  fail "eleven fixture registered $n worktrees, expected 11"
 fi
-install_adapter "$repo_ten" 1793334960
-if ! attempt_commit "$repo_ten" ok.txt 'at deadline ten trees' "$work_root/ten.log"; then
-  fail "commit at the deadline with 10 worktrees was rejected: $(cat "$work_root/ten.log")"
+install_adapter "$repo_eleven" 1793334960
+if ! attempt_commit "$repo_eleven" ok11.txt 'at deadline eleven trees' "$work_root/eleven.log"; then
+  fail "commit at the deadline with 11 worktrees was rejected: $(cat "$work_root/eleven.log")"
 else
-  if ! git -C "$repo_ten" log -1 --format=%s | grep -qx 'at deadline ten trees'; then
-    fail 'ten-worktree allowed commit did not create the expected commit'
+  if ! git -C "$repo_eleven" log -1 --format=%s | grep -qx 'at deadline eleven trees'; then
+    fail 'eleven-worktree allowed commit did not create the expected commit'
   fi
 fi
 
-# --- B2. 10 registered worktrees, one path contains a newline followed by a
+# --- B. 15 registered worktrees -------------------------------------------
+
+scenario='deadline-15-allows'
+repo_fifteen="$work_root/fifteen"
+init_repo "$repo_fifteen"
+add_worktrees "$repo_fifteen" 14 plain
+n="$(count_trees "$repo_fifteen")"
+if [[ "$n" -ne 15 ]]; then
+  fail "fifteen fixture registered $n worktrees, expected 15"
+fi
+install_adapter "$repo_fifteen" 1793334960
+if ! attempt_commit "$repo_fifteen" ok.txt 'at deadline fifteen trees' "$work_root/fifteen.log"; then
+  fail "commit at the deadline with 15 worktrees was rejected: $(cat "$work_root/fifteen.log")"
+else
+  if ! git -C "$repo_fifteen" log -1 --format=%s | grep -qx 'at deadline fifteen trees'; then
+    fail 'fifteen-worktree allowed commit did not create the expected commit'
+  fi
+fi
+
+# --- B2. 15 registered worktrees, one path contains a newline followed by a
 #         literal "worktree " token (regression for NUL-field counting) ------
 
-scenario='deadline-10-newline-worktree-allows'
-repo_ten_nl="$work_root/ten-nl"
-init_repo "$repo_ten_nl"
-add_worktrees "$repo_ten_nl" 9 worktreeline
-special_nl="$repo_ten_nl"$'-wt special\nworktree x'
+scenario='deadline-15-newline-worktree-allows'
+repo_fifteen_nl="$work_root/fifteen-nl"
+init_repo "$repo_fifteen_nl"
+add_worktrees "$repo_fifteen_nl" 14 worktreeline
+special_nl="$repo_fifteen_nl"$'-wt special\nworktree x'
 if [[ ! -d "$special_nl" ]]; then
   fail 'worktree path with a newline and a "worktree " token was not created'
 fi
-n="$(count_trees "$repo_ten_nl")"
-if [[ "$n" -ne 10 ]]; then
-  fail "ten-newline fixture registered $n worktrees, expected 10"
+n="$(count_trees "$repo_fifteen_nl")"
+if [[ "$n" -ne 15 ]]; then
+  fail "fifteen-newline fixture registered $n worktrees, expected 15"
 fi
-install_adapter "$repo_ten_nl" 1793334960
-if ! attempt_commit "$repo_ten_nl" nlok.txt 'at deadline ten trees newline path' "$work_root/ten-nl.log"; then
-  fail "commit at the deadline with 10 worktrees (newline+worktree path) was rejected: $(cat "$work_root/ten-nl.log")"
+install_adapter "$repo_fifteen_nl" 1793334960
+if ! attempt_commit "$repo_fifteen_nl" nlok.txt 'at deadline fifteen trees newline path' "$work_root/fifteen-nl.log"; then
+  fail "commit at the deadline with 15 worktrees (newline+worktree path) was rejected: $(cat "$work_root/fifteen-nl.log")"
 else
-  if ! git -C "$repo_ten_nl" log -1 --format=%s | grep -qx 'at deadline ten trees newline path'; then
-    fail 'ten-newline allowed commit did not create the expected commit'
+  if ! git -C "$repo_fifteen_nl" log -1 --format=%s | grep -qx 'at deadline fifteen trees newline path'; then
+    fail 'fifteen-newline allowed commit did not create the expected commit'
   fi
 fi
 
 scenario='clock-failure-errors'
-install_adapter "$repo_ten" FAIL
-git -C "$repo_ten" reset -q
-printf 'clock\n' > "$repo_ten/clock.txt"
-git -C "$repo_ten" add clock.txt
-if git -C "$repo_ten" commit -q -m 'clock failure' > "$work_root/clock.log" 2>&1; then
+install_adapter "$repo_fifteen" FAIL
+git -C "$repo_fifteen" reset -q
+printf 'clock\n' > "$repo_fifteen/clock.txt"
+git -C "$repo_fifteen" add clock.txt
+if git -C "$repo_fifteen" commit -q -m 'clock failure' > "$work_root/clock.log" 2>&1; then
   fail 'commit succeeded despite a clock read failure'
 else
   if ! grep -q 'failed to read the current UTC epoch' "$work_root/clock.log"; then
@@ -302,9 +321,9 @@ else
 fi
 
 scenario='query-failure-errors'
-install_adapter "$repo_ten" 1793334960
-git -C "$repo_ten" reset -q
-hooks_dir="$(resolve_hooks_dir "$repo_ten")"
+install_adapter "$repo_fifteen" 1793334960
+git -C "$repo_fifteen" reset -q
+hooks_dir="$(resolve_hooks_dir "$repo_fifteen")"
 cat > "$hooks_dir/pre-commit" <<QUERY_HOOK
 #!/usr/bin/env bash
 set -euo pipefail
@@ -322,9 +341,9 @@ git() {
 worktree_gate_main "\$@"
 QUERY_HOOK
 chmod 0755 "$hooks_dir/pre-commit"
-printf 'query\n' > "$repo_ten/query.txt"
-git -C "$repo_ten" add query.txt
-if git -C "$repo_ten" commit -q -m 'query failure' > "$work_root/query.log" 2>&1; then
+printf 'query\n' > "$repo_fifteen/query.txt"
+git -C "$repo_fifteen" add query.txt
+if git -C "$repo_fifteen" commit -q -m 'query failure' > "$work_root/query.log" 2>&1; then
   fail 'commit succeeded despite a worktree list failure'
 else
   if ! grep -q 'failed to list registered worktrees' "$work_root/query.log"; then
@@ -341,9 +360,9 @@ fi
 scenario='owned-chain-allows'
 chain_marker="$work_root/chain.marker"
 : > "$chain_marker"
-install_dispatcher "$repo_ten" 1793334960 '' "$chain_marker"
-git -C "$repo_ten" reset -q
-if ! attempt_commit "$repo_ten" chain.txt 'owned chain allow' "$work_root/chain.log"; then
+install_dispatcher "$repo_fifteen" 1793334960 '' "$chain_marker"
+git -C "$repo_fifteen" reset -q
+if ! attempt_commit "$repo_fifteen" chain.txt 'owned chain allow' "$work_root/chain.log"; then
   fail "owned hook chain rejected an allowed commit: $(cat "$work_root/chain.log")"
 fi
 if ! grep -qx 'before' "$chain_marker"; then
@@ -356,10 +375,10 @@ fi
 scenario='owned-chain-failure-propagates'
 chain_fail_marker="$work_root/chainfail.marker"
 : > "$chain_fail_marker"
-install_dispatcher "$repo_ten" 1793334960 \
+install_dispatcher "$repo_fifteen" 1793334960 \
   'printf "chain callback failed\n" >&2; exit 7' "$chain_fail_marker"
-git -C "$repo_ten" reset -q
-if attempt_commit "$repo_ten" chainfail.txt 'owned chain fail' "$work_root/chainfail.log"; then
+git -C "$repo_fifteen" reset -q
+if attempt_commit "$repo_fifteen" chainfail.txt 'owned chain fail' "$work_root/chainfail.log"; then
   fail 'commit succeeded despite a failing existing hook callback'
 else
   if ! grep -q 'chain callback failed' "$work_root/chainfail.log"; then

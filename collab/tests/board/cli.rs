@@ -375,7 +375,8 @@ import time
 release = Path({release})
 entered = Path({entered})
 child_pid = Path({child_pid})
-expected_cwd = {project}
+expected_work_tree = {project}
+expected_git_dir = os.path.join({project}, ".git")
 expected_args = {expected_args}
 real_git = {real_git}
 
@@ -387,7 +388,20 @@ if sys.argv[1:] == ["--hold-integration-git"]:
     except FileNotFoundError:
         pass
     sys.exit(0)
-if os.getcwd() == expected_cwd and sys.argv[1:] == expected_args:
+argv = sys.argv[1:]
+repo_flags = [a for a in argv if a.startswith("--git-dir=") or a.startswith("--work-tree=")]
+bare_args = [a for a in argv if a not in repo_flags]
+work_tree = next((a[len("--work-tree="):] for a in repo_flags if a.startswith("--work-tree=")), None)
+git_dir = next((a[len("--git-dir="):] for a in repo_flags if a.startswith("--git-dir=")), None)
+same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
+if (
+    os.getcwd() == "/"
+    and work_tree
+    and git_dir
+    and same(work_tree, expected_work_tree)
+    and same(git_dir, expected_git_dir)
+    and bare_args == expected_args
+):
     entered.write_text("entered")
     child = subprocess.Popen([sys.executable, __file__, "--hold-integration-git"])
     child_pid.write_text(str(child.pid))

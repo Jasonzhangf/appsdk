@@ -395,6 +395,7 @@ fn real_pane_cwd_is_rejected_by_the_production_registration_gate() {
             desktop_bridge: None,
             appserver: None,
             dsh: None,
+            rex: None,
             tmux: Some(crate::proto::TmuxCandidate {
                 endpoint,
                 cwd: candidate_cwd,

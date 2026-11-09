@@ -943,6 +943,7 @@ impl ProjectRuntimeManager {
                 effect.effect_id
             ));
         }
+        let mut events = Vec::new();
         if !Self::pending_effect_complete(&state, effect) || !role_events.is_empty() {
             let occupancy = crate::server::name_state::NameOccupancy {
                 name: effect.name.clone(),
@@ -957,7 +958,7 @@ impl ProjectRuntimeManager {
             } else {
                 &[]
             };
-            let mut events =
+            events =
                 crate::server::name_resolution::build_name_resolution_events_with_rename_from(
                     &state,
                     effect.project_scope.as_str(),
@@ -990,11 +991,36 @@ impl ProjectRuntimeManager {
                 );
             }
             events.extend(role_events);
-            if !events.is_empty() {
-                runtime
-                    .commit_locked_checked(&mut state, &events)
-                    .map_err(|error| format!("PENDING_EFFECT_COMMIT_FAILED: {error}"))?;
-            }
+        }
+        // Name, assignment, resource and ticket recovery are decided from one
+        // candidate view. The candidate is memory-only; the real state is
+        // committed once below.
+        let mut candidate = state.clone();
+        for event in &events {
+            candidate
+                .apply_checked(event)
+                .map_err(|error| format!("PENDING_EFFECT_CANDIDATE_FAILED: {error}"))?;
+        }
+        // Occupancy can already be current when only the native thread changed.
+        // Ticket recovery therefore has its own admission condition here.
+        events.extend(
+            ticket_binding_recovery_events(
+                &candidate,
+                control,
+                &route_scope,
+                &effect.name,
+            )
+            .map_err(|error| {
+                format!(
+                    "TICKET_BINDING_RECOVERY_FAILED: {}",
+                    error.error.unwrap_or_else(|| "unknown recovery error".into())
+                )
+            })?,
+        );
+        if !events.is_empty() {
+            runtime
+                .commit_locked_checked(&mut state, &events)
+                .map_err(|error| format!("PENDING_EFFECT_COMMIT_FAILED: {error}"))?;
         }
         let mut identity = self
             .recovered_binding_identity(

@@ -11,7 +11,11 @@ fn board_execution_gate(server: &Server, state: &State, actor: &str, task_id: &s
 
 /// Peers orchestrate multiple goals. Admission checks the task's actual
 /// resource ownership, rather than treating another goal as a busy slot.
-fn board_resume_gate(state: &State, actor: &str, task_id: &str) -> Result<(), Resp> {
+pub(crate) fn board_resume_gate(
+    state: &State,
+    actor: &str,
+    task_id: &str,
+) -> Result<(), Resp> {
     if state.worktree_bindings.values().any(|resource| resource.task_id == task_id && resource.owner_agent_id != actor) {
         return Err(Resp::err("BOARD_RESOURCE_OWNER_CONFLICT: assignment resource belongs to another actor"));
     }
@@ -28,6 +32,83 @@ fn board_resume_gate(state: &State, actor: &str, task_id: &str) -> Result<(), Re
     Ok(())
 }
 
+fn ticket_stale_binding_error(
+    state: &State,
+    task_id: &str,
+    slot_name: &str,
+    current_generation: u64,
+    attempt: u64,
+) -> Option<Resp> {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+
+    state
+        .ticket_phases
+        .iter()
+        .find(|phase| {
+            phase.task_id == task_id
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.slot_name.as_deref() == Some(slot_name)
+                && phase.attempt_generation == attempt
+                && phase.binding_generation > 0
+                && phase.binding_generation < current_generation
+                && matches!(
+                    phase.status,
+                    TicketPhaseStatus::Claimed
+                        | TicketPhaseStatus::Running
+                        | TicketPhaseStatus::Revoked
+                )
+        })
+        .map(|phase| {
+            Resp::err_data(
+                "TICKET_STALE_BINDING: the attempt belongs to an older identity generation",
+                json!({
+                    "task_id": task_id,
+                    "attempt": attempt,
+                    "claimed_generation": phase.binding_generation,
+                    "current_generation": current_generation,
+                }),
+            )
+        })
+}
+
+/// Resolve the authenticated worker's current binding slot and, when its
+/// declared attempt still matches an older generation, return the exact stale
+/// binding error. `Ok(None)` means the current scope/slot is absent and no
+/// stale diagnosis can be made; control/route read errors stay explicit.
+pub(crate) fn current_ticket_stale_binding_error(
+    server: &Server,
+    state: &State,
+    actor: &str,
+    task_id: &str,
+    attempt: u64,
+) -> Result<Option<Resp>, Resp> {
+    let route = match server_route_scope(server, state) {
+        Ok(Some(route)) => route,
+        Ok(None) => return Ok(None),
+        Err(error) => return Err(Resp::err(error)),
+    };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control,
+        Err(error) => return Err(Resp::err(error)),
+    };
+    let slot = match control.current_for_worker(
+        &route.project_scope_id,
+        &route.app_scope_id,
+        actor,
+    ) {
+        Ok(Some(slot)) => slot,
+        Ok(None) => return Ok(None),
+        Err(error) => return Err(Resp::err(error)),
+    };
+    Ok(ticket_stale_binding_error(
+        state,
+        task_id,
+        &slot.identity_key.name,
+        slot.generation,
+        attempt,
+    ))
+}
+
 fn board_claim(server: &Server, actor: String, token: String, id: String, expected_revision: u64) -> Resp {
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
@@ -36,69 +117,119 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     if !details.public_visibility && task.owner != actor {
         return Resp::err("BOARD_PRIVATE_TASK: private queue work is claimable only by its publisher");
     }
-    if task.status != "pending" || task.owner != task.created_by {
-        return Resp::err_data(
-            "BOARD_TASK_NOT_PENDING: only pending publisher-owned work may be claimed",
-            json!({"task_id": id, "status": task.status}),
-        );
-    }
-    if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
-    let binding = match board_execution_gate(server, &state, &actor, &id) {
-        Ok(binding) => binding, Err(error) => return error,
-    };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
-    let name_session = match control.current_for_worker(&binding.project_scope, &binding.app_scope_id, &actor) {
-        Ok(slot) => slot.and_then(|slot| slot.active_binding().and_then(|current|
-            current.binding.session_id.as_ref().map(|session| (
-                slot.identity_key.name.clone(),
-                session.to_string(),
-                slot.generation,
-            )))),
-        Err(error) => return Resp::err(error),
-    };
-    // An admitted ticket's pending phase is its queue position. A peer may only
-    // advance the phase queued on its own slot; a WaitingAssignment phase has
-    // no slot and stays open to any claimer. The current manager may still pull
-    // another slot's queued ticket, and that claim moves the phase to the
-    // manager's slot so the phase and the task never disagree.
-    let admitted_public = state
-        .board_details
-        .get(&id)
-        .is_some_and(|details| details.admitted);
-    let queued_phase = state
-        .ticket_phases
-        .iter()
-        .find(|phase| {
-            phase.task_id == id
-                && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
-                && matches!(
-                    phase.status,
-                    crate::server::ticket_state::TicketPhaseStatus::Queued
-                        | crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
-                )
-        })
-        .cloned();
-    let slot_claim = name_session
-        .as_ref()
-        .and_then(|(slot_name, _, _)| {
-            queued_phase.as_ref().filter(|phase| {
-                phase.status == crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
-                    || phase.slot_name.as_deref() == Some(slot_name.as_str())
-            })
-        })
-        .cloned();
-    let manager_claim = matches!(
-        current_master_holder(server, &state),
-        Ok(Some(master)) if master == actor
+    let ordinary_pending = task.status == "pending" && task.owner == task.created_by;
+    let not_pending_error = Resp::err_data(
+        "BOARD_TASK_NOT_PENDING: only pending publisher-owned work may be claimed",
+        json!({"task_id": id, "status": task.status}),
     );
-    let claimable = slot_claim.or_else(|| manager_claim.then_some(queued_phase).flatten());
-    if admitted_public && claimable.is_none() {
-        return Resp::err_data(
-            "TICKET_SLOT_MISMATCH: pending ticket is queued on another slot",
-            json!({"task_id": id}),
+    let claimable;
+    let name_session;
+    if ordinary_pending {
+        if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
+        let binding = match board_execution_gate(server, &state, &actor, &id) {
+            Ok(binding) => binding, Err(error) => return error,
+        };
+        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control, Err(error) => return Resp::err(error),
+        };
+        name_session = match control.current_for_worker(&binding.project_scope, &binding.app_scope_id, &actor) {
+            Ok(slot) => slot.and_then(|slot| slot.active_binding().and_then(|current|
+                current.binding.session_id.as_ref().map(|session| (
+                    slot.identity_key.name.clone(),
+                    session.to_string(),
+                    slot.generation,
+                )))),
+            Err(error) => return Resp::err(error),
+        };
+        // An admitted ticket's pending phase is its queue position. A peer may
+        // only advance the phase queued on its own slot; a WaitingAssignment
+        // phase has no slot and stays open to any claimer. The current manager
+        // may still pull another slot's queued ticket, and that claim moves the
+        // phase to the manager's slot so the phase and the task never disagree.
+        let admitted_public = state
+            .board_details
+            .get(&id)
+            .is_some_and(|details| details.admitted);
+        let queued_phase = state
+            .ticket_phases
+            .iter()
+            .find(|phase| {
+                phase.task_id == id
+                    && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
+                    && matches!(
+                        phase.status,
+                        crate::server::ticket_state::TicketPhaseStatus::Queued
+                            | crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
+                    )
+            })
+            .cloned();
+        let slot_claim = name_session
+            .as_ref()
+            .and_then(|(slot_name, _, _)| {
+                queued_phase.as_ref().filter(|phase| {
+                    phase.status == crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
+                        || phase.slot_name.as_deref() == Some(slot_name.as_str())
+                })
+            })
+            .cloned();
+        let manager_claim = matches!(
+            current_master_holder(server, &state),
+            Ok(Some(master)) if master == actor
         );
+        claimable = slot_claim.or_else(|| manager_claim.then_some(queued_phase).flatten());
+        if admitted_public && claimable.is_none() {
+            return Resp::err_data(
+                "TICKET_SLOT_MISMATCH: pending ticket is queued on another slot",
+                json!({"task_id": id}),
+            );
+        }
+    } else {
+        // Only the exact recovered working+Queued responsibility may bypass the
+        // pending publisher-owned claim rule. This branch has no manager
+        // override: the current stable-name carrier is the sole claimant.
+        if !state
+            .board_details
+            .get(&id)
+            .is_some_and(|details| details.admitted)
+        {
+            return not_pending_error;
+        }
+        let route = match server_route_scope(server, &state) {
+            Ok(Some(route)) => route,
+            Ok(None) => return not_pending_error,
+            Err(error) => return Resp::err(error),
+        };
+        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control, Err(error) => return Resp::err(error),
+        };
+        let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
+            Ok(Some(slot)) => slot,
+            Ok(None) => return not_pending_error,
+            Err(error) => return Resp::err(error),
+        };
+        let Some(current) = slot.active_binding() else {
+            return not_pending_error;
+        };
+        let Some(session) = current.binding.session_id.as_ref() else {
+            return not_pending_error;
+        };
+        let slot_name = slot.identity_key.name.clone();
+        let binding_generation = slot.generation;
+        let Some(recovered) = ticket_recovery_claim_phase(
+            &state,
+            &slot_name,
+            session.as_str(),
+            &id,
+            &actor,
+            binding_generation,
+        ) else {
+            return not_pending_error;
+        };
+        if let Err(error) = board_execution_gate(server, &state, &actor, &id) {
+            return error;
+        }
+        claimable = Some(recovered);
+        name_session = Some((slot_name, session.to_string(), binding_generation));
     }
     task.owner = actor.clone();
     task.status = "working".into();
@@ -118,7 +249,15 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
         claimed.slot_name = Some(slot_name.clone());
         claimed.binding_generation = *binding_generation;
-        claimed.attempt_generation = claimed.attempt_generation.saturating_add(1);
+        claimed.attempt_generation = match claimed.attempt_generation.checked_add(1) {
+            Some(attempt) => attempt,
+            None => {
+                return Resp::err_data(
+                    "TICKET_ATTEMPT_EXHAUSTED: cannot allocate a new claim attempt",
+                    json!({"task_id": id, "attempt": claimed.attempt_generation}),
+                )
+            }
+        };
         claimed.wait_reason = None;
         events.push(Event::TicketPhaseRecorded { phase: claimed });
     }
@@ -144,6 +283,11 @@ fn board_start(
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token) {
         return error;
+    }
+    match current_ticket_stale_binding_error(server, &state, &actor, &id, attempt) {
+        Ok(Some(error)) => return error,
+        Ok(None) => {}
+        Err(error) => return error,
     }
     if let Err(error) = board_check_revision(&state, &id, expected_revision) {
         return error;
@@ -246,6 +390,16 @@ fn board_ticket_result_event(
         .board_details
         .get(task_id)
         .is_some_and(|details| details.admitted);
+
+    if admitted_public {
+        if let Some(attempt) = attempt {
+            match current_ticket_stale_binding_error(server, state, actor, task_id, attempt) {
+                Ok(Some(error)) => return Err(error),
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
 
     let Some(phase) = state
         .ticket_phases

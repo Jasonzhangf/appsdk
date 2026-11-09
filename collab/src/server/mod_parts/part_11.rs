@@ -36,6 +36,26 @@ fn dispatch_with_route_context_bound(
     };
     if let Some(task_id) = unaccepted_resource_task {
         let state = server.state.lock().unwrap();
+        if let Req::TaskDeliver {
+            worker_id,
+            token,
+            attempt,
+            ..
+        } = &req
+        {
+            if let Err(error) = verify(&state, worker_id, token) {
+                return error;
+            }
+            if let Some(attempt) = attempt {
+                match current_ticket_stale_binding_error(
+                    server, &state, worker_id, task_id, *attempt,
+                ) {
+                    Ok(Some(error)) => return error,
+                    Ok(None) => {}
+                    Err(error) => return error,
+                }
+            }
+        }
         if state
             .tasks
             .get(task_id)

@@ -160,6 +160,31 @@ where
         .count()
 }
 
+/// Select execute attempts that still occupy a stable name slot even though
+/// their binding generation has already been replaced.
+pub(crate) fn stale_binding_execute_phases<'a, I>(
+    phases: I,
+    slot_name: &str,
+    current_generation: u64,
+) -> Vec<&'a TicketPhaseRecord>
+where
+    I: IntoIterator<Item = &'a TicketPhaseRecord>,
+{
+    phases
+        .into_iter()
+        .filter(|phase| {
+            phase.phase == TicketPhaseKind::Execute
+                && phase.slot_name.as_deref() == Some(slot_name)
+                && matches!(
+                    phase.status,
+                    TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+                )
+                && phase.binding_generation > 0
+                && phase.binding_generation < current_generation
+        })
+        .collect()
+}
+
 /// Select the shortest queue among candidates. The caller passes candidates in
 /// stable key order and the group's last selected slot name (rotation cursor).
 /// Ties rotate to the first candidate strictly after the cursor, wrapping.

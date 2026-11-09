@@ -41,7 +41,7 @@
       "id": "同步全部未关闭任务代理会话",
       "operator": "appsdk.collab_name.sync_open_assignments",
       "operator_version": "1",
-      "description": "仅消费当前map的精确有界effect。同一active主体缺业务worker时由原typed Register事务补齐，不新增map待办、新peer通知或bootstrap消费；既有Name/Register待办保留其操作、授权及角色效果。真实新注册将worker、默认信箱及符合当前master条件的一次加入通知在同一业务事务保存。名字交接按当前消息的project/name地址选择未消费邮件，即使名字曾空缺且无前任；不从旧身份或正文推导归属。无变化载体不重复唤醒，已消费邮件及receive回执保持。任务ID、状态、证据、资源、merge及cleanup责任保持；消息ID、正文、发送者保持。精确grant/credential owner保存当前绑定，当前可缺投递地址；只按真实地址发布或撤销route。必要写盘失败保留effect与原错，成功后清除；不依赖历史阶段链。缺地址只影响相应通信，不否决当前身份或无关收件。",
+      "description": "仅消费当前map的精确有界effect。同一active主体缺业务worker时由原typed Register事务补齐，不新增map待办、新peer通知或bootstrap消费；既有Name/Register待办保留其操作、授权及角色效果。真实新注册将worker、默认信箱及符合当前master条件的一次加入通知在同一业务事务保存。名字交接按当前消息的project/name地址选择未消费邮件，即使名字曾空缺且无前任；不从旧身份或正文推导归属。无变化载体不重复唤醒，已消费邮件及receive回执保持。名字代际更新后，在已有业务候选状态上撤销旧代际的claimed或running执行阶段并创建queued新batch，与任务会话及阶段变化同批提交。已接单任务的working状态和资源责任保持；当前载体可重新领取，旧代际start/result拒绝并保留原错，不宣称终止旧外部执行。任务ID、证据、资源、merge及cleanup责任保持；消息ID、正文、发送者保持。精确grant/credential owner保存当前绑定，当前可缺投递地址；只按真实地址发布或撤销route。必要写盘失败保留effect与原错，成功后清除；不依赖历史阶段链。缺地址只影响相应通信，不否决当前身份或无关收件。",
       "inputs": ["name_commit_outcome"],
       "output": {"id": "assignment_sync_outcome", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

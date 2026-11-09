@@ -185,6 +185,7 @@ impl IsolatedTmux {
             String::from_utf8_lossy(&created.stdout),
             String::from_utf8_lossy(&created.stderr),
         );
+        self.sessions.borrow_mut().push(session.clone());
         let output = Command::new("tmux")
             .args([
                 "-S",
@@ -211,14 +212,63 @@ impl IsolatedTmux {
             "inspect isolated tmux session: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let fields = String::from_utf8(output.stdout)
+        let fields = String::from_utf8(output.stdout.clone())
             .unwrap()
             .trim_end()
             .split('\t')
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(fields.len(), 5);
-        self.sessions.borrow_mut().push(fields[1].clone());
+        *self.sessions.borrow_mut().last_mut().unwrap() = fields[1].clone();
+
+        let first_cwd = fields[4].as_str();
+        let expected = std::fs::canonicalize(root).expect("canonicalize fixture root");
+        let actual = std::fs::canonicalize(first_cwd).expect("canonicalize observed pane cwd");
+        let root_matches = expected == actual;
+        if !root_matches {
+            eprintln!(
+                "COLLAB_CI_TEMPORAL first_query_mismatch root={} socket={} session={session} pane={} first_cwd={} first_exit_code={:?} first_stdout={:?} first_stderr={:?}",
+                root.display(),
+                self.socket.display(),
+                fields[2],
+                first_cwd,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+
+            for (index, delay_ms) in [25u64, 200u64].into_iter().enumerate() {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let probe = self.display_message(&format!("{session}:0"));
+                let probe_stdout = String::from_utf8_lossy(&probe.stdout);
+                let probe_stderr = String::from_utf8_lossy(&probe.stderr);
+                let probe_cwd = probe_stdout.trim_end().split('\t').nth(4);
+                eprintln!(
+                    "COLLAB_CI_TEMPORAL probe index={} delay_ms={} socket={} session={session} pane={} exit_code={:?} success={} stdout={:?} stderr={:?} cwd={:?}",
+                    index,
+                    delay_ms,
+                    self.socket.display(),
+                    fields[2],
+                    probe.status.code(),
+                    probe.status.success(),
+                    probe_stdout,
+                    probe_stderr,
+                    probe_cwd,
+                );
+            }
+
+            panic!(
+                "COLLAB_CI_TEMPORAL first-query cwd does not match project root: root={} socket={} session={session} pane={} first_cwd={} first_exit_code={:?} first_stdout={:?} first_stderr={:?}",
+                root.display(),
+                self.socket.display(),
+                fields[2],
+                first_cwd,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+
         crate::proto::TmuxEndpoint {
             socket_path: self.socket.to_string_lossy().into_owned(),
             server_pid: fields[0].parse().unwrap(),
@@ -228,6 +278,21 @@ impl IsolatedTmux {
             codex_session_id: None,
             codex_thread_id: None,
         }
+    }
+
+    fn display_message(&self, target: &str) -> std::process::Output {
+        Command::new("tmux")
+            .args([
+                "-S",
+                self.socket.to_str().unwrap(),
+                "display-message",
+                "-p",
+                "-t",
+                target,
+                "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}",
+            ])
+            .output()
+            .unwrap()
     }
 
     fn kill_pane(&self, pane_id: &str) {

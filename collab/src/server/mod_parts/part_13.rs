@@ -1,8 +1,55 @@
+fn git_dir_for_root(root: &Path) -> std::io::Result<PathBuf> {
+    let marker = root.join(".git");
+    if marker.is_dir() {
+        return Ok(marker);
+    }
+    if marker.is_file() {
+        let text = std::fs::read_to_string(&marker)?;
+        let value = text
+            .trim()
+            .strip_prefix("gitdir:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid gitdir marker {}", marker.display()),
+                )
+            })?;
+        let git_dir = PathBuf::from(value);
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            marker.parent().unwrap_or(root).join(git_dir)
+        };
+        if git_dir.join("HEAD").is_file() {
+            return Ok(git_dir);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("no git repository at {}", root.display()),
+    ))
+}
+
+/// Keep the git child's cwd outside the project mount. A launchd-owned child
+/// can block in getcwd when its initial cwd is protected; explicit git-dir and
+/// work-tree preserve repository semantics without changing TCC permissions.
+fn safe_git_command(root: &Path) -> std::io::Result<Command> {
+    let git_dir = git_dir_for_root(root)?;
+    let mut command = Command::new("git");
+    command.current_dir(Path::new("/"));
+    command.arg(format!("--git-dir={}", git_dir.display()));
+    command.arg(format!("--work-tree={}", root.display()));
+    Ok(command)
+}
+
+fn run_safe_git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    safe_git_command(root)?.args(args).output()
+}
+
 fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args(["rev-parse", "--verify", "refs/heads/main^{commit}"])
-        .output();
+    let output = run_safe_git(root, &["rev-parse", "--verify", "refs/heads/main^{commit}"]);
     match output {
         Ok(output) if output.status.success() => {
             let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -16,10 +63,10 @@ fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
             }
         }
         Ok(output) => {
-            let dirty = Command::new("git")
-                .current_dir(root)
-                .args(["status", "--porcelain", "--untracked-files=all"])
-                .output()
+            let dirty = run_safe_git(
+                root,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
                 .map(|status| status.status.success() && !status.stdout.is_empty())
                 .unwrap_or(false);
             Err(Resp::err_data(
@@ -44,10 +91,10 @@ fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
 /// the daemon root may be checked out on a different branch while the main
 /// worktree advances elsewhere.
 fn commit_is_integrated_in_main(root: &Path, commit: &str) -> Result<bool, Resp> {
-    let verified = Command::new("git")
-        .current_dir(root)
-        .args(["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
-        .output();
+    let verified = run_safe_git(
+        root,
+        &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
+    );
     let verified = match verified {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
@@ -72,10 +119,10 @@ fn commit_is_integrated_in_main(root: &Path, commit: &str) -> Result<bool, Resp>
         }
     };
     let resolved = String::from_utf8_lossy(&verified.stdout).trim().to_string();
-    let reachable = Command::new("git")
-        .current_dir(root)
-        .args(["merge-base", "--is-ancestor", &resolved, "refs/heads/main"])
-        .output();
+    let reachable = run_safe_git(
+        root,
+        &["merge-base", "--is-ancestor", &resolved, "refs/heads/main"],
+    );
     match reachable {
         Ok(output) if output.status.success() => Ok(true),
         Ok(output) if output.status.code() == Some(1) => Ok(false),

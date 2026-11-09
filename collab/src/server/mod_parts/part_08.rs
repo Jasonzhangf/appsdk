@@ -2655,17 +2655,11 @@ fn close_task_resources(
     }
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = Command::new("git")
-            .current_dir(root)
-            .args(["rev-parse", "--verify", &branch_ref])
-            .output()
+        let branch_exists = run_safe_git(root, &["rev-parse", "--verify", &branch_ref])
             .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
         if branch_exists.status.success() {
             let main_ref = "refs/heads/main";
-            let merged = Command::new("git")
-                .current_dir(root)
-                .args(["merge-base", "--is-ancestor", &branch_ref, main_ref])
-                .output()
+            let merged = run_safe_git(root, &["merge-base", "--is-ancestor", &branch_ref, main_ref])
                 .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
             if !merged.status.success()
                 && !integration_commit_proves_branch_merged(
@@ -2683,11 +2677,7 @@ fn close_task_resources(
     if let Some(relative) = worktree_path {
         let worktree = cleanup_worktree_path(root, config, relative)?;
         if worktree.exists() {
-            let dirty = Command::new("git")
-                .arg("-C")
-                .arg(&worktree)
-                .args(["status", "--porcelain"])
-                .output()
+            let dirty = run_safe_git(&worktree, &["status", "--porcelain"])
                 .map_err(|e| format!("cannot inspect worktree {}: {e}", relative))?;
             if !dirty.status.success() {
                 return Err(format!(
@@ -2700,10 +2690,10 @@ fn close_task_resources(
                 return Err(format!("worktree {} has uncommitted changes", relative));
             }
 
-            let removed = Command::new("git")
-                .current_dir(root)
-                .args(["worktree", "remove", &worktree.display().to_string()])
-                .output()
+            let removed = run_safe_git(
+                root,
+                &["worktree", "remove", &worktree.display().to_string()],
+            )
                 .map_err(|e| format!("cannot remove worktree {}: {e}", relative))?;
             if !removed.status.success() {
                 return Err(format!(
@@ -2717,16 +2707,10 @@ fn close_task_resources(
 
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = Command::new("git")
-            .current_dir(root)
-            .args(["rev-parse", "--verify", &branch_ref])
-            .output()
+        let branch_exists = run_safe_git(root, &["rev-parse", "--verify", &branch_ref])
             .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
         if branch_exists.status.success() {
-            let deleted = Command::new("git")
-                .current_dir(root)
-                .args(["branch", "-D", branch])
-                .output()
+            let deleted = run_safe_git(root, &["branch", "-D", branch])
                 .map_err(|e| format!("cannot delete branch {branch}: {e}"))?;
             if !deleted.status.success() {
                 return Err(format!(
@@ -2815,10 +2799,7 @@ fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {
         }
     }
     if let Some(branch) = receipt.branch.as_deref() {
-        let branch_exists = Command::new("git")
-            .current_dir(root)
-            .args(["rev-parse", "--verify", branch])
-            .output()
+        let branch_exists = run_safe_git(root, &["rev-parse", "--verify", branch])
             .is_ok_and(|output| output.status.success());
         if branch_exists {
             return false;

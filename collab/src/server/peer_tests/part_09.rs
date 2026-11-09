@@ -34,6 +34,129 @@ fn removed_role_and_dispatch_commands_fail_fast() {
 }
 
 #[test]
+fn git_dir_for_root_resolves_plain_and_worktree_markers() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-gitdir-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    assert_eq!(git_dir_for_root(&root).unwrap(), root.join(".git"));
+
+    // A linked worktree replaces `.git/` with a `gitdir:` pointer file.
+    let linked = root.join("linked");
+    let admin = root.join("admin");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+    assert_eq!(git_dir_for_root(&linked).unwrap(), admin);
+
+    let bare = root.join("not-a-repo");
+    std::fs::create_dir_all(&bare).unwrap();
+    assert!(git_dir_for_root(&bare).is_err());
+    std::fs::remove_dir_all(root).ok();
+}
+
+struct PathEnvGuard(String);
+
+impl Drop for PathEnvGuard {
+    fn drop(&mut self) {
+        std::env::set_var("PATH", &self.0);
+    }
+}
+
+/// The daemon hangs when a launchd-owned git child starts in a TCC-restricted
+/// project mount. The fix must start the child outside that mount and pass the
+/// repository explicitly. A real git binary cannot prove the cwd, so a fake
+/// git records its cwd and arguments while delegating unrelated calls.
+#[test]
+fn safe_git_runs_outside_the_project_mount_with_explicit_git_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "collab-safegit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let fakebin = root.join("fakebin");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(&fakebin).unwrap();
+    let log = fakebin.join("calls.log");
+    std::fs::write(&log, "").unwrap();
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .arg("-c")
+            .arg("command -v git")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let script = format!(
+        "#!/bin/sh\n\
+         FAKEDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+         case \"$*\" in\n\
+         *--git-dir*)\n\
+         echo \"$(pwd) $*\" >> \"$FAKEDIR/calls.log\"\n\
+         case \"$*\" in\n\
+         *merge-base*)\n\
+         if [ -f \"$FAKEDIR/merge-base-exit\" ]; then\n\
+         exit \"$(cat \"$FAKEDIR/merge-base-exit\")\"\n\
+         fi\n\
+         ;;\n\
+         *rev-parse*)\n\
+         echo 1111111111111111111111111111111111111111\n\
+         ;;\n\
+         esac\n\
+         exit 0\n\
+         ;;\n\
+         esac\n\
+         exec {real_git} \"$@\"\n"
+    );
+    let fake_git = fakebin.join("git");
+    std::fs::write(&fake_git, script).unwrap();
+    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let _guard = PathEnvGuard(old_path.clone());
+    std::env::set_var("PATH", format!("{}:{}", fakebin.display(), old_path));
+
+    let head = resolve_authoritative_main_head(&root).unwrap();
+    assert_eq!(head, "1111111111111111111111111111111111111111");
+    assert!(commit_is_integrated_in_main(&root, &head).unwrap());
+    std::fs::write(fakebin.join("merge-base-exit"), "1\n").unwrap();
+    assert!(!commit_is_integrated_in_main(&root, &head).unwrap());
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(!calls.is_empty(), "fake git recorded no --git-dir call");
+    for line in calls.lines() {
+        assert!(
+            line.starts_with("/ "),
+            "git child must start outside the project mount: {line}"
+        );
+        assert!(
+            line.contains("--git-dir=") && line.contains("--work-tree="),
+            "git child must receive an explicit repository: {line}"
+        );
+    }
+    drop(_guard);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn lifecycle_cannot_bypass_delivery_or_review() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");

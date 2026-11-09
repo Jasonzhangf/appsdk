@@ -712,6 +712,15 @@ fn dispatch_with_route_context_bound(
                 })
                 .collect::<Result<Vec<_>, String>>();
             let mut workers = match workers { Ok(workers) => workers, Err(error) => return Resp::err(error) };
+            if workers.is_empty() {
+                if let Some(worker_id) = worker_id.as_deref() {
+                    match cross_route_worker_status(server, &control, worker_id) {
+                        Ok(Some(worker)) => workers.push(worker),
+                        Ok(None) => {}
+                        Err(error) => return Resp::err(error),
+                    }
+                }
+            }
             workers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
             Resp::data(json!({
                 "workers": workers,
@@ -1146,6 +1155,35 @@ fn validate_wire_route_principals(
     let principals = wire_route_principals(req)?;
     if principals.is_empty() {
         return Ok(());
+    }
+
+    // Worker status is a read-only identity query. A registered worker whose
+    // active mapping belongs to another project route remains inspectable,
+    // while the response marks route_match=false and never admits mutation.
+    if let Req::WorkerStatus {
+        worker_id: Some(worker_id),
+    } = req
+    {
+        let control =
+            binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
+        let mut matches = control.slots().filter_map(|slot| {
+            let current = slot.active_binding()?;
+            (current.binding.agent_id.as_str() == worker_id).then_some(&current.binding)
+        });
+        let Some(binding) = matches.next() else {
+            return Err(format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no registered runtime binding",
+                worker_id
+            ));
+        };
+        if matches.next().is_some() {
+            return Err("IDENTITY_MAP_AMBIGUOUS: worker carries multiple active mappings".into());
+        }
+        if binding.project_scope != route_scope.project_scope_id
+            || binding.app_scope_id != route_scope.app_scope_id
+        {
+            return Ok(());
+        }
     }
 
     let state = server.state.lock().unwrap();

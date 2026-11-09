@@ -536,6 +536,59 @@ mod close_endpoint_fence_tests {
 /// A persisted transport address proves the registered identity even when the
 /// current runtime state is unknown. `None` reachability means the probe could
 /// not decide; it is not a negative identity result.
+pub(crate) fn selected_transport_endpoint_live(
+    server: &Server,
+    transport: &SelectedTransport,
+) -> Option<bool> {
+    match transport.kind {
+        TransportKind::DesktopBridge => transport
+            .thread_id
+            .as_deref()
+            .and_then(|thread| (server.appserver_thread_status)(transport, thread).ok())
+            .map(|_| true),
+        TransportKind::Tmux => match transport
+            .tmux_endpoint
+            .as_ref()
+            .map(crate::client::adapters::tmux::probe)
+        {
+            Some(Ok(crate::client::adapters::tmux::PanePresence::Present)) => Some(true),
+            Some(Ok(crate::client::adapters::tmux::PanePresence::Missing)) => Some(false),
+            Some(Ok(crate::client::adapters::tmux::PanePresence::Unknown))
+            | Some(Err(_))
+            | None => None,
+        },
+        TransportKind::AppServer => transport
+            .thread_id
+            .as_deref()
+            .and_then(|thread| match (server.appserver_thread_status)(transport, thread) {
+                Ok(_) => Some(true),
+                Err(error)
+                    if error.contains("not found")
+                        || error.contains("MISSING")
+                        || error.contains("GONE") =>
+                {
+                    Some(false)
+                }
+                Err(_) => None,
+            }),
+        TransportKind::Dsh => {
+            let (Some(endpoint), Some(runtime_id), Some(agent_id)) = (
+                transport.endpoint.as_deref(),
+                transport.namespace.as_deref(),
+                transport.thread_id.as_deref(),
+            ) else {
+                return None;
+            };
+            match crate::client::adapters::dsh::facts(endpoint, runtime_id, agent_id) {
+                Ok(_) => Some(true),
+                Err(error) if error.is_definitely_absent() => Some(false),
+                Err(_) => None,
+            }
+        }
+        TransportKind::Rex => None,
+    }
+}
+
 pub(crate) fn worker_identity_and_endpoint(
     server: &Server,
     worker: &WorkerRec,

@@ -418,6 +418,7 @@ fn worker_status_summary_with_maps(
         "endpoint_live": endpoint_live,
         "identity_valid": identity_valid,
         "agent_state": agent_state,
+        "route_match": true,
         "transport_view": transport_view,
         "unacked_notifications": unacked_notifications,
         "pending_notifications": pending_notifications,
@@ -469,6 +470,119 @@ fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet)
     }
     targets.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
     Ok(targets)
+}
+
+fn cross_route_worker_status(
+    server: &Server,
+    control: &binding_slot::BindingControlSet,
+    worker_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let request_route = {
+        let state = server.state.lock().unwrap();
+        server_route_scope(server, &state)?
+    };
+    let Some(request_route) = request_route else {
+        return Ok(None);
+    };
+
+    let mut matches = control.slots().filter_map(|slot| {
+        let current = slot.active_binding()?;
+        (current.binding.agent_id.as_str() == worker_id).then_some((slot, current))
+    });
+    let Some((slot, current)) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err("IDENTITY_MAP_AMBIGUOUS: worker carries multiple active mappings".into());
+    }
+    if current.binding.project_scope == request_route.project_scope_id
+        && current.binding.app_scope_id == request_route.app_scope_id
+    {
+        return Ok(None);
+    }
+
+    let endpoint_live = selected_transport_endpoint_live(server, &current.transport);
+    let status = if endpoint_live == Some(false) {
+        "lost"
+    } else {
+        "unknown"
+    };
+    let presence = match endpoint_live {
+        Some(true) => "present",
+        Some(false) => "missing",
+        None => "unknown",
+    };
+    let project_scope = current.binding.project_scope.as_str();
+    let app_scope = current.binding.app_scope_id.as_str();
+    let project_key = canonical_project_key(std::path::Path::new(project_scope))
+        .unwrap_or_else(|| project_scope.to_owned());
+    let address = format!("{project_key}.{}", slot.identity_key.name);
+    let (role, work_roles, unacked_notifications, pending_notifications, unacked_keepalives, suspected_offline) = {
+        let state = server.state.lock().unwrap();
+        let is_master = state.global.projects.values().any(|project| {
+            project.master_grants.values().any(|grant| {
+                grant.project_scope == current.binding.project_scope
+                    && grant.app_scope_id == current.binding.app_scope_id
+                    && grant.agent_id.as_str() == worker_id
+            })
+        });
+        let work_roles = state.name_work_roles(project_scope, &slot.identity_key.name);
+        let unacked_notifications = state
+            .msgs
+            .values()
+            .filter(|message| message.to == worker_id && message.state == "delivered")
+            .count();
+        let pending_notifications = state
+            .msgs
+            .values()
+            .filter(|message| message.to == worker_id && message.state == "pending")
+            .count();
+        let keepalive = state.keepalives.get(worker_id);
+        (
+            if is_master { "master" } else { "unknown" },
+            work_roles,
+            unacked_notifications,
+            pending_notifications,
+            keepalive.map(|record| record.unacked).unwrap_or(0),
+            keepalive.map(|record| record.suspected_offline).unwrap_or(false),
+        )
+    };
+    let diagnostic = if endpoint_live == Some(false) {
+        "registered identity belongs to another project route and its transport is not live; this read-only projection does not authorize cross-route mutation"
+    } else {
+        "registered identity belongs to another project route; this read-only projection does not authorize cross-route mutation"
+    };
+    Ok(Some(json!({
+        "id": worker_id,
+        "display_name": slot.identity_key.name,
+        "work_roles": work_roles,
+        "role": role,
+        "transport": {
+            "kind": current.transport.kind.as_str(),
+            "endpoint": current.transport.endpoint,
+            "namespace": current.transport.namespace,
+            "session_id": current.transport.session_id,
+            "thread_id": current.transport.thread_id,
+            "self_check": current.transport.self_check,
+        },
+        "status": status,
+        "presence": presence,
+        "endpoint_live": endpoint_live,
+        "identity_valid": true,
+        "agent_state": "unknown",
+        "route_match": false,
+        "project_scope": project_scope,
+        "app_scope": app_scope,
+        "address": address,
+        "unacked_notifications": unacked_notifications,
+        "pending_notifications": pending_notifications,
+        "notifications_paused": false,
+        "unacked_keepalives": unacked_keepalives,
+        "suspected_offline": suspected_offline,
+        "diagnostic": diagnostic,
+        "active_task": serde_json::Value::Null,
+        "active_status": serde_json::Value::Null,
+    })))
 }
 
 fn handle_directory(server: &Server) -> Resp {

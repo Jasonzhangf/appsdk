@@ -278,6 +278,30 @@ fn run_ok_at(
     parse_json(&output.stdout)
 }
 
+fn run_error_at(
+    fixture: &Fixture,
+    project_root: &Path,
+    pane: &Pane,
+    args: &[&str],
+    no_native_identity: bool,
+) -> String {
+    let output = command_at(fixture, project_root, pane, args, no_native_identity)
+        .output()
+        .expect("run public collab CLI in isolated project");
+    assert!(
+        !output.status.success(),
+        "collab {args:?} unexpectedly succeeded in {}: stdout={} stderr={}",
+        project_root.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 fn register_context(
     fixture: &Fixture,
     project_root: &Path,
@@ -1324,6 +1348,117 @@ fn address_for(listed: &Value, worker_id: &str) -> String {
         .and_then(|target| target["address"].as_str())
         .map(str::to_owned)
         .unwrap_or_else(|| panic!("address for {worker_id} missing from {listed}"))
+}
+
+#[test]
+fn worker_status_distinguishes_registered_cross_route_identity_from_unknown_worker() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, source_pane) =
+        Fixture::isolated_with_pane_command("cross-route-worker-status", "sleep 600");
+    let source_root = fixture.root.canonicalize().unwrap();
+    let target_root = create_external_project(&fixture, "cross-route-target");
+    let target_pane = create_session(&fixture, "cross-route-target");
+
+    let source = register_context(&fixture, &source_root, &source_pane, "status-source", false);
+    let (source_id, _) = identity(&source);
+    let target = register_context(&fixture, &target_root, &target_pane, "status-target", false);
+    let (target_id, _) = identity(&target);
+    let target_name = target["result"]["snapshot"]["identity"]["display_name"]
+        .as_str()
+        .expect("target display name")
+        .to_owned();
+    let target_project = target_root
+        .file_name()
+        .expect("target project name")
+        .to_string_lossy()
+        .into_owned();
+    let target_address = format!("{target_project}.{target_name}");
+
+    let local = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &["worker", "status", &source_id],
+        false,
+    );
+    let local_row = worker_row(&local, &source_id);
+    assert_eq!(local_row["identity_valid"], true, "{local_row}");
+    assert_eq!(local_row["route_match"], true, "{local_row}");
+    assert_eq!(local_row["endpoint_live"], true, "{local_row}");
+
+    let unknown_id = "missing-cross-route-worker";
+    let unknown = run_error_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &["worker", "status", unknown_id],
+        false,
+    );
+    assert!(
+        unknown.contains("has no registered runtime binding"),
+        "unexpected unknown-worker error: {unknown}"
+    );
+
+    let live = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &["worker", "status", &target_id],
+        false,
+    );
+    let live_row = worker_row(&live, &target_id);
+    assert_eq!(live_row["display_name"], target_name, "{live_row}");
+    assert_eq!(live_row["address"], target_address, "{live_row}");
+    assert_eq!(live_row["identity_valid"], true, "{live_row}");
+    assert_eq!(live_row["route_match"], false, "{live_row}");
+    assert_eq!(live_row["endpoint_live"], true, "{live_row}");
+
+    let target_physical_name = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &target_pane.pane_id,
+                "#{session_name}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let killed = Command::new("tmux")
+        .args([
+            "-S",
+            fixture.tmux_socket.to_str().unwrap(),
+            "kill-session",
+            "-t",
+            &target_physical_name,
+        ])
+        .output()
+        .expect("close owned cross-route target session");
+    assert!(
+        killed.status.success(),
+        "close owned cross-route target session failed: {}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+
+    let dead = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &["worker", "status", &target_id],
+        false,
+    );
+    let dead_row = worker_row(&dead, &target_id);
+    assert_eq!(dead_row["display_name"], target_name, "{dead_row}");
+    assert_eq!(dead_row["address"], target_address, "{dead_row}");
+    assert_eq!(dead_row["identity_valid"], true, "{dead_row}");
+    assert_eq!(dead_row["route_match"], false, "{dead_row}");
+    assert_eq!(dead_row["endpoint_live"], false, "{dead_row}");
+    assert_eq!(dead_row["status"], "lost", "{dead_row}");
 }
 
 #[test]

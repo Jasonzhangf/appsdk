@@ -276,7 +276,8 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .join(" ")
         .to_lowercase();
     assert!(master_responsibilities.contains("long-horizon goals"));
-    assert!(master_responsibilities.contains("one-shot execution or observation"));
+    assert!(master_responsibilities
+        .contains("only after confirming no peer can take the remaining work"));
     assert!(master_responsibilities.contains("bounded subagent tasks"));
     assert!(master_responsibilities.contains("no authorized next action remains"));
     assert!(

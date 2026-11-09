@@ -44,7 +44,7 @@ fn peer_lifecycle_tool() -> Value {
 
 fn tools() -> Value {
     let mut tools = json!([
-        tool("collab_msg", "Read a durable notification by ID.", json!({"id":{"type":"string"}}), &["id"]),
+        tool("collab_msg", "Read a durable notification by local ID or a full collab-ref.", json!({"id":{"type":"string"}}), &["id"]),
         tool(
             "collab_recv",
             "Consume the durable inbox batch. receive_id is the caller-owned receive identity; repeat the same value to replay a committed receive after a lost response.",
@@ -63,8 +63,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_sendmessage",
-            "Persist an explicit peer notification with a required short subject and original body preview; the recipient is woken only through its own active direct-message subscription. reply_required asks for an answer to this message; reply_on_completion asks for the completed result. in_reply_to links a real answer to the original message ID and clears its reply obligation. The two reply flags are mutually exclusive and default to no obligation.",
-            json!({"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"},"delivery":{"type":"string","enum":["immediate","queued"],"default":"immediate"},"in_reply_to":{"type":"string"},"reply_required":{"type":"boolean"},"reply_on_completion":{"type":"boolean"}}),
+            "Persist an explicit peer notification with a required short subject and original body preview. to accepts a stable local name, project-qualified local address, or machine.project.name; machine.project.name goes through this machine's local daemon. in_reply_to accepts a local message ID or a full collab-ref. operation_id is the caller-owned stable key for same-operation recovery. reply_required asks for an answer to this message; reply_on_completion asks for the completed result. The two reply flags are mutually exclusive and default to no obligation.",
+            json!({"to":{"type":"string","minLength":1},"subject":{"type":"string"},"body":{"type":"string"},"delivery":{"type":"string","enum":["immediate","queued"],"default":"immediate"},"in_reply_to":{"type":"string"},"operation_id":{"type":"string","minLength":1},"reply_required":{"type":"boolean"},"reply_on_completion":{"type":"boolean"}}),
             &["to", "subject", "body"]
         ),
         tool(
@@ -444,6 +444,7 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 argv.extend(["--delivery".into(), delivery.to_string()]);
             }
             optional_flag(&mut argv, args, "in_reply_to", "--in-reply-to")?;
+            optional_flag(&mut argv, args, "operation_id", "--operation-id")?;
             let reply_required =
                 optional_boolean_flag(&mut argv, args, "reply_required", "--reply-required")?;
             let reply_on_completion = optional_boolean_flag(

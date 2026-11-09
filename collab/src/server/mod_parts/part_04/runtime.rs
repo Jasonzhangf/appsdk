@@ -145,8 +145,12 @@ impl ProjectRuntimeManager {
             appserver_notification_sink: self.host.appserver_notification_sink.clone(),
             appserver_thread_status: self.host.appserver_thread_status.clone(),
             appserver_thread_archive: self.host.appserver_thread_archive.clone(),
+            rex_monitor: Default::default(),
             mailbox_notify: Notify::new(),
         });
+        if let Some(handle) = self.host.rex_monitor.runtime_handle() {
+            runtime.rex_monitor.install_runtime_handle(handle);
+        }
         restore_registered_peer_default_leases(&runtime);
         purge_expired_storage(&runtime, now_ms());
         Ok((runtime, project_lock))
@@ -1110,7 +1114,9 @@ fn authenticate_and_commit_cross_project(
         .workers
         .get(worker_id)
         .and_then(selected_transport_for_worker)
-        .and_then(|transport| notification_target(&transport).map(str::to_owned));
+        .and_then(|transport| {
+            notification_target(&transport).map(|target| target.into_owned())
+        });
     let source_project = source.root.to_string_lossy().into_owned();
     commit_cross_project_message(
         target,

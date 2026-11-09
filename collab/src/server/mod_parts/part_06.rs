@@ -201,7 +201,7 @@ fn handle_notification_subscribe(
     let Some(thread_id) = notification_target(&transport) else {
         return Resp::err("selected transport has no route address");
     };
-    let target = thread_id.to_owned();
+    let target = thread_id.into_owned();
     if goal_deadline {
         let requested_key = trigger_ms
             .or_else(|| trigger_times_ms.first().copied())
@@ -978,7 +978,7 @@ fn handle_goal_schedule_reconcile_with_period(
             let mut superseded = Vec::new();
             if existing.method != transport.kind.as_str() || existing.target != target {
                 existing.method = transport.kind.as_str().into();
-                existing.target = target.to_owned();
+                existing.target = target.as_ref().to_owned();
                 existing.updated_ms = now;
                 events.push(Event::NotificationSubscribed {
                     subscription: existing.clone(),
@@ -1081,7 +1081,7 @@ fn handle_goal_schedule_reconcile_with_period(
             worker_id: worker_id.clone(),
             event: "deadline".into(),
             subject: Some(format!("goal:{goal_id}")),
-            target: target.to_owned(),
+            target: target.into_owned(),
             method: transport.kind.as_str().into(),
             trigger_ms: Some(trigger_ms),
             trigger_times_ms: Vec::new(),
@@ -1530,6 +1530,8 @@ pub(crate) fn commit_current_thread_route_for_runtime(
             (&binding.session_id, &binding.native_thread_id)
         {
             state.global.lookup_current_thread_route(session, thread) == Some(&binding)
+        } else if binding.session_id.is_some() {
+            state.global.current_thread_routes.values().any(|current| current == &binding)
         } else {
             return Err("ROUTE_TRANSITION_INVALID: registration has no route address".into());
         }
@@ -1615,7 +1617,9 @@ fn handle_register_with_app_scope_inner_bound(
     >,
 ) -> Resp {
     let candidates = candidates.unwrap_or_default();
-    let selected = match validate_transport_candidates(server, &candidates, &cwd) {
+    let agent_session = outer_binding.and_then(RegisterOuterBinding::identity_facts)
+        .and_then(|facts| facts.session_id.as_deref());
+    let selected = match validate_transport_candidates_for_session(server, &candidates, &cwd, agent_session) {
         Ok(selected) => selected,
         Err(error) => return Resp::err(error),
     };

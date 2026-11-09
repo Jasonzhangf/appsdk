@@ -29,6 +29,7 @@ fn server() -> Arc<Server> {
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| unreachable!()),
         appserver_thread_status: Arc::new(|_, _| unreachable!()),
         appserver_thread_archive: Arc::new(|_, _| unreachable!()),
+        rex_monitor: Default::default(),
         mailbox_notify: tokio::sync::Notify::new(),
     });
     server.state.lock().unwrap().workers.insert(
@@ -53,6 +54,7 @@ fn server() -> Arc<Server> {
                     codex_session_id: Some("agent-session".into()),
                     codex_thread_id: None,
                 }),
+                rex_endpoint: None,
                 capabilities: vec![],
                 self_check: "test".into(),
             }),

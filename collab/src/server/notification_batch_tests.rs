@@ -1,4 +1,5 @@
 use super::*;
+use crate::proto::RexEndpoint;
 use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
 use std::sync::{Arc, Mutex};
 
@@ -29,6 +30,7 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
                     session_id: Some(candidate.session_id.clone()),
                     thread_id: Some(candidate.thread_id.clone()),
                     tmux_endpoint: None,
+                    rex_endpoint: None,
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
                 })
@@ -46,6 +48,7 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
                 }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            rex_monitor: Default::default(),
             mailbox_notify: tokio::sync::Notify::new(),
         }),
         root,
@@ -69,6 +72,7 @@ fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
                     session_id: Some(format!("session-{worker_id}")),
                     thread_id: Some(format!("thread-{worker_id}")),
                     tmux_endpoint: None,
+                    rex_endpoint: None,
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
                 }),
@@ -208,6 +212,156 @@ fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
     }
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unknown_batch_failure_records_every_submitted_member_without_resend() {
+    let (mut server, root) = test_server();
+    let subscription = register_and_subscribe(&server, "recipient");
+    let sink_calls = Arc::new(Mutex::new(0usize));
+    let sink_calls_for_sink = sink_calls.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
+        *sink_calls_for_sink.lock().unwrap() += 1;
+        Err("test sink unknown outcome".into())
+    });
+    let now = now_ms();
+    for id in ["batch-a", "batch-b"] {
+        queue_message(&server, "recipient", &subscription, id, now);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: id.into(),
+            mode: "immediate".into(),
+            source_thread_id: None,
+        }]);
+    }
+    let attempt = attempt_notification_detailed_with_at(&server, "batch-a", &subscription, now);
+    assert!(!attempt.accepted(), "{attempt:?}");
+    {
+        let state = server.state.lock().unwrap();
+        for id in ["batch-a", "batch-b"] {
+            let failure = state
+                .notification_delivery_failures
+                .get(id)
+                .unwrap_or_else(|| panic!("unknown batch failure must record {id}"));
+            assert_eq!(failure.error, "test sink unknown outcome", "{id}");
+            assert!(!failure.retryable, "{id}: unknown outcome must not retry");
+            assert_eq!(state.msgs[id].wake_attempt_count, 1, "{id}");
+            assert!(
+                !state.notification_delivery_accepted.contains_key(id),
+                "{id}"
+            );
+        }
+    }
+    assert_eq!(*sink_calls.lock().unwrap(), 1);
+    let next = attempt_notification_detailed_with_at(&server, "batch-b", &subscription, now + 1);
+    assert!(
+        matches!(next, NotificationAttempt::NotAttempted(_)),
+        "unknown batch must not be resent: {next:?}"
+    );
+    assert_eq!(*sink_calls.lock().unwrap(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_notification_target_is_the_full_service_scoped_terminal_address() {
+    let rex = SelectedTransport {
+        kind: TransportKind::Rex,
+        endpoint: None,
+        namespace: None,
+        session_id: Some("agent-session".into()),
+        thread_id: Some("agent-thread".into()),
+        tmux_endpoint: None,
+        rex_endpoint: Some(RexEndpoint {
+            server: "macstudio".into(),
+            session_id: "rex-session".into(),
+            block_id: "rex-block".into(),
+            host_id: None,
+            instance_id: "instance-7".into(),
+            cwd: "/tmp".into(),
+        }),
+        capabilities: Vec::new(),
+        self_check: "test rex transport".into(),
+    };
+    assert_eq!(
+        notification_target(&rex).unwrap().as_ref(),
+        r#"["macstudio","rex-session","rex-block"]"#
+    );
+    let mut subscription = owned_subscription("worker", "rex-lease", "armed");
+    subscription.method = "rex".into();
+    subscription.target = notification_target(&rex).unwrap().into_owned();
+    assert!(subscription_matches_transport(&subscription, &rex));
+    subscription.target = r#"["other-server","rex-session","rex-block"]"#.into();
+    assert!(
+        !subscription_matches_transport(&subscription, &rex),
+        "the same Rex session/block on another server must not match"
+    );
+    subscription.target = notification_target(&rex).unwrap().into_owned();
+    subscription.method = "appserver".into();
+    assert!(
+        !subscription_matches_transport(&subscription, &rex),
+        "a Rex target must not match an old transport method"
+    );
+    let appserver = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/test.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session".into()),
+        thread_id: Some("thread-id".into()),
+        tmux_endpoint: None,
+        rex_endpoint: None,
+        capabilities: Vec::new(),
+        self_check: "test appserver".into(),
+    };
+    assert_eq!(
+        notification_target(&appserver).unwrap().as_ref(),
+        "thread-id",
+        "old transports must keep borrowing their thread id"
+    );
+}
+
+#[test]
+fn rex_input_receipt_names_the_actual_transport_without_consuming_mail() {
+    let response = notification_send_response(
+        json!({"msg_id": "rex-message"}),
+        true,
+        "rex",
+        &NotificationAttempt::Accepted,
+    );
+    assert!(response.ok);
+    assert_eq!(response.data["notification"], "rex-input-submitted");
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["consumed"], false);
+}
+
+#[test]
+fn rex_sink_uses_only_the_selected_rex_arm() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let transport = SelectedTransport {
+        kind: TransportKind::Rex,
+        endpoint: None,
+        namespace: None,
+        session_id: Some("agent-session".into()),
+        thread_id: Some("agent-thread".into()),
+        tmux_endpoint: None,
+        rex_endpoint: None,
+        capabilities: Vec::new(),
+        self_check: "test rex transport".into(),
+    };
+    let error = default_appserver_notification_sink()(
+        &transport,
+        None,
+        "body",
+        "message-id",
+        false,
+        "immediate",
+    )
+    .unwrap_err();
+    assert!(error.starts_with("REX_NOT_DELIVERED:"), "{error}");
 }
 
 #[test]
@@ -497,6 +651,7 @@ fn queued_tmux_wake_drains_through_the_existing_timer_without_consumption() {
         session_id: None,
         thread_id: None,
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into()],
         self_check: "fixture".into(),
     });
@@ -678,6 +833,7 @@ fn default_appserver_sink_does_not_fallback_to_tmux() {
         session_id: Some("session-thread-recipient".into()),
         thread_id: Some("thread-recipient".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };
@@ -1015,6 +1171,7 @@ fn retarget_same_target_transport_lost_preserves_schedule_and_terminal_states() 
         session_id: Some("session-a".into()),
         thread_id: Some(target.into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };

@@ -78,6 +78,7 @@ fn register_desktop_bridge(
         session_id: Some(format!("session-{worker_id}")),
         thread_id: Some(thread_id.into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
         self_check: "Desktop bridge verified registered thread and project".into(),
     };

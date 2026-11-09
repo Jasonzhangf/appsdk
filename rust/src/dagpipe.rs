@@ -331,7 +331,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 49] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -438,6 +438,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
             include_str!("../../docs/dagpipe/collab-notification-consumption.graph.json"),
         ),
         (
+            "docs/dagpipe/collab-rex-adaptor.graph.json",
+            include_str!("../../docs/dagpipe/collab-rex-adaptor.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-federation.graph.json",
+            include_str!("../../docs/dagpipe/collab-federation.graph.json"),
+        ),
+        (
             "docs/dagpipe/merge-pending.graph.json",
             include_str!("../../docs/dagpipe/merge-pending.graph.json"),
         ),
@@ -526,7 +534,7 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 45] {
+fn design_graph_ids() -> [&'static str; 47] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -554,6 +562,8 @@ fn design_graph_ids() -> [&'static str; 45] {
         "appsdk-collab-appserver-route-repair",
         "appsdk-collab-subscription-lifecycle",
         "appsdk-collab-notification-consumption",
+        "appsdk-collab-rex-adaptor",
+        "appsdk-collab-federation",
         "appsdk-collab-merge-pending",
         "appsdk-collab-dsh-channel",
         "appsdk-collab-dsh-delivery",
@@ -576,7 +586,7 @@ fn design_graph_ids() -> [&'static str; 45] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 260] {
+fn design_graph_operator_names() -> [&'static str; 274] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -776,6 +786,20 @@ fn design_graph_operator_names() -> [&'static str; 260] {
         "appsdk.collab_notification_consume.commit_receipt",
         "appsdk.collab_notification_consume.read_payloads",
         "appsdk.collab_notification_consume.verify_owner",
+        "appsdk.collab_rex.read_binding",
+        "appsdk.collab_rex.validate_facts",
+        "appsdk.collab_rex.verify_target",
+        "appsdk.collab_rex.execute",
+        "appsdk.collab_rex.classify",
+        "appsdk.collab_rex.commit",
+        "appsdk.collab_rex.emit_receipt",
+        "appsdk.collab_federation.admit_request",
+        "appsdk.collab_federation.resolve_address",
+        "appsdk.collab_federation.resolve_route",
+        "appsdk.collab_federation.authenticate_source",
+        "appsdk.collab_federation.commit_batch",
+        "appsdk.collab_federation.deliver_channel_reply",
+        "appsdk.collab_federation.emit_receipt",
         "appsdk.collab_pane_route.classify_claimants",
         "appsdk.collab_pane_route.publish_owner_route",
         "appsdk.collab_pane_route.resolve_pane_owner",

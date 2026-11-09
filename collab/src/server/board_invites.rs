@@ -125,32 +125,73 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
                 reflow: None, updated_ms: now_ms(),
             } });
             // An invitation accept on an admitted ticket is the compat
-            // "specified receiver" entry. Claim the queued execute phase onto
-            // the accepting slot exactly like `board claim`; otherwise the
-            // phase stays queued and the accepted peer could never start or
-            // deliver it.
+            // "specified receiver" entry. It must leave exactly one current
+            // execute phase owned by the accepting slot.
             if state.board_details.get(&id).is_some_and(|details| details.admitted) {
                 if let Some(phase) = state
                     .ticket_phases
                     .iter()
-                    .find(|phase| {
+                    .filter(|phase| {
                         phase.task_id == id
                             && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
-                            && matches!(
-                                phase.status,
-                                crate::server::ticket_state::TicketPhaseStatus::Queued
-                                    | crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
-                            )
+                            && phase.status
+                                != crate::server::ticket_state::TicketPhaseStatus::Revoked
                     })
+                    .max_by_key(|phase| phase.batch)
                     .cloned()
                 {
-                    let mut claimed = phase;
-                    claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
-                    claimed.slot_name = Some(slot.identity_key.name.clone());
-                    claimed.binding_generation = slot.generation;
-                    claimed.attempt_generation = claimed.attempt_generation.saturating_add(1);
-                    claimed.wait_reason = None;
-                    events.push(Event::TicketPhaseRecorded { phase: claimed });
+                    if matches!(
+                        phase.status,
+                        crate::server::ticket_state::TicketPhaseStatus::Queued
+                            | crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
+                    ) {
+                        let mut claimed = phase;
+                        claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
+                        claimed.slot_name = Some(slot.identity_key.name.clone());
+                        claimed.binding_generation = slot.generation;
+                        claimed.attempt_generation = match claimed.attempt_generation.checked_add(1) {
+                            Some(attempt) => attempt,
+                            None => return Resp::err_data(
+                                "TICKET_ATTEMPT_EXHAUSTED: cannot allocate a new claim attempt",
+                                json!({"task_id": id, "attempt": claimed.attempt_generation}),
+                            ),
+                        };
+                        claimed.wait_reason = None;
+                        events.push(Event::TicketPhaseRecorded { phase: claimed });
+                    } else if phase.status
+                        == crate::server::ticket_state::TicketPhaseStatus::Claimed
+                        && phase.slot_name.as_deref()
+                            != Some(slot.identity_key.name.as_str())
+                    {
+                        let batch = match phase.batch.checked_add(1) {
+                            Some(batch) => batch,
+                            None => return Resp::err_data(
+                                "TICKET_BATCH_EXHAUSTED: cannot allocate a reassignment batch",
+                                json!({"task_id": id, "batch": phase.batch}),
+                            ),
+                        };
+                        let attempt = match phase.attempt_generation.checked_add(1) {
+                            Some(attempt) => attempt,
+                            None => return Resp::err_data(
+                                "TICKET_ATTEMPT_EXHAUSTED: cannot allocate a reassignment attempt",
+                                json!({"task_id": id, "attempt": phase.attempt_generation}),
+                            ),
+                        };
+                        let mut revoked = phase.clone();
+                        revoked.status = crate::server::ticket_state::TicketPhaseStatus::Revoked;
+                        let mut claimed = phase;
+                        claimed.batch = batch;
+                        claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
+                        claimed.slot_name = Some(slot.identity_key.name.clone());
+                        claimed.binding_generation = slot.generation;
+                        claimed.attempt_generation = attempt;
+                        claimed.wait_reason = None;
+                        claimed.result = None;
+                        events.extend([
+                            Event::TicketPhaseRecorded { phase: revoked },
+                            Event::TicketPhaseRecorded { phase: claimed },
+                        ]);
+                    }
                 }
             }
         } else if state.task_assignment(&id).is_some() {

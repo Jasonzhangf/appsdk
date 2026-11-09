@@ -136,7 +136,7 @@ pub(crate) fn purge_expired_storage(server: &Server, now: i64) -> usize {
         return 0;
     }
     let mut candidate = st.clone();
-    for id in &expired { candidate.drop_message(id); }
+    for id in &expired { candidate.expire_federated_message(id, now); }
     if let Err(error) = candidate.advance_version() {
         server.report_state_error(&notification_contract::MutationError::InvalidState(error));
         return 0;
@@ -339,7 +339,7 @@ fn retarget_owned_notification_events(
     transport: &SelectedTransport,
     now: i64,
 ) -> Vec<Event> {
-    let Some(target) = notification_target(transport) else {
+    let Some(target) = notification_target(transport).map(|target| target.into_owned()) else {
         return Vec::new();
     };
     let default_id = default_direct_message_id(worker_id);
@@ -365,7 +365,7 @@ fn retarget_owned_notification_events(
         .map(|subscription| {
             let mut subscription = subscription.clone();
             subscription.method = transport.kind.as_str().to_owned();
-            subscription.target = target.to_owned();
+            subscription.target = target.clone();
             if subscription.status != "cancelled" {
                 subscription.status = "armed".into();
                 subscription.status_reason = None;
@@ -484,7 +484,7 @@ fn default_direct_message_events(
                     worker_id: worker_id.into(),
                     event: "direct-message".into(),
                     subject: None,
-                    target: thread_id.into(),
+                    target: thread_id.into_owned(),
                     method: transport.kind.as_str().into(),
                     trigger_ms: None,
                     trigger_times_ms: Vec::new(),
@@ -529,7 +529,7 @@ fn default_direct_message_events(
                 worker_id: worker_id.into(),
                 event: "direct-message".into(),
                 subject: None,
-                target: thread_id.into(),
+                target: thread_id.into_owned(),
                 method: transport.kind.as_str().into(),
                 trigger_ms: None,
                 trigger_times_ms: Vec::new(),
@@ -563,7 +563,7 @@ fn default_direct_message_events(
             worker_id: worker_id.into(),
             event: "direct-message".into(),
             subject: None,
-            target: thread_id.into(),
+            target: thread_id.into_owned(),
             method: transport.kind.as_str().into(),
             trigger_ms: None,
             trigger_times_ms: Vec::new(),
@@ -621,15 +621,37 @@ pub(crate) fn selected_transport_for_worker(worker: &WorkerRec) -> Option<Select
     worker.transport.clone()
 }
 
-pub(crate) fn notification_target(transport: &SelectedTransport) -> Option<&str> {
+pub(crate) fn notification_target(
+    transport: &SelectedTransport,
+) -> Option<std::borrow::Cow<'_, str>> {
     match transport.kind {
-        TransportKind::Tmux => transport.thread_id.as_deref().or_else(|| {
-            transport
-                .tmux_endpoint
-                .as_ref()
-                .map(|endpoint| endpoint.pane_id.as_str())
+        TransportKind::Tmux => transport
+            .thread_id
+            .as_deref()
+            .or_else(|| {
+                transport
+                    .tmux_endpoint
+                    .as_ref()
+                    .map(|endpoint| endpoint.pane_id.as_str())
+            })
+            .map(std::borrow::Cow::Borrowed),
+        // Rex is addressed by its full service-scoped terminal target. The
+        // compact JSON array keeps the server and session/block boundary
+        // visible in the subscription target instead of borrowing thread_id.
+        TransportKind::Rex => transport.rex_endpoint.as_ref().map(|endpoint| {
+            std::borrow::Cow::Owned(
+                serde_json::json!([
+                    endpoint.server.as_str(),
+                    endpoint.session_id.as_str(),
+                    endpoint.block_id.as_str(),
+                ])
+                .to_string(),
+            )
         }),
-        _ => transport.thread_id.as_deref(),
+        _ => transport
+            .thread_id
+            .as_deref()
+            .map(std::borrow::Cow::Borrowed),
     }
 }
 
@@ -638,7 +660,8 @@ fn subscription_matches_transport(
     transport: &SelectedTransport,
 ) -> bool {
     subscription.method == transport.kind.as_str()
-        && notification_target(transport).is_some_and(|thread_id| subscription.target == thread_id)
+        && notification_target(transport)
+            .is_some_and(|target| subscription.target == target.as_ref())
 }
 
 pub(crate) fn subscription_matches_transport_by_worker(
@@ -715,6 +738,7 @@ fn transport_log_label(transport: &SelectedTransport) -> &'static str {
         TransportKind::Tmux => "TMUX",
         TransportKind::AppServer => "APPSERVER",
         TransportKind::Dsh => "DSH",
+        TransportKind::Rex => "REX",
     }
 }
 
@@ -1021,18 +1045,15 @@ fn attempt_tmux_notification_with_retry(
                 ),
             );
             let mut state = server.state.lock().unwrap();
-            // A failed connect wrote none of the batch. Preserve that proof
-            // for each member so recovery can resume every pending message.
-            let failed_ids = if error
-                .starts_with(crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX)
-            {
-                batch
-                    .iter()
-                    .map(|message| message.1.clone())
-                    .collect::<Vec<_>>()
-            } else {
-                vec![seed_id]
-            };
+            // One delivery call carried every member of this batch. Record
+            // this attempt's outcome for all of them so no submitted member is
+            // left "attempted without outcome". Retryability still follows the
+            // single real classification: only a known-undelivered error can
+            // resume automatically.
+            let failed_ids = batch
+                .iter()
+                .map(|message| message.1.clone())
+                .collect::<Vec<_>>();
             server.commit_locked_reporting(
                 &mut state,
                 &failed_ids
@@ -1370,6 +1391,7 @@ fn notification_send_response(
             data["notification"] = match notification_method {
                 "desktop_bridge" => json!("desktop-bridge-input-submitted"),
                 "appserver" => json!("appserver-input-submitted"),
+                "rex" => json!("rex-input-submitted"),
                 // The gateway answered `enqueue` with a durable message id.
                 // That is queue admission, not agent execution.
                 "dsh" => json!("dsh-wake-enqueued"),

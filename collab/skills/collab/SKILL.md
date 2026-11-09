@@ -19,8 +19,8 @@ master 权限。只有用户要求注册时才初始化；未注册或初始化�
 已注册身份、角色、任务、消息和订阅以当前 `collab context` 为真源。项目由本次真实
 cwd 确定，名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递与任务锚点；
 sessionID 只承载当前执行。第一次绑定分配固定名字，后续绑定与恢复可显式继承名字，
-新注册为新会话新增名字，旧名字在旧持有者离线或获得用户授权时可顶替。TUI 的固定
-tmux session 名字为 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
+新注册为新会话新增名字，旧名字在旧持有者离线或获得用户授权时可顶替。选择 tmux
+适配器的 TUI 使用固定 session 名字 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
 `appsdk_1_Jenny`；只有固定位置 1 可升 Jenny。布局读取共享 manifest，正常改名由
 Collab 负责。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
 恢复链已删除。tmux `$N`、pane、thread 和 socket 仅定位通信。不得猜身份、
@@ -66,6 +66,38 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 
+### 跨机器地址与 Rex
+
+每台机器保留自己的 daemon、身份、任务和 mailbox。机器配置由该机的
+`collab machine` 入口管理。`machine status/list` 只读声明，`machine check <machine>`
+验证已声明对端。连接使用定向凭据和 SSH 私有 Unix socket。
+
+| 使用路径 | 正式入口 |
+|---|---|
+| 查远端可投递地址 | `collab directory --machine '<machine>' [--project '<project>']`，复制其中的 `qualified_address` |
+| 发远端消息 | `collab send --to '<machine.project.name>' --subject '<主题>' --content '<正文>'` |
+| 远端关联回复 | 使用原消息的完整 `collab-ref:` message reference 作为 `--in-reply-to`，目标使用原真实发送者地址 |
+| 恢复不确定发送 | 保留原 `--operation-id`、正文、地址和关联字段，用原引用查询，或提交同一操作恢复请求 |
+| 查接受和消费 | `collab msg '<collab-ref:...>'`，分别读取接受、通知、正式消费和 channel 平台结果 |
+
+省略 machine 的短名和 `project.name` 保持本机语义。机器必须预先声明。
+名字中的点和百分号由目录编码，直接复制地址。消息过期后保留过期结果。
+同操作修改意图会返回 conflict。不确定结果不能换操作号盲发。
+显式恢复操作号当前用于远端发送。
+
+Rex 注册通过 `collab context --op '<operation>' --provide '<真实 facts JSON>'`。
+facts 的 `session_id` 是 agent 会话。`rex` 对象提供实际 `server`、完整
+`session_id`、`block_id` 和 `cwd`。终端地址与 agent 会话分别绑定。
+Rex 的 working、blocked/question 和断连事件投影到 activity。
+输入 ACK、Enter 接受和 activity 都不能代替正式 `collab recv` 消费。
+服务 instance 变化后刷新绑定，再继续输入。
+
+QQ 跨机器入站由原 channel owner 保留可信 envelope。远端收件使用返回的
+`collab-channel:` 发送者地址和完整 message reference 关联回复。
+原 owner 通过配置的 `qqbot.delivery` helper 返回原会话，并保存平台结果。
+重复投递沿用原引用。平台 uncertain 保留原发送 claim。
+远端 channel 入站当前支持文本，附件返回明确的本地路径不可用错误。
+
 ### 未注册脚本自通知
 
 未注册的外部脚本或后台工作进程无需先注册 peer 即可向项目内 peer 发送通知，不适用 peer 协作规程。目录查询和脚本发送都在接收方所属项目根目录运行。
@@ -93,29 +125,44 @@ collab sendmessage --unknown-sender --to 'my-peer-id' \
 
 ## Task routing and role responsibilities
 
-master 管项目目标，peer 管已接受的子目标，两者均负责拆分、解阻、验收和资源收口。
+master 是项目唯一负责人，负责持续推进、验收、集成和汇报项目进度；peer 缺位或失联不改变 master 的进度责任。peer 管已接受的子目标，两者均负责拆分、解阻、验收和资源收口。
 manager 核实下级对进度、完成、阻塞和验收的声明，检查相关原始回执或产物，判断证据
 是否支持结论。worker 报告的权限、环境、失败或无法执行也是待核查的声明；manager
 检查原错，区分沙箱限制与系统拒绝，并在已有授权内解阻。不把局部限制扩大为全局结论。
-长程目标经任务板邀请可用且同意接收的 peer；一次性执行或观察沿
-[统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)。
-无可用 peer 时保留长程目标并拆分 worker，不等待注册。
+master 先按下节当前提示词中的优先级，通过任务板邀请合适、可用且获授权的 peer。
+无可承接 peer 时，master 保留目标并按
+[统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)直接派独立
+`codex exec --profile gcm` execution/observation worker，不等待注册，也不把角色缺位
+当作停工理由。
 
 ### 派单顺序与一 peer 一任务
 
-manager（master 与各层 peer）按固定顺序选择承接任务的 peer：默认优先 DSH peer 和
-Codex TUI peer，二者为同一优先层；该层没有合适且可用的承接者时，最后才选择 Codex
-Desktop peer。先按任务权限、能力、依赖和实际容量筛选，再应用此宿主顺序；用户明确
-指定承接者时按其指定执行。
+manager（master 与各层 peer）每轮派单先查看 board 的当前项目成员与容量，列出全部
+idle peer，包括没有当前任务的成员，并显式显示各自通道来源（Codex TUI、DSH、Codex
+Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
+`identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
+[非 live peer 主动核实流程](references/board-idle-patrol.md#非-live-peer-的主动核实流程)
+处理：一次主动核实、最长 15 分钟有界等待、终判后不可用者移除、可用者进入派发队列；
+等待期间不计入容量，也不因这些 peer 未响应停工。
+先按任务权限、能力、依赖和实际容量筛选，再按当前用户或任务提示词中的优先级选择。
+派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
+默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，
+不得跳过 idle 列表直接新开 Desktop peer；没有可承接 peer 时沿已有独立 worker 路由，
+直接派 `codex exec --profile gcm` execution/observation worker 推进。
 
 同一 peer 一次只持有一个未完成实现或主责任务。manager 不把多个并发实现任务叠给同一
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-独立审查只由非本任务执行者的 peer 或独立 review subagent 承担。没有合适且可用的
-reviewer 时，manager 指定另一名未持有该任务的 peer（`architect` 或 `expert` 优先），
-或派独立 review subagent；不由执行同一任务的 peer 自查复核，也不为凑 review 让同一
-peer 叠加第二个任务。实现者、Planner 与最终 reviewer 保持分离。
+reviewer、planner、裁判等是职责，不要求存在同名 agent 或固定角色标签。
+独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review`/独立
+Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 peer 承接 review，
+若仍有 reviewer 空闲就让它 review。每个任务默认用自己的独立 reviewer 验收；
+发布时多个问题统一给 reviewer 做架构 review。master（Jenny）不是默认 review 对象，
+不承担常规评审。角色缺位时按[负责人承接规则](../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进)
+改派，并更新原 board 与合同。极端条件下的 master 临时代审、实际审查者与独立性
+缺口记录均由该规则和现有 Review 合同统一维护。角色缺位本身不得成为停工理由；
+负责人继续解阻、派发和推进其他可执行工作。
 
 普通 peer 是受托子目标的编排者，wire role `worker` 不改变该身份。只有当前有效
 工作角色明确为 `worker`/`executor`，或任务合同明确指定直接执行时，peer 才在合同
@@ -166,6 +213,9 @@ master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体
 合同或 board；同一巡检任务各轮续写同一文件，开头长期目标，后续记录本轮目的、来源、
 结果、相对前次进展、缺口、阻塞和下一步。文档、board、笔记和角色投影不替代正式 goal
 登记回执。
+
+每轮编排循环、board 对齐、优先级与 bottleneck 拆分细节见
+[Collab 编排与长程目标](references/orchestration.md)。
 
 ## Registered patrol duties
 

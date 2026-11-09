@@ -124,6 +124,7 @@ fn test_server() -> (crate::server::Server, PathBuf) {
             appserver_notification_sink: crate::server::default_appserver_notification_sink(),
             appserver_thread_status: crate::server::default_appserver_thread_status(),
             appserver_thread_archive: crate::server::default_appserver_thread_archive(),
+            rex_monitor: Default::default(),
             mailbox_notify: tokio::sync::Notify::new(),
         },
         root,

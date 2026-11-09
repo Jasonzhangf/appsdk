@@ -7,6 +7,7 @@ import {
   createBatchQueue,
   createInboundSerial,
   extensionForAttachment,
+  inboundSendRoot,
   matchCeoTarget,
   parseLeadingAddress,
   resolveAddress,
@@ -47,12 +48,35 @@ const targets = [
   },
 ];
 
+const federatedTargets = [
+  ...targets,
+  {
+    address: "appsdk.Alice",
+    qualified_address: "macbookair.appsdk.Alice",
+    machine: "macbookair",
+    worker_id: "air-alice",
+    project_root: "/Users/fanzhang/Projects/appsdk",
+  },
+  {
+    address: "appsdk.Alice",
+    qualified_address: "coder1.appsdk.Alice",
+    machine: "coder1",
+    worker_id: "coder-alice",
+    project_root: "/home/fanzhang/appsdk",
+  },
+];
+
 test("only a leading bracket selects a route", () => {
   assert.deepEqual(parseLeadingAddress("  [AppSDK.Bob] 原始正文"), {
     address: "AppSDK.Bob",
     body: "原始正文",
   });
   assert.equal(parseLeadingAddress("请转给 [AppSDK.Bob] 处理"), null);
+});
+
+test("a mid-body bracket stays user text", () => {
+  const leading = parseLeadingAddress("please ask [appsdk.Bob] later");
+  assert.equal(leading, null);
 });
 
 test("consecutive messages merge into one body in arrival order", () => {
@@ -87,6 +111,21 @@ test("addresses match published entries case-insensitively", () => {
   assert.equal(
     resolveAddress("appSDK.bOB", targets).target.worker_id,
     "worker-bob",
+  );
+});
+
+test("machine-qualified addresses resolve through the published qualified address", () => {
+  const routed = resolveAddress("macbookair.appsdk.Alice", federatedTargets);
+  assert.equal(routed.target.worker_id, "air-alice");
+  assert.equal(routed.target.resolvedAddress, "macbookair.appsdk.Alice");
+});
+
+test("the same project and name on two machines stay distinct", () => {
+  const routed = resolveAddress("coder1.appsdk.Alice", federatedTargets);
+  assert.equal(routed.target.worker_id, "coder-alice");
+  assert.match(
+    resolveAddress("appsdk.Alice", federatedTargets).error,
+    /ADDRESS_AMBIGUOUS/,
   );
 });
 
@@ -167,6 +206,30 @@ test("unset default resolves to CEO and a set default never falls back", async (
   });
   assert.match(invalidDefault.error, /ADDRESS_NOT_FOUND/);
   assert.equal(ceos, 0);
+});
+
+test("a typed machine default is preserved and sent as the qualified address", async () => {
+  let ceos = 0;
+  const routed = await resolveInboundRoute({
+    leading: null,
+    targets: federatedTargets,
+    lookupDefault: async () => "macbookair.appsdk.Alice",
+    lookupCeo: async () => {
+      ceos += 1;
+      return { workerId: "worker-ceo", workspace: "/Users/fanzhang", name: "Alice" };
+    },
+  });
+  assert.equal(routed.source, "default");
+  assert.equal(routed.target.worker_id, "air-alice");
+  assert.equal(routed.target.resolvedAddress, "macbookair.appsdk.Alice");
+  assert.equal(ceos, 0);
+});
+
+test("a remote directory target never uses its project_root as the local send root", () => {
+  const remote = federatedTargets.find((entry) => entry.machine === "macbookair");
+  const local = targets.find((entry) => entry.address === "appsdk.Bob");
+  assert.equal(inboundSendRoot("/local/owner", remote), "/local/owner");
+  assert.equal(inboundSendRoot("/local/owner", local), "/projects/appsdk");
 });
 
 test("ceo-default accepts the directory address only when its name matches the grant", async () => {
@@ -379,7 +442,7 @@ test("channel envelope keeps the external reply route and attachments typed", ()
     buildChannelEnvelope({
       batchId: "qqbot-batch-1",
       sessionTargetId: "conversation-42",
-      sendToAddress: "appsdk.Bob",
+      sendToAddress: "macbookair.appsdk.Bob",
       replyTarget: { scope: "c2c", targetId: "conversation-42" },
       messages: [
         {
@@ -401,12 +464,33 @@ test("channel envelope keeps the external reply route and attachments typed", ()
       external_conversation: "conversation-42",
       platform_message_id: "platform-event-1",
       reply_route: "qqbot://c2c/conversation-42",
-      recipient_address: "appsdk.Bob",
+      recipient_address: "macbookair.appsdk.Bob",
       attachments: [
         { local_path: "/tmp/a.png", display_name: "a.png", media_type: "image/png" },
       ],
     },
   );
+});
+
+test("a queued remote default keeps the typed address and the local owner root", async () => {
+  const batch = {
+    projectRoot: "/local/owner",
+    deliveryAddress: "macbookair.appsdk.Alice",
+    sendToAddress: "macbookair.appsdk.Alice",
+    resolvedAddress: "macbookair.appsdk.Alice",
+    resolvedWorkerId: "air-alice",
+    ownerProject: "/local/owner",
+  };
+  const resolved = await resolveQueuedCeoRoute(batch, {
+    loadTargets: async () => {
+      throw new Error("a non-CEO remote route must not refresh through the local CEO grant");
+    },
+    lookupCeo: async () => {
+      throw new Error("a non-CEO remote route must not read the CEO grant");
+    },
+  });
+  assert.equal(resolved.projectRoot, "/local/owner");
+  assert.equal(resolved.sendToAddress, "macbookair.appsdk.Alice");
 });
 
 test("an in-flight attachment keeps its open batch from flushing too early", async () => {

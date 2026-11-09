@@ -130,6 +130,7 @@ mod tests {
             session_id: Some(session.into()),
             thread_id: Some("readiness-thread".into()),
             tmux_endpoint: None,
+            rex_endpoint: None,
             capabilities: vec!["send_message_to_thread".into(), "probe_thread".into()],
             self_check: "readiness gateway".into(),
         }
@@ -268,6 +269,7 @@ mod tests {
                     session_id: Some(candidate.session_id.clone()),
                     thread_id: Some(candidate.thread_id.clone()),
                     tmux_endpoint: None,
+                    rex_endpoint: None,
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
                 })
@@ -281,6 +283,7 @@ mod tests {
                 }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            rex_monitor: Default::default(),
             mailbox_notify: tokio::sync::Notify::new(),
         };
         (server, root, state_path, host)

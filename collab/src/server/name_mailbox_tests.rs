@@ -170,6 +170,7 @@ fn name_mailbox_new_holder_wake_ignores_old_budget_and_consumes_no_old_subscript
         let transport = SelectedTransport { kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/name-mailbox.sock".into()), namespace: Some("test".into()),
             session_id: Some(format!("session-{id}")), thread_id: Some(id.into()), tmux_endpoint: None,
+            rex_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()], self_check: "committed fixture".into() };
         assert!(peer_tests::seed_committed_owner(&server, id, &format!("token-{id}"), &transport,
             &root.display().to_string(), Some(AppServerId::new("name-mailbox").unwrap())).ok);

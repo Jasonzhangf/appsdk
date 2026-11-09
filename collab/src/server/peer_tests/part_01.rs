@@ -5,6 +5,9 @@ pub(crate) struct IsolatedTmux {
     sessions: RefCell<Vec<String>>,
 }
 
+const FIXTURE_PANE_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const FIXTURE_PANE_READY_POLL: Duration = Duration::from_millis(10);
+
 impl IsolatedTmux {
     pub(crate) fn start(root: &std::path::Path) -> Self {
         Self::start_with_spare_pane(root, true, "sleep 60")
@@ -14,7 +17,7 @@ impl IsolatedTmux {
         Self::start_with_spare_pane(root, false, "sleep 60")
     }
 
-    fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool, pane_command: &str) -> Self {
+    pub(super) fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool, pane_command: &str) -> Self {
         static SOCKET_SEQ: AtomicU64 = AtomicU64::new(0);
         let socket = std::env::temp_dir().join(format!(
             "ctmux-{}-{}.sock",
@@ -92,27 +95,14 @@ impl IsolatedTmux {
             .unwrap()
             .lines()
             .map(|pane_id| {
-                let output = Command::new("tmux")
-                    .args([
-                        "-S",
-                        self.socket.to_str().unwrap(),
-                        "display-message",
-                        "-p",
-                        "-t",
-                        pane_id,
-                        "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
-                    ])
-                    .output()
-                    .unwrap();
-                assert!(output.status.success());
-                let line = String::from_utf8(output.stdout).unwrap();
-                let fields = line.trim_end().split('\t').collect::<Vec<_>>();
-                assert_eq!(fields.len(), 4);
+                let fields = self
+                    .wait_for_pane_cwd(pane_id, &self.owner_root)
+                    .unwrap_or_else(|error| panic!("{error}"));
                 crate::proto::TmuxEndpoint {
                     socket_path: self.socket.to_string_lossy().into_owned(),
                     server_pid: fields[0].parse().unwrap(),
-                    tmux_session_id: fields[1].into(),
-                    pane_id: fields[2].into(),
+                    tmux_session_id: fields[1].clone(),
+                    pane_id: fields[2].clone(),
                     pane_pid: fields[3].parse().unwrap(),
                     codex_session_id: None,
                     codex_thread_id: None,
@@ -138,6 +128,9 @@ impl IsolatedTmux {
                 self.socket.to_str().unwrap(),
                 "new-session",
                 "-d",
+                "-P",
+                "-F",
+                "#{session_id}\t#{pane_id}",
                 "-c",
                 root.to_str().unwrap(),
                 "-s",
@@ -151,31 +144,31 @@ impl IsolatedTmux {
             "add isolated tmux session: {}",
             String::from_utf8_lossy(&created.stderr)
         );
-        let output = Command::new("tmux")
-            .args([
-                "-S",
-                self.socket.to_str().unwrap(),
-                "display-message",
-                "-p",
-                "-t",
-                &format!("{session}:0"),
-                "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "inspect isolated tmux session: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let fields = String::from_utf8(output.stdout)
+        self.sessions.borrow_mut().push(session.clone());
+        let created_fields = String::from_utf8(created.stdout)
             .unwrap()
             .trim_end()
             .split('\t')
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        assert_eq!(fields.len(), 4);
-        self.sessions.borrow_mut().push(fields[1].clone());
+        assert_eq!(
+            created_fields.len(),
+            2,
+            "inspect created isolated tmux session: {created_fields:?}"
+        );
+        *self.sessions.borrow_mut().last_mut().unwrap() = created_fields[0].clone();
+        let fields = self
+            .wait_for_pane_cwd(&created_fields[1], root)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            fields[1], created_fields[0],
+            "readiness queried a different tmux session"
+        );
+        assert_eq!(
+            fields[2], created_fields[1],
+            "readiness queried a different tmux pane"
+        );
+
         crate::proto::TmuxEndpoint {
             socket_path: self.socket.to_string_lossy().into_owned(),
             server_pid: fields[0].parse().unwrap(),
@@ -185,6 +178,93 @@ impl IsolatedTmux {
             codex_session_id: None,
             codex_thread_id: None,
         }
+    }
+
+    fn wait_for_pane_cwd(
+        &self,
+        target: &str,
+        expected_root: &Path,
+    ) -> Result<Vec<String>, String> {
+        let expected = std::fs::canonicalize(expected_root).map_err(|error| {
+            format!(
+                "canonicalize fixture root {}: {error}",
+                expected_root.display()
+            )
+        })?;
+        let deadline = Instant::now() + FIXTURE_PANE_READY_TIMEOUT;
+        loop {
+            let output = self.display_message(target);
+            if !output.status.success() {
+                return Err(format!(
+                    "inspect isolated tmux session failed: root={} socket={} target={} exit_code={:?} stdout={:?} stderr={:?}",
+                    expected_root.display(),
+                    self.socket.display(),
+                    target,
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+            let stdout = String::from_utf8(output.stdout).map_err(|error| {
+                format!(
+                    "isolated tmux session output is not UTF-8: root={} socket={} target={} bytes={:?}",
+                    expected_root.display(),
+                    self.socket.display(),
+                    target,
+                    error.as_bytes(),
+                )
+            })?;
+            let fields = stdout
+                .trim_end()
+                .split('\t')
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if fields.len() != 5 {
+                return Err(format!(
+                    "inspect isolated tmux session returned {} fields: root={} socket={} target={} stdout={:?}",
+                    fields.len(),
+                    expected_root.display(),
+                    self.socket.display(),
+                    target,
+                    stdout,
+                ));
+            }
+            let actual_cwd = &fields[4];
+            let actual = std::fs::canonicalize(actual_cwd).map_err(|error| {
+                format!("canonicalize observed pane cwd {actual_cwd}: {error}")
+            })?;
+            if actual == expected {
+                return Ok(fields);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "cwd did not reach fixture root before timeout: root={} actual={} socket={} target={} exit_code={:?} stdout={:?} stderr={:?}",
+                    expected_root.display(),
+                    actual_cwd,
+                    self.socket.display(),
+                    target,
+                    output.status.code(),
+                    stdout,
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+            std::thread::sleep(FIXTURE_PANE_READY_POLL);
+        }
+    }
+
+    fn display_message(&self, target: &str) -> std::process::Output {
+        Command::new("tmux")
+            .args([
+                "-S",
+                self.socket.to_str().unwrap(),
+                "display-message",
+                "-p",
+                "-t",
+                target,
+                "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}",
+            ])
+            .output()
+            .unwrap()
     }
 
     fn kill_pane(&self, pane_id: &str) {
@@ -232,6 +312,105 @@ impl Drop for IsolatedTmux {
     }
 }
 
+#[test]
+fn isolated_tmux_readiness_rejects_a_persistent_cwd_mismatch() {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let id = SEQ.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("collab-readiness-{}-{id}", std::process::id()));
+    let other = root.with_file_name(format!(
+        "{}-other",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let tmux = IsolatedTmux::start_single(&root);
+    let endpoint = tmux.endpoints().remove(0);
+    let error = tmux
+        .wait_for_pane_cwd(&endpoint.pane_id, &other)
+        .unwrap_err();
+    assert!(
+        error.contains("cwd did not reach fixture root before timeout"),
+        "{error}"
+    );
+    assert!(error.contains(&root.display().to_string()), "{error}");
+    assert!(error.contains(&other.display().to_string()), "{error}");
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other).unwrap();
+}
+
+#[test]
+fn isolated_tmux_readiness_exposes_query_errors() {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let id = SEQ.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("collab-readiness-{}-{id}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let tmux = IsolatedTmux::start_single(&root);
+    let error = tmux
+        .wait_for_pane_cwd("missing-readiness-target", &root)
+        .unwrap_err();
+    assert!(
+        error.contains("inspect isolated tmux session returned"),
+        "{error}"
+    );
+    assert!(error.contains("missing-readiness-target"), "{error}");
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn real_pane_cwd_is_rejected_by_the_production_registration_gate() {
+    let (server, root) = test_server();
+    let other = root.with_file_name(format!(
+        "{}-other",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&other).unwrap();
+    let tmux = IsolatedTmux::start_single(&other);
+    let endpoint = tmux.endpoints().remove(0);
+    let observed = Command::new("tmux")
+        .args([
+            "-S",
+            &endpoint.socket_path,
+            "display-message",
+            "-p",
+            "-t",
+            &endpoint.pane_id,
+            "#{pane_current_path}",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        observed.status.success(),
+        "inspect real pane cwd: {}",
+        String::from_utf8_lossy(&observed.stderr)
+    );
+    let candidate_cwd = String::from_utf8(observed.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let error = validate_transport_candidates(
+        &server,
+        &TransportCandidates {
+            desktop_bridge: None,
+            appserver: None,
+            dsh: None,
+            rex: None,
+            tmux: Some(crate::proto::TmuxCandidate {
+                endpoint,
+                cwd: candidate_cwd,
+            }),
+        },
+        root.to_str().unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.starts_with("RUNTIME_BINDING_REJECTED:"), "{error}");
+    assert!(error.contains("does not match project root"), "{error}");
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other).unwrap();
+}
+
 /// Defined committed owner for tests that begin with an existing peer. This
 /// seeds typed state; it does not test public initial participant admission.
 pub(super) fn register_tmux(
@@ -254,6 +433,7 @@ pub(super) fn register_tmux(
             .clone()
             .or_else(|| Some(endpoint.pane_id.clone())),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "prior committed peer fixture".into(),
     };
@@ -720,6 +900,7 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
                 }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            rex_monitor: Default::default(),
             mailbox_notify: tokio::sync::Notify::new(),
         },
         root,
@@ -745,6 +926,7 @@ pub(crate) fn test_appserver_transport(thread_id: &str) -> SelectedTransport {
         session_id: Some(format!("session-{thread_id}")),
         thread_id: Some(thread_id.into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     }
@@ -767,6 +949,7 @@ fn test_tmux_transport(thread_id: &str) -> SelectedTransport {
         session_id: endpoint.codex_session_id.clone(),
         thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "test tmux transport".into(),
     }
@@ -873,6 +1056,7 @@ fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
                 desktop_bridge: None,
                 appserver: None,
                 dsh: None,
+                rex: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint,
                     cwd: server.root.display().to_string(),

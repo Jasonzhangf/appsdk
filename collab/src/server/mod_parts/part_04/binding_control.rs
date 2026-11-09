@@ -740,8 +740,7 @@ impl ProjectRuntimeManager {
                 &effect.target_worker_id,
             )
             .map_err(|error| format!("PENDING_EFFECT_RETIREMENT_CREDENTIAL_FAILED: {error}"))?;
-            if value.binding.tmux_endpoint.is_some()
-                || (value.binding.session_id.is_some() && value.binding.native_thread_id.is_some())
+            if crate::server::global_state::installed_route_address_key(&value.binding).is_some()
             {
                 self.host
                     .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
@@ -912,8 +911,7 @@ impl ProjectRuntimeManager {
                     },
                     Event::Registered { worker },
                 ];
-                if current.tmux_endpoint.is_some()
-                    || (current.session_id.is_some() && current.native_thread_id.is_some())
+                if crate::server::global_state::installed_route_address_key(&current).is_some()
                 {
                     events.insert(
                         0,
@@ -945,6 +943,7 @@ impl ProjectRuntimeManager {
                 effect.effect_id
             ));
         }
+        let mut events = Vec::new();
         if !Self::pending_effect_complete(&state, effect) || !role_events.is_empty() {
             let occupancy = crate::server::name_state::NameOccupancy {
                 name: effect.name.clone(),
@@ -959,7 +958,7 @@ impl ProjectRuntimeManager {
             } else {
                 &[]
             };
-            let mut events =
+            events =
                 crate::server::name_resolution::build_name_resolution_events_with_rename_from(
                     &state,
                     effect.project_scope.as_str(),
@@ -992,11 +991,36 @@ impl ProjectRuntimeManager {
                 );
             }
             events.extend(role_events);
-            if !events.is_empty() {
-                runtime
-                    .commit_locked_checked(&mut state, &events)
-                    .map_err(|error| format!("PENDING_EFFECT_COMMIT_FAILED: {error}"))?;
-            }
+        }
+        // Name, assignment, resource and ticket recovery are decided from one
+        // candidate view. The candidate is memory-only; the real state is
+        // committed once below.
+        let mut candidate = state.clone();
+        for event in &events {
+            candidate
+                .apply_checked(event)
+                .map_err(|error| format!("PENDING_EFFECT_CANDIDATE_FAILED: {error}"))?;
+        }
+        // Occupancy can already be current when only the native thread changed.
+        // Ticket recovery therefore has its own admission condition here.
+        events.extend(
+            ticket_binding_recovery_events(
+                &candidate,
+                control,
+                &route_scope,
+                &effect.name,
+            )
+            .map_err(|error| {
+                format!(
+                    "TICKET_BINDING_RECOVERY_FAILED: {}",
+                    error.error.unwrap_or_else(|| "unknown recovery error".into())
+                )
+            })?,
+        );
+        if !events.is_empty() {
+            runtime
+                .commit_locked_checked(&mut state, &events)
+                .map_err(|error| format!("PENDING_EFFECT_COMMIT_FAILED: {error}"))?;
         }
         let mut identity = self
             .recovered_binding_identity(
@@ -1041,9 +1065,7 @@ impl ProjectRuntimeManager {
                         == effect.previous_worker_id.as_deref()
                     && previous.binding.session_id.as_ref().map(|id| id.as_str())
                         == effect.previous_session_id.as_deref()
-                    && (previous.binding.tmux_endpoint.is_some()
-                        || (previous.binding.session_id.is_some()
-                            && previous.binding.native_thread_id.is_some()))
+                    && crate::server::global_state::installed_route_address_key(&previous.binding).is_some()
             }) {
                 publications.push(Event::GlobalCurrentThreadRouteRetired {
                     binding: previous.binding.clone(),
@@ -1063,9 +1085,7 @@ impl ProjectRuntimeManager {
                 }
             }
             if !self.binding_publication_matches(&value.binding)
-                && (value.binding.tmux_endpoint.is_some()
-                    || (value.binding.session_id.is_some()
-                        && value.binding.native_thread_id.is_some()))
+                && crate::server::global_state::installed_route_address_key(&value.binding).is_some()
             {
                 publications.push(Event::GlobalCurrentThreadRouteSet {
                     binding: value.binding.clone(),

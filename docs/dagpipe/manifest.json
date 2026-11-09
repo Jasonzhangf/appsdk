@@ -88,6 +88,14 @@
       "path": "docs/dagpipe/collab-notification-consumption.graph.json"
     },
     {
+      "id": "appsdk-collab-rex-adaptor",
+      "path": "docs/dagpipe/collab-rex-adaptor.graph.json"
+    },
+    {
+      "id": "appsdk-collab-federation",
+      "path": "docs/dagpipe/collab-federation.graph.json"
+    },
+    {
       "id": "appsdk-collab-merge-pending",
       "path": "docs/dagpipe/merge-pending.graph.json"
     },

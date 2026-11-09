@@ -267,6 +267,7 @@ fn test_server(root: &Path) -> Arc<Server> {
         }),
         appserver_thread_status: Arc::new(|_, _| Ok(serde_json::json!({}))),
         appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({}))),
+        rex_monitor: Default::default(),
         mailbox_notify: Notify::new(),
     })
 }

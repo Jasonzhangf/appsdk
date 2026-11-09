@@ -222,7 +222,17 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             &id,
             &actor,
             binding_generation,
-        ) else {
+        )
+        .or_else(|| {
+            ticket_stale_active_claim_phase(
+                &state,
+                &slot_name,
+                session.as_str(),
+                &id,
+                &actor,
+                binding_generation,
+            )
+        }) else {
             return not_pending_error;
         };
         if let Err(error) = board_execution_gate(server, &state, &actor, &id) {
@@ -245,6 +255,27 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     if let (Some(phase), Some((slot_name, _, binding_generation))) =
         (claimable, name_session.as_ref())
     {
+        let mut phase = phase;
+        if matches!(
+            phase.status,
+            crate::server::ticket_state::TicketPhaseStatus::Claimed
+                | crate::server::ticket_state::TicketPhaseStatus::Running
+        ) {
+            let mut revoked = phase.clone();
+            revoked.status = crate::server::ticket_state::TicketPhaseStatus::Revoked;
+            revoked.wait_reason = None;
+            events.push(Event::TicketPhaseRecorded { phase: revoked });
+            phase.batch = match phase.batch.checked_add(1) {
+                Some(batch) => batch,
+                None => {
+                    return Resp::err_data(
+                        "TICKET_BATCH_EXHAUSTED: cannot allocate a recovery batch",
+                        json!({"task_id": id, "batch": phase.batch}),
+                    )
+                }
+            };
+            phase.result = None;
+        }
         let mut claimed = phase;
         claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
         claimed.slot_name = Some(slot_name.clone());

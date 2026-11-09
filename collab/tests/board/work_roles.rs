@@ -68,6 +68,34 @@ fn slot_generation(fixture: &AppFixture, worker_id: &str) -> u64 {
         .expect("active slot has a generation")
 }
 
+// Move a slot's generation forward without going through the bind/rebind effect
+// path. This reproduces the state a pre-recovery daemon left behind: the
+// identity generation advanced while an in-flight ticket phase stayed at the
+// older generation with no pending control effect left to replay.
+fn set_slot_generation(fixture: &AppFixture, worker_id: &str, generation: u64) {
+    let mut map = identity_map(fixture);
+    let slot = map["slots"]
+        .as_array_mut()
+        .expect("identity map slots")
+        .iter_mut()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == worker_id
+        })
+        .expect("worker must hold an active slot");
+    let previous = slot["generation"].as_u64().expect("slot generation");
+    assert!(
+        generation > previous,
+        "simulated drift must advance the generation: previous={previous} next={generation}"
+    );
+    slot["generation"] = json!(generation);
+    std::fs::write(
+        fixture.host_state.join("identity-map.json"),
+        serde_json::to_vec(&map).expect("identity map JSON"),
+    )
+    .expect("persist simulated legacy generation drift");
+}
+
 fn relationship_fixture() -> AppFixture {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
@@ -2165,6 +2193,152 @@ fn running_binding_handoff_reclaims_slot_after_transport_refresh() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn pre_recovery_stale_running_attempt_reclaims_from_public_claim() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "pre-recovery stale running fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "legacy-stale-running", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"].as_str().unwrap();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker = slot_worker_id(&board, slot);
+    let owner_thread = ticket_thread(&fixture, &worker);
+
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "legacy-stale-running",
+            "--expected-revision",
+            "1",
+        ],
+        owner_thread,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "legacy-stale-running",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+
+    let old_generation = slot_generation(&fixture, &worker);
+    set_slot_generation(&fixture, &worker, old_generation + 1);
+
+    let drifted = fixture.current_state();
+    let phase = drifted["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["task_id"] == "legacy-stale-running")
+        .unwrap();
+    assert_eq!(phase["status"], "running");
+    assert_eq!(phase["binding_generation"], old_generation);
+
+    let stale_error = rejected(
+        &fixture,
+        &[
+            "board",
+            "start",
+            "legacy-stale-running",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+    assert!(
+        stale_error.contains("TICKET_STALE_BINDING"),
+        "{stale_error}"
+    );
+
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "legacy-stale-running",
+            "--expected-revision",
+            "2",
+        ],
+        owner_thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 3);
+
+    let recovered = fixture.current_state();
+    let newest = recovered["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == "legacy-stale-running")
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap())
+        .unwrap();
+    assert_eq!(newest["status"], "claimed");
+    assert_eq!(newest["binding_generation"], old_generation + 1);
+    assert_eq!(newest["attempt_generation"], 2);
+
+    let old_start = rejected(
+        &fixture,
+        &[
+            "board",
+            "start",
+            "legacy-stale-running",
+            "--expected-revision",
+            "3",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+    assert!(old_start.contains("TICKET_STALE_BINDING"), "{old_start}");
+
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            "legacy-stale-running",
+            "--expected-revision",
+            "3",
+            "--attempt",
+            "2",
+        ],
+        owner_thread,
+    );
+    assert_eq!(started["task"]["status"], "working");
+
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "legacy-stale-running",
+            "--evidence",
+            "pre-recovery stale running recovery",
+            "--attempt",
+            "2",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    assert_eq!(delivered["status"], "delivered");
 }
 
 #[test]

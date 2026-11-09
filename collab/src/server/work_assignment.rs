@@ -310,6 +310,60 @@ pub(crate) fn ticket_recovery_claim_phase(
     Some((*queued).clone())
 }
 
+/// Release an in-flight stale attempt left behind by a daemon that had no
+/// bind-time recovery. Unlike `ticket_recovery_claim_phase`, this needs no
+/// recovery batch because no pending control effect exists to have queued one.
+/// The current stable-name carrier may still release the slot through the
+/// public claim path when the newest execute attempt is Claimed/Running at an
+/// older generation.
+pub(crate) fn ticket_stale_active_claim_phase(
+    state: &State,
+    slot_name: &str,
+    current_session: &str,
+    task_id: &str,
+    current_worker_id: &str,
+    current_generation: u64,
+) -> Option<crate::server::ticket_state::TicketPhaseRecord> {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+
+    if !state
+        .board_details
+        .get(task_id)
+        .is_some_and(|details| details.admitted)
+    {
+        return None;
+    }
+    let task = state.tasks.get(task_id)?;
+    if !matches!(task.status.as_str(), "working" | "blocked") || task.owner != current_worker_id {
+        return None;
+    }
+    let assignment = state.task_assignment(task_id)?;
+    if assignment.name != slot_name || assignment.session_id != current_session {
+        return None;
+    }
+    let mut execute: Vec<_> = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.task_id == task_id
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.slot_name.as_deref() == Some(slot_name)
+        })
+        .collect();
+    execute.sort_by_key(|phase| phase.batch);
+    let newest = execute.last()?;
+    if !matches!(
+        newest.status,
+        TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+    ) {
+        return None;
+    }
+    if newest.binding_generation == 0 || newest.binding_generation >= current_generation {
+        return None;
+    }
+    Some((*newest).clone())
+}
+
 /// Eligible review receivers for one admitted ticket phase. A participating
 /// actor or stable name is excluded by the route itself; the caller only has to
 /// supply every bound, project-authorized peer.

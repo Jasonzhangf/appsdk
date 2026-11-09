@@ -241,7 +241,9 @@ mod tests {
         assert!(prompt.contains("appsdk bug intake --input <json>"));
         assert!(prompt.contains("Peer-first"));
         assert!(prompt.contains("PROTECTED_HOLD"));
-        assert!(prompt.contains("重新武装"));
+        assert!(prompt.contains("默认100次循环"));
+        assert!(prompt.contains("消费一次不重置次数"));
+        assert!(prompt.contains("批次耗尽后仍有授权工作才显式续订"));
         assert!(prompt.contains("不得声明 token、时间、上下文或轮次预算"));
         assert!(!prompt.contains("token_budget"));
         assert!(!prompt.contains("先饱和每一个 live+present 的空闲普通 peer"));

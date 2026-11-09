@@ -38,13 +38,109 @@ fn register_participant_fixture(
             facts.tmux.as_mut().expect("selected context participant"),
         _ => panic!("initial fixture requires selected Register or context"),
     };
-    let observed = std::process::Command::new("tmux").args([
-        "-S", &candidate.endpoint.socket_path, "display-message", "-p", "-t",
-        &candidate.endpoint.pane_id, "#{pane_current_path}",
-    ]).output().unwrap();
-    assert!(observed.status.success(), "inspect selected participant");
-    candidate.cwd = String::from_utf8(observed.stdout).unwrap().trim().to_owned();
+    // A created pane can report its inherited cwd before its child enters -c.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let observed = std::process::Command::new("tmux").args([
+            "-S", &candidate.endpoint.socket_path, "display-message", "-p", "-t",
+            &candidate.endpoint.pane_id, "#{pane_current_path}",
+        ]).output().unwrap();
+        assert!(observed.status.success(), "inspect selected participant");
+        candidate.cwd = String::from_utf8(observed.stdout).unwrap().trim().to_owned();
+        let ready = std::path::Path::new(&candidate.cwd).is_absolute()
+            && std::fs::canonicalize(&candidate.cwd)
+                .is_ok_and(|cwd| cwd == std::path::Path::new(&context.canonical_root));
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if ready || remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+    }
     dispatch(context, request)
+}
+
+#[test]
+fn fixture_registration_waits_for_the_actual_project_directory() {
+    let (server, root, _) = test_server();
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let foreign = root.join("startup-directory");
+    std::fs::create_dir(&foreign).unwrap();
+    let release = root.join("release-startup");
+    let command = format!(
+        "while [ ! -f '{}' ]; do sleep 0.01; done; cd '{}' && exec sleep 60",
+        release.display(), root.display(),
+    );
+    let tmux = super::peer_tests::IsolatedTmux::start_with_spare_pane(&foreign, false, &command);
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-cwd-ready".into());
+    endpoint.codex_thread_id = Some("thread-cwd-ready".into());
+    let observed_endpoint = endpoint.clone();
+    let observed = std::process::Command::new("tmux").args([
+        "-S", &endpoint.socket_path, "display-message", "-p", "-t",
+        &endpoint.pane_id, "#{pane_current_path}",
+    ]).output().unwrap();
+    assert_eq!(
+        std::fs::canonicalize(String::from_utf8(observed.stdout).unwrap().trim()).unwrap(),
+        foreign.canonicalize().unwrap(),
+    );
+    let startup = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(release, "ready").unwrap();
+    });
+    let (registered_runtime, registered) = register_host_fixture(
+        &manager, Some(context_with_app(&root, "app-cwd-ready")),
+        Req::register("cwd-ready".into(), "token-cwd-ready".into(), root.display().to_string(),
+            Some(TransportCandidates {
+                desktop_bridge: None, appserver: None, dsh: None,
+                tmux: Some(crate::proto::TmuxCandidate {
+                    endpoint, cwd: root.display().to_string(),
+                }),
+            })),
+    );
+    startup.join().unwrap();
+    let observed = std::process::Command::new("tmux").args([
+        "-S", &observed_endpoint.socket_path, "display-message", "-p", "-t",
+        &observed_endpoint.pane_id, "#{pane_current_path}",
+    ]).output().unwrap();
+    assert_eq!(
+        std::fs::canonicalize(String::from_utf8(observed.stdout).unwrap().trim()).unwrap(),
+        root.canonicalize().unwrap(),
+    );
+    assert!(registered.ok, "{registered:?}");
+    assert!(registered_runtime.state.lock().unwrap().workers.contains_key("cwd-ready"));
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fixture_registration_rejects_a_persistent_foreign_directory() {
+    let (server, root, _) = test_server();
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let foreign = root.join("foreign-directory");
+    std::fs::create_dir(&foreign).unwrap();
+    let tmux = super::peer_tests::IsolatedTmux::start(&foreign);
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-cwd-foreign".into());
+    endpoint.codex_thread_id = Some("thread-cwd-foreign".into());
+    let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+    let identity = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let before_identity = identity.load().unwrap();
+    let (_, rejected) = register_host_fixture(
+        &manager, Some(context_with_app(&root, "app-cwd-foreign")),
+        Req::register("cwd-foreign".into(), "token-cwd-foreign".into(), root.display().to_string(),
+            Some(TransportCandidates {
+                desktop_bridge: None, appserver: None, dsh: None,
+                tmux: Some(crate::proto::TmuxCandidate {
+                    endpoint, cwd: root.display().to_string(),
+                }),
+            })),
+    );
+    assert!(!rejected.ok, "{rejected:?}");
+    assert!(rejected.error.as_deref().unwrap().contains("cwd does not match project root"));
+    assert_eq!(serde_json::to_value(&*server.state.lock().unwrap()).unwrap(), before);
+    assert_eq!(identity.load().unwrap(), before_identity);
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn runtime_fixture_for_host(host: &Arc<Server>) -> (Arc<Server>, PathBuf, PathBuf) {

@@ -73,12 +73,12 @@ impl Drop for PathEnvGuard {
     }
 }
 
-/// The daemon hangs when a launchd-owned git child starts in a TCC-restricted
-/// project mount. The fix must start the child outside that mount and pass the
-/// repository explicitly. A real git binary cannot prove the cwd, so a fake
-/// git records its cwd and arguments while delegating unrelated calls.
+/// The launchd daemon cannot rely on a git child: the child can block on the
+/// protected project mount before git reads the repository. Poison `git` after
+/// constructing a real repository and prove that integration resolution stays
+/// entirely in-process.
 #[test]
-fn safe_git_runs_outside_the_project_mount_with_explicit_git_dir() {
+fn integration_git_queries_do_not_spawn_git() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = std::env::temp_dir().join(format!(
@@ -90,41 +90,21 @@ fn safe_git_runs_outside_the_project_mount_with_explicit_git_dir() {
             .as_nanos()
     ));
     let fakebin = root.join("fakebin");
-    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    initialize_main(&root);
+    let head = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "--orphan", "orphan"]);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "orphan"]);
+    let orphan = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "main"]);
     std::fs::create_dir_all(&fakebin).unwrap();
     let log = fakebin.join("calls.log");
     std::fs::write(&log, "").unwrap();
-    let real_git = String::from_utf8(
-        Command::new("sh")
-            .arg("-c")
-            .arg("command -v git")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
     let script = format!(
         "#!/bin/sh\n\
-         FAKEDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
-         case \"$*\" in\n\
-         *--git-dir*)\n\
-         echo \"$(pwd) $*\" >> \"$FAKEDIR/calls.log\"\n\
-         case \"$*\" in\n\
-         *merge-base*)\n\
-         if [ -f \"$FAKEDIR/merge-base-exit\" ]; then\n\
-         exit \"$(cat \"$FAKEDIR/merge-base-exit\")\"\n\
-         fi\n\
-         ;;\n\
-         *rev-parse*)\n\
-         echo 1111111111111111111111111111111111111111\n\
-         ;;\n\
-         esac\n\
-         exit 0\n\
-         ;;\n\
-         esac\n\
-         exec {real_git} \"$@\"\n"
+         echo \"$*\" >> \"{log}\"\n\
+         exit 97\n",
+        log = log.display()
     );
     let fake_git = fakebin.join("git");
     std::fs::write(&fake_git, script).unwrap();
@@ -134,24 +114,14 @@ fn safe_git_runs_outside_the_project_mount_with_explicit_git_dir() {
     let _guard = PathEnvGuard(old_path.clone());
     std::env::set_var("PATH", format!("{}:{}", fakebin.display(), old_path));
 
-    let head = resolve_authoritative_main_head(&root).unwrap();
-    assert_eq!(head, "1111111111111111111111111111111111111111");
+    assert_eq!(resolve_authoritative_main_head(&root).unwrap(), head);
     assert!(commit_is_integrated_in_main(&root, &head).unwrap());
-    std::fs::write(fakebin.join("merge-base-exit"), "1\n").unwrap();
-    assert!(!commit_is_integrated_in_main(&root, &head).unwrap());
-
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(!calls.is_empty(), "fake git recorded no --git-dir call");
-    for line in calls.lines() {
-        assert!(
-            line.starts_with("/ "),
-            "git child must start outside the project mount: {line}"
-        );
-        assert!(
-            line.contains("--git-dir=") && line.contains("--work-tree="),
-            "git child must receive an explicit repository: {line}"
-        );
-    }
+    assert!(!commit_is_integrated_in_main(&root, &orphan).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "",
+        "integration resolution must not spawn git"
+    );
     drop(_guard);
     std::fs::remove_dir_all(root).ok();
 }

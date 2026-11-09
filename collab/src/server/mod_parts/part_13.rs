@@ -48,42 +48,30 @@ fn run_safe_git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Out
     safe_git_command(root)?.args(args).output()
 }
 
+fn open_git_repository(root: &Path) -> Result<gix::Repository, Resp> {
+    gix::open(root).map_err(|error| {
+        Resp::err_data(
+            "TASK_INTEGRATION_MAIN_UNRESOLVED",
+            json!({"root": root, "detail": error.to_string()}),
+        )
+    })
+}
+
 fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
-    let output = run_safe_git(root, &["rev-parse", "--verify", "refs/heads/main^{commit}"]);
-    match output {
-        Ok(output) if output.status.success() => {
-            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if head.is_empty() {
-                Err(Resp::err_data(
-                    "TASK_INTEGRATION_MAIN_UNRESOLVED",
-                    json!({"root": root, "ref": "refs/heads/main"}),
-                ))
-            } else {
-                Ok(head)
-            }
-        }
-        Ok(output) => {
-            let dirty = run_safe_git(
-                root,
-                &["status", "--porcelain", "--untracked-files=all"],
-            )
-                .map(|status| status.status.success() && !status.stdout.is_empty())
-                .unwrap_or(false);
-            Err(Resp::err_data(
+    let repository = open_git_repository(root)?;
+    let head = repository
+        .rev_parse_single("refs/heads/main^{commit}")
+        .map_err(|error| {
+            Resp::err_data(
                 "TASK_INTEGRATION_MAIN_UNRESOLVED",
                 json!({
                     "root": root,
-                    "dirty": dirty,
                     "ref": "refs/heads/main",
-                    "detail": String::from_utf8_lossy(&output.stderr).trim(),
+                    "detail": error.to_string(),
                 }),
-            ))
-        }
-        Err(error) => Err(Resp::err_data(
-            "TASK_INTEGRATION_MAIN_UNRESOLVED",
-            json!({"root": root, "ref": "refs/heads/main", "detail": error.to_string()}),
-        )),
-    }
+            )
+        })?;
+    Ok(head.detach().to_string())
 }
 /// Integration records accept the main tip, a real merge commit, or the
 /// merged candidate SHA itself. The authoritative question is reachability
@@ -91,56 +79,82 @@ fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
 /// the daemon root may be checked out on a different branch while the main
 /// worktree advances elsewhere.
 fn commit_is_integrated_in_main(root: &Path, commit: &str) -> Result<bool, Resp> {
-    let verified = run_safe_git(
-        root,
-        &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
-    );
-    let verified = match verified {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            return Err(Resp::err_data(
-                "TASK_INTEGRATION_COMMIT_UNRESOLVED",
-                json!({
-                    "provided": commit,
-                    "detail": String::from_utf8_lossy(&output.stderr).trim(),
-                    "expected": "a commit reachable from refs/heads/main",
-                }),
-            ))
-        }
-        Err(error) => {
-            return Err(Resp::err_data(
+    let repository = open_git_repository(root)?;
+    let commit_spec = format!("{commit}^{{commit}}");
+    let verified = repository
+        .rev_parse_single(commit_spec.as_str())
+        .map_err(|error| {
+            Resp::err_data(
                 "TASK_INTEGRATION_COMMIT_UNRESOLVED",
                 json!({
                     "provided": commit,
                     "detail": error.to_string(),
                     "expected": "a commit reachable from refs/heads/main",
                 }),
-            ))
-        }
-    };
-    let resolved = String::from_utf8_lossy(&verified.stdout).trim().to_string();
-    let reachable = run_safe_git(
-        root,
-        &["merge-base", "--is-ancestor", &resolved, "refs/heads/main"],
-    );
-    match reachable {
-        Ok(output) if output.status.success() => Ok(true),
-        Ok(output) if output.status.code() == Some(1) => Ok(false),
-        Ok(output) => Err(Resp::err_data(
-            "TASK_INTEGRATION_MAIN_UNRESOLVED",
+            )
+        })?
+        .detach();
+    repository.find_commit(verified).map_err(|error| {
+        Resp::err_data(
+            "TASK_INTEGRATION_COMMIT_UNRESOLVED",
             json!({
                 "provided": commit,
-                "ref": "refs/heads/main",
-                "detail": String::from_utf8_lossy(&output.stderr).trim(),
-            }),
-        )),
-        Err(error) => Err(Resp::err_data(
-            "TASK_INTEGRATION_MAIN_UNRESOLVED",
-            json!({
-                "provided": commit,
-                "ref": "refs/heads/main",
                 "detail": error.to_string(),
+                "expected": "a commit reachable from refs/heads/main",
             }),
-        )),
+        )
+    })?;
+    let main = repository
+        .rev_parse_single("refs/heads/main^{commit}")
+        .map_err(|error| {
+            Resp::err_data(
+                "TASK_INTEGRATION_MAIN_UNRESOLVED",
+                json!({
+                    "provided": commit,
+                    "ref": "refs/heads/main",
+                    "detail": error.to_string(),
+                }),
+            )
+        })?
+        .detach();
+    let walk = repository
+        .find_commit(main)
+        .map_err(|error| {
+            Resp::err_data(
+                "TASK_INTEGRATION_MAIN_UNRESOLVED",
+                json!({
+                    "provided": commit,
+                    "ref": "refs/heads/main",
+                    "detail": error.to_string(),
+                }),
+            )
+        })?
+        .ancestors()
+        .all()
+        .map_err(|error| {
+            Resp::err_data(
+                "TASK_INTEGRATION_MAIN_UNRESOLVED",
+                json!({
+                    "provided": commit,
+                    "ref": "refs/heads/main",
+                    "detail": error.to_string(),
+                }),
+            )
+        })?;
+    for ancestor in walk {
+        let ancestor = ancestor.map_err(|error| {
+            Resp::err_data(
+                "TASK_INTEGRATION_MAIN_UNRESOLVED",
+                json!({
+                    "provided": commit,
+                    "ref": "refs/heads/main",
+                    "detail": error.to_string(),
+                }),
+            )
+        })?;
+        if ancestor.id == verified {
+            return Ok(true);
+        }
     }
+    Ok(false)
 }

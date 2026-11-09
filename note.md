@@ -688,3 +688,67 @@ TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递�
   重启生产 daemon 后由 master 同入口重放回执；修复源码本身不依赖杀掉这些进程。
 - 下一步：请 reviewer 审查候选与黑盒证据；通过后按交付合同提交/集成，再请求
   用户批准生产 daemon 安装。
+
+## 2026-11-09 rework：集成解析改用进程内 gix（消除集成路径 git 子进程）
+
+### 现场真源证据（live launchd，只读）
+
+- 生产 daemon 0.2.0448（launchd PID 63957，`/Users/fanzhang/.local/bin/collab
+  serve --service`）实测仍有挂起 git 子进程：PID 36286，PPID=63957，etime>2m。
+  命令：
+  `/Applications/Xcode.app/Contents/Developer/usr/bin/git
+  --git-dir=/Users/fanzhang/Documents/github/appsdk/.git
+  --work-tree=/Users/fanzhang/Documents/github/appsdk
+  rev-parse --verify refs/heads/main^{commit}`。
+- `lsof`：该子进程 cwd=`/`。`sample 36286 3`（2412 帧全在栈顶）显示阻塞在
+  `cmd_rev_parse → setup_git_directory_gently → setup_explicit_git_dir →
+  is_git_directory → git_open_with_retry → open → __open`。
+- 证据支持的结论：`current_dir("/")` + 显式 `--git-dir/--work-tree` 不能消除
+  挂起；git 子进程仍要对受 TCC 保护的 Documents `.git` 路径执行 `open()`，而
+  子二进制（Xcode git）不具备 daemon 自身的 TCC/FDA 授权，`open()` 不返回。
+  与 Jack 更正观察一致：不得再据此前“state 锁等 Git”的结论改锁定。
+- 同一时刻多个 `collab recv` 客户端阻塞等 daemon 回包，与该挂起子进程同源。
+
+### 唯一 owner 与最小修复
+
+- 唯一 owner 仍为 `collab/src/server/mod_parts/part_13.rs`。
+- 变更：`resolve_authoritative_main_head` 与 `commit_is_integrated_in_main` 改用
+  进程内 `gix`（`gix::open` + `rev_parse_single` + `find_commit` +
+  `ancestors().all()` 可达性判定），不再派生 git。
+- 依赖：`gix = { version = "0.81", default-features = false,
+  features = ["revision","sha1"] }`。
+- cwd=/ + 显式 repo 的 `run_safe_git` 仍保留给 close/cleanup 路径
+  （`close_task_resources`、`cleanup_receipt_is_reusable`），不在本次
+  `task integrated` 复现范围内，未改。
+- 优点：读操作在 daemon 自身进程内完成，使用 daemon 已获得的 TCC/FDA 上下文；
+  集成路径不再依赖无授权的 git 子进程。
+
+### 红测与回归
+
+- 新测试 `integration_git_queries_do_not_spawn_git`：构造真实仓库后 poison `git`
+  （任何调用记录并 exit 97），断言 `resolve_authoritative_main_head` 返回真实
+  main head、`commit_is_integrated_in_main` 对 main 可达 commit=true、对 orphan
+  commit=false，且 fake git 调用日志为空。通过。
+- 集成路径回归（全部 pass）：`task_integrated_accepts_the_main_tip`、
+  `task_integrated_accepts_a_real_merge_commit_and_the_merged_candidate`、
+  `task_integrated_rejects_a_commit_not_reachable_from_main_with_an_actionable_error`、
+  `task_integrated_is_correct_when_root_is_not_checked_out_on_main`、
+  `delivery_review_and_exact_main_integration_are_durable`、
+  `pending_merge_without_candidate_integrates_a_main_reachable_commit`、
+  `task_lifecycle_public_masterless_code_integration_requires_main_reachable_commit`、
+  `owner_close_uses_integrated_main_not_daemon_head_for_cleanup`。
+- 全 bin 单测：1293 pass；8 个 `context_*` FAILED，但隔离单跑均 pass，属并行套件
+  既有 flaky，与本变更（仅集成解析）无关。
+- `git diff --check`、`cargo fmt --check` 通过。
+- 候选：`./collab/scripts/build-collab.sh` -> `collab_build_version=0.2.0450`，
+  二进制
+  `/Volumes/Intel/playground/appsdk/collab-daemon-git-tcc-integration-20261109/collab/target/release/collab`。
+
+### 交付边界 / 剩余缺口
+
+- live activation UNVERIFIED：0.2.0450 尚未安装到 canonical 路径/重启 launchd；
+  全局安装与 daemon 重启需用户逐次批准，本任务不执行。
+- 真实验收缺口：需在真实 launchd daemon（canonical
+  `/Users/fanzhang/.local/bin/collab`）上用真实任务跑 `collab task integrated ...`
+  并取得原始 `EXIT=0` 回执；隔离 shell daemon 结果不作为 live 激活。
+- 若不能取得上述 live 黑盒，按停止条件交回精确缺口，不冒充完成。

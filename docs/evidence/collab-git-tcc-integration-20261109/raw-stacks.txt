@@ -1,0 +1,83 @@
+# git child 36286 stack (sample 3s)
+
+Call graph:
+    2412 Thread_336748106   DispatchQueue_1: com.apple.main-thread  (serial)
+      2412 start  (in dyld) + 6992  [0x182ed84e4]
+        2412 main  (in git) + 40  [0x1000c3354]
+          2412 cmd_main  (in git) + 856  [0x100008dac]
+            2412 handle_builtin  (in git) + 340  [0x10000955c]
+              2412 run_builtin  (in git) + 440  [0x10000a080]
+                2412 cmd_rev_parse  (in git) + 1952  [0x10009f630]
+                  2412 setup_git_directory_gently  (in git) + 260  [0x1001e3c00]
+                    2412 setup_explicit_git_dir  (in git) + 112  [0x1001e4320]
+                      2412 is_git_directory  (in git) + 304  [0x1001e1ee8]
+                        2412 git_open_with_retry  (in git) + 60  [0x1000f750c]
+                          2412 open  (in libsystem_kernel.dylib) + 64  [0x18326b8f0]
+                            2412 __open  (in libsystem_kernel.dylib) + 8  [0x183260694]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        __open  (in libsystem_kernel.dylib)        2412
+
+# daemon 63957: posix_spawn + __wait4 frames
+
+988-    + !                   |     +     :     | 26 ???  (in collab)  load address 0x102a88000 + 0x8ff49c  [0x10338749c]
+989-    + !                   |     +     :     |   26 poll  (in libsystem_kernel.dylib) + 8  [0x1832686f8]
+990-    + !                   |     +     :     1 ???  (in collab)  load address 0x102a88000 + 0x8f6c60  [0x10337ec60]
+991-    + !                   |     +     :       1 ???  (in collab)  load address 0x102a88000 + 0x8e67b4  [0x10336e7b4]
+992:    + !                   |     +     :         1 posix_spawnp  (in libsystem_c.dylib) + 364  [0x18316236c]
+993-    + !                   |     +     :           1 posix_spawn  (in libsystem_kernel.dylib) + 496  [0x183267080]
+994:    + !                   |     +     :             1 __posix_spawn  (in libsystem_kernel.dylib) + 8  [0x1832670dc]
+995-    + !                   |     +     12 ???  (in collab)  load address 0x102a88000 + 0x114d98  [0x102b9cd98]
+--
+1343-    +                         : |   + !     : 26 ???  (in collab)  load address 0x102a88000 + 0x8ff49c  [0x10338749c]
+1344-    +                         : |   + !     :   26 poll  (in libsystem_kernel.dylib) + 8  [0x1832686f8]
+1345-    +                         : |   + !     3 ???  (in collab)  load address 0x102a88000 + 0x8f6c60  [0x10337ec60]
+1346-    +                         : |   + !       3 ???  (in collab)  load address 0x102a88000 + 0x8e67b4  [0x10336e7b4]
+1347:    +                         : |   + !         3 posix_spawnp  (in libsystem_c.dylib) + 364  [0x18316236c]
+1348-    +                         : |   + !           3 posix_spawn  (in libsystem_kernel.dylib) + 496  [0x183267080]
+1349:    +                         : |   + !             3 __posix_spawn  (in libsystem_kernel.dylib) + 8  [0x1832670dc]
+1350-    +                         : |   + 10 ???  (in collab)  load address 0x102a88000 + 0x114d0c  [0x102b9cd0c]
+--
+1484-    +                           :     +       :     1 ???  (in collab)  load address 0x102a88000 + 0x8f5350  [0x10337d350]
+1485-    +                           :     +       :       1 open  (in libsystem_kernel.dylib) + 64  [0x18326b8f0]
+1486-    +                           :     +       :         1 __open  (in libsystem_kernel.dylib) + 8  [0x183260694]
+1487-    +                           :     +       1 ???  (in collab)  load address 0x102a88000 + 0x8e67b4  [0x10336e7b4]
+1488:    +                           :     +         1 posix_spawnp  (in libsystem_c.dylib) + 364  [0x18316236c]
+1489-    +                           :     +           1 posix_spawn  (in libsystem_kernel.dylib) + 496  [0x183267080]
+1490:    +                           :     +             1 __posix_spawn  (in libsystem_kernel.dylib) + 8  [0x1832670dc]
+1491-    +                           :     28 ???  (in collab)  load address 0x102a88000 + 0x114d50  [0x102b9cd50]
+--
+1658-    +                         : |   + !     : 24 ???  (in collab)  load address 0x102a88000 + 0x8ff49c  [0x10338749c]
+1659-    +                         : |   + !     :   24 poll  (in libsystem_kernel.dylib) + 8  [0x1832686f8]
+1660-    +                         : |   + !     3 ???  (in collab)  load address 0x102a88000 + 0x8f6c60  [0x10337ec60]
+1661-    +                         : |   + !       3 ???  (in collab)  load address 0x102a88000 + 0x8e67b4  [0x10336e7b4]
+1662:    +                         : |   + !         3 posix_spawnp  (in libsystem_c.dylib) + 364  [0x18316236c]
+1663-    +                         : |   + !           3 posix_spawn  (in libsystem_kernel.dylib) + 496  [0x183267080]
+1664:    +                         : |   + !             3 __posix_spawn  (in libsystem_kernel.dylib) + 8  [0x1832670dc]
+1665-    +                         : |   + 13 ???  (in collab)  load address 0x102a88000 + 0x114d98  [0x102b9cd98]
+--
+1797-    +                         : |     !     : 27 ???  (in collab)  load address 0x102a88000 + 0x8ff49c  [0x10338749c]
+1798-    +                         : |     !     :   27 poll  (in libsystem_kernel.dylib) + 8  [0x1832686f8]
+1799-    +                         : |     !     1 ???  (in collab)  load address 0x102a88000 + 0x8f6c60  [0x10337ec60]
+1800-    +                         : |     !       1 ???  (in collab)  load address 0x102a88000 + 0x8e67b4  [0x10336e7b4]
+
+# daemon 63957: child-wait (Command::output) frames
+
+2504:    +                   : | +     1 __wait4  (in libsystem_kernel.dylib) + 8  [0x183267478]
+2831:    +           !       : | +       1 __wait4  (in libsystem_kernel.dylib) + 8  [0x183267478]
+4200:    +                           :   | +       1 __wait4  (in libsystem_kernel.dylib) + 8  [0x183267478]
+
+-- context around first __wait4 (2496-2506):
+    +                   : | +   ! : 1 ???  (in collab)  load address 0x102a88000 + 0x8f36b8  [0x10337b6b8]
+    +                   : | +   ! :   1 ???  (in collab)  load address 0x102a88000 + 0x8e7858  [0x10336f858]
+    +                   : | +   ! :     1 ???  (in collab)  load address 0x102a88000 + 0x8f5350  [0x10337d350]
+    +                   : | +   ! :       1 open  (in libsystem_kernel.dylib) + 64  [0x18326b8f0]
+    +                   : | +   ! :         1 __open  (in libsystem_kernel.dylib) + 8  [0x183260694]
+    +                   : | +   ! 1 ???  (in collab)  load address 0x102a88000 + 0x8e6674  [0x10336e674]
+    +                   : | +   !   1 posix_spawn_file_actions_adddup2  (in libsystem_kernel.dylib) + 84  [0x18326693c]
+    +                   : | +   1 ???  (in collab)  load address 0x102a88000 + 0x8f6d40  [0x10337ed40]
+    +                   : | +     1 __wait4  (in libsystem_kernel.dylib) + 8  [0x183267478]
+    +                   : | 32 ???  (in collab)  load address 0x102a88000 + 0x669724  [0x1030f1724]
+    +                   : |   32 ???  (in collab)  load address 0x102a88000 + 0x669f48  [0x1030f1f48]

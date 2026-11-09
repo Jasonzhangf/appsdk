@@ -120,6 +120,14 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(role_task.contains("long-horizon"));
                 assert!(role_task.contains("bounded"));
                 assert!(role_task.contains("orchestrator"));
+                let next_action = context.data["role_brief"]["next_action"]
+                    .as_str()
+                    .expect("role next action is explicit")
+                    .to_lowercase();
+                assert!(next_action.contains(
+                    "invite suitable, available and authorized peers first"
+                ));
+                assert!(next_action.contains("only after confirming none can take the work"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));
             }
             "worker" => {

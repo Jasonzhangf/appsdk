@@ -915,6 +915,32 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
         contains_ci(&text, "only after"),
         "master role_brief must fall back to independent workers only after peers: {text}"
     );
+    assert!(
+        contains_ci(&text, "codex exec --profile gcm"),
+        "master role_brief must preserve the independent GCM fallback route: {text}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "actively verify identity-mismatch, cold, offline, unknown or missing workers"
+        ),
+        "master role_brief must require active non-live peer verification: {text}"
+    );
+    assert!(
+        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
+        "master role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+    );
+    assert!(
+        contains_ci(&text, "wait at most 15 minutes"),
+        "master role_brief must bound non-live peer verification: {text}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "remove the still-unavailable from the dispatch queue and enqueue the available"
+        ),
+        "master role_brief must resolve non-live peers into unavailable or dispatchable state: {text}"
+    );
 
     // The current installed wording requires a complete idle-peer inventory
     // with explicit host channels and eligible capacity, then a customizable
@@ -1016,6 +1042,34 @@ fn patrol_default_batch_preserves_explicit_user_count() {
             "{label}: role_brief must not convert non-patrol one-shot schedules to 100 deliveries: {text}"
         );
     }
+}
+
+#[test]
+fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
+    let fixture = AppFixture::new();
+    let patrol = fixture.run_public(&["context", "--work-roles", "patrol"], THREAD_B);
+    let text = role_projection_text(&patrol);
+
+    assert!(
+        contains_ci(
+            &text,
+            "identity-mismatch, cold, offline, unknown or missing peers"
+        ),
+        "patrol role_brief must name the non-live peer states: {text}"
+    );
+    assert!(
+        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
+        "patrol role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+    );
+    assert!(
+        contains_ci(&text, "wait at most 15 minutes"),
+        "patrol role_brief must bound non-live peer verification: {text}"
+    );
+    assert!(
+        contains_ci(&text, "remove the still-unavailable from the dispatch queue")
+            && contains_ci(&text, "enqueue the available"),
+        "patrol role_brief must resolve non-live peers into unavailable or dispatchable state: {text}"
+    );
 }
 
 #[test]

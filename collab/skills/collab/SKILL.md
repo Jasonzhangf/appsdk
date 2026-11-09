@@ -99,26 +99,38 @@ manager 核实下级对进度、完成、阻塞和验收的声明，检查相关
 检查原错，区分沙箱限制与系统拒绝，并在已有授权内解阻。不把局部限制扩大为全局结论。
 master 先按下节当前提示词中的优先级，通过任务板邀请合适、可用且获授权的 peer。
 无可承接 peer 时，master 保留目标并按
-[统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)拆分独立 worker，不等待注册。
+[统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)直接派独立
+`codex exec --profile gcm` execution/observation worker，不等待注册，也不把角色缺位
+当作停工理由。
 
 ### 派单顺序与一 peer 一任务
 
 manager（master 与各层 peer）每轮派单先查看 board 的当前项目成员与容量，列出全部
 idle peer，包括没有当前任务的成员，并显式显示各自通道来源（Codex TUI、DSH、Codex
 Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
+`identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
+[非 live peer 主动核实流程](references/board-idle-patrol.md#非-live-peer-的主动核实流程)
+处理：一次主动核实、最长 15 分钟有界等待、终判后不可用者移除、可用者进入派发队列；
+等待期间不计入容量，也不因这些 peer 未响应停工。
 先按任务权限、能力、依赖和实际容量筛选，再按当前用户或任务提示词中的优先级选择。
 派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
 默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，
-不得跳过 idle 列表直接新开 Desktop peer；没有可承接 peer 时沿已有独立 worker 路由推进。
+不得跳过 idle 列表直接新开 Desktop peer；没有可承接 peer 时沿已有独立 worker 路由，
+直接派 `codex exec --profile gcm` execution/observation worker 推进。
 
 同一 peer 一次只持有一个未完成实现或主责任务。manager 不把多个并发实现任务叠给同一
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
 reviewer、planner、裁判等是职责，不要求存在同名 agent 或固定角色标签。
-角色缺位时按[负责人承接规则](../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进)
-改派，并更新原 board 与合同。独立 reviewer 后备、极端条件下的 master 临时代审、
-实际审查者与独立性缺口记录均由该规则和现有 Review 合同统一维护。
+独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review`/独立
+Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 peer 承接 review，
+若仍有 reviewer 空闲就让它 review。每个任务默认用自己的独立 reviewer 验收；
+发布时多个问题统一给 reviewer 做架构 review。master（Jenny）不是默认 review 对象，
+不承担常规评审。角色缺位时按[负责人承接规则](../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进)
+改派，并更新原 board 与合同。极端条件下的 master 临时代审、实际审查者与独立性
+缺口记录均由该规则和现有 Review 合同统一维护。角色缺位本身不得成为停工理由；
+负责人继续解阻、派发和推进其他可执行工作。
 
 普通 peer 是受托子目标的编排者，wire role `worker` 不改变该身份。只有当前有效
 工作角色明确为 `worker`/`executor`，或任务合同明确指定直接执行时，peer 才在合同

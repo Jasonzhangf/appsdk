@@ -225,6 +225,7 @@ fn master_context_routes_work_by_task_kind() {
     assert!(responsibilities.contains("bounded subagent tasks"));
     assert!(responsibilities.contains("first inviting suitable, available and authorized peers"));
     assert!(responsibilities.contains("only after confirming no peer can take the remaining work"));
+    assert!(responsibilities.contains("codex exec --profile gcm"));
     assert!(!responsibilities.contains("saturate every live present peer first"));
     assert!(!context
         .data
@@ -336,7 +337,7 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         accepted_context.data["role_brief"]["next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("accepted goal's long-horizon orchestrator"),
+            .contains("Resume your authorized owned goal from the current board."),
         "{}",
         accepted_context.data["role_brief"]
     );
@@ -1692,7 +1693,8 @@ fn worker_freed_transitions_notify_live_master() {
     assert!(alert
         .body
         .contains("only after confirming no peer can take it"));
-    assert!(alert.body.contains("independent-worker assignments"));
+    assert!(alert.body.contains("worker assignments"));
+    assert!(alert.body.contains("codex exec --profile gcm"));
     assert!(alert.body.contains("authorized peers"));
     assert!(!alert
         .body

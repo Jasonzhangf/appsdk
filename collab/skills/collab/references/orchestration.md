@@ -37,7 +37,9 @@ Collab 日常注册、恢复和通信使用 Collab Skill。tm-iterm 仅在用户
 
 动作顺序为并发派发 > 阻塞任务解决 > 推进当前任务 > 资源回收 > scope 内巡视。派发所需的 idle、owner、权限和容量核对属于第一级。先选最高优先级 ready 工作，完成本次派发所需的最小同步后实际派出。必要 Plan/Review 容量一并保留。
 
-CEO 按授权管理项目 master，master 优先交合适可用 peer，peer 拆派本子目标的独立 worker。确认无合适 peer 可承接时，master 保留责任并沿宿主入口派独立 worker。巡检或记忆 peer 从所有任务派发候选和可承接容量中排除，任务优先级、idle 或容量不足均沿用这一限制。
+CEO 按授权管理项目 master，master 优先交合适可用 peer，peer 拆派本子目标的独立 worker。确认无合适 peer 可承接时，master 保留责任并沿宿主入口直接派独立 `codex exec --profile gcm` execution/observation worker。巡检或记忆 peer 从所有任务派发候选和可承接容量中排除，任务优先级、idle 或容量不足均沿用这一限制。
+
+每轮派发先列出全部 live idle peer，包括没有当前任务的成员。`identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 不进入容量：Codex TUI/tmux peer 先运行 `collab worker snapshot <id> --lines 80` 看真实 pane 状态，再主动核实一次，最长 15 分钟有界等待后终判；不可用者从派发队列排除，可用者进入派发队列，等待期间不计入容量，也不因这些 peer 未响应停工。详细流程见 [board idle 巡检](board-idle-patrol.md#非-live-peer-的主动核实流程)。
 
 master 选择承接任务的 peer 时，按 Collab Skill
 [派单顺序与一 peer 一任务](../SKILL.md#派单顺序与一-peer-一任务) 维护的当前提示词优先级和容量边界执行；本文件不复制该排序细节。

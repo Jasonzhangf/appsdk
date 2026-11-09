@@ -21,13 +21,6 @@ fn register_participant_fixture(
     dispatch: impl FnOnce(ProjectContext, Req) -> (Arc<Server>, Resp),
 ) -> (Arc<Server>, Resp) {
     let context = context.expect("participant project context");
-    let context_root = context.canonical_root.clone();
-    let request_cwd = match &request {
-        Req::Register { cwd, .. } => Some(cwd.clone()),
-        Req::IdentityContext { identity_context, .. } =>
-            identity_context.as_ref().and_then(|request| request.invocation_cwd.clone()),
-        _ => None,
-    };
     if let Req::IdentityContext { facts, .. } = &mut request {
         if facts.session_id.is_none() {
             facts.session_id = facts.tmux.as_ref()
@@ -45,37 +38,13 @@ fn register_participant_fixture(
             facts.tmux.as_mut().expect("selected context participant"),
         _ => panic!("initial fixture requires selected Register or context"),
     };
-    let endpoint_socket = candidate.endpoint.socket_path.clone();
-    let endpoint_session = candidate.endpoint.tmux_session_id.clone();
-    let endpoint_pane = candidate.endpoint.pane_id.clone();
-    eprintln!(
-        "COLLAB_CI_FIXTURE participant_before_query context_root={context_root} request_cwd={request_cwd:?} candidate_cwd_before={} socket={endpoint_socket} session={endpoint_session} pane={endpoint_pane}",
-        candidate.cwd,
-    );
     let observed = std::process::Command::new("tmux").args([
-        "-S", &endpoint_socket, "display-message", "-p", "-t",
-        &endpoint_pane, "#{pane_current_path}",
+        "-S", &candidate.endpoint.socket_path, "display-message", "-p", "-t",
+        &candidate.endpoint.pane_id, "#{pane_current_path}",
     ]).output().unwrap();
-    eprintln!(
-        "COLLAB_CI_FIXTURE participant_query context_root={context_root} socket={endpoint_socket} session={endpoint_session} pane={endpoint_pane} exit_code={:?} success={} stdout={:?} stderr={:?}",
-        observed.status.code(),
-        observed.status.success(),
-        String::from_utf8_lossy(&observed.stdout),
-        String::from_utf8_lossy(&observed.stderr),
-    );
     assert!(observed.status.success(), "inspect selected participant");
     candidate.cwd = String::from_utf8(observed.stdout).unwrap().trim().to_owned();
-    let candidate_cwd_after = candidate.cwd.clone();
-    eprintln!(
-        "COLLAB_CI_FIXTURE participant_after_query context_root={context_root} candidate_cwd_after={candidate_cwd_after} socket={endpoint_socket} session={endpoint_session} pane={endpoint_pane}",
-    );
-    let (server, response) = dispatch(context, request);
-    eprintln!(
-        "COLLAB_CI_FIXTURE participant_response context_root={context_root} request_cwd={request_cwd:?} candidate_cwd_after={candidate_cwd_after} socket={endpoint_socket} session={endpoint_session} pane={endpoint_pane} ok={} error={:?}",
-        response.ok,
-        response.error,
-    );
-    (server, response)
+    dispatch(context, request)
 }
 
 fn runtime_fixture_for_host(host: &Arc<Server>) -> (Arc<Server>, PathBuf, PathBuf) {

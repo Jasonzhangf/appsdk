@@ -2923,6 +2923,34 @@ fn restricted_cwd_context_in_pane(
     }
 }
 
+/// Report whether the current runner actually denies `getcwd` inside
+/// `restricted`. The denied-cwd fallback only applies when the kernel refuses
+/// `getcwd` for a permission reason; a privileged runner (for example GitHub's
+/// root CI user) reads the directory regardless of mode, so the degraded path
+/// is not reachable there and the assertions must not be faked against the
+/// normal `getcwd` path.
+fn restricted_cwd_denies_getcwd(fixture: &Fixture, pane: &Pane, restricted: &Path) -> bool {
+    let done = fixture.root.join("ctxop-restricted-getcwd-probe.exit");
+    fs::remove_file(&done).ok();
+    let script = format!(
+        "cd {}\nchmod 000 .\nunset PWD\nsh -c 'pwd -P >/dev/null 2>&1'\nstatus=$?\nchmod 700 {}\nprintf '%s' \"$status\" >{}\nsleep 600\n",
+        shell_quote(&restricted.to_string_lossy()),
+        shell_quote(&restricted.to_string_lossy()),
+        shell_quote(&done.to_string_lossy()),
+    );
+    let consumer = fixture.run_in_pane(pane, "ctxop-restricted-getcwd-probe", &script);
+    assert!(
+        wait_until(Duration::from_secs(20), || fs::read_to_string(&done)
+            .is_ok_and(|value| !value.is_empty())),
+        "restricted cwd getcwd probe did not finish in its own pane: {}",
+        consumer.output()
+    );
+    fs::read_to_string(&done)
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .is_some_and(|code| code != 0)
+}
+
 #[test]
 fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
@@ -2939,6 +2967,17 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         .as_str()
         .unwrap()
         .to_owned();
+
+    // The fallback only exists for a real `getcwd` permission denial. On a
+    // privileged runner the mode change does not deny `getcwd`, so the degraded
+    // path is unreachable and the denial assertions below would test the normal
+    // path by accident.
+    if !restricted_cwd_denies_getcwd(&fixture, &pane, &restricted) {
+        eprintln!(
+            "skipping denied-cwd fallback assertions: this runner does not deny getcwd for mode 000 cwd"
+        );
+        return;
+    }
 
     let valid = restricted_cwd_context_in_pane(
         &fixture,

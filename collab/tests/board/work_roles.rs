@@ -1891,6 +1891,159 @@ fn admitted_ticket_missing_execute_phase_is_rejected_not_treated_as_legacy() {
     assert!(rejected.contains("TICKET_PHASE_MISSING"), "{rejected}");
 }
 
+#[test]
+fn master_backfills_missing_execute_phase_and_restores_start_deliver() {
+    let mut fixture = setup_roles();
+    let published = publish(&fixture, "ticket-backfill", &["--executor", "Alice"]);
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .expect("admitted ticket has an execution slot")
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let owner_worker = slot_worker_id(&board, &slot);
+    let owner_thread = ticket_thread(&fixture, &owner_worker);
+
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "ticket-backfill",
+            "--expected-revision",
+            "1",
+        ],
+        owner_thread,
+    );
+    let owner = claimed["task"]["owner"]
+        .as_str()
+        .expect("claimed ticket has an owner")
+        .to_owned();
+    let original_revision = claimed["task"]["revision"]
+        .as_u64()
+        .expect("claimed ticket has a board revision");
+    assert_eq!(claimed["task"]["owner_name"], slot);
+    assert_eq!(claimed["task"]["status"], "working");
+
+    fixture.update_current_state(|state| {
+        state["ticket_phases"]
+            .as_array_mut()
+            .expect("phase records persist")
+            .retain(|phase| phase["task_id"] != "ticket-backfill");
+    });
+    let after_loss = fixture.run_public(&["board", "show"], THREAD_A);
+    assert_eq!(
+        task(&after_loss, "ticket-backfill")["revision"],
+        original_revision
+    );
+    let revision = original_revision.to_string();
+
+    let red = rejected(
+        &fixture,
+        &[
+            "board",
+            "start",
+            "ticket-backfill",
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+    assert!(red.contains("TICKET_PHASE_NOT_CLAIMED"), "{red}");
+    eprintln!("backfill_red_start_error={red}");
+
+    let non_master = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            "ticket-backfill",
+            "--expected-revision",
+            &revision,
+        ],
+        owner_thread,
+    );
+    assert!(non_master.contains("BOARD_MASTER_REQUIRED"), "{non_master}");
+
+    let backfilled = fixture.run_public(
+        &[
+            "board",
+            "backfill-execute",
+            "ticket-backfill",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(backfilled["task"]["owner"], owner);
+    assert_eq!(backfilled["task"]["revision"], original_revision);
+    let phases = backfilled["ticket"]["phases"]
+        .as_array()
+        .expect("backfill returns the ticket projection");
+    assert_eq!(phases.len(), 1);
+    assert_eq!(phases[0]["status"], "claimed");
+    assert_eq!(phases[0]["slot"], slot);
+    assert_eq!(
+        phases[0]["binding_generation"],
+        slot_generation(&fixture, &owner)
+    );
+    assert_eq!(phases[0]["attempt_generation"], 1);
+
+    let duplicate = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            "ticket-backfill",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert!(
+        duplicate.contains("TICKET_BACKFILL_PHASE_EXISTS"),
+        "{duplicate}"
+    );
+    eprintln!("backfill_duplicate_error={duplicate}");
+
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            "ticket-backfill",
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+    assert_eq!(started["task"]["status"], "working");
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "ticket-backfill",
+            "--evidence",
+            "backfill restores start and deliver",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    assert_eq!(delivered["status"], "delivered");
+    let final_state = fixture.current_state();
+    let phase = final_state["ticket_phases"]
+        .as_array()
+        .expect("phase records persist")
+        .iter()
+        .find(|phase| phase["task_id"] == "ticket-backfill")
+        .expect("backfilled phase remains durable");
+    assert_eq!(phase["status"], "completed");
+    assert_eq!(phase["attempt_generation"], 1);
+}
+
 fn seed_idle(fixture: &mut AppFixture, worker_id: &str, thread: &str) {
     let project = std::fs::canonicalize(&fixture.project)
         .unwrap()

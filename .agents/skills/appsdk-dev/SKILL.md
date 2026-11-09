@@ -109,7 +109,7 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 ## 项目本地提交门禁
 
 `scripts/check-worktree-limit.sh` 是 worktree 数量门禁的唯一运行时 owner。
-从 `2026-10-30 04:36 UTC` 起，仓库全部注册 worktree（含主树）超过 10 个时
+从 `2026-10-30 04:36 UTC` 起，仓库全部注册 worktree（含主树）超过 15 个时
 拒绝提交；截止前不因数量超限阻断。生产入口读取真实 UTC，无时间或跳过开关。
 
 显式激活入口为 `bash scripts/install-project-commit-gate.sh <目标仓库绝对路径>`。
@@ -119,8 +119,8 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 由 hook owner 确认接入位置；不得删除、绕过或自动搬移已有 hook。
 
 验证使用 `bash scripts/tests/test-worktree-commit-gate.sh`，在独立临时仓库内执行
-真实提交，覆盖截止前后、10/11 个工作树和已有 hook 行为。本地执行将 `TMPDIR`
-设为本任务外置工作树内的独占测试目录；不要用业务主树的提交或第 11 棵树做探测。
+真实提交，覆盖截止前后、11/15 个工作树合法、16 个拒绝和已有 hook 行为。本地执行将 `TMPDIR`
+设为本任务外置工作树内的独占测试目录；不要用业务主树的提交或第 16 棵树做探测。
 此变更只需 shell、选择器和真实提交验证，不触发 Rust 构建或 daemon 操作。
 
 ## 构建、安装与发布

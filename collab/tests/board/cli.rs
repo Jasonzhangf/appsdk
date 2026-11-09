@@ -239,16 +239,15 @@ fn json_from_output(output: std::process::Output) -> Value {
 struct HeldGitIntegration {
     fixture: AppFixture,
     entered: PathBuf,
-    release: PathBuf,
-    child_pid: PathBuf,
+    hold: PathBuf,
     commit: String,
 }
 
 impl HeldGitIntegration {
     fn release_and_wait(&self) {
-        let _ = std::fs::write(&self.release, b"release");
+        let _ = std::fs::remove_file(&self.hold);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.child_pid.exists() && Instant::now() < deadline {
+        while self.entered.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -261,8 +260,6 @@ impl Drop for HeldGitIntegration {
 }
 
 fn prepare_held_git_integration() -> HeldGitIntegration {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
@@ -353,76 +350,15 @@ fn prepare_held_git_integration() -> HeldGitIntegration {
     );
     assert_eq!(reviewed["merge_pending"], json!(true));
 
-    let entered = fixture.root.join("integration-git-entered");
-    let release = fixture.root.join("integration-git-release");
-    let child_pid = fixture.root.join("integration-git-child.pid");
-    let wrapper = fixture.path_prepend.join("git");
-    let expected_args = serde_json::to_string(&vec![
-        "merge-base",
-        "--is-ancestor",
-        commit.as_str(),
-        "refs/heads/main",
-    ])
-    .unwrap();
-    let script = format!(
-        r#"#!/usr/bin/env python3
-import os
-from pathlib import Path
-import subprocess
-import sys
-import time
-
-release = Path({release})
-entered = Path({entered})
-child_pid = Path({child_pid})
-expected_work_tree = {project}
-expected_git_dir = os.path.join({project}, ".git")
-expected_args = {expected_args}
-real_git = {real_git}
-
-if sys.argv[1:] == ["--hold-integration-git"]:
-    while not release.exists():
-        time.sleep(0.01)
-    try:
-        child_pid.unlink()
-    except FileNotFoundError:
-        pass
-    sys.exit(0)
-argv = sys.argv[1:]
-repo_flags = [a for a in argv if a.startswith("--git-dir=") or a.startswith("--work-tree=")]
-bare_args = [a for a in argv if a not in repo_flags]
-work_tree = next((a[len("--work-tree="):] for a in repo_flags if a.startswith("--work-tree=")), None)
-git_dir = next((a[len("--git-dir="):] for a in repo_flags if a.startswith("--git-dir=")), None)
-same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
-if (
-    os.getcwd() == "/"
-    and work_tree
-    and git_dir
-    and same(work_tree, expected_work_tree)
-    and same(git_dir, expected_git_dir)
-    and bare_args == expected_args
-):
-    entered.write_text("entered")
-    child = subprocess.Popen([sys.executable, __file__, "--hold-integration-git"])
-    child_pid.write_text(str(child.pid))
-    sys.exit(0)
-os.execv(real_git, ["git"] + sys.argv[1:])
-"#,
-        release = serde_json::to_string(&release).unwrap(),
-        entered = serde_json::to_string(&entered).unwrap(),
-        child_pid = serde_json::to_string(&child_pid).unwrap(),
-        project = serde_json::to_string(&project).unwrap(),
-        expected_args = expected_args,
-        real_git = serde_json::to_string(&real_git).unwrap(),
-    );
-    std::fs::write(&wrapper, script).unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let seam = fixture.project.join(".agent-collab");
+    let hold = seam.join("held-integration-resolution");
+    let entered = seam.join("held-integration-resolution-entered");
+    std::fs::write(&hold, b"held").unwrap();
 
     HeldGitIntegration {
         fixture,
         entered,
-        release,
-        child_pid,
+        hold,
         commit,
     }
 }

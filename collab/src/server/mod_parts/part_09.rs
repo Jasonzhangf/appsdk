@@ -321,6 +321,9 @@ fn handle_task_integrated(
         }
     };
 
+    #[cfg(debug_assertions)]
+    held_integration_resolution_test_seam(&server.root);
+
     let head = match resolve_authoritative_main_head(&server.root) {
         Ok(head) => head,
         Err(error) => return error,

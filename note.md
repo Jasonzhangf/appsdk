@@ -752,3 +752,18 @@ TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递�
   `/Users/fanzhang/.local/bin/collab`）上用真实任务跑 `collab task integrated ...`
   并取得原始 `EXIT=0` 回执；隔离 shell daemon 结果不作为 live 激活。
 - 若不能取得上述 live 黑盒，按停止条件交回精确缺口，不冒充完成。
+
+### PR139 Collab CI rework：held-git fixture 对齐进程内解析
+
+- head `9fdbde53` 的 Collab job `129515148323` 中 4 个
+  `task_integration_held_git_*` 用例在 `tests/board/cli.rs:435` 等待
+  `/tmp/ct-*/integration-git-entered` 超时。根因是集成解析已改走进程内 `gix`
+  后不再派生 git，而旧 fixture 仍依赖 PATH 中的 fake `git` 记录进入点。
+- 最小修复：移除 fake git 与子进程探针；在 debug-only
+  `held_integration_resolution_test_seam` 中记录
+  `.agent-collab/held-integration-resolution-entered`，并由 fixture 创建/删除
+  `.agent-collab/held-integration-resolution` 控制窗口。并发语义断言保持不变。
+- 本地回归：4 个 held-git 用例并行与串行均通过；`cargo fmt --check`、
+  `cargo check --tests`、`git diff --check` 通过。
+- 本地完整 `appserver_two_tui_integration` 并发运行在 `ulimit -n=256` 下触发
+  `EMFILE` 级联失败，不是被修复用例的断言失败；本轮不以该环境结果冒充 CI。

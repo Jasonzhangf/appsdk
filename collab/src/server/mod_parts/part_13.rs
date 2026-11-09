@@ -57,6 +57,26 @@ fn open_git_repository(root: &Path) -> Result<gix::Repository, Resp> {
     })
 }
 
+/// Debug-only fault-injection seam. CLI fixtures hold the in-process
+/// integration resolution window by creating `held-integration-resolution`
+/// under the project `.agent-collab` dir; the seam records entry and waits
+/// until the fixture removes it. Compiled out of release builds.
+#[cfg(debug_assertions)]
+fn held_integration_resolution_test_seam(root: &Path) {
+    let dir = root.join(".agent-collab");
+    let hold = dir.join("held-integration-resolution");
+    if !hold.is_file() {
+        return;
+    }
+    let entered = dir.join("held-integration-resolution-entered");
+    let _ = std::fs::write(&entered, "entered");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while hold.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = std::fs::remove_file(&entered);
+}
+
 fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
     let repository = open_git_repository(root)?;
     let head = repository

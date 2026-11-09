@@ -371,6 +371,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         }]);
 
@@ -438,6 +439,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         }]);
 
@@ -509,6 +511,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: true,
+                goal_content: None,
             },
         }]);
 
@@ -592,6 +595,7 @@ use super::*;
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
                 },
             }]);
         }
@@ -730,6 +734,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         }]);
 
@@ -789,6 +794,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         }]);
 
@@ -856,6 +862,7 @@ use super::*;
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
                 },
             }]);
         };
@@ -978,6 +985,7 @@ use super::*;
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
                 },
             }]);
         };
@@ -1097,6 +1105,7 @@ use super::*;
                     patrol_idle_since_ms: None,
                     patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
                 },
             }]);
             id
@@ -2290,6 +2299,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         }]);
         server.commit(&[Event::MasterWakeUpdated {
@@ -2387,6 +2397,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         }]);
         server.commit(&[Event::MasterWakeUpdated {

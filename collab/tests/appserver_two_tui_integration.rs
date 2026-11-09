@@ -2309,6 +2309,10 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
             "t",
             "--priority",
             "p2",
+            "--long-horizon-content",
+            "Complete the replacement master's task under its current board contract",
+            "--long-horizon-every-ms",
+            "3600000",
         ],
         THREAD_B,
     );

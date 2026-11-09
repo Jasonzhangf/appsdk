@@ -176,6 +176,7 @@ fn master_idle_subscription(server: &Server, interval_ms: i64) -> String {
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
     id
@@ -211,6 +212,7 @@ fn subscribe(
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
     id
@@ -241,6 +243,7 @@ fn periodic_deadline_subscription(server: &Server, worker_id: &str, subject: &st
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
     id
@@ -1032,6 +1035,7 @@ fn project_patrol_subscription_unseeded(
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
     id

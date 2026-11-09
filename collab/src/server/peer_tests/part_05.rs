@@ -645,6 +645,7 @@ fn daemon_maintenance_replaces_a_persisted_appserver_default_wake_lease() {
                         patrol_idle_since_ms: None,
                         patrol_last_push_ms: 0,
                         periodic_declared: false,
+                        goal_content: None,
                     },
                 }],
             )
@@ -851,6 +852,7 @@ fn pending_unattempted_direct_message_is_recovered_once_and_not_replayed() {
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
     server.commit(&[
@@ -1074,6 +1076,7 @@ fn maintenance_tick_refreshes_idle_default_lease_without_recipient_context() {
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
 
@@ -1178,6 +1181,7 @@ fn maintenance_tick_refreshes_default_lease_with_timers_disabled() {
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
 
@@ -1370,6 +1374,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     }]);
 
@@ -1448,6 +1453,7 @@ fn registration_adds_default_lease_when_only_short_direct_message_lease_exists()
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
             periodic_declared: false,
+            goal_content: None,
         },
     });
 
@@ -1811,6 +1817,7 @@ fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         },
         Event::NotificationSubscribed {
@@ -1834,6 +1841,7 @@ fn context_scope_digest_reports_subordinate_manager_patrol_idle_and_blockers() {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         },
     ]);

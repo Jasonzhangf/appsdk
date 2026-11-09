@@ -142,6 +142,7 @@ fn daemon_restart_reuses_existing_deadline_without_recreating_it() {
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
         periodic_declared: false,
+        goal_content: None,
     };
     state.apply(&Event::NotificationSubscribed {
         subscription: original.clone(),

@@ -218,11 +218,16 @@ appsdk longhorizon show --json
 `appsdk goal status --json` must report `active: true`, `desired: subscribed`,
 `observed: subscribed`, `collab_subscribed: true`, a non-null
 `subscription_id`, and a null `error`. A successful command output is not
-proof that a timer fired. Run one short-interval live replay and record the
+proof that a timer fired. Exercise the declared interval and record the
 armed subscription, fired deadline notification, and consumed result before
-declaring long-horizon scheduling verified. The current implementation is a
-one-shot deadline that must be explicitly rearmed with `appsdk goal subscribe`
-after it is consumed, expires, or Collab restarts.
+declaring long-horizon scheduling verified. New periodic long-horizon goals
+default to100 deliveries, with an explicit count taking priority. Reuse a valid
+batch across consumption and restart. Renew an ended batch only while work and
+authorization remain. Explicit one-shot deadlines and existing one-shot records
+keep their lifecycle. A batch ending does not establish task or goal completion.
+Master dispatch task sheets carry the long-horizon content and cadence, and
+dispatch starts the target peer's subscription atomically. The current typed
+CEO can modify any member's long-horizon schedule across projects.
 
 For a new governance root, AppSDK installs a project-neutral root `AGENTS.md`
 when none exists. It contains the Project Truth, Semantic Invariants,

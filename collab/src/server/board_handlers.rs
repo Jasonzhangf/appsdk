@@ -99,6 +99,7 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         description: details.description.clone(),
         delivery_condition: details.delivery_condition.clone(),
         test_condition: details.test_condition.clone(),
+        long_horizon: details.long_horizon.clone(),
         revision: details.revision,
         owner_display_name: if owner.is_empty() { String::new() }
             else if let Some(assignment) = assignment.filter(|_| current_owner == Some(owner.as_str())) { assignment.name.clone() }
@@ -152,7 +153,7 @@ fn board_task_response(server: &Server, state: &State, task_id: &str, viewer: &s
     };
     let result = state.tasks.get(task_id).map(|task| board_task_view_with_master(state, &control, task, Some(viewer), master.as_deref(), route.as_ref())).transpose();
     match result {
-        Ok(Some(Some(task))) => Resp::data(json!({ "task": task, "notification": "none" })),
+        Ok(Some(Some(task))) => Resp::data(json!({ "task": task, "notification": "none", "goal_schedule": task_goal_receipt(state, task_id) })),
         Ok(_) => Resp::err("BOARD_TASK_NOT_PUBLIC: task does not belong to the public task board"),
         Err(error) => Resp::err(error),
     }
@@ -344,7 +345,10 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
     match command {
         BoardCommand::Show => handle_board_show(server, Some(&actor)),
         BoardCommand::Publish { id, title, description, delivery_condition, test_condition, priority,
-            work_kind,parent_task,prefer_role,executor,reviewer,depends_on } => {
+            work_kind,parent_task,prefer_role,executor,reviewer,depends_on,long_horizon } => {
+            let long_horizon = match long_horizon.merge(None) {
+                Ok(spec) => spec, Err(error) => return Resp::err(error),
+            };
             if [&id, &title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) {
                 return Resp::err("BOARD_DESCRIPTION_REQUIRED: provide task id, title, description, delivery condition and test condition");
             }
@@ -354,6 +358,9 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             let mut state = server.state.lock().unwrap();
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
             if state.tasks.contains_key(&id) { return Resp::err("task id already exists"); }
+            if long_horizon.is_some() {
+                if let Err(error) = board_check_master_locked(server, &state, &actor) { return error; }
+            }
             if let Some(parent)=parent_task.as_deref() {
                 let Some(task)=state.tasks.get(parent) else {return Resp::err("WORK_PARENT_NOT_FOUND");};
                 if !board_task_visible(&state,task,Some(&actor)) {return Resp::err("BOARD_PRIVATE_TASK");}
@@ -379,7 +386,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
                 created_ms: now, updated_ms: now,
             };
             let details = BoardTaskDetails {
-                title, description, delivery_condition, test_condition,
+                title, description, delivery_condition, test_condition, long_horizon,
                 parent_task_id:parent_task,work_policy,
                 revision: 1, public_visibility, admitted: public_visibility, ..BoardTaskDetails::default()
             };
@@ -418,18 +425,25 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             }
             response
         },
-        BoardCommand::Describe { id, expected_revision, title, description, delivery_condition, test_condition } => {
+        BoardCommand::Describe { id, expected_revision, title, description, delivery_condition, test_condition, long_horizon } => {
             let mut state = server.state.lock().unwrap();
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
             let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
-            if task.owner != actor { return Resp::err("only the task owner may describe it"); }
+            if task.owner != actor && board_check_master_locked(server, &state, &actor).is_err() { return Resp::err("only the task owner or current master may describe it"); }
             let Some(mut details) = state.board_details.get(&id).cloned() else { return Resp::err("task description record missing"); };
             if details.revision != expected_revision { return Resp::err("BOARD_STALE_REVISION: reread the board"); }
+            let long_horizon = match long_horizon.merge(details.long_horizon.as_ref()) {
+                Ok(spec) => spec, Err(error) => return Resp::err(error),
+            };
             if [&title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) { return Resp::err("description and conditions must not be empty"); }
-            if task.status == "invited" { return Resp::err("withdraw the invitation before changing its contract"); }
+            if task.status == "invited" && (details.title != title || details.description != description
+                || details.delivery_condition != delivery_condition || details.test_condition != test_condition) {
+                return Resp::err("withdraw the invitation before changing its contract");
+            }
             if matches!(task.status.as_str(),"merged"|"closed"|"cancelled") {return Resp::err("WORK_CONTRACT_TERMINAL: create a follow-up task");}
             let changed=details.title!=title || details.description!=description
-                || details.delivery_condition!=delivery_condition || details.test_condition!=test_condition;
+                || details.delivery_condition!=delivery_condition || details.test_condition!=test_condition
+                || details.long_horizon!=long_horizon;
             let mut events=Vec::new();
             if changed {
                 if let Some(mut record)=state.task_lifecycle.get(&id).cloned() {
@@ -440,6 +454,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             }
             details.title = title; details.description = description;
             details.delivery_condition = delivery_condition; details.test_condition = test_condition;
+            details.long_horizon = long_horizon;
             // Editing a claimed public task does not make it a private child assignment.
             details.public_visibility |= !is_managed_subagent(&state, &actor); details.revision += 1;
             task.updated_ms=now_ms();
@@ -459,7 +474,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         },
         BoardCommand::DeclineAssigned { id, expected_revision, reason } => board_decline_assigned(server, actor, token, id, expected_revision, reason),
         BoardCommand::Withdraw { id, expected_revision, reason } => board_withdraw(server, actor, token, id, expected_revision, reason),
-        BoardCommand::Dispatch {id,expected_revision} => board_dispatch_work(server,actor,token,id,expected_revision),
+        BoardCommand::Dispatch {id,expected_revision,long_horizon} => board_dispatch_work(server,actor,token,id,expected_revision,long_horizon),
         BoardCommand::Policy {scope,id,work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer,expected_revision} => {
             let patch=match parse_work_policy(work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer) {
                 Ok(policy)=>policy,Err(error)=>return error,

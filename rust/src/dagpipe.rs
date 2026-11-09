@@ -576,7 +576,7 @@ fn design_graph_ids() -> [&'static str; 45] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 266] {
+fn design_graph_operator_names() -> [&'static str; 267] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -680,6 +680,7 @@ fn design_graph_operator_names() -> [&'static str; 266] {
         "collab.assignment.read",
         "collab.assignment.resolve_constraints",
         "collab.assignment.select",
+        "collab.assignment.prepare_goal_schedule",
         "collab.assignment.invite_accept",
         "collab.assignment.emit",
         "collab.required_review.read",

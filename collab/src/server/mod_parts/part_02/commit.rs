@@ -56,6 +56,11 @@ impl Server {
                 .apply_checked(change)
                 .map_err(MutationError::InvalidState)?;
         }
+        for change in task_goal_transition_events(self, state, &candidate, changes)
+            .map_err(|error| MutationError::InvalidCommand(error.error.unwrap_or_default()))?
+        {
+            candidate.apply_checked(&change).map_err(MutationError::InvalidState)?;
+        }
         candidate
             .advance_version()
             .map_err(MutationError::InvalidState)?;

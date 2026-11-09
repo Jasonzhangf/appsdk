@@ -77,6 +77,7 @@ fn subscription(worker_id: &str, id: &str, status: &str) -> state::NotificationS
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
     }
 }
 

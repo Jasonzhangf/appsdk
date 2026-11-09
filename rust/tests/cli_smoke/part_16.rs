@@ -83,13 +83,14 @@ esac
     // Charter, fleet rules and notification rules all travel with the wake.
     assert!(text.contains("不要空转，不要假装完成"));
     assert!(text.contains("Peer-first"));
-    assert!(text.contains("不以 peer 忙闲为前提"));
+    assert!(text.contains("master在派发任务单填写完整长程内容与明确周期"));
+    assert!(text.contains("派发原子开启目标peer订阅"));
     assert!(!text.contains("`[subagent].max_concurrent`（默认 8）"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
     assert!(text.contains("collab subagent"));
     assert!(text.contains("旧状态诊断"));
     assert!(text.contains("PROTECTED_HOLD"));
-    assert!(text.contains("重新武装"));
+    assert!(text.contains("复用仍有效的周期长程批次"));
 
     // Goal objective is read out of the markdown, past the frontmatter.
     assert!(text.contains("# Ship It"));
@@ -117,11 +118,11 @@ esac
     assert!(payload["charter"]
         .as_str()
         .unwrap()
-        .contains("不以 peer 忙闲为前提"));
+        .contains("派发原子开启目标peer订阅"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()
-        .contains("重新武装"));
+        .contains("复用仍有效的周期长程批次"));
     assert!(payload["fleet_rules"]
         .as_str()
         .unwrap()
@@ -940,19 +941,21 @@ esac
     assert!(prompt.contains("Master / Peer"));
     assert!(prompt.contains("peer 不是执行 worker"));
     assert!(prompt.contains("appsdk bug"));
-    assert_eq!(sub_json["schedule"], "one-shot");
-    assert_eq!(sub_json["local_schedule"], "periodic-rearm-intent");
-    assert_eq!(sub_json["repeat_count"], 1);
+    assert_eq!(sub_json["schedule"], "periodic");
+    assert_eq!(sub_json["local_schedule"], "daemon-periodic");
+    assert_eq!(sub_json["repeat_count"], 100);
     assert_eq!(sub_json["requested_repeat_count"], 100);
     assert!(sub_json["subject"]
         .as_str()
         .unwrap()
         .starts_with("goal:sha256:"));
-    assert!(prompt.contains("每次 Collab deadline 都是单次触发"));
+    assert!(prompt.contains("默认100次循环"));
     let reconcile_args = fs::read_to_string(root.join("reconcile-args")).unwrap();
     assert!(reconcile_args.contains("--desired active"));
     assert!(reconcile_args.contains("--at-ms "));
-    assert!(!reconcile_args.contains("--every-ms"));
+    assert!(reconcile_args.contains("--every-ms 300000"));
+    assert!(reconcile_args.contains("--repeat 100"));
+    assert!(reconcile_args.contains("--content "));
     assert!(!reconcile_args.contains("--repeat-count"));
 
     let duplicate = Command::new(binary())
@@ -1041,7 +1044,7 @@ esac
     let prompt_text = String::from_utf8_lossy(&prompt_res.stdout);
     assert!(prompt_text.contains("长程任务目标文档"));
     assert!(prompt_text.contains("10m"));
-    assert!(prompt_text.contains("本地重唤醒意图"));
+    assert!(prompt_text.contains("长程订阅周期"));
 
     // 6. Cancel goal
     let cancel_res = Command::new(binary())
@@ -1766,8 +1769,8 @@ esac
     let retained_payload: Value = serde_json::from_slice(&retained.stdout).unwrap();
     assert_eq!(retained_payload["subscription_id"], "sub-retained");
     assert_eq!(retained_payload["idempotent"], true);
-    let subscribe_calls = fs::read_to_string(root.join("subscribe-calls")).unwrap();
-    assert_eq!(subscribe_calls.lines().count(), 1);
+    let subscribe_calls: u32 = fs::read_to_string(root.join("subscribe-count")).unwrap().parse().unwrap();
+    assert_eq!(subscribe_calls, 1);
     assert!(!root.join("ended-calls").exists());
 
     // Condition 1: once the retained one-shot deadline is due, the subscribe

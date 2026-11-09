@@ -29,10 +29,7 @@ fn appsdk_test_binary() -> PathBuf {
 }
 
 fn evidence_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("candidate root")
-        .join(".evidence/collab-ablation/sdk-goal-blackbox-20261031")
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("sdk-goal-blackbox")
 }
 
 fn write_bytes(evidence: &Path, name: &str, bytes: &[u8]) {
@@ -185,7 +182,7 @@ fn sdk_goal_subscribe_consumes_a_real_deadline_and_cancel_stops_it() {
     .expect("write isolated goal file");
 
     let interval_ms = 120_000i64;
-    let repeat = 5u32;
+    let repeat = 100u32;
     let ttl_seconds = 600u64;
     let subscribed = run_appsdk_ok(
         &fixture,
@@ -197,8 +194,6 @@ fn sdk_goal_subscribe_consumes_a_real_deadline_and_cancel_stops_it() {
             goal_file.to_str().unwrap(),
             "--interval",
             "120s",
-            "--repeat",
-            &repeat.to_string(),
             "--ttl",
             &ttl_seconds.to_string(),
             "--json",
@@ -286,6 +281,13 @@ fn sdk_goal_subscribe_consumes_a_real_deadline_and_cancel_stops_it() {
         }
         for id in ids {
             let status = fixture.run_ok(&["msg", &id], Some(&pane));
+            assert!(
+                status["body"]
+                    .as_str()
+                    .unwrap()
+                    .contains("sdk-goal-blackbox.md"),
+                "the full generated goal prompt must reach the peer: {status}"
+            );
             write_json(&evidence, &format!("msg-{id}.json"), &status);
             assert_eq!(status["state"], "read", "recv must consume {id}: {status}");
             consumed.push(id);

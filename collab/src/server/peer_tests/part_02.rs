@@ -588,6 +588,7 @@ fn goal_reconcile_does_not_close_master_idle_or_direct_reception() {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         },
         Event::Sent {

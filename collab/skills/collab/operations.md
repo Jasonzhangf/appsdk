@@ -346,9 +346,9 @@ Desktop 的 agent sessionID 和 DSH 的 gateway sessionID 只是传输载体，�
 所持资源与需要巡检的事项。名字的当前工作者接续任务；旧执行者不另行处理。
 规则升级与已加载 runtime 分别验收，不能仅凭读到新版 Skill 宣称 daemon 已升级。
 
-master 与 peer 均自行管理本人的 longhorizon goal；旧的“goal 只归 master”
-“peer 找 master 代登记”“所有 peer 忙才可发 GCM”规则已废弃。详细入口与回执沿
-[本人目标合同](#register-the-long-horizon-goal-before-dispatch)。以当前正式安装 Skill
+master 与 peer 均可管理本人的 longhorizon goal。项目master派单时提供长程内容与周期，
+自动开启本项目peer订阅。当前typed CEO可修改任意成员的长程订阅。详细入口与回执沿
+[目标合同](#register-the-long-horizon-goal-before-dispatch)。以当前正式安装 Skill
 和 daemon 当前 `role_brief` 为准；旧 worktree 的 `collab/skills/` 是分发源码副本，
 不能替代当前运行规则，也不能通过改写他人的 worktree 来做规则升级。
 
@@ -480,18 +480,23 @@ closure is a long-horizon goal.
 
 ### Register the long-horizon goal before dispatch
 
-Master and peer must explicitly register their own accepted long-horizon goal
-through the supported goal control entry. Master owns the project goal; peer
-owns the delegated subgoal. On registration/recovery and each new assignment,
-read the existing goal, resume or update it, and create one only when missing.
-Record the objective, scope, acceptance evidence, current owner/name and parent
-goal when delegated. Report the goal path/identifier and registration receipt.
-An ordinary worker task, board assignment, note, timer subscription or verbal
-promise does not register a long-horizon goal. Do not report registration as
-complete without the goal control receipt.
+Master and peer can manage their own accepted long-horizon goals. A project
+master fills the full long-horizon task content and cadence on the dispatch
+sheet. Dispatch starts the selected peer's subscription in the same durable
+commit and returns its actual receipt. The peer remains the stable-name owner.
+The current typed CEO can modify any registered member's long-horizon schedule
+across projects. These actions use the existing goal schedule owner.
+
+Use `--long-horizon-content` and `--long-horizon-every-ms` on `board publish`,
+`board describe` or `board dispatch`. Dispatch can retain a complete declaration
+already stored on that same task. Optional `--long-horizon-repeat` overrides the
+default100. Optional `--long-horizon-ttl-seconds` declares the lifetime. A missing
+content or cadence, stale revision, authority failure or schedule admission error
+returns an explicit failure before any partial dispatch. A saved task sheet alone
+does not prove a subscription is armed.
 
 The AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`;
-a formal patrol defaults to one 100-delivery batch with the same entry and `--repeat 100`;
+a periodic long-horizon goal defaults to one 100-delivery batch;
 when the user specifies another count, use that count. Reuse the valid batch while deliveries remain; do not re-register, reset
 the count, or create a duplicate after context recovery or a single delivered occurrence.
 After exhaustion, the owning role renews one whole batch only while the standing duty and
@@ -499,11 +504,15 @@ its authorization remain. An ordinary one-shot goal or deadline outside the patr
 keeps its own one-shot lifecycle. Inspect your own goal with `appsdk goal status --json` and
 `appsdk longhorizon show --json`. `appsdk longhorizon` is a read projection,
 not a register/subscribe command; `collab longhorizon` does not exist. The
-goal entry selects the authenticated caller's project and stable name. Master
-and peer each register, read, update, rearm and cancel their own goal. SessionID
-is the execution carrier; a worktree or transport change does not transfer
-ownership. Master must not proxy-register, hold or cancel a peer's goal. Each
-owner's status reconciliation must leave other owners' records unchanged.
+goal entry selects the authenticated caller's project and stable name. Direct
+schedule control uses `collab goal reconcile --owner <target-name>` with optional
+`--project` and `--app` for an exact target scope. A current project master may
+manage its own project's peers. A current typed CEO may manage any target project.
+Other peers retain self-management. `--every-ms` without `--repeat` uses 100 total
+cycles. `--content` supplies an independent goal's full instructions. Task-linked
+content remains on the authoritative task form. SessionID is the execution
+carrier. A worktree or transport change retains the target's ownership and progress.
+Read-only status does not modify another owner's records.
 A runtime that refuses an ordinary peer's own goal has an implementation defect;
 report its exact error, do not promote the peer or route registration through master.
 

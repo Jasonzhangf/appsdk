@@ -50,13 +50,18 @@ pub(crate) enum NotifyCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum GoalCmd {
-    /// Reconcile the caller's owned finite goal schedule without touching
-    /// daemon-owned direct-message reception.
+    /// Manage a goal schedule as its owner, project master, or current CEO.
     Reconcile {
         #[arg(long)]
         goal_id: String,
         #[arg(long)]
         owner: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        content: Option<String>,
         /// active or ended
         #[arg(long)]
         desired: String,
@@ -66,7 +71,7 @@ pub(crate) enum GoalCmd {
         #[arg(long = "ttl-seconds")]
         ttl_seconds: Option<u64>,
         /// Periodic interval in milliseconds for a sustained active goal
-        /// deadline; pair with --repeat. Omit both for a one-shot occurrence.
+        /// deadline. Omitted --repeat uses 100 total deliveries.
         #[arg(long = "every-ms")]
         interval_ms: Option<i64>,
         /// Total deliveries for a periodic active goal deadline (1..=100)

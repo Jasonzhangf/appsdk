@@ -99,6 +99,7 @@ fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         },
     ]);
@@ -1145,6 +1146,7 @@ fn owned_subscription(worker_id: &str, id: &str, status: &str) -> NotificationSu
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
         periodic_declared: false,
+        goal_content: None,
     }
 }
 

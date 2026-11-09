@@ -76,15 +76,15 @@ fn initial_tmux_registers_once_without_participant_return() {
             .iter()
             .filter_map(Value::as_str)
             .any(|rule| {
-                rule.contains("register your own accepted goal")
-                    && rule.contains("Never ask master to proxy-register a peer goal")
-                    && rule.contains("Stable name owns the goal")
+                rule.contains("Manage your own accepted goal")
+                    && rule.contains("dispatch atomically starts the target peer's subscription")
+                    && rule.contains("The target stable name retains ownership")
             })
     };
     let first = &response["result"]["snapshot"];
     assert!(
         owns_goal(first),
-        "registration must explain self-owned goals: {response}"
+        "registration must explain stable goal ownership and delegated activation: {response}"
     );
     assert!(closes_idle_patrol(first), "{response}");
     assert!(first["role_brief"]["responsibilities"]

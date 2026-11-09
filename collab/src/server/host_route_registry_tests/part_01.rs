@@ -339,6 +339,7 @@ fn notification_subscription_transport_must_match_tmux_or_appserver_kind() {
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
     };
     assert!(subscription_matches_transport(
         &subscription("tmux"),
@@ -1358,6 +1359,7 @@ fn appserver_subscription_is_bound_to_the_selected_thread() {
         patrol_idle_since_ms: None,
         patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
         created_ms: 0,
         updated_ms: 0,
         expires_ms: i64::MAX,

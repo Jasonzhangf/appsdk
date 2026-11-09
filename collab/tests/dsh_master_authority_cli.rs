@@ -879,6 +879,10 @@ fn board_pending_accept_nonpublisher_starts_and_delivers() {
             "read-only result",
             "--test-condition",
             "public acceptance and delivery",
+            "--long-horizon-content",
+            "Complete the accepted read-only task and deliver its public acceptance evidence",
+            "--long-horizon-every-ms",
+            "3600000",
         ],
         "agentA",
     );
@@ -1010,7 +1014,9 @@ fn board_pending_accept_keeps_response_and_resource_guards() {
     let id = "pending-guard-20261106";
     assert_ok(&board(
         json!({"action":"publish","id":id,"title":id,"description":"guards",
-        "delivery_condition":"read-only result","test_condition":"public guards","priority":"p1"}),
+        "delivery_condition":"read-only result","test_condition":"public guards","priority":"p1",
+        "long_horizon_content":"Complete the read-only task within its response and resource guards",
+        "long_horizon_every_ms":3600000}),
         "workerA",
         "tokenA",
         &a,

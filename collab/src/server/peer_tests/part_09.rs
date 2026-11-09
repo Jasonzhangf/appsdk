@@ -1089,6 +1089,7 @@ fn publisher_claims_pending_task_and_non_publisher_cannot_reclaim() {
         "publisher".into(),
         "token-publisher".into(),
         crate::board::BoardCommand::Publish {
+            long_horizon: Default::default(),
             id: "publisher-pending".into(),
             title: "publisher pending".into(),
             description: "claim regression".into(),

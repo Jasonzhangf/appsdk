@@ -194,18 +194,17 @@ Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 
 
 ## Register the long-horizon goal before dispatch
 
-已注册 master/peer 接受长程目标时，各自先恢复或登记本人 goal，再拆解派发。已有目标
-直接续接，不重复创建；任务板、笔记和口头承诺不替代 goal 回执。使用当前已支持的
-`appsdk goal` 入口，详见
+已注册 master/peer 可恢复或登记本人 goal。master 派发任务单时须填写完整长程任务
+内容和明确周期，派发自动为选中的 peer 开启订阅，并返回真实目标订阅回执。
+当前 typed CEO 可修改任意项目成员的长程订阅。目标 peer 保持名字归属和当前投递绑定。
+已有有效批次直接续接，任务字段、笔记和口头承诺不替代已开启回执。详细入口见
 [goal 登记与关闭](operations.md#register-the-long-horizon-goal-before-dispatch)。
-master 不代持或代登记 peer goal，旧 runtime 拒绝 peer 时记录具体缺口，不提升身份
-绕过。
-正式巡检 goal 默认一次登记 100 次，入口保持
-`appsdk goal subscribe --goal <已有文档> --interval <既有周期> --repeat 100`；
-用户明确指定其他次数时，使用指定次数。
+周期长程订阅默认一次登记100次。本人入口为
+`appsdk goal subscribe --goal <已有文档> --interval <既有周期>`，显式 `--repeat` 覆盖次数。
+master 的派发入口使用任务单的长程内容和周期，省略次数同样采用100。
 批次仍有效且有剩余次数时复用同一订阅；context、恢复、单次交付或新增轮次都不重复登记、
 不重置计数、不并排新建。批次耗尽后，只有原职责仍有效并获授权继续时，由原 owner 整批
-续订；显式指定其他次数或普通非巡检 one-shot/deadline 保持原语义。
+续订。显式一次性 deadline 与旧单次记录保持各自语义。通用通知缺省次数保持原值。
 
 每个角色维护自己的目标文档。文档先写长期目标、范围、硬约束、交付和验收，再写当前
 增量及实现细节。更新细节前回看长期目标；重大细节变化同时修改长期目标。每个巡检任务

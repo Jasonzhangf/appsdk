@@ -100,7 +100,16 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
         let alice = fixture.run_public(&["context"], THREAD_B);
         let bob = fixture.run_public(&["context"], THREAD_C);
         assert_eq!(alice["work_roles"], json!([]));
-        publish(&fixture, "first", &[]);
+        publish(
+            &fixture,
+            "first",
+            &[
+                "--long-horizon-content",
+                "Complete the first task under its current board contract",
+                "--long-horizon-every-ms",
+                "3600000",
+            ],
+        );
         if owned {
             fixture.run_public(
                 &["board", "claim", "first", "--expected-revision", "1"],
@@ -113,7 +122,18 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
             );
         }
         fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
-        publish(&fixture, "preferred", &["--prefer-role", "designer"]);
+        publish(
+            &fixture,
+            "preferred",
+            &[
+                "--prefer-role",
+                "designer",
+                "--long-horizon-content",
+                "Complete the role-preferred task under its current board contract",
+                "--long-horizon-every-ms",
+                "3600000",
+            ],
+        );
         let preferred = fixture.run_public(
             &["board", "dispatch", "preferred", "--expected-revision", "1"],
             THREAD_A,
@@ -122,7 +142,33 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
             preferred["task"]["invited_peer"],
             alice["identity"]["worker_id"]
         );
-        publish(&fixture, "pinned", &["--executor", "Alice"]);
+        // Keep the first task's ownership/invitation for selection while
+        // releasing its finite goal slot before another explicit override.
+        fixture.run_public(
+            &[
+                "goal",
+                "reconcile",
+                "--goal-id",
+                "task:first",
+                "--owner",
+                "Alice",
+                "--desired",
+                "ended",
+            ],
+            THREAD_A,
+        );
+        publish(
+            &fixture,
+            "pinned",
+            &[
+                "--executor",
+                "Alice",
+                "--long-horizon-content",
+                "Complete the pinned task under its current board contract",
+                "--long-horizon-every-ms",
+                "3600000",
+            ],
+        );
         let pinned = fixture.run_public(
             &["board", "dispatch", "pinned", "--expected-revision", "1"],
             THREAD_A,
@@ -131,7 +177,16 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
             pinned["task"]["invited_peer"],
             alice["identity"]["worker_id"]
         );
-        publish(&fixture, "second", &[]);
+        publish(
+            &fixture,
+            "second",
+            &[
+                "--long-horizon-content",
+                "Complete the second task under its current board contract",
+                "--long-horizon-every-ms",
+                "3600000",
+            ],
+        );
         let result = fixture.run_public(
             &["board", "dispatch", "second", "--expected-revision", "1"],
             THREAD_A,
@@ -881,7 +936,18 @@ fn role_preference_goal_override_and_missing_pinned_executor_stay_explicit() {
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     assert_eq!(task(&board, "role-child")["executor_name"], "Alice");
     assert_eq!(task(&board, "role-child")["reviewer_name"], "Bob");
-    publish(&fixture, "role-preferred", &["--prefer-role", "designer"]);
+    publish(
+        &fixture,
+        "role-preferred",
+        &[
+            "--prefer-role",
+            "designer",
+            "--long-horizon-content",
+            "Complete the designer task under its current board contract",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+    );
     fixture.run_public(
         &[
             "board",
@@ -897,7 +963,18 @@ fn role_preference_goal_override_and_missing_pinned_executor_stay_explicit() {
         task(&board, "role-preferred")["dispatch_selection"],
         "Alice"
     );
-    publish(&fixture, "role-no-match", &["--prefer-role", "translator"]);
+    publish(
+        &fixture,
+        "role-no-match",
+        &[
+            "--prefer-role",
+            "translator",
+            "--long-horizon-content",
+            "Complete the translator task under its current board contract",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+    );
     fixture.run_public(
         &[
             "board",
@@ -913,7 +990,18 @@ fn role_preference_goal_override_and_missing_pinned_executor_stay_explicit() {
         .as_str()
         .unwrap()
         .is_empty());
-    publish(&fixture, "role-missing", &["--executor", "MissingDesigner"]);
+    publish(
+        &fixture,
+        "role-missing",
+        &[
+            "--executor",
+            "MissingDesigner",
+            "--long-horizon-content",
+            "Complete the explicitly pinned task under its current board contract",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+    );
     let response = fixture.command_public(
         &[
             "board",
@@ -3157,7 +3245,18 @@ fn claimed_executor_reassignment_lets_new_slot_start_and_deliver() {
         .to_owned();
 
     let id = "executor-reassignment";
-    publish(&fixture, id, &["--executor", "Bob"]);
+    publish(
+        &fixture,
+        id,
+        &[
+            "--executor",
+            "Bob",
+            "--long-horizon-content",
+            "Complete the reassigned task under its current board contract",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+    );
     let claimed = fixture.run_public(
         &["board", "claim", id, "--expected-revision", "1"],
         THREAD_B,
@@ -3642,6 +3741,10 @@ fn reassignment_accept_while_executor_slot_already_running_leaves_two_active_exe
             "bob reassigned receipt",
             "--executor",
             "Bob",
+            "--long-horizon-content",
+            "Complete the reassigned task after the current execute slot is released",
+            "--long-horizon-every-ms",
+            "3600000",
         ],
         THREAD_A,
     );

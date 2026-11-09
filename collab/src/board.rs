@@ -310,6 +310,13 @@ pub enum BoardCommand {
         #[serde(flatten)]
         long_horizon: LongHorizonArgs,
     },
+    /// Master-only repair: recreate the current Execute phase of an admitted
+    /// task that predates the ticket-phase machine, preserving its owner.
+    BackfillExecute {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

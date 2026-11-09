@@ -309,6 +309,191 @@ fn ticket_projection(state: &State, task_id: &str) -> serde_json::Value {
     })
 }
 
+fn board_backfill_execute(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+) -> Resp {
+    use crate::server::ticket_state::{
+        TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus,
+    };
+
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = board_check_actor(&state, &actor, &token) {
+        return error;
+    }
+    if let Err(error) = board_check_master_locked(server, &state, &actor) {
+        return error;
+    }
+    if let Err(error) = board_check_revision(&state, &id, expected_revision) {
+        return error;
+    }
+    let Some(details) = state.board_details.get(&id).cloned() else {
+        return Resp::err("BOARD_TASK_NOT_FOUND: no described task with this id");
+    };
+    if !details.admitted {
+        return Resp::err_data(
+            "TICKET_BACKFILL_NOT_ADMITTED: backfill requires an admitted ticket",
+            json!({"task_id": id}),
+        );
+    }
+    let Some(task) = state.tasks.get(&id).cloned() else {
+        return Resp::err("task not found");
+    };
+    if task.status != "working" {
+        return Resp::err_data(
+            "TICKET_BACKFILL_NOT_WORKING: backfill only repairs working admitted tickets",
+            json!({"task_id": id, "status": task.status}),
+        );
+    }
+    if state.ticket_phases.iter().any(|phase| {
+        phase.task_id == id
+            && phase.phase == TicketPhaseKind::Execute
+            && phase.status != TicketPhaseStatus::Revoked
+    }) {
+        return Resp::err_data(
+            "TICKET_BACKFILL_PHASE_EXISTS: ticket already has a non-revoked execute phase",
+            json!({"task_id": id}),
+        );
+    }
+
+    let route = match server_route_scope(server, &state) {
+        Ok(Some(route)) => route,
+        Ok(None) => return Resp::err("project route is not ready"),
+        Err(error) => return Resp::err(error),
+    };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control,
+        Err(error) => return Resp::err(error),
+    };
+    let slot = match control.current_for_worker(
+        &route.project_scope_id,
+        &route.app_scope_id,
+        &task.owner,
+    ) {
+        Ok(Some(slot)) => slot,
+        Ok(None) => {
+            return Resp::err_data(
+                "TICKET_BACKFILL_SLOT_MISSING: task owner has no current execution slot",
+                json!({"task_id": id, "owner": task.owner}),
+            )
+        }
+        Err(error) => return Resp::err(error),
+    };
+    let Some(current) = slot.active_binding() else {
+        return Resp::err_data(
+            "TICKET_BACKFILL_SLOT_INACTIVE: owner slot has no active binding",
+            json!({"task_id": id, "owner": task.owner}),
+        );
+    };
+    let Some(current_session) = current.binding.session_id.as_ref() else {
+        return Resp::err_data(
+            "TICKET_BACKFILL_SESSION_MISSING: owner slot has no session",
+            json!({"task_id": id, "owner": task.owner}),
+        );
+    };
+    let Some(assignment) = state.task_assignment(&id).cloned() else {
+        return Resp::err_data(
+            "TICKET_BACKFILL_ASSIGNMENT_MISSING: ticket has no stable assignment",
+            json!({"task_id": id}),
+        );
+    };
+    if assignment.name != slot.identity_key.name {
+        return Resp::err_data(
+            "TICKET_BACKFILL_ASSIGNMENT_NAME_MISMATCH: ticket assignment name does not match owner slot",
+            json!({
+                "task_id": id,
+                "assignment_name": assignment.name,
+                "slot": slot.identity_key.name,
+            }),
+        );
+    }
+    if assignment.session_id != current_session.as_str() {
+        return Resp::err_data(
+            "TICKET_BACKFILL_ASSIGNMENT_SESSION_MISMATCH: ticket assignment session does not match owner slot",
+            json!({"task_id": id}),
+        );
+    }
+
+    let latest = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| phase.task_id == id && phase.phase == TicketPhaseKind::Execute)
+        .max_by_key(|phase| (phase.batch, phase.attempt_generation));
+    let attempt_generation = match latest
+        .map(|phase| phase.attempt_generation)
+        .unwrap_or(0)
+        .checked_add(1)
+    {
+        Some(attempt) => attempt,
+        None => {
+            return Resp::err_data(
+                "TICKET_BACKFILL_ATTEMPT_EXHAUSTED: cannot allocate a new attempt",
+                json!({"task_id": id}),
+            )
+        }
+    };
+    let batch = match latest.map(|phase| phase.batch) {
+        Some(batch) => match batch.checked_add(1) {
+            Some(batch) => batch,
+            None => {
+                return Resp::err_data(
+                    "TICKET_BACKFILL_BATCH_EXHAUSTED: cannot allocate a new batch",
+                    json!({"task_id": id}),
+                )
+            }
+        },
+        None => 0,
+    };
+    let depends_on = latest
+        .map(|phase| phase.depends_on.clone())
+        .unwrap_or_default();
+    let enqueue_seq = match state
+        .ticket_phases
+        .iter()
+        .map(|phase| phase.enqueue_seq)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+    {
+        Some(sequence) => sequence,
+        None => {
+            return Resp::err_data(
+                "TICKET_BACKFILL_SEQUENCE_EXHAUSTED: cannot allocate an enqueue sequence",
+                json!({"task_id": id}),
+            )
+        }
+    };
+    let phase = TicketPhaseRecord {
+        task_id: id.clone(),
+        phase: TicketPhaseKind::Execute,
+        batch,
+        priority: task.priority.clone(),
+        status: TicketPhaseStatus::Claimed,
+        slot_name: Some(slot.identity_key.name.clone()),
+        binding_generation: slot.generation,
+        enqueue_seq,
+        attempt_generation,
+        depends_on,
+        route_group: None,
+        wait_reason: None,
+        result: None,
+    };
+    if let Err(error) = server.commit_locked_checked(
+        &mut state,
+        &[Event::TicketPhaseRecorded { phase }],
+    ) {
+        return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
+    }
+    let mut response = board_task_response(server, &state, &id, &actor);
+    if let Some(object) = response.data.as_object_mut() {
+        object.insert("ticket".into(), ticket_projection(&state, &id));
+    }
+    response
+}
+
 fn board_check_actor(state: &State, actor: &str, token: &str) -> Result<(), Resp> {
     verify(state, actor, token)?;
     Ok(())
@@ -333,7 +518,8 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             | BoardCommand::Update { id, .. }
             | BoardCommand::Describe { id, .. } | BoardCommand::Invite { id, .. }
             | BoardCommand::Respond { id, .. } | BoardCommand::DeclineAssigned { id, .. }
-            | BoardCommand::Withdraw { id, .. } | BoardCommand::Dispatch {id,..} => Some(id),
+            | BoardCommand::Withdraw { id, .. } | BoardCommand::Dispatch {id,..}
+            | BoardCommand::BackfillExecute { id, .. } => Some(id),
         };
         // Check visibility before reporting revision or lifecycle facts.
         if let Some(task) = task_id.and_then(|id| state.tasks.get(id)) {
@@ -475,6 +661,9 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         BoardCommand::DeclineAssigned { id, expected_revision, reason } => board_decline_assigned(server, actor, token, id, expected_revision, reason),
         BoardCommand::Withdraw { id, expected_revision, reason } => board_withdraw(server, actor, token, id, expected_revision, reason),
         BoardCommand::Dispatch {id,expected_revision,long_horizon} => board_dispatch_work(server,actor,token,id,expected_revision,long_horizon),
+        BoardCommand::BackfillExecute { id, expected_revision } => {
+            board_backfill_execute(server, actor, token, id, expected_revision)
+        },
         BoardCommand::Policy {scope,id,work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer,expected_revision} => {
             let patch=match parse_work_policy(work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer) {
                 Ok(policy)=>policy,Err(error)=>return error,

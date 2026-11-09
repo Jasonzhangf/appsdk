@@ -1235,6 +1235,7 @@ mod qqbot_lifecycle_tests {
             conversation: conversation.to_owned(),
             project_scope: "/project".into(),
             target_address: target_address.to_owned(),
+            resolved_target: None,
             revision: revision + 1,
             updated_ms: 0,
         };
@@ -1330,7 +1331,10 @@ mod qqbot_lifecycle_tests {
         );
         assert_eq!(state.channel_envelopes.len(), 1);
         assert_eq!(
-            state.platform_event_index.get(&key).map(String::as_str),
+            state
+                .platform_event_index
+                .get(&key)
+                .and_then(crate::server::channel_envelope::PlatformEventTarget::local_message_id),
             Some("collab-msg-1"),
             "the first durable message must win for the platform event"
         );
@@ -1404,7 +1408,10 @@ mod qqbot_lifecycle_tests {
             "project.Bob"
         );
         assert_eq!(
-            replayed.platform_event_index.get(&key).map(String::as_str),
+            replayed
+                .platform_event_index
+                .get(&key)
+                .and_then(crate::server::channel_envelope::PlatformEventTarget::local_message_id),
             Some("collab-msg-1")
         );
         assert!(replayed.channel_envelopes.contains_key("collab-msg-1"));

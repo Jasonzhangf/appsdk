@@ -1,0 +1,94 @@
+{
+  "id": "appsdk-collab-federation",
+  "version": "0.1.0",
+  "description": "Each machine retains its identity and mailbox owner. Typed results carry success, failure, cancellation and unknown to one receipt. Recovery preserves the original operation reference.",
+  "inputs": [{"id": "federation_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "admit_request",
+      "operator": "appsdk.collab_federation.admit_request",
+      "operator_version": "1",
+      "description": "Read declared configuration and the typed request. Reject malformed input without side effects.",
+      "inputs": ["federation_request"],
+      "output": {"id": "admitted_request", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "authenticate_source",
+      "operator": "appsdk.collab_federation.authenticate_source",
+      "operator_version": "1",
+      "description": "Authenticate the local peer, trusted channel owner or origin daemon through its current control boundary. Derive source machine from the verified directional credential. An external channel is a typed actor and never a forged peer.",
+      "inputs": ["admitted_request"],
+      "output": {"id": "authenticated_request", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_address",
+      "operator": "appsdk.collab_federation.resolve_address",
+      "operator_version": "1",
+      "description": "Resolve a local legacy address, an explicit machine address or an original message reference. Unknown and ambiguous machine addresses cannot enter local fallback.",
+      "inputs": ["authenticated_request"],
+      "output": {"id": "normalized_address", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_route",
+      "operator": "appsdk.collab_federation.resolve_route",
+      "operator_version": "1",
+      "description": "Verify the current local name owner or configured peer connection and original reply participants. Connection readiness, exchange and owned-resource cleanup share one absolute deadline. Expiry prevents the next network side effect. Channel replies return to the retained original envelope owner. Network IO holds no mailbox lock.",
+      "inputs": ["normalized_address"],
+      "output": {"id": "target_route", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_batch",
+      "operator": "appsdk.collab_federation.commit_batch",
+      "operator_version": "1",
+      "description": "Send persists the origin operation before IO. Accept atomically commits the target message, deduplication, participants and any trusted channel reply binding. Duplicate acceptance returns the original reference without notification. Target Lookup and intent comparison are read-only. A recovery Lookup and its permitted Put share one deadline. Origin recovery records authoritative acceptance even when transport cleanup remains incomplete. Consumption delegates to recv.",
+      "inputs": ["target_route"],
+      "output": {"id": "committed_batch", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "deliver_channel_reply",
+      "operator": "appsdk.collab_federation.deliver_channel_reply",
+      "operator_version": "1",
+      "description": "Channel replies claim their committed message once, invoke the configured QQ helper outside mailbox locks and save the actual platform result. Existing claims never trigger a resend. Ordinary peer messages pass through. All outcomes reach the receipt exit.",
+      "inputs": ["committed_batch"],
+      "output": {"id": "delivery_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_receipt",
+      "operator": "appsdk.collab_federation.emit_receipt",
+      "operator_version": "1",
+      "description": "Return the actual owner reference. Mailbox acceptance, adapter outcome and consumption remain separate. Authoritative responses retain their meaning and expose cleanup failure separately as transport_error. Expiry never claims an unconfirmed child reap or reader closure. Failed or unknown operations skip success effects and reach this exit.",
+      "inputs": ["delivery_result"],
+      "output": {"id": "federation_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "admit_request", "to": "authenticate_source", "arc_id": "admitted_request"},
+    {"from": "authenticate_source", "to": "resolve_address", "arc_id": "authenticated_request"},
+    {"from": "resolve_address", "to": "resolve_route", "arc_id": "normalized_address"},
+    {"from": "resolve_route", "to": "commit_batch", "arc_id": "target_route"},
+    {"from": "commit_batch", "to": "deliver_channel_reply", "arc_id": "committed_batch"},
+    {"from": "deliver_channel_reply", "to": "emit_receipt", "arc_id": "delivery_result"}
+  ],
+  "outputs": ["federation_receipt"]
+}

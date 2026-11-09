@@ -231,6 +231,26 @@ fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_de
 }
 
 #[test]
+fn rex_and_federation_graphs_compile_with_project_operator_registry() {
+    for source in [
+        include_str!("../../docs/dagpipe/collab-rex-adaptor.graph.json"),
+        include_str!("../../docs/dagpipe/collab-federation.graph.json"),
+    ] {
+        let graph = parse_graph_json(source).unwrap();
+        ensure_single_source_single_sink(&graph).unwrap();
+        validate_graph_registry(&graph).unwrap();
+
+        let mut invalid = graph;
+        invalid.nodes[0].operator = "appsdk.unregistered_transport_operator".to_owned();
+        let error = validate_graph_registry(&invalid).unwrap_err();
+        assert!(
+            error.starts_with("DAGPIPE_DESIGN_GRAPH_OPERATOR_SCOPE_INVALID:"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn validate_graph_registry_rejects_design_operator_on_non_design_graph() {
     let source = include_str!("../../docs/dagpipe/collab-context.graph.json");
     let mut graph = parse_graph_json(source).unwrap();

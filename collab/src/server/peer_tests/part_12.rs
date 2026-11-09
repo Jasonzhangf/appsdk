@@ -464,6 +464,7 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
             codex_session_id: Some("session-tmux".into()),
             codex_thread_id: Some("thread-tmux".into()),
         }),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into()],
         self_check: "fixture".into(),
     };
@@ -474,6 +475,7 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
         session_id: Some("session-dsh".into()),
         thread_id: Some("thread-dsh".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["dsh_channel".into()],
         self_check: "fixture".into(),
     };
@@ -484,6 +486,7 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
         session_id: Some("session-desktop".into()),
         thread_id: Some("thread-desktop".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["desktop_bridge".into()],
         self_check: "fixture".into(),
     };

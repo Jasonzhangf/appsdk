@@ -740,8 +740,7 @@ impl ProjectRuntimeManager {
                 &effect.target_worker_id,
             )
             .map_err(|error| format!("PENDING_EFFECT_RETIREMENT_CREDENTIAL_FAILED: {error}"))?;
-            if value.binding.tmux_endpoint.is_some()
-                || (value.binding.session_id.is_some() && value.binding.native_thread_id.is_some())
+            if crate::server::global_state::installed_route_address_key(&value.binding).is_some()
             {
                 self.host
                     .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
@@ -912,8 +911,7 @@ impl ProjectRuntimeManager {
                     },
                     Event::Registered { worker },
                 ];
-                if current.tmux_endpoint.is_some()
-                    || (current.session_id.is_some() && current.native_thread_id.is_some())
+                if crate::server::global_state::installed_route_address_key(&current).is_some()
                 {
                     events.insert(
                         0,
@@ -1067,9 +1065,7 @@ impl ProjectRuntimeManager {
                         == effect.previous_worker_id.as_deref()
                     && previous.binding.session_id.as_ref().map(|id| id.as_str())
                         == effect.previous_session_id.as_deref()
-                    && (previous.binding.tmux_endpoint.is_some()
-                        || (previous.binding.session_id.is_some()
-                            && previous.binding.native_thread_id.is_some()))
+                    && crate::server::global_state::installed_route_address_key(&previous.binding).is_some()
             }) {
                 publications.push(Event::GlobalCurrentThreadRouteRetired {
                     binding: previous.binding.clone(),
@@ -1089,9 +1085,7 @@ impl ProjectRuntimeManager {
                 }
             }
             if !self.binding_publication_matches(&value.binding)
-                && (value.binding.tmux_endpoint.is_some()
-                    || (value.binding.session_id.is_some()
-                        && value.binding.native_thread_id.is_some()))
+                && crate::server::global_state::installed_route_address_key(&value.binding).is_some()
             {
                 publications.push(Event::GlobalCurrentThreadRouteSet {
                     binding: value.binding.clone(),

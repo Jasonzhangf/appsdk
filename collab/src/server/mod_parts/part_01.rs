@@ -334,6 +334,24 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                     }
                     Ok(receipt)
                 }
+                TransportKind::Rex => {
+                    // The notification sink is synchronous while the Rex
+                    // primitive owns async process I/O. daemon callers enter
+                    // this sink from the Tokio blocking pool, so block on the
+                    // current runtime handle instead of starting a second one.
+                    let handle = tokio::runtime::Handle::try_current().map_err(|error| {
+                        format!("REX_UNKNOWN: Tokio runtime unavailable for Rex sink: {error}")
+                    })?;
+                    let receipt = handle
+                        .block_on(crate::client::adapters::rex::notify(
+                            transport,
+                            body,
+                            Some(mode),
+                        ))
+                        .map_err(|error| error.to_string())?;
+                    serde_json::from_str::<serde_json::Value>(&receipt)
+                        .map_err(|error| error.to_string())
+                }
             }
         },
     )
@@ -384,6 +402,9 @@ fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
             crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
                 .map_err(|error| error.to_string())
         }
+        TransportKind::Rex => Err(
+            "REX_ENDPOINT_NOT_QUERYABLE: a rex transport has no App Server thread status".to_owned(),
+        ),
         TransportKind::Dsh => {
             let endpoint = transport.endpoint.as_deref().ok_or_else(|| {
                 "DSH_ENDPOINT_REJECTED: selected dsh transport has no control socket".to_owned()
@@ -422,6 +443,10 @@ pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> 
         // or retires it.
         TransportKind::Dsh => Err(
             "TRANSPORT_UNSUPPORTED: a dsh agent's lifecycle is owned by the gateway, not by collab"
+                .into(),
+        ),
+        TransportKind::Rex => Err(
+            "TRANSPORT_UNSUPPORTED: a rex agent's lifecycle is owned by the Rex server, not by collab"
                 .into(),
         ),
     })
@@ -814,6 +839,7 @@ pub struct Server {
     pub appserver_notification_sink: Arc<TmuxNotificationSink>,
     pub appserver_thread_status: Arc<AppServerThreadStatus>,
     pub appserver_thread_archive: Arc<AppServerThreadArchive>,
+    pub rex_monitor: rex_monitor::RexMonitor,
     pub mailbox_notify: Notify,
 }
 

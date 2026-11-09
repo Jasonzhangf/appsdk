@@ -63,7 +63,7 @@ fn rearm_cancelled_project_patrol(
             continue;
         };
         subscription.method = transport.kind.as_str().to_owned();
-        subscription.target = target.to_owned();
+        subscription.target = target.into_owned();
         subscription.status = "armed".into();
         subscription.status_reason = None;
         subscription.trigger_ms = Some(
@@ -479,9 +479,20 @@ impl State {
                     return Ok(());
                 }
                 self.platform_event_index
-                    .insert(idempotency_key.clone(), message_id.clone());
+                    .insert(idempotency_key.clone(), crate::server::channel_envelope::PlatformEventTarget::LocalMessage(message_id.clone()));
                 self.channel_envelopes
                     .insert(message_id.clone(), envelope.clone());
+            }
+            Event::FederatedChannelInboundRecorded { origin, inbound_id, idempotency_key, envelope } => {
+                let target = crate::server::channel_envelope::PlatformEventTarget::FederatedOrigin(origin.clone());
+                if let Some(existing) = self.platform_event_index.get(idempotency_key) {
+                    if existing != &target {
+                        return Err("CHANNEL_EVENT_CONFLICT: platform event already has another destination".into());
+                    }
+                    return Ok(());
+                }
+                self.platform_event_index.insert(idempotency_key.clone(), target);
+                self.channel_envelopes.insert(inbound_id.clone(), envelope.clone());
             }
             Event::ChannelReplyRouteBound { message_id, route } => {
                 self.channel_reply_routes
@@ -663,6 +674,27 @@ impl State {
             Event::LegacyMasterTransferred { .. } => {}
             Event::Sent { msg } => {
                 self.msgs.insert(msg.id.clone(), msg.clone());
+            }
+            Event::FederationOutboundPrepared { record } => {
+                self.federation
+                    .record_outbound(record.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::FederationOutboundResulted { record } => {
+                self.federation
+                    .update_outbound(record.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::FederationAccepted { message_id, meta } => {
+                self.federation
+                    .accept(message_id, meta.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::FederationExpired {
+                message_id,
+                expired_ms,
+            } => {
+                self.federation.expire(message_id, *expired_ms);
             }
             Event::TargetSessionBound {
                 message_id,
@@ -1440,9 +1472,17 @@ impl State {
         self.wake_bindings.remove(id);
         self.channel_envelopes.remove(id);
         self.platform_event_index
-            .retain(|_, message_id| message_id != id);
+            .retain(|_, target| target.local_message_id() != Some(id));
         self.channel_reply_routes.remove(id);
         self.channel_delivery_results.remove(id);
+    }
+
+    /// Single retention owner for a mailbox message that may carry federation
+    /// metadata. It installs the origin tombstone before dropping the body so a
+    /// late retry reports `Expired` instead of `NotSeen`.
+    pub fn expire_federated_message(&mut self, id: &str, expired_ms: i64) {
+        self.federation.expire(id, expired_ms);
+        self.drop_message(id);
     }
 
     /// Persisted work specialities for one stable name. Session carriers and

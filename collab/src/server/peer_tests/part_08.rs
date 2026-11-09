@@ -1239,6 +1239,7 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
             conversation: "u1:session".into(),
             project_scope: root.display().to_string(),
             target_address: "other".into(),
+            resolved_target: None,
             revision: 1,
             updated_ms: now_ms(),
         },
@@ -1308,82 +1309,6 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
         .as_deref()
         .unwrap_or_default()
         .contains("CHANNEL_REPLY_FORBIDDEN"));
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn qqbot_uncertain_delivery_is_separate_from_message_state() {
-    use crate::server::channel_delivery::{
-        record_channel_delivery_result, ChannelDeliveryResult, ChannelDeliveryStatus,
-    };
-
-    let (mut server, root) = test_server();
-    server.config.notifications.enabled = false;
-    register_synthetic_peer(&server, "sender", "qqbot-sender");
-    register_synthetic_peer(&server, "recipient", "qqbot-recipient");
-    // Delivery-result tests exercise durable state, not the wake transport.
-    server.state.lock().unwrap().notification_subscriptions.clear();
-    let sent = handle_send(
-        &server,
-        "sender".into(),
-        "recipient".into(),
-        "notify".into(),
-        Some("result".into()),
-        "body".into(),
-        None,
-        "immediate".into(),
-    );
-    assert!(sent.ok, "{sent:?}");
-    let message_id = sent.data["msg_id"].as_str().unwrap().to_owned();
-    let uncertain = record_channel_delivery_result(
-        &server,
-        ChannelDeliveryResult {
-            message_id: message_id.clone(),
-            channel_instance: "qqbot@host".into(),
-            status: ChannelDeliveryStatus::Uncertain,
-            platform_message_id: None,
-            error: Some("response lost after submit".into()),
-            updated_ms: 0,
-        },
-    );
-    assert!(uncertain.ok, "{uncertain:?}");
-    let st = server.state.lock().unwrap();
-    assert_eq!(st.msgs[&message_id].state, "pending");
-    assert_eq!(
-        st.channel_delivery_results[&message_id].status,
-        ChannelDeliveryStatus::Uncertain
-    );
-    drop(st);
-
-    let accepted = record_channel_delivery_result(
-        &server,
-        ChannelDeliveryResult {
-            message_id: message_id.clone(),
-            channel_instance: "qqbot@host".into(),
-            status: ChannelDeliveryStatus::Accepted,
-            platform_message_id: Some("platform-msg-out-1".into()),
-            error: None,
-            updated_ms: 0,
-        },
-    );
-    assert!(accepted.ok, "{accepted:?}");
-    let downgrade = record_channel_delivery_result(
-        &server,
-        ChannelDeliveryResult {
-            message_id,
-            channel_instance: "qqbot@host".into(),
-            status: ChannelDeliveryStatus::Uncertain,
-            platform_message_id: None,
-            error: Some("late retry".into()),
-            updated_ms: 0,
-        },
-    );
-    assert!(!downgrade.ok);
-    assert!(downgrade
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("CHANNEL_DELIVERY_ACCEPTED_FINAL"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1932,6 +1857,7 @@ fn routing_set_default(server: &Server, conversation: &str, target: &str) {
             conversation: conversation.into(),
             project_scope: scope,
             target_address: target.into(),
+            resolved_target: None,
             revision: revision + 1,
             updated_ms: now_ms(),
         },

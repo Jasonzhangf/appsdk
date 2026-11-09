@@ -219,6 +219,7 @@ impl ProjectRuntimeManager {
             project_locks: Mutex::new(std::collections::BTreeMap::new()),
             register_gate: Mutex::new(()),
             identity_gate: Mutex::new(()),
+            federation_accept_gate: Mutex::new(()),
             runtime_init_gates: Mutex::new(std::collections::BTreeMap::new()),
             materialization_gate: Mutex::new(()),
             materialization_cap: std::sync::atomic::AtomicUsize::new(

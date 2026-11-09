@@ -63,6 +63,7 @@ fn init_runtime_projection_accepts_appserver_and_tmux_hosts() {
         session_id: Some("session-1".into()),
         thread_id: Some("thread-1".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
         self_check: "test appserver".into(),
     });
@@ -88,6 +89,7 @@ fn init_runtime_projection_accepts_appserver_and_tmux_hosts() {
             codex_session_id: Some("session-1".into()),
             codex_thread_id: Some("thread-1".into()),
         }),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "test tmux".into(),
     });

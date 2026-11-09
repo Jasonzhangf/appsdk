@@ -85,14 +85,44 @@ fn validate_registration_transport(
     transport: &SelectedTransport,
     runtime: &RuntimeIdentity,
 ) -> anyhow::Result<()> {
+    if transport.self_check.trim().is_empty() {
+        anyhow::bail!("selected transport is missing its server self-check");
+    }
+    if transport.kind == TransportKind::Rex {
+        let rex = transport
+            .rex_endpoint
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("selected Rex transport has no Rex endpoint"))?;
+        if rex.server.trim().is_empty()
+            || rex.session_id.trim().is_empty()
+            || rex.block_id.trim().is_empty()
+            || rex.instance_id.trim().is_empty()
+        {
+            anyhow::bail!("selected Rex endpoint is missing a required address field");
+        }
+        let session_id = transport
+            .session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("selected Rex transport has no agent session"))?;
+        if runtime.session_id.as_ref().map(SessionId::as_str) != Some(session_id) {
+            anyhow::bail!("selected Rex agent session does not match typed binding");
+        }
+        if transport.thread_id.is_some()
+            || transport.tmux_endpoint.is_some()
+            || runtime.native_thread_id.is_some()
+            || transport.endpoint.is_some()
+            || transport.namespace.is_some()
+        {
+            anyhow::bail!("selected Rex transport must not carry a native thread or tmux binding");
+        }
+        return Ok(());
+    }
     let endpoint = transport
         .endpoint
         .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("selected transport has no endpoint"))?;
-    if transport.self_check.trim().is_empty() {
-        anyhow::bail!("selected transport is missing its server self-check");
-    }
     if transport.kind == TransportKind::Tmux {
         let tmux = transport
             .tmux_endpoint
@@ -159,6 +189,7 @@ fn validate_registration_transport(
             }
         }
         TransportKind::Tmux => unreachable!("tmux receipt validated above"),
+        TransportKind::Rex => unreachable!("Rex receipt validated above"),
         TransportKind::Dsh => {
             // The dsh endpoint is the gateway control socket. It gets its own
             // `unix://` judgement rather than sharing the App Server one: the

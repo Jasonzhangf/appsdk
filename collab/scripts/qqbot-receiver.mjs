@@ -55,11 +55,42 @@ const uniqueTargets = (matches) => {
   const byKey = new Map();
   for (const entry of matches) {
     byKey.set(
-      `${entry.project_root ?? ""}|${entry.worker_id ?? ""}|${entry.address ?? ""}`,
+      [
+        entry.machine ?? "",
+        entry.project_root ?? "",
+        entry.worker_id ?? "",
+        entry.qualified_address ?? "",
+        entry.address ?? "",
+      ].join("|"),
       entry,
     );
   }
   return [...byKey.values()];
+};
+
+// The daemon publishes the canonical address. `address` remains the historical
+// local `project.name`; `qualified_address` is the typed `machine.project.name`
+// form. The receiver never parses either form itself.
+const directoryAddress = (entry) =>
+  String(entry?.qualified_address ?? "").trim() ||
+  String(entry?.address ?? "").trim();
+
+const addressForms = (entry) => {
+  const forms = [];
+  for (const value of [entry?.address, entry?.qualified_address]) {
+    const text = String(value ?? "").trim().toLowerCase();
+    if (text && !forms.includes(text)) forms.push(text);
+  }
+  return forms;
+};
+
+// A machine-qualified target routes through its daemon. Its `project_root`
+// may be a remote fact, so it never selects the local RPC context; the local
+// channel-owner project does.
+export const inboundSendRoot = (ownerProject, target) => {
+  const owner = String(ownerProject ?? "").trim();
+  if (String(target?.machine ?? "").trim()) return owner;
+  return String(target?.project_root ?? "").trim() || owner;
 };
 
 const directoryAddressMatchesName = (address, name) => {
@@ -73,15 +104,17 @@ const directoryAddressMatchesName = (address, name) => {
 export const resolveAddress = (requested, targets) => {
   const wanted = String(requested ?? "").trim().toLowerCase();
   if (!wanted) return { error: "ADDRESS_EMPTY" };
-  const matches = targets.filter(
-    (entry) => String(entry.address ?? "").toLowerCase() === wanted,
-  );
+  const matches = targets.filter((entry) => addressForms(entry).includes(wanted));
   const unique = uniqueTargets(matches);
-  if (unique.length === 1) return { target: unique[0] };
+  if (unique.length === 1) {
+    const resolved = unique[0];
+    const typed = directoryAddress(resolved);
+    return { target: { ...resolved, resolvedAddress: typed } };
+  }
   if (unique.length > 1) {
     return {
       error: `ADDRESS_AMBIGUOUS: ${unique
-        .map((entry) => entry.address || entry.worker_id)
+        .map((entry) => directoryAddress(entry) || entry.worker_id)
         .join(", ")}`,
     };
   }
@@ -215,9 +248,9 @@ const collabList = async () => {
   const parsed = await runCollab(["list"], HOME);
   return (parsed.targets ?? []).filter(
     (entry) =>
-      entry.address &&
+      (entry.address || entry.qualified_address) &&
       entry.deliverable !== "unavailable" &&
-      entry.project_root,
+      (entry.project_root || entry.machine),
   );
 };
 
@@ -849,7 +882,10 @@ async function startReceiver() {
           conversationDefault(owner.owner_project, sessionTargetId),
       });
       const deliveryTarget = route.target ?? null;
-      const deliveryAddress = deliveryTarget?.address || null;
+      const deliveryAddress =
+        route.source && route.source !== "explicit" && route.source !== "default"
+          ? deliveryTarget?.address || null
+          : directoryAddress(deliveryTarget) || deliveryTarget?.address || null;
       const resolvedAddress =
         route.resolvedAddress ?? deliveryTarget?.resolvedAddress ?? null;
       const resolvedWorkerId =
@@ -896,7 +932,7 @@ async function startReceiver() {
           attachmentErrorCount: attachmentResult.failed.length,
         },
         {
-          projectRoot: deliveryTarget.project_root,
+          projectRoot: inboundSendRoot(owner.owner_project, deliveryTarget),
           sendToAddress: resolvedAddress ?? deliveryAddress,
           deliveryAddress,
           resolvedAddress,

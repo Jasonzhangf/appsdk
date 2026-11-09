@@ -55,10 +55,10 @@ use mailbox::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use state::{
-    derive_isolation_mode, goal_deadline_key, is_goal_deadline, now_ms, task_resource_active,
-    wait_cycle, CleanupReceipt, CleanupVerification, Event, GlobalEvent, Message,
-    NotificationSubscription, State, TaskBlockRequest, TaskBlockRequestState, TaskRec,
-    TypedCommand, TypedEnvelope, WaitSpec, WorkerRec, WorktreeBinding, MAX_WAKE_ATTEMPTS,
+    goal_deadline_key, is_goal_deadline, now_ms, task_resource_active, wait_cycle, CleanupReceipt,
+    CleanupVerification, Event, GlobalEvent, Message, NotificationSubscription, State,
+    TaskBlockRequest, TaskBlockRequestState, TaskRec, TypedCommand, TypedEnvelope, WaitSpec,
+    WorkerRec, WorktreeBinding, ISOLATION_WORKTREE, MAX_WAKE_ATTEMPTS,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;

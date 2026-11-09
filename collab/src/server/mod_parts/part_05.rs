@@ -164,7 +164,7 @@ fn worktree_binding_for_task(server: &Server, task: &TaskRec) -> Option<Worktree
         owner_agent_id: task.owner.clone(),
         binding_id: format!("binding-task-{}", task.id),
         base_commit: task.base_commit.clone().unwrap_or_default(),
-        isolation_mode: Some(task.isolation_mode_value()),
+        isolation_mode: task.isolation_mode.clone(),
     })
 }
 
@@ -192,15 +192,14 @@ fn handoff_referenced_paths(body: &str) -> Vec<String> {
         // start with `playground/`.  Resolving them against the project root
         // is what binds them to project-owned worktree identity; collapsing
         // them to their first separator would silently relocate `./x` to `/x`.
-        let candidate = if token.starts_with("./") || token.starts_with("../") {
-            token
-        } else if token.to_ascii_lowercase().starts_with("playground/") {
+        let candidate = if token.starts_with("./")
+            || token.starts_with("../")
+            || token.contains('/')
+            || token.contains('\\')
+        {
             token
         } else {
-            let Some(start) = token.find('/') else {
-                continue;
-            };
-            &token[start..]
+            continue;
         };
         let candidate = candidate.trim_end_matches(|c: char| {
             matches!(
@@ -233,15 +232,19 @@ fn handoff_worktree_reference(server: &Server, state: &State, candidate: &str) -
         server.root.join(raw)
     };
     let normalized = normalize_path_lexically(&absolute);
+    let canonical =
+        canonicalize_with_existing_suffix(&absolute).unwrap_or_else(|_| normalized.clone());
     let playground_normalized = normalize_path_lexically(&playground);
-    if normalized.starts_with(&playground_normalized) {
-        return Some(normalized);
+    let playground_canonical = canonicalize_with_existing_suffix(&playground)
+        .unwrap_or_else(|_| playground_normalized.clone());
+    if canonical.starts_with(&playground_canonical) {
+        return Some(canonical);
     }
     for task in state.tasks.values() {
         let Some(registered) = task.worktree_path.as_deref() else {
             continue;
         };
-        if is_layerfs_workspace(registered) {
+        if workspace_reference_is_ambiguous(registered) {
             continue;
         }
         // A registered worktree path is project-scoped, so a relative spelling
@@ -252,9 +255,11 @@ fn handoff_worktree_reference(server: &Server, state: &State, candidate: &str) -
         } else {
             server.root.join(registered)
         };
-        let registered = normalize_path_lexically(&registered);
-        if normalized == registered {
-            return Some(normalized);
+        let registered_normalized = normalize_path_lexically(&registered);
+        let registered_canonical = canonicalize_with_existing_suffix(&registered)
+            .unwrap_or_else(|_| registered_normalized.clone());
+        if canonical == registered_canonical {
+            return Some(canonical);
         }
     }
     None

@@ -1067,6 +1067,14 @@ pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Va
             continue;
         };
         let Some(actual) = declared.get(key) else {
+            let const_is_single_enum = key == "const"
+                && declared
+                    .get("enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| values.len() == 1 && &values[0] == expected);
+            if const_is_single_enum {
+                continue;
+            }
             fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
         };
         let compatible = match key {
@@ -1080,6 +1088,21 @@ pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Va
         };
         if !compatible {
             fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        }
+    }
+    if let Some(expected_const) = canonical.get("const") {
+        // A canonical const also constrains any declared enum to the same single
+        // value. Without this, a declaration could pair a valid const with an
+        // empty or widened enum and still be admitted.
+        if let Some(declared_enum) = declared.get("enum") {
+            let Some(declared_values) = declared_enum.as_array() else {
+                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            };
+            if declared_values.is_empty()
+                || declared_values.iter().any(|value| value != expected_const)
+            {
+                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            }
         }
     }
     if let Some(expected_enum) = canonical.get("enum") {

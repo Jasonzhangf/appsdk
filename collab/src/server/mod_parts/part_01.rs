@@ -1,91 +1,17 @@
-/// Explicit scheme prefix that marks an existing task workspace field as a
-/// LayerFS task branch reference rather than a local Git worktree path.
-pub(crate) const LAYERFS_WORKSPACE_SCHEME: &str = "layerfs:";
-
-/// A parsed LayerFS task workspace reference: the LayerFS project name plus the
-/// task Branch name. The Workspace mount handle is transient execution
-/// placement, like a tmux pane, so it is not part of the stable isolation
-/// identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LayerFsWorkspace {
-    pub project: String,
-    pub branch: String,
-}
-
-pub(crate) fn is_layerfs_workspace(value: &str) -> bool {
-    value.trim_start().starts_with(LAYERFS_WORKSPACE_SCHEME)
-}
-
-/// 对 LayerFS 工作空间声明，任务分支必须来自被解析的 `layerfs:<project>/<branch>`
-/// 引用。单独传入且不一致的 `--branch` 是冲突，不能被静默覆盖；Git worktree
-/// 声明保持原有独立 branch 行为。
-pub(crate) fn resolve_task_branch(
-    worktree_path: &str,
-    supplied: Option<&str>,
-) -> Result<Option<String>, String> {
-    if !is_layerfs_workspace(worktree_path) {
-        return Ok(supplied.map(str::to_owned));
-    }
-    let workspace = parse_layerfs_workspace(worktree_path)?;
-    if let Some(branch) = supplied {
-        if branch != workspace.branch {
-            return Err(format!(
-                "layerfs workspace branch mismatch: reference declares {:?} but --branch is {:?}; the task branch comes from layerfs:<project>/<branch>",
-                workspace.branch, branch
-            ));
-        }
-    }
-    Ok(Some(workspace.branch))
-}
-
-/// Parse `layerfs:<project>/<branch>`. The LayerFS project name follows the
-/// LayerFS naming rule; the Branch name is the remainder and may contain `/`.
-pub(crate) fn parse_layerfs_workspace(value: &str) -> Result<LayerFsWorkspace, String> {
-    let value = value.trim();
-    let rest = value
-        .strip_prefix(LAYERFS_WORKSPACE_SCHEME)
-        .ok_or_else(|| format!("{value:?} is not a layerfs workspace reference"))?;
-    let (project, branch) = rest.split_once('/').ok_or_else(|| {
-        format!("layerfs workspace reference must be layerfs:<project>/<branch>, got {value:?}")
-    })?;
-    validate_layerfs_project_name(project)?;
-    if branch.is_empty() || branch.len() > 255 {
-        return Err(format!(
-            "layerfs workspace branch must be 1-255 characters: {branch:?}"
-        ));
-    }
-    if branch.contains(char::is_whitespace)
-        || branch.contains("..")
-        || branch.starts_with('/')
-        || branch.ends_with('/')
-    {
-        return Err(format!("layerfs workspace branch is invalid: {branch:?}"));
-    }
-    Ok(LayerFsWorkspace {
-        project: project.to_owned(),
-        branch: branch.to_owned(),
-    })
-}
-
-fn validate_layerfs_project_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.len() > 63 {
-        return Err("layerfs project name must be 1-63 characters".into());
-    }
-    let bytes = name.as_bytes();
-    let is_edge = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    if !is_edge(bytes[0]) || !is_edge(bytes[bytes.len() - 1]) {
-        return Err("layerfs project name must start and end with a letter or digit".into());
-    }
-    if !bytes
-        .iter()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.'))
-    {
-        return Err(
-            "layerfs project name may only contain lowercase letters, digits, '_', '-' or '.'"
-                .into(),
-        );
-    }
-    Ok(())
+/// A historical workspace string that cannot prove a local-path declaration.
+/// Dedicated declaration paths may contain colons; lifecycle consumers use
+/// this predicate only to fail closed on old ambiguous references.
+fn workspace_reference_is_ambiguous(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    let first_component = trimmed
+        .split(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    !trimmed.starts_with("./")
+        && !trimmed.starts_with("../")
+        && !trimmed.starts_with('/')
+        && !trimmed.starts_with("\\\\")
+        && first_component.contains(':')
 }
 
 /// The resident daemon owns one current project-state reducer. Keep that
@@ -619,135 +545,32 @@ fn validate_worktree_slug(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_worktree_reference(raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() {
+        return Err("worktree path must be non-empty".into());
+    }
+    validate_worktree_slug(raw)
+}
+
 fn validate_worktree_path(
     root: &Path,
     config: &crate::config::Config,
     raw: &str,
 ) -> Result<PathBuf, String> {
-    validate_worktree_slug(raw)?;
+    validate_worktree_reference(raw)?;
     resolve_worktree_path(root, config, raw, false)
 }
 
-/// The generic LayerFS entry. It resolves the per-project profile, Store, VM
-/// and image from `~/.config/layerfs/projects/<project>.env`; Collab never
-/// hardcodes a project path, Store, volume or runtime.
-const LAYERFS_ENTRY: &str = "layerfs";
-
-/// Normalize a declared task workspace. A `layerfs:` reference is parsed and
-/// re-rendered without any host-path or configured-worktree-base requirement;
-/// every other value keeps the original Git worktree validation. This is the
-/// only place a task workspace is classified, so registration and relocation
-/// cannot diverge.
+/// Normalize a declared task workspace. Register, relocate and scheduler
+/// dispatch share this single path contract.
 pub(crate) fn declare_task_workspace(
     root: &Path,
     config: &crate::config::Config,
     raw: &str,
 ) -> Result<String, String> {
-    if is_layerfs_workspace(raw) {
-        let workspace = parse_layerfs_workspace(raw)?;
-        if !layerfs_branch_exists(&workspace.project, &workspace.branch)? {
-            return Err(format!(
-                "layerfs task branch {} does not exist in project {}; preserve the declaration and reconcile through the LayerFS entry",
-                workspace.branch, workspace.project
-            ));
-        }
-        return Ok(format!(
-            "{LAYERFS_WORKSPACE_SCHEME}{}/{}",
-            workspace.project, workspace.branch
-        ));
-    }
     Ok(validate_worktree_path(root, config, raw)?
         .display()
         .to_string())
-}
-
-/// Read-only JSON call against the generic LayerFS entry. The entry returns a
-/// typed `{"code","message"}` object for expected failures such as
-/// `NoSuchBranch`, so a `code` field is an error even when the process exits
-/// zero. A missing tool, missing profile, unreachable Store or malformed output
-/// is returned as the original error and never replaced with a worktree
-/// fallback.
-fn run_layerfs_json(project: &str, args: &[&str]) -> Result<serde_json::Value, String> {
-    let output = Command::new(LAYERFS_ENTRY)
-        .arg("--project")
-        .arg(project)
-        .args(args)
-        .output()
-        .map_err(|error| {
-            format!("cannot run `layerfs --project {project}` for workspace binding: {error}")
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
-    let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|error| {
-        format!(
-            "`layerfs --project {project} {}` returned no JSON ({error}); stderr: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-    })?;
-    if let Some(code) = value.get("code").and_then(|code| code.as_str()) {
-        let message = value
-            .get("message")
-            .and_then(|message| message.as_str())
-            .unwrap_or_default();
-        return Err(format!("LAYERFS_ERROR {code}: {message}"));
-    }
-    if !output.status.success() {
-        return Err(format!(
-            "`layerfs --project {project} {}` exited {}: {}",
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(value)
-}
-
-/// Resolve the exact LayerFS task branch head. This is the real branch
-/// candidate a LayerFS delivery records; it is a LayerFS commit id, not a Git
-/// sha, so Git integration is proven separately by the Git owner.
-pub(crate) fn layerfs_branch_head(project: &str, branch: &str) -> Result<String, String> {
-    let value = run_layerfs_json(
-        project,
-        &["branch", "list_commits", branch, "--page-size", "1"],
-    )?;
-    value
-        .get("items")
-        .and_then(|items| items.as_array())
-        .and_then(|items| items.first())
-        .and_then(|commit| commit.get("id"))
-        .and_then(|id| id.as_str())
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| format!("layerfs branch {branch} has no commits in project {project}"))
-}
-
-/// Confirm a LayerFS task branch still exists in its project. Used to verify
-/// close state without ever touching a local Git worktree or branch.
-pub(crate) fn layerfs_branch_exists(project: &str, branch: &str) -> Result<bool, String> {
-    let value = run_layerfs_json(project, &["project", "list_branches", "--page-size", "1000"])?;
-    Ok(value
-        .get("items")
-        .and_then(|items| items.as_array())
-        .is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| item.get("name").and_then(|name| name.as_str()) == Some(branch))
-        }))
-}
-
-/// Re-check a declared LayerFS task binding through the generic entry. This is
-/// the shared read-only validation for public lifecycle boundaries that must
-/// not treat an unreachable profile, Store or branch as a valid binding.
-pub(crate) fn validate_layerfs_workspace(value: &str) -> Result<(), String> {
-    let workspace = parse_layerfs_workspace(value)?;
-    if layerfs_branch_exists(&workspace.project, &workspace.branch)? {
-        return Ok(());
-    }
-    Err(format!(
-        "layerfs task branch {} no longer exists in project {}; preserve the site and reconcile through the LayerFS entry",
-        workspace.branch, workspace.project
-    ))
 }
 
 fn cleanup_worktree_path(
@@ -755,7 +578,7 @@ fn cleanup_worktree_path(
     config: &crate::config::Config,
     raw: &str,
 ) -> Result<PathBuf, String> {
-    validate_worktree_slug(raw)?;
+    validate_worktree_reference(raw)?;
     resolve_worktree_path(root, config, raw, true)
 }
 
@@ -833,54 +656,4 @@ fn wire_route_mutation_gate(server: &Server) -> Arc<Mutex<()>> {
         .entry(server.root.clone())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
-}
-
-#[cfg(test)]
-mod layerfs_workspace_tests {
-    use super::*;
-
-    #[test]
-    fn recognizes_layerfs_workspace_references() {
-        assert!(is_layerfs_workspace("layerfs:demo/task-1"));
-        assert!(is_layerfs_workspace("  layerfs:demo/task-1"));
-        assert!(!is_layerfs_workspace("/tmp/worktree"));
-        assert!(!is_layerfs_workspace("layerfsdemo/task"));
-    }
-
-    #[test]
-    fn parses_valid_layerfs_workspace_reference() {
-        let parsed = parse_layerfs_workspace("layerfs:my-proj/feature/task-2").unwrap();
-        assert_eq!(parsed.project, "my-proj");
-        assert_eq!(parsed.branch, "feature/task-2");
-    }
-
-    #[test]
-    fn rejects_invalid_layerfs_workspace_references() {
-        assert!(parse_layerfs_workspace("layerfs:").is_err());
-        assert!(parse_layerfs_workspace("layerfs:demo").is_err());
-        assert!(parse_layerfs_workspace("layerfs:Demo/task").is_err());
-        assert!(parse_layerfs_workspace("layerfs:-demo/task").is_err());
-        assert!(parse_layerfs_workspace("layerfs:demo/").is_err());
-        assert!(parse_layerfs_workspace("not-layerfs").is_err());
-    }
-
-    #[test]
-    fn isolation_mode_is_explicit_and_backward_compatible() {
-        use crate::server::state::{
-            derive_isolation_mode, ISOLATION_LAYERFS_WORKSPACE, ISOLATION_WORKTREE,
-        };
-
-        // A LayerFS workspace declares the LayerFS isolation mode.
-        assert_eq!(
-            derive_isolation_mode(Some("layerfs:demo/task-1")),
-            ISOLATION_LAYERFS_WORKSPACE
-        );
-        // A local worktree path stays on the historical worktree mode.
-        assert_eq!(
-            derive_isolation_mode(Some("/tmp/playground/worktree")),
-            ISOLATION_WORKTREE
-        );
-        // Historical records without a declared workspace default to worktree.
-        assert_eq!(derive_isolation_mode(None), ISOLATION_WORKTREE);
-    }
 }

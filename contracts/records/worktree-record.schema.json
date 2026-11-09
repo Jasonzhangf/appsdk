@@ -31,7 +31,7 @@
     "head_commit": {"type": "string"},
     "initial_clean": {"const": true},
     "final_clean": {"const": true},
-    "isolation_mode": {"enum": ["isolated_worktree", "layerfs_workspace"]},
+    "isolation_mode": {"const": "isolated_worktree"},
     "scope_hash": {"type": "string"},
     "bug_triage": {
       "type": "object",

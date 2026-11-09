@@ -866,18 +866,6 @@ fn goal_project_patrol_record(
     Ok(matches.into_iter().next())
 }
 
-pub(super) fn goal_project_patrol_subscription(
-    root: &Path,
-    scope: &GoalScope,
-) -> Result<Option<(String, Value)>, String> {
-    let now_ms = goal_now_ms();
-    Ok(
-        goal_project_patrol_record(root, scope)?.filter(|(_, subscription)| {
-            goal_patrol_subscription_is_usable(scope, subscription, now_ms).is_some()
-        }),
-    )
-}
-
 fn goal_project_patrol_subscribe(
     root: &Path,
     scope: &GoalScope,

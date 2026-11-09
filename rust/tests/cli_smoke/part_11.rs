@@ -1,3 +1,23 @@
+fn record_paths(root: &Path) -> Vec<PathBuf> {
+    fn visit(dir: &Path, base: &Path, paths: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(&path, base, paths);
+            } else {
+                paths.push(path.strip_prefix(base).unwrap().to_path_buf());
+            }
+        }
+    }
+    let records_root = root.join(".appsdk/records");
+    let mut paths = Vec::new();
+    if records_root.is_dir() {
+        visit(&records_root, &records_root, &mut paths);
+    }
+    paths.sort();
+    paths
+}
+
 #[test]
 fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
     let root = temp_root("lifecycle-record-producer");
@@ -352,20 +372,30 @@ esac
     assert!(String::from_utf8_lossy(&mismatched_result.stderr)
         .contains("BUG_TRIAGE_QUERY_IDENTITY_MISMATCH"));
 
-    let mut layerfs_input = valid_input.clone();
-    layerfs_input["worktree"]["isolation_mode"] = Value::String("layerfs_workspace".into());
+    let mut invalid_isolation_input = valid_input.clone();
+    invalid_isolation_input["worktree"]["isolation_mode"] =
+        Value::String("layerfs_workspace".into());
     fs::write(
         &input_path,
-        serde_json::to_string_pretty(&layerfs_input).unwrap() + "\n",
+        serde_json::to_string_pretty(&invalid_isolation_input).unwrap() + "\n",
     )
     .unwrap();
-    let layerfs_result = produce(&input_path);
-    assert!(!layerfs_result.status.success());
+    // An earlier valid producer call in this test already created records, so
+    // only the difference in record side effects proves this failure wrote none.
+    let records_before = record_paths(&root);
+    let invalid_isolation_result = produce(&input_path);
+    assert!(!invalid_isolation_result.status.success());
     assert!(
-        String::from_utf8_lossy(&layerfs_result.stderr).contains("PRODUCER_LAYERFS_UNSUPPORTED"),
+        String::from_utf8_lossy(&invalid_isolation_result.stderr)
+            .contains("PRODUCER_MODULE_MISMATCH"),
         "stdout={} stderr={}",
-        String::from_utf8_lossy(&layerfs_result.stdout),
-        String::from_utf8_lossy(&layerfs_result.stderr)
+        String::from_utf8_lossy(&invalid_isolation_result.stdout),
+        String::from_utf8_lossy(&invalid_isolation_result.stderr)
+    );
+    assert_eq!(
+        record_paths(&root),
+        records_before,
+        "invalid isolation producer changed record side effects"
     );
 
     fs::write(

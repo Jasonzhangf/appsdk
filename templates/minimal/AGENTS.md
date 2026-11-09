@@ -100,15 +100,14 @@ current ledger version, and use the SDK review context for all applicable items.
 ## Git Protection
 
 - Treat the protected mainline checkout as read-only. Develop in a clean owner
-  worktree created from the latest remote mainline, or in the project's
-  configured LayerFS task branch and Workspace. Preserve other workers' state.
+  worktree created from the latest remote mainline. Preserve other workers'
+  state.
 - Configure the project's own commit and push protection. A passing protection
   check proves only the Git boundary.
-- For a Git worktree, remove the owned worktree and release its claim only
-  after required delivery, remote receipt, and retention evidence exist. For a
-  LayerFS task, keep the branch reference until its publish, Git capture, and
-  remote delivery evidence are complete; do not run Git worktree commands
-  against the LayerFS Workspace.
+- Remove the owned worktree and release its claim only after required delivery,
+  remote receipt, and retention evidence exist. A non-Git workspace reference
+  fails the normal worktree contract. Do not migrate or delete old data
+  automatically.
 
 ## Task Routing
 

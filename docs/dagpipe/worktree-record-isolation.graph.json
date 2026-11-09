@@ -1,0 +1,58 @@
+{
+  "id": "appsdk-worktree-record-isolation",
+  "version": "0.1.0",
+  "description": "一次工作树记录操作的 Git-only SESE：由既有入口决定 producer、当前 gate 或冻结历史读取。当前生产与合同只接受合法 isolation；冻结读取沿既有发布合同读取原文，不解释旧载体。失败不写记录，真实结果和错误汇入唯一出口。图只描述合同，不新增 dispatcher、状态字段或验证器。",
+  "inputs": [{"id": "worktree_record_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "确定记录操作范围",
+      "operator": "appsdk.worktree_record.select_operation",
+      "operator_version": "1",
+      "description": "由既有入口确定 producer、当前 gate 或冻结历史读取，不新增供调用者任意绕 gate 的模式参数。",
+      "inputs": ["worktree_record_request"],
+      "output": {"id": "record_operation", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "应用普通记录合同",
+      "operator": "appsdk.worktree_record.apply_contract",
+      "operator_version": "1",
+      "description": "当前生产与合同只接受合法 isolation，非法值使用普通记录合同错误；冻结历史读取沿既有发布合同读取 JSON 原文，不追加当前 gate，不解释旧载体。不新增 dispatcher、状态字段或验证器。",
+      "inputs": ["record_operation"],
+      "output": {"id": "record_contract_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "完成允许的记录操作",
+      "operator": "appsdk.worktree_record.complete_operation",
+      "operator_version": "1",
+      "description": "允许请求沿原 owner 读取或生产真实产物；失败不写记录、不产生 baseline 副作用。",
+      "inputs": ["record_contract_result"],
+      "output": {"id": "record_operation_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出记录结果",
+      "operator": "appsdk.worktree_record.emit_result",
+      "operator_version": "1",
+      "description": "输出真实产物、读取结果或明确错误。普通合同失败、当前 gate 错误和冻结读取错误均汇到同一出口。",
+      "inputs": ["record_operation_result"],
+      "output": {"id": "worktree_record_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "确定记录操作范围", "to": "应用普通记录合同", "arc_id": "record_operation"},
+    {"from": "应用普通记录合同", "to": "完成允许的记录操作", "arc_id": "record_contract_result"},
+    {"from": "完成允许的记录操作", "to": "输出记录结果", "arc_id": "record_operation_result"}
+  ],
+  "outputs": ["worktree_record_result"]
+}

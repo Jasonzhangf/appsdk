@@ -1,0 +1,58 @@
+{
+  "id": "appsdk-collab-task-workspace-declaration",
+  "version": "0.1.0",
+  "description": "一次任务工作树请求的 Git-only SESE：register、relocate、dispatch、status、close、finalize-cleanup 和 handoff 调用同一普通工作树合同。只读请求展示原存储数据，不执行外部有效性确认；写入、清理和回执复用必须先通过路径合同。无效引用明确失败，不创建任务、不改绑定、不写回执、不删除资源。成功、明确失败和既有取消结果汇入唯一出口，不新增 dispatcher、状态字段或包络框架。",
+  "inputs": [{"id": "task_workspace_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "确定任务工作树操作",
+      "operator": "appsdk.collab_workspace.classify",
+      "operator_version": "1",
+      "description": "由既有 Req/handler 和控制状态确定一次请求的用途：register、relocate、dispatch、status、close、finalize-cleanup 或 handoff。status 只读取普通存储数据；handoff 复用同一工作树引用判定，并保留完整相对引用，包括首段含冒号的路径，不把 scheme 前缀截成项目内路径；不按外部载体分类请求。",
+      "inputs": ["task_workspace_request"],
+      "output": {"id": "operation_context", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "应用普通工作树合同",
+      "operator": "appsdk.collab_workspace.apply_policy",
+      "operator_version": "1",
+      "description": "part_01.rs 的现有路径 owner 应用本地路径、slug、配置 base/layout 和边界约束。当前专用路径参数表达新本地路径声明意图，首段含冒号的目录名不因冒号本身拒绝，但必须通过既有 base/layout 边界合同，声明成功后保存规范化路径。URI 或 scheme 形状不得作为相对路径拼接。历史歧义原始引用只有在现有 typed 控制记录充分证明任务对特定 canonical Git 资源的归属时才进入清理、receipt 复用或释放；缺少该证据时保持现有安全失败，不因本地同名目标、Git 存在或孤立 receipt 授权，不发明新字段或退役专名。声明、清理、receipt 复用和 handoff 共用该合同，不复制前缀分类器。只读 status 只取普通数据，原样展示历史字段，不检查外部有效性。",
+      "inputs": ["operation_context"],
+      "output": {"id": "workspace_contract_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "完成允许的读取或操作",
+      "operator": "appsdk.collab_workspace.validate_worktree",
+      "operator_version": "1",
+      "description": "part_05/07/08/09/11.rs 只对通过适用路径与来源合同的请求执行既有 Git path/branch、占用、交付和清理动作。历史歧义引用须先证明当前任务与 canonical 资源归属，匹配 cleanup receipt 不得绕过当前任务引用及来源校验，失败不升级 receipt、不释放绑定、不写 verified receipt、不删除同名分支或目录。无效引用不进入写入或删除。",
+      "inputs": ["workspace_contract_result"],
+      "output": {"id": "operation_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出真实结果",
+      "operator": "appsdk.collab_workspace.emit_result",
+      "operator_version": "1",
+      "description": "既有响应 owner 输出原始只读数据、真实操作结果或明确错误。成功、普通合同失败和既有取消结果汇到唯一出口；不伪造清理成功，不新增取消行为。",
+      "inputs": ["operation_result"],
+      "output": {"id": "task_workspace_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "确定任务工作树操作", "to": "应用普通工作树合同", "arc_id": "operation_context"},
+    {"from": "应用普通工作树合同", "to": "完成允许的读取或操作", "arc_id": "workspace_contract_result"},
+    {"from": "完成允许的读取或操作", "to": "输出真实结果", "arc_id": "operation_result"}
+  ],
+  "outputs": ["task_workspace_result"]
+}

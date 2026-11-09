@@ -669,7 +669,9 @@ fn handle_task_close(
                 && receipt.worktree_path == task.worktree_path
                 && receipt.branch == task.branch
         })
-        .is_some_and(|receipt| cleanup_receipt_is_reusable(&server.root, receipt));
+        .is_some_and(|receipt| {
+            cleanup_receipt_is_reusable(&server.root, &server.config, receipt)
+        });
     if !receipt_reusable {
         if let Err(e) = close_task_resources(
             &server.root,
@@ -1003,6 +1005,15 @@ fn handle_task_finalize_cleanup(
                 && receipt.worktree_path == task.worktree_path
                 && receipt.branch == task.branch
         });
+    if existing
+        .as_ref()
+        .and_then(|receipt| receipt.worktree_path.as_deref())
+        .is_some_and(workspace_reference_is_ambiguous)
+    {
+        return Resp::err(
+            "CLEANUP_FINALIZE_REFUSED: worktree reference is historically ambiguous",
+        );
+    }
     if existing
         .as_ref()
         .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified)

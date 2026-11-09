@@ -98,6 +98,7 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         },
         state::Event::Sent {

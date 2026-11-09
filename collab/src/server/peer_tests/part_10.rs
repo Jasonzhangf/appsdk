@@ -282,6 +282,11 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         "master".into(),
         "token-master".into(),
         crate::board::BoardCommand::Publish {
+            long_horizon: crate::board::LongHorizonArgs {
+                long_horizon_content: Some("Verify authoritative invitation binding and continue the assigned task".into()),
+                long_horizon_every_ms: Some(60_000),
+                ..Default::default()
+            },
             id: "stale-route-invite".into(),
             title: "stale route invite".into(),
             description: "durable invitation admission".into(),
@@ -1414,6 +1419,7 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
                 created_ms: now,
                 updated_ms: now,
                 fired_count: 0,
@@ -1467,6 +1473,7 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         },
         Event::WakeBound {
@@ -1541,6 +1548,7 @@ fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
                 created_ms: now,
                 updated_ms: now,
                 fired_count: 1,

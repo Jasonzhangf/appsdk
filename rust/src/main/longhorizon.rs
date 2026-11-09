@@ -170,7 +170,7 @@ pub(super) fn goal_mark_recovery_required(record: &mut Value, error: String) {
     record["active"] = Value::Bool(false);
     record["error"] = Value::String(error);
     record["recovery"] = Value::String(
-        "Restore Collab if needed, then rerun appsdk goal subscribe --goal <path.md> to rearm a fresh one-shot deadline; no automatic renewal is attempted".into(),
+        "Restore Collab if needed, then reconcile the existing goal with appsdk goal subscribe --goal <path.md>. Reuse a valid remaining periodic batch; renew an ended batch explicitly only while work remains authorized.".into(),
     );
     record["revision"] = Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
 }
@@ -469,6 +469,7 @@ pub(super) fn goal_reconcile_active(
     ttl_seconds: u64,
     interval_ms: Option<i64>,
     repeat_count: Option<u32>,
+    content: &str,
 ) -> Result<(Value, String), String> {
     let mut command = Command::new("collab");
     command.args([
@@ -493,6 +494,7 @@ pub(super) fn goal_reconcile_active(
             &repeat_count.to_string(),
         ]);
     }
+    command.args(["--content", content]);
     command.current_dir(root);
     let out = run_goal_collab_command(command, GOAL_COLLAB_WRITE_TIMEOUT).map_err(|error| {
         if error == "GOAL_COLLAB_COMMAND_TIMEOUT" {

@@ -329,6 +329,574 @@ fn register_context(
     context
 }
 
+#[test]
+fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, master_pane) = Fixture::isolated("delegated-goal");
+    let root = fixture.root.canonicalize().unwrap();
+    register_context(&fixture, &root, &master_pane, "goal-master", false);
+    run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated goal master",
+        ],
+        false,
+    );
+    let peer_pane = create_session(&fixture, "goal-peer");
+    let peer = register_context(&fixture, &root, &peer_pane, "goal-peer", false);
+    let (peer_id, _) = identity(&peer);
+    let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
+    let published = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "publish",
+            "goal-task",
+            "--title",
+            "Delegated goal",
+            "--description",
+            "Implement delegated work",
+            "--delivery-condition",
+            "Public entry works",
+            "--test-condition",
+            "Real peer consumes task content",
+            "--executor",
+            peer_name,
+        ],
+        false,
+    );
+    let revision = published["task"]["revision"].as_u64().unwrap().to_string();
+    let missing = command_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "dispatch",
+            "goal-task",
+            "--expected-revision",
+            &revision,
+        ],
+        false,
+    )
+    .output()
+    .unwrap();
+    assert!(
+        !missing.status.success(),
+        "dispatch without a long-horizon form must fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("BOARD_LONG_HORIZON_CONTENT_REQUIRED")
+    );
+    let dispatched = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "dispatch",
+            "goal-task",
+            "--expected-revision",
+            &revision,
+            "--long-horizon-content",
+            "DELEGATED_TASK_SENTINEL: finish the exact delegated task and verify its public entry",
+            "--long-horizon-every-ms",
+            "2000",
+            "--long-horizon-ttl-seconds",
+            "300",
+        ],
+        false,
+    );
+    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
+    let subscription = dispatched["goal_schedule"]["subscription"].clone();
+    assert_eq!(subscription["worker_id"], peer_id);
+    assert_eq!(subscription["repeat_count"], 100);
+    assert_eq!(subscription["goal_content"]["source"]["kind"], "board-task");
+    let mut reminder = None;
+    assert!(
+        wait_until(Duration::from_secs(25), || {
+            let current = fixture.current_state_for(&root, "appserver-cli");
+            reminder = current["msgs"]
+                .as_object()
+                .unwrap()
+                .values()
+                .find(|message| {
+                    message["to"] == peer_id && message["subject"] == "deadline:goal:task:goal-task"
+                })
+                .cloned();
+            reminder.is_some()
+        }),
+        "task deadline never became due"
+    );
+    let reminder = reminder.unwrap();
+    let message_id = reminder["id"].as_str().unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            let captured = Command::new("tmux")
+                .args([
+                    "-S",
+                    fixture.tmux_socket.to_str().unwrap(),
+                    "capture-pane",
+                    "-p",
+                    "-t",
+                    &peer_pane.pane_id,
+                    "-S",
+                    "-4096",
+                ])
+                .output()
+                .unwrap();
+            let compact: String = String::from_utf8_lossy(&captured.stdout)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            compact.contains(message_id)
+        }),
+        "exact reminder was not observed in the real target pane"
+    );
+    let received = run_ok_at(
+        &fixture,
+        &root,
+        &peer_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    let consumed = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == message_id)
+        .unwrap();
+    assert!(consumed["body"]
+        .as_str()
+        .unwrap()
+        .contains("DELEGATED_TASK_SENTINEL"));
+    assert!(consumed["body"]
+        .as_str()
+        .unwrap()
+        .contains("Public entry works"));
+    let status = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    let current = status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == subscription["id"])
+        .unwrap();
+    assert_eq!(current["fired_count"], 1);
+    fixture.restart_daemon();
+    let retained = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "task:goal-task",
+            "--owner",
+            peer_name,
+            "--desired",
+            "active",
+            "--content",
+            "UPDATED_TASK_SENTINEL: continue the same authorized task",
+        ],
+        false,
+    );
+    assert_eq!(retained["subscription"]["id"], subscription["id"]);
+    assert_eq!(retained["subscription"]["fired_count"], 1);
+    assert_eq!(
+        retained["subscription"]["expires_ms"],
+        subscription["expires_ms"]
+    );
+    assert_eq!(
+        retained["subscription"]["goal_content"]["source"]["kind"],
+        "board-task"
+    );
+    let ended = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "task:goal-task",
+            "--owner",
+            peer_name,
+            "--desired",
+            "ended",
+        ],
+        false,
+    );
+    assert_eq!(ended["status"], "ended");
+    let direct = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "send",
+            "--to",
+            &peer_id,
+            "--subject",
+            "after-goal-end",
+            "--content",
+            "ordinary reception remains",
+        ],
+        false,
+    );
+    let received = run_ok_at(
+        &fixture,
+        &root,
+        &peer_pane,
+        &["recv", "--timeout", "0"],
+        false,
+    );
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == direct["msg_id"]));
+}
+
+#[test]
+fn delegated_goal_ceo_updates_foreign_peer_and_other_peers_are_refused() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, source_pane) = Fixture::isolated("ceo-goal");
+    let source_root = fixture.root.canonicalize().unwrap();
+    register_context(&fixture, &source_root, &source_pane, "goal-ceo", false);
+    run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated source master",
+        ],
+        false,
+    );
+    let target_root = create_external_project(&fixture, "goal-target");
+    let target_pane = create_session(&fixture, "goal-target");
+    let target = register_context(&fixture, &target_root, &target_pane, "goal-target", false);
+    let target_name = target["result"]["snapshot"]["name"].as_str().unwrap();
+    let arguments = [
+        "goal",
+        "reconcile",
+        "--project",
+        target_root.to_str().unwrap(),
+        "--owner",
+        target_name,
+        "--goal-id",
+        "ceo-delegated-goal",
+        "--desired",
+        "active",
+        "--every-ms",
+        "60000",
+        "--ttl-seconds",
+        "300",
+        "--content",
+        "CEO_GOAL_SENTINEL: deliver the authorized target goal",
+    ];
+    let unauthorized = command_at(&fixture, &source_root, &source_pane, &arguments, false)
+        .output()
+        .unwrap();
+    assert!(!unauthorized.status.success());
+    assert!(String::from_utf8_lossy(&unauthorized.stderr).contains("CEO_AUTHORITY_REQUIRED"));
+    run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "ceo",
+            "promote",
+            "--approval",
+            "user approved isolated CEO goal management",
+        ],
+        false,
+    );
+    let armed = run_ok_at(&fixture, &source_root, &source_pane, &arguments, false);
+    assert_eq!(armed["goal_owner"], target_name);
+    assert_eq!(armed["subscription"]["worker_id"], identity(&target).0);
+    assert_eq!(armed["subscription"]["repeat_count"], 100);
+    let edited = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "goal",
+            "reconcile",
+            "--project",
+            target_root.to_str().unwrap(),
+            "--owner",
+            target_name,
+            "--goal-id",
+            "ceo-delegated-goal",
+            "--desired",
+            "active",
+            "--repeat",
+            "4",
+            "--ttl-seconds",
+            "180",
+            "--content",
+            "CEO_EDITED_SENTINEL: continue target work",
+        ],
+        false,
+    );
+    assert_eq!(edited["subscription"]["id"], armed["subscription"]["id"]);
+    assert_eq!(edited["subscription"]["repeat_count"], 4);
+    assert!(
+        edited["subscription"]["expires_ms"].as_i64().unwrap()
+            < armed["subscription"]["expires_ms"].as_i64().unwrap()
+    );
+    let repeated = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_pane,
+        &[
+            "goal",
+            "reconcile",
+            "--project",
+            target_root.to_str().unwrap(),
+            "--owner",
+            target_name,
+            "--goal-id",
+            "ceo-delegated-goal",
+            "--desired",
+            "active",
+            "--repeat",
+            "4",
+            "--ttl-seconds",
+            "180",
+        ],
+        false,
+    );
+    assert_eq!(
+        repeated["subscription"]["expires_ms"],
+        edited["subscription"]["expires_ms"]
+    );
+    let target_status = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["notify", "status"],
+        false,
+    );
+    assert!(target_status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|sub| sub["id"] == armed["subscription"]["id"]));
+    std::fs::remove_dir_all(target_root).unwrap();
+}
+
+#[test]
+fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_enforced() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, master_pane) = Fixture::isolated("goal-capacity");
+    let root = fixture.root.canonicalize().unwrap();
+    register_context(&fixture, &root, &master_pane, "capacity-master", false);
+    run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approved isolated goal capacity master",
+        ],
+        false,
+    );
+    let peer_pane = create_session(&fixture, "capacity-peer");
+    let peer = register_context(&fixture, &root, &peer_pane, "capacity-peer", false);
+    let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
+    let intruder_pane = create_session(&fixture, "capacity-other");
+    register_context(&fixture, &root, &intruder_pane, "capacity-other", false);
+    let base = [
+        "goal",
+        "reconcile",
+        "--goal-id",
+        "capacity-standing",
+        "--owner",
+        peer_name,
+        "--desired",
+        "active",
+        "--every-ms",
+        "60000",
+        "--ttl-seconds",
+        "300",
+    ];
+    let standing = run_ok_at(&fixture, &root, &master_pane, &base, false);
+    run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "capacity-extra",
+            "--owner",
+            peer_name,
+            "--desired",
+            "active",
+            "--every-ms",
+            "60000",
+            "--ttl-seconds",
+            "300",
+        ],
+        false,
+    );
+    let full = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    assert_eq!(
+        full["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|sub| sub["status"] == "armed")
+            .count(),
+        3
+    );
+    let denied = command_at(&fixture, &root, &intruder_pane, &base, false)
+        .output()
+        .unwrap();
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("GOAL_SCHEDULE_OWNER_MISMATCH"));
+    let published = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "publish",
+            "capacity-task",
+            "--title",
+            "Capacity task",
+            "--description",
+            "Preserve dispatch on refusal",
+            "--delivery-condition",
+            "No partial invite",
+            "--test-condition",
+            "Capacity refusal keeps task revision",
+            "--executor",
+            peer_name,
+        ],
+        false,
+    );
+    let revision = published["task"]["revision"].as_u64().unwrap().to_string();
+    let failed = command_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "dispatch",
+            "capacity-task",
+            "--expected-revision",
+            &revision,
+            "--long-horizon-content",
+            "Capacity task full instructions",
+            "--long-horizon-every-ms",
+            "60000",
+        ],
+        false,
+    )
+    .output()
+    .unwrap();
+    assert!(!failed.status.success(), "capacity-full dispatch must fail");
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("maximum 3 active subscriptions"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    let board = run_ok_at(&fixture, &root, &master_pane, &["board", "show"], false);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "capacity-task")
+        .unwrap();
+    assert_eq!(task["revision"], published["task"]["revision"]);
+    assert!(task["invited_peer"].is_null());
+    assert!(task["long_horizon"].is_null());
+    let status = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    assert!(status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|sub| sub["id"] == standing["subscription"]["id"] && sub["status"] == "armed"));
+    run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "capacity-standing",
+            "--owner",
+            peer_name,
+            "--desired",
+            "ended",
+        ],
+        false,
+    );
+    let dispatched = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "dispatch",
+            "capacity-task",
+            "--expected-revision",
+            &revision,
+            "--long-horizon-content",
+            "Capacity task full instructions",
+            "--long-horizon-every-ms",
+            "60000",
+            "--long-horizon-repeat",
+            "4",
+        ],
+        false,
+    );
+    assert_eq!(
+        dispatched["goal_schedule"]["subscription"]["repeat_count"],
+        4
+    );
+    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "withdraw",
+            "capacity-task",
+            "--expected-revision",
+            &revision,
+            "--reason",
+            "isolated lifecycle verification",
+        ],
+        false,
+    );
+    let status = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    let subscription = status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|sub| sub["id"] == dispatched["goal_schedule"]["subscription"]["id"])
+        .unwrap();
+    assert_eq!(subscription["status"], "cancelled");
+}
+
 fn identity(context: &Value) -> (String, String) {
     let snapshot = &context["result"]["snapshot"];
     (

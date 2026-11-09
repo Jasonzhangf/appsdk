@@ -777,6 +777,12 @@ pub enum Req {
         goal_id: String,
         /// Stable-name owner that owns this goal in the current project.
         goal_owner: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
         /// `active` creates or retains one bounded deadline occurrence.
         /// With `interval_ms`/`repeat_count` the occurrence recurs on that
         /// interval up to that many deliveries; without them it stays the

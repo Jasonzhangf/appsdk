@@ -163,6 +163,7 @@ fn subscribe(server: &Server, worker: &str) {
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         })
         .unwrap();

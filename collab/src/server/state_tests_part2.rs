@@ -131,6 +131,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         });
 
@@ -196,6 +197,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         });
         for count in 1..=3 {
@@ -247,6 +249,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         });
         state.apply(&Event::Sent {
@@ -333,6 +336,7 @@ use super::*;
             patrol_idle_since_ms: None,
             patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
         };
 
         let mut none_state = State::default();
@@ -433,6 +437,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         });
         state.apply(&Event::Sent {
@@ -509,6 +514,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         });
         state.apply(&Event::Sent {
@@ -587,6 +593,7 @@ use super::*;
                 patrol_idle_since_ms: None,
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
+                goal_content: None,
             },
         });
         state.apply(&Event::Sent {

@@ -9,7 +9,7 @@ pub(crate) fn generate_long_horizon_goal_prompt(
         r#"# 本人长程目标编排提示词（Master / Peer）
 
 **长程任务目标文档**: `{}`
-**本地重唤醒意图**: 每 `{}` 检查一次；每次 Collab deadline 都是单次触发，不自动续期
+**长程订阅周期**: 每 `{}` 检查一次；默认100次循环，显式次数优先，有效批次保留剩余次数
 **执行边界**: `/goal` 和实现文档都不得声明 token、时间、上下文或轮次预算；只以目标文档中的完成条件和证据判断是否结束。
 
 RUN: `appsdk longhorizon show`
@@ -120,7 +120,7 @@ pub(crate) const POLICY: PolicySource = PolicySource::new();
 const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务不是写代码，而是调度：
 
 1. **审计与编排**：读取当前角色、任务、容量、worktree、资源、P0/P1 和 canonical issue 事实，再派发、核验、集成并推动闭环。
-2. **Peer-first**：长程工作先交给合适且同意的普通 peer，由该 peer 编排自己的子目标。一次性执行或观察直接派独立 `codex exec --profile gcm`，不以 peer 忙闲为前提。master 自行登记、读取、更新、续订和取消本人的 goal，不代持 peer goal。
+2. **Peer-first**：长程工作交给合适且同意的普通peer。master在派发任务单填写完整长程内容与明确周期，派发原子开启目标peer订阅，默认100次，目标名字保持归属。当前typed CEO可修改任意成员的长程订阅。一次性执行或观察直接派独立 `codex exec --profile gcm`。
 3. **保持合格容量饱和**：存在可派发工作、存在合适执行者却闲置，就是调度失败。不要用固定轮询替代 durable 任务和一次性唤醒。
 4. **推动闭环**：驱动测试与真实入口验证，然后审查、提交、合并、清理 worktree 和资源。代码写完不算完成。
 5. **核实所有阻塞**：peer 报告不等于事实。独立检查或复现失败证据、已尝试解法、权限和授权内替代路径；有确凿外部依赖或未覆盖决定才批准，记录证据、影响范围和恢复条件，证据不足退回调查。peer 保留交付责任，除非明确改派。不得为停止提醒强制关闭未完成任务。真实外部门禁可用 `collab master wake hold --reason "<门禁与解除条件>" --ttl-seconds <n>` 表达。
@@ -133,13 +133,13 @@ const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都�
 3. **兼容边界**：`collab subagent`、`appsdk subworker` 及其 managed records 只用于旧状态诊断、迁移和有证据的兼容操作，不授予新任务执行指导。任务结束后只回收自有 worker 和资源。
 4. **Standing patrol**：每次巡检只收敛本人目标范围。可恢复提取后移除不需要的自有 worktree；回收自有 stale resource；逐项处理本目标 open P0/P1 或用 owner、原因、解除条件明确停车；每个新生产问题先走项目 canonical issue intake。
 5. **PROTECTED_HOLD**：dirty、active、shared、unknown 资源必须保留并报告。不得删除其他 owner 的资源，不得批量终止进程，不得以 Collab/AppSDK 维护重启共享 daemon、tmux server 或宿主 pane。
-6. **一次性唤醒**：消费 goal/deadline wake 后仍需继续调度时，在本轮结束前显式重新武装。读取、ACK、摘要或派发回执都不自动续期。巡检只是兜底唤醒，不是执行依赖；登记或续订后立即继续所有 ready 工作，不等待下一次唤醒，也不等待别人替自己解决问题。"#;
+6. **有限订阅**：周期长程批次有剩余时继续复用，消费一次不重置次数。批次耗尽后仍有授权工作才显式续订。旧单次或显式一次性deadline保持原生命周期。读取、ACK、摘要不是交付完成。巡检是兜底唤醒，登记后立即推进ready工作。"#;
 
 pub(crate) const NOTIFY_RULES: &str = r#"通知处理准则（master 和 peer 通用）：
 
 通知是打断，不是本轮的目标。读取即已消费，没有单独的 ACK 义务。
 **绝不能以 ACK、已读或一段总结结束一轮。** 处理后继续本人 goal；没有新任务且无事可做时关闭本人定时调度和巡检，保留新任务消息接收，不循环查询空状态。
-需要继续调度时，在本轮结束前显式重新武装已消费的一次性 goal/deadline wake；读取和消费不是自动续期。
+需要继续调度时复用仍有效的周期长程批次。批次耗尽或显式单次deadline已消费后，只有工作和授权仍有效才显式续订。
 
 每条通知都带 `P<n> ACTION: <一个动作>`。优先级：
 - P0 人类消息、blocker 上报；`goal:` / `deadline` 唤醒 → 跑 longhorizon show 后排程。

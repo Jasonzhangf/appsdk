@@ -1416,6 +1416,28 @@ fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
     fixture.run_public(&["context", "--approve-grant",
         r#"{"action":"restore_master","authorization":"fixture independent master routes real task transfer"}"#], NEXT_CARRIER);
     fixture.run_public(&["task", "register", "T1"], THREAD_A);
+    fixture.run_public(
+        &[
+            "board",
+            "describe",
+            "T1",
+            "--expected-revision",
+            "1",
+            "--title",
+            "Stable-name task",
+            "--description",
+            "Transfer the current named owner",
+            "--delivery-condition",
+            "The current name owns the task",
+            "--test-condition",
+            "Patrol cancellation follows stable ownership",
+            "--long-horizon-content",
+            "Continue the transferred task and verify its current stable owner",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        NEXT_CARRIER,
+    );
     fixture.run_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
 
     fixture.update_current_state(|state| {

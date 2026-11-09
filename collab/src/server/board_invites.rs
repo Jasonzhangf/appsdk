@@ -10,17 +10,23 @@ fn board_unstarted_resources(state: &State, task: &TaskRec) -> Result<(), Resp> 
 }
 
 fn board_invite(server: &Server, actor: String, token: String, id: String, to: String, expected_revision: u64) -> Resp {
-    board_invite_with_selection(server,actor,token,id,to,expected_revision,None)
+    board_invite_with_selection(server,actor,token,id,to,expected_revision,None,None)
 }
 
 fn board_invite_with_selection(server: &Server, actor: String, token: String, id: String, to: String,
-    expected_revision: u64,selection:Option<(String,String)>) -> Resp {
+    expected_revision: u64,selection:Option<(String,String)>,long_horizon:Option<crate::board::LongHorizonTaskSpec>) -> Resp {
     // Resolve the name, binding and task revision under the same reducer lock.
     // Notification delivery happens after the durable invitation is committed.
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token)
         .and_then(|()| board_check_master_locked(server, &state, &actor)) { return error; }
     let mut details = match board_check_revision(&state, &id, expected_revision) { Ok(details) => details, Err(error) => return error };
+    details.long_horizon = long_horizon.or(details.long_horizon);
+    details.long_horizon = match crate::board::LongHorizonArgs::default().merge(details.long_horizon.as_ref()) {
+        Ok(Some(spec)) => Some(spec),
+        Ok(None) => return Resp::err("BOARD_LONG_HORIZON_CONTENT_REQUIRED: fill the task long-horizon declaration before inviting"),
+        Err(error) => return Resp::err(error),
+    };
     if !details.public_visibility { return Resp::err("BOARD_TASK_NOT_PUBLIC: only public work may be invited"); }
     let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
     if matches!(task.status.as_str(), "closed" | "cancelled") { return Resp::err("BOARD_TASK_CLOSED: closed tasks cannot be reassigned"); }
@@ -76,7 +82,7 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
     let task = match state.tasks.get(&id).map(|task| board_task_view_with_master(&state, &control, task, Some(&actor), master.as_deref(), Some(&route))).transpose() {
         Ok(task) => task.flatten(), Err(error) => return Resp::err(error),
     };
-    let data = json!({ "task": task, "msg_id": message_id, "consumed": false });
+    let data = json!({ "task": task, "msg_id": message_id, "consumed": false, "goal_schedule": task_goal_receipt(&state, &id) });
     drop(state);
     let attempt = match &subscription {
         Some(subscription) => attempt_notification_detailed_with_at(server, &message_id, &subscription.id, now_ms()),

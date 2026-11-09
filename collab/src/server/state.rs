@@ -196,7 +196,20 @@ pub struct TypedOutcome {
 pub const MAX_WAKE_ATTEMPTS: u32 = 1;
 pub const MAX_NOTIFICATION_REPEATS: u32 = 100;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum GoalScheduleContent {
+    Inline { content: String },
+    BoardTask { task_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalScheduleBinding {
+    pub source: Option<GoalScheduleContent>,
+    pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationSubscription {
     pub id: String,
     pub worker_id: String,
@@ -234,6 +247,8 @@ pub struct NotificationSubscription {
     /// decode it as `false` and keep the single-shot compatibility behavior.
     #[serde(default)]
     pub periodic_declared: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_content: Option<GoalScheduleBinding>,
 }
 
 pub fn default_repeat_count() -> u32 {

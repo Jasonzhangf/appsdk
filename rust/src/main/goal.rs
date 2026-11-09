@@ -424,7 +424,6 @@ where
             let mut goal_file: Option<String> = None;
             let mut interval_str = "10m".to_string();
             let mut repeat_count: u32 = 100;
-            let mut repeat_declared = false;
             let mut ttl_seconds: u64 = 604800;
             let mut format_json = false;
 
@@ -444,7 +443,6 @@ where
                                 r, error
                             ))
                         });
-                        repeat_declared = true;
                     }
                     "--ttl" | "--ttl-seconds" => {
                         let t = args.next().unwrap_or_else(|| fail("MISSING_TTL_ARG"));
@@ -505,11 +503,6 @@ where
                     GOAL_MIN_INTERVAL_MS / 60_000
                 ));
             }
-            // A sustained periodic goal deadline is declared only when the
-            // caller explicitly pairs the interval with --repeat. Without an
-            // explicit --repeat the historical one-shot rearm-intent contract
-            // is preserved.
-            let explicit_periodic = repeat_declared;
             let period_interval_ms = every_ms.min(i64::MAX as u64) as i64;
             let scope = match resolve_goal_scope(root) {
                 Ok(scope) => scope,
@@ -755,21 +748,7 @@ where
             }
 
             let mut trigger_ms = goal_now_ms().saturating_add(every_ms.min(i64::MAX as u64) as i64);
-            let schedule = if explicit_periodic {
-                "periodic"
-            } else {
-                "one-shot"
-            };
-            let local_schedule = if explicit_periodic {
-                "daemon-periodic"
-            } else {
-                "periodic-rearm-intent"
-            };
-            let recovery = if explicit_periodic {
-                "The daemon keeps this explicit periodic deadline recurring for the requested interval and count or until TTL expiry; cancel the goal to stop it early."
-            } else {
-                "When the one-shot deadline is consumed, expires, or Collab restarts, rerun appsdk goal subscribe with this goal to create a fresh one-shot deadline; renewal is explicit and is not automatic."
-            };
+            let recovery = "The daemon repeats this goal for the declared interval and count or until TTL expiry. Cancel the goal to stop it early.";
             let mut record = serde_json::json!({
                 "schema_version": 1,
                 "goal_id": goal_id,
@@ -781,11 +760,11 @@ where
                 "interval": interval_str,
                 "every_ms": every_ms,
                 "trigger_ms": trigger_ms,
-                "repeat_count": if explicit_periodic { repeat_count } else { 1 },
+                "repeat_count": repeat_count,
                 "requested_repeat_count": repeat_count,
-                "schedule": schedule,
-                "local_schedule": local_schedule,
-                "periodic_declared": explicit_periodic,
+                "schedule": "periodic",
+                "local_schedule": "daemon-periodic",
+                "periodic_declared": true,
                 "rearm_interval_ms": every_ms,
                 "ttl_seconds": ttl_seconds,
                 "owner": owner,
@@ -837,8 +816,9 @@ where
                 &owner,
                 trigger_ms,
                 ttl_seconds,
-                explicit_periodic.then_some(period_interval_ms),
-                explicit_periodic.then_some(repeat_count),
+                Some(period_interval_ms),
+                Some(repeat_count),
+                &goal_prompt,
             );
 
             let (collab_subscribed, sub_details, subscription_id, sub_error) = match collab_sub {
@@ -929,23 +909,8 @@ where
             } else {
                 println!("Long-horizon goal successfully registered:");
                 println!("- Goal file: {}", goal_path.display());
-                if explicit_periodic {
-                    println!(
-                        "- Periodic deadline: first trigger after {}, recurring every {}, up to {} deliveries; TTL {} seconds",
-                        interval_str, interval_str, repeat_count, ttl_seconds
-                    );
-                    println!(
-                        "- Collab notification status: explicit periodic subscription armed; each occurrence is consumed independently"
-                    );
-                } else {
-                    println!(
-                        "- One-shot deadline: first trigger after {} (local rearm intent: every {}, up to {} deliveries; TTL {} seconds)",
-                        interval_str, interval_str, repeat_count, ttl_seconds
-                    );
-                    println!(
-                        "- Collab notification status: one-shot armed; rearm is explicit and verifiable"
-                    );
-                }
+                println!("- Periodic deadline: first trigger after {}, recurring every {}, up to {} deliveries; TTL {} seconds", interval_str, interval_str, repeat_count, ttl_seconds);
+                println!("- Collab notification status: periodic subscription armed; each occurrence is consumed independently");
                 goal_print_patrol_status(&record);
                 println!("\n{}", goal_prompt);
             }
@@ -1023,15 +988,16 @@ where
                         } else if record["periodic_declared"].as_bool() == Some(true)
                             && matches!(remote_status.as_str(), "consumed" | "expired")
                         {
-                            // An explicit periodic subscription that finished
-                            // its deliveries (or TTL) is complete, not a
-                            // broken one-shot that needs manual recovery.
-                            record["desired"] = Value::String("completed".into());
+                            // A finite subscription ending does not establish
+                            // that the user's long-horizon objective is done.
+                            let error = format!("GOAL_PERIODIC_BATCH_ENDED:{remote_status}");
+                            record["desired"] = Value::String("recovery_required".into());
                             record["observed"] = Value::String(remote_status.clone());
                             record["active"] = Value::Bool(false);
                             record["collab_subscribed"] = Value::Bool(false);
-                            record["error"] = Value::Null;
-                            record["recovery"] = Value::Null;
+                            record["error"] = Value::String(error.clone());
+                            record["recovery"] = Value::String("If authorized work remains, renew the batch with appsdk goal subscribe --goal <path.md>. A completed batch does not close the task or establish goal completion.".into());
+                            reconcile_error = Some(error);
                         } else {
                             let error = format!(
                                 "GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:{}: deadline may be consumed or expired, or Collab may have restarted",

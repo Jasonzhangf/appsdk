@@ -52,6 +52,7 @@ async fn wire_notification_mutation_requires_runtime_and_read_status_stays_compa
     assert!(status.data["subscriptions"].as_array().unwrap().iter().any(|subscription| subscription["id"] == id));
     let reconciled = dispatch_wire(server.clone(), Some(context_with_runtime(&root, app, &runtime)),
         Req::GoalScheduleReconcile {
+            project: None, app: None, content: None,
             worker_id: worker.into(), token: token.into(), goal_id: "wire-goal".into(), goal_owner: "Alice".into(),
             desired: "ended".into(), trigger_ms: None, ttl_seconds: None, interval_ms: None,
             repeat_count: None, goal_subject: None, reason: Some("fixture cleanup".into()),

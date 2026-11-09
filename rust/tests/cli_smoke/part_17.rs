@@ -189,9 +189,9 @@ esac
     );
     let initial_text = String::from_utf8_lossy(&initial.stdout);
     assert!(initial_text.contains(
-        "One-shot deadline: first trigger after 5m (local rearm intent: every 5m, up to 100 deliveries; TTL 604800 seconds)"
+        "Periodic deadline: first trigger after 5m, recurring every 5m, up to 100 deliveries; TTL 604800 seconds"
     ));
-    assert!(initial_text.contains("one-shot armed; rearm is explicit and verifiable"));
+    assert!(initial_text.contains("periodic subscription armed; each occurrence is consumed independently"));
 
     let record_path = goal_test_record_path(&root);
     let mut legacy: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
@@ -267,7 +267,7 @@ esac
     assert!(expired["error"]
         .as_str()
         .unwrap()
-        .contains("GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:expired"));
+        .contains("GOAL_PERIODIC_BATCH_ENDED:expired"));
     assert!(
         expired["record"]["recovery"]
             .as_str()

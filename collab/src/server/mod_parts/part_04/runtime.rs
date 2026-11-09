@@ -762,6 +762,16 @@ impl ProjectRuntimeManager {
                 }
             }
         }
+        if let Req::GoalScheduleReconcile { worker_id, token, goal_id, goal_owner, project, app, content,
+            desired, trigger_ms, ttl_seconds, interval_ms, repeat_count, goal_subject, reason } = &req {
+            return self.dispatch_goal_schedule(&context, &req, worker_id, token, project.as_deref(), app.as_deref(), GoalScheduleChange {
+                goal_id: goal_id.clone(), goal_owner: goal_owner.clone(), desired: desired.clone(),
+                trigger_ms: *trigger_ms, ttl_seconds: *ttl_seconds, interval_ms: *interval_ms,
+                repeat_count: *repeat_count, goal_subject: goal_subject.clone(), reason: reason.clone(),
+                content: content.clone().map(|content| GoalScheduleContent::Inline { content }),
+                renew_ended: true,
+            });
+        }
         if let Req::Ceo {worker_id,token,command} = req {
             return self.dispatch_ceo(Some(context),worker_id,token,command);
         }

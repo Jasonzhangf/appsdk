@@ -387,6 +387,44 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                     });
                 }
             }
+            let goal_body = match subscription
+                .goal_content
+                .as_ref()
+                .and_then(|binding| binding.source.as_ref())
+            {
+                Some(super::state::GoalScheduleContent::Inline { content }) => {
+                    Some(content.clone())
+                }
+                Some(super::state::GoalScheduleContent::BoardTask { task_id }) => {
+                    let Some(details) = state.board_details.get(task_id) else {
+                        crate::server::presence::append_log(
+                            &server.log_path(),
+                            "GOAL_TASK_CONTENT_MISSING: referenced task has no details",
+                        );
+                        continue;
+                    };
+                    let Some(spec) = details.long_horizon.as_ref() else {
+                        crate::server::presence::append_log(
+                            &server.log_path(),
+                            "GOAL_TASK_CONTENT_MISSING: task has no long-horizon declaration",
+                        );
+                        continue;
+                    };
+                    let status = state
+                        .tasks
+                        .get(task_id)
+                        .map(|task| task.status.as_str())
+                        .unwrap_or("missing");
+                    let action = if details.invitation.is_some() {
+                        "Read the current task revision and accept or decline with collab board respond before execution."
+                    } else {
+                        "Continue only the task's current authorized phase and dependency constraints."
+                    };
+                    Some(format!("Task {task_id}\n{}\n{}\nDelivery condition: {}\nTest condition: {}\nCurrent status: {status}\n{action}",
+                        details.title, spec.content, details.delivery_condition, details.test_condition))
+                }
+                None => None,
+            };
             let message_id = super::gen_msg_id();
             if subscription.event == "master-idle" {
                 let record = idle_gate_records
@@ -418,6 +456,9 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                                 state.pending_merges.keys().cloned().collect();
                             pending_merges.sort();
                             format!("MASTER_IDLE_WAKE pending_merges={}. Inspect actionable tasks, pending merges, and authorized open bugs. Merge accepted candidates by recording collab task integrated after moving the commit onto refs/heads/main. Do not rearm this finite master-idle schedule unless actionable work remains. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, end the owning goal or task-owned finite schedule through its lifecycle (`appsdk goal cancel` for a goal, task closure for a task schedule) and let this schedule exhaust. Direct-message reception is daemon-owned and must never be closed.", pending_merges.join(","))
+                        } else if let Some(content) = &goal_body {
+                            format!("DEADLINE_REACHED\n{content}\nCycle {}/{}; interval_ms={:?}; expires_ms={}",
+                                subscription.fired_count + 1, subscription.repeat_count, subscription.interval_ms, subscription.expires_ms)
                         } else {
                             format!("DEADLINE_REACHED{}", if subscription.fired_count + 1 >= if subscription.interval_ms.is_some() { subscription.repeat_count } else { subscription.trigger_times_ms.len().max(1) as u32 } { if subscription.subject.as_deref().is_some_and(|subject| subject.starts_with("goal:")) { "; LAST_REMINDER=true; renew explicitly with `appsdk goal subscribe` for the owned goal only when continued scheduling is required" } else { "; LAST_REMINDER=true; renew explicitly with `collab notify subscribe --event deadline --subject <subject> --at-ms <future-epoch-ms> --ttl-seconds <bounded>` only when continued scheduling is required" } } else { "" })
                         },

@@ -116,6 +116,7 @@ include!("mod_parts/part_04.rs");
 include!("mod_parts/project_reset_manager.rs");
 include!("mod_parts/part_05.rs");
 include!("mod_parts/part_06.rs");
+include!("goal_schedule.rs");
 include!("mod_parts/part_07.rs");
 include!("mod_parts/part_08.rs");
 include!("mod_parts/channel_routing.rs");

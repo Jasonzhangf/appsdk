@@ -1,6 +1,6 @@
 {
   "id": "collab-ticket-event-flow-design",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "待独立审查的实现设计。一次工单事件到一次流转结果。入 daemon 立即按接收范围进入合格 slot 的最短 queue，busy 及等待依赖也可入队，依赖满足且 slot 空闲后按优先级开始。每个阶段仅推进当前适用状态，等待、拒绝和失败结果传递到唯一出口。审查顺位为独立 Reviewer、独立 architect 或 expert、另一独立 peer，组内 busy 排队，无合格接收者才检查下一组。返工与恢复由同一工单的新批次处理，无回边。算子为拟定接口，未绑定运行实现。互斥分支与权限见同名 Markdown。",
   "inputs": [{"id": "工单事件", "schema": "Object"}],
   "nodes": [
@@ -38,7 +38,7 @@
       "id": "按范围选择最短队列并推进执行",
       "operator": "collab.ticket_design.advance_execution",
       "operator_version": "1",
-      "description": "名字代际更新时，已有业务候选状态撤销旧claimed或running阶段并创建queued新batch，与任务会话和阶段变化同批提交；原任务的working状态及资源责任保持。当前授权载体可重新领取并使用当前代际的新attempt；旧代际start/result拒绝并保留原错。处于claimed阶段的任务跨名字改派时保留撤销历史，为新执行者建立新batch和attempt；running阶段的跨名字改派未在本次验证。失败沿既有结果出口传递，不宣称终止旧外部执行。",
+      "description": "名字代际更新时，已有业务候选状态撤销旧claimed或running阶段并创建queued新batch，与任务会话和阶段变化同批提交；原任务的working状态及资源责任保持。当前授权载体可重新领取并使用当前代际的新attempt；旧代际start/result拒绝并保留原错。带长程声明的任务在执行slot实际claim或start时，复用唯一goal计划owner准备目标peer订阅，与执行归属同批提交。纯排队只保存声明；master显式邀请或派发立即原子开启目标订阅。任务单提供完整内容和明确周期，周期次数默认100。无执行目标保持等待，不对Planner或Reviewer创建执行订阅。旧通用工单不因加载而自动加订阅。失败沿既有结果出口传递，不宣称终止旧外部执行。",
       "inputs": ["规划阶段结果"],
       "output": {"id": "执行验证结果", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -69,6 +69,7 @@
       "id": "保存未结责任或关闭结果",
       "operator": "collab.ticket_design.persist_outcome",
       "operator_version": "1",
+      "description": "任务取消或最终关闭在同一提交中结束其关联长程计划。重试、同名换载体和内容更新保留已消费次数。到期消息读取任务单当前完整内容，保持未接单、排队和执行约束。基础消息接收和无关任务订阅保留。",
       "inputs": ["工单关闭判定"],
       "output": {"id": "已持久化流转结果", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

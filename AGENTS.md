@@ -128,11 +128,13 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   不接临时开发派单；`memory` 提炼纠偏经验；`architect` 负责架构计划及代码准入。
   context 回显的有效职责由源码 workflow 模板和共享 `role_brief` 投影，角色标签不
   授权。注册和恢复须说明此职责，并推荐对自身目标、阻塞和资源配置定时巡检。
-  master 与 peer 均自行登记、读取、更新、续订和关闭本人的 longhorizon goal。
-  master 不代登记或代持 peer goal；项目仲裁权不等于他人目标的所有权。
+  master 与 peer 均可维护本人的 longhorizon goal。项目 master 派发任务单时填写
+  长程任务内容和明确周期，并自动开启目标 peer 的订阅。当前 typed CEO 可修改
+  任意项目成员的长程订阅，目标稳定名字保持归属。新周期长程订阅默认100次，
+  显式次数优先。有效批次继续复用，不逐轮重置次数。
   各角色的目标文档先写长期目标和验收，再写实现细节；重大细节变化同步更新目标。
   目标按规范项目和稳定名字隔离，sessionID 是执行载体；同名换会话或 worktree 继续
-  原目标。普通 task、board 分配、笔记和定时订阅不能代替 goal 的真实登记回执。
+  原目标。任务派发须返回真实目标订阅回执，笔记或任务字段存在不能证明已经开启。
 - `.agent-collab/` 为项目局部状态；存在目录不证明当前 peer 已注册。
 - 任务工作空间按项目实际工作流选择 Git worktree 或 LayerFS。已有 Git worktree
   项目保持原路径、校验和清理规则；已启用 LayerFS 的项目使用

@@ -584,6 +584,7 @@ fn board_dispatch_work(
     token: String,
     id: String,
     expected_revision: u64,
+    long_horizon: crate::board::LongHorizonArgs,
 ) -> Resp {
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token)
@@ -594,6 +595,11 @@ fn board_dispatch_work(
     let mut details = match board_check_revision(&state, &id, expected_revision) {
         Ok(details) => details,
         Err(error) => return error,
+    };
+    details.long_horizon = match long_horizon.merge(details.long_horizon.as_ref()) {
+        Ok(Some(spec)) => Some(spec),
+        Ok(None) => return Resp::err("BOARD_LONG_HORIZON_CONTENT_REQUIRED: supply long-horizon task content and cadence"),
+        Err(error) => return Resp::err(error),
     };
     let Some(task) = state.tasks.get(&id) else {
         return Resp::err("task not found");
@@ -716,6 +722,7 @@ fn board_dispatch_work(
         peer,
         expected_revision,
         Some((name, reason)),
+        details.long_horizon,
     )
 }
 

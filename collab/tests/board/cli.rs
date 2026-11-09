@@ -38,6 +38,10 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
             "cargo test --test appserver_two_tui_integration",
             "--priority",
             "p1",
+            "--long-horizon-content",
+            "Continue this task from its current board state and preserve its delivery and test conditions",
+            "--long-horizon-every-ms",
+            "3600000",
         ],
         THREAD_A,
     )

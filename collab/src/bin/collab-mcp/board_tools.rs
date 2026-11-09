@@ -37,6 +37,18 @@ pub fn tools() -> Vec<Value> {
     ] {
         publish["inputSchema"]["properties"][field] = json!({"type":"string"});
     }
+    for entry in tools.iter_mut().filter(|entry| {
+        matches!(
+            entry["name"].as_str(),
+            Some("collab_board_publish" | "collab_board_describe" | "collab_board_dispatch")
+        )
+    }) {
+        let fields = &mut entry["inputSchema"]["properties"];
+        fields["long_horizon_content"] = json!({"type":"string"});
+        fields["long_horizon_every_ms"] = json!({"type":"integer","minimum":1});
+        fields["long_horizon_repeat"] = json!({"type":"integer","minimum":1,"maximum":100});
+        fields["long_horizon_ttl_seconds"] = json!({"type":"integer","minimum":1});
+    }
     tools
 }
 
@@ -114,6 +126,27 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
     argv.push(required(args, "id")?);
     if action != "publish" {
         revision(&mut argv, args)?;
+    }
+    if matches!(action, "publish" | "describe" | "dispatch") {
+        optional_flag(
+            &mut argv,
+            args,
+            "long_horizon_content",
+            "--long-horizon-content",
+        )?;
+        for (key, flag) in [
+            ("long_horizon_every_ms", "--long-horizon-every-ms"),
+            ("long_horizon_repeat", "--long-horizon-repeat"),
+            ("long_horizon_ttl_seconds", "--long-horizon-ttl-seconds"),
+        ] {
+            if let Some(value) = args.get(key) {
+                let value = value
+                    .as_u64()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| format!("{key} must be a positive integer"))?;
+                argv.extend([flag.into(), value.to_string()]);
+            }
+        }
     }
     match action {
         "publish" | "describe" => {

@@ -93,6 +93,77 @@ pub(crate) fn apply_policy_field<T: Clone>(value: &Option<T>, clear: bool, targe
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongHorizonTaskSpec {
+    pub content: String,
+    pub interval_ms: i64,
+    pub repeat_count: u32,
+    pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, clap::Args)]
+pub struct LongHorizonArgs {
+    #[arg(long = "long-horizon-content")]
+    pub long_horizon_content: Option<String>,
+    #[arg(long = "long-horizon-every-ms")]
+    pub long_horizon_every_ms: Option<i64>,
+    #[arg(long = "long-horizon-repeat")]
+    pub long_horizon_repeat: Option<u32>,
+    #[arg(long = "long-horizon-ttl-seconds")]
+    pub long_horizon_ttl_seconds: Option<u64>,
+}
+
+impl LongHorizonArgs {
+    pub fn merge(
+        self,
+        previous: Option<&LongHorizonTaskSpec>,
+    ) -> Result<Option<LongHorizonTaskSpec>, String> {
+        if previous.is_none()
+            && self.long_horizon_content.is_none()
+            && self.long_horizon_every_ms.is_none()
+            && self.long_horizon_repeat.is_none()
+            && self.long_horizon_ttl_seconds.is_none()
+        {
+            return Ok(None);
+        }
+        let content = self
+            .long_horizon_content
+            .or_else(|| previous.map(|spec| spec.content.clone()))
+            .filter(|text| !text.trim().is_empty())
+            .ok_or("BOARD_LONG_HORIZON_CONTENT_REQUIRED")?;
+        let interval_ms = self
+            .long_horizon_every_ms
+            .or_else(|| previous.map(|spec| spec.interval_ms))
+            .filter(|interval| *interval > 0)
+            .ok_or(
+                "BOARD_LONG_HORIZON_CADENCE_REQUIRED: provide a positive --long-horizon-every-ms",
+            )?;
+        let repeat_count = self
+            .long_horizon_repeat
+            .or_else(|| previous.map(|spec| spec.repeat_count))
+            .unwrap_or(100);
+        if !(1..=100).contains(&repeat_count) {
+            return Err("long-horizon-repeat must be between 1 and 100".into());
+        }
+        let ttl_seconds = self
+            .long_horizon_ttl_seconds
+            .or_else(|| previous.map(|spec| spec.ttl_seconds))
+            .unwrap_or(crate::server::mailbox::MAX_NOTIFICATION_TTL_SECONDS);
+        if !(1..=crate::server::mailbox::MAX_NOTIFICATION_TTL_SECONDS).contains(&ttl_seconds) {
+            return Err(format!(
+                "long-horizon-ttl-seconds must be between 1 and {}",
+                crate::server::mailbox::MAX_NOTIFICATION_TTL_SECONDS
+            ));
+        }
+        Ok(Some(LongHorizonTaskSpec {
+            content,
+            interval_ms,
+            repeat_count,
+            ttl_seconds,
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum BoardCommand {
@@ -125,6 +196,9 @@ pub enum BoardCommand {
         #[arg(long = "depends-on", num_args(1..))]
         #[serde(default)]
         depends_on: Vec<String>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        long_horizon: LongHorizonArgs,
     },
     /// Atomically claim one pending task at the observed board revision.
     Claim {
@@ -200,6 +274,9 @@ pub enum BoardCommand {
         delivery_condition: String,
         #[arg(long)]
         test_condition: String,
+        #[command(flatten)]
+        #[serde(flatten)]
+        long_horizon: LongHorizonArgs,
     },
     /// Save project, goal, or task-scoped work assignment policy.
     Policy {
@@ -229,6 +306,9 @@ pub enum BoardCommand {
         id: String,
         #[arg(long)]
         expected_revision: u64,
+        #[command(flatten)]
+        #[serde(flatten)]
+        long_horizon: LongHorizonArgs,
     },
 }
 
@@ -250,6 +330,8 @@ pub struct BoardTaskDetails {
     pub description: String,
     pub delivery_condition: String,
     pub test_condition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_horizon: Option<LongHorizonTaskSpec>,
     pub revision: u64,
     pub public_visibility: bool,
     /// True only after ticket admission atomically created the ticket phases.
@@ -290,6 +372,7 @@ pub struct BoardTaskView {
     pub description: String,
     pub delivery_condition: String,
     pub test_condition: String,
+    pub long_horizon: Option<LongHorizonTaskSpec>,
     pub revision: u64,
     pub owner: String,
     pub owner_display_name: String,

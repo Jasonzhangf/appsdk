@@ -582,6 +582,7 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
         session_id: Some(candidate.session_id.clone()),
         thread_id: Some(thread_id.to_string()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec![
             "session_status".into(),
             "read_thread".into(),

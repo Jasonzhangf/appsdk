@@ -112,6 +112,7 @@ impl BindingValue {
             crate::proto::TransportKind::Dsh => "dsh",
             crate::proto::TransportKind::DesktopBridge => "codex_desktop",
             crate::proto::TransportKind::AppServer => "native",
+            crate::proto::TransportKind::Rex => "rex",
         }
         .to_owned();
         Self {
@@ -166,6 +167,7 @@ impl BindingValue {
             && self.transport.session_id == other.transport.session_id
             && self.transport.thread_id == other.transport.thread_id
             && self.transport.tmux_endpoint == other.transport.tmux_endpoint
+            && self.transport.rex_endpoint == other.transport.rex_endpoint
             && self.tab_id == other.tab_id
             && self.host == other.host
             && self.invocation_cwd == other.invocation_cwd
@@ -516,6 +518,8 @@ impl BindingControlSet {
             .filter_map(|slot| slot.active_binding().map(|value| (slot, value)))
             .filter(|(_, value)| {
                 (dsh.is_none() || value.transport.kind == crate::proto::TransportKind::Dsh)
+                    && (facts.rex.is_none()
+                        || value.transport.kind == crate::proto::TransportKind::Rex)
                     && (facts.tmux.is_none()
                         || value.transport.kind == crate::proto::TransportKind::Tmux)
                     && facts.agent_kind.as_ref().is_none_or(|kind| {

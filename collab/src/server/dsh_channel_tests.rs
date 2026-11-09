@@ -27,6 +27,7 @@ fn a_verified_dsh_candidate_is_admitted_as_the_dsh_transport() {
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),
+            rex: None,
         },
         root.to_str().unwrap(),
     )
@@ -100,6 +101,7 @@ fn dsh_must_not_be_combined_with_a_pane_candidate() {
             appserver: None,
             tmux: Some(tmux),
             dsh: Some(candidate(&gateway.socket, &root)),
+            rex: None,
         },
         root.to_str().unwrap(),
     )
@@ -138,6 +140,7 @@ fn dsh_candidate_cwd_must_be_the_project_root() {
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &other)),
+            rex: None,
         },
         root.to_str().unwrap(),
     )
@@ -182,6 +185,7 @@ fn a_gateway_reporting_another_runtime_is_rejected() {
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),
+            rex: None,
         },
         root.to_str().unwrap(),
     )
@@ -222,6 +226,7 @@ fn a_reply_that_does_not_echo_the_challenge_nonce_is_rejected() {
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),
+            rex: None,
         },
         root.to_str().unwrap(),
     )
@@ -445,6 +450,7 @@ fn dsh_transport(socket: &Path) -> SelectedTransport {
         session_id: Some("ses-1".into()),
         thread_id: Some("ses-1".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["enqueue_wake".into()],
         self_check: "test".into(),
     }
@@ -494,6 +500,7 @@ fn commit_dsh_rebind_fixture(server: &Arc<Server>, gateway: &Gateway) -> Runtime
                     session_id: Some(session_id.into()),
                     thread_id: Some(agent_id.into()),
                     tmux_endpoint: None,
+                    rex_endpoint: None,
                     capabilities: vec!["enqueue_wake".into()],
                     self_check: "committed dsh rebind fixture".into(),
                 }),
@@ -1006,6 +1013,7 @@ fn dsh_candidate_serializes_additively_without_disturbing_pane_candidates() {
         appserver: None,
         tmux: None,
         dsh: Some(candidate(&root.join("control.sock"), &root)),
+        rex: None,
     };
     let encoded = serde_json::to_value(&candidates).unwrap();
     assert_eq!(encoded["dsh"]["runtime_id"], "rt-1");
@@ -1179,6 +1187,7 @@ fn register_dsh(
             appserver: None,
             tmux: None,
             dsh: Some(candidate_ids(socket, &server.root, runtime_id, agent_id)),
+            rex: None,
         },
         &server.root.display().to_string(),
     ) {
@@ -1405,6 +1414,7 @@ fn a_dsh_rebind_is_refused_without_pointing_at_a_tmux_pane() {
             appserver: None,
             tmux: None,
             dsh: Some(candidate(&gateway.socket, &root)),
+            rex: None,
         }),
     )
     .expect_err("collab must not rebind a dsh peer from the CLI");

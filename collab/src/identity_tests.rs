@@ -26,9 +26,32 @@ fn selected() -> SelectedTransport {
         session_id: Some("session-1".into()),
         thread_id: Some("thread-1".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message".into()],
         self_check: "verified fixture".into(),
     }
+}
+
+#[test]
+fn rex_registration_uses_an_agent_session_and_a_separate_terminal_endpoint() {
+    let mut transport = selected();
+    transport.kind = TransportKind::Rex;
+    transport.endpoint = None;
+    transport.namespace = None;
+    transport.thread_id = None;
+    transport.rex_endpoint = Some(crate::proto::RexEndpoint {
+        server: "unix:///tmp/rex.sock".into(),
+        session_id: "session:11111111-1111-1111-1111-111111111111".into(),
+        block_id: "block:22222222-2222-2222-2222-222222222222".into(),
+        host_id: Some("host".into()),
+        instance_id: "instance".into(),
+        cwd: "/remote/project".into(),
+    });
+    let mut runtime = runtime_identity("binding-rex");
+    runtime.native_thread_id = None;
+    validate_registration_transport(&transport, &runtime).unwrap();
+    runtime.native_thread_id = Some(NativeThreadId::new("wrong-thread").unwrap());
+    assert!(validate_registration_transport(&transport, &runtime).is_err());
 }
 
 fn credential(paths: &HostPaths, scope: &Scope) -> Identity {

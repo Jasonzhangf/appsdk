@@ -402,6 +402,7 @@ fn launch(
             // A subagent is a child App Server thread. dsh peers register as
             // independent peers, never through this path.
             dsh: None,
+            rex: None,
         }),
     );
     if !registered.ok {

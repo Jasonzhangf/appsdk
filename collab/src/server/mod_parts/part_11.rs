@@ -54,6 +54,8 @@ fn dispatch_with_route_context_bound(
         Req::ProjectReset { .. } => Resp::err("PROJECT_RESET_HOST_REQUIRED"),
         Req::PeerLifecycle { request } => peer_lifecycle::handle(server, project_context.as_ref(), request, None),
         Req::IdentityContext { .. } => Resp::err("IDENTITY_CONTEXT_HOST_REQUIRED: identity reconciliation belongs to the host daemon"),
+        Req::AddressSend { .. } | Req::FederationDirectory { .. } | Req::MessageRefStatus { .. } =>
+            Resp::err("FEDERATION_HOST_REQUIRED: federation operations belong to the host runtime manager"),
         Req::BoardShow => handle_board_show(server, None),
         Req::WorkRolesSet { worker_id, token, name, roles } => handle_work_roles(server, worker_id, token, name, roles),
         Req::WorkflowTemplateSet {
@@ -1027,7 +1029,7 @@ fn handle_msg_status(
     });
     let target_session = st.target_sessions.get(&msg_id).cloned();
     let delivery_failure = st.notification_delivery_failures.get(&msg_id).cloned();
-    Resp::data(json!({
+    let mut data = json!({
         "id": msg.id, "from": msg.from, "to": msg.to, "type": msg.mtype,
         "subject": msg.subject, "body": msg.body,
         "state": msg.state, "wake_attempts": msg.wake_attempt_count,
@@ -1037,7 +1039,11 @@ fn handle_msg_status(
         "reply_obligation": reply_obligation,
         "target_session": target_session,
         "notification_delivery_failure": delivery_failure,
-    }))
+    });
+    if let Some(result) = channel_delivery::current_result(&st, &msg_id) {
+        data["channel_delivery"] = json!(result);
+    }
+    Resp::data(data)
 }
 
 fn request_requires_project_context(req: &Req) -> bool {

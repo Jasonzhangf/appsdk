@@ -282,6 +282,7 @@ fn selected_transport(target: &PeerLifecycleTarget) -> SelectedTransport {
         session_id: target.transport.session_id.clone(),
         thread_id: target.transport.thread_id.clone(),
         tmux_endpoint: target.transport.tmux_endpoint.clone(),
+        rex_endpoint: None,
         capabilities: Vec::new(),
         self_check: "peer_lifecycle_exact_target".into(),
     }

@@ -615,7 +615,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     let stale_target = worker_row(&stale_workers, &target_id);
     // The fixture supplies a registered session in a shell pane, not a live
     // Codex runtime. Activity remains unknown while identity/address stay valid.
-    assert_eq!(stale_target["presence"], "unknown", "{stale_target}");
+    assert_eq!(stale_target["agent_state"], "unknown", "{stale_target}");
     assert_eq!(stale_target["identity_valid"], true, "{stale_target}");
     assert_eq!(stale_target["endpoint_live"], true, "{stale_target}");
     assert_eq!(stale_target["role"], "master", "{stale_target}");

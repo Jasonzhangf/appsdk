@@ -224,6 +224,9 @@ impl ProjectRuntimeManager {
                 })?
         };
         match transport.kind {
+            TransportKind::Rex => {
+                return Err("ROUTE_RESOLVE_INVALID: Rex routes use the agent session without a native thread address".into());
+            }
             TransportKind::DesktopBridge => {
                 if requested_tmux_endpoint.is_some() {
                     return Err("ROUTE_RESOLVE_NOT_FOUND: Desktop route has no tmux endpoint".into());

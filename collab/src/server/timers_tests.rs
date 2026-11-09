@@ -32,6 +32,7 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
                     session_id: Some(candidate.session_id.clone()),
                     thread_id: Some(candidate.thread_id.clone()),
                     tmux_endpoint: None,
+                    rex_endpoint: None,
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
                 })
@@ -49,6 +50,7 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
                 }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            rex_monitor: Default::default(),
             mailbox_notify: tokio::sync::Notify::new(),
         }),
         root,
@@ -109,6 +111,7 @@ fn seed_ledger_owner(server: &Server, worker_id: &str) {
         session_id: endpoint.codex_session_id.clone(),
         thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "prior committed ledger owner".into(),
     };
@@ -611,6 +614,7 @@ fn restart_does_not_reset_exhausted_direct_message_attempts() {
         appserver_notification_sink: super::super::default_appserver_notification_sink(),
         appserver_thread_status: super::super::default_appserver_thread_status(),
         appserver_thread_archive: super::super::default_appserver_thread_archive(),
+        rex_monitor: Default::default(),
         mailbox_notify: tokio::sync::Notify::new(),
     };
     let sent = std::sync::atomic::AtomicBool::new(false);
@@ -671,6 +675,7 @@ fn restart_attempts_only_undelivered_pending() {
         }),
         appserver_thread_status: super::super::default_appserver_thread_status(),
         appserver_thread_archive: super::super::default_appserver_thread_archive(),
+        rex_monitor: Default::default(),
         mailbox_notify: tokio::sync::Notify::new(),
     });
 

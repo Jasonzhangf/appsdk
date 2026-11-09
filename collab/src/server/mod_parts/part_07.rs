@@ -59,6 +59,28 @@ fn desktop_identity_presence(server: &Server, state: &State, worker: &WorkerRec)
     }
 }
 
+fn rex_identity_presence(_server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
+    let Some(transport) = worker.transport.as_ref() else {
+        return IdentityPresence::Missing;
+    };
+    let has_endpoint = transport.rex_endpoint.is_some();
+    let has_session = transport
+        .session_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_endpoint || !has_session {
+        return IdentityPresence::Missing;
+    }
+    let current = state.workers.get(&worker.id).is_some_and(|current| {
+        current.token == worker.token && current.transport == worker.transport
+    });
+    if current {
+        IdentityPresence::Present
+    } else {
+        IdentityPresence::Missing
+    }
+}
+
 fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
     let Some(transport) = selected_transport_for_worker(worker) else {
         return IdentityPresence::Missing;
@@ -89,6 +111,10 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
             }
         }
         TransportKind::Dsh => dsh_identity_presence(&transport),
+        TransportKind::Rex => {
+            let state = server.state.lock().unwrap();
+            rex_identity_presence(server, &state, worker)
+        }
     }
 }
 
@@ -323,6 +349,18 @@ pub(crate) fn maintenance_presence(
             thread_status_presence((server.appserver_thread_status)(&transport, thread_id))
         }
         TransportKind::Dsh => dsh_identity_presence(&transport),
+        TransportKind::Rex => {
+            if transport.rex_endpoint.is_some()
+                && transport
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            {
+                IdentityPresence::Unknown
+            } else {
+                IdentityPresence::Missing
+            }
+        }
     }
 }
 
@@ -476,6 +514,7 @@ mod close_endpoint_fence_tests {
             session_id: Some("session".into()),
             thread_id: Some("thread".into()),
             tmux_endpoint: None,
+            rex_endpoint: None,
             capabilities: vec![],
             self_check: "bound".into(),
         });
@@ -542,6 +581,14 @@ pub(crate) fn worker_identity_and_endpoint(
                 IdentityPresence::Unknown => None,
             };
             (identity_valid, endpoint_live)
+        }
+        TransportKind::Rex => {
+            let identity_valid = transport.rex_endpoint.is_some()
+                && transport
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+            (identity_valid, None)
         }
     }
 }
@@ -642,6 +689,23 @@ fn transport_agent_view(
                 serde_json::json!({"transport": "appserver", "thread_state": "unknown", "error": error}),
                 serde_json::Value::Null,
             ),
+        };
+    }
+    if transport.kind == TransportKind::Rex {
+        return match transport.rex_endpoint.as_ref() {
+            None => (
+                IdentityPresence::Missing,
+                serde_json::json!({"transport": "rex", "error": "REX_ENDPOINT_MISSING"}),
+                serde_json::Value::Null,
+            ),
+            Some(_) => match worker_agent_view(server, worker) {
+                Some((presence, view)) => (presence, view, serde_json::Value::Null),
+                None => (
+                    IdentityPresence::Unknown,
+                    serde_json::json!({"transport": "rex", "thread_state": "unknown"}),
+                    serde_json::Value::Null,
+                ),
+            },
         };
     }
     if transport.kind == TransportKind::Dsh {
@@ -1619,7 +1683,7 @@ fn handle_worker_snapshot(
                 ))
             }
         },
-        crate::proto::TransportKind::DesktopBridge | crate::proto::TransportKind::AppServer | crate::proto::TransportKind::Dsh => {
+        crate::proto::TransportKind::DesktopBridge | crate::proto::TransportKind::AppServer | crate::proto::TransportKind::Dsh | crate::proto::TransportKind::Rex => {
             return Resp::err(
                 "WORKER_SNAPSHOT_UNSUPPORTED: only registered tmux peers expose transient pane buffers",
             )

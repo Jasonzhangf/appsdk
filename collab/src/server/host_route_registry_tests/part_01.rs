@@ -39,6 +39,7 @@ fn test_server() -> (Arc<Server>, PathBuf, PathBuf) {
             }))
         }),
         appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+        rex_monitor: Default::default(),
         mailbox_notify: Notify::new(),
     });
     (server, root, state_path)
@@ -89,6 +90,7 @@ fn commit_tmux_typed_fixture(
         session_id: endpoint.codex_session_id.clone(),
         thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["direct-input".into()],
         self_check: "typed fixture committed pane receipt".into(),
     };
@@ -138,6 +140,7 @@ fn verified_appserver(candidate: &AppServerCandidate) -> SelectedTransport {
         session_id: Some(candidate.session_id.clone()),
         thread_id: Some(candidate.thread_id.clone()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec![
             "session_status".into(),
             "read_thread".into(),
@@ -197,6 +200,7 @@ fn test_candidates_at(thread_id: &str, cwd: &Path) -> Option<TransportCandidates
         desktop_bridge: None,
         appserver: None,
         dsh: None,
+        rex: None,
         tmux: Some(crate::proto::TmuxCandidate {
             endpoint,
             cwd: cwd.display().to_string(),
@@ -239,6 +243,7 @@ fn seed_committed_registration_fixture(
         session_id: endpoint.codex_session_id.clone(),
         thread_id: endpoint.codex_thread_id.clone(),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "previously committed typed-owner fixture".into(),
     };
@@ -279,6 +284,7 @@ fn test_selected_transport(thread_id: &str) -> SelectedTransport {
             .clone()
             .or_else(|| Some(candidate.endpoint.pane_id.clone())),
         tmux_endpoint: Some(candidate.endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
         self_check: "test selected tmux transport".into(),
     }
@@ -302,6 +308,7 @@ fn notification_subscription_transport_must_match_tmux_or_appserver_kind() {
         session_id: Some(endpoint.tmux_session_id.clone()),
         thread_id: Some(endpoint.pane_id.clone()),
         tmux_endpoint: Some(endpoint),
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into()],
         self_check: "test tmux transport".into(),
     };
@@ -444,6 +451,7 @@ fn test_candidates_for_registered(
         desktop_bridge: None,
         appserver: None,
         dsh: None,
+        rex: None,
         tmux: Some(crate::proto::TmuxCandidate {
             endpoint: binding.tmux_endpoint?,
             cwd: root.display().to_string(),
@@ -484,6 +492,7 @@ fn register_native_peer(
         session_id: Some(format!("session-{thread_id}")),
         thread_id: Some(thread_id.to_owned()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };
@@ -511,6 +520,7 @@ fn appserver_registration_is_rejected_without_candidate_check() {
             desktop_bridge: None,
             appserver: Some(appserver),
             dsh: None,
+            rex: None,
             tmux: None,
         },
         root.to_str().unwrap(),
@@ -542,6 +552,7 @@ fn appserver_self_check_failure_is_explicit_and_has_no_fallback() {
                 cwd: root.display().to_string(),
             }),
             dsh: None,
+            rex: None,
             tmux: None,
         },
         root.to_str().unwrap(),
@@ -567,6 +578,7 @@ fn registration_fails_when_no_server_verified_candidate_exists() {
             desktop_bridge: None,
             appserver: None,
             dsh: None,
+            rex: None,
             tmux: None,
         },
         root.to_str().unwrap(),
@@ -651,6 +663,7 @@ fn tmux_registration_and_identity_do_not_require_a_live_probe() {
         desktop_bridge: None,
         appserver: None,
         dsh: None,
+        rex: None,
         tmux: Some(crate::proto::TmuxCandidate {
             endpoint: endpoint.clone(),
             cwd: root.display().to_string(),
@@ -825,6 +838,7 @@ fn tmux_registration_rejects_a_cwd_that_is_not_the_server_project_root() {
             desktop_bridge: None,
             appserver: None,
             dsh: None,
+            rex: None,
             tmux: Some(crate::proto::TmuxCandidate {
                 endpoint: crate::proto::TmuxEndpoint {
                     socket_path: "/tmp/collab-test-tmux.sock".into(),
@@ -1316,6 +1330,7 @@ fn appserver_subscription_is_bound_to_the_selected_thread() {
         session_id: Some("session-thread-current".into()),
         thread_id: Some("thread-current".into()),
         tmux_endpoint: None,
+        rex_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "server verified".into(),
     };

@@ -48,6 +48,7 @@ pub fn tick(server: &Arc<Server>) {
 fn tick_at(server: &Arc<Server>, now: i64) {
     super::keepalive::tick_at(server, now);
     super::name_monitor::tick(server, now);
+    super::rex_monitor::reconcile(server, now);
     super::name_stewardship::tick(server, now);
     super::purge_expired_storage(server, now);
     tick_default_lease_maintenance_at(server, now);

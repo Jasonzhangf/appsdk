@@ -187,10 +187,13 @@ where
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         // git-bug 0.10.1 can expose an empty lock owner as this parse error
-        // while another read is releasing the repository lock.
+        // while another read is releasing the repository lock. Concurrent
+        // readers rebuilding a missing cache can also race on index creation
+        // and fail with "path already exists" until the winning rebuild ends.
         if !stderr.contains("already locked")
             && !stderr.contains("git-bug/lock")
             && !stderr.contains("strconv.Atoi: parsing \"\": invalid syntax")
+            && !stderr.contains("cannot create new index, path already exists")
             && !(expect_output && output.status.success())
         {
             return Ok(output);
@@ -318,6 +321,58 @@ pub(super) fn bug_intake_migrate_classification(
             "GIT_BUG_LABEL_FAILED:{}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn output(code: i32, stdout: &str, stderr: &str) -> Output {
+        Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn read_retries_transient_cache_index_race() {
+        let attempts = std::cell::Cell::new(0);
+        let result = run_git_bug_read(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Ok(output(
+                        1,
+                        "",
+                        "Building cache... \nError: cannot create new index, path already exists\n",
+                    ))
+                } else {
+                    Ok(output(0, "[]\n", ""))
+                }
+            },
+            true,
+        )
+        .unwrap();
+        assert!(result.status.success());
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn read_does_not_retry_unrelated_failure() {
+        let attempts = std::cell::Cell::new(0);
+        let result = run_git_bug_read(
+            || {
+                attempts.set(attempts.get() + 1);
+                Ok(output(1, "", "Error: permission denied\n"))
+            },
+            true,
+        )
+        .unwrap();
+        assert!(!result.status.success());
+        assert_eq!(attempts.get(), 1);
     }
 }
 

@@ -4,7 +4,7 @@ use crate::proto::AppServerCandidate;
 use crate::server::state::WorkerRec;
 
 thread_local! {
-    static TEST_TMUX: std::cell::RefCell<Option<(super::peer_tests::IsolatedTmux, usize)>> = const { std::cell::RefCell::new(None) };
+    static TEST_TMUX: std::cell::RefCell<Option<(PathBuf, super::peer_tests::IsolatedTmux, usize)>> = const { std::cell::RefCell::new(None) };
     static TEST_PROJECT_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -177,8 +177,15 @@ fn committed_native_scope_fixture(
 fn test_candidates_at(thread_id: &str, cwd: &Path) -> Option<TransportCandidates> {
     let mut endpoint = TEST_TMUX.with(|fixture| {
         let mut fixture = fixture.borrow_mut();
-        let (tmux, endpoint_index) = fixture.get_or_insert_with(|| {
+        if fixture
+            .as_ref()
+            .is_some_and(|(owner_root, _, _)| owner_root != cwd)
+        {
+            *fixture = None;
+        }
+        let (_, tmux, endpoint_index) = fixture.get_or_insert_with(|| {
             (
+                cwd.to_path_buf(),
                 super::peer_tests::IsolatedTmux::start(cwd),
                 0,
             )

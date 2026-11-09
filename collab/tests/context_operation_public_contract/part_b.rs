@@ -2923,13 +2923,13 @@ fn restricted_cwd_context_in_pane(
     }
 }
 
-/// Report whether the current runner actually denies `getcwd` inside
-/// `restricted`. The denied-cwd fallback only applies when the kernel refuses
-/// `getcwd` for a permission reason; a privileged runner (for example GitHub's
-/// root CI user) reads the directory regardless of mode, so the degraded path
-/// is not reachable there and the assertions must not be faked against the
-/// normal `getcwd` path.
-fn restricted_cwd_denies_getcwd(fixture: &Fixture, pane: &Pane, restricted: &Path) -> bool {
+/// Return the exit status of a real `getcwd` call inside `restricted`. The
+/// denied-cwd fallback only applies when the kernel refuses `getcwd` for a
+/// permission reason; a privileged runner (for example GitHub's root CI user)
+/// reads the directory regardless of mode, so the degraded path is not
+/// reachable there and the assertions must not be faked against the normal
+/// `getcwd` path. A non-zero status means the denial is real and reproducible.
+fn restricted_cwd_getcwd_probe_status(fixture: &Fixture, pane: &Pane, restricted: &Path) -> i32 {
     let done = fixture.root.join("ctxop-restricted-getcwd-probe.exit");
     fs::remove_file(&done).ok();
     let script = format!(
@@ -2948,7 +2948,7 @@ fn restricted_cwd_denies_getcwd(fixture: &Fixture, pane: &Pane, restricted: &Pat
     fs::read_to_string(&done)
         .ok()
         .and_then(|value| value.trim().parse::<i32>().ok())
-        .is_some_and(|code| code != 0)
+        .expect("getcwd probe writes a numeric status")
 }
 
 #[test]
@@ -2971,14 +2971,21 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
     // The fallback only exists for a real `getcwd` permission denial. On a
     // privileged runner the mode change does not deny `getcwd`, so the degraded
     // path is unreachable and the denial assertions below would test the normal
-    // path by accident.
-    if !restricted_cwd_denies_getcwd(&fixture, &pane, &restricted) {
+    // path by accident. The probe status and branch decision are printed so a
+    // `--nocapture` receipt proves which branch this candidate executed.
+    let getcwd_probe = restricted_cwd_getcwd_probe_status(&fixture, &pane, &restricted);
+    eprintln!("denied-cwd guard: restricted_cwd getcwd probe exit status = {getcwd_probe}");
+    if getcwd_probe == 0 {
         eprintln!(
-            "skipping denied-cwd fallback assertions: this runner does not deny getcwd for mode 000 cwd"
+            "denied-cwd guard: getcwd readable on mode-000 cwd; skipping fallback assertions (supported-runtime limitation)"
         );
         return;
     }
+    eprintln!(
+        "denied-cwd guard: real PermissionDenied on mode-000 cwd; executing the complete fallback assertions"
+    );
 
+    eprintln!("denied-cwd assertion 1/6: valid absolute PWD resolves to the registered identity and project");
     let valid = restricted_cwd_context_in_pane(
         &fixture,
         &pane,
@@ -3005,7 +3012,9 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         Some(root.as_str()),
         "authenticated PWD must resolve to the same registered project: {valid_payload}"
     );
+    eprintln!("denied-cwd assertion 1/6 passed: valid PWD resolved to the seed worker and project");
 
+    eprintln!("denied-cwd assertion 2/6: missing PWD is rejected with PWD is unavailable");
     let missing = restricted_cwd_context_in_pane(
         &fixture,
         &pane,
@@ -3020,7 +3029,9 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         "{}",
         text(&missing)
     );
+    eprintln!("denied-cwd assertion 2/6 passed: missing PWD rejected");
 
+    eprintln!("denied-cwd assertion 3/6: relative PWD is rejected with PWD is unavailable");
     let relative = restricted_cwd_context_in_pane(
         &fixture,
         &pane,
@@ -3035,7 +3046,9 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         "{}",
         text(&relative)
     );
+    eprintln!("denied-cwd assertion 3/6 passed: relative PWD rejected");
 
+    eprintln!("denied-cwd assertion 4/6: nonexistent absolute PWD is rejected with PWD cannot be canonicalized");
     let forged = restricted_cwd_context_in_pane(
         &fixture,
         &pane,
@@ -3050,7 +3063,9 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         "{}",
         text(&forged)
     );
+    eprintln!("denied-cwd assertion 4/6 passed: nonexistent PWD rejected");
 
+    eprintln!("denied-cwd assertion 5/6: real but unregistered PWD is rejected with COLLAB_CONTEXT_UNRESOLVED");
     let unregistered = unique_root("restricted-cwd-unregistered");
     fs::create_dir_all(&unregistered).expect("create forged but real PWD target");
     let forged_real = restricted_cwd_context_in_pane(
@@ -3068,7 +3083,9 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         "{}",
         text(&forged_real)
     );
+    eprintln!("denied-cwd assertion 5/6 passed: unregistered real PWD rejected");
 
+    eprintln!("denied-cwd assertion 6/6: foreign registered PWD is rejected with IDENTITY_MAP_NOT_FOUND and leaves identity-map/routes unchanged");
     let foreign = fixture.root.join("restricted-cwd-foreign");
     seed_baseline(&foreign);
     let foreign_canonical = fs::canonicalize(&foreign)
@@ -3130,4 +3147,6 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
         before_map,
         "forged foreign PWD must not re-map the original binding"
     );
+    eprintln!("denied-cwd assertion 6/6 passed: foreign PWD rejected without identity-map or route mutation");
+    eprintln!("denied-cwd assertions: all six public degraded-path groups executed and passed");
 }

@@ -348,7 +348,7 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         accepted_context.data["role_brief"]["next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("Resume your authorized owned goal from the current board."),
+            .contains("Act as the accepted goal's long-horizon orchestrator"),
         "{}",
         accepted_context.data["role_brief"]
     );

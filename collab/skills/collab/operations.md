@@ -1826,8 +1826,10 @@ assignment. A reviewed read-only delivery proceeds directly through cleanup
 and normal close. Do not leave a peer idle merely because its last task
 returned `delivered`, `merged`, or a review verdict. Route the next
 non-overlapping P0/P1 work peer-first. Reuse an autonomous peer for another
-long-horizon goal. Dispatch one-shot execution or observation directly to
-independent GCM workers. Closing or force-closing a stale task is a scheduling
+long-horizon goal. Check idle, suitable authorized peers and available capacity
+first; use peer capacity that can take the ready work. Direct-dispatch
+independent GCM workers only when no suitable authorized peer can take the
+work. Closing or force-closing a stale task is a scheduling
 decision that must preserve evidence, not a reason to stop dispatching.
 
 ### Verified merge and resource cleanup DAG（单源单汇）

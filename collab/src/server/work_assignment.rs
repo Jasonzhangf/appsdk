@@ -605,8 +605,18 @@ fn board_work_policy(
                     &mut record,
                     details.work_policy.reviewer_name.clone(),
                 ));
+                // A reviewer rebind invalidates the previous verdict, but it is
+                // not itself a typed rework decision. Keep a delivered (or
+                // accepted) task delivered so the new reviewer can decide, and
+                // point next_step at the current required reviewer.
                 if matches!(task.status.as_str(), "accepted" | "delivered") {
-                    task.status = "rework".into();
+                    task.status = "delivered".into();
+                    task.next_step = Some(match details.work_policy.reviewer_name.as_deref() {
+                        Some(name) => format!(
+                            "await review by {name}; use collab task review --accept or --rework"
+                        ),
+                        None => "task owner or live master reviews delivery with collab task review --accept or --rework".into(),
+                    });
                 }
                 if record.delivered_ms.is_some() {
                     events.push(Event::TaskLifecycleUpdated {
@@ -619,6 +629,7 @@ fn board_work_policy(
     }
     details.revision += 1;
     task.updated_ms = now_ms();
+    let resulting_status = task.status.clone();
     events.extend([
         Event::TaskUpdated { task },
         Event::BoardDetailsChanged {
@@ -626,8 +637,12 @@ fn board_work_policy(
             details,
         },
     ]);
-    if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
-        events.push(event);
+    // Only an executing state reopens a completed execute phase. A reviewer
+    // rebind that keeps the task delivered must not restart execution.
+    if matches!(resulting_status.as_str(), "working" | "verifying" | "rework") {
+        if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
+            events.push(event);
+        }
     }
     if let Err(error) = server.commit_locked_checked(&mut state, &events) {
         return Resp::err(format!("WORK_POLICY_DURABILITY_FAILED: {error}"));

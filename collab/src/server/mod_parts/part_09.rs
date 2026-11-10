@@ -840,13 +840,21 @@ fn release_dependents_of_closed_task(
     let waiting = waiting_dependents_of(st, closed_id);
     let mut subscribed_notifications = Vec::new();
     for mut waiter_task in waiting {
+        // An ownerless master repair keeps the persisted owner unchanged but
+        // records the live master in WaitSpec.waiter. Route the release to the
+        // durable waiter so the notification and subscription lookup never
+        // target an unavailable persisted owner.
+        let waiter = waiter_task
+            .wait
+            .as_ref()
+            .map(|wait| wait.waiter.clone())
+            .unwrap_or_else(|| waiter_task.owner.clone());
         waiter_task.status = "blocked".into();
         waiter_task.wait = None;
         waiter_task.next_step = Some(format!(
             "RESOURCE_RELEASED={closed_id} recheck conflicts, then resume only after Server confirms free"
         ));
         waiter_task.updated_ms = now_ms();
-        let waiter = waiter_task.owner.clone();
         let subscription = st
             .matching_subscription(&waiter, "resource-released", Some(closed_id), now_ms())
             .cloned();

@@ -244,3 +244,177 @@ fn board_reassign_exclusive_resource_conflict_is_not_a_peer_capacity_limit() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// The board projects an unavailable owner as empty and `needs_reassignment`.
+/// The current master must be able to repair the task: reassign it by
+/// invitation or put it into a durable typed wait, without losing status or
+/// evidence.
+fn ownerless_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
+    let (server, root, route) = board_name_fixture();
+    let response = crate::server::peer_tests::register_synthetic_peer(&server, "master", "master");
+    assert!(response.ok, "{:?}", response.error);
+    crate::server::peer_tests::promote_master(&server, "master", "user-approved");
+    {
+        let mut state = server.state.lock().unwrap();
+        // Drop the carrier assignment and point the persisted owner at a name
+        // with no current binding, so the board projects owner empty.
+        state.task_assignments.remove("named-work");
+        {
+            let task = state.tasks.get_mut("named-work").unwrap();
+            task.owner = "ghost".into();
+            task.status = status.into();
+            task.next_step = Some("preserved next step".into());
+        }
+        {
+            let details = state.board_details.get_mut("named-work").unwrap();
+            details.invitation = None;
+            details.work_policy.reviewer_name = Some("Grace".into());
+            details.long_horizon = Some(crate::board::LongHorizonTaskSpec {
+                content: "continue ownerless repair".into(),
+                interval_ms: 3_600_000,
+                repeat_count: 100,
+                ttl_seconds: 86_400,
+            });
+        }
+        state.task_lifecycle.insert(
+            "named-work".into(),
+            state::TaskLifecycleRecord {
+                required_reviewer_name: Some("Grace".into()),
+                delivery_kind: state::TaskDeliveryKind::Code,
+                delivery_evidence: Some("kept evidence".into()),
+                delivered_ms: Some(1),
+                review_subject_revision: 1,
+                ..Default::default()
+            },
+        );
+        state
+            .apply_checked(&Event::TaskCreated {
+                task: task("blocking-resource", "current"),
+            })
+            .unwrap();
+        {
+            let blocking = state.tasks.get_mut("blocking-resource").unwrap();
+            blocking.status = "working".into();
+            blocking.feature_id = Some("shared".into());
+        }
+        state
+            .board_details
+            .get_mut("blocking-resource")
+            .unwrap()
+            .public_visibility = true;
+    }
+    (server, root, route)
+}
+
+fn ownerless_board_view(server: &Server) -> serde_json::Value {
+    let control =
+        binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+    let state = server.state.lock().unwrap();
+    let route = server_route_scope(server, &state).unwrap();
+    let view = board_task_view_with_master(
+        &state,
+        &control,
+        &state.tasks["named-work"],
+        None,
+        None,
+        route.as_ref(),
+    )
+    .unwrap()
+    .unwrap();
+    serde_json::to_value(view).unwrap()
+}
+
+#[test]
+fn master_can_reassign_ownerless_task_and_preserve_status_and_evidence() {
+    let (server, root, _) = ownerless_fixture("rework");
+    let view = ownerless_board_view(&server);
+    assert_eq!(view["owner"], "");
+    assert_eq!(view["needs_reassignment"], true);
+    assert_eq!(view["status"], "rework");
+
+    let invited = board_invite(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "named-work".into(),
+        "current".into(),
+        1,
+    );
+    assert!(invited.ok, "{:?}", invited.error);
+    assert_eq!(invited.data["task"]["owner"], "");
+    assert_eq!(invited.data["task"]["status"], "rework");
+
+    let accepted = board_respond(
+        &server,
+        "current".into(),
+        "token-current".into(),
+        "named-work".into(),
+        2,
+        true,
+        None,
+    );
+    assert!(accepted.ok, "{:?}", accepted.error);
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["named-work"].owner, "current");
+    assert_eq!(state.tasks["named-work"].status, "rework");
+    assert_eq!(
+        state.task_lifecycle["named-work"].delivery_evidence.as_deref(),
+        Some("kept evidence")
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_can_put_ownerless_task_into_durable_wait_with_owner_preserved() {
+    let (server, root, _) = ownerless_fixture("rework");
+    {
+        let mut state = server.state.lock().unwrap();
+        state.tasks.get_mut("named-work").unwrap().feature_id = Some("shared".into());
+    }
+    let response = handle_task_wait(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "named-work".into(),
+        "blocking-resource".into(),
+    );
+    assert!(response.ok, "{:?}", response.error);
+    {
+        let state = server.state.lock().unwrap();
+        let task = &state.tasks["named-work"];
+        assert_eq!(task.status, "waiting");
+        assert!(task
+            .wait
+            .as_ref()
+            .is_some_and(|wait| wait.waiting_for == "blocking-resource"));
+        // The persisted owner row stays intact; the wait is a repair, not a loss.
+        assert_eq!(task.owner, "ghost");
+        assert_eq!(
+            task.next_step.as_deref(),
+            Some("WAITING_FOR=blocking-resource")
+        );
+    }
+    // The board no longer exposes owner empty together with wait empty.
+    let view = ownerless_board_view(&server);
+    assert_eq!(view["owner"], "");
+    assert_eq!(view["blocking_task"], "blocking-resource");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn non_master_cannot_repair_ownerless_task() {
+    let (server, root, _) = ownerless_fixture("rework");
+    let response = handle_task_wait(
+        &server,
+        "current".into(),
+        "token-current".into(),
+        "named-work".into(),
+        "blocking-resource".into(),
+    );
+    assert!(
+        !response.ok,
+        "a non-master peer must not repair an ownerless task"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

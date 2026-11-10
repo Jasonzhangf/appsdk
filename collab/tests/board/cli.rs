@@ -1455,7 +1455,7 @@ fn peer_publication_can_be_claimed_by_self_or_master() {
 }
 
 #[test]
-fn admitted_ticket_reviewer_change_reopens_execute_phase_for_rework() {
+fn admitted_ticket_reviewer_change_keeps_delivered_then_rework_reopens_execute_phase() {
     let (fixture, _, peer) = setup();
     let id = "reviewer-change-rework";
     publish(&fixture, id);
@@ -1515,8 +1515,27 @@ fn admitted_ticket_reviewer_change_reopens_execute_phase_for_rework() {
         ],
         THREAD_A,
     );
-    assert_eq!(policy["task"]["status"], "rework");
-    let rework_revision = policy["task"]["revision"].as_u64().unwrap().to_string();
+    // A reviewer rebind is a routing change, not a typed rework decision. The
+    // delivered task stays delivered and points at the new reviewer.
+    assert_eq!(policy["task"]["status"], "delivered");
+    assert_eq!(
+        policy["task"]["next_step"],
+        "await review by ReviewerX; use collab task review --accept or --rework"
+    );
+    // A typed rework decision, not the reviewer rebind, is what reopens the
+    // execute phase so the owner can redo the work.
+    let rework = fixture.run_public(&["task", "update", id, "--status", "rework"], THREAD_B);
+    assert_eq!(rework["status"], "rework");
+    let rework_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let rework_revision = rework_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
     let started = fixture.run_public(
         &[
             "board",
@@ -1544,6 +1563,354 @@ fn admitted_ticket_reviewer_change_reopens_execute_phase_for_rework() {
         THREAD_B,
     );
     assert_eq!(redelivered["status"], "delivered");
+}
+
+#[test]
+fn reviewer_rebind_keeps_delivered_task_in_delivered_with_updated_next_step() {
+    let (fixture, _, peer) = setup();
+    let id = "reviewer-rebind-delivered";
+    publish(&fixture, id);
+    fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "first delivery",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let revision = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let rebind = fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            id,
+            "--reviewer",
+            "ReviewerX",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(rebind["task"]["status"], "delivered");
+    assert_eq!(
+        rebind["task"]["next_step"],
+        "await review by ReviewerX; use collab task review --accept or --rework"
+    );
+    assert_eq!(rebind["task"]["reviewer_name"], "ReviewerX");
+    assert_eq!(
+        peer,
+        fixture.run_public(&["board", "show"], THREAD_B)["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == id)
+            .unwrap()["owner"]
+    );
+}
+
+#[test]
+fn master_can_set_ownerless_task_into_typed_wait_and_non_master_cannot() {
+    let (mut fixture, _master, _peer) = setup();
+    // A live third worker owns the blocking resource, so the wait has a real
+    // responsible actor.
+    fixture.run_public(&["context"], THREAD_C);
+    let blocker = "blocking-resource";
+    publish(&fixture, blocker);
+    fixture.run_public(
+        &["board", "claim", blocker, "--expected-revision", "1"],
+        THREAD_C,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            blocker,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_C,
+    );
+
+    let id = "ownerless-wait";
+    publish(&fixture, id);
+    fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "ownerless evidence",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+
+    // Drop the current binding and point the persisted owner at a name that has
+    // no holder. The board must then project owner empty and needs_reassignment
+    // while the delivery evidence stays in task_lifecycle. The two tasks share
+    // a feature so the wait has a real matching resource.
+    fixture.update_current_state(|state| {
+        let task = state["tasks"][id].as_object_mut().unwrap();
+        task.insert("owner".into(), json!("ghost"));
+        task.insert("status".into(), json!("rework"));
+        task.insert("feature_id".into(), json!("shared"));
+        state["task_assignments"]
+            .as_object_mut()
+            .unwrap()
+            .remove(id);
+        state["tasks"][blocker]["feature_id"] = json!("shared");
+    });
+
+    let view = fixture.run_public(&["board", "show"], THREAD_A);
+    let row = view["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()
+        .clone();
+    assert_eq!(row["owner"], "");
+    assert_eq!(row["needs_reassignment"], true);
+
+    // A non-master peer cannot reach the repair path.
+    let refused = fixture.command_public(&["task", "wait", id, "--for", blocker], THREAD_B);
+    assert!(
+        !refused.status.success(),
+        "non-master must not repair an ownerless task: {}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+
+    // The current master records the durable typed wait without losing the
+    // owner row, the next-step contract, or the delivery evidence.
+    fixture.run_public(&["task", "wait", id, "--for", blocker], THREAD_A);
+    let after = fixture.current_state();
+    assert_eq!(after["tasks"][id]["status"], "waiting");
+    assert_eq!(
+        after["tasks"][id]["next_step"],
+        format!("WAITING_FOR={blocker}")
+    );
+    assert_eq!(after["tasks"][id]["owner"], "ghost");
+    assert_eq!(
+        after["task_lifecycle"][id]["delivery_evidence"],
+        "ownerless evidence"
+    );
+}
+
+/// Public CLI black box for c947cbe/10a0d54 release routing: a master records a
+/// durable wait for a task whose persisted owner is unavailable, then releases
+/// the blocking resource. The release notification must target the durable
+/// waiter recorded in WaitSpec, not the unavailable persisted owner, while the
+/// owner row and delivery evidence stay unchanged.
+#[test]
+fn ownerless_wait_release_notifies_the_durable_waiter_after_blocker_cleanup() {
+    let (mut fixture, master, _peer) = setup();
+    // A live third worker owns the blocking resource so the wait has a real
+    // responsible actor.
+    fixture.run_public(&["context"], THREAD_C);
+    let blocker = "ownerless-release-blocker";
+    publish(&fixture, blocker);
+    fixture.run_public(
+        &["board", "claim", blocker, "--expected-revision", "1"],
+        THREAD_C,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            blocker,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_C,
+    );
+
+    let id = "ownerless-release-waiter";
+    publish(&fixture, id);
+    fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--no-candidate",
+            "--evidence",
+            "ownerless evidence",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+
+    // Point the persisted owner at a name with no holder while the delivery
+    // evidence stays in task_lifecycle. Both tasks share a feature so the
+    // blocking task holds a matching active resource.
+    fixture.update_current_state(|state| {
+        let task = state["tasks"][id].as_object_mut().unwrap();
+        task.insert("owner".into(), json!("ghost"));
+        task.insert("status".into(), json!("rework"));
+        task.insert("feature_id".into(), json!("shared-release"));
+        state["task_assignments"]
+            .as_object_mut()
+            .unwrap()
+            .remove(id);
+        state["tasks"][blocker]["feature_id"] = json!("shared-release");
+    });
+
+    // The current master records the durable typed wait and subscribes for the
+    // release event the wait response points to.
+    fixture.run_public(&["task", "wait", id, "--for", blocker], THREAD_A);
+    let waiting = fixture.current_state();
+    assert_eq!(waiting["tasks"][id]["status"], "waiting");
+    assert_eq!(waiting["tasks"][id]["owner"], "ghost");
+    assert_eq!(waiting["tasks"][id]["wait"]["waiter"], master);
+    let wait_revision = fixture.run_public(&["board", "show"], THREAD_A)["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()["revision"]
+        .clone();
+    let subscribed = fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "resource-released",
+            "--subject",
+            blocker,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(subscribed["subscription"]["event"], "resource-released");
+
+    // Force close the blocker, then finalize its cleanup. Finalization is the
+    // legal completion path that releases dependents without changing the
+    // waiter's owner or evidence.
+    fixture.run_public(
+        &[
+            "task",
+            "close",
+            blocker,
+            "--force",
+            "--reason",
+            "isolated fixture blocker released",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(&["task", "finalize-cleanup", blocker], THREAD_A);
+
+    let after = fixture.current_state();
+    assert_eq!(after["tasks"][id]["status"], "blocked");
+    assert_eq!(after["tasks"][id]["owner"], "ghost");
+    assert_eq!(
+        after["task_lifecycle"][id]["delivery_evidence"],
+        "ownerless evidence"
+    );
+    assert_eq!(
+        after["tasks"][id]["next_step"],
+        format!(
+            "RESOURCE_RELEASED={blocker} recheck conflicts, then resume only after Server confirms free"
+        )
+    );
+    let releases: Vec<&Value> = after["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|message| message["subject"] == format!("released:{blocker}"))
+        .collect();
+    assert_eq!(
+        releases.len(),
+        1,
+        "exactly one release notification: {releases:?}"
+    );
+    assert_eq!(
+        releases[0]["to"], master,
+        "release notification must target the durable waiter, not the unavailable owner: {releases:?}"
+    );
+    assert_ne!(releases[0]["to"], "ghost");
+    let release_revision = fixture.run_public(&["board", "show"], THREAD_A)["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()["revision"]
+        .clone();
+    println!(
+        "PROBE ownerless-release: revision_after_wait={wait_revision} \
+         revision_after_release={release_revision} waiter={master} \
+         notification_to={} owner_after=ghost evidence_preserved=true",
+        releases[0]["to"]
+    );
 }
 
 #[test]

@@ -314,12 +314,240 @@ fn ticket_projection(state: &State, task_id: &str) -> serde_json::Value {
     })
 }
 
+/// Current execution slot resolved for an existing task owner. Shared by
+/// ordinary Execute-phase repair and explicit legacy admission so both use one
+/// active-binding and stable-assignment boundary.
+struct OwnerExecution {
+    slot_name: String,
+    generation: u64,
+}
+
+fn resolve_owner_execution(
+    server: &Server,
+    state: &State,
+    id: &str,
+    owner: &str,
+) -> Result<OwnerExecution, Resp> {
+    let route = match server_route_scope(server, state) {
+        Ok(Some(route)) => route,
+        Ok(None) => return Err(Resp::err("project route is not ready")),
+        Err(error) => return Err(Resp::err(error)),
+    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Err(Resp::err(error)),
+        };
+    let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, owner)
+    {
+        Ok(Some(slot)) => slot,
+        Ok(None) => {
+            return Err(Resp::err_data(
+                "TICKET_BACKFILL_SLOT_MISSING: task owner has no current execution slot",
+                json!({"task_id": id, "owner": owner}),
+            ))
+        }
+        Err(error) => return Err(Resp::err(error)),
+    };
+    let Some(current) = slot.active_binding() else {
+        return Err(Resp::err_data(
+            "TICKET_BACKFILL_SLOT_INACTIVE: owner slot has no active binding",
+            json!({"task_id": id, "owner": owner}),
+        ));
+    };
+    let Some(current_session) = current.binding.session_id.as_ref() else {
+        return Err(Resp::err_data(
+            "TICKET_BACKFILL_SESSION_MISSING: owner slot has no session",
+            json!({"task_id": id, "owner": owner}),
+        ));
+    };
+    let Some(assignment) = state.task_assignment(id).cloned() else {
+        return Err(Resp::err_data(
+            "TICKET_BACKFILL_ASSIGNMENT_MISSING: ticket has no stable assignment",
+            json!({"task_id": id}),
+        ));
+    };
+    if assignment.name != slot.identity_key.name {
+        return Err(Resp::err_data(
+            "TICKET_BACKFILL_ASSIGNMENT_NAME_MISMATCH: ticket assignment name does not match owner slot",
+            json!({
+                "task_id": id,
+                "assignment_name": assignment.name,
+                "slot": slot.identity_key.name,
+            }),
+        ));
+    }
+    if assignment.session_id != current_session.as_str() {
+        return Err(Resp::err_data(
+            "TICKET_BACKFILL_ASSIGNMENT_SESSION_MISMATCH: ticket assignment session does not match owner slot",
+            json!({"task_id": id}),
+        ));
+    }
+    Ok(OwnerExecution {
+        slot_name: slot.identity_key.name.clone(),
+        generation: slot.generation,
+    })
+}
+
+/// Eligibility for explicit legacy admission that needs only current state.
+/// Returns the first typed rejection, or `Ok(())` when the described
+/// unadmitted task may be admitted. Identity-control checks run separately.
+pub(super) fn legacy_admission_eligibility(
+    state: &State,
+    details: &BoardTaskDetails,
+    task: &TaskRec,
+) -> Result<(), Resp> {
+    if details.admitted {
+        return Err(Resp::err_data(
+            "TICKET_ADMISSION_ALREADY_ADMITTED: task is already admitted",
+            json!({"task_id": task.id}),
+        ));
+    }
+    if !details.public_visibility {
+        return Err(Resp::err(
+            "BOARD_TASK_NOT_PUBLIC: only public work may be admitted",
+        ));
+    }
+    if !matches!(task.status.as_str(), "working" | "rework") {
+        return Err(Resp::err_data(
+            "TICKET_ADMISSION_INELIGIBLE_STATUS: only working or rework legacy tickets may be admitted",
+            json!({"task_id": task.id, "status": task.status}),
+        ));
+    }
+    if [
+        &details.title,
+        &details.description,
+        &details.delivery_condition,
+        &details.test_condition,
+    ]
+    .iter()
+    .any(|text| text.trim().is_empty())
+    {
+        return Err(Resp::err(
+            "BOARD_DESCRIPTION_REQUIRED: admission requires title, description, delivery condition and test condition",
+        ));
+    }
+    if details.invitation.is_some() {
+        return Err(Resp::err_data(
+            "TICKET_ADMISSION_INVITATION_PENDING: withdraw the pending invitation before admitting",
+            json!({"task_id": task.id}),
+        ));
+    }
+    if state.ticket_phases.iter().any(|phase| phase.task_id == task.id) {
+        return Err(Resp::err_data(
+            "TICKET_ADMISSION_PHASE_CONFLICT: an unadmitted ticket must have no phase history",
+            json!({"task_id": task.id}),
+        ));
+    }
+    Ok(())
+}
+
+/// Explicit, master-only legacy admission. The caller already authenticated
+/// the actor, required the current project master, and checked the revision.
+/// All eligibility and slot checks run before any mutation event is built, and
+/// the detail change and the single claimed Execute phase commit together.
+fn board_admit_legacy_locked(
+    server: &Server,
+    state: &mut State,
+    id: &str,
+    actor: &str,
+    details: &BoardTaskDetails,
+    task: &TaskRec,
+) -> Resp {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+
+    if let Err(error) = legacy_admission_eligibility(state, details, task) {
+        return error;
+    }
+    let execution = match resolve_owner_execution(server, state, id, &task.owner) {
+        Ok(execution) => execution,
+        Err(error) => return error,
+    };
+    if let Err(error) = work_executor_gate(server, state, id, &task.owner) {
+        return error;
+    }
+    if state.ticket_phases.iter().any(|phase| {
+        phase.task_id != id
+            && phase.slot_name.as_deref() == Some(execution.slot_name.as_str())
+            && matches!(
+                phase.status,
+                TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+            )
+    }) {
+        return Resp::err_data(
+            "TICKET_ADMISSION_SLOT_OCCUPIED: owner slot already holds a claimed or running phase",
+            json!({"task_id": id, "slot": execution.slot_name}),
+        );
+    }
+    let revision = match details.revision.checked_add(1) {
+        Some(revision) => revision,
+        None => {
+            return Resp::err_data(
+                "TICKET_ADMISSION_REVISION_EXHAUSTED: cannot advance the task revision",
+                json!({"task_id": id}),
+            )
+        }
+    };
+    let enqueue_seq = match state
+        .ticket_phases
+        .iter()
+        .map(|phase| phase.enqueue_seq)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+    {
+        Some(sequence) => sequence,
+        None => {
+            return Resp::err_data(
+                "TICKET_BACKFILL_SEQUENCE_EXHAUSTED: cannot allocate an enqueue sequence",
+                json!({"task_id": id}),
+            )
+        }
+    };
+    let phase = TicketPhaseRecord {
+        task_id: id.to_owned(),
+        phase: TicketPhaseKind::Execute,
+        batch: 0,
+        priority: task.priority.clone(),
+        status: TicketPhaseStatus::Claimed,
+        slot_name: Some(execution.slot_name.clone()),
+        binding_generation: execution.generation,
+        enqueue_seq,
+        attempt_generation: 1,
+        depends_on: Vec::new(),
+        route_group: None,
+        wait_reason: None,
+        result: None,
+    };
+    let mut admitted = details.clone();
+    admitted.admitted = true;
+    admitted.revision = revision;
+    if let Err(error) = server.commit_locked_checked(
+        state,
+        &[
+            Event::BoardDetailsChanged {
+                task_id: id.to_owned(),
+                details: admitted,
+            },
+            Event::TicketPhaseRecorded { phase },
+        ],
+    ) {
+        return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
+    }
+    let mut response = board_task_response(server, state, id, actor);
+    if let Some(object) = response.data.as_object_mut() {
+        object.insert("ticket".into(), ticket_projection(state, id));
+    }
+    response
+}
+
 fn board_backfill_execute(
     server: &Server,
     actor: String,
     token: String,
     id: String,
     expected_revision: u64,
+    admit_legacy: bool,
 ) -> Resp {
     use crate::server::ticket_state::{
         TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus,
@@ -338,7 +566,7 @@ fn board_backfill_execute(
     let Some(details) = state.board_details.get(&id).cloned() else {
         return Resp::err("BOARD_TASK_NOT_FOUND: no described task with this id");
     };
-    if !details.admitted {
+    if !admit_legacy && !details.admitted {
         return Resp::err_data(
             "TICKET_BACKFILL_NOT_ADMITTED: backfill requires an admitted ticket",
             json!({"task_id": id}),
@@ -347,6 +575,9 @@ fn board_backfill_execute(
     let Some(task) = state.tasks.get(&id).cloned() else {
         return Resp::err("task not found");
     };
+    if admit_legacy {
+        return board_admit_legacy_locked(server, &mut state, &id, &actor, &details, &task);
+    }
     if task.status != "working" {
         return Resp::err_data(
             "TICKET_BACKFILL_NOT_WORKING: backfill only repairs working admitted tickets",
@@ -364,63 +595,10 @@ fn board_backfill_execute(
         );
     }
 
-    let route = match server_route_scope(server, &state) {
-        Ok(Some(route)) => route,
-        Ok(None) => return Resp::err("project route is not ready"),
-        Err(error) => return Resp::err(error),
+    let execution = match resolve_owner_execution(server, &state, &id, &task.owner) {
+        Ok(execution) => execution,
+        Err(error) => return error,
     };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control,
-        Err(error) => return Resp::err(error),
-    };
-    let slot = match control.current_for_worker(
-        &route.project_scope_id,
-        &route.app_scope_id,
-        &task.owner,
-    ) {
-        Ok(Some(slot)) => slot,
-        Ok(None) => {
-            return Resp::err_data(
-                "TICKET_BACKFILL_SLOT_MISSING: task owner has no current execution slot",
-                json!({"task_id": id, "owner": task.owner}),
-            )
-        }
-        Err(error) => return Resp::err(error),
-    };
-    let Some(current) = slot.active_binding() else {
-        return Resp::err_data(
-            "TICKET_BACKFILL_SLOT_INACTIVE: owner slot has no active binding",
-            json!({"task_id": id, "owner": task.owner}),
-        );
-    };
-    let Some(current_session) = current.binding.session_id.as_ref() else {
-        return Resp::err_data(
-            "TICKET_BACKFILL_SESSION_MISSING: owner slot has no session",
-            json!({"task_id": id, "owner": task.owner}),
-        );
-    };
-    let Some(assignment) = state.task_assignment(&id).cloned() else {
-        return Resp::err_data(
-            "TICKET_BACKFILL_ASSIGNMENT_MISSING: ticket has no stable assignment",
-            json!({"task_id": id}),
-        );
-    };
-    if assignment.name != slot.identity_key.name {
-        return Resp::err_data(
-            "TICKET_BACKFILL_ASSIGNMENT_NAME_MISMATCH: ticket assignment name does not match owner slot",
-            json!({
-                "task_id": id,
-                "assignment_name": assignment.name,
-                "slot": slot.identity_key.name,
-            }),
-        );
-    }
-    if assignment.session_id != current_session.as_str() {
-        return Resp::err_data(
-            "TICKET_BACKFILL_ASSIGNMENT_SESSION_MISMATCH: ticket assignment session does not match owner slot",
-            json!({"task_id": id}),
-        );
-    }
 
     let latest = state
         .ticket_phases
@@ -477,8 +655,8 @@ fn board_backfill_execute(
         batch,
         priority: task.priority.clone(),
         status: TicketPhaseStatus::Claimed,
-        slot_name: Some(slot.identity_key.name.clone()),
-        binding_generation: slot.generation,
+        slot_name: Some(execution.slot_name.clone()),
+        binding_generation: execution.generation,
         enqueue_seq,
         attempt_generation,
         depends_on,
@@ -666,8 +844,12 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         BoardCommand::DeclineAssigned { id, expected_revision, reason } => board_decline_assigned(server, actor, token, id, expected_revision, reason),
         BoardCommand::Withdraw { id, expected_revision, reason } => board_withdraw(server, actor, token, id, expected_revision, reason),
         BoardCommand::Dispatch {id,expected_revision,long_horizon} => board_dispatch_work(server,actor,token,id,expected_revision,long_horizon),
-        BoardCommand::BackfillExecute { id, expected_revision } => {
-            board_backfill_execute(server, actor, token, id, expected_revision)
+        BoardCommand::BackfillExecute {
+            id,
+            expected_revision,
+            admit_legacy,
+        } => {
+            board_backfill_execute(server, actor, token, id, expected_revision, admit_legacy)
         },
         BoardCommand::Policy {scope,id,work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer,expected_revision} => {
             let patch=match parse_work_policy(work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer) {

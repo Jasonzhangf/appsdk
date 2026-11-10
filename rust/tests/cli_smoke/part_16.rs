@@ -83,6 +83,12 @@ esac
     // Charter, fleet rules and notification rules all travel with the wake.
     assert!(text.contains("不要空转，不要假装完成"));
     assert!(text.contains("Peer-first"));
+    assert!(text.contains("先检查 idle、获授权且合适的 peer 与可用容量"));
+    assert!(text.contains("有 ready 工作可承接时优先派给该 peer"));
+    assert!(text.contains("仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`"));
+    assert!(!text.contains("一次性执行或观察直接派独立"));
+    assert!(!text.contains("不以其他 peer 忙闲为前提"));
+    assert!(!text.contains("一次性执行直接 GCM，不等待 peer 忙闲"));
     assert!(text.contains("master在派发任务单填写完整长程内容与明确周期"));
     assert!(text.contains("派发原子开启目标peer订阅"));
     assert!(!text.contains("`[subagent].max_concurrent`（默认 8）"));
@@ -119,6 +125,11 @@ esac
         .as_str()
         .unwrap()
         .contains("派发原子开启目标peer订阅"));
+    assert!(payload["fleet_rules"].as_str().unwrap().contains("先检查 idle、获授权且合适的 peer 与可用容量"));
+    assert!(payload["notification_rules"]
+        .as_str()
+        .unwrap()
+        .contains("仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()

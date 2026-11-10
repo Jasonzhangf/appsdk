@@ -107,7 +107,10 @@ it, including during installation, identity recovery, Collab reset, or this
 governance flow. Long-horizon work belongs to a consenting peer assigned through
 the public board. That peer orchestrates independent
 `codex exec --profile gcm` workers. One-shot execution and observation go
-directly to those workers regardless of peer availability. Each master/peer
+to those workers after checking idle, suitable authorized peers and available
+capacity first; use peer capacity that can take the ready work. Direct-dispatch
+those independent GCM workers only when no suitable authorized peer can take the
+work. Each master/peer
 registers and manages its own goal; master does not proxy-register peer goals.
 
 ## Do not guess

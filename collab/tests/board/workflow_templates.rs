@@ -895,6 +895,8 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
     let fixture = master_fixture();
     let master = fixture.run_public(&["context"], THREAD_A);
     let text = role_projection_text(&master);
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let peer_text = role_projection_text(&peer);
 
     // The old fixed master text unconditionally bypassed suitable peers for
     // one-shot work and asked the reader to retire a peer-first policy. The
@@ -927,6 +929,20 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
     assert!(
         contains_ci(&text, "codex exec --profile gcm"),
         "master role_brief must preserve the independent GCM fallback route: {text}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "direct-dispatch independent `codex exec --profile gcm` workers only when no suitable authorized peer can take the work"
+        ),
+        "master role_brief must gate direct GCM dispatch on eligible peer capacity: {text}"
+    );
+    assert!(
+        contains_ci(
+            &peer_text,
+            "dispatch bounded execution or observation directly to independent `codex exec --profile gcm` subworkers"
+        ) && contains_ci(&peer_text, "not a manager bypass of eligible peer capacity"),
+        "peer role_brief must preserve direct GCM dispatch for its own bounded subwork without turning bounded work peer-first: {peer_text}"
     );
     assert!(
         contains_ci(
@@ -1095,9 +1111,12 @@ fn explicit_worker_peer_executes_directly_without_ordinary_peer_orchestration() 
     assert!(
         contains_ci(
             &ordinary_text,
-            "split the accepted goal into non-overlapping bounded scopes"
+            "split an accepted goal into non-overlapping bounded scopes"
+        ) && contains_ci(
+            &ordinary_text,
+            "dispatch bounded execution or observation directly to independent `codex exec --profile gcm` subworkers"
         ),
-        "ordinary peer must keep the delegated-goal dispatch duty: {ordinary_text}"
+        "ordinary peer must keep its bounded-subwork dispatch duty: {ordinary_text}"
     );
     assert!(
         contains_ci(&ordinary_text, "markdown log")
@@ -1112,7 +1131,7 @@ fn explicit_worker_peer_executes_directly_without_ordinary_peer_orchestration() 
     assert!(
         !contains_ci(
             &worker_text,
-            "split the accepted goal into non-overlapping bounded scopes"
+            "split an accepted goal into non-overlapping bounded scopes"
         ),
         "worker specialty must not be told to dispatch subworkers first: {worker_text}"
     );

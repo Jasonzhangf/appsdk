@@ -315,7 +315,8 @@ pub(crate) fn ticket_recovery_claim_phase(
 /// recovery batch because no pending control effect exists to have queued one.
 /// The current stable-name carrier may still release the slot through the
 /// public claim path when the newest execute attempt is Claimed/Running at an
-/// older generation.
+/// older generation. `rework` is included because a reopened rework attempt
+/// can be left at an older generation with no other recovery path.
 pub(crate) fn ticket_stale_active_claim_phase(
     state: &State,
     slot_name: &str,
@@ -334,7 +335,9 @@ pub(crate) fn ticket_stale_active_claim_phase(
         return None;
     }
     let task = state.tasks.get(task_id)?;
-    if !matches!(task.status.as_str(), "working" | "blocked") || task.owner != current_worker_id {
+    if !matches!(task.status.as_str(), "working" | "blocked" | "rework")
+        || task.owner != current_worker_id
+    {
         return None;
     }
     let assignment = state.task_assignment(task_id)?;

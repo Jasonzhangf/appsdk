@@ -487,7 +487,8 @@ pub(crate) fn context_operation_with_intent(
                 &scope.root,
             )?;
         }
-        let explicit_transport = facts.endpoint.is_some()
+        let explicit_transport = facts.rex.is_some()
+            || facts.endpoint.is_some()
             || provide
                 .map(serde_json::from_str::<Value>)
                 .transpose()?

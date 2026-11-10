@@ -456,16 +456,22 @@ closure is a long-horizon goal.
   scheduled patrols for each role's own goals, risks and resources.
 - `master` audits, dispatches, verifies, and integrates. It offers each
   long-horizon goal through the public board to a suitable, consenting peer.
-  Bounded one-shot execution or observation always uses an independent
-  `codex exec --profile gcm` worker. With no eligible peer, retain the long-horizon
-  goal and split bounded work. Master retains project coordination, cross-peer
-  dependencies, final integration, and the delivery owner's ordinary scope.
+  Check idle, suitable authorized peers and available capacity first. Only when
+  no suitable authorized peer can take the goal, retain it and split bounded
+  work to independent `codex exec --profile gcm` workers. A peer may split an
+  accepted goal into non-overlapping bounded scopes and dispatch those scopes
+  directly to independent `codex exec --profile gcm` workers; this is the
+  peer's own execution split, not a manager bypass of eligible peer capacity.
+  Master retains project coordination, cross-peer dependencies, final
+  integration, and the delivery owner's ordinary scope.
 - An ordinary peer keeps the code-compatible wire role `worker` and derivation
   `peer`. It is the long-horizon orchestrator for an accepted goal: split and
-  plan, run bounded work through independent `codex exec --profile gcm`
-  execution or observation workers when it has no explicit execution specialty,
-  verify evidence, resolve blockers, integrate assigned work, close owned
-  resources, and report to the sender. It does not inherit master authority.
+  plan its bounded subwork, then dispatch those scopes directly to independent
+  `codex exec --profile gcm` execution or observation workers when it has no
+  explicit execution specialty. This is the peer's own execution split, not a
+  manager bypass of eligible peer capacity. Verify evidence, resolve blockers,
+  integrate assigned work, close owned resources, and report to the sender. It
+  does not inherit master authority.
   An explicit `worker` or `executor` specialty, or an assignment that names this
   peer as the bounded executor, permits direct in-contract execution.
 - `patrol`, `memory`, and `architect` are work specialties, not new identity
@@ -1043,9 +1049,12 @@ maintain a separate role prompt:
   capacity that can take the ready work. Direct-dispatch independent GCM workers
   only when no suitable authorized peer can take the work.
 - `worker` with derivation `peer`: orchestrate the accepted long-horizon goal,
-  run bounded work through independent `codex exec --profile gcm` workers,
-  verify evidence, resolve blockers, integrate assigned work, and report to the
-  sender. Evaluate master invitations against current ownership and capacity.
+  split the accepted goal into non-overlapping bounded scopes and dispatch
+  those scopes directly to independent `codex exec --profile gcm` workers.
+  This is the peer's own execution split, not a manager bypass of eligible peer
+  capacity. Verify evidence, resolve blockers, integrate assigned work, and
+  report to the sender. Evaluate master invitations against current ownership
+  and capacity.
   Do not inherit master authority.
 - `managed-subagent`: legacy compatibility only. Preserve historical facts;
   accept no new work and create no schedule, dispatch, registration, or
@@ -1196,8 +1205,8 @@ collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
 Public work uses claim or the board invitation above. `collab subagent
 dispatch` is a legacy private managed path and grants no new production work.
 If a peer declines a long-horizon invitation, retain that goal and arrange
-another consenting peer or decompose it under the current orchestrator.
-Dispatch its bounded execution or observation directly to independent
+another consenting peer. Only when no suitable authorized peer can take the
+goal, decompose its bounded execution or observation to independent
 `codex exec --profile gcm` workers. A refusal does not authorize the legacy
 private managed path or transfer orchestration responsibility to a subworker.
 
@@ -1263,11 +1272,13 @@ and its coordination tasks. Legacy managed records are inspection
 inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
-   and test condition, then claim it or accept its invitation. For bounded
-   execution or observation, give an independent `codex exec --profile gcm`
-   worker the same goal, scope, delivery/test evidence, and stop conditions.
-   Reuse an existing assigned or registered task; describe it if conditions
-   are missing. Do not register a duplicate task for the same work.
+   and test condition, then claim it or accept its invitation. After a manager
+   confirms no suitable authorized peer can take an unassigned goal, or the
+   accepted goal's peer splits its own bounded subwork, give an independent
+   `codex exec --profile gcm` worker the same goal, scope, delivery/test
+   evidence, and stop conditions. Reuse an existing assigned or registered
+   task; describe it if conditions are missing. Do not register a duplicate
+   task for the same work.
    Bind a claimed task's execution worktree through `collab task relocate
    <task-id> --worktree <owned-worktree> [--branch <branch>]`; queue entries
    do not reserve another task's resources.
@@ -1315,10 +1326,12 @@ worker-idle fact remain unchanged.
 ## Common command card
 
 Legacy managed-subagent records grant no new production execution authority.
-Registered peer status and thread state use the owning AppServer RPC. Use peers
-for long-horizon goals. Use independent `codex exec --profile gcm` workers for
-bounded execution or observation. Legacy records may be inspected only for
-diagnosis.
+Registered peer status and thread state use the owning AppServer RPC. Offer
+unassigned long-horizon goals to suitable authorized peers first, and use
+independent `codex exec --profile gcm` workers only when no suitable authorized
+peer can take the goal. A peer may dispatch independent GCM workers directly
+for bounded subwork inside its accepted goal. Legacy records may be inspected
+only for diagnosis.
 For registered participants, `collab-mcp` and the `collab` CLI expose the same
 collaboration protocol. Listed `collab_*` tools alone do not prove registration.
 If MCP is missing, unsupported, aborted, or unknown, run the same
@@ -1715,8 +1728,9 @@ Master operates under two prime directives:
    output symptoms.
 2. **Peer-first Capacity**: Master must keep eligible capacity saturated
    without serial bottlenecks. Offer long-horizon goals through the public
-   board to suitable, consenting peers. Each peer orchestrates independent
-   `codex exec --profile gcm` workers for bounded execution or observation.
+   board to suitable, consenting peers. Each peer may split its accepted goal
+   and orchestrate independent `codex exec --profile gcm` workers for its
+   bounded subwork.
    Check idle, suitable authorized peers and available capacity first; use peer
    capacity that can take the ready work. Direct-dispatch independent GCM
    workers only when no suitable authorized peer can take the work. Before
@@ -1761,10 +1775,12 @@ master must:
 
 Do not stop after consuming a report or closing a task while authorized ready
 work has no correct receiver. Offer long-horizon goals to peers through the
-board. Use independent `codex exec --profile gcm` workers for bounded execution
-or observation. Dispatch the next ready non-overlapping P0/P1 work before the
-scheduling turn ends. Master and peer retain their goal's orchestration and
-delivery responsibility when dispatching bounded GCM work.
+board. Only when no suitable authorized peer can take the goal, route bounded
+execution or observation through independent `codex exec --profile gcm`
+workers. A peer may dispatch independent GCM workers directly for bounded
+subwork inside its accepted goal. Dispatch the next ready non-overlapping P0/P1
+work before the scheduling turn ends. Master and peer retain their goal's
+orchestration and delivery responsibility when dispatching bounded GCM work.
 
 Master idle reminders are level-triggered. Within the same master idle episode,
 each reminder attempt consumes the shared episode-local budget, up to three

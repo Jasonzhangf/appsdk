@@ -77,6 +77,72 @@
         *server.state.lock().unwrap() = current_state::load(&server.state_path, false).unwrap();
     }
 
+    fn idle_projection_task(id: &str, owner: &str, status: &str) -> TaskRec {
+        TaskRec {
+            id: id.into(),
+            owner: owner.into(),
+            created_by: "master".into(),
+            feature_id: None,
+            worktree_path: None,
+            branch: None,
+            base_commit: None,
+            priority: "p1".into(),
+            status: status.into(),
+            next_step: None,
+            wait: None,
+            isolation_mode: None,
+            created_ms: now_ms(),
+            updated_ms: now_ms(),
+        }
+    }
+
+    fn seed_live_observed_idle(server: &Server, root: &std::path::Path, worker_id: &str) {
+        register_appserver_worker(server, root, worker_id, &format!("thread-{worker_id}"));
+        server.commit(&[
+            Event::KeepaliveUpdated {
+                worker_id: worker_id.into(),
+                record: crate::server::keepalive::Record {
+                    observed: "idle".into(),
+                    ..Default::default()
+                },
+            },
+            Event::MasterWakeSignal {
+                signal: MasterWakeSignal::WorkerIdle {
+                    worker_id: worker_id.into(),
+                },
+                at_ms: now_ms(),
+            },
+        ]);
+    }
+
+    fn idle_projection_subagent(id: &str, peer: &str, status: &str) -> crate::subagent::Record {
+        crate::subagent::Record {
+            id: id.into(),
+            parent: "master".into(),
+            peer: peer.into(),
+            status: status.into(),
+            thread_id: Some(format!("thread-{peer}")),
+            profile: None,
+            created_ms: now_ms(),
+            ready_deadline_ms: now_ms() + 60_000,
+            last_message: None,
+            error: None,
+            probe_failures: vec![],
+            runtime: Some("codex".into()),
+            create_operation_id: None,
+            binding_id: None,
+        }
+    }
+
+    fn idle_keys(value: &serde_json::Value) -> Vec<String> {
+        value["idle_workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect()
+    }
+
     #[test]
     fn authenticated_start_is_unsupported_without_mutation() {
         let (server, root) = test_server();
@@ -631,6 +697,264 @@
                 .iter()
                 .any(|id| id.as_str() == Some("lost-peer")),
             "lost peer must not remain idle capacity"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_capacity_projection_filters_execution_and_observation() {
+        let (mut server, root) = test_server();
+        register_appserver_worker(&server, &root, "master", "thread-master");
+        promote_master(&server);
+        for worker_id in [
+            "busy-peer",
+            "accepted-peer",
+            "rework-peer",
+            "idle-peer",
+            "blocked-peer",
+            "waiting-peer",
+            "working-observation-peer",
+            "missing-peer",
+        ] {
+            seed_live_observed_idle(&server, &root, worker_id);
+        }
+        server.commit(&[
+            Event::TaskCreated {
+                task: idle_projection_task("busy", "busy-peer", "working"),
+            },
+            Event::TaskCreated {
+                task: idle_projection_task("accepted", "accepted-peer", "accepted"),
+            },
+            Event::TaskCreated {
+                task: idle_projection_task("rework", "rework-peer", "rework"),
+            },
+            Event::TaskCreated {
+                task: idle_projection_task("blocked", "blocked-peer", "blocked"),
+            },
+            Event::TaskCreated {
+                task: idle_projection_task("waiting", "waiting-peer", "waiting"),
+            },
+            Event::KeepaliveUpdated {
+                worker_id: "working-observation-peer".into(),
+                record: crate::server::keepalive::Record {
+                    observed: "working".into(),
+                    ..Default::default()
+                },
+            },
+        ]);
+        let mut accumulator = server.state.lock().unwrap().master_wake.clone();
+        accumulator.idle_workers.push("unresponsive-peer".into());
+        accumulator
+            .newly_idle_workers
+            .push("unresponsive-peer".into());
+        accumulator
+            .unresponsive_workers
+            .push("unresponsive-peer".into());
+        server.commit(&[Event::MasterWakeUpdated { accumulator }]);
+        server.appserver_thread_status = Arc::new(|_, thread_id| {
+            if thread_id == "thread-missing-peer" {
+                Err("APP_SERVER_THREAD_MISSING: fixture".into())
+            } else {
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "idle"},
+                        "canAcceptDirectInput": true
+                    }
+                }))
+            }
+        });
+
+        let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        let board = handle_board_show(&server, Some("master"));
+        let context = context_projection(&server, "master".into(), "token-master".into());
+        assert!(board.ok, "{board:?}");
+        assert!(context.ok, "{context:?}");
+        let after = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        assert_eq!(before, after, "read projections must not mutate state");
+
+        for wake in [
+            &board.data["master"]["master_wake"],
+            &context.data["master_wake"],
+            &context.data["master"]["master_wake"],
+        ] {
+            let idle = idle_keys(wake);
+            for excluded in [
+                "busy-peer",
+                "accepted-peer",
+                "rework-peer",
+                "working-observation-peer",
+                "missing-peer",
+                "unresponsive-peer",
+            ] {
+                assert!(
+                    !idle.iter().any(|id| id == excluded),
+                    "{excluded} must not be projected as idle capacity: {wake}"
+                );
+            }
+            for retained in ["idle-peer", "blocked-peer", "waiting-peer"] {
+                assert!(
+                    idle.iter().any(|id| id == retained),
+                    "{retained} must remain idle capacity: {wake}"
+                );
+            }
+            assert!(
+                wake["newly_idle_workers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|id| {
+                        !matches!(
+                            id.as_str(),
+                            Some("busy-peer")
+                                | Some("accepted-peer")
+                                | Some("rework-peer")
+                                | Some("working-observation-peer")
+                                | Some("missing-peer")
+                        )
+                    }),
+                "newly idle capacity must use the same filter: {wake}"
+            );
+            assert!(
+                wake["unresponsive_workers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|id| id.as_str() == Some("unresponsive-peer")),
+                "unresponsive history must survive pruning: {wake}"
+            );
+        }
+        assert_eq!(
+            context.data["master_wake"], context.data["master"]["master_wake"],
+            "context top-level and nested master capacity must be identical"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_capacity_projection_filters_subagents_and_invitations() {
+        let (server, root) = test_server();
+        register_appserver_worker(&server, &root, "master", "thread-master");
+        promote_master(&server);
+        for worker_id in [
+            "invitee",
+            "publisher",
+            "active-child-peer",
+            "free-peer",
+        ] {
+            seed_live_observed_idle(&server, &root, worker_id);
+        }
+        server.commit(&[
+            Event::TaskCreated {
+                task: idle_projection_task("offer", "publisher", "invited"),
+            },
+            Event::BoardDetailsChanged {
+                task_id: "offer".into(),
+                details: crate::board::BoardTaskDetails {
+                    revision: 1,
+                    public_visibility: true,
+                    invitation: Some(crate::board::BoardInvitation {
+                        peer_id: "invitee".into(),
+                        binding_id: "fixture-binding".into(),
+                        message_id: "offer-message".into(),
+                        created_ms: now_ms(),
+                        original_status: None,
+                        original_owner: None,
+                    }),
+                    ..crate::board::BoardTaskDetails::default()
+                },
+            },
+            Event::TaskCreated {
+                task: idle_projection_task("active-child", "active-child-peer", "working"),
+            },
+            Event::SubagentUpdated {
+                subagent: idle_projection_subagent("active-child", "active-child-peer", "idle"),
+            },
+            Event::MasterWakeSignal {
+                signal: MasterWakeSignal::SubagentStatus {
+                    subagent_id: "active-child".into(),
+                },
+                at_ms: now_ms(),
+            },
+            Event::SubagentUpdated {
+                subagent: idle_projection_subagent("closed-child", "invitee", "closed"),
+            },
+            Event::MasterWakeSignal {
+                signal: MasterWakeSignal::SubagentStatus {
+                    subagent_id: "closed-child".into(),
+                },
+                at_ms: now_ms(),
+            },
+            Event::SubagentUpdated {
+                subagent: idle_projection_subagent("lost-child", "lost-peer", "idle"),
+            },
+            Event::MasterWakeSignal {
+                signal: MasterWakeSignal::SubagentStatus {
+                    subagent_id: "lost-child".into(),
+                },
+                at_ms: now_ms(),
+            },
+            Event::SubagentUpdated {
+                subagent: idle_projection_subagent("free-child", "free-peer", "idle"),
+            },
+            Event::MasterWakeSignal {
+                signal: MasterWakeSignal::SubagentStatus {
+                    subagent_id: "free-child".into(),
+                },
+                at_ms: now_ms(),
+            },
+        ]);
+
+        let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        let board = handle_board_show(&server, Some("master"));
+        let master_context =
+            context_projection(&server, "master".into(), "token-master".into());
+        let peer_context =
+            context_projection(&server, "free-peer".into(), "token-free-peer".into());
+        assert!(board.ok, "{board:?}");
+        assert!(master_context.ok, "{master_context:?}");
+        assert!(peer_context.ok, "{peer_context:?}");
+        let after = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        assert_eq!(before, after, "read projections must not mutate state");
+
+        for wake in [
+            &board.data["master"]["master_wake"],
+            &master_context.data["master_wake"],
+            &master_context.data["master"]["master_wake"],
+        ] {
+            let idle = idle_keys(wake);
+            assert!(
+                !idle.iter().any(|id| id == "invitee"),
+                "a valid invitation reserves execution capacity: {wake}"
+            );
+            for excluded in [
+                "subagent:active-child",
+                "subagent:closed-child",
+                "subagent:lost-child",
+            ] {
+                assert!(
+                    !idle.iter().any(|id| id == excluded),
+                    "{excluded} must not be idle capacity: {wake}"
+                );
+            }
+            assert!(
+                idle.iter().any(|id| id == "subagent:free-child"),
+                "a live idle subagent without a reservation must remain: {wake}"
+            );
+        }
+        assert!(
+            peer_context.data["master_wake"].is_null(),
+            "ordinary peer top-level master capacity must stay null: {peer_context:?}"
+        );
+        let peer_nested = &peer_context.data["master"]["master_wake"];
+        let peer_nested_idle = idle_keys(peer_nested);
+        assert!(
+            !peer_nested_idle.iter().any(|id| id == "invitee"),
+            "ordinary peer nested master capacity must share the filtered invitation view: {peer_context:?}"
+        );
+        assert!(
+            peer_nested_idle.iter().any(|id| id == "subagent:free-child"),
+            "ordinary peer nested master capacity must keep a live idle subagent: {peer_context:?}"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1727,8 +1727,12 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
 
     // Normal Context records presence before this pure projection. A completed
     // operation readback projects the same current state without recording it.
-    let (master_wake, message_count, unread_count, inbox_messages) = {
+    // The idle-capacity projection is one pure snapshot shared by the
+    // master-only top-level ledger and the nested `master.master_wake` field,
+    // so both read entry points report the same filtered capacity.
+    let (projected_master_wake, master_wake, message_count, unread_count, inbox_messages) = {
         let st = server.state.lock().unwrap();
+        let projected_master_wake = project_master_wake_idle_capacity(server, &st);
         let unread: Vec<&Message> = st.inbox_of(&worker_id);
         let messages: Vec<serde_json::Value> = unread
             .iter()
@@ -1747,11 +1751,12 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             })
             .collect();
         let (master_wake, message_count) = if role == "master" {
-            (json!(st.master_wake.clone()), st.msgs.len())
+            (json!(projected_master_wake.clone()), st.msgs.len())
         } else {
             // `master_wake` is the master-only scheduling ledger. An ordinary
             // peer's message counter covers only messages it sent or received,
-            // never the whole project's historical traffic.
+            // never the whole project's historical traffic. The nested
+            // `master.master_wake` still shares the filtered capacity snapshot.
             (
                 serde_json::Value::Null,
                 st.msgs
@@ -1760,7 +1765,13 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                     .count(),
             )
         };
-        (master_wake, message_count, unread.len(), messages)
+        (
+            projected_master_wake,
+            master_wake,
+            message_count,
+            unread.len(),
+            messages,
+        )
     };
 
     let (presence, agent) = worker_presence_with_view(server, &worker);
@@ -1837,7 +1848,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                 .copied()
                 .flatten()
         });
-        match master_authority_view_with_endpoint(
+        let mut master = match master_authority_view_with_endpoint(
             &st,
             &control,
             route_scope.as_ref(),
@@ -1845,7 +1856,11 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         ) {
             Ok(master) => master,
             Err(error) => return Resp::err(error),
+        };
+        if let Some(master_object) = master.as_object_mut() {
+            master_object.insert("master_wake".into(), json!(projected_master_wake.clone()));
         }
+        master
     };
     let recorded_unusable = serde_json::Value::Null;
     let next_actions: Vec<String> = tasks

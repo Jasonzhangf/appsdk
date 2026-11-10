@@ -1250,6 +1250,8 @@ impl AppFixture {
             .env_remove("COLLAB_APPSERVER_SOCKET")
             .env_remove("CODEX_APP_SERVER_SOCKET")
             .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
+            .env_remove("CODEX_MCP_NODE_PATH")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("CODEX_SESSION_ID")
@@ -1794,6 +1796,154 @@ fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
     );
 
     drop(app_fixture);
+}
+
+#[test]
+fn idle_capacity_projection_public_board_and_context_share_pruned_capacity() {
+    let thread_c = "01a0d63b-7a35-71c6-83b4-6d4eb7b47a25";
+    let mut fixture = AppFixture::new();
+    let context_a = fixture.run_public(&["context"], THREAD_A);
+    let context_c = fixture.run_public(&["context"], thread_c);
+    let promoted = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"isolated idle projection fixture"}"#,
+        ],
+        THREAD_B,
+    );
+    let busy_worker = context_a["identity"]["worker_id"]
+        .as_str()
+        .expect("busy fixture worker id")
+        .to_owned();
+    let idle_worker = context_c["identity"]["worker_id"]
+        .as_str()
+        .expect("idle fixture worker id")
+        .to_owned();
+    assert_eq!(
+        promoted["master"]["worker_id"],
+        promoted["identity"]["worker_id"]
+    );
+
+    fixture.update_current_state(|state| {
+        for worker_id in [&busy_worker, &idle_worker] {
+            state["keepalives"][worker_id] = json!({
+                "observed": "idle",
+                "idle_since_ms": 1,
+                "activity_ms": 1,
+                "last_notice_ms": 0,
+                "last_notice_id": null,
+                "unacked": 0,
+                "suspected_offline": false
+            });
+        }
+        state["tasks"]["public-busy"] = json!({
+            "id": "public-busy",
+            "owner": busy_worker,
+            "created_by": promoted["identity"]["worker_id"],
+            "feature_id": null,
+            "worktree_path": null,
+            "branch": null,
+            "base_commit": null,
+            "priority": "p1",
+            "status": "accepted",
+            "next_step": null,
+            "wait": null,
+            "isolation_mode": null,
+            "created_ms": 1,
+            "updated_ms": 1
+        });
+        state["master_wake"]["idle_workers"] = json!([busy_worker, idle_worker]);
+        state["master_wake"]["newly_idle_workers"] = json!([busy_worker, idle_worker]);
+        state["master_wake"]["generation"] = json!(1);
+        state["master_wake"]["delivery_state"] = json!("pending");
+    });
+    let before = fixture.current_state();
+
+    let board_output = fixture.command_public(&["board", "show"], THREAD_B);
+    let context_output = fixture.command_public(&["context"], THREAD_B);
+    println!("PUBLIC_CLI_FIXTURE {}", fixture.root.display());
+    println!(
+        "PUBLIC_CLI_COMMAND cwd={} COLLAB_STATE_DIR={} CODEX_SESSION_ID={} collab board show",
+        fixture.project.display(),
+        fixture.host_state.display(),
+        THREAD_B
+    );
+    println!("PUBLIC_CLI_BOARD_EXIT {:?}", board_output.status.code());
+    println!(
+        "PUBLIC_CLI_BOARD_STDOUT {}",
+        String::from_utf8_lossy(&board_output.stdout)
+    );
+    println!(
+        "PUBLIC_CLI_BOARD_STDERR {}",
+        String::from_utf8_lossy(&board_output.stderr)
+    );
+    println!(
+        "PUBLIC_CLI_COMMAND cwd={} COLLAB_STATE_DIR={} CODEX_SESSION_ID={} collab context",
+        fixture.project.display(),
+        fixture.host_state.display(),
+        THREAD_B
+    );
+    println!("PUBLIC_CLI_CONTEXT_EXIT {:?}", context_output.status.code());
+    println!(
+        "PUBLIC_CLI_CONTEXT_STDOUT {}",
+        String::from_utf8_lossy(&context_output.stdout)
+    );
+    println!(
+        "PUBLIC_CLI_CONTEXT_STDERR {}",
+        String::from_utf8_lossy(&context_output.stderr)
+    );
+    assert!(
+        board_output.status.success(),
+        "board show failed: {}",
+        String::from_utf8_lossy(&board_output.stderr)
+    );
+    assert!(
+        context_output.status.success(),
+        "context failed: {}",
+        String::from_utf8_lossy(&context_output.stderr)
+    );
+    let snapshot = |output: &Output| {
+        let value: Value = serde_json::from_slice(&output.stdout).expect("public CLI JSON");
+        value
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .cloned()
+            .unwrap_or(value)
+    };
+    let board = snapshot(&board_output);
+    let context = snapshot(&context_output);
+    for wake in [
+        &board["master"]["master_wake"],
+        &context["master_wake"],
+        &context["master"]["master_wake"],
+    ] {
+        assert!(
+            !wake["idle_workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id.as_str() == Some(busy_worker.as_str())),
+            "busy worker leaked into public idle capacity: {wake}"
+        );
+        assert!(
+            wake["idle_workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id.as_str() == Some(idle_worker.as_str())),
+            "genuine idle worker disappeared from public capacity: {wake}"
+        );
+    }
+    assert_eq!(
+        context["master_wake"], context["master"]["master_wake"],
+        "context must project one master capacity value in both fields"
+    );
+    assert_eq!(
+        fixture.current_state(),
+        before,
+        "public reads must not mutate control state"
+    );
 }
 
 fn native_input_texts(input: &Value) -> Vec<String> {

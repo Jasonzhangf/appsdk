@@ -35,11 +35,12 @@ identity. Opaque legacy files are not replayed.
 | Original QQ channel reply | `federation_public_contract::federation_channel_reply_reaches_the_original_owner_once`; `server::channel_delivery`; `client::adapters::qqbot`; `collab/scripts/tests/qqbot-send.test.mjs` | Keep the original envelope at its owner. Commit the reply before a single persistent sending claim. Invoke the configured helper outside locks, preserve uncertain outcomes and expose platform results separately from mailbox consumption. The public sink test and real QQ platform acceptance are separate evidence. |
 | AGY TUI registration | `register_reply_public_contract::agy_tmux_with_inherited_cross_project_codex_registers_real_agy_session_and_subsequent_commands_agree` | Persist the actual AGY session and host type. Inherited Codex facts cannot change the selected host. |
 | Current-file startup and storage boundary | `server::startup_tests`; scope tests; `appserver_two_tui_integration::degraded_user_maintenance`; Desktop Node consumer | Restore current files. Reject malformed current state before publishing a listener. Validate storage ownership before creating a namespace. Keep foreign resources and opaque legacy bytes unchanged. |
-| Read-only projection and endpoint observation | Context query controls; `identity_endpoint_projection`; `master_status_cli`; `tmux_recv_e2e` | Query does not register, consume messages or perform communication recovery. Current reachability is distinct from stable identity and task ownership. |
+| Read-only projection and endpoint observation | Context query controls; `identity_endpoint_projection`; `master_status_cli`; `tmux_recv_e2e`; `server::scheduler_admission_tests::idle_capacity_projection_filters_execution_and_observation`; `server::scheduler_admission_tests::idle_capacity_projection_filters_subagents_and_invitations`; `appserver_two_tui_integration::idle_capacity_projection_public_board_and_context_share_pruned_capacity` | Query does not register, consume messages or perform communication recovery. Current reachability is distinct from stable identity and task ownership. Board and Context project idle capacity through one shared pruning owner, keeping only present workers and subagents whose latest observation is idle and that hold no execution reservation; unresponsive history survives. The projection is read-only: it clones the accumulator, does not take a second reducer lock, does not commit `MasterWakeUpdated` and does not mutate journal, task, assignment or notification consumption. Only `master status` keeps the persistent pruning wrapper. In Context the master-only top-level ledger and the nested `master.master_wake` share one projection value; an ordinary peer keeps a null top-level field. |
 
 The affected graphs are `collab-identity-anchor`, `collab-context`,
-`collab-binding-lifecycle`, `collab-name-ownership`, `collab-startup-recovery`
-and `collab-work-role-registration` under `docs/dagpipe/`.
+`collab-board-caller-read`, `collab-binding-lifecycle`, `collab-name-ownership`,
+`collab-startup-recovery` and `collab-work-role-registration` under
+`docs/dagpipe/`.
 
 ## Current work and messages
 

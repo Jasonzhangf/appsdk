@@ -2668,7 +2668,6 @@ mod tests {
             !body.contains("regardless of whether other peers are busy"),
             "{body}"
         );
-        assert!(!body.contains("regardless of whether other peers are busy"));
         assert!(body.contains("protected holds"), "{body}");
         assert!(body.contains("one-shot goal or deadline wake"), "{body}");
         drop(state);

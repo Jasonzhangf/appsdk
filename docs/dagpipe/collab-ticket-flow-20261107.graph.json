@@ -1,13 +1,14 @@
 {
   "id": "collab-ticket-event-flow-design",
   "version": "0.2.0",
-  "description": "待独立审查的实现设计。一次工单事件到一次流转结果。入 daemon 立即按接收范围进入合格 slot 的最短 queue，busy 及等待依赖也可入队，依赖满足且 slot 空闲后按优先级开始。每个阶段仅推进当前适用状态，等待、拒绝和失败结果传递到唯一出口。审查顺位为独立 Reviewer、独立 architect 或 expert、另一独立 peer，组内 busy 排队，无合格接收者才检查下一组。返工与恢复由同一工单的新批次处理，无回边。算子为拟定接口，未绑定运行实现。互斥分支与权限见同名 Markdown。",
+  "description": "待独立审查的实现设计。一次工单事件到一次流转结果。入 daemon 立即按接收范围进入合格 slot 的最短 queue，busy 及等待依赖也可入队，依赖满足且 slot 空闲后按优先级开始。每个阶段仅推进当前适用状态，等待、拒绝和失败结果传递到唯一出口。审查顺位为独立 Reviewer、独立 architect 或 expert、另一独立 peer，组内 busy 排队，无合格接收者才检查下一组。返工与恢复由同一工单的新批次处理，无回边。另含唯一显式存量准入分支：master 使用 `board backfill-execute --admit-legacy`，仅对公开、已描述、当前 owner 有稳定 active 分配、状态为 working 或 rework、未准入且无任何工单阶段记录的存量任务生效；准入标记与一个 Claimed Execute 阶段同批原子提交，读取和拒绝均不改变状态。算子为拟定接口，未绑定运行实现。互斥分支与权限见同名 Markdown。",
   "inputs": [{"id": "工单事件", "schema": "Object"}],
   "nodes": [
     {
       "id": "接收并标准化工单事件",
       "operator": "collab.ticket_design.admit",
       "operator_version": "1",
+      "description": "常规事件与显式存量准入 `backfill-execute --admit-legacy` 均在此统一分类。显式准入只认同一个既有 board 命令的新布尔选项，不新增请求族；未带选项保持原修复语义。",
       "inputs": ["工单事件"],
       "output": {"id": "标准工单意图", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -18,6 +19,7 @@
       "id": "校验权限与工单合同",
       "operator": "collab.ticket_design.authorize",
       "operator_version": "1",
+      "description": "显式存量准入由当前项目 master 发起，校验 observed revision，并要求任务公开、已描述、状态为 working 或 rework、无准入标记、无待处理 invitation、无任何阶段历史且当前 owner slot 有 active binding 与匹配的稳定 assignment。",
       "inputs": ["标准工单意图"],
       "output": {"id": "工单准入结果", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -69,7 +71,7 @@
       "id": "保存未结责任或关闭结果",
       "operator": "collab.ticket_design.persist_outcome",
       "operator_version": "1",
-      "description": "任务取消或最终关闭在同一提交中结束其关联长程计划。重试、同名换载体和内容更新保留已消费次数。到期消息读取任务单当前完整内容，保持未接单、排队和执行约束。基础消息接收和无关任务订阅保留。",
+      "description": "任务取消或最终关闭在同一提交中结束其关联长程计划。显式存量准入在同一批中提交 `BoardDetailsChanged`（仅改 admitted 与 revision）和一个 Claimed Execute 阶段，不产生 task-created、assignment、lifecycle 或 subscription 事件，也不开始执行或交付。重试、同名换载体和内容更新保留已消费次数。到期消息读取任务单当前完整内容，保持未接单、排队和执行约束。基础消息接收和无关任务订阅保留。",
       "inputs": ["工单关闭判定"],
       "output": {"id": "已持久化流转结果", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

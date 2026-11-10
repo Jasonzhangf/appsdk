@@ -2044,6 +2044,949 @@ fn master_backfills_missing_execute_phase_and_restores_start_deliver() {
     assert_eq!(phase["attempt_generation"], 1);
 }
 
+// ---------------------------------------------------------------------------
+// Explicit legacy ticket admission (`board backfill-execute --admit-legacy`).
+//
+// A legacy task created through `task register` predates the ticket machine:
+// its board details are `admitted == false` and it carries no phase records.
+// The explicit, master-only admission branch must admit exactly one such task
+// and reopen the ordinary start/deliver path without fabricating progress.
+// ---------------------------------------------------------------------------
+
+struct LegacyTask {
+    id: String,
+    owner_worker: String,
+    slot: String,
+}
+
+fn current_task_revision(fixture: &AppFixture, id: &str) -> u64 {
+    task(&fixture.run_public(&["board", "show"], THREAD_A), id)["revision"]
+        .as_u64()
+        .expect("board task exposes its revision")
+}
+
+fn detail_revision(fixture: &AppFixture, id: &str) -> u64 {
+    fixture.current_state()["board_details"][id]["revision"]
+        .as_u64()
+        .expect("board details expose their revision")
+}
+
+fn phases_for(state: &Value, id: &str) -> Vec<Value> {
+    state["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| phase["task_id"] == id)
+        .cloned()
+        .collect()
+}
+
+/// Build a resource-free legacy task through public commands: register, fully
+/// describe, invite the existing owner and accept. This establishes a stable
+/// assignment without creating any ticket phase, so `admitted` stays false.
+fn register_legacy_assigned_task(fixture: &mut AppFixture, id: &str) -> LegacyTask {
+    fixture.run_public(&["task", "register", id, "--priority", "p1"], THREAD_B);
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let owner_worker = task(&board, id)["owner"]
+        .as_str()
+        .expect("registered legacy task has an owner")
+        .to_owned();
+    let revision = task(&board, id)["revision"]
+        .as_u64()
+        .expect("registered legacy task has a revision");
+    fixture.run_public(
+        &[
+            "board",
+            "describe",
+            id,
+            "--expected-revision",
+            &revision.to_string(),
+            "--title",
+            "Legacy ticket",
+            "--description",
+            "Pre-phase owned legacy ticket",
+            "--delivery-condition",
+            "Start and deliver after admission",
+            "--test-condition",
+            "run the admission gate",
+            "--long-horizon-content",
+            "Continue the legacy ticket from its current board state and preserve delivery and test conditions",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_B,
+    );
+    let revision = current_task_revision(fixture, id);
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            &owner_worker,
+            "--expected-revision",
+            &revision.to_string(),
+        ],
+        THREAD_A,
+    );
+    let revision = invited["task"]["revision"]
+        .as_u64()
+        .expect("invited legacy task has a revision");
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            &revision.to_string(),
+        ],
+        THREAD_B,
+    );
+    LegacyTask {
+        id: id.to_owned(),
+        owner_worker,
+        slot: accepted["task"]["owner_name"]
+            .as_str()
+            .expect("accepted legacy task exposes the stable slot name")
+            .to_owned(),
+    }
+}
+
+fn legacy_admission_args(task: &LegacyTask, revision: u64) -> Vec<String> {
+    vec![
+        "board".into(),
+        "backfill-execute".into(),
+        task.id.clone(),
+        "--expected-revision".into(),
+        revision.to_string(),
+        "--admit-legacy".into(),
+    ]
+}
+
+fn admit_legacy(fixture: &AppFixture, task: &LegacyTask, revision: u64) -> Value {
+    let args = legacy_admission_args(task, revision);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = fixture.command_public(&borrowed, THREAD_A);
+    assert!(
+        output.status.success(),
+        "explicit legacy admission must succeed: status={:?} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    serde_json::from_slice(&output.stdout).expect("admission response is JSON")
+}
+
+#[test]
+fn master_admits_legacy_rework_and_restores_start_deliver() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-rework");
+
+    // Reach the rework state through the ordinary public lifecycle.
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            &legacy.id,
+            "--evidence",
+            "legacy delivery before admission",
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(delivered["status"], "delivered");
+    let reviewed = fixture.run_public(
+        &[
+            "task",
+            "review",
+            &legacy.id,
+            "--rework",
+            "--evidence",
+            "needs another pass",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(reviewed["status"], "rework");
+
+    let before = fixture.current_state();
+    assert_eq!(before["board_details"][&legacy.id]["admitted"], false);
+    assert_eq!(before["tasks"][&legacy.id]["status"], "rework");
+    assert!(phases_for(&before, &legacy.id).is_empty());
+    let before_task = before["tasks"][&legacy.id].clone();
+    let before_assignment = before["task_assignments"][&legacy.id].clone();
+    let before_lifecycle = before["task_lifecycle"][&legacy.id].clone();
+    assert_eq!(before_lifecycle["review_evidence"], "needs another pass");
+
+    let revision = current_task_revision(&fixture, &legacy.id);
+
+    // The unmodified command still repairs only admitted tickets.
+    let without_flag = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &revision.to_string(),
+        ],
+        THREAD_A,
+    );
+    assert!(
+        without_flag.contains("TICKET_BACKFILL_NOT_ADMITTED"),
+        "{without_flag}"
+    );
+    eprintln!("legacy_admission_red_without_flag={without_flag}");
+
+    // The explicit public flag is the operation under test. Pre-fix this call
+    // is rejected by the parser as an unexpected argument.
+    let admitted = admit_legacy(&fixture, &legacy, revision);
+
+    let phases = admitted["ticket"]["phases"]
+        .as_array()
+        .expect("admission returns the ticket projection");
+    assert_eq!(phases.len(), 1, "{admitted}");
+    assert_eq!(phases[0]["status"], "claimed");
+    assert_eq!(phases[0]["phase"], "execute");
+    assert_eq!(phases[0]["slot"], legacy.slot);
+    assert_eq!(phases[0]["batch"], 0);
+    assert_eq!(phases[0]["attempt_generation"], 1);
+    assert_eq!(phases[0]["depends_on"], json!([]));
+    assert_eq!(
+        phases[0]["binding_generation"],
+        slot_generation(&fixture, &legacy.owner_worker)
+    );
+    let admitted_task = &admitted["task"];
+    assert_eq!(admitted_task["owner"], before_task["owner"]);
+    assert_eq!(admitted_task["status"], "rework");
+    let admitted_revision = admitted_task["revision"]
+        .as_u64()
+        .expect("admission advances the board revision");
+    assert_eq!(admitted_revision, revision + 1);
+
+    // Only the admission flag and revision change on the details record.
+    let after = fixture.current_state();
+    assert_eq!(after["board_details"][&legacy.id]["admitted"], true);
+    let mut expected_details = before["board_details"][&legacy.id].clone();
+    expected_details["admitted"] = json!(true);
+    expected_details["revision"] = json!(admitted_revision);
+    assert_eq!(after["board_details"][&legacy.id], expected_details);
+    assert_eq!(after["tasks"][&legacy.id], before_task);
+    assert_eq!(after["task_assignments"][&legacy.id], before_assignment);
+    assert_eq!(after["task_lifecycle"][&legacy.id], before_lifecycle);
+
+    // Repeating the call with the old revision is stale; with the fresh
+    // revision it is already admitted. Neither writes a second phase.
+    let stale = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(stale.contains("BOARD_STALE_REVISION"), "{stale}");
+    let repeated = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &admitted_revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        repeated.contains("TICKET_ADMISSION_ALREADY_ADMITTED"),
+        "{repeated}"
+    );
+    assert_eq!(phases_for(&fixture.current_state(), &legacy.id).len(), 1);
+
+    // A non-master caller is refused without any mutation.
+    let non_master = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &admitted_revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_B,
+    );
+    assert!(non_master.contains("BOARD_MASTER_REQUIRED"), "{non_master}");
+    assert_eq!(phases_for(&fixture.current_state(), &legacy.id).len(), 1);
+
+    // Admission adds no ordinary claim bypass.
+    let ordinary_claim = rejected(
+        &fixture,
+        &[
+            "board",
+            "claim",
+            &legacy.id,
+            "--expected-revision",
+            &admitted_revision.to_string(),
+        ],
+        THREAD_B,
+    );
+    assert!(
+        ordinary_claim.contains("BOARD_TASK_NOT_PENDING"),
+        "{ordinary_claim}"
+    );
+
+    // Admission alone does not permit a result before Started, and a stale
+    // attempt cannot start.
+    let early_deliver = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            &legacy.id,
+            "--evidence",
+            "too early",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        early_deliver.contains("TICKET_PHASE_NOT_RUNNING"),
+        "{early_deliver}"
+    );
+    let wrong_attempt = rejected(
+        &fixture,
+        &[
+            "board",
+            "start",
+            &legacy.id,
+            "--expected-revision",
+            &admitted_revision.to_string(),
+            "--attempt",
+            "2",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        wrong_attempt.contains("TICKET_STALE_ATTEMPT"),
+        "{wrong_attempt}"
+    );
+
+    // Ordinary owner start then delivery complete the restored responsibility.
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            &legacy.id,
+            "--expected-revision",
+            &admitted_revision.to_string(),
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(started["task"]["status"], "rework");
+    assert_eq!(started["ticket"]["phases"][0]["status"], "running");
+    let re_delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            &legacy.id,
+            "--evidence",
+            "admitted legacy delivery",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(re_delivered["status"], "delivered");
+    let final_state = fixture.current_state();
+    let final_phases = phases_for(&final_state, &legacy.id);
+    assert_eq!(final_phases.len(), 1);
+    assert_eq!(final_phases[0]["status"], "completed");
+    assert_eq!(final_phases[0]["attempt_generation"], 1);
+}
+
+#[test]
+fn legacy_admission_working_task_is_admitted_without_starting_or_delivering() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-working");
+    let before = fixture.current_state();
+    assert_eq!(before["tasks"][&legacy.id]["status"], "working");
+    let before_task = before["tasks"][&legacy.id].clone();
+    let revision = current_task_revision(&fixture, &legacy.id);
+
+    let admitted = admit_legacy(&fixture, &legacy, revision);
+    assert_eq!(admitted["task"]["status"], "working");
+    assert_eq!(admitted["ticket"]["phases"][0]["status"], "claimed");
+
+    let after = fixture.current_state();
+    assert_eq!(after["board_details"][&legacy.id]["admitted"], true);
+    assert_eq!(after["tasks"][&legacy.id], before_task);
+    let phases = phases_for(&after, &legacy.id);
+    assert_eq!(phases.len(), 1);
+    assert_eq!(phases[0]["status"], "claimed");
+    assert_eq!(phases[0]["result"], Value::Null);
+}
+
+#[test]
+fn legacy_admission_rejects_duplicate_and_non_master_without_mutation() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-duplicate");
+    let revision = current_task_revision(&fixture, &legacy.id);
+    let admitted = admit_legacy(&fixture, &legacy, revision);
+    let fresh = admitted["task"]["revision"].as_u64().unwrap();
+
+    // Two concurrent-equivalent repeats: one stale, one already-admitted.
+    let stale = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(stale.contains("BOARD_STALE_REVISION"), "{stale}");
+    let already = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &fresh.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        already.contains("TICKET_ADMISSION_ALREADY_ADMITTED"),
+        "{already}"
+    );
+    let non_master = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &fresh.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_C,
+    );
+    assert!(non_master.contains("BOARD_MASTER_REQUIRED"), "{non_master}");
+    assert_eq!(phases_for(&fixture.current_state(), &legacy.id).len(), 1);
+}
+
+#[test]
+fn legacy_admission_concurrent_duplicate_admits_once() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-race");
+    let revision = current_task_revision(&fixture, &legacy.id);
+    let args = legacy_admission_args(&legacy, revision);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let first = fixture.spawn_public(&borrowed, THREAD_A);
+    let second = fixture.spawn_public(&borrowed, THREAD_A);
+    let first_output = first.wait_with_output().expect("first admission settles");
+    let second_output = second.wait_with_output().expect("second admission settles");
+    let successes = [&first_output, &second_output]
+        .iter()
+        .filter(|output| output.status.success())
+        .count();
+    assert_eq!(successes, 1, "exactly one concurrent admission must win");
+    let loser = if first_output.status.success() {
+        &second_output
+    } else {
+        &first_output
+    };
+    let loser_text = format!(
+        "{} {}",
+        String::from_utf8_lossy(&loser.stdout),
+        String::from_utf8_lossy(&loser.stderr)
+    );
+    assert!(
+        loser_text.contains("BOARD_STALE_REVISION"),
+        "losing admission must be stale: {loser_text}"
+    );
+    assert_eq!(phases_for(&fixture.current_state(), &legacy.id).len(), 1);
+}
+
+#[test]
+fn legacy_admission_rejects_representative_ineligible_statuses() {
+    for status in ["delivered", "verifying", "cancelled"] {
+        let mut fixture = setup_roles();
+        let id = format!("legacy-admission-{status}");
+        let _legacy = register_legacy_assigned_task(&mut fixture, &id);
+        if status == "delivered" {
+            let delivered = fixture.run_public(
+                &[
+                    "task",
+                    "deliver",
+                    &id,
+                    "--evidence",
+                    "status fixture delivery",
+                    "--no-candidate",
+                ],
+                THREAD_B,
+            );
+            assert_eq!(delivered["status"], "delivered");
+        } else {
+            let revision = current_task_revision(&fixture, &id);
+            let updated = fixture.run_public(
+                &[
+                    "board",
+                    "update",
+                    &id,
+                    "--expected-revision",
+                    &revision.to_string(),
+                    "--status",
+                    status,
+                ],
+                THREAD_B,
+            );
+            assert_eq!(updated["task"]["status"], status);
+        }
+        let revision = detail_revision(&fixture, &id);
+        let rejected_status = rejected(
+            &fixture,
+            &[
+                "board",
+                "backfill-execute",
+                &id,
+                "--expected-revision",
+                &revision.to_string(),
+                "--admit-legacy",
+            ],
+            THREAD_A,
+        );
+        assert!(
+            rejected_status.contains("TICKET_ADMISSION_INELIGIBLE_STATUS"),
+            "{status}: {rejected_status}"
+        );
+        assert!(phases_for(&fixture.current_state(), &id).is_empty());
+        assert_eq!(
+            fixture.current_state()["board_details"][&id]["admitted"],
+            false
+        );
+    }
+}
+
+#[test]
+fn legacy_admission_rejects_pending_invitation_and_incomplete_description() {
+    // Pending invitation: the task stays working, but the open invitation is
+    // not a valid admission state.
+    let mut fixture = setup_roles();
+    let pending = register_legacy_assigned_task(&mut fixture, "legacy-admission-pending");
+    let revision = current_task_revision(&fixture, &pending.id);
+    fixture.run_public(
+        &[
+            "board",
+            "invite",
+            &pending.id,
+            "--to",
+            &pending.owner_worker,
+            "--expected-revision",
+            &revision.to_string(),
+        ],
+        THREAD_A,
+    );
+    let revision = current_task_revision(&fixture, &pending.id);
+    let invited = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &pending.id,
+            "--expected-revision",
+            &revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        invited.contains("TICKET_ADMISSION_INVITATION_PENDING"),
+        "{invited}"
+    );
+    assert!(phases_for(&fixture.current_state(), &pending.id).is_empty());
+
+    // Incomplete description: a bare registered task has no description
+    // contract yet, so it cannot be admitted.
+    let bare = setup_roles();
+    bare.run_public(&["task", "register", "legacy-admission-bare"], THREAD_B);
+    let bare_revision = current_task_revision(&bare, "legacy-admission-bare");
+    let incomplete = rejected(
+        &bare,
+        &[
+            "board",
+            "backfill-execute",
+            "legacy-admission-bare",
+            "--expected-revision",
+            &bare_revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        incomplete.contains("BOARD_DESCRIPTION_REQUIRED"),
+        "{incomplete}"
+    );
+    assert!(phases_for(&bare.current_state(), "legacy-admission-bare").is_empty());
+}
+
+#[test]
+fn legacy_admission_rejects_missing_assignment_and_occupied_slot() {
+    // Described but not yet assigned: no stable assignment exists.
+    let fixture = setup_roles();
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "legacy-admission-unassigned",
+            "--priority",
+            "p1",
+        ],
+        THREAD_B,
+    );
+    let revision = current_task_revision(&fixture, "legacy-admission-unassigned");
+    fixture.run_public(
+        &[
+            "board",
+            "describe",
+            "legacy-admission-unassigned",
+            "--expected-revision",
+            &revision.to_string(),
+            "--title",
+            "Legacy unassigned",
+            "--description",
+            "No stable assignment yet",
+            "--delivery-condition",
+            "describe the assignment gate",
+            "--test-condition",
+            "assignment gate",
+            "--long-horizon-content",
+            "Continue the legacy task from its current board state",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_B,
+    );
+    let revision = current_task_revision(&fixture, "legacy-admission-unassigned");
+    let missing = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            "legacy-admission-unassigned",
+            "--expected-revision",
+            &revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        missing.contains("TICKET_BACKFILL_ASSIGNMENT_MISSING"),
+        "{missing}"
+    );
+
+    // Occupied slot: the same owner already holds a claimed execute phase for
+    // another admitted task. Admission must not create a second reservation.
+    let occupied = setup_roles();
+    let published = publish(
+        &occupied,
+        "legacy-admission-blocker",
+        &["--executor", "Alice"],
+    );
+    let slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let board = occupied.run_public(&["board", "show"], THREAD_A);
+    let blocker_thread = ticket_thread(&occupied, &slot_worker_id(&board, &slot));
+    occupied.run_public(
+        &[
+            "board",
+            "claim",
+            "legacy-admission-blocker",
+            "--expected-revision",
+            "1",
+        ],
+        blocker_thread,
+    );
+    // Register the legacy candidate on the same owner thread as the blocker.
+    let legacy_id = "legacy-admission-blocked";
+    occupied.run_public(
+        &["task", "register", legacy_id, "--priority", "p1"],
+        blocker_thread,
+    );
+    {
+        // The owner is the same stable name; describe it through the owner.
+        let board = occupied.run_public(&["board", "show"], THREAD_A);
+        let owner = task(&board, legacy_id)["owner"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let revision = task(&board, legacy_id)["revision"].as_u64().unwrap();
+        occupied.run_public(
+            &[
+                "board",
+                "describe",
+                legacy_id,
+                "--expected-revision",
+                &revision.to_string(),
+                "--title",
+                "Legacy blocked",
+                "--description",
+                "Owner already holds another phase",
+                "--delivery-condition",
+                "admission must reject the occupied slot",
+                "--test-condition",
+                "occupied slot gate",
+                "--long-horizon-content",
+                "Continue the legacy task from its current board state",
+                "--long-horizon-every-ms",
+                "3600000",
+            ],
+            blocker_thread,
+        );
+        let revision = current_task_revision(&occupied, legacy_id);
+        let invited = occupied.run_public(
+            &[
+                "board",
+                "invite",
+                legacy_id,
+                "--to",
+                &owner,
+                "--expected-revision",
+                &revision.to_string(),
+            ],
+            THREAD_A,
+        );
+        let revision = invited["task"]["revision"].as_u64().unwrap();
+        occupied.run_public(
+            &[
+                "board",
+                "respond",
+                legacy_id,
+                "--accept",
+                "--expected-revision",
+                &revision.to_string(),
+            ],
+            blocker_thread,
+        );
+    }
+    let revision = current_task_revision(&occupied, legacy_id);
+    let occupied_error = rejected(
+        &occupied,
+        &[
+            "board",
+            "backfill-execute",
+            legacy_id,
+            "--expected-revision",
+            &revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        occupied_error.contains("TICKET_ADMISSION_SLOT_OCCUPIED"),
+        "{occupied_error}"
+    );
+    assert!(phases_for(&occupied.current_state(), legacy_id).is_empty());
+    assert_eq!(
+        phases_for(&occupied.current_state(), "legacy-admission-blocker").len(),
+        1
+    );
+}
+
+#[test]
+fn legacy_admission_reads_and_generic_updates_never_admit() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-readonly");
+    let revision = current_task_revision(&fixture, &legacy.id);
+    let before = fixture.current_state();
+
+    // Reads of the board and context do not mutate admission.
+    fixture.run_public(&["board", "show"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["board", "show"], THREAD_B);
+
+    // A generic owner update changes the task but never admits it.
+    let updated = fixture.run_public(
+        &[
+            "board",
+            "update",
+            &legacy.id,
+            "--expected-revision",
+            &revision.to_string(),
+            "--next",
+            "still legacy",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(updated["task"]["next_step"], "still legacy");
+
+    let after = fixture.current_state();
+    assert_eq!(after["board_details"][&legacy.id]["admitted"], false);
+    assert!(phases_for(&after, &legacy.id).is_empty());
+    assert_eq!(
+        after["board_details"][&legacy.id]["title"],
+        before["board_details"][&legacy.id]["title"]
+    );
+}
+
+#[test]
+fn legacy_admission_rejects_invalid_authentication_without_mutation() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-auth");
+    let revision = current_task_revision(&fixture, &legacy.id);
+    let binding = fixture.run_public(&["context"], THREAD_A)["binding"].clone();
+    let actor = fixture.worker_id(THREAD_A);
+    let scope = fixture.project.canonicalize().unwrap();
+    let scope_text = scope.to_string_lossy();
+    let request = json!({
+        "op": "Board",
+        "worker_id": actor,
+        "token": "not-the-current-token",
+        "command": {
+            "action": "backfill-execute",
+            "id": legacy.id,
+            "expected_revision": revision,
+            "admit_legacy": true
+        },
+        "project_context": {
+            "app_scope_id": binding["app_scope_id"],
+            "project_scope": scope_text,
+            "canonical_root": scope_text,
+            "runtime_context": {
+                "agent_id": binding["agent_id"],
+                "runtime_id": binding["runtime_id"],
+                "appserver_id": binding["app_scope_id"],
+                "binding_id": binding["binding_id"],
+                "session_id": binding["session_id"],
+                "native_thread_id": binding["native_thread_id"],
+            }
+        }
+    });
+    let response = raw_public_response(&fixture, &request);
+    assert_eq!(response["ok"], false, "{response}");
+    let error = response["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("token mismatch") || error.contains("not registered"),
+        "existing authentication family must be preserved: {error}"
+    );
+    assert!(!error.contains("TICKET_ADMISSION_AUTH_FAILED"), "{error}");
+    assert!(phases_for(&fixture.current_state(), &legacy.id).is_empty());
+    assert_eq!(
+        fixture.current_state()["board_details"][&legacy.id]["admitted"],
+        false
+    );
+}
+
+#[test]
+fn legacy_admission_rejects_executor_conflict_without_mutation() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-executor");
+    let revision = current_task_revision(&fixture, &legacy.id);
+    // Pin the ticket executor to a different stable name than the owner so the
+    // ordinary executor gate rejects admission without repairing the owner.
+    fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            &legacy.id,
+            "--executor",
+            "Carol",
+            "--expected-revision",
+            &revision.to_string(),
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        fixture.current_state()["board_details"][&legacy.id]["work_policy"]["executor_name"],
+        "Carol"
+    );
+    let revision = current_task_revision(&fixture, &legacy.id);
+    let conflict = rejected(
+        &fixture,
+        &[
+            "board",
+            "backfill-execute",
+            &legacy.id,
+            "--expected-revision",
+            &revision.to_string(),
+            "--admit-legacy",
+        ],
+        THREAD_A,
+    );
+    assert!(conflict.contains("WORK_EXECUTOR_REQUIRED"), "{conflict}");
+    assert!(phases_for(&fixture.current_state(), &legacy.id).is_empty());
+    assert_eq!(
+        fixture.current_state()["board_details"][&legacy.id]["admitted"],
+        false
+    );
+}
+
+#[test]
+fn legacy_admission_preserves_subscription_and_unrelated_task() {
+    let mut fixture = setup_roles();
+    let legacy = register_legacy_assigned_task(&mut fixture, "legacy-admission-preserve");
+    let unrelated = register_legacy_assigned_task(&mut fixture, "legacy-admission-unrelated");
+
+    let before = fixture.current_state();
+    let subject = format!("goal:task:{}", legacy.id);
+    let before_subscription = before["notification_subscriptions"]
+        .as_object()
+        .and_then(|map| map.values().find(|sub| sub["subject"] == subject.as_str()))
+        .cloned()
+        .expect("legacy task has an armed goal subscription");
+    assert_eq!(before_subscription["status"], "armed");
+
+    let revision = current_task_revision(&fixture, &legacy.id);
+    let admitted = admit_legacy(&fixture, &legacy, revision);
+    let receipt_subscription = admitted["goal_schedule"]["subscription"]
+        .as_object()
+        .expect("admission receipt carries the goal schedule");
+    assert_eq!(receipt_subscription["id"], before_subscription["id"]);
+
+    let after = fixture.current_state();
+    let after_subscription = after["notification_subscriptions"]
+        .as_object()
+        .and_then(|map| map.values().find(|sub| sub["subject"] == subject.as_str()))
+        .cloned()
+        .expect("admission keeps the goal subscription");
+    assert_eq!(after_subscription, before_subscription);
+    // The unrelated legacy task and its assignment are untouched.
+    assert_eq!(
+        after["tasks"][&unrelated.id],
+        before["tasks"][&unrelated.id]
+    );
+    assert_eq!(
+        after["board_details"][&unrelated.id],
+        before["board_details"][&unrelated.id]
+    );
+    assert_eq!(
+        after["task_assignments"][&unrelated.id],
+        before["task_assignments"][&unrelated.id]
+    );
+}
+
 fn seed_idle(fixture: &mut AppFixture, worker_id: &str, thread: &str) {
     let project = std::fs::canonicalize(&fixture.project)
         .unwrap()

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub(super) fn promote(root: &Path, target: &str) {
     assert_project_root_safe(root);
@@ -544,6 +545,23 @@ pub(super) fn publish_active_internal(
 }
 
 pub(super) fn assert_sdk_resources(root: &Path, required: bool, allow_reset_resource_gaps: bool) {
+    assert_sdk_resources_inner(root, required, allow_reset_resource_gaps, true);
+}
+
+pub(super) fn assert_sdk_resources_semantics(
+    root: &Path,
+    required: bool,
+    allow_reset_resource_gaps: bool,
+) {
+    assert_sdk_resources_inner(root, required, allow_reset_resource_gaps, false);
+}
+
+fn assert_sdk_resources_inner(
+    root: &Path,
+    required: bool,
+    allow_reset_resource_gaps: bool,
+    verify_content_identity: bool,
+) {
     let path = root.join(".appsdk/sdk-resources.json");
     if !path.exists() {
         if required && !allow_reset_resource_gaps {
@@ -650,7 +668,9 @@ pub(super) fn assert_sdk_resources(root: &Path, required: bool, allow_reset_reso
             }
             fail(format!("SDK_RESOURCE_MISMATCH:{}", relative));
         }
-        if !target.is_file() || file_sha256(&target, "sdk_resource") != expected {
+        if !target.is_file()
+            || (verify_content_identity && file_sha256(&target, "sdk_resource") != expected)
+        {
             fail(format!("SDK_RESOURCE_MISMATCH:{}", relative));
         }
         let project_record_contract = class == "contracts"
@@ -659,7 +679,9 @@ pub(super) fn assert_sdk_resources(root: &Path, required: bool, allow_reset_reso
         let source_path = root.join(source);
         if project_record_contract && source_path.is_file() {
             assert_no_symlink_components(root, &source_path, "sdk_resource_source");
-            if file_sha256(&source_path, "sdk_resource_source") != expected {
+            if verify_content_identity
+                && file_sha256(&source_path, "sdk_resource_source") != expected
+            {
                 fail(format!("SDK_RESOURCE_SOURCE_MISMATCH:{}", source));
             }
         }
@@ -679,34 +701,34 @@ pub(super) fn assert_sdk_resources(root: &Path, required: bool, allow_reset_reso
     }
 }
 
-pub(super) fn reset_governance_record_mode(root: &Path) -> Option<String> {
+pub(super) fn try_reset_governance_record_mode(root: &Path) -> Result<Option<String>, String> {
     let path = root
         .join(".appsdk")
         .join("records")
         .join("reset-governance-record.json");
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return None,
-        Err(_) => fail("INVALID_RESET_GOVERNANCE_RECORD"),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned()),
     };
     if metadata.file_type().is_symlink() {
-        fail("GOVERNANCE_PATH_SYMLINK:reset_governance_record");
+        return Err("GOVERNANCE_PATH_SYMLINK:reset_governance_record".to_owned());
     }
     if !metadata.is_file() {
-        fail("INVALID_RESET_GOVERNANCE_RECORD");
+        return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
     }
     let record: Value = serde_json::from_str(
-        &fs::read_to_string(&path).unwrap_or_else(|_| fail("INVALID_RESET_GOVERNANCE_RECORD")),
+        &fs::read_to_string(&path).map_err(|_| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?,
     )
-    .unwrap_or_else(|_| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+    .map_err(|_| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?;
     if record.get("schema_version").and_then(Value::as_u64) != Some(1) {
-        fail("INVALID_RESET_GOVERNANCE_RECORD");
+        return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
     }
     let mode = record
         .get("mode")
         .and_then(Value::as_str)
         .filter(|mode| matches!(*mode, "fresh_init" | "discard_legacy_control_plane"))
-        .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+        .ok_or_else(|| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?;
     for key in ["reset_id", "branch"] {
         if record
             .get(key)
@@ -714,7 +736,7 @@ pub(super) fn reset_governance_record_mode(root: &Path) -> Option<String> {
             .filter(|value| !value.is_empty())
             .is_none()
         {
-            fail("INVALID_RESET_GOVERNANCE_RECORD");
+            return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
         }
     }
     let transaction_id = record
@@ -722,14 +744,14 @@ pub(super) fn reset_governance_record_mode(root: &Path) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty());
     if record.get("transaction_id").is_some() && transaction_id.is_none() {
-        fail("INVALID_RESET_GOVERNANCE_RECORD");
+        return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
     }
     match transaction_id {
         Some(_) if record.get("reset_id") != record.get("transaction_id") => {
-            fail("INVALID_RESET_GOVERNANCE_RECORD");
+            return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
         }
         Some(_) => {}
-        None if mode == "fresh_init" => fail("INVALID_RESET_GOVERNANCE_RECORD"),
+        None if mode == "fresh_init" => return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned()),
         // Legacy discard receipts predate the transactional reset owner. They
         // bind the operation through the historical `reset-<pid>` identity and
         // are accepted only when the full receipt below validates and the
@@ -738,13 +760,13 @@ pub(super) fn reset_governance_record_mode(root: &Path) -> Option<String> {
             let reset_id = record
                 .get("reset_id")
                 .and_then(Value::as_str)
-                .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+                .ok_or_else(|| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?;
             let suffix = reset_id
                 .strip_prefix("reset-")
                 .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+                .ok_or_else(|| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?;
             if !suffix.chars().all(|value| value.is_ascii_digit()) {
-                fail("INVALID_RESET_GOVERNANCE_RECORD");
+                return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
             }
             let prefix = Command::new("git")
                 .args([
@@ -771,7 +793,7 @@ pub(super) fn reset_governance_record_mode(root: &Path) -> Option<String> {
                 .map(|output| output.stdout)
                 .is_some_and(|bytes| fs::read(&path).is_ok_and(|current| current == bytes));
             if !committed {
-                fail("INVALID_RESET_GOVERNANCE_RECORD");
+                return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
             }
             eprintln!(
                 "warning: authorized legacy governance reset receipt has no transaction_id ({})",
@@ -783,82 +805,27 @@ pub(super) fn reset_governance_record_mode(root: &Path) -> Option<String> {
         .get("created_at")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+        .ok_or_else(|| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?;
     let created_at = DateTime::parse_from_rfc3339(created_at)
-        .unwrap_or_else(|_| fail("INVALID_RESET_GOVERNANCE_RECORD"))
+        .map_err(|_| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?
         .with_timezone(&Utc);
     if created_at > Utc::now() {
-        fail("INVALID_RESET_GOVERNANCE_RECORD");
+        return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
     }
     for key in ["preserved", "removed"] {
         let values = record
             .get(key)
             .and_then(Value::as_array)
             .filter(|values| !values.is_empty())
-            .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+            .ok_or_else(|| "INVALID_RESET_GOVERNANCE_RECORD".to_owned())?;
         if values
             .iter()
             .any(|entry| entry.as_str().filter(|entry| !entry.is_empty()).is_none())
         {
-            fail("INVALID_RESET_GOVERNANCE_RECORD");
+            return Err("INVALID_RESET_GOVERNANCE_RECORD".to_owned());
         }
     }
-    Some(mode.to_string())
-}
-
-pub(super) fn verify_sdk_migration_record(root: &Path, admission: bool) {
-    if !admission && reset_governance_record_mode(root).is_some() {
-        for step in SDK_MAP_MIGRATION_STEPS {
-            let migration_root = sdk_map_migration_root(root, step);
-            if fs::symlink_metadata(&migration_root).is_ok() {
-                eprintln!(
-                    "warning: SDK migration history ignored after authorized governance reset ({})",
-                    migration_root.display()
-                );
-            }
-        }
-        return;
-    }
-    if !admission {
-        // A project that still points at an older SDK bundle may continue
-        // ordinary development while its immutable migration witness awaits
-        // the explicit pin-lock/fresh-init owner.  Keep path integrity checks
-        // active, but do not turn an historical bundle mismatch into a
-        // development blocker.  Once the lock points at this Bundle, the
-        // strict migration validator below remains authoritative.
-        for step in SDK_MAP_MIGRATION_STEPS {
-            let migration_root = sdk_map_migration_root(root, step);
-            if fs::symlink_metadata(&migration_root).is_ok() {
-                assert_no_symlink_components(root, &migration_root, "sdk_migration");
-                let lock_path = root.join(".appsdk/sdk.lock");
-                let lock_bundle = fs::read_to_string(&lock_path)
-                    .ok()
-                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                    .and_then(|lock| {
-                        lock.get("bundle_digest")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    });
-                let current_bundle = sdk_bundle_digest();
-                if lock_bundle.as_deref() != Some(current_bundle.as_str()) {
-                    eprintln!(
-                        "warning: legacy SDK migration history retained for ordinary development ({})",
-                        migration_root.display()
-                    );
-                    return;
-                }
-            }
-        }
-    }
-    for step in SDK_MAP_MIGRATION_STEPS {
-        if sdk_map_migration_root(root, step)
-            .join("record.json")
-            .is_file()
-        {
-            let _ =
-                assert_sdk_migration_record(root, step, sdk_map_migration_checks_live_target(step));
-        }
-    }
+    Ok(Some(mode.to_string()))
 }
 
 pub(super) fn verify_internal(
@@ -868,15 +835,19 @@ pub(super) fn verify_internal(
     check_module_publications: bool,
     emit_result: bool,
 ) {
-    assert_project_root_safe(root);
-    let reset_epoch = reset_governance_record_mode(root).is_some();
+    let invocation = Arc::new(
+        VerifyInvocation::new(root.to_path_buf(), admission).unwrap_or_else(|error| fail(error)),
+    );
+    let root_path = invocation.root().to_path_buf();
+    let reset_epoch = invocation.reset_epoch();
+    let project_checked = run_verify_foundation(invocation).unwrap_or_else(|error| fail(error));
+    let root = root_path.as_path();
+    let project = project_checked
+        .get("project")
+        .cloned()
+        .unwrap_or_else(|| fail("VERIFY_FOUNDATION_PROJECT_ENVELOPE_MISSING"));
     let mut delivery_verified = false;
     let mut baseline_status = if reset_epoch { "required" } else { "current" };
-    let project = read_project(root);
-    assert_governance_maps(root);
-    verify_sdk_migration_record(root, admission);
-    assert_declared_contracts(root, &project);
-    assert_project_contract(root, &project);
     let test_governance = if emit_result {
         match test_governance_report(root, &project, None, admission) {
             Ok(report) => {
@@ -899,198 +870,9 @@ pub(super) fn verify_internal(
     } else {
         Value::Null
     };
-    if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
-        fail("UNSUPPORTED_PROJECT_SCHEMA");
-    }
-    if project
-        .pointer("/access/protected_paths")
-        .and_then(Value::as_array)
-        .is_none()
-        || project
-            .pointer("/governance/playground_root")
-            .and_then(Value::as_str)
-            .is_none()
-        || project
-            .pointer("/governance/active_root")
-            .and_then(Value::as_str)
-            .is_none()
-        || project
-            .pointer("/governance/protected_root")
-            .and_then(Value::as_str)
-            .is_none()
-        || project
-            .pointer("/governance/generated_root")
-            .and_then(Value::as_str)
-            .is_none()
-        || project
-            .pointer("/governance/active_kind")
-            .and_then(Value::as_str)
-            != Some("immutable_consumable_library")
-        || project
-            .pointer("/lifecycles/issue")
-            .and_then(Value::as_str)
-            .is_none()
-        || project
-            .pointer("/lifecycles/library")
-            .and_then(Value::as_str)
-            .is_none()
-        || project
-            .pointer("/lifecycles/source_snapshot")
-            .and_then(Value::as_str)
-            .is_none()
-        || project
-            .pointer("/lifecycles/artifact")
-            .and_then(Value::as_str)
-            .is_none()
-    {
-        fail("INVALID_GOVERNANCE_CONTRACT");
-    }
-    let modules = project
-        .get("modules")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"));
-    let mut module_ids = std::collections::HashSet::new();
-    for module in modules {
-        let module_id = module
-            .get("module_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        assert_identifier(module_id, &format!("INVALID_MODULE_CONTRACT:{}", module_id));
-        if !module_ids.insert(module_id) {
-            fail(format!("DUPLICATE_MODULE:{}", module_id));
-        }
-        for key in ["module_id", "stage", "source_owner", "active_artifact"] {
-            if module.get(key).and_then(Value::as_str).is_none() {
-                fail(format!("INVALID_MODULE_CONTRACT:{}", key));
-            }
-        }
-        let stage = module.get("stage").and_then(Value::as_str).unwrap_or("");
-        if !matches!(
-            stage,
-            "draft"
-                | "source_implemented"
-                | "contract_bound"
-                | "compiled"
-                | "controlled_verified"
-                | "architecture_stable"
-                | "frozen"
-                | "retired"
-        ) {
-            fail(format!("INVALID_MODULE_CONTRACT:{}", module_id));
-        }
-        if module.get("source_owner").and_then(Value::as_str) != Some(module_id)
-            || module
-                .get("owned_paths")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values.is_empty()
-                        || values.iter().any(|value| {
-                            value.as_str().map(|entry| entry.is_empty()).unwrap_or(true)
-                        })
-                })
-                .unwrap_or(true)
-            || module
-                .get("generated_outputs")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values.is_empty()
-                        || values.iter().any(|value| {
-                            value.as_str().map(|entry| entry.is_empty()).unwrap_or(true)
-                        })
-                })
-                .unwrap_or(true)
-            || module
-                .get("active_artifact")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .is_none()
-            || module
-                .get("contract_paths")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values.is_empty()
-                        || values.iter().any(|value| {
-                            value.as_str().map(|entry| entry.is_empty()).unwrap_or(true)
-                        })
-                })
-                .unwrap_or(true)
-            || module.get("build").and_then(Value::as_object).is_none()
-            || module
-                .get("artifact_paths")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values.is_empty()
-                        || values.iter().any(|value| {
-                            value.as_str().map(|entry| entry.is_empty()).unwrap_or(true)
-                        })
-                })
-                .unwrap_or(true)
-        {
-            fail("INVALID_MODULE_SURFACES");
-        }
-        if let Some(version_base) = module.get("version_base").filter(|value| !value.is_null()) {
-            for path in [
-                "/previous_active_version",
-                "/new_active_version",
-                "/base_artifact_hash",
-                "/base_source_commit",
-            ] {
-                record_str(version_base, path, "module-version-base");
-            }
-            if version_base
-                .get("previous_active_version")
-                .and_then(Value::as_str)
-                == version_base
-                    .get("new_active_version")
-                    .and_then(Value::as_str)
-            {
-                fail(format!("INVALID_MODULE_VERSION_BASE:{}", module_id));
-            }
-        }
-        let build = module
-            .get("build")
-            .and_then(Value::as_object)
-            .unwrap_or_else(|| fail(format!("INVALID_MODULE_CONTRACT:{}", module_id)));
-        if build
-            .get("program")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .is_none()
-            || build
-                .get("working_directory")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .is_none()
-            || build
-                .get("args")
-                .and_then(Value::as_array)
-                .map(|values| values.iter().any(|value| value.as_str().is_none()))
-                .unwrap_or(true)
-        {
-            fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id));
-        }
-    }
-    let project_id = project
-        .get("project_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    assert_identifier(project_id, "INVALID_PROJECT_ID");
     let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
-    if !matches!(
-        stage,
-        "draft"
-            | "source_implemented"
-            | "contract_bound"
-            | "compiled"
-            | "controlled_verified"
-            | "architecture_stable"
-            | "frozen"
-            | "retired"
-    ) {
-        fail(format!("UNKNOWN_PROJECT_STAGE:{}", stage));
-    }
     assert_sdk_lock(root, &project);
-    assert_sdk_resources(
+    assert_sdk_resources_semantics(
         root,
         matches!(
             stage,
@@ -1117,7 +899,7 @@ pub(super) fn verify_internal(
         None
     };
     if let Some(artifact) = artifact.as_ref() {
-        assert_artifact_matches(&project, artifact);
+        assert_artifact_semantics(&project, artifact);
     }
     let development_gap = reset_epoch && !admission;
     let verify_publication_graph = check_module_publications && !development_gap;
@@ -1319,5 +1101,25 @@ pub(super) fn verify_internal(
 }
 
 pub(super) fn verify(root: &Path, admission: bool) {
+    let selection = if admission { "admission" } else { "default" };
+    log_verify_invocation(root, selection);
     verify_internal(root, admission, true, true, true);
+}
+
+/// Appends one `invoked` record for the public `verify` command. The shared
+/// logger owns path safety and the append; a log failure is a warning and never
+/// replaces the business result or exit code.
+fn log_verify_invocation(root: &Path, selection: &str) {
+    let started_at = chrono::Utc::now().to_rfc3339();
+    if let Err(error) = crate::command_invocation::append_command_invocation(
+        root,
+        "verify",
+        &started_at,
+        None,
+        Some(("selection", selection)),
+        "invoked",
+        None,
+    ) {
+        eprintln!("COMMAND_INVOCATION_LOG_WRITE_FAILED:{error}");
+    }
 }

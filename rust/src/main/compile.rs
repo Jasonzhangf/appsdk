@@ -131,7 +131,15 @@ pub(super) fn generated_root(root: &Path, project: &Value) -> PathBuf {
 }
 
 pub(super) fn contract_root(root: &Path, project: &Value, path: &str) -> PathBuf {
-    let value = required_str(project, path, "INVALID_GOVERNANCE_CONTRACT");
+    try_contract_root(root, project, path).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_contract_root(
+    root: &Path,
+    project: &Value,
+    path: &str,
+) -> Result<PathBuf, String> {
+    let value = try_required_str(project, path, "INVALID_GOVERNANCE_CONTRACT")?;
     let relative = value.trim_end_matches("/**").trim_end_matches('/');
     let candidate = Path::new(relative);
     if relative.is_empty()
@@ -143,23 +151,31 @@ pub(super) fn contract_root(root: &Path, project: &Value, path: &str) -> PathBuf
             )
         })
     {
-        fail(format!("INVALID_GOVERNANCE_ROOT:{}", path));
+        return Err(format!("INVALID_GOVERNANCE_ROOT:{}", path));
     }
     let current = root.join(candidate);
-    assert_no_symlink_components(root, &current, path);
-    current
+    try_assert_no_symlink_components(root, &current, path)?;
+    Ok(current)
 }
 
 pub(super) fn assert_no_symlink_components(root: &Path, path: &Path, label: &str) {
+    try_assert_no_symlink_components(root, path, label).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_assert_no_symlink_components(
+    root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<(), String> {
     if fs::symlink_metadata(root)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        fail(format!("GOVERNANCE_PATH_SYMLINK:{}", label));
+        return Err(format!("GOVERNANCE_PATH_SYMLINK:{}", label));
     }
     let relative = path
         .strip_prefix(root)
-        .unwrap_or_else(|_| fail(format!("GOVERNANCE_PATH_ESCAPE:{}", label)));
+        .map_err(|_| format!("GOVERNANCE_PATH_ESCAPE:{}", label))?;
     let mut current = root.to_path_buf();
     for component in relative.components() {
         current.push(component.as_os_str());
@@ -167,16 +183,25 @@ pub(super) fn assert_no_symlink_components(root: &Path, path: &Path, label: &str
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)
         {
-            fail(format!("GOVERNANCE_PATH_SYMLINK:{}", label));
+            return Err(format!("GOVERNANCE_PATH_SYMLINK:{}", label));
         }
     }
+    Ok(())
 }
 
 pub(super) fn safe_owned_path(root: &Path, relative: &str, label: &str) -> PathBuf {
+    try_safe_owned_path(root, relative, label).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_safe_owned_path(
+    root: &Path,
+    relative: &str,
+    label: &str,
+) -> Result<PathBuf, String> {
     let trimmed = relative.trim_end_matches("/**").trim_end_matches('/');
     let path = Path::new(trimmed);
     if trimmed.is_empty() || path.is_absolute() {
-        fail(format!("INVALID_OWNED_PATH:{}", label));
+        return Err(format!("INVALID_OWNED_PATH:{}", label));
     }
     if trimmed != "."
         && path.components().any(|component| {
@@ -186,11 +211,11 @@ pub(super) fn safe_owned_path(root: &Path, relative: &str, label: &str) -> PathB
             )
         })
     {
-        fail(format!("INVALID_OWNED_PATH:{}", label));
+        return Err(format!("INVALID_OWNED_PATH:{}", label));
     }
     let full = root.join(path);
-    assert_no_symlink_components(root, &full, label);
-    full
+    try_assert_no_symlink_components(root, &full, label)?;
+    Ok(full)
 }
 
 pub(super) fn assert_vcs_clean(root: &Path, project: &Value, module_id: &str) {
@@ -722,40 +747,53 @@ pub(super) fn module_public_api_hash(artifact_entries: &[Value]) -> String {
 }
 
 pub(super) fn module_deployment_operations(module: &Value) -> Vec<&str> {
+    try_module_deployment_operations(module).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_module_deployment_operations(module: &Value) -> Result<Vec<&str>, String> {
     let Some(value) = module.get("deployment_operations") else {
         // Existing service contracts retain both receipts until explicitly changed.
-        return vec!["install", "restart"];
+        return Ok(vec!["install", "restart"]);
     };
     let values = value
         .as_array()
-        .unwrap_or_else(|| fail("INVALID_DEPLOYMENT_OPERATIONS"));
+        .ok_or_else(|| "INVALID_DEPLOYMENT_OPERATIONS".to_owned())?;
     let mut operations = Vec::new();
     for value in values {
         let operation = value
             .as_str()
-            .unwrap_or_else(|| fail("INVALID_DEPLOYMENT_OPERATIONS"));
+            .ok_or_else(|| "INVALID_DEPLOYMENT_OPERATIONS".to_owned())?;
         if !matches!(operation, "install" | "restart") || operations.contains(&operation) {
-            fail("INVALID_DEPLOYMENT_OPERATIONS");
+            return Err("INVALID_DEPLOYMENT_OPERATIONS".to_owned());
         }
         operations.push(operation);
     }
-    operations
+    Ok(operations)
 }
 
 pub(super) fn assert_module_regression_contract(module: &Value, stage: &str, module_id: &str) {
+    try_assert_module_regression_contract(module, stage, module_id)
+        .unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_assert_module_regression_contract(
+    module: &Value,
+    stage: &str,
+    module_id: &str,
+) -> Result<(), String> {
     let Some(regression_value) = module.get("regression") else {
         if matches!(stage, "frozen" | "retired") {
-            fail(format!("REGRESSION_CONTRACT_REQUIRED:{}", module_id));
+            return Err(format!("REGRESSION_CONTRACT_REQUIRED:{}", module_id));
         }
-        return;
+        return Ok(());
     };
     let regression = regression_value
         .as_object()
-        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+        .ok_or_else(|| format!("INVALID_REGRESSION_CONTRACT:{}", module_id))?;
     let required_before_freeze = regression
         .get("required_before_freeze")
         .and_then(Value::as_bool)
-        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+        .ok_or_else(|| format!("INVALID_REGRESSION_CONTRACT:{}", module_id))?;
     if (!required_before_freeze && matches!(stage, "architecture_stable" | "frozen" | "retired"))
         || regression
             .get("suite_id")
@@ -801,12 +839,12 @@ pub(super) fn assert_module_regression_contract(module: &Value, stage: &str, mod
             })
             .unwrap_or(true)
     {
-        fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
+        return Err(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
     }
     let command = regression
         .get("command")
         .and_then(Value::as_object)
-        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+        .ok_or_else(|| format!("INVALID_REGRESSION_CONTRACT:{}", module_id))?;
     if command
         .get("program")
         .and_then(Value::as_str)
@@ -823,8 +861,9 @@ pub(super) fn assert_module_regression_contract(module: &Value, stage: &str, mod
             .map(|values| values.iter().any(|value| value.as_str().is_none()))
             .unwrap_or(true)
     {
-        fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
+        return Err(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
     }
+    Ok(())
 }
 
 pub(super) fn build_module_artifact(
@@ -1237,6 +1276,17 @@ pub(super) fn read_compiled_artifact(root: &Path, project: &Value) -> Value {
 }
 
 pub(super) fn assert_artifact_matches(project: &Value, artifact: &Value) {
+    assert_artifact_schema(project, artifact);
+    assert_artifact_hash(artifact);
+    assert_artifact_module_semantics(project, artifact);
+}
+
+pub(super) fn assert_artifact_semantics(project: &Value, artifact: &Value) {
+    assert_artifact_schema(project, artifact);
+    assert_artifact_module_semantics(project, artifact);
+}
+
+fn assert_artifact_schema(project: &Value, artifact: &Value) {
     if artifact.get("artifact_schema").and_then(Value::as_u64) != Some(1)
         || artifact.get("project_id").and_then(Value::as_str)
             != project.get("project_id").and_then(Value::as_str)
@@ -1246,6 +1296,9 @@ pub(super) fn assert_artifact_matches(project: &Value, artifact: &Value) {
     {
         fail("INVALID_ARTIFACT_SCHEMA");
     }
+}
+
+fn assert_artifact_hash(artifact: &Value) {
     let stored_hash = record_str(artifact, "/artifact_hash", "artifact");
     let mut unsigned = artifact.clone();
     unsigned
@@ -1255,6 +1308,9 @@ pub(super) fn assert_artifact_matches(project: &Value, artifact: &Value) {
     if stored_hash != sha256(&canonical(&unsigned)) {
         fail("ARTIFACT_HASH_MISMATCH");
     }
+}
+
+fn assert_artifact_module_semantics(project: &Value, artifact: &Value) {
     let project_modules = project
         .get("modules")
         .and_then(Value::as_array)

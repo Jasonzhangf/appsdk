@@ -1,0 +1,119 @@
+{
+  "id": "appsdk-verify-foundation",
+  "version": "0.1.0",
+  "description": "Executable foundation segment consumed by verify_internal. One Null invocation request enters a linear, read-only chain for safe project loading, governance baseline, declared contracts, and project contracts. The caller constructs one immutable typed invocation resource for root, mode, and reset state; those control fields are not JSON payload fields. Each node returns a runtime error to the same invocation failure boundary and stops later nodes. The unmigrated remainder consumes only the final project_checked.project value. It does not require summary freezing, hash manifests, identity wrapping, or a generic control plane.",
+  "inputs": [
+    {
+      "id": "verify_request",
+      "schema": "Null"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "load_project",
+      "operator": "appsdk.verify.load_project",
+      "operator_version": "1",
+      "description": "Reads and parses project JSON with the existing project-file safety checks, without adding an early project schema. Any legal JSON project value is wrapped as {project: value}. The caller checks root safety and reads reset state once before constructing the immutable typed invocation resource.",
+      "inputs": ["verify_request"],
+      "output": {
+        "id": "project_loaded",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "governance_baseline",
+      "operator": "appsdk.verify.governance_baseline",
+      "operator_version": "1",
+      "description": "Validates governance map structure and required fields. Daily migration identity replay is excluded; this node does not calculate or compare hashes, snapshots, or candidate identity wrappers.",
+      "inputs": ["project_loaded"],
+      "output": {
+        "id": "governance_checked",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "declared_contracts",
+      "operator": "appsdk.verify.declared_contracts",
+      "operator_version": "1",
+      "description": "Runs the current assert_declared_contracts validation for canonical declarations, zones, and record semantics. The project payload is retained for the next node.",
+      "inputs": ["governance_checked"],
+      "output": {
+        "id": "declarations_checked",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_contract",
+      "operator": "appsdk.verify.project_contract",
+      "operator_version": "1",
+      "description": "Runs the current assert_project_contract validation for project, module, governance-root, ownership, build, and applicable regression contracts. The final Object is the single graph output for the unmigrated remainder of verify_internal.",
+      "inputs": ["declarations_checked"],
+      "output": {
+        "id": "project_checked",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "load_project",
+      "to": "governance_baseline",
+      "arc_id": "project_loaded"
+    },
+    {
+      "from": "governance_baseline",
+      "to": "declared_contracts",
+      "arc_id": "governance_checked"
+    },
+    {
+      "from": "declared_contracts",
+      "to": "project_contract",
+      "arc_id": "declarations_checked"
+    }
+  ],
+  "outputs": ["project_checked"]
+}

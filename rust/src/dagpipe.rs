@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::{
     assert_identifier, assert_no_symlink_components, assert_project_root_safe, fail,
-    module_record_name,
+    module_record_name, register_verify_operators_for_validation,
 };
 
 pub(super) const FIX_LIFECYCLE_GRAPH: &str =
@@ -278,6 +278,7 @@ fn validate_graph_registry(graph: &Graph) -> Result<(), String> {
     let mut registry = Registry::default();
     register_fix_operators(&mut registry)?;
     register_notification_operators(&mut registry)?;
+    register_verify_operators_for_validation(&mut registry)?;
     for name in &design_operators {
         registry
             .register(DesignGraphOperator {
@@ -331,7 +332,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 48] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -388,6 +389,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
         (
             "contracts/dagpipe/notification.graph.json",
             NOTIFICATION_LIFECYCLE_GRAPH,
+        ),
+        (
+            "contracts/dagpipe/verify-foundation.graph.json",
+            crate::verify_foundation::VERIFY_FOUNDATION_GRAPH,
         ),
         (
             "docs/dagpipe/collab-context.graph.json",

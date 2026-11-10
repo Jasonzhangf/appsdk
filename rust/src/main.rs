@@ -11,6 +11,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "main/command_invocation.rs"]
+mod command_invocation;
 mod global_registry;
 mod guidance;
 mod long_horizon_policy;
@@ -667,6 +669,9 @@ use merge_gates::*;
 #[path = "main/promotion.rs"]
 mod promotion;
 use promotion::*;
+#[path = "main/verify_foundation.rs"]
+mod verify_foundation;
+use verify_foundation::*;
 #[path = "main/init.rs"]
 mod init;
 use init::*;

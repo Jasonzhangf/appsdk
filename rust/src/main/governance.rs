@@ -355,19 +355,27 @@ pub(super) fn project_file(root: &Path) -> PathBuf {
 }
 
 pub(super) fn read_project(root: &Path) -> Value {
+    try_read_project(root).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_read_project(root: &Path) -> Result<Value, String> {
     let file = project_file(root);
     if fs::symlink_metadata(&file)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        fail("GOVERNANCE_PATH_SYMLINK:project");
+        return Err("GOVERNANCE_PATH_SYMLINK:project".to_owned());
     }
     let text = fs::read_to_string(&file)
-        .unwrap_or_else(|_| fail(format!("PROJECT_CONTRACT_MISSING:{}", file.display())));
-    serde_json::from_str(&text).unwrap_or_else(|_| fail("INVALID_PROJECT_CONTRACT"))
+        .map_err(|_| format!("PROJECT_CONTRACT_MISSING:{}", file.display()))?;
+    serde_json::from_str(&text).map_err(|_| "INVALID_PROJECT_CONTRACT".to_owned())
 }
 
 pub(super) fn assert_project_root_safe(root: &Path) {
+    try_assert_project_root_safe(root).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_assert_project_root_safe(root: &Path) -> Result<(), String> {
     for ancestor in root.ancestors() {
         if ancestor == Path::new("/tmp") || ancestor == Path::new("/var") {
             continue;
@@ -376,27 +384,27 @@ pub(super) fn assert_project_root_safe(root: &Path) {
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)
         {
-            fail(format!("PROJECT_ROOT_SYMLINK:{}", ancestor.display()));
+            return Err(format!("PROJECT_ROOT_SYMLINK:{}", ancestor.display()));
         }
     }
     if fs::symlink_metadata(root)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        fail("PROJECT_ROOT_SYMLINK");
+        return Err("PROJECT_ROOT_SYMLINK".to_owned());
     }
     let resolved = root
         .canonicalize()
-        .unwrap_or_else(|_| fail("PROJECT_ROOT_MISSING"));
+        .map_err(|_| "PROJECT_ROOT_MISSING".to_owned())?;
     for ancestor in resolved.ancestors() {
         if fs::symlink_metadata(ancestor)
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)
         {
-            fail(format!("PROJECT_ROOT_SYMLINK:{}", ancestor.display()));
+            return Err(format!("PROJECT_ROOT_SYMLINK:{}", ancestor.display()));
         }
     }
-    assert_no_symlink_components(root, &root.join(".appsdk"), "appsdk_control");
+    try_assert_no_symlink_components(root, &root.join(".appsdk"), "appsdk_control")
 }
 
 pub(super) fn freeze_record_name(module_id: &str) -> String {
@@ -999,12 +1007,16 @@ pub(super) fn assert_version(value: &str, error: &str) {
 }
 
 pub(super) fn canonical_record_contract(relative: &str) -> Value {
+    try_canonical_record_contract(relative).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_canonical_record_contract(relative: &str) -> Result<Value, String> {
     let content = SDK_BUNDLE_RESOURCES
         .iter()
         .find(|(path, class, _)| *path == relative && *class == "contracts")
         .map(|(_, _, content)| *content)
-        .unwrap_or_else(|| fail("NON_CANONICAL_RECORD_CONTRACT_SET"));
-    serde_json::from_str(content).unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"))
+        .ok_or_else(|| "NON_CANONICAL_RECORD_CONTRACT_SET".to_owned())?;
+    serde_json::from_str(content).map_err(|_| "INVALID_CANONICAL_RECORD_CONTRACT".to_owned())
 }
 
 pub(super) fn schema_array_contains(values: &Value, expected: &Value) -> bool {
@@ -1013,16 +1025,23 @@ pub(super) fn schema_array_contains(values: &Value, expected: &Value) -> bool {
         .is_some_and(|entries| entries.iter().any(|entry| entry == expected))
 }
 
-pub(super) fn schema_required_names<'a>(schema: &'a Value, path: &str) -> &'a Vec<Value> {
+pub(super) fn try_schema_required_names<'a>(
+    schema: &'a Value,
+    path: &str,
+) -> Result<&'a Vec<Value>, String> {
     schema
         .get("required")
         .and_then(Value::as_array)
-        .unwrap_or_else(|| fail(format!("INVALID_DECLARED_RECORD_CONTRACT:{}", path)))
+        .ok_or_else(|| format!("INVALID_DECLARED_RECORD_CONTRACT:{}", path))
 }
 
-pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Value, path: &str) {
+pub(super) fn try_assert_schema_property_compatible(
+    canonical: &Value,
+    declared: &Value,
+    path: &str,
+) -> Result<(), String> {
     if !canonical.is_object() || !declared.is_object() {
-        fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
     }
     for key in ["if", "then", "not"] {
         let Some(expected) = canonical.get(key) else {
@@ -1030,25 +1049,25 @@ pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Va
         };
         let actual = declared
             .get(key)
-            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/{key}")));
-        assert_schema_property_compatible(expected, actual, &format!("{path}/{key}"));
+            .ok_or_else(|| format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/{key}"))?;
+        try_assert_schema_property_compatible(expected, actual, &format!("{path}/{key}"))?;
     }
     if let Some(expected_all_of) = canonical.get("allOf") {
         let Some(expected_rules) = expected_all_of.as_array() else {
-            fail(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path));
+            return Err(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path));
         };
         let Some(actual_rules) = declared.get("allOf").and_then(Value::as_array) else {
-            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/allOf"));
+            return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/allOf"));
         };
         for (index, expected_rule) in expected_rules.iter().enumerate() {
             let Some(actual_rule) = actual_rules.get(index) else {
-                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/allOf"));
+                return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/allOf"));
             };
-            assert_schema_property_compatible(
+            try_assert_schema_property_compatible(
                 expected_rule,
                 actual_rule,
                 &format!("{path}/allOf/{index}"),
-            );
+            )?;
         }
     }
     for key in [
@@ -1067,7 +1086,7 @@ pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Va
             continue;
         };
         let Some(actual) = declared.get(key) else {
-            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
         };
         let compatible = match key {
             "minimum" | "minItems" | "minLength" => actual
@@ -1079,45 +1098,49 @@ pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Va
             _ => actual == expected,
         };
         if !compatible {
-            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
         }
     }
     if let Some(expected_enum) = canonical.get("enum") {
         let Some(expected_values) = expected_enum.as_array() else {
-            fail(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path));
+            return Err(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path));
         };
         let declared_const = declared.get("const");
         let declared_enum = declared.get("enum");
         if declared_const.is_none() && declared_enum.is_none() {
-            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
         }
         if declared_const.is_some_and(|value| !expected_values.contains(value)) {
-            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
         }
         if let Some(actual_enum) = declared_enum {
             let Some(actual_values) = actual_enum.as_array() else {
-                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+                return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
             };
             if actual_values.is_empty()
                 || actual_values
                     .iter()
                     .any(|value| !expected_values.iter().any(|entry| entry == value))
             {
-                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+                return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
             }
         }
     }
     if let Some(expected_items) = canonical.get("items") {
         let actual_items = declared
             .get("items")
-            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path)));
-        assert_schema_property_compatible(expected_items, actual_items, &format!("{path}/items"));
+            .ok_or_else(|| format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path))?;
+        try_assert_schema_property_compatible(
+            expected_items,
+            actual_items,
+            &format!("{path}/items"),
+        )?;
     }
     if let Some(expected_props) = canonical.get("properties").and_then(Value::as_object) {
         let actual_props = declared
             .get("properties")
             .and_then(Value::as_object)
-            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path)));
+            .ok_or_else(|| format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path))?;
         let expected_required = canonical
             .get("required")
             .and_then(Value::as_array)
@@ -1129,72 +1152,74 @@ pub(super) fn assert_schema_property_compatible(canonical: &Value, declared: &Va
                     .iter()
                     .any(|required| required.as_str() == Some(name.as_str()))
                 {
-                    fail(format!(
+                    return Err(format!(
                         "DECLARED_RECORD_CONTRACT_MISMATCH:{path}/properties/{name}"
                     ));
                 }
                 continue;
             };
-            assert_schema_property_compatible(
+            try_assert_schema_property_compatible(
                 expected_property,
                 actual_property,
                 &format!("{path}/properties/{name}"),
-            );
+            )?;
         }
     }
     if let Some(expected_required) = canonical.get("required") {
         let actual_required = declared
             .get("required")
-            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path)));
+            .ok_or_else(|| format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path))?;
         for required in expected_required
             .as_array()
-            .unwrap_or_else(|| fail(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path)))
+            .ok_or_else(|| format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path))?
         {
             if !schema_array_contains(actual_required, required) {
-                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+                return Err(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
             }
         }
     }
+    Ok(())
 }
 
-pub(super) fn assert_record_schema_minimum(relative: &str, declared: &Value) {
-    let canonical = canonical_record_contract(relative);
+pub(super) fn try_assert_record_schema_minimum(
+    relative: &str,
+    declared: &Value,
+) -> Result<(), String> {
+    let canonical = try_canonical_record_contract(relative)?;
     let mut canonical_root = serde_json::Map::new();
     let mut declared_root = serde_json::Map::new();
     for key in ["if", "then", "not", "allOf"] {
         let Some(expected) = canonical.get(key) else {
             continue;
         };
-        let actual = declared.get(key).unwrap_or_else(|| {
-            fail(format!(
-                "DECLARED_RECORD_CONTRACT_MISMATCH:{relative}/{key}"
-            ))
-        });
+        let actual = declared
+            .get(key)
+            .ok_or_else(|| format!("DECLARED_RECORD_CONTRACT_MISMATCH:{relative}/{key}"))?;
         canonical_root.insert(key.into(), expected.clone());
         declared_root.insert(key.into(), actual.clone());
     }
     if !canonical_root.is_empty() {
-        assert_schema_property_compatible(
+        try_assert_schema_property_compatible(
             &Value::Object(canonical_root),
             &Value::Object(declared_root),
             relative,
-        );
+        )?;
     }
-    let canonical_required = schema_required_names(&canonical, relative);
-    let declared_required = schema_required_names(declared, relative);
+    let canonical_required = try_schema_required_names(&canonical, relative)?;
+    let declared_required = try_schema_required_names(declared, relative)?;
     let declared_properties = declared
         .get("properties")
         .and_then(Value::as_object)
-        .unwrap_or_else(|| fail("INVALID_DECLARED_RECORD_CONTRACT"));
+        .ok_or_else(|| "INVALID_DECLARED_RECORD_CONTRACT".to_owned())?;
     let canonical_properties = canonical
         .get("properties")
         .and_then(Value::as_object)
-        .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+        .ok_or_else(|| "INVALID_CANONICAL_RECORD_CONTRACT".to_owned())?;
     for required in canonical_required {
         let name = required
             .as_str()
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+            .ok_or_else(|| "INVALID_CANONICAL_RECORD_CONTRACT".to_owned())?;
         let compatibility_exception = relative == "contracts/records/promotion-record.schema.json"
             && name == "bug_closure_verified";
         let required_present =
@@ -1204,23 +1229,28 @@ pub(super) fn assert_record_schema_minimum(relative: &str, declared: &Value) {
             continue;
         }
         if !required_present || declared_property.is_none() {
-            fail(format!(
+            return Err(format!(
                 "DECLARED_RECORD_CONTRACT_MISMATCH:{relative}:{name}"
             ));
         }
         let canonical_property = canonical_properties
             .get(name)
-            .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
-        assert_schema_property_compatible(
+            .ok_or_else(|| "INVALID_CANONICAL_RECORD_CONTRACT".to_owned())?;
+        try_assert_schema_property_compatible(
             canonical_property,
             declared_property.unwrap(),
             &format!("{relative}/properties/{name}"),
-        );
+        )?;
     }
+    Ok(())
 }
 
 pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
-    let zone = contract_root(root, project, "/governance/zone_transition_contract");
+    try_assert_declared_contracts(root, project).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_assert_declared_contracts(root: &Path, project: &Value) -> Result<(), String> {
+    let zone = try_contract_root(root, project, "/governance/zone_transition_contract")?;
     let canonical_zone = project
         .pointer("/governance/zone_transition_contract")
         .and_then(Value::as_str)
@@ -1243,12 +1273,12 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
         .unwrap_or(false);
     let canonical_project = canonical_zone && canonical_records;
     if !canonical_project {
-        fail("NON_CANONICAL_GOVERNANCE_CONTRACT");
+        return Err("NON_CANONICAL_GOVERNANCE_CONTRACT".to_owned());
     }
     let declared_records = project
         .pointer("/governance/record_contracts")
         .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/governance/record_contracts"));
+        .ok_or_else(|| "INVALID_PROJECT_CONTRACT:/governance/record_contracts".to_owned())?;
     if declared_records.len() != CANONICAL_RECORD_CONTRACTS.len()
         || CANONICAL_RECORD_CONTRACTS.iter().any(|path| {
             !declared_records
@@ -1256,25 +1286,25 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
                 .any(|value| value.as_str() == Some(*path))
         })
     {
-        fail("NON_CANONICAL_RECORD_CONTRACT_SET");
+        return Err("NON_CANONICAL_RECORD_CONTRACT_SET".to_owned());
     }
     let zone_text =
-        fs::read_to_string(&zone).unwrap_or_else(|_| fail("DECLARED_ZONE_CONTRACT_MISSING"));
-    let zone_value: Value =
-        serde_json::from_str(&zone_text).unwrap_or_else(|_| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+        fs::read_to_string(&zone).map_err(|_| "DECLARED_ZONE_CONTRACT_MISSING".to_owned())?;
+    let zone_value: Value = serde_json::from_str(&zone_text)
+        .map_err(|_| "INVALID_DECLARED_ZONE_CONTRACT".to_owned())?;
     let canonical_zone: Value = serde_json::from_str(CANONICAL_ZONE_TRANSITION_CONTRACT)
-        .unwrap_or_else(|_| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
+        .map_err(|_| "INVALID_CANONICAL_ZONE_CONTRACT".to_owned())?;
     if zone_value.get("zones") != canonical_zone.get("zones") {
-        fail("INVALID_DECLARED_ZONE_CONTRACT");
+        return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
     }
     let declared_transitions = zone_value
         .get("transitions")
         .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+        .ok_or_else(|| "INVALID_DECLARED_ZONE_CONTRACT".to_owned())?;
     let canonical_transitions = canonical_zone
         .get("transitions")
         .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
+        .ok_or_else(|| "INVALID_CANONICAL_ZONE_CONTRACT".to_owned())?;
     let declared_transition_keys = declared_transitions
         .iter()
         .map(|transition| {
@@ -1282,15 +1312,15 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
                 .get("from")
                 .and_then(Value::as_str)
                 .zip(transition.get("to").and_then(Value::as_str))
-                .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"))
+                .ok_or_else(|| "INVALID_DECLARED_ZONE_CONTRACT".to_owned())
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let mut unique_transition_keys = BTreeSet::new();
     if declared_transition_keys
         .iter()
         .any(|key| !unique_transition_keys.insert(key))
     {
-        fail("INVALID_DECLARED_ZONE_CONTRACT");
+        return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
     }
     let canonical_transition_keys = canonical_transitions
         .iter()
@@ -1299,27 +1329,27 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
                 .get("from")
                 .and_then(Value::as_str)
                 .zip(transition.get("to").and_then(Value::as_str))
-                .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"))
+                .ok_or_else(|| "INVALID_CANONICAL_ZONE_CONTRACT".to_owned())
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let mut unique_canonical_keys = BTreeSet::new();
     if canonical_transition_keys
         .iter()
         .any(|key| !unique_canonical_keys.insert(key))
     {
-        fail("INVALID_CANONICAL_ZONE_CONTRACT");
+        return Err("INVALID_CANONICAL_ZONE_CONTRACT".to_owned());
     }
     if declared_transition_keys.len() != canonical_transition_keys.len()
         || canonical_transition_keys
             .iter()
             .any(|key| !declared_transition_keys.contains(key))
     {
-        fail("INVALID_DECLARED_ZONE_CONTRACT");
+        return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
     }
     for transition in declared_transitions {
         let object = transition
             .as_object()
-            .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+            .ok_or_else(|| "INVALID_DECLARED_ZONE_CONTRACT".to_owned())?;
         for field in ["from", "to", "owner"] {
             if object
                 .get(field)
@@ -1327,7 +1357,7 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
                 .filter(|value| !value.is_empty())
                 .is_none()
             {
-                fail("INVALID_DECLARED_ZONE_CONTRACT");
+                return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
             }
         }
         if object.get("allowed").and_then(Value::as_bool).is_none()
@@ -1348,16 +1378,16 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
                 .and_then(Value::as_array)
                 .is_none()
         {
-            fail("INVALID_DECLARED_ZONE_CONTRACT");
+            return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
         }
         for field in ["requirements", "record_required"] {
             if object[field]
                 .as_array()
-                .unwrap()
+                .ok_or_else(|| "INVALID_DECLARED_ZONE_CONTRACT".to_owned())?
                 .iter()
                 .any(|value| value.as_str().is_none())
             {
-                fail("INVALID_DECLARED_ZONE_CONTRACT");
+                return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
             }
         }
     }
@@ -1366,7 +1396,7 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
             .get("from")
             .and_then(Value::as_str)
             .zip(expected.get("to").and_then(Value::as_str))
-            .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
+            .ok_or_else(|| "INVALID_CANONICAL_ZONE_CONTRACT".to_owned())?;
         let actual = declared_transitions
             .iter()
             .find(|transition| {
@@ -1376,42 +1406,42 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
                     .zip(transition.get("to").and_then(Value::as_str))
                     .is_some_and(|actual_key| actual_key == key)
             })
-            .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+            .ok_or_else(|| "INVALID_DECLARED_ZONE_CONTRACT".to_owned())?;
         if actual != expected {
-            fail("INVALID_DECLARED_ZONE_CONTRACT");
+            return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
         }
     }
     if let Some(expected_forbidden) = canonical_zone.get("forbidden_runtime_edges") {
         let actual_forbidden = zone_value
             .get("forbidden_runtime_edges")
             .and_then(Value::as_array)
-            .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+            .ok_or_else(|| "INVALID_DECLARED_ZONE_CONTRACT".to_owned())?;
         if !expected_forbidden
             .as_array()
-            .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"))
+            .ok_or_else(|| "INVALID_CANONICAL_ZONE_CONTRACT".to_owned())?
             .iter()
             .all(|expected| actual_forbidden.iter().any(|actual| actual == expected))
         {
-            fail("INVALID_DECLARED_ZONE_CONTRACT");
+            return Err("INVALID_DECLARED_ZONE_CONTRACT".to_owned());
         }
     }
     let canonical_path = zone.with_file_name("zone-transition.manifest.json");
     if !canonical_path.exists() {
-        fail("CANONICAL_ZONE_CONTRACT_MISSING");
+        return Err("CANONICAL_ZONE_CONTRACT_MISSING".to_owned());
     }
     for declared in project
         .pointer("/governance/record_contracts")
         .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/governance/record_contracts"))
+        .ok_or_else(|| "INVALID_PROJECT_CONTRACT:/governance/record_contracts".to_owned())?
     {
         let relative = declared
             .as_str()
-            .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/governance/record_contracts"));
-        let path = safe_owned_path(root, relative, "record_contract");
+            .ok_or_else(|| "INVALID_PROJECT_CONTRACT:/governance/record_contracts".to_owned())?;
+        let path = try_safe_owned_path(root, relative, "record_contract")?;
         let text =
-            fs::read_to_string(path).unwrap_or_else(|_| fail("DECLARED_RECORD_CONTRACT_MISSING"));
+            fs::read_to_string(path).map_err(|_| "DECLARED_RECORD_CONTRACT_MISSING".to_owned())?;
         let value: Value = serde_json::from_str(&text)
-            .unwrap_or_else(|_| fail("INVALID_DECLARED_RECORD_CONTRACT"));
+            .map_err(|_| "INVALID_DECLARED_RECORD_CONTRACT".to_owned())?;
         let schema = value
             .get("$schema")
             .and_then(Value::as_str)
@@ -1434,8 +1464,9 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
                         .any(|entry| entry.as_str().filter(|name| !name.is_empty()).is_none())
             })
         {
-            fail("INVALID_DECLARED_RECORD_CONTRACT");
+            return Err("INVALID_DECLARED_RECORD_CONTRACT".to_owned());
         }
-        assert_record_schema_minimum(relative, &value);
+        try_assert_record_schema_minimum(relative, &value)?;
     }
+    Ok(())
 }

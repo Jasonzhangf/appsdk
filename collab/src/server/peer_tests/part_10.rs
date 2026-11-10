@@ -2095,19 +2095,17 @@ fn worker_freed_transitions_notify_live_master() {
     assert!(alert.body.contains("Long-horizon orchestration"));
     assert!(alert
         .body
-        .contains("invite suitable, available and authorized peers"));
+        .contains("check idle, suitable, authorized peers and available capacity first"));
     assert!(alert
         .body
-        .contains("only after confirming no peer can take it"));
+        .contains("Only when no suitable authorized peer can take the work"));
     assert!(alert.body.contains("worker assignments"));
     assert!(alert.body.contains("codex exec --profile gcm"));
     assert!(alert.body.contains("authorized peers"));
     assert!(!alert
         .body
-        .contains("no suitable authorized peer can take the work"));
-    assert!(!alert
-        .body
         .contains("regardless of whether other peers are busy"));
+    assert!(!alert.body.contains("only after confirming no peer can take it"));
     assert!(!alert.body.contains("saturate live present peers first"));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();

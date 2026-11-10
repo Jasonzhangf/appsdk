@@ -13,6 +13,7 @@ sha2 = "0.10"
 rand = "0.8"
 chrono = "0.4"
 anyhow = "1"
+gix = { version = "0.81", default-features = false, features = ["revision", "sha1"] }
 toml = "0.8"
 toml_edit = "0.22"
 libc = "0.2"

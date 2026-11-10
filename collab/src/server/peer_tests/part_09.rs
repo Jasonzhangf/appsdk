@@ -34,6 +34,99 @@ fn removed_role_and_dispatch_commands_fail_fast() {
 }
 
 #[test]
+fn git_dir_for_root_resolves_plain_and_worktree_markers() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-gitdir-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    assert_eq!(git_dir_for_root(&root).unwrap(), root.join(".git"));
+
+    // A linked worktree replaces `.git/` with a `gitdir:` pointer file.
+    let linked = root.join("linked");
+    let admin = root.join("admin");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+    assert_eq!(git_dir_for_root(&linked).unwrap(), admin);
+
+    let bare = root.join("not-a-repo");
+    std::fs::create_dir_all(&bare).unwrap();
+    assert!(git_dir_for_root(&bare).is_err());
+    std::fs::remove_dir_all(root).ok();
+}
+
+struct PathEnvGuard(String);
+
+impl Drop for PathEnvGuard {
+    fn drop(&mut self) {
+        std::env::set_var("PATH", &self.0);
+    }
+}
+
+/// The launchd daemon cannot rely on a git child: the child can block on the
+/// protected project mount before git reads the repository. Poison `git` after
+/// constructing a real repository and prove that integration resolution stays
+/// entirely in-process.
+#[test]
+fn integration_git_queries_do_not_spawn_git() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "collab-safegit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let fakebin = root.join("fakebin");
+    std::fs::create_dir_all(&root).unwrap();
+    initialize_main(&root);
+    let head = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "--orphan", "orphan"]);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "orphan"]);
+    let orphan = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "main"]);
+    std::fs::create_dir_all(&fakebin).unwrap();
+    let log = fakebin.join("calls.log");
+    std::fs::write(&log, "").unwrap();
+    let script = format!(
+        "#!/bin/sh\n\
+         echo \"$*\" >> \"{log}\"\n\
+         exit 97\n",
+        log = log.display()
+    );
+    let fake_git = fakebin.join("git");
+    std::fs::write(&fake_git, script).unwrap();
+    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let _guard = PathEnvGuard(old_path.clone());
+    std::env::set_var("PATH", format!("{}:{}", fakebin.display(), old_path));
+
+    assert_eq!(resolve_authoritative_main_head(&root).unwrap(), head);
+    assert!(commit_is_integrated_in_main(&root, &head).unwrap());
+    assert!(!commit_is_integrated_in_main(&root, &orphan).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "",
+        "integration resolution must not spawn git"
+    );
+    drop(_guard);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn lifecycle_cannot_bypass_delivery_or_review() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");

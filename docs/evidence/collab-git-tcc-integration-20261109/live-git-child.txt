@@ -1,0 +1,11 @@
+# live receipt 2026-11-09T23:22:56Z
+
+## daemon + git child
+36286 63957       20:30 S    /Applications/Xcode.app/Contents/Developer/usr/bin/git --git-dir=/Users/fanzhang/Documents/github/appsdk/.git --work-tree=/Users/fanzhang/Documents/github/appsdk rev-parse --verify refs/heads/main^{commit}
+52073 69804       00:00 Ss   /bin/zsh -c cd /Volumes/Intel/playground/appsdk/collab-daemon-git-tcc-integration-20261109 && EV=docs/evidence/collab-git-tcc-integration-20261109 && mkdir -p "$EV" && { echo "# live receipt $(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo; echo "## daemon + git child"; ps -Ao pid,ppid,etime,stat,command | rg '[g]it |collab serve' ; echo; echo "## child cwd (lsof)"; lsof -p 36286 2>&1 | rg ' cwd '; echo; } > "$EV/live-git-child.txt"; cat "$EV/live-git-child.txt"
+52111 52073       00:00 R    rg [g]it |collab serve
+63957     1       40:46 S    /Users/fanzhang/.local/bin/collab serve --service
+83426 63957       01:09 S    /Applications/Xcode.app/Contents/Developer/usr/bin/git --git-dir=/Users/fanzhang/Documents/github/appsdk/.git --work-tree=/Users/fanzhang/Documents/github/appsdk rev-parse --verify refs/heads/main^{commit}
+
+## child cwd (lsof)
+git     36286 fanzhang  cwd    DIR               1,17      704                   2 /

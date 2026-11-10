@@ -207,6 +207,11 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
     let authority = match master_authority_view_with_endpoint(&state, &control, route.as_ref(), endpoint_live) {
         Ok(authority) => authority, Err(error) => return Resp::err(error),
     };
+    let projected_master_wake = project_master_wake_idle_capacity(server, &state);
+    let mut authority = authority;
+    if let Some(master_object) = authority.as_object_mut() {
+        master_object.insert("master_wake".into(), json!(projected_master_wake));
+    }
     let master = authority
         .get("worker_id")
         .and_then(serde_json::Value::as_str)

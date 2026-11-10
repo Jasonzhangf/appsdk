@@ -699,7 +699,11 @@ fn shipped_workflow_asset_rejects_peer_busy_before_gcm_guidance() {
         ),
         ("README.md", include_str!("../../README.md")),
     ] {
-        let text = text.replace(['\r', '\n'], " ").to_lowercase();
+        let text = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         assert!(
             !text.contains("regardless of whether other peers are busy"),
             "{name} must reject peer-busy-before-GCM guidance"
@@ -722,6 +726,30 @@ fn shipped_workflow_asset_rejects_peer_busy_before_gcm_guidance() {
             text.contains("no suitable authorized peer can take the work"),
             "{name} must require peer-first dispatch"
         );
+        if name == "operations.md" {
+            for old in [
+                "bounded one-shot execution or observation always uses an independent",
+                "dispatch its bounded execution or observation directly to independent",
+                "run bounded work through independent",
+                "for bounded execution or observation, give an independent",
+                "use independent `codex exec --profile gcm` workers for bounded execution or observation",
+            ] {
+                assert!(
+                    !text.contains(old),
+                    "{name} must reject unconditional direct-GCM guidance: {old}"
+                );
+            }
+            assert!(
+                text.contains(
+                    "a peer may split an accepted goal into non-overlapping bounded scopes and dispatch those scopes directly to independent"
+                ),
+                "{name} must preserve direct GCM dispatch for a peer's own bounded subwork"
+            );
+            assert!(
+                text.contains("only when no suitable authorized peer can take the goal"),
+                "{name} must gate manager direct dispatch on eligible peer capacity"
+            );
+        }
     }
 }
 

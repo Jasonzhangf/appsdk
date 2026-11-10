@@ -405,7 +405,7 @@ fn base_role_brief(
     if peer_orchestration {
         peer_responsibilities.extend([
             serde_json::Value::String(active_progress_rule.to_owned()),
-            serde_json::Value::String("Split the accepted goal into non-overlapping bounded scopes, then dispatch bounded one-shot execution or observation to independent `codex exec --profile gcm` subworkers; use autonomous peers only for subordinate long-horizon goals within the authorized scope.".to_owned()),
+            serde_json::Value::String("Split an accepted goal into non-overlapping bounded scopes and dispatch bounded execution or observation directly to independent `codex exec --profile gcm` subworkers; this is the peer's own execution split, not a manager bypass of eligible peer capacity. Use autonomous peers only for subordinate long-horizon goals within the authorized scope.".to_owned()),
             serde_json::Value::String("Own planning, execution, verification, unblocking, assigned integration, and resource closure for the accepted scope. Verify subworker evidence and deliver the goal to the sender.".to_owned()),
             serde_json::Value::String("Keep the sender contract explicit: goal, scope, authorized actions, resource owner, delivery/test evidence, report channel, and stop conditions.".to_owned()),
             serde_json::Value::String("Use a finite patrol for goal progress, blockers, subworker activity, worktree/runtime resources, and the need to re-arm consumed scheduling. Account for registration and context restoration in that scope, but do not repeat unrelated recovery checks.".to_owned()),

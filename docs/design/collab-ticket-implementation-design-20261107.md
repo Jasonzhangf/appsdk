@@ -64,7 +64,7 @@ manager 关系优先复用 managed subagent 的 parent 和项目 master。受托
 
 公开请求继续进入 `Req::Board` / 既有 task 请求，先转成 typed 工单意图，再调用唯一控制函数。新增必要意图为接入、接收策略更新、阶段领取/开始/结果、master 关闭意图、鉴别请求与决定。内部事件包括阶段入队/领取/开始/结果、活动边沿、idle 阈值、slot/范围变化、资源释放。事件是 reducer 输入，不是新增可回放的业务历史真源。
 
-新 publish 默认接入 daemon。自领沿现有 executor 参数指定本人，并在一次请求内完成创建、接入和本人 slot 入队。既有 `board dispatch` 收敛成显式接入存量单；不再建立邀请。`board claim` 走同一领取 gate，不允许跨过队列优先级、阶段前置或其他人的 active claim。
+新 publish 默认接入 daemon。自领沿现有 executor 参数指定本人，并在一次请求内完成创建、接入和本人 slot 入队。`board backfill-execute --admit-legacy` 是当前已落地的最小显式存量准入分支；`board dispatch` 的既有存量接入语义不在本次改动范围。`board claim` 走同一领取 gate，不允许跨过队列优先级、阶段前置或其他人的 active claim。
 
 `commit_locked_checked` 已能对 candidate 应用一组变化并原子保存。工单控制函数须在同一个 State 锁区间完成读取水位、选 slot、生成阶段变化、预留/释放 claim、生成必要消息和保存请求回执。阶段结果、下游入队和旧 slot 释放不得拆为三个提交。adapter 调用、snapshot 采集及外部资源查询均在锁外；结果回库时核对目标 binding generation、阶段 batch 和 attempt。
 
@@ -142,6 +142,14 @@ review 候选依次为独立 Reviewer、独立 architect/expert、另一独立 p
 接入未接受的旧 invitation 时保留原 owner。事务中撤销尚未消费的邀请及其启动权限，再创建唯一 queue 项；若 accept 与接入竞争，锁内只有一种结果生效，败者收到 stale revision。接受事实已经成立时按已承接存量处理。旧消息消费历史保留，不重放。
 
 原 `board publish/claim/update/dispatch`、task register/update/deliver/review/close 及适用 scheduler 请求均转入同一工单 gate。旧 invite/respond 在已接入单上作为兼容指定接收或本阶段回执，不再要求新流程人工 accept，也不新增入队通知。未接入存量入口不得获得绕过 master 关闭和必需独立审查的权限。未知旧版本请求若无法合法转换，返回具体升级错误，不静默退回旧执行链。
+
+### 显式存量准入（`backfill-execute --admit-legacy`）
+
+这是当前唯一落地的存量准入实现，范围为已描述但缺阶段记录的既有 owner 单。命令扩展已有 `board backfill-execute <task-id> --expected-revision <r>`，新增必填语义的显式布尔选项 `--admit-legacy`。
+
+- 权限与范围：实际调用者须为当前项目 master；仅接受公开、已描述、状态为 `working` 或 `rework`、`admitted == false`、无任何 stage 记录、无待处理 invitation，且当前 owner 在本项目 scope 有 active binding 与匹配稳定 assignment 的任务。
+- 原子性：在一个 State 锁区间内校验 revision、slot、binding、assignment、executor pin 与同 slot 占用，然后同批提交 `BoardDetailsChanged`（仅改 `admitted` 与 `revision`）和一个 `Execute` 阶段（状态 `Claimed`，`attempt_generation = 1`，`batch = 0`，空依赖）。不产生 task-created、assignment、lifecycle、subscription 事件，也不启动执行或交付。
+- 保留与拒绝：任务 ID、owner、历史、证据、review/close 义务和订阅保持不变。读取与普通更新不触发准入；重复请求一次成功、其余因 stale revision 或已准入被明确拒绝，不产生第二个阶段或第二次 attempt。未带 `--admit-legacy` 的原命令行为完全不变。
 
 ## 自动接续与对象提醒
 

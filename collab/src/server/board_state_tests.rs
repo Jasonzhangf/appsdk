@@ -19,6 +19,87 @@ fn register_worker(state: &mut State, id: &str) {
     );
 }
 
+fn described_owner_task(
+    id: &str,
+    owner: &str,
+    status: &str,
+) -> (TaskRec, crate::board::BoardTaskDetails) {
+    let task = TaskRec {
+        id: id.into(),
+        owner: owner.into(),
+        created_by: owner.into(),
+        feature_id: None,
+        worktree_path: None,
+        branch: None,
+        base_commit: None,
+        priority: "p2".into(),
+        status: status.into(),
+        next_step: None,
+        wait: None,
+        isolation_mode: None,
+        created_ms: now_ms(),
+        updated_ms: now_ms(),
+    };
+    let details = crate::board::BoardTaskDetails {
+        title: "Legacy state ticket".into(),
+        description: "state reducer legacy admission".into(),
+        delivery_condition: "admission creates one claimed phase".into(),
+        test_condition: "state reducer admission test".into(),
+        public_visibility: true,
+        admitted: false,
+        revision: 1,
+        ..crate::board::BoardTaskDetails::default()
+    };
+    (task, details)
+}
+
+#[test]
+fn legacy_admission_rejects_any_phase_history_before_mutation() {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+    let mut state = State::default();
+    let (task, details) = described_owner_task("legacy-state-phase", "owner", "rework");
+    state
+        .apply_checked(&Event::TaskCreated { task: task.clone() })
+        .unwrap();
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: task.id.clone(),
+            details: details.clone(),
+        })
+        .unwrap();
+    // The described rework task is eligible while it has no phase history.
+    assert!(super::legacy_admission_eligibility(&state, &details, &task).is_ok());
+    // Any phase record, including revoked history, blocks admission.
+    state
+        .apply_checked(&Event::TicketPhaseRecorded {
+            phase: TicketPhaseRecord {
+                task_id: task.id.clone(),
+                phase: TicketPhaseKind::Execute,
+                batch: 0,
+                priority: "p2".into(),
+                status: TicketPhaseStatus::Revoked,
+                slot_name: None,
+                binding_generation: 0,
+                enqueue_seq: 1,
+                attempt_generation: 0,
+                depends_on: Vec::new(),
+                route_group: None,
+                wait_reason: None,
+                result: None,
+            },
+        })
+        .unwrap();
+    let rejection = super::legacy_admission_eligibility(&state, &details, &task).unwrap_err();
+    assert!(
+        rejection
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("TICKET_ADMISSION_PHASE_CONFLICT"),
+        "{rejection:?}"
+    );
+}
+
 fn register_managed_child(state: &mut State, id: &str, parent: &str, peer: &str) {
     state
         .apply_checked(&Event::SubagentUpdated {

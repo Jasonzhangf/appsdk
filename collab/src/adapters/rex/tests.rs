@@ -818,3 +818,168 @@ async fn event_stream_can_cancel_while_receiver_is_backpressured() {
         "a full event queue must not block cancellation"
     );
 }
+
+/// Test-only `whoami` CLI. It records each invocation and emits one scenario's
+/// reply, so environment discovery can be proven without a live Rex server.
+struct WhoamiEnv {
+    dir: PathBuf,
+    log: PathBuf,
+}
+
+impl WhoamiEnv {
+    fn new(scenario: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "rex-env-discovery-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).expect("create whoami fixture dir");
+        let log = dir.join("invocations.log");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{}",
+            log.display(),
+            match scenario {
+                "ok" => "printf '%s\\n' '{\"endpoint\":\"unix:///tmp/rex-env-server.sock\"}'\n",
+                "bad_json" => "printf '%s\\n' 'not-json'\n",
+                "missing_endpoint" => "printf '%s\\n' '{}'\n",
+                "fail" => "printf '%s\\n' 'whoami rejected' >&2\nexit 9\n",
+                other => panic!("unknown whoami scenario {other}"),
+            }
+        );
+        let fixture = dir.join("rex-whoami");
+        fs::write(&fixture, script).expect("write whoami fixture");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700))
+            .expect("make whoami fixture executable");
+        set_test_cli(Some(fixture));
+        Self { dir, log }
+    }
+
+    fn invocations(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for WhoamiEnv {
+    fn drop(&mut self) {
+        set_test_cli(None);
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn with_rex_env<T>(session: Option<&str>, block: Option<&str>, run: impl FnOnce() -> T) -> T {
+    let _lock = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let previous: Vec<_> = ["REX_SESSION", "REX_BLOCK"]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+    for (key, value) in [("REX_SESSION", session), ("REX_BLOCK", block)] {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    let result = run();
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    result
+}
+
+const ENV_SESSION: &str = "session:01a1c47f-7e66-7df6-b484-e727bc9e1811";
+const ENV_BLOCK: &str = "block:01a1c47f-7e66-7e9a-bdf1-84a9bd310276";
+
+#[tokio::test]
+async fn env_pair_forms_typed_candidate_from_whoami_endpoint() {
+    let _guard = fixture_guard().await;
+    let probe = WhoamiEnv::new("ok");
+    let candidate = with_rex_env(Some(ENV_SESSION), Some(ENV_BLOCK), candidate_from_env)
+        .expect("whoami discovery succeeds")
+        .expect("both block variables form a candidate");
+    assert_eq!(candidate.server, "unix:///tmp/rex-env-server.sock");
+    assert_eq!(candidate.session_id, ENV_SESSION);
+    assert_eq!(candidate.block_id, ENV_BLOCK);
+    assert_eq!(
+        candidate.cwd,
+        std::env::current_dir()
+            .expect("test cwd")
+            .to_string_lossy()
+            .into_owned()
+    );
+    let calls = probe.invocations();
+    assert_eq!(calls.len(), 1, "whoami is called once: {calls:?}");
+    assert!(calls[0].contains("whoami"), "call is whoami: {calls:?}");
+}
+
+#[tokio::test]
+async fn env_partial_pair_stays_absent_without_calling_cli() {
+    let _guard = fixture_guard().await;
+    for (session, block) in [
+        (Some(ENV_SESSION), None),
+        (None, Some(ENV_BLOCK)),
+        (None, None),
+    ] {
+        let probe = WhoamiEnv::new("ok");
+        let result = with_rex_env(session, block, candidate_from_env);
+        assert_eq!(result.expect("partial pair is not an error"), None);
+        assert!(
+            probe.invocations().is_empty(),
+            "a partial pair must not run whoami"
+        );
+    }
+}
+
+#[tokio::test]
+async fn env_partial_pair_is_still_a_rex_environment_hint() {
+    let _guard = fixture_guard().await;
+    for (session, block) in [
+        (Some(ENV_SESSION), None),
+        (None, Some(ENV_BLOCK)),
+        (None, None),
+    ] {
+        assert_eq!(
+            with_rex_env(session, block, env_block_hint),
+            session.is_some() || block.is_some()
+        );
+    }
+}
+
+#[tokio::test]
+async fn whoami_failures_keep_typed_error_and_never_fabricate() {
+    let _guard = fixture_guard().await;
+    for scenario in ["fail", "bad_json", "missing_endpoint"] {
+        let _probe = WhoamiEnv::new(scenario);
+        let error = with_rex_env(Some(ENV_SESSION), Some(ENV_BLOCK), candidate_from_env)
+            .expect_err("unverified whoami output stays a typed error");
+        let text = error.to_string();
+        assert!(
+            text.starts_with("REX_UNKNOWN:") || text.starts_with("REX_NOT_DELIVERED:"),
+            "unexpected error for {scenario}: {text}"
+        );
+        assert!(
+            text.contains("discover_env"),
+            "error names the discovery operation for {scenario}: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn env_pair_rejects_non_canonical_rex_ids_after_whoami() {
+    let _guard = fixture_guard().await;
+    let _probe = WhoamiEnv::new("ok");
+    let error = with_rex_env(
+        Some("session:not-a-uuid"),
+        Some(ENV_BLOCK),
+        candidate_from_env,
+    )
+    .expect_err("non-canonical Rex ids are not a candidate");
+    assert!(
+        error.to_string().contains("canonical lowercase UUID"),
+        "{error}"
+    );
+}

@@ -316,7 +316,10 @@ impl Drop for IsolatedTmux {
 fn isolated_tmux_readiness_rejects_a_persistent_cwd_mismatch() {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let id = SEQ.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("collab-readiness-{}-{id}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "collab-peer-readiness-cwd-mismatch-{}-{id}",
+        std::process::id()
+    ));
     let other = root.with_file_name(format!(
         "{}-other",
         root.file_name().unwrap().to_string_lossy()
@@ -343,7 +346,10 @@ fn isolated_tmux_readiness_rejects_a_persistent_cwd_mismatch() {
 fn isolated_tmux_readiness_exposes_query_errors() {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let id = SEQ.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("collab-readiness-{}-{id}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "collab-peer-readiness-query-errors-{}-{id}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&root).unwrap();
     let tmux = IsolatedTmux::start_single(&root);
     let error = tmux

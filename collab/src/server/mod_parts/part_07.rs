@@ -302,11 +302,16 @@ fn worker_presence_in_state(
     } else if selected_transport_for_worker(worker)
         .is_some_and(|transport| transport.kind == TransportKind::Rex)
     {
-        // Rex presence is decided entirely from the held state: the persisted
-        // transport endpoint and session prove identity. Falling through to
-        // worker_transport_presence_with_view would re-lock server.state while
-        // the caller already holds it, deadlocking the dispatch thread.
-        rex_identity_presence(server, state, worker)
+        // Rex identity is proved from the held state, but the Rex monitor keeps
+        // agent presence independent of program status. Combine the identity
+        // check with the recorded observation (Unknown by default) without
+        // re-entering the state lock; falling through to
+        // worker_transport_presence_with_view would deadlock the holder.
+        let identity = rex_identity_presence(server, state, worker);
+        let observed = worker_agent_view_in_state(server, state, worker)
+            .map(|view| view.0)
+            .unwrap_or(IdentityPresence::Unknown);
+        merge_transport_presence(identity, observed)
     } else {
         worker_agent_view_in_state(server, state, worker)
             .unwrap_or_else(|| worker_transport_presence_with_view(server, worker))

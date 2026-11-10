@@ -86,6 +86,9 @@ esac
     assert!(text.contains("先检查 idle、获授权且合适的 peer 与可用容量"));
     assert!(text.contains("有 ready 工作可承接时优先派给该 peer"));
     assert!(text.contains("仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`"));
+    assert!(text.contains("Peer bounded subwork"));
+    assert!(text.contains("直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker"));
+    assert!(text.contains("不是 manager 绕过可用 peer 容量"));
     assert!(!text.contains("一次性执行或观察直接派独立"));
     assert!(!text.contains("不以其他 peer 忙闲为前提"));
     assert!(!text.contains("一次性执行直接 GCM，不等待 peer 忙闲"));
@@ -711,7 +714,14 @@ esac
         assert_eq!(payload["role"], expected_role, "variant={variant}");
         if variant == "stale_identity" {
             assert_eq!(payload["assigned"][0]["id"], "stale-route-invite");
-            assert!(payload["charter"].as_str().unwrap().contains("peer 不是执行 worker"));
+            let peer_charter = payload["charter"].as_str().unwrap();
+            assert!(peer_charter.contains("peer 不是执行 worker"));
+            // The peer charter must not require peer-first for its own
+            // accepted-goal bounded subwork; that direct split is what the
+            // fleet rule restores, so the same output must not conflict.
+            assert!(peer_charter.contains("自己的目标可直接拆成 non-overlapping bounded scopes"));
+            assert!(peer_charter.contains("只有把未分配目标按管理入口派发时"));
+            assert!(!peer_charter.contains("拆解本人目标，先检查 idle"));
         }
     }
 

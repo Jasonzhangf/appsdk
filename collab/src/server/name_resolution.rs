@@ -12,18 +12,25 @@ pub(crate) const ORDINARY_NAME_POOL: [&str; 20] = [
 /// Physical tmux labels are scoped by the actual execution directory.
 /// Logical occupancy keys remain the declared Collab names.
 pub(crate) fn physical_tmux_name(cwd: &str, logical_name: &str) -> Result<String, String> {
-    let slot = display_slot(logical_name)?;
     let folder = std::path::Path::new(cwd)
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("TMUX_SESSION_NAME_INVALID: cwd has no folder name")?;
-    Ok(format!("{folder}_{slot}_{logical_name}"))
+    match display_slot(logical_name)? {
+        Some(slot) => Ok(format!("{folder}_{slot}_{logical_name}")),
+        None => Ok(format!("{folder}_{logical_name}")),
+    }
 }
 
-pub(crate) fn display_slot(name: &str) -> Result<u32, String> {
-    if name == "Jenny" { return Ok(1); }
-    ORDINARY_NAME_POOL.iter().position(|candidate| *candidate == name)
-        .map(|index| index as u32 + 2)
+pub(crate) fn display_slot(name: &str) -> Result<Option<u32>, String> {
+    if name == "Jenny" {
+        return Ok(Some(1));
+    }
+    ORDINARY_NAME_POOL
+        .iter()
+        .position(|candidate| *candidate == name)
+        .map(|index| Some(index as u32 + 2))
+        .or_else(|| free_name_registration_number(name).map(|_| None))
         .ok_or_else(|| format!("NAME_INVALID: unknown registered name {name}"))
 }
 
@@ -88,24 +95,90 @@ pub(crate) fn name_for_registration(
     state: &State,
     control: &super::binding_slot::BindingControlSet,
     binding: &super::RuntimeBinding,
-) -> Result<String, String> {
-    if let Some(key) = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())? {
-        return Ok(key.name.clone());
+) -> Result<RegistrationName, String> {
+    if let Some(key) = control.key_for_worker(
+        &binding.project_scope,
+        &binding.app_scope_id,
+        binding.agent_id.as_str(),
+    )? {
+        let registration_number = control
+            .registration_number_for_worker(
+                &binding.project_scope,
+                &binding.app_scope_id,
+                binding.agent_id.as_str(),
+            )?
+            .unwrap_or(
+                control.next_registration_number(&binding.project_scope, &binding.app_scope_id)?,
+            );
+        return Ok(RegistrationName {
+            name: key.name.clone(),
+            registration_number,
+        });
     }
-    if super::current_master_worker_id(state, Some(&binding.route_scope())).as_deref() == Some(binding.agent_id.as_str()) {
-        return Ok("Jenny".into());
+    if super::current_master_worker_id(state, Some(&binding.route_scope())).as_deref()
+        == Some(binding.agent_id.as_str())
+    {
+        let registration_number = control
+            .registration_number_for_worker(
+                &binding.project_scope,
+                &binding.app_scope_id,
+                binding.agent_id.as_str(),
+            )?
+            .unwrap_or(
+                control.next_registration_number(&binding.project_scope, &binding.app_scope_id)?,
+            );
+        return Ok(RegistrationName {
+            name: "Jenny".into(),
+            registration_number,
+        });
     }
-    control.ordinary_name(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())
+    let name = control.ordinary_name(
+        &binding.project_scope,
+        &binding.app_scope_id,
+        binding.agent_id.as_str(),
+    )?;
+    let registration_number = if name.starts_with("peer-") {
+        free_name_registration_number(&name)
+            .ok_or_else(|| format!("NAME_INVALID: generated name {name} is malformed"))?
+    } else {
+        control
+            .registration_number_for_worker(
+                &binding.project_scope,
+                &binding.app_scope_id,
+                binding.agent_id.as_str(),
+            )?
+            .unwrap_or(
+                control.next_registration_number(&binding.project_scope, &binding.app_scope_id)?,
+            )
+    };
+    Ok(RegistrationName {
+        name,
+        registration_number,
+    })
 }
 
-fn validate_name(name: &str) -> Result<(), String> {
-    if name == "Jenny" || ORDINARY_NAME_POOL.contains(&name) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegistrationName {
+    pub(crate) name: String,
+    pub(crate) registration_number: u64,
+}
+
+pub(crate) fn validate_name(name: &str) -> Result<(), String> {
+    if name == "Jenny"
+        || ORDINARY_NAME_POOL.contains(&name)
+        || free_name_registration_number(name).is_some()
+    {
         Ok(())
     } else {
         Err(format!(
-            "NAME_INVALID: {name}; expected Jenny or a fixed-pool name"
+            "NAME_INVALID: {name}; expected Jenny, a fixed-pool name, or peer-<registration_number>"
         ))
     }
+}
+
+fn free_name_registration_number(name: &str) -> Option<u64> {
+    let number = name.strip_prefix("peer-")?.parse::<u64>().ok()?;
+    (number > 0 && format!("peer-{number}") == name).then_some(number)
 }
 
 /// Build one transaction after a successful decision. `rename_from` carries
@@ -143,7 +216,8 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
         // later re-take by a different session, but a same-session commit is
         // still a no-op.
         let matches_target_name = existing.is_some_and(|assignment| {
-            previous.is_some() && assignment.name == occupancy.name
+            previous.is_some()
+                && assignment.name == occupancy.name
                 && (target_held_by_other || assignment.session_id != occupancy.session_id)
         });
         let matches_caller_name = matches_rename_from || matches_target_name;
@@ -194,15 +268,15 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
         });
     }
     let releases_extra_names = state
-            .name_occupancies
-            .get(project_scope)
-            .is_some_and(|names| {
-                names.values().any(|holder| {
-                    holder.worker_id == occupancy.worker_id
-                        && holder.session_id == occupancy.session_id
-                        && holder.name != occupancy.name
-                })
-            });
+        .name_occupancies
+        .get(project_scope)
+        .is_some_and(|names| {
+            names.values().any(|holder| {
+                holder.worker_id == occupancy.worker_id
+                    && holder.session_id == occupancy.session_id
+                    && holder.name != occupancy.name
+            })
+        });
     if previous != Some(occupancy) || !assignments.is_empty() || releases_extra_names {
         events.insert(
             0,

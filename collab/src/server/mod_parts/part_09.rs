@@ -1938,6 +1938,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         "schema_version": 1,
         "registration": registration,
         "name": mapped.identity_key.name,
+        "registration_number": mapped_current.registration_number,
         "session_id": mapped_current.binding.session_id,
         "layout": tm_layout::projection(mapped_current),
         "binding": binding,

@@ -447,11 +447,22 @@ impl ProjectRuntimeManager {
             .and_then(|slot| slot.active_binding())
             .expect("active key");
         let mut value = original.clone();
+        if value.registration_number == 0 {
+            value.registration_number = map
+                .registration_number_for_worker(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    worker,
+                )?
+                .unwrap_or(
+                    map.next_registration_number(&context.project_scope, &context.app_scope_id)?,
+                );
+        }
         let target = intent
             .as_ref()
             .map(|intent| intent.requested_name.clone())
             .unwrap_or_else(|| source.name.clone());
-        name_resolution::display_slot(&target)?;
+        name_resolution::validate_name(&target)?;
         if intent
             .as_ref()
             .is_some_and(|intent| !intent.user_authorized)
@@ -565,6 +576,18 @@ impl ProjectRuntimeManager {
                         &ordinary,
                     );
                     let mut outgoing = previous.clone();
+                    if outgoing.registration_number == 0 {
+                        outgoing.registration_number = candidate
+                            .registration_number_for_worker(
+                                &context.project_scope,
+                                &context.app_scope_id,
+                                previous.binding.agent_id.as_str(),
+                            )?
+                            .unwrap_or(candidate.next_registration_number(
+                                &context.project_scope,
+                                &context.app_scope_id,
+                            )?);
+                    }
                     if let Some(endpoint) = &outgoing.binding.tmux_endpoint {
                         outgoing.physical_name = crate::client::adapters::tmux::session_name_if_live(endpoint)?
                             .map(|_| super::tm_layout::physical_name(&outgoing, &outgoing.invocation_cwd, &ordinary))

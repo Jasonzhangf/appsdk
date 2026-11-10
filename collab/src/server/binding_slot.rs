@@ -84,6 +84,8 @@ pub(crate) struct BindingValue {
     pub(crate) physical_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) layout_binding_id: Option<String>,
+    #[serde(default)]
+    pub(crate) registration_number: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,7 @@ impl BindingValue {
             },
             physical_name: None,
             layout_binding_id: None,
+            registration_number: 0,
         }
     }
 
@@ -173,6 +176,7 @@ impl BindingValue {
             && self.invocation_cwd == other.invocation_cwd
             && self.physical_name == other.physical_name
             && self.layout_binding_id == other.layout_binding_id
+            && self.registration_number == other.registration_number
     }
 }
 
@@ -187,7 +191,7 @@ pub(crate) enum IdentityStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IdentityBindingSlot {
     pub(crate) identity_key: IdentityBindingKey,
-    pub(crate) display_slot: u32,
+    pub(crate) display_slot: Option<u32>,
     pub(crate) identity_status: IdentityStatus,
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
@@ -665,7 +669,7 @@ impl BindingControlSet {
                 return Ok(name.into());
             }
         }
-        super::name_resolution::ORDINARY_NAME_POOL
+        if let Some(name) = super::name_resolution::ORDINARY_NAME_POOL
             .into_iter()
             .find(|name| {
                 !self.slots.iter().any(|slot| {
@@ -675,8 +679,60 @@ impl BindingControlSet {
                         && slot.active_binding().is_some()
                 })
             })
-            .map(str::to_owned)
-            .ok_or_else(|| "NAME_POOL_FULL: all ordinary names have active mappings".into())
+        {
+            return Ok(name.to_owned());
+        }
+        let registration_number = match self.registration_number_for_worker(project, app, worker)? {
+            Some(number) => number,
+            None => self.next_registration_number(project, app)?,
+        };
+        Ok(format!("peer-{registration_number}"))
+    }
+
+    pub(crate) fn registration_number_for_worker(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        worker: &str,
+    ) -> Result<Option<u64>, String> {
+        let numbers = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                &slot.identity_key.project_scope == project
+                    && &slot.identity_key.app_scope_id == app
+            })
+            .flat_map(|slot| slot.current.iter().chain(slot.previous.iter()))
+            .filter(|value| {
+                value.binding.agent_id.as_str() == worker && value.registration_number > 0
+            })
+            .map(|value| value.registration_number)
+            .collect::<std::collections::BTreeSet<_>>();
+        if numbers.len() > 1 {
+            return Err(format!(
+                "IDENTITY_MAP_AMBIGUOUS: {worker} carries multiple registration numbers"
+            ));
+        }
+        Ok(numbers.into_iter().next())
+    }
+
+    pub(crate) fn next_registration_number(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+    ) -> Result<u64, String> {
+        self.slots
+            .iter()
+            .filter(|slot| {
+                &slot.identity_key.project_scope == project
+                    && &slot.identity_key.app_scope_id == app
+            })
+            .flat_map(|slot| slot.current.iter().chain(slot.previous.iter()))
+            .map(|value| value.registration_number)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| "REGISTRATION_NUMBER_EXHAUSTED".into())
     }
 
     pub(crate) fn from_slots(slots: Vec<IdentityBindingSlot>) -> Self {

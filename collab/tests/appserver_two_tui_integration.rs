@@ -631,38 +631,153 @@ fn context_names_online_replacement_approves_directly() {
 }
 
 #[test]
-fn context_names_full_pool_reuses_the_released_source_and_refuses_true_exhaustion() {
-    let fixture = AppFixture::new();
+fn context_names_full_pool_allocates_stable_peer_name_and_mailbox() {
+    let mut fixture = AppFixture::new();
+    let default_names = [
+        "Alice", "Bob", "Carol", "David", "Emma", "Frank", "Grace", "Henry", "Iris", "Jack",
+        "Kate", "Leo", "Mia", "Noah", "Olivia", "Peter", "Quinn", "Rose", "Sam", "Tina",
+    ];
+    let first = fixture.run_public(&["context"], THREAD_A);
+    let mut contexts = vec![(THREAD_A.to_owned(), first.clone())];
+    for name in default_names.iter().skip(1) {
+        let thread = format!("ordinary-pool-{name}");
+        let context = fixture.run_public(&["context"], &thread);
+        assert_eq!(context["name"], *name, "{context}");
+        contexts.push((thread, context));
+    }
+
+    let generated_thread = "ordinary-pool-generated";
+    let generated_output = fixture.command_public(&["context"], generated_thread);
+    assert!(
+        generated_output.status.success(),
+        "a full default pool must not block registration: stdout={} stderr={}",
+        String::from_utf8_lossy(&generated_output.stdout),
+        String::from_utf8_lossy(&generated_output.stderr)
+    );
+    let generated_document: Value =
+        serde_json::from_slice(&generated_output.stdout).expect("context emits JSON");
+    let generated = generated_document
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .cloned()
+        .unwrap_or(generated_document);
+    let generated_name = generated["name"].as_str().expect("generated name");
+    let generated_number = generated["registration_number"]
+        .as_u64()
+        .expect("registration number");
+    assert!(generated_name.starts_with("peer-"), "{generated}");
+    assert_eq!(generated_name, format!("peer-{generated_number}"));
+    assert!(generated_number > 20, "{generated}");
+    assert!(
+        generated["master"].is_null(),
+        "unexpected role grant: {generated}"
+    );
+    let map_path = fixture.host_state.join("identity-map.json");
+    let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let generated_slot = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == generated_name)
+        .expect("generated name is persisted in the identity map");
+    assert!(
+        generated_slot["display_slot"].is_null(),
+        "free names must not claim a fixed display slot: {generated_slot}"
+    );
+    for (index, (_, context)) in contexts.iter().enumerate() {
+        assert_eq!(
+            context["registration_number"].as_u64(),
+            Some(index as u64 + 1),
+            "{context}"
+        );
+    }
+
+    let repeated = fixture.run_public(&["context"], generated_thread);
+    assert_eq!(
+        repeated["identity"]["worker_id"],
+        generated["identity"]["worker_id"]
+    );
+    assert_eq!(repeated["name"], generated_name);
+    assert_eq!(
+        repeated["registration_number"],
+        generated["registration_number"]
+    );
+
+    fixture.restart_daemon();
+    let restarted = fixture.run_public(&["context"], generated_thread);
+    assert_eq!(
+        restarted["identity"]["worker_id"],
+        generated["identity"]["worker_id"]
+    );
+    assert_eq!(restarted["name"], generated_name);
+    assert_eq!(
+        restarted["registration_number"],
+        generated["registration_number"]
+    );
+
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            generated_name,
+            "--subject",
+            "generated-peer",
+            "hello generated peer",
+        ],
+        &contexts[1].0,
+    );
+    let received = fixture.run_public(
+        &["recv", "--receive-id", "generated-peer", "--timeout", "0"],
+        generated_thread,
+    );
+    assert_eq!(received["count"], 1, "{received}");
+    assert_eq!(received["messages"][0]["id"], sent["msg_id"]);
+    assert_eq!(
+        received["messages"][0]["to"],
+        generated["identity"]["worker_id"]
+    );
+
+    let before = std::fs::read(&map_path).unwrap();
+    let invalid = fixture.command_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_name","requested_name":"peer invalid","authorization":"fixture rejects invalid free name"}"#,
+        ],
+        generated_thread,
+    );
+    assert!(!invalid.status.success(), "invalid names must be rejected");
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("NAME_INVALID"),
+        "{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+    assert_eq!(std::fs::read(&map_path).unwrap(), before);
+}
+
+#[test]
+fn context_names_full_pool_takeover_displaces_to_generated_name_and_preserves_authority() {
+    let mut fixture = AppFixture::new();
     let mut contexts = Vec::new();
     for index in 0..20 {
-        let thread = format!("ordinary-pool-{index}");
+        let thread = format!("ordinary-pool-takeover-{index}");
         let context = fixture.run_public(&["context"], &thread);
         contexts.push((thread, context));
     }
     let first_worker = contexts[0].1["identity"]["worker_id"].clone();
-    let incoming_worker = contexts[1].1["identity"]["worker_id"].clone();
+    let first_number = contexts[0].1["registration_number"].clone();
+    let promoted_worker = contexts[19].1["identity"]["worker_id"].clone();
+    let incoming_thread = "ordinary-pool-takeover-generated-incoming";
+    let incoming_context = fixture.run_public(&["context"], incoming_thread);
+    let incoming_worker = incoming_context["identity"]["worker_id"].clone();
+    let incoming_number = incoming_context["registration_number"].clone();
+    assert_eq!(incoming_context["name"], "peer-21", "{incoming_context}");
+    assert_eq!(incoming_number, 21, "{incoming_context}");
     let target = contexts[0].1["name"].as_str().unwrap();
-    let released = contexts[1].1["name"].clone();
     let approval = json!({"action":"restore_name","requested_name":target,
         "authorization":"user continues the selected name with the full pool"})
     .to_string();
-    let restored = fixture.run_public(&["context", "--approve-grant", &approval], &contexts[1].0);
-    assert_eq!(restored["identity"]["worker_id"], incoming_worker);
-    assert_eq!(restored["name"], target);
-    let displaced = fixture.run_public(&["context"], &contexts[0].0);
-    assert_eq!(displaced["identity"]["worker_id"], first_worker);
-    assert_eq!(displaced["name"], released);
-    let map_path = fixture.host_state.join("identity-map.json");
-    let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
-    assert_eq!(
-        map["slots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|slot| slot["identity_status"] == "active")
-            .count(),
-        20
-    );
+
     fixture.run_public(
         &[
             "master",
@@ -672,14 +787,101 @@ fn context_names_full_pool_reuses_the_released_source_and_refuses_true_exhaustio
         ],
         &contexts[19].0,
     );
-    fixture.run_public(&["context"], "ordinary-pool-extra");
-    let before = std::fs::read(&map_path).unwrap();
+    let sender_thread = "ordinary-pool-takeover-refill";
+    let sender_context = fixture.run_public(&["context"], sender_thread);
+    assert_eq!(sender_context["name"], "Tina", "{sender_context}");
     let authority = fixture.run_public(&["master", "status"], &contexts[19].0);
-    let exhausted =
-        fixture.command_public(&["context", "--approve-grant", &approval], &contexts[19].0);
-    assert!(!exhausted.status.success());
-    assert!(String::from_utf8_lossy(&exhausted.stderr).contains("NAME_POOL_FULL"));
-    assert_eq!(std::fs::read(&map_path).unwrap(), before);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "full-pool-handoff",
+            "--next",
+            "keep named work",
+        ],
+        &contexts[0].0,
+    );
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            target,
+            "--subject",
+            "takeover",
+            "keep mailbox ownership",
+        ],
+        sender_thread,
+    );
+
+    let restored_output =
+        fixture.command_public(&["context", "--approve-grant", &approval], incoming_thread);
+    assert!(
+        restored_output.status.success(),
+        "full-pool takeover must allocate a generated name: stdout={} stderr={}",
+        String::from_utf8_lossy(&restored_output.stdout),
+        String::from_utf8_lossy(&restored_output.stderr)
+    );
+    let restored_document: Value =
+        serde_json::from_slice(&restored_output.stdout).expect("context emits JSON");
+    let restored = restored_document
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .cloned()
+        .unwrap_or(restored_document);
+    assert_eq!(restored["identity"]["worker_id"], incoming_worker);
+    assert_eq!(restored["name"], target);
+    assert_eq!(restored["registration_number"], incoming_number);
+    assert_eq!(restored["identity"]["role"], "worker", "{restored}");
+    assert_eq!(
+        restored["master"]["worker_id"], promoted_worker,
+        "{restored}"
+    );
+    assert_ne!(
+        restored["master"]["worker_id"], incoming_worker,
+        "name takeover inherited a grant: {restored}"
+    );
+
+    let displaced = fixture.run_public(&["context"], &contexts[0].0);
+    assert_eq!(displaced["identity"]["worker_id"], first_worker);
+    let displaced_name = displaced["name"]
+        .as_str()
+        .expect("generated displaced name");
+    assert!(displaced_name.starts_with("peer-"), "{displaced}");
+    assert_eq!(
+        displaced_name,
+        format!(
+            "peer-{}",
+            displaced["registration_number"].as_u64().unwrap()
+        )
+    );
+    assert_eq!(displaced["registration_number"], first_number);
+
+    let board = fixture.run_public(&["board", "show"], &contexts[19].0);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "full-pool-handoff")
+        .unwrap();
+    assert_eq!(task["owner"], incoming_worker, "{task}");
+    assert_eq!(task["owner_session_id"], incoming_thread, "{task}");
+    let message = fixture.run_public(&["msg", sent["msg_id"].as_str().unwrap()], incoming_thread);
+    assert_eq!(message["to"], incoming_worker, "{message}");
+    assert_eq!(message["body"], "keep mailbox ownership");
+    assert_eq!(message["state"], "pending");
+    let received = fixture.run_public(
+        &[
+            "recv",
+            "--receive-id",
+            "full-pool-takeover",
+            "--timeout",
+            "0",
+        ],
+        incoming_thread,
+    );
+    assert_eq!(received["count"], 1, "{received}");
+    assert_eq!(received["messages"][0]["id"], sent["msg_id"]);
+
     let after = fixture.run_public(&["master", "status"], &contexts[19].0);
     for field in [
         "worker_id",
@@ -1264,7 +1466,10 @@ impl AppFixture {
         daemon_readiness::wait_for_ping(
             self.daemon.as_mut().unwrap(),
             &self.host_state.join("server.sock"),
-            Duration::from_secs(5),
+            // This fixture is often run on a loaded host alongside other
+            // worktree builds. Keep the readiness assertion but tolerate slow
+            // startup instead of flaking at five seconds.
+            Duration::from_secs(30),
         );
     }
 

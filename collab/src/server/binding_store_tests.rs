@@ -91,6 +91,38 @@ fn save_then_load_round_trips_current_map() {
 }
 
 #[test]
+fn legacy_identity_map_without_registration_numbers_still_loads() {
+    let root = temp_root("legacy-registration-number");
+    let store = BindingControlStore::new(&root);
+    let key = key();
+    let mut set = BindingControlSet::new();
+    set.commit(&key, value(&key, "alice", "runtime-a"), Some(0))
+        .unwrap();
+    store.save(&set).unwrap();
+
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+    for slot in document["slots"].as_array_mut().unwrap() {
+        for side in ["current", "previous"] {
+            if let Some(value) = slot[side].as_object_mut() {
+                value.remove("registration_number");
+            }
+        }
+    }
+    std::fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+
+    let loaded = store.load().unwrap();
+    let slot = loaded.slot(&key).unwrap();
+    assert_eq!(slot.display_slot, Some(2));
+    assert_eq!(
+        slot.active_binding().unwrap().registration_number,
+        0,
+        "legacy entries must decode without inventing a registration number"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn corrupt_file_fails_closed_instead_of_returning_empty() {
     let root = temp_root("corrupt");
     let store = BindingControlStore::new(&root);

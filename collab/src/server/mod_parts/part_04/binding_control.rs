@@ -466,11 +466,8 @@ impl ProjectRuntimeManager {
         runtime.validate_typed_register(&state, &prepared.typed)
             .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
         let control = self.binding_control_store().load()?;
-        let name = name_resolution::name_for_registration(
-            &state,
-            &control,
-            binding,
-        )?;
+        let registration = name_resolution::name_for_registration(&state, &control, binding)?;
+        let name = registration.name.clone();
         let target_session_id = binding
             .session_id
             .as_ref()
@@ -505,6 +502,7 @@ impl ProjectRuntimeManager {
         if let Some(anchor) = pane_anchor.as_ref() {
             value.invocation_cwd = anchor.cwd.clone();
         }
+        value.registration_number = registration.registration_number;
         Self::prepare_control_value(&control, &key, &mut value)?;
         let route = binding.route_scope();
         let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref()

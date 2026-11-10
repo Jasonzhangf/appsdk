@@ -62,6 +62,71 @@ fn task(id: &str, owner: &str) -> TaskRec {
 }
 
 #[test]
+fn reviewer_rebind_keeps_delivered_task_stable_and_updates_next_step() {
+    let (server, root) = test_server();
+    {
+        let mut state = server.state.lock().unwrap();
+        register_worker(&mut state, "author");
+        register_worker(&mut state, "master");
+        let mut delivered = task("reviewer-rebind", "author");
+        delivered.created_by = "master".into();
+        delivered.status = "delivered".into();
+        delivered.next_step =
+            Some("await review by Bob; use collab task review --accept or --rework".into());
+        state
+            .apply_checked(&Event::TaskCreated { task: delivered })
+            .unwrap();
+        state
+            .board_details
+            .get_mut("reviewer-rebind")
+            .unwrap()
+            .work_policy
+            .reviewer_name = Some("Bob".into());
+        state.task_lifecycle.insert(
+            "reviewer-rebind".into(),
+            state::TaskLifecycleRecord {
+                required_reviewer_name: Some("Bob".into()),
+                delivery_kind: state::TaskDeliveryKind::ReadOnly,
+                delivery_evidence: Some("delivery evidence".into()),
+                delivered_ms: Some(now_ms()),
+                review_subject_revision: 2,
+                ..Default::default()
+            },
+        );
+    }
+
+    let patch = crate::board::WorkPolicy {
+        reviewer_name: Some("Carol".into()),
+        ..Default::default()
+    };
+    let response = board_work_policy(
+        &server,
+        "author".into(),
+        "token-author".into(),
+        "task".into(),
+        Some("reviewer-rebind".into()),
+        patch,
+        Some(1),
+    );
+    assert!(response.ok, "{:?}", response.error);
+
+    let state = server.state.lock().unwrap();
+    let task = &state.tasks["reviewer-rebind"];
+    assert_eq!(task.status, "delivered");
+    assert_eq!(
+        task.next_step.as_deref(),
+        Some("await review by Carol; use collab task review --accept or --rework")
+    );
+    let lifecycle = &state.task_lifecycle["reviewer-rebind"];
+    assert_eq!(lifecycle.required_reviewer_name.as_deref(), Some("Carol"));
+    assert!(lifecycle.reviewer.is_none());
+    assert!(lifecycle.review_evidence.is_none());
+    assert_eq!(lifecycle.review_subject_revision, 3);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn board_lists_only_open_tasks_without_deleting_history() {
     let (server, root) = test_server();
     let control = binding_slot::BindingControlSet::default();

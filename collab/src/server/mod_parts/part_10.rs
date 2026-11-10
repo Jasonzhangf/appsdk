@@ -274,7 +274,10 @@ fn handle_task_wait(
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
     };
-    if task.owner != worker_id || !task_claim_held(&task.status) {
+    let master_repair = task.owner != worker_id
+        && task_owner_unavailable(server, &st, &task)
+        && board_check_master_locked(server, &st, &worker_id).is_ok();
+    if (!master_repair && task.owner != worker_id) || !task_claim_held(&task.status) {
         return Resp::err("only an owned active task may enter waiting");
     }
     if matches!(
@@ -295,7 +298,7 @@ fn handle_task_wait(
     if !conflict {
         return Resp::err("blocking task does not hold a matching active resource");
     }
-    if blocking.owner == worker_id || !st.workers.contains_key(&blocking.owner) {
+    if blocking.owner == task.owner || !st.workers.contains_key(&blocking.owner) {
         return Resp::err("WAIT_RESPONSIBLE_ACTOR_MISSING");
     }
     let responsible_actor = blocking.owner.clone();

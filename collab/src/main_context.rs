@@ -534,12 +534,17 @@ pub(crate) fn context_operation_with_intent(
         let origin = std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").unwrap_or_default();
         let desktop = origin == "Codex Desktop"
             || (origin.is_empty() && std::env::var_os("CODEX_APP_TOOLS_PIPE_PATH").is_some());
+        // A session already mapped to a saved binding owns its restore. When
+        // its old native thread is gone (for example a Desktop-to-Rex move),
+        // Desktop discovery must not fabricate a thread requirement; the daemon
+        // reconciles the saved binding and any explicit transport facts.
         if desktop
             && !explicit_transport
             && facts.dsh_session_id.is_none()
             && crate::host_runtime::host_runtime_facts()
                 .agy_session_id
                 .is_none()
+            && (facts.thread_id.is_some() || !mapped)
         {
             let candidate = crate::desktop_capability::discover(
                 host_paths.state_root(),

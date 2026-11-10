@@ -391,6 +391,7 @@ impl ProjectRuntimeManager {
             &value,
             &value.invocation_cwd, &key.name,
             current_master_worker_id(&state, Some(&saved.route_scope())).as_deref() == Some(ident.worker_id.as_str()),
+            false,
             None,
         ).map_err(anyhow::Error::msg)?;
         let committed = match self.commit_control_change_locked(

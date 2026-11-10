@@ -526,6 +526,7 @@ impl ProjectRuntimeManager {
             &value,
             &value.invocation_cwd, &name,
             is_current_master,
+            false,
             None,
         ) {
             Ok(rename) => rename,

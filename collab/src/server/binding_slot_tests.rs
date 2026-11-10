@@ -3,7 +3,7 @@ use super::binding_slot::{
     IdentityStatus, SlotError,
 };
 use crate::identity::{AgentId, AppServerId, BindingId, NativeThreadId, RuntimeId, SessionId};
-use crate::proto::{SelectedTransport, TransportKind};
+use crate::proto::{IdentityFacts, RexCandidate, RexEndpoint, SelectedTransport, TransportKind};
 use crate::scope::ProjectScopeId;
 use crate::server::global_state::RuntimeBinding;
 
@@ -53,6 +53,46 @@ fn value(key: &IdentityBindingKey, agent: &str, runtime: &str, endpoint: &str) -
     )
 }
 
+fn rex_value(
+    key: &IdentityBindingKey,
+    agent: &str,
+    runtime: &str,
+    session: &str,
+    block: &str,
+) -> BindingValue {
+    let binding = RuntimeBinding::new_with_session(
+        key.project_scope.clone(),
+        key.app_scope_id.clone(),
+        AgentId::new(agent).unwrap(),
+        RuntimeId::new(runtime).unwrap(),
+        BindingId::new(format!("binding-{runtime}")).unwrap(),
+        Some(SessionId::new(session).unwrap()),
+        None,
+    )
+    .unwrap();
+    BindingValue::new(
+        binding,
+        SelectedTransport {
+            kind: TransportKind::Rex,
+            endpoint: None,
+            namespace: None,
+            session_id: Some(session.into()),
+            thread_id: None,
+            tmux_endpoint: None,
+            rex_endpoint: Some(RexEndpoint {
+                server: "unix:///tmp/rex-test.sock".into(),
+                session_id: "rex-session".into(),
+                block_id: block.into(),
+                host_id: Some("host".into()),
+                instance_id: "instance".into(),
+                cwd: key.project_scope.as_str().into(),
+            }),
+            capabilities: vec!["send_message_to_block".into()],
+            self_check: "ok".into(),
+        },
+    )
+}
+
 #[test]
 fn first_binding_becomes_current_without_previous() {
     let key = key("alice");
@@ -72,6 +112,82 @@ fn first_binding_becomes_current_without_previous() {
     assert_eq!(slot.generation(), 1);
     assert!(slot.reference_previous().is_none());
     slot.validate().unwrap();
+}
+
+#[test]
+fn current_lookup_rejects_a_rex_anchor_owned_by_a_different_subject() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(
+            &alice,
+            value(&alice, "alice", "runtime-alice", "endpoint-alice"),
+            None,
+        )
+        .unwrap();
+    control
+        .commit(
+            &bob,
+            rex_value(&bob, "bob", "runtime-bob", "bob-session", "block-bob"),
+            None,
+        )
+        .unwrap();
+    let before = serde_json::to_value(&control).unwrap();
+    let facts = IdentityFacts {
+        session_id: Some("runtime-alice-session".into()),
+        rex: Some(RexCandidate {
+            server: "unix:///tmp/rex-test.sock".into(),
+            session_id: "rex-session".into(),
+            block_id: "block-bob".into(),
+            cwd: "/tmp/collab-binding-slot".into(),
+        }),
+        ..Default::default()
+    };
+
+    let error = control
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .unwrap_err();
+    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
+    assert_eq!(serde_json::to_value(&control).unwrap(), before);
+}
+
+#[test]
+fn current_lookup_allows_same_subject_to_move_to_a_new_rex_block() {
+    let alice = key("alice");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(
+            &alice,
+            rex_value(
+                &alice,
+                "alice",
+                "runtime-alice",
+                "agent-session",
+                "old-block",
+            ),
+            None,
+        )
+        .unwrap();
+    let facts = IdentityFacts {
+        session_id: Some("agent-session".into()),
+        rex: Some(RexCandidate {
+            server: "unix:///tmp/rex-test.sock".into(),
+            session_id: "rex-session".into(),
+            block_id: "new-block".into(),
+            cwd: "/tmp/collab-binding-slot".into(),
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        control
+            .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        alice
+    );
 }
 
 #[test]

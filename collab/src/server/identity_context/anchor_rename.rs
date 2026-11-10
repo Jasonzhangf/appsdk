@@ -35,10 +35,11 @@ pub(crate) fn rename_prepared_anchor(
     cwd: &str,
     target: &str,
     is_current_master: bool,
+    user_approved_master: bool,
     outgoing: Option<(&super::binding_slot::BindingValue, &str)>,
 ) -> Result<Option<TmuxAnchorRename>, String> {
     use crate::client::adapters::tmux;
-    if target == "Jenny" && !is_current_master {
+    if target == "Jenny" && !is_current_master && !user_approved_master {
         super::tm_layout::require_master_position(value)?;
     }
     let mut changes = Vec::new();

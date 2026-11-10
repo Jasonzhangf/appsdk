@@ -39,7 +39,7 @@ fn project_tmux_name(cwd: &Path, name: &str) -> String {
 }
 
 #[test]
-fn identity_map_links_fixed_manifest_position_and_refuses_nonfirst_master_promotion() {
+fn identity_map_links_fixed_manifest_position_and_allows_approved_master_promotion() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("identity-map-layout-pane-five");
     let path = fixture
@@ -70,8 +70,7 @@ fn identity_map_links_fixed_manifest_position_and_refuses_nonfirst_master_promot
         .unwrap()["current"];
     assert_eq!(current["layout_binding_id"], "tm_fixed_five");
     assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_5_Alice");
-    let before = fs::read(&map_path).unwrap();
-    let refused = fixture.command(
+    let promoted = fixture.command(
         &[
             "master",
             "promote",
@@ -81,21 +80,11 @@ fn identity_map_links_fixed_manifest_position_and_refuses_nonfirst_master_promot
         Some(&pane),
     );
     assert!(
-        !refused.status.success(),
-        "only fixed position one may become Jenny: {}",
-        text(&refused)
+        promoted.status.success(),
+        "explicit user approval permits the existing position: {}",
+        text(&promoted)
     );
-    assert!(
-        text(&refused).contains("MASTER_SLOT_REQUIRED"),
-        "{}",
-        text(&refused)
-    );
-    assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_5_Alice");
-    assert_eq!(
-        fs::read(&map_path).unwrap(),
-        before,
-        "refused promotion cannot publish identity changes"
-    );
+    assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_5_Jenny");
     assert_eq!(
         fs::read(&path).unwrap(),
         manifest,
@@ -106,7 +95,7 @@ fn identity_map_links_fixed_manifest_position_and_refuses_nonfirst_master_promot
         restored["result"]["snapshot"]["identity"]["worker_id"],
         worker
     );
-    assert_eq!(restored["result"]["snapshot"]["name"], "Alice");
+    assert_eq!(restored["result"]["snapshot"]["name"], "Jenny");
 }
 
 #[test]
@@ -2332,6 +2321,20 @@ fn pane_identity_context(
     thread: &str,
     operation_id: &str,
 ) -> Value {
+    success_payload(&pane_identity_command(
+        fixture, pane, label, cwd, session, thread, operation_id,
+    ))
+}
+
+fn pane_identity_command(
+    fixture: &Fixture,
+    pane: &Pane,
+    label: &str,
+    cwd: &Path,
+    session: &str,
+    thread: &str,
+    operation_id: &str,
+) -> std::process::Output {
     use std::os::unix::process::ExitStatusExt;
     let done = fixture.root.join(format!("{label}.exit"));
     let result = fixture.root.join(format!("{label}.result"));
@@ -2361,7 +2364,7 @@ fn pane_identity_context(
         stdout: fs::read(&result).unwrap_or_default(),
         stderr: fs::read(&stderr).unwrap_or_default(),
     };
-    success_payload(&output)
+    output
 }
 
 fn current_map_holder(fixture: &Fixture, name: &str) -> Value {
@@ -2557,7 +2560,7 @@ fn different_agent_session_does_not_inherit_name_across_panes() {
 }
 
 #[test]
-fn different_agent_session_does_not_inherit_name_across_invocation_cwd() {
+fn same_tmux_anchor_with_new_agent_session_keeps_name_across_invocation_cwd() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("pane-inherit-other-cwd");
     let root = PathBuf::from(canonical_root(&fixture));
@@ -2576,7 +2579,7 @@ fn different_agent_session_does_not_inherit_name_across_invocation_cwd() {
         ],
     );
 
-    let fresh = pane_identity_context(
+    let resumed = pane_identity_context(
         &fixture,
         &pane,
         "pane-inherit-other-cwd-readback",
@@ -2585,21 +2588,18 @@ fn different_agent_session_does_not_inherit_name_across_invocation_cwd() {
         "pane-inherit-other-cwd-thread",
         "pane-inherit-other-cwd-readback",
     );
-    let snapshot = &fresh["result"]["snapshot"];
-    let fresh_name = snapshot["name"]
-        .as_str()
-        .expect("fresh registration has a name")
-        .to_owned();
-    assert_ne!(
-        fresh_name, seed_name,
-        "a different invocation cwd with a different fixed tmux session name must not inherit the first name: {fresh}"
-    );
-    assert_ne!(
+    let snapshot = &resumed["result"]["snapshot"];
+    assert_eq!(
         snapshot["identity"]["worker_id"].as_str(),
         Some(seed_worker.as_str()),
-        "{fresh}"
+        "the same tmux session anchor resumes the existing subject with a new agent session: {resumed}"
     );
-    let current = current_map_holder(&fixture, &fresh_name);
+    assert_eq!(
+        snapshot["name"].as_str(),
+        Some(seed_name.as_str()),
+        "a stable runtime anchor keeps its name across agent sessions and invocation cwd: {resumed}"
+    );
+    let current = current_map_holder(&fixture, &seed_name);
     assert_eq!(
         current["binding"]["session_id"].as_str(),
         Some("pane-inherit-other-cwd-session"),
@@ -2613,7 +2613,99 @@ fn different_agent_session_does_not_inherit_name_across_invocation_cwd() {
     assert_eq!(
         current["invocation_cwd"].as_str(),
         Some(other_cwd.to_string_lossy().as_ref()),
-        "a fresh name records the current invocation cwd: {current}"
+        "the resumed binding records the current invocation cwd: {current}"
+    );
+}
+
+#[test]
+fn cross_subject_anchor_match_is_rejected_before_publication() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, pane) = Fixture::isolated("cross-subject-anchor-conflict");
+    let root = PathBuf::from(canonical_root(&fixture));
+    let seed = fixture.registered_context("cross-subject-anchor-conflict-seed", &pane);
+    let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
+    let other_pane = second_pane(&fixture, "cross-subject-anchor-conflict-other", pane.server_pid);
+    let other = pane_identity_context(
+        &fixture,
+        &other_pane,
+        "cross-subject-anchor-conflict-other-register",
+        &root,
+        &other_pane.session_anchor,
+        &other_pane.thread_anchor,
+        "cross-subject-anchor-conflict-other-register",
+    );
+    let (other_name, other_worker) = seeded_name_and_worker(&other);
+    assert_ne!(other_name, seed_name);
+    assert_ne!(other_worker, seed_worker);
+
+    let before = fixture.current_resources();
+    let seed_session_name = tmux_session_name(&fixture, &pane);
+    let other_session_name = tmux_session_name(&fixture, &other_pane);
+
+    let conflict = pane_identity_command(
+        &fixture,
+        &other_pane,
+        "cross-subject-anchor-conflict-readback",
+        &root,
+        &pane.session_anchor,
+        &pane.thread_anchor,
+        "cross-subject-anchor-conflict-readback",
+    );
+    assert!(
+        !conflict.status.success(),
+        "a cross-subject anchor match must fail: {}",
+        text(&conflict)
+    );
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        stderr.contains("IDENTITY_ANCHOR_CONFLICT"),
+        "the cross-subject anchor match must be a typed explicit failure: {stderr}"
+    );
+    let after = fixture.current_resources();
+    if before != after {
+        fn changed_paths(before: &Value, after: &Value, path: &str, changed: &mut Vec<String>) {
+            match (before, after) {
+                (Value::Object(before), Value::Object(after)) => {
+                    for key in before.keys().chain(after.keys()) {
+                        let child = format!("{path}/{key}");
+                        match (before.get(key), after.get(key)) {
+                            (Some(before), Some(after)) => {
+                                changed_paths(before, after, &child, changed)
+                            }
+                            _ => changed.push(child),
+                        }
+                    }
+                }
+                _ if before != after => changed.push(path.to_owned()),
+                _ => {}
+            }
+        }
+        let mut changed = Vec::new();
+        changed_paths(&before, &after, "", &mut changed);
+        panic!(
+            "a rejected cross-subject anchor must not mutate resources: {}",
+            changed.join(", ")
+        );
+    }
+    assert_eq!(
+        tmux_session_name(&fixture, &pane),
+        seed_session_name,
+        "the original fixed tmux session name must stay unchanged"
+    );
+    assert_eq!(
+        tmux_session_name(&fixture, &other_pane),
+        other_session_name,
+        "the other fixed tmux session name must stay unchanged"
+    );
+    assert_eq!(
+        current_map_holder(&fixture, &seed_name)["binding"]["session_id"],
+        pane.session_anchor,
+        "subject A must keep its own agent session"
+    );
+    assert_eq!(
+        current_map_holder(&fixture, &other_name)["binding"]["session_id"],
+        other_pane.session_anchor,
+        "subject B must keep its own agent session"
     );
 }
 

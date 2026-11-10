@@ -507,13 +507,9 @@ impl ProjectRuntimeManager {
             Some(RoleAction::ClearMaster) => current_master_grant(&state, Some(&route)).is_none(),
             None => true,
         };
-        if matches!(
-            role.as_ref().map(|role| &role.action),
-            Some(RoleAction::SetMaster)
-        ) && !settled
-        {
-            super::tm_layout::require_master_position(&value)?;
-        }
+        let user_approved_master = role.as_ref().is_some_and(|role|
+            matches!(role.action, RoleAction::SetMaster)
+                && matches!(role.authorization, RoleAuthorization::User { .. }));
         if source.name == target
             && original == &value
             && settled
@@ -621,7 +617,7 @@ impl ProjectRuntimeManager {
         };
         let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker);
         drop(state);
-        let rename = rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master,
+        let rename = rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master, user_approved_master,
             companion.as_ref().map(|(key, value, _)| (value, key.name.as_str())))?;
         let committed = match self.commit_control_change_locked(
             super::binding_store::ControlChange::MoveNameWithEffect {

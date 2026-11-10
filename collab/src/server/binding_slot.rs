@@ -506,7 +506,7 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
-        let dsh = facts.dsh_session_id.as_deref().or_else(|| {
+        let dsh_anchor = facts.dsh_session_id.as_deref().or_else(|| {
             facts
                 .dsh
                 .as_ref()
@@ -521,18 +521,13 @@ impl BindingControlSet {
             })
             .filter_map(|slot| slot.active_binding().map(|value| (slot, value)))
             .filter(|(_, value)| {
-                (dsh.is_none() || value.transport.kind == crate::proto::TransportKind::Dsh)
-                    && (facts.rex.is_none()
-                        || value.transport.kind == crate::proto::TransportKind::Rex)
-                    && (facts.tmux.is_none()
-                        || value.transport.kind == crate::proto::TransportKind::Tmux)
-                    && facts.agent_kind.as_ref().is_none_or(|kind| {
-                        value
-                            .host
-                            .agent_kind
-                            .as_ref()
-                            .is_none_or(|saved| saved == kind)
-                    })
+                facts.agent_kind.as_ref().is_none_or(|kind| {
+                    value
+                        .host
+                        .agent_kind
+                        .as_ref()
+                        .is_none_or(|saved| saved == kind)
+                })
             })
             .collect::<Vec<_>>();
         fn unique(
@@ -547,22 +542,8 @@ impl BindingControlSet {
                 ),
             }
         }
-        if facts.tmux.is_some() {
-            if let Some(name) = facts.tmux_session_name.as_ref() {
-                let found = unique(
-                    candidates
-                        .iter()
-                        .filter(|(_, value)| value.physical_name.as_ref() == Some(name))
-                        .map(|(slot, _)| *slot)
-                        .collect(),
-                )?;
-                if found.is_some() {
-                    return Ok(found);
-                }
-            }
-        }
-        if let Some(session) = dsh.or(facts.session_id.as_deref()) {
-            let found = unique(
+        let session_match = if let Some(session) = facts.session_id.as_deref() {
+            unique(
                 candidates
                     .iter()
                     .filter(|(_, value)| {
@@ -574,17 +555,85 @@ impl BindingControlSet {
                     })
                     .map(|(slot, _)| *slot)
                     .collect(),
-            )?;
-            if found.is_some() {
-                return Ok(found);
+            )?
+        } else {
+            None
+        };
+        let anchor_match = if let Some(candidate) = facts.tmux.as_ref() {
+            unique(
+                candidates
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.transport.kind == crate::proto::TransportKind::Tmux
+                            && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                                saved.tmux_session_id == candidate.endpoint.tmux_session_id
+                            })
+                    })
+                    .map(|(slot, _)| *slot)
+                    .collect(),
+            )?
+        } else if let Some(candidate) = facts.rex.as_ref() {
+            unique(
+                candidates
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.transport.kind == crate::proto::TransportKind::Rex
+                            && value
+                                .transport
+                                .rex_endpoint
+                                .as_ref()
+                                .is_some_and(|saved| saved.block_id == candidate.block_id)
+                    })
+                    .map(|(slot, _)| *slot)
+                    .collect(),
+            )?
+        } else if let Some(session) = dsh_anchor {
+            unique(
+                candidates
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.transport.kind == crate::proto::TransportKind::Dsh
+                            && value.transport.session_id.as_deref() == Some(session)
+                    })
+                    .map(|(slot, _)| *slot)
+                    .collect(),
+            )?
+        } else if let Some(candidate) = facts.desktop_bridge.as_ref() {
+            unique(
+                candidates
+                    .iter()
+                    .filter(|(_, value)| {
+                        value.transport.kind == crate::proto::TransportKind::DesktopBridge
+                            && value.transport.session_id.as_deref()
+                                == Some(candidate.session_id.as_str())
+                    })
+                    .map(|(slot, _)| *slot)
+                    .collect(),
+            )?
+        } else {
+            None
+        };
+        if let (Some(session), Some(anchor)) = (session_match, anchor_match) {
+            if session.identity_key != anchor.identity_key {
+                return Err(format!(
+                    "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current runtime anchor selects {}",
+                    session.identity_key.name, anchor.identity_key.name
+                ));
             }
+        }
+        if session_match.is_some() {
+            return Ok(session_match);
+        }
+        if anchor_match.is_some() {
+            return Ok(anchor_match);
         }
         if let (Some(candidate), Some(cwd)) = (facts.tmux.as_ref(), cwd) {
             return unique(
                 candidates
                     .iter()
                     .filter(|(_, value)| {
-                        value.invocation_cwd == cwd
+                        value.transport.kind == crate::proto::TransportKind::Tmux
+                            && value.invocation_cwd == cwd
                             && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
                                 crate::client::adapters::tmux::same_owned_pane(
                                     saved,

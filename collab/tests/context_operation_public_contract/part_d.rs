@@ -788,6 +788,33 @@ fn public_context_partial_rex_environment_skips_desktop_bridge() {
     );
 }
 
+#[test]
+fn public_context_invalid_rex_environment_fails_without_desktop_fallback() {
+    let fixture = Fixture::without_tmux("rex-invalid-env");
+    let output = fixture
+        .configured_command(&["context", "--op", "rex-invalid-env"], None)
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .env("REX_SESSION", "session:not-a-canonical-id")
+        .env("REX_BLOCK", "block:not-a-canonical-id")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("REX_NOT_DELIVERED:") || stderr.contains("REX_UNKNOWN:"),
+        "invalid Rex facts must return a typed Rex discovery error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED")
+            && !stderr.contains("DESKTOP_BRIDGE_THREAD_REQUIRED"),
+        "an invalid Rex pair must not fall through to Desktop discovery: {stderr}"
+    );
+    assert!(
+        !fixture.host_state.join("identity-map.json").exists(),
+        "invalid Rex facts must not publish an identity"
+    );
+}
+
 // A master's public `collab context` snapshot must expose, in one read, the
 // durable subordinate managers of its scope: activity, open/blocked tasks and
 // whether each subordinate keeps a patrol armed. The child itself has no

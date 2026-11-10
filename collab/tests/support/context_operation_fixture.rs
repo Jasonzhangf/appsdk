@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 #[path = "daemon_readiness.rs"]
 mod daemon_readiness;
 
-/// Fixture roots live under `/tmp` so the AF_UNIX socket stays inside
+/// Fixture roots live under `/var/tmp` so the AF_UNIX socket stays inside
 /// `SUN_LEN`. The macOS default temp dir is long enough to make every daemon
 /// start fail with `path must be shorter than SUN_LEN` before any product
-/// behavior is reachable.
-const FIXTURE_ROOT_PREFIX: &str = "/tmp/v23f";
+/// behavior is reachable. Unlike `/tmp`, `/var/tmp` does not inherit a host
+/// `.agent-collab` marker that changes public context root resolution.
+const FIXTURE_ROOT_PREFIX: &str = "/var/tmp/v23f";
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub static TMUX_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

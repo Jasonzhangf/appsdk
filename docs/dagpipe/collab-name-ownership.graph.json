@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-name-ownership",
   "version": "0.2.2",
-  "description": "统一身份映射的名字分配与交接 SESE。identity-map.json 是四宿主唯一选择和提交源。有效授权优先；普通恢复只查 active current，previous 不参与。真实新注册先通过既有typed业务预检并确认精确候选凭据，再发布active；未发布失败恢复原凭据和物理名，可见Unknown保留候选及待办。普通同主体续接不旋转token。布局关联后物理名取共享manifest项目tab_id_固定pane_order_名字，overview仅作展示，只有项目固定位置1可升Jenny；名字池不决定布局位置。未关联布局的原有命名行为保持。旧archive、route、reducer占名和operation历史不选择身份。保留精确凭据/grant及业务交接owner；缺少投递地址不否决当前身份；不操作tmux生命周期。",
+  "description": "统一身份映射的名字分配与交接 SESE。identity-map.json 是四宿主唯一选择和提交源。有效授权优先；普通恢复只查 active current，previous 不参与。真实新注册先通过既有typed业务预检并确认精确候选凭据，再发布active；未发布失败恢复原凭据和物理名，可见Unknown保留候选及待办。普通同主体续接不旋转token。布局关联后物理名取共享manifest项目tab_id_固定pane_order_名字，overview仅作展示；明确用户授权晋升保留successor的现有project fixed position，例如position 5成为project_alpha_5_Jenny，只有无该明确授权的Jenny路径保持项目固定位置1限制；名字池不决定布局位置。未关联布局的原有命名行为保持。旧archive、route、reducer占名和operation历史不选择身份。已精确核实消失的outgoing session跳过物理改名，但不取消logical名字、任务、消息与grant交接。保留精确凭据/grant及业务交接owner；缺少投递地址不否决当前身份；不操作tmux生命周期。",
   "inputs": [{"id": "name_context_request", "schema": "Object"}],
   "nodes": [
     {

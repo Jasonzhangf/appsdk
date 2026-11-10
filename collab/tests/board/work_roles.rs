@@ -2495,6 +2495,198 @@ fn pre_recovery_stale_running_attempt_reclaims_from_public_claim() {
 }
 
 #[test]
+fn rework_stale_running_attempt_reclaims_from_public_claim() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "rework stale running fixture",
+        ],
+        THREAD_A,
+    );
+
+    let published = publish(&fixture, "rework-stale-running", &[]);
+    let slot = published["ticket"]["phases"][0]["slot"].as_str().unwrap();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker = slot_worker_id(&board, slot);
+    let owner_thread = ticket_thread(&fixture, &worker);
+
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "rework-stale-running",
+            "--expected-revision",
+            "1",
+        ],
+        owner_thread,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "rework-stale-running",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "rework-stale-running",
+            "--evidence",
+            "first run",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "update",
+            "rework-stale-running",
+            "--status",
+            "rework",
+            "--next",
+            "rework the first run",
+        ],
+        owner_thread,
+    );
+    let reworked = fixture.run_public(&["task", "status", "rework-stale-running"], owner_thread);
+    assert_eq!(reworked["status"], "rework");
+
+    // Rework reopens the execute phase as a fresh claimed attempt at the
+    // generation current at rework time.
+    let old_generation = slot_generation(&fixture, &worker);
+    set_slot_generation(&fixture, &worker, old_generation + 1);
+
+    let drifted = fixture.current_state();
+    let phase = drifted["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == "rework-stale-running")
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap())
+        .unwrap();
+    assert_eq!(phase["status"], "claimed");
+    assert_eq!(phase["binding_generation"], old_generation);
+    assert_eq!(phase["attempt_generation"], 2);
+
+    let revision = drifted["board_details"]["rework-stale-running"]["revision"]
+        .as_u64()
+        .expect("board details revision")
+        .to_string();
+
+    let stale_start = rejected(
+        &fixture,
+        &[
+            "board",
+            "start",
+            "rework-stale-running",
+            "--expected-revision",
+            revision.as_str(),
+            "--attempt",
+            "2",
+        ],
+        owner_thread,
+    );
+    assert!(
+        stale_start.contains("TICKET_STALE_BINDING"),
+        "{stale_start}"
+    );
+
+    // Pre-fix this claim returns BOARD_TASK_NOT_PENDING because rework is not
+    // in the working|blocked set accepted by ticket_stale_active_claim_phase.
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "rework-stale-running",
+            "--expected-revision",
+            revision.as_str(),
+        ],
+        owner_thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+
+    let recovered = fixture.current_state();
+    let newest = recovered["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == "rework-stale-running")
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap())
+        .unwrap();
+    assert_eq!(newest["status"], "claimed");
+    assert_eq!(newest["binding_generation"], old_generation + 1);
+    assert_eq!(newest["attempt_generation"], 3);
+
+    let recovered_revision = recovered["board_details"]["rework-stale-running"]["revision"]
+        .as_u64()
+        .expect("recovered board details revision")
+        .to_string();
+
+    let old_deliver = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "rework-stale-running",
+            "--evidence",
+            "old generation result",
+            "--attempt",
+            "2",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    assert!(
+        old_deliver.contains("TICKET_STALE_BINDING"),
+        "{old_deliver}"
+    );
+
+    let started = fixture.run_public(
+        &[
+            "board",
+            "start",
+            "rework-stale-running",
+            "--expected-revision",
+            recovered_revision.as_str(),
+            "--attempt",
+            "3",
+        ],
+        owner_thread,
+    );
+    assert_eq!(started["task"]["status"], "working");
+
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "rework-stale-running",
+            "--evidence",
+            "rework stale running recovery",
+            "--attempt",
+            "3",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    assert_eq!(delivered["status"], "delivered");
+}
+
+#[test]
 fn pending_deliver_without_or_wrong_attempt_stays_rejected() {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);

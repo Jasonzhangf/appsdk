@@ -358,7 +358,7 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
     match role {
         ExecutionRole::Master => {
             println!("从以下四项中选一项并立即执行，不要以 ACK 或\"已读\"结束本轮：");
-            println!("1. 派发 ready 长程工作给获授权的合适 peer；一次性执行或观察直接派独立 GCM worker；");
+            println!("1. 先检查 idle、获授权且合适的 peer 与可用容量；有 ready 工作可承接时优先派给该 peer；仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`；");
             println!("2. 收敛一个 worktree、resource、P0/P1 或 canonical issue blocker；受保护资源显式保留；");
             println!("3. 合并一个 pending merge（accepted 任务）并记录 collab task integrated，再关闭 worktree；");
             println!("4. 用行为证据关闭阶段；仍需调度时在结束前重新武装一次性 wake。");

@@ -127,7 +127,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(next_action.contains(
                     "invite suitable, available and authorized peers first"
                 ));
-                assert!(next_action.contains("only after confirming none can take the work"));
+                assert!(next_action.contains("no suitable authorized peer can take the work"));
                 assert!(responsibilities.contains("codex exec --profile gcm"));
             }
             "worker" => {

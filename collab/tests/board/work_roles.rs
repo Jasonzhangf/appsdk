@@ -661,6 +661,70 @@ fn canonical_work_role_rules() -> Vec<String> {
     .collect()
 }
 
+fn collect_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => out.push(text.clone()),
+        Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
+        Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
+        _ => {}
+    }
+}
+
+#[test]
+fn shipped_workflow_asset_rejects_peer_busy_before_gcm_guidance() {
+    let asset: Value = serde_json::from_str(include_str!(
+        "../../skills/collab/references/workflow-templates.json"
+    ))
+    .expect("shipped workflow-templates.json must parse");
+    let mut strings = Vec::new();
+    collect_strings(&asset, &mut strings);
+    let old = "regardless of whether other peers are busy";
+    for text in &strings {
+        assert!(
+            !text.to_lowercase().contains(old),
+            "peer-busy-before-GCM guidance must be rejected: {text}"
+        );
+    }
+    for role in ["master", "peer"] {
+        let text = asset["identity_templates"][role].to_string().to_lowercase();
+        assert!(
+            text.contains("no suitable authorized peer can take the work"),
+            "{role} identity template must prefer idle authorized peer capacity: {text}"
+        );
+    }
+    for (name, text) in [
+        (
+            "operations.md",
+            include_str!("../../skills/collab/operations.md"),
+        ),
+        ("README.md", include_str!("../../README.md")),
+    ] {
+        let text = text.replace(['\r', '\n'], " ").to_lowercase();
+        assert!(
+            !text.contains("regardless of whether other peers are busy"),
+            "{name} must reject peer-busy-before-GCM guidance"
+        );
+        assert!(
+            !text.contains("regardless of peer idleness"),
+            "{name} must reject peer-idle-independent GCM dispatch"
+        );
+        assert!(
+            !text.contains("peer availability does not gate this routing"),
+            "{name} must reject peer-availability-independent GCM dispatch"
+        );
+        assert!(
+            !text.contains(
+                "send one-shot execution or observation directly to independent gcm workers"
+            ),
+            "{name} must reject direct-GCM-first guidance"
+        );
+        assert!(
+            text.contains("no suitable authorized peer can take the work"),
+            "{name} must require peer-first dispatch"
+        );
+    }
+}
+
 fn static_operation_kinds(snapshot: &Value) -> Vec<String> {
     snapshot["operations"]
         .as_array()
@@ -685,6 +749,15 @@ fn context_role_guidance_reaches_master_and_peer_with_latest_dynamic_roles() {
 
     for (label, snapshot) in [("master", &master), ("peer", &peer)] {
         let brief = &snapshot["role_brief"];
+        let brief_lower = brief.to_string().to_lowercase();
+        assert!(
+            !brief_lower.contains("regardless of whether other peers are busy"),
+            "{label} role_brief must reject peer-busy-before-GCM guidance: {brief_lower}"
+        );
+        assert!(
+            brief_lower.contains("no suitable authorized peer can take the work"),
+            "{label} role_brief must prefer idle, suitable authorized peer capacity: {brief_lower}"
+        );
         assert!(
             brief.get("work_roles").is_none() && brief.get("tasks").is_none(),
             "{label} role_brief must reuse top-level dynamic values instead of mirroring them: {brief}"

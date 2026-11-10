@@ -45,3 +45,42 @@ fn typed_presence_read_under_state_lock_does_not_relock() {
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn rex_presence_read_under_state_lock_does_not_relock() {
+    let (server, root) = peer_tests::test_server();
+    assert!(peer_tests::register_synthetic_peer(&server, "rex-reader", "rex-reader").ok);
+    let server = Arc::new(server);
+    {
+        let mut state = server.state.lock().unwrap();
+        let worker = state.workers.get_mut("rex-reader").unwrap();
+        let transport = worker.transport.as_mut().unwrap();
+        transport.kind = TransportKind::Rex;
+        transport.rex_endpoint = Some(crate::proto::RexEndpoint {
+            server: "rex-server".into(),
+            session_id: "rex-session".into(),
+            block_id: "rex-block".into(),
+            host_id: None,
+            instance_id: "rex-instance".into(),
+            cwd: "/tmp".into(),
+        });
+        transport.session_id = Some("rex-agent-session".into());
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let observed = server.clone();
+    let reader = std::thread::spawn(move || {
+        let state = observed.state.lock().unwrap();
+        let presence =
+            worker_presence_in_state(&observed, &state, &state.workers["rex-reader"]);
+        sender.send(presence).unwrap();
+    });
+    assert_eq!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        IdentityPresence::Present
+    );
+    reader.join().unwrap();
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}

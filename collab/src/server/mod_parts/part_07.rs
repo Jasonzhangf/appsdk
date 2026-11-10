@@ -299,6 +299,14 @@ fn worker_presence_in_state(
         .is_some_and(|transport| transport.kind == TransportKind::Tmux)
     {
         tmux_identity_presence(server, state, worker)
+    } else if selected_transport_for_worker(worker)
+        .is_some_and(|transport| transport.kind == TransportKind::Rex)
+    {
+        // Rex presence is decided entirely from the held state: the persisted
+        // transport endpoint and session prove identity. Falling through to
+        // worker_transport_presence_with_view would re-lock server.state while
+        // the caller already holds it, deadlocking the dispatch thread.
+        rex_identity_presence(server, state, worker)
     } else {
         worker_agent_view_in_state(server, state, worker)
             .unwrap_or_else(|| worker_transport_presence_with_view(server, worker))

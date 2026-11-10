@@ -13,7 +13,7 @@ to declare tested work delivered.
 
 ```text
 latest main
-  -> exclusive Git worktree or LayerFS task branch/Workspace
+  -> exclusive Git worktree
   -> register owned task
   -> implement and verify
   -> task deliver {code candidate | --no-candidate read-only evidence}
@@ -94,9 +94,9 @@ lease. Base reception is daemon-owned and has no subscription-closing command;
 end a leftover finite goal schedule with `appsdk goal cancel`, and let
 task-owned schedules end with task closure.
 
-- Use the project/host contract's exclusive Git worktree or LayerFS task
-  branch/Workspace. Keep Close-Before-Open for Git worktrees. CLI acceptance of
-  a legacy path does not authorize a new tree there.
+- Use the project/host contract's exclusive Git worktree. Keep
+  Close-Before-Open. CLI acceptance of a legacy path does not authorize a new
+  tree there.
 - The task workspace is only the execution carrier and has no identity context.
   Reuse valid context; run `collab context` when recovery is needed. The CLI observes runtime facts, and the
   daemon owns identity selection, creation, recovery, update, registration,
@@ -108,30 +108,17 @@ task-owned schedules end with task closure.
 - Never share a write scope or reuse another owner's workspace. The same owner
   may continue the same task in its existing workspace. Never depend on dirty main.
 
-## Git worktree and LayerFS
+## Git worktree
 
-Choose the workspace carrier from the project's actual workflow. Do not require
-Git metadata or a local worktree when the project uses LayerFS.
+The task workspace is an owned Git worktree.
 
-- A Git-worktree task keeps the existing path, branch, base, validation and
-  cleanup rules. Pass the worktree path as before.
-- A LayerFS task declares the stable reference
-  `layerfs:<project>/<branch>`. `project` is the project's LayerFS name and
-  `branch` is its task branch. The Workspace mount handle is transient
-  execution placement, like a pane, and is not the stable isolation identity.
-- Resolve the project through the current `layerfs --project <project>`
-  configuration or `LAYERFS_PROJECT`; never hardcode another project's Store,
-  VM, image or path, and do not create a per-project launcher for Collab.
-- Collab binds the task owner to that task branch reference and uses the
-  existing task control resource. It does not create a Git worktree, call
-  `git worktree remove`, or delete a LayerFS branch.
-- Delivery records the current LayerFS task branch head as the candidate.
-  Branch sync, publish, Git commit capture and remote delivery follow the
-  LayerFS Skill and remain separate evidence.
-- Close verifies the declared LayerFS task branch still exists through the
-  generic LayerFS entry. A missing profile, unreachable Store or LayerFS error
-  stays an explicit failure with the original error; never fall back to a Git
-  worktree.
+- A task keeps the existing path, branch, base, validation and cleanup rules.
+  Pass the worktree path as before.
+- A non-Git workspace reference fails the normal worktree contract. It does not
+  create a task, change a binding, remove a directory or Git branch, or
+  migrate or delete existing data automatically.
+- A failed reference preserves the task, binding and cleanup obligation. Do
+  not infer a valid worktree from a path that fails the normal contract.
 - Historical task records with a normal path keep their original Git-worktree
   interpretation. No reset, state clear or project rebuild is required.
 - Only the owner may update, deliver, cancel, or normally close. A named
@@ -142,16 +129,13 @@ Git metadata or a local worktree when the project uses LayerFS.
   may close a task whose owner registered transport identity is lost.
 - A bound worktree creates a mandatory cleanup obligation. Keep its exact path
   and branch bound until close.
-- A bound LayerFS task branch creates the same task cleanup obligation. Keep
-  its exact `layerfs:<project>/<branch>` reference until close.
 - Before any removal, extract recoverable commits and untracked content that
   the task still needs. Dirty, active, shared, or unknown worktrees are
   PROTECTED_HOLD. Preserve and report them; never force-remove them.
 - `delivered`/`merged` are not cleanup. Close requires the applicable verified
-  Git-worktree removal or LayerFS branch reference check plus a durable
-  cleanup receipt.
+  Git-worktree removal plus a durable cleanup receipt.
 - Close rejects unmerged commits, dirty paths, path escape, wrong branch,
-  unique unmerged history, a missing LayerFS branch, or cleanup failure.
+  unique unmerged history, an invalid worktree reference, or cleanup failure.
 - Cancellation cannot bypass cleanup. Dirty/missing/unproven paths are never
   force-removed. Terminal state without a receipt is an audit failure.
 

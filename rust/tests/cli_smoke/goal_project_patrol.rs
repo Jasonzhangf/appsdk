@@ -29,7 +29,9 @@ case "$1 $2" in
     patrol_repeat="${PATROL_STATUS_REPEAT:-100}"
     if [ -f patrol-id ]; then
       patrol_id=$(/bin/cat patrol-id)
-      if [ "${PATROL_STATUS_MODE:-armed}" = "consumed" ]; then
+      if [ "${PATROL_STATUS_MODE:-armed}" = "cancelled" ]; then
+        patrol="{\"id\":\"$patrol_id\",\"worker_id\":\"master-peer\",\"event\":\"master-idle\",\"subject\":\"$patrol_subject\",\"interval_ms\":900000,\"repeat_count\":$patrol_repeat,\"fired_count\":0,\"expires_ms\":9999999999999,\"status\":\"cancelled\",\"created_ms\":2}"
+      elif [ "${PATROL_STATUS_MODE:-armed}" = "consumed" ]; then
         patrol="{\"id\":\"$patrol_id\",\"worker_id\":\"master-peer\",\"event\":\"master-idle\",\"subject\":\"$patrol_subject\",\"interval_ms\":900000,\"repeat_count\":$patrol_repeat,\"fired_count\":100,\"expires_ms\":9999999999999,\"status\":\"consumed\",\"created_ms\":2}"
       else
         patrol="{\"id\":\"$patrol_id\",\"worker_id\":\"master-peer\",\"event\":\"master-idle\",\"subject\":\"$patrol_subject\",\"interval_ms\":900000,\"repeat_count\":$patrol_repeat,\"fired_count\":0,\"expires_ms\":9999999999999,\"status\":\"armed\",\"created_ms\":2}"
@@ -348,6 +350,67 @@ fn longhorizon_show_projects_patrol_without_subscription_side_effect() {
     assert!(
         !root.join("notify-subscribe-calls").exists(),
         "longhorizon show must never create a patrol subscription"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_project_patrol_preserves_cancelled_subscription_without_rearm() {
+    let root = temp_root("goal-project-patrol-cancelled");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let (fake_bin, _) = install_project_patrol_fake(&root, "master");
+    fs::write(root.join("patrol-id"), "sub-patrol-cancelled").unwrap();
+
+    let receipt = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("PATROL_STATUS_MODE", "cancelled")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        receipt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&receipt.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&receipt.stdout).unwrap();
+    assert_eq!(payload["active"], true);
+    assert_eq!(payload["patrol_armed"], false);
+    assert_eq!(payload["patrol_subscription_id"], "sub-patrol-cancelled");
+    assert_eq!(payload["patrol_source"], "cancelled");
+    assert_eq!(payload["patrol_status"], "cancelled");
+    assert!(
+        !root.join("notify-subscribe-calls").exists(),
+        "a cancelled patrol subscription must not be treated as missing and re-armed"
+    );
+
+    let show = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("PATROL_STATUS_MODE", "cancelled")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(shown["goal"]["patrol_armed"], false);
+    assert_eq!(
+        shown["goal"]["patrol_subscription_id"],
+        "sub-patrol-cancelled"
+    );
+    assert_eq!(shown["goal"]["patrol_source"], "cancelled");
+    assert_eq!(shown["goal"]["patrol_status"], "cancelled");
+    assert!(
+        !root.join("notify-subscribe-calls").exists(),
+        "longhorizon show must not re-arm a cancelled patrol subscription"
     );
 
     fs::remove_dir_all(root).unwrap();

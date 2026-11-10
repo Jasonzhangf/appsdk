@@ -1463,8 +1463,8 @@ pub(crate) fn handle_scheduler_dispatch(
             }),
             wait: None,
             isolation_mode: worktree_path
-                .as_deref()
-                .map(|path| derive_isolation_mode(Some(path))),
+                .as_ref()
+                .map(|_| ISOLATION_WORKTREE.to_owned()),
             created_ms: now,
             updated_ms: now,
         };

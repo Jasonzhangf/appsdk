@@ -1055,6 +1055,382 @@ fn close_accepts_squash_integrated_branch_from_recorded_integration() {
 }
 
 #[test]
+fn invalid_workspace_close_preserves_same_named_git_branch_and_local_directory() {
+    let (server, root) = test_server();
+    let playground = root.join("playground");
+    std::fs::create_dir_all(&playground).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+    assert!(git(&["branch", "retired-workspace"]).status.success());
+    let side_directory = playground.join("retired-workspace");
+    std::fs::create_dir_all(&side_directory).unwrap();
+    std::fs::write(side_directory.join("user-data.txt"), "preserve\n").unwrap();
+
+    register(&server, "holder", "%holder");
+    let now = now_ms();
+    let task = TaskRec {
+        id: "invalid-close".into(),
+        owner: "holder".into(),
+        created_by: "holder".into(),
+        feature_id: None,
+        worktree_path: Some("retired:demo/retired-workspace".into()),
+        branch: Some("retired-workspace".into()),
+        base_commit: None,
+        priority: default_priority(),
+        status: "merged".into(),
+        next_step: None,
+        wait: None,
+        isolation_mode: None,
+        created_ms: now,
+        updated_ms: now,
+    };
+    server.commit(&[
+        Event::TaskCreated { task: task.clone() },
+        Event::TaskLifecycleUpdated {
+            task_id: "invalid-close".into(),
+            record: crate::server::state::TaskLifecycleRecord {
+                delivery_kind: crate::server::state::TaskDeliveryKind::ReadOnly,
+                delivery_evidence: Some("read-only delivery evidence".into()),
+                delivered_ms: Some(now),
+                review_evidence: Some("independent review pass".into()),
+                reviewer: Some("holder".into()),
+                reviewed_ms: Some(now),
+                ..Default::default()
+            },
+        },
+        Event::CleanupVerified {
+            receipt: CleanupReceipt {
+                id: "cleanup-invalid-close".into(),
+                task_id: "invalid-close".into(),
+                worktree_path: Some("retired:demo/retired-workspace".into()),
+                branch: Some("retired-workspace".into()),
+                verified_ms: now,
+                verification: CleanupVerification::Verified,
+                manual_reason: None,
+            },
+        },
+    ]);
+    let before_close = server.state.lock().unwrap().tasks["invalid-close"].clone();
+    let close = handle_task_close(
+        &server,
+        "holder".into(),
+        "token-holder".into(),
+        "invalid-close".into(),
+        false,
+        None,
+    );
+    assert!(
+        !close.ok,
+        "a non-Git workspace reference must not close: {close:?}"
+    );
+    let state = server.state.lock().unwrap();
+    assert_task_record_unchanged(&before_close, &state.tasks["invalid-close"]);
+    assert_eq!(
+        state.cleanup_receipts["invalid-close"].verification,
+        CleanupVerification::Verified
+    );
+    assert!(side_directory.join("user-data.txt").is_file());
+    assert!(git(&["rev-parse", "--verify", "refs/heads/retired-workspace"])
+        .status
+        .success());
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn invalid_workspace_finalize_keeps_unverified_receipt_and_local_resources() {
+    let (server, root) = test_server();
+    let playground = root.join("playground");
+    std::fs::create_dir_all(&playground).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+    assert!(git(&["branch", "retired-finalize"]).status.success());
+    let side_directory = playground.join("retired-finalize");
+    std::fs::create_dir_all(&side_directory).unwrap();
+    std::fs::write(side_directory.join("user-data.txt"), "preserve\n").unwrap();
+
+    register(&server, "holder", "%holder");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved invalid workspace finalize test");
+    let now = now_ms();
+    server.commit(&[Event::TaskCreated {
+        task: TaskRec {
+            id: "invalid-finalize".into(),
+            owner: "holder".into(),
+            created_by: "holder".into(),
+            feature_id: None,
+            worktree_path: Some("retired:demo/retired-finalize".into()),
+            branch: Some("retired-finalize".into()),
+            base_commit: None,
+            priority: default_priority(),
+            status: "working".into(),
+            next_step: None,
+            wait: None,
+            isolation_mode: None,
+            created_ms: now,
+            updated_ms: now,
+        },
+    }]);
+    let forced = handle_task_close(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "invalid-finalize".into(),
+        true,
+        Some("fixture leaves cleanup for finalize".into()),
+    );
+    assert!(forced.ok, "{forced:?}");
+    let before_finalize = server.state.lock().unwrap().tasks["invalid-finalize"].clone();
+    let finalized = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "invalid-finalize".into(),
+        None,
+    );
+    assert!(
+        !finalized.ok,
+        "finalize must not verify an invalid workspace reference: {finalized:?}"
+    );
+    let state = server.state.lock().unwrap();
+    assert_task_record_unchanged(&before_finalize, &state.tasks["invalid-finalize"]);
+    assert_eq!(
+        state.cleanup_receipts["invalid-finalize"].verification,
+        CleanupVerification::Unverified
+    );
+    assert!(side_directory.join("user-data.txt").is_file());
+    assert!(git(&["rev-parse", "--verify", "refs/heads/retired-finalize"])
+        .status
+        .success());
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn invalid_workspace_close_cannot_reuse_a_verified_receipt_for_a_missing_path() {
+    let (server, root) = test_server();
+    register(&server, "holder", "%holder");
+    let now = now_ms();
+    server.commit(&[
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "missing-workspace-close".into(),
+                owner: "holder".into(),
+                created_by: "holder".into(),
+                feature_id: None,
+                worktree_path: Some("retired:demo/missing-workspace".into()),
+                branch: None,
+                base_commit: None,
+                priority: default_priority(),
+                status: "merged".into(),
+                next_step: None,
+                wait: None,
+                isolation_mode: None,
+                created_ms: now,
+                updated_ms: now,
+            },
+        },
+        Event::TaskLifecycleUpdated {
+            task_id: "missing-workspace-close".into(),
+            record: crate::server::state::TaskLifecycleRecord {
+                delivery_kind: crate::server::state::TaskDeliveryKind::ReadOnly,
+                delivery_evidence: Some("read-only delivery evidence".into()),
+                delivered_ms: Some(now),
+                review_evidence: Some("independent review pass".into()),
+                reviewer: Some("holder".into()),
+                reviewed_ms: Some(now),
+                ..Default::default()
+            },
+        },
+        Event::CleanupVerified {
+            receipt: CleanupReceipt {
+                id: "cleanup-missing-workspace-close".into(),
+                task_id: "missing-workspace-close".into(),
+                worktree_path: Some("retired:demo/missing-workspace".into()),
+                branch: None,
+                verified_ms: now,
+                verification: CleanupVerification::Verified,
+                manual_reason: None,
+            },
+        },
+    ]);
+    assert!(!root.join("playground/missing-workspace").exists());
+    let before = server.state.lock().unwrap().tasks["missing-workspace-close"].clone();
+    let closed = handle_task_close(
+        &server,
+        "holder".into(),
+        "token-holder".into(),
+        "missing-workspace-close".into(),
+        false,
+        None,
+    );
+    assert!(
+        !closed.ok,
+        "a verified receipt must not bypass workspace validation: {closed:?}"
+    );
+    let state = server.state.lock().unwrap();
+    assert_task_record_unchanged(&before, &state.tasks["missing-workspace-close"]);
+    assert_eq!(
+        state.cleanup_receipts["missing-workspace-close"].verification,
+        CleanupVerification::Verified
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn invalid_workspace_finalize_cannot_reuse_a_verified_receipt_for_a_missing_path() {
+    let (server, root) = test_server();
+    register(&server, "holder", "%holder");
+    register(&server, "master", "%master");
+    promote_master(
+        &server,
+        "master",
+        "user approved invalid workspace receipt finalize test",
+    );
+    let now = now_ms();
+    server.commit(&[
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "missing-workspace-finalize".into(),
+                owner: "holder".into(),
+                created_by: "holder".into(),
+                feature_id: None,
+                worktree_path: Some("retired:demo/missing-finalize".into()),
+                branch: None,
+                base_commit: None,
+                priority: default_priority(),
+                status: "closed".into(),
+                next_step: None,
+                wait: None,
+                isolation_mode: None,
+                created_ms: now,
+                updated_ms: now,
+            },
+        },
+        Event::CleanupVerified {
+            receipt: CleanupReceipt {
+                id: "cleanup-missing-workspace-finalize".into(),
+                task_id: "missing-workspace-finalize".into(),
+                worktree_path: Some("retired:demo/missing-finalize".into()),
+                branch: None,
+                verified_ms: now,
+                verification: CleanupVerification::Verified,
+                manual_reason: None,
+            },
+        },
+    ]);
+    assert!(!root.join("playground/missing-finalize").exists());
+    let before = server.state.lock().unwrap().tasks["missing-workspace-finalize"].clone();
+    let finalized = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "missing-workspace-finalize".into(),
+        None,
+    );
+    assert!(
+        !finalized.ok,
+        "a verified receipt must not bypass workspace validation in finalize: {finalized:?}"
+    );
+    let state = server.state.lock().unwrap();
+    assert_task_record_unchanged(&before, &state.tasks["missing-workspace-finalize"]);
+    assert_eq!(
+        state.cleanup_receipts["missing-workspace-finalize"].verification,
+        CleanupVerification::Verified
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn invalid_workspace_handoff_mention_delivers_without_claiming_a_worktree() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    server.commit(&[Event::TaskCreated {
+        task: TaskRec {
+            id: "retired-handoff-task".into(),
+            owner: "handoff-owner".into(),
+            created_by: "handoff-owner".into(),
+            feature_id: None,
+            worktree_path: Some("retired:demo/retired-handoff".into()),
+            branch: Some("retired-handoff".into()),
+            base_commit: None,
+            priority: default_priority(),
+            status: "working".into(),
+            next_step: None,
+            wait: None,
+            isolation_mode: None,
+            created_ms: now_ms(),
+            updated_ms: now_ms(),
+        },
+    }]);
+    assert!(!root.join("retired:demo/retired-handoff").exists());
+    let prose = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("retired workspace prose mention".into()),
+        "see retired:demo/retired-handoff for context".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(prose.ok, "{prose:?}");
+    let explicit = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("retired workspace explicit mention".into()),
+        "preflight implementation lives at ./retired:demo/retired-handoff".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(
+        explicit.ok,
+        "a retired scheme is prose text, not a project worktree claim: {explicit:?}"
+    );
+    assert_eq!(explicit.data["durable"], true);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn codex_subagents_exchange_messages() {
     use crate::subagent::{Action, Record};
     let (server, root) = test_server();
@@ -1237,6 +1613,22 @@ fn codex_subagents_exchange_messages() {
         "{msgs:?}"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn assert_task_record_unchanged(before: &TaskRec, after: &TaskRec) {
+    assert_eq!(before.id, after.id);
+    assert_eq!(before.owner, after.owner);
+    assert_eq!(before.created_by, after.created_by);
+    assert_eq!(before.feature_id, after.feature_id);
+    assert_eq!(before.worktree_path, after.worktree_path);
+    assert_eq!(before.branch, after.branch);
+    assert_eq!(before.base_commit, after.base_commit);
+    assert_eq!(before.priority, after.priority);
+    assert_eq!(before.status, after.status);
+    assert_eq!(before.next_step, after.next_step);
+    assert_eq!(before.isolation_mode, after.isolation_mode);
+    assert_eq!(before.created_ms, after.created_ms);
+    assert_eq!(before.updated_ms, after.updated_ms);
 }
 
 #[test]
@@ -1981,4 +2373,758 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
     );
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn colon_prefixed_relative_alias_worktree_is_a_valid_local_git_path() {
+    let (mut server, root) = test_server();
+    let base = root.with_file_name(format!(
+        "{}-colon-external",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let project_key = crate::server::configured_project_key(&root).unwrap();
+    let project_dir = base.join(&project_key);
+    let direct_target = project_dir.join("colon-direct");
+    let dotted_target = project_dir.join("colon-dotted");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+    assert!(git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "colon-direct",
+        direct_target.to_str().unwrap(),
+    ])
+    .status
+    .success());
+    assert!(git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "colon-dotted",
+        dotted_target.to_str().unwrap(),
+    ])
+    .status
+    .success());
+
+    // A project-root directory alias can point at the configured external
+    // worktree base. The colon is part of a legal POSIX directory name, not a
+    // URI scheme.
+    let alias = root.join("a:b");
+    std::os::unix::fs::symlink(&base, &alias).unwrap();
+    server.config.worktree.base = Some(base.canonicalize().unwrap());
+
+    let direct = format!(
+        "a:b/{project_key}/{}",
+        direct_target.file_name().unwrap().to_string_lossy()
+    );
+    let dotted = format!(
+        "./a:b/{project_key}/{}",
+        dotted_target.file_name().unwrap().to_string_lossy()
+    );
+    let direct_expected = direct_target.canonicalize().unwrap();
+    let dotted_expected = dotted_target.canonicalize().unwrap();
+
+    // The old path owner validated only the final slug and then resolved the
+    // relative path. Prove both spellings resolve to the configured target
+    // before exercising the public registration handler.
+    assert!(validate_worktree_slug(&direct).is_ok());
+    assert!(validate_worktree_slug(&dotted).is_ok());
+    assert_eq!(
+        resolve_worktree_path(&root, &server.config, &direct, false).unwrap(),
+        direct_expected
+    );
+    assert_eq!(
+        resolve_worktree_path(&root, &server.config, &dotted, false).unwrap(),
+        dotted_expected
+    );
+
+    register(&server, "owner", "%owner");
+    let direct_registered = handle_task_register(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "colon-direct-task".into(),
+        None,
+        Some("colon-direct".into()),
+        Some(direct),
+        Some("colon-direct".into()),
+        None,
+        default_priority(),
+    );
+    assert!(
+        direct_registered.ok,
+        "a colon-prefixed relative alias must be a valid local worktree: {direct_registered:?}"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().tasks["colon-direct-task"]
+            .worktree_path
+            .as_deref(),
+        Some(direct_expected.to_string_lossy().as_ref())
+    );
+
+    let dotted_registered = handle_task_register(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "colon-dotted-task".into(),
+        None,
+        Some("colon-dotted".into()),
+        Some(dotted),
+        Some("colon-dotted".into()),
+        None,
+        default_priority(),
+    );
+    assert!(
+        dotted_registered.ok,
+        "the equivalent ./ spelling must remain valid: {dotted_registered:?}"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().tasks["colon-dotted-task"]
+            .worktree_path
+            .as_deref(),
+        Some(dotted_expected.to_string_lossy().as_ref())
+    );
+
+    std::fs::remove_dir_all(base).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn scheme_shaped_worktree_registration_fails_without_deleting_local_data() {
+    let (server, root) = test_server();
+    let side_directory = root.join("playground/retired-workspace");
+    std::fs::create_dir_all(&side_directory).unwrap();
+    std::fs::write(side_directory.join("user-data.txt"), "preserve\n").unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+    assert!(git(&["branch", "retired-workspace"]).status.success());
+
+    register(&server, "owner", "%owner");
+    let response = handle_task_register(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "retired-task".into(),
+        None,
+        Some("retired-feature".into()),
+        Some("retired:demo/retired-workspace".into()),
+        Some("retired-workspace".into()),
+        None,
+        default_priority(),
+    );
+    assert!(!response.ok, "{response:?}");
+    assert_eq!(
+        response.error.as_deref(),
+        Some("new worktree requires a configured external worktree base")
+    );
+    assert!(!server
+        .state
+        .lock()
+        .unwrap()
+        .tasks
+        .contains_key("retired-task"));
+    assert!(side_directory.join("user-data.txt").is_file());
+    assert!(git(&["rev-parse", "--verify", "refs/heads/retired-workspace"])
+        .status
+        .success());
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn local_colon_worktree_reference_keeps_the_real_contract_error() {
+    let (mut server, root) = test_server();
+
+    // A colon in the first component of a POSIX path is legal. This reference
+    // is a real local directory, not a URI scheme, so its validation error is
+    // a real contract error and must not be rewritten as a scheme rejection.
+    let local_task = root.join("retired:demo/red-task");
+    std::fs::create_dir_all(&local_task).unwrap();
+    std::fs::write(local_task.join("user-data.txt"), "preserve\n").unwrap();
+
+    register(&server, "holder", "%holder");
+    let bindings_before = server.state.lock().unwrap().worktree_bindings.len();
+
+    // Missing configured base: the real error from validate_worktree_path
+    // must survive declare_task_workspace instead of being replaced.
+    let missing_base = handle_task_register(
+        &server,
+        "holder".into(),
+        "token-holder".into(),
+        "colon-missing-base-task".into(),
+        None,
+        Some("colon-missing-base".into()),
+        Some("retired:demo/red-task".into()),
+        Some("red-task".into()),
+        None,
+        default_priority(),
+    );
+    assert!(!missing_base.ok, "{missing_base:?}");
+    assert_eq!(
+        missing_base.error.as_deref(),
+        Some("new worktree requires a configured external worktree base")
+    );
+
+    // Layout mismatch against a configured external base keeps its own error.
+    let base = root.with_file_name(format!(
+        "{}-colon-error",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&base).unwrap();
+    server.config.worktree.base = Some(base.canonicalize().unwrap());
+    let layout_mismatch = handle_task_register(
+        &server,
+        "holder".into(),
+        "token-holder".into(),
+        "colon-layout-mismatch-task".into(),
+        None,
+        Some("colon-layout-mismatch".into()),
+        Some("retired:demo/red-task".into()),
+        Some("red-task".into()),
+        None,
+        default_priority(),
+    );
+    assert!(!layout_mismatch.ok, "{layout_mismatch:?}");
+    assert_eq!(
+        layout_mismatch.error.as_deref(),
+        Some("worktree path must match the configured worktree base/layout")
+    );
+
+    // A rejected declaration must not create a task or change a binding.
+    let state = server.state.lock().unwrap();
+    assert!(!state.tasks.contains_key("colon-missing-base-task"));
+    assert!(!state.tasks.contains_key("colon-layout-mismatch-task"));
+    assert_eq!(state.worktree_bindings.len(), bindings_before);
+    drop(state);
+
+    // The real local colon path and its data stay untouched.
+    assert!(local_task.join("user-data.txt").is_file());
+
+    std::fs::remove_dir_all(base).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn historical_colon_alias_does_not_authorize_close_or_finalize_on_a_real_worktree() {
+    let (mut server, root) = test_server();
+    let base = root.with_file_name(format!(
+        "{}-colon-history",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let project_key = crate::server::configured_project_key(&root).unwrap();
+    let project_dir = base.join(&project_key);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+
+    let close_target = project_dir.join("history-close");
+    assert!(git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "history-close",
+        close_target.to_str().unwrap(),
+    ])
+    .status
+    .success());
+    let close_user_file = close_target.join("user-data.txt");
+    std::fs::write(&close_user_file, "preserve close\n").unwrap();
+    assert!(Command::new("git")
+        .current_dir(&close_target)
+        .args(["add", "user-data.txt"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(Command::new("git")
+        .current_dir(&close_target)
+        .args(["commit", "-q", "-m", "close user file"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(git(&["merge", "-q", "--no-edit", "history-close"])
+        .status
+        .success());
+
+    let finalize_target = project_dir.join("history-finalize");
+    assert!(git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "history-finalize",
+        finalize_target.to_str().unwrap(),
+    ])
+    .status
+    .success());
+    let finalize_user_file = finalize_target.join("user-data.txt");
+    std::fs::write(&finalize_user_file, "preserve finalize\n").unwrap();
+    assert!(Command::new("git")
+        .current_dir(&finalize_target)
+        .args(["add", "user-data.txt"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(Command::new("git")
+        .current_dir(&finalize_target)
+        .args(["commit", "-q", "-m", "finalize user file"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(git(&["merge", "-q", "--no-edit", "history-finalize"])
+        .status
+        .success());
+
+    for target in [&close_target, &finalize_target] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(target)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(
+            status.stdout.is_empty(),
+            "fixture worktree must be clean so cleanup would otherwise be allowed: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+    }
+
+    let alias = root.join("retired:demo");
+    std::os::unix::fs::symlink(base.canonicalize().unwrap(), &alias).unwrap();
+    server.config.worktree.base = Some(base.canonicalize().unwrap());
+
+    let close_raw = format!("retired:demo/{project_key}/history-close");
+    let finalize_raw = format!("retired:demo/{project_key}/history-finalize");
+    let close_canonical = close_target.canonicalize().unwrap();
+    let finalize_canonical = finalize_target.canonicalize().unwrap();
+
+    // The colon-prefixed alias and its ./ spelling reach the same real Git
+    // storage through the existing path owner. That equivalence is not
+    // ownership proof for a historical string stored in a task or receipt.
+    assert_eq!(
+        resolve_worktree_path(&server.root, &server.config, &close_raw, true).unwrap(),
+        close_canonical
+    );
+    assert_eq!(
+        resolve_worktree_path(
+            &server.root,
+            &server.config,
+            &format!("./{close_raw}"),
+            true,
+        )
+        .unwrap(),
+        close_canonical
+    );
+    assert_eq!(
+        resolve_worktree_path(&server.root, &server.config, &finalize_raw, true).unwrap(),
+        finalize_canonical
+    );
+    assert_eq!(
+        resolve_worktree_path(
+            &server.root,
+            &server.config,
+            &format!("./{finalize_raw}"),
+            true,
+        )
+        .unwrap(),
+        finalize_canonical
+    );
+    let declared_close = declare_task_workspace(
+        &server.root,
+        &server.config,
+        &format!("./{close_raw}"),
+    )
+    .unwrap();
+    assert_eq!(PathBuf::from(&declared_close), close_canonical);
+    assert_ne!(&declared_close, &close_raw);
+
+    register(&server, "holder", "%holder");
+    register(&server, "master", "%master");
+    promote_master(
+        &server,
+        "master",
+        "user approved historical colon alias finalize safety test",
+    );
+
+    let now = now_ms();
+    let close_binding = WorktreeBinding {
+        worktree_root: close_raw.clone(),
+        owning_project_scope: server.root.display().to_string(),
+        task_id: "historical-colon-close".into(),
+        owner_agent_id: "holder".into(),
+        binding_id: "binding-historical-colon-close".into(),
+        base_commit: String::new(),
+        isolation_mode: Some(crate::server::ISOLATION_WORKTREE.into()),
+    };
+    server.commit(&[
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "historical-colon-close".into(),
+                owner: "holder".into(),
+                created_by: "holder".into(),
+                feature_id: None,
+                worktree_path: Some(close_raw.clone()),
+                branch: Some("history-close".into()),
+                base_commit: None,
+                priority: default_priority(),
+                status: "merged".into(),
+                next_step: None,
+                wait: None,
+                isolation_mode: Some(crate::server::ISOLATION_WORKTREE.into()),
+                created_ms: now,
+                updated_ms: now,
+            },
+        },
+        Event::WorktreeBound {
+            binding: close_binding.clone(),
+        },
+        Event::TaskLifecycleUpdated {
+            task_id: "historical-colon-close".into(),
+            record: crate::server::state::TaskLifecycleRecord {
+                delivery_kind: crate::server::state::TaskDeliveryKind::ReadOnly,
+                delivery_evidence: Some("read-only delivery evidence".into()),
+                delivered_ms: Some(now),
+                review_evidence: Some("independent review pass".into()),
+                reviewer: Some("holder".into()),
+                reviewed_ms: Some(now),
+                ..Default::default()
+            },
+        },
+        Event::CleanupVerified {
+            receipt: CleanupReceipt {
+                id: "cleanup-historical-colon-close".into(),
+                task_id: "historical-colon-close".into(),
+                worktree_path: Some(close_raw.clone()),
+                branch: Some("history-close".into()),
+                verified_ms: now,
+                verification: CleanupVerification::Verified,
+                manual_reason: None,
+            },
+        },
+    ]);
+
+    let before_close = server
+        .state
+        .lock()
+        .unwrap()
+        .tasks["historical-colon-close"]
+        .clone();
+    let closed = handle_task_close(
+        &server,
+        "holder".into(),
+        "token-holder".into(),
+        "historical-colon-close".into(),
+        false,
+        None,
+    );
+    assert!(
+        !closed.ok,
+        "historical colon alias with a real worktree and verified receipt must not close: {closed:?}"
+    );
+    let state = server.state.lock().unwrap();
+    assert_task_record_unchanged(&before_close, &state.tasks["historical-colon-close"]);
+    assert_eq!(
+        state.worktree_bindings["binding-historical-colon-close"],
+        close_binding
+    );
+    assert_eq!(
+        state.cleanup_receipts["historical-colon-close"].verification,
+        CleanupVerification::Verified
+    );
+    drop(state);
+    assert!(close_user_file.is_file());
+    assert!(git(&["rev-parse", "--verify", "refs/heads/history-close"])
+        .status
+        .success());
+
+    let finalize_binding = WorktreeBinding {
+        worktree_root: finalize_raw.clone(),
+        owning_project_scope: server.root.display().to_string(),
+        task_id: "historical-colon-finalize".into(),
+        owner_agent_id: "holder".into(),
+        binding_id: "binding-historical-colon-finalize".into(),
+        base_commit: String::new(),
+        isolation_mode: Some(crate::server::ISOLATION_WORKTREE.into()),
+    };
+    server.commit(&[
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "historical-colon-finalize".into(),
+                owner: "holder".into(),
+                created_by: "holder".into(),
+                feature_id: None,
+                worktree_path: Some(finalize_raw.clone()),
+                branch: Some("history-finalize".into()),
+                base_commit: None,
+                priority: default_priority(),
+                status: "closed".into(),
+                next_step: None,
+                wait: None,
+                isolation_mode: Some(crate::server::ISOLATION_WORKTREE.into()),
+                created_ms: now,
+                updated_ms: now,
+            },
+        },
+        Event::WorktreeBound {
+            binding: finalize_binding.clone(),
+        },
+        Event::CleanupVerified {
+            receipt: CleanupReceipt {
+                id: "cleanup-historical-colon-finalize".into(),
+                task_id: "historical-colon-finalize".into(),
+                worktree_path: Some(finalize_raw.clone()),
+                branch: Some("history-finalize".into()),
+                verified_ms: now,
+                verification: CleanupVerification::Verified,
+                manual_reason: None,
+            },
+        },
+    ]);
+    let before_finalize = server
+        .state
+        .lock()
+        .unwrap()
+        .tasks["historical-colon-finalize"]
+        .clone();
+    let finalized = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "historical-colon-finalize".into(),
+        None,
+    );
+    assert!(
+        !finalized.ok,
+        "historical colon alias with a real worktree and verified receipt must not finalize: {finalized:?}"
+    );
+    let state = server.state.lock().unwrap();
+    assert_task_record_unchanged(
+        &before_finalize,
+        &state.tasks["historical-colon-finalize"],
+    );
+    assert_eq!(
+        state.worktree_bindings["binding-historical-colon-finalize"],
+        finalize_binding
+    );
+    assert_eq!(
+        state.cleanup_receipts["historical-colon-finalize"].verification,
+        CleanupVerification::Verified
+    );
+    drop(state);
+    assert!(finalize_user_file.is_file());
+    assert!(git(&["rev-parse", "--verify", "refs/heads/history-finalize"])
+        .status
+        .success());
+    assert!(alias.symlink_metadata().is_ok());
+
+    std::fs::remove_dir_all(base).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn handoff_bare_colon_alias_matches_registered_worktree_without_claiming_prose() {
+    let (mut server, root) = test_server();
+    let base = root.with_file_name(format!(
+        "{}-colon-handoff-external",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let project_key = crate::server::configured_project_key(&root).unwrap();
+    let project_dir = base.join(&project_key);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=main"])
+        .status
+        .success());
+    assert!(git(&["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "collab test"])
+        .status
+        .success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+
+    let worktree = project_dir.join("handoff-colon");
+    assert!(git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "handoff-colon",
+        worktree.to_str().unwrap(),
+    ])
+    .status
+    .success());
+    let canonical_worktree = worktree.canonicalize().unwrap();
+    server.config.worktree.base = Some(base.canonicalize().unwrap());
+    let alias = root.join("handoff:alias");
+    std::os::unix::fs::symlink(&base, &alias).unwrap();
+    let alias_ref = format!("handoff:alias/{project_key}/handoff-colon");
+    assert_eq!(
+        resolve_worktree_path(&server.root, &server.config, &alias_ref, true).unwrap(),
+        canonical_worktree
+    );
+
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let registered = handle_task_register(
+        &server,
+        "handoff-owner".into(),
+        "token-handoff-owner".into(),
+        "handoff-colon-task".into(),
+        None,
+        Some("handoff-colon".into()),
+        Some(canonical_worktree.display().to_string()),
+        Some("handoff-colon".into()),
+        None,
+        default_priority(),
+    );
+    assert!(registered.ok, "{registered:?}");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["handoff-colon-task"]
+            .worktree_path
+            .as_deref(),
+        Some(canonical_worktree.to_string_lossy().as_ref())
+    );
+    let task_count = server.state.lock().unwrap().tasks.len();
+
+    let url_body = "reference https://example.com/docs/handoff-colon for background";
+    let url = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("ordinary URL".into()),
+        url_body.into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(url.ok, "{url:?}");
+    let url_id = url.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&url_id].body,
+        url_body
+    );
+
+    let historical_body = "see retired:demo/handoff-missing for context";
+    let historical = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("historical ambiguous token".into()),
+        historical_body.into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(historical.ok, "{historical:?}");
+    let historical_id = historical.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        server.state.lock().unwrap().msgs[&historical_id].body,
+        historical_body
+    );
+    assert_eq!(server.state.lock().unwrap().tasks.len(), task_count);
+
+    let valid_alias = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("valid alias".into()),
+        format!("worktree {alias_ref}"),
+        None,
+        "immediate".into(),
+    );
+    assert!(valid_alias.ok, "{valid_alias:?}");
+
+    std::fs::remove_dir_all(&worktree).unwrap();
+    let message_count = server.state.lock().unwrap().msgs.len();
+    let missing_alias = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("missing alias target".into()),
+        format!("worktree {alias_ref}"),
+        None,
+        "immediate".into(),
+    );
+    assert!(
+        !missing_alias.ok,
+        "a registered canonical worktree alias must be matched even when its target is missing: {missing_alias:?}"
+    );
+    assert_eq!(missing_alias.data["error_code"], "HANDOFF_TARGET_UNRESOLVED");
+    assert_eq!(missing_alias.data["reason"], "worktree_path_missing");
+    assert_eq!(missing_alias.data["recorded"], false);
+    assert_eq!(server.state.lock().unwrap().msgs.len(), message_count);
+
+    std::fs::remove_dir_all(base).ok();
+    std::fs::remove_dir_all(root).ok();
 }

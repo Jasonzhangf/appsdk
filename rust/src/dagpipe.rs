@@ -331,7 +331,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 49] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -523,10 +523,18 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 47] {
                 "../../docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json"
             ),
         ),
+        (
+            "docs/dagpipe/collab-task-workspace-declaration.graph.json",
+            include_str!("../../docs/dagpipe/collab-task-workspace-declaration.graph.json"),
+        ),
+        (
+            "docs/dagpipe/worktree-record-isolation.graph.json",
+            include_str!("../../docs/dagpipe/worktree-record-isolation.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 45] {
+fn design_graph_ids() -> [&'static str; 47] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -573,10 +581,12 @@ fn design_graph_ids() -> [&'static str; 45] {
         "appsdk-user-requirement-consumption",
         "appsdk-sdk-resource-refresh",
         "collab-ceo-coordination",
+        "appsdk-collab-task-workspace-declaration",
+        "appsdk-worktree-record-isolation",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 267] {
+fn design_graph_operator_names() -> [&'static str; 275] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -845,6 +855,14 @@ fn design_graph_operator_names() -> [&'static str; 267] {
         "appsdk.sdk_resource_refresh.publish_record",
         "appsdk.sdk_resource_refresh.resolve_project_baseline",
         "appsdk.sdk_resource_refresh.write_resources",
+        "appsdk.collab_workspace.classify",
+        "appsdk.collab_workspace.apply_policy",
+        "appsdk.collab_workspace.validate_worktree",
+        "appsdk.collab_workspace.emit_result",
+        "appsdk.worktree_record.select_operation",
+        "appsdk.worktree_record.apply_contract",
+        "appsdk.worktree_record.complete_operation",
+        "appsdk.worktree_record.emit_result",
     ]
 }
 

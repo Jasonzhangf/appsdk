@@ -197,10 +197,9 @@ pub fn canonical_route_for_identity(
         .filter(|route| &route.app_scope_id == app_scope_id)
         .collect::<Vec<_>>();
     // An explicit `.agent-collab` marker in the cwd binds identity to its
-    // registered project before Git containment. A LayerFS Workspace lives
-    // outside the Git main root and has no `.git` topology, so this is the
-    // only portable way for a task Workspace to resolve its project. The
-    // marker is authoritative for the same AppServer scope only.
+    // registered project before Git containment. This supports a cwd outside
+    // the Git main root while keeping the marker authoritative only for the
+    // same AppServer scope.
     if let Some(marker_root) = project_root_for_cwd(&cwd) {
         let marker_root = std::fs::canonicalize(&marker_root).unwrap_or(marker_root);
         let marker_matches = matches

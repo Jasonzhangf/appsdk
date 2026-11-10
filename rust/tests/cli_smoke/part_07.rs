@@ -126,41 +126,119 @@ fn init_bounds_hanging_collab_bootstrap_without_faking_success() {
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
     let fake_collab = fake_bin.join("collab");
+    let runtime_id = "runtime-timeout-not-accepted";
+    let thread_id = "thread-timeout-not-accepted";
+    let response = serde_json::json!({
+        "ok": true,
+        "runtime": {
+            "runtimeId": runtime_id,
+            "appserverId": "appserver-cli",
+            "namespace": "codex_tui",
+            "endpoint": "unix:///tmp/codex.sock",
+            "projectRoot": root.canonicalize().unwrap(),
+            "capabilities": [
+                "session_status",
+                "read_thread",
+                "send_message_to_thread",
+                "wait_reply"
+            ],
+            "processId": 4242
+        },
+        "transport_selected": {
+            "kind": "appserver",
+            "endpoint": "unix:///tmp/codex.sock",
+            "namespace": "codex_tui",
+            "thread_id": thread_id,
+            "capabilities": [
+                "session_status",
+                "read_thread",
+                "send_message_to_thread",
+                "wait_reply"
+            ],
+            "self_check": "test"
+        }
+    })
+    .to_string();
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf 'started\\n' > \"$APPSDK_COLLAB_PROBE\"\nwhile :; do :; done\n",
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{response}'\nprintf 'started\\n' > \"$APPSDK_COLLAB_PROBE\"\nwhile :; do :; done\n"
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
     let probe = root.join("collab-timeout-probe.txt");
+    let global_registry_root = test_global_registry_root_for_project(&root);
     let started = Instant::now();
     let output = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
         .current_dir(&root)
-        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("APPSDK_HOME", &global_registry_root)
         .env("PATH", &fake_bin)
         .env("APPSDK_COLLAB_PROBE", &probe)
         .env("APPSDK_COLLAB_INIT_TIMEOUT_MS", "3000")
         .output()
         .unwrap();
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        stdout,
+        stderr
     );
     assert!(started.elapsed() < Duration::from_secs(8));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_TIMEOUT"),
+        stderr.contains("COLLAB_INIT_TIMEOUT"),
         "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        stdout,
+        stderr
     );
-    assert_eq!(fs::read_to_string(&probe).unwrap(), "started\n");
     assert!(
-        !String::from_utf8_lossy(&output.stdout).contains("started"),
-        "timed-out Collab output must not be reported as a successful bootstrap"
+        !stderr.contains("COLLAB_INIT_UNAVAILABLE"),
+        "stdout={} stderr={}",
+        stdout,
+        stderr
+    );
+    let marker_observed = match fs::read_to_string(&probe) {
+        Ok(marker) => {
+            assert_eq!(
+                marker, "started\n",
+                "unexpected Collab execution marker at {}",
+                probe.display()
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!(
+            "failed to read Collab execution marker at {}: {error}",
+            probe.display()
+        ),
+    };
+    eprintln!("COLLAB_EXECUTION_MARKER_OBSERVED={marker_observed}");
+    assert!(
+        !stdout.contains("collab-channel"),
+        "timed-out Collab output must not be reported as a successful bootstrap: {stdout}"
+    );
+    assert!(
+        !stdout.contains(runtime_id),
+        "timed-out Collab runtime must not be reported: {stdout}"
+    );
+    let registry = global_registry_root.join("runtimes.jsonl");
+    if registry.exists() {
+        let runtime = fs::read_to_string(&registry).unwrap();
+        assert!(
+            !runtime.contains(runtime_id),
+            "timed-out Collab runtime was registered: {runtime}"
+        );
+    }
+    let verified = run(&["verify", root.to_str().unwrap()]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -921,10 +999,6 @@ fn verify_admission_accepts_const_and_enum_subsets() {
         ("const", serde_json::json!({"const":"isolated_worktree"})),
         ("single_enum", serde_json::json!({"enum":["isolated_worktree"]})),
         (
-            "full_enum",
-            serde_json::json!({"enum":["isolated_worktree","layerfs_workspace"]}),
-        ),
-        (
             "const_and_enum",
             serde_json::json!({"const":"isolated_worktree","enum":["isolated_worktree"]}),
         ),
@@ -983,6 +1057,10 @@ fn verify_admission_rejects_invalid_const_and_enum() {
         (
             "invalid_const",
             serde_json::json!({"const":"unsupported_isolation_mode"}),
+        ),
+        (
+            "legacy_enum",
+            serde_json::json!({"enum":["isolated_worktree","layerfs_workspace"]}),
         ),
         ("null_const", serde_json::json!({"const":null})),
         ("empty_enum", serde_json::json!({"enum":[]})),

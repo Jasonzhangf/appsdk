@@ -1971,16 +1971,9 @@ fn handle_task_register_with_next(
             Err(error) => return Resp::err(error),
         }
     }
-    let branch = match worktree_path.as_deref() {
-        Some(path) => match resolve_task_branch(path, branch.as_deref()) {
-            Ok(resolved) => resolved,
-            Err(error) => return Resp::err(error),
-        },
-        None => branch,
-    };
     let isolation_mode = worktree_path
-        .as_deref()
-        .map(|path| derive_isolation_mode(Some(path)));
+        .as_ref()
+        .map(|_| ISOLATION_WORKTREE.to_owned());
     if let Some(existing) = st
         .tasks
         .values()
@@ -2115,11 +2108,7 @@ fn handle_task_relocate(
     }
     let old_worktree = task.worktree_path.clone();
     task.worktree_path = Some(worktree_path.clone());
-    let branch = match resolve_task_branch(&worktree_path, branch.as_deref()) {
-        Ok(resolved) => resolved,
-        Err(error) => return Resp::err(error),
-    };
-    task.isolation_mode = Some(derive_isolation_mode(Some(&worktree_path)));
+    task.isolation_mode = Some(ISOLATION_WORKTREE.to_owned());
     if branch.is_some() {
         task.branch = branch;
     }
@@ -2651,9 +2640,10 @@ fn close_task_resources(
     branch: Option<&str>,
     recorded_integration: Option<&str>,
 ) -> Result<(), String> {
-    if worktree_path.is_some_and(is_layerfs_workspace) {
-        let worktree_path = worktree_path.unwrap_or_default();
-        return close_layerfs_task_workspace(worktree_path);
+    if worktree_path.is_some_and(workspace_reference_is_ambiguous) {
+        return Err(
+            "worktree reference is historically ambiguous; refusing cleanup".into(),
+        );
     }
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
@@ -2725,24 +2715,6 @@ fn close_task_resources(
     Ok(())
 }
 
-/// Release a LayerFS task workspace obligation. Collab owns only the isolation
-/// binding: it verifies the declared LayerFS task branch still exists through
-/// the generic LayerFS entry and never runs `git worktree remove`, `git branch
-/// -D`, `git status`, or any other local-Git operation against the Workspace.
-/// Branch sync, publish and Git commit capture remain the LayerFS Skill's
-/// contract. A missing entry, missing profile or unreachable Store keeps the
-/// original error and leaves the obligation open instead of faking success.
-fn close_layerfs_task_workspace(worktree_path: &str) -> Result<(), String> {
-    let workspace = parse_layerfs_workspace(worktree_path)?;
-    if !layerfs_branch_exists(&workspace.project, &workspace.branch)? {
-        return Err(format!(
-            "layerfs task branch {} no longer exists in project {}; preserve the site and reconcile through the LayerFS Skill",
-            workspace.branch, workspace.project
-        ));
-    }
-    Ok(())
-}
-
 /// A squash integration replaces the branch tip with a new commit, so the
 /// branch is not an ancestor of main even though its work landed. The recorded
 /// `integration.commit` is the authoritative proof in that case. The check is
@@ -2778,23 +2750,22 @@ fn integration_commit_proves_branch_merged(
     }
 }
 
-fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {
-    // A LayerFS binding has no local path or Git branch to re-check; always
-    // re-verify through the LayerFS entry so a stale receipt cannot skip the
-    // branch check with a locally coincidental Git branch name.
+fn cleanup_receipt_is_reusable(
+    root: &Path,
+    config: &crate::config::Config,
+    receipt: &CleanupReceipt,
+) -> bool {
     if receipt
         .worktree_path
         .as_deref()
-        .is_some_and(is_layerfs_workspace)
+        .is_some_and(workspace_reference_is_ambiguous)
     {
         return false;
     }
     if let Some(path) = receipt.worktree_path.as_deref() {
-        let worktree = Path::new(path);
-        let worktree = if worktree.is_absolute() {
-            worktree.to_path_buf()
-        } else {
-            root.join(worktree.strip_prefix("./").unwrap_or(worktree))
+        let worktree = match cleanup_worktree_path(root, config, path) {
+            Ok(worktree) => worktree,
+            Err(_) => return false,
         };
         if worktree.exists() {
             return false;

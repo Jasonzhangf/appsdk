@@ -777,7 +777,7 @@ fn design_graph_operator_names() -> [&'static str; 267] {
         "appsdk.collab_notification_consume.commit_receipt",
         "appsdk.collab_notification_consume.read_payloads",
         "appsdk.collab_notification_consume.verify_owner",
-        "appsdk.collab_rex.read_binding",
+        "appsdk.collab_rex.select_input",
         "appsdk.collab_rex.validate_facts",
         "appsdk.collab_rex.verify_target",
         "appsdk.collab_rex.execute",

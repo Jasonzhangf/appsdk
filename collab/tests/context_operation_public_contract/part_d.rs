@@ -767,6 +767,27 @@ fn public_context_rex_facts_skip_desktop_discovery() {
     );
 }
 
+#[test]
+fn public_context_partial_rex_environment_skips_desktop_bridge() {
+    let fixture = Fixture::without_tmux("rex-partial-env");
+    let output = fixture
+        .configured_command(&["context", "--op", "rex-partial-env"], None)
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .env(
+            "REX_SESSION",
+            "session:01a1c47f-7e66-7df6-b484-e727bc9e1811",
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED")
+            && !stderr.contains("DESKTOP_BRIDGE_THREAD_REQUIRED"),
+        "a partial Rex environment must not go through Desktop discovery: {stderr}"
+    );
+}
+
 // A master's public `collab context` snapshot must expose, in one read, the
 // durable subordinate managers of its scope: activity, open/blocked tasks and
 // whether each subordinate keeps a patrol armed. The child itself has no

@@ -1129,6 +1129,67 @@ fn identity_supplement_conflict_never_overrides_observed_fact() {
 }
 
 #[test]
+fn explicit_rex_facts_win_over_block_environment_discovery() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let keys = [
+        "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "COLLAB_APPSERVER_SOCKET",
+        "CODEX_APP_SERVER_SOCKET",
+        "COLLAB_APPSERVER_NAMESPACE",
+        "REX_SESSION",
+        "REX_BLOCK",
+    ];
+    let previous: Vec<_> = keys
+        .iter()
+        .map(|key| (*key, std::env::var_os(key)))
+        .collect();
+    for key in keys {
+        std::env::remove_var(key);
+    }
+    std::env::set_var(
+        "REX_SESSION",
+        "session:01a1c47f-7e66-7df6-b484-e727bc9e1811",
+    );
+    std::env::set_var("REX_BLOCK", "block:01a1c47f-7e66-7e9a-bdf1-84a9bd310276");
+    let explicit = json!({
+        "session_id": "agent-session",
+        "rex": {
+            "server": "unix:///explicit-rex.sock",
+            "session_id": "session:11111111-1111-4111-8111-111111111111",
+            "block_id": "block:22222222-2222-4222-8222-222222222222",
+            "cwd": "/tmp/explicit-rex",
+        },
+    })
+    .to_string();
+
+    let result = crate::main_context::collect_identity_facts(Some(&explicit));
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    let facts = result.expect("explicit Rex facts are authoritative");
+    assert_eq!(facts.session_id.as_deref(), Some("agent-session"));
+    assert_eq!(
+        facts
+            .rex
+            .as_ref()
+            .map(|candidate| candidate.server.as_str()),
+        Some("unix:///explicit-rex.sock")
+    );
+    assert_eq!(
+        facts
+            .rex
+            .as_ref()
+            .map(|candidate| candidate.session_id.as_str()),
+        Some("session:11111111-1111-4111-8111-111111111111")
+    );
+}
+
+#[test]
 fn identity_context_required_forwards_the_daemon_update_exactly() {
     let update = json!({
         "required": true,

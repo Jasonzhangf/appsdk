@@ -267,25 +267,14 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     let supplied = provide.map(parse_identity_supplement).transpose()?;
     let mut facts = crate::client::adapters::codex_app_server::identity_facts_from_env()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    if facts.dsh_session_id.is_some()
-        || supplied.as_ref().is_some_and(|report| report.dsh.is_some())
-    {
-        // DSH owns this invocation. Native variables may describe its launcher.
-        facts.session_id = None;
-        facts.thread_id = None;
-        facts.endpoint = None;
-        facts.namespace = None;
-    }
-    let Some(supplied) = supplied else {
-        return Ok(facts);
-    };
-    if let Some(candidate) = supplied.rex {
-        if supplied.dsh.is_some()
-            || supplied.desktop_bridge.is_some()
-            || supplied.thread_id.is_some()
-            || supplied.endpoint.is_some()
-            || supplied.namespace.is_some()
-        {
+    if let Some(candidate) = supplied.as_ref().and_then(|report| report.rex.as_ref()) {
+        if supplied.as_ref().is_some_and(|report| {
+            report.dsh.is_some()
+                || report.desktop_bridge.is_some()
+                || report.thread_id.is_some()
+                || report.endpoint.is_some()
+                || report.namespace.is_some()
+        }) {
             anyhow::bail!(
                 "IDENTITY_FACT_INVALID: Rex candidate cannot be mixed with DSH, Desktop or AppServer facts"
             );
@@ -298,16 +287,60 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
         ] {
             validate_supplement_string(&format!("rex.{field}"), value)?;
         }
-        merge_supplied_fact("session_id", &mut facts.session_id, supplied.session_id)?;
+        merge_supplied_fact(
+            "session_id",
+            &mut facts.session_id,
+            supplied
+                .as_ref()
+                .and_then(|report| report.session_id.clone()),
+        )?;
         facts.thread_id = None;
         facts.endpoint = None;
         facts.namespace = None;
         facts.desktop_bridge = None;
         facts.dsh = None;
         facts.dsh_session_id = None;
-        facts.rex = Some(candidate);
+        facts.rex = Some(candidate.clone());
         return Ok(facts);
     }
+    let dsh_owns = facts.dsh_session_id.is_some()
+        || supplied.as_ref().is_some_and(|report| report.dsh.is_some());
+    if !dsh_owns && crate::client::adapters::rex::env_block_present() {
+        if supplied.as_ref().is_some_and(|report| {
+            report.dsh.is_some()
+                || report.desktop_bridge.is_some()
+                || report.thread_id.is_some()
+                || report.endpoint.is_some()
+                || report.namespace.is_some()
+        }) {
+            anyhow::bail!(
+                "IDENTITY_FACT_INVALID: Rex candidate cannot be mixed with DSH, Desktop or AppServer facts"
+            );
+        }
+        // REX_SESSION/REX_BLOCK own this invocation's placement. Native Codex
+        // variables may still describe the agent session, but inherited thread,
+        // Desktop and AppServer fields must not become a competing transport.
+        let candidate = crate::client::adapters::rex::candidate_from_env()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .expect("both Rex block variables form a candidate");
+        facts.rex = Some(candidate);
+        facts.thread_id = None;
+        facts.endpoint = None;
+        facts.namespace = None;
+        facts.desktop_bridge = None;
+    }
+    if dsh_owns {
+        // DSH owns this invocation. Native variables may describe its launcher.
+        facts.session_id = None;
+        facts.thread_id = None;
+        facts.endpoint = None;
+        facts.namespace = None;
+        facts.desktop_bridge = None;
+        facts.rex = None;
+    }
+    let Some(supplied) = supplied else {
+        return Ok(facts);
+    };
     if let Some(candidate) = supplied.dsh {
         if supplied.desktop_bridge.is_some()
             || supplied.session_id.is_some()
@@ -488,6 +521,7 @@ pub(crate) fn context_operation_with_intent(
             )?;
         }
         let explicit_transport = facts.rex.is_some()
+            || crate::client::adapters::rex::env_block_hint()
             || facts.endpoint.is_some()
             || provide
                 .map(serde_json::from_str::<Value>)

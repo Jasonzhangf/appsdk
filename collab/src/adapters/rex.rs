@@ -485,6 +485,120 @@ fn validate_target_fields(server: &str, session: &str, block: &str) -> Result<()
     Ok(())
 }
 
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// True only when both block environment variables are present and non-empty.
+///
+/// A single variable is not a Rex block address. Callers use this to detect an
+/// explicit candidate conflict before any CLI work.
+pub fn env_block_present() -> bool {
+    nonempty_env("REX_SESSION").is_some() && nonempty_env("REX_BLOCK").is_some()
+}
+
+/// True when either block variable is present.
+///
+/// A partial pair still means the caller is inside a Rex-aware environment.
+/// It must not fall through to another transport, even though it cannot form a
+/// complete Rex candidate.
+pub fn env_block_hint() -> bool {
+    nonempty_env("REX_SESSION").is_some() || nonempty_env("REX_BLOCK").is_some()
+}
+
+/// Read the official CLI's actual server endpoint from `whoami --json`.
+///
+/// This runs with the caller's environment intact so the CLI resolves the same
+/// server the block belongs to; it never guesses a socket. A failed or
+/// malformed reply stays a typed error.
+fn whoami_endpoint() -> Result<String, RexError> {
+    let operation = "discover_env";
+    let call = std::process::Command::new(official_cli_path())
+        .args(["whoami", "--json", "--autostart=false"])
+        .output()
+        .map_err(|error| {
+            RexError::known_not_delivered(
+                operation,
+                RexInputStage::BeforeWrite,
+                format!("official Rex CLI did not start: {error}"),
+            )
+        })?;
+    let stdout = String::from_utf8_lossy(&call.stdout);
+    let stderr = String::from_utf8_lossy(&call.stderr);
+    if !call.status.success() {
+        return Err(RexError::unknown(
+            operation,
+            RexInputStage::BeforeWrite,
+            format!(
+                "official Rex CLI whoami failed with returncode {}: stderr={}",
+                call.status.code().unwrap_or(-1),
+                stderr.trim()
+            ),
+        ));
+    }
+    let value: Value = serde_json::from_str(stdout.trim()).map_err(|error| {
+        RexError::unknown(
+            operation,
+            RexInputStage::BeforeWrite,
+            format!("official Rex CLI returned malformed whoami JSON: {error}"),
+        )
+    })?;
+    value
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            RexError::unknown(
+                operation,
+                RexInputStage::BeforeWrite,
+                "official Rex CLI whoami did not report a server endpoint",
+            )
+        })
+}
+
+/// Discover this invocation's Rex block placement from `REX_SESSION` and
+/// `REX_BLOCK`.
+///
+/// Both variables are required. A partial pair is not a Rex block address and
+/// yields `None` rather than a fabricated candidate. The server comes from the
+/// official CLI's successful `whoami --json` endpoint, so the adapter never
+/// invents a socket or falls back to another transport.
+pub(crate) fn candidate_from_env() -> Result<Option<RexCandidate>, RexError> {
+    let Some(session_id) = nonempty_env("REX_SESSION") else {
+        return Ok(None);
+    };
+    let Some(block_id) = nonempty_env("REX_BLOCK") else {
+        return Ok(None);
+    };
+    let server = whoami_endpoint()?;
+    validate_target_fields(&server, &session_id, &block_id)?;
+    let cwd = crate::scope::process_cwd().map_err(|error| {
+        RexError::known_not_delivered(
+            "discover_env",
+            RexInputStage::BeforeWrite,
+            format!("cannot resolve Rex candidate cwd: {error}"),
+        )
+    })?;
+    let cwd = cwd.to_str().map(str::to_owned).ok_or_else(|| {
+        RexError::known_not_delivered(
+            "discover_env",
+            RexInputStage::BeforeWrite,
+            "Rex candidate cwd must be valid UTF-8",
+        )
+    })?;
+    Ok(Some(RexCandidate {
+        server,
+        session_id,
+        block_id,
+        cwd,
+    }))
+}
+
 #[derive(Debug, Clone)]
 enum NativeError {
     Typed { code: String },

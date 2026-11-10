@@ -1706,6 +1706,21 @@ fn idle_notifications_to(state: &Value, master: &str) -> usize {
     })
 }
 
+fn wait_for_first_board_patrol_poll(fixture: &AppFixture, worker_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let gate = fixture.current_state()["board_patrol_gates"][worker_id].clone();
+        if !gate.is_null() {
+            return gate;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background board patrol did not record its first poll for {worker_id}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Public-entry idempotence and recipient-presence contract for the idle
 /// wake. An unknown-presence master keeps the batch pending; once the master
 /// is confirmed online the same idle set is delivered exactly once and is not
@@ -1858,9 +1873,33 @@ fn idle_capacity_projection_public_board_and_context_share_pruned_capacity() {
         state["master_wake"]["generation"] = json!(1);
         state["master_wake"]["delivery_state"] = json!("pending");
     });
+    // update_current_state restarts the owned daemon. Its default scheduler
+    // first tick is immediate and legitimately records the initial idle patrol
+    // gate. This observed gate proves timers, keepalive and notifications are
+    // enabled; wait for that typed commit before sampling the read boundary.
+    let first_poll = wait_for_first_board_patrol_poll(&fixture, &busy_worker);
+    assert_eq!(
+        first_poll["owner_key"], context_a["name"],
+        "background patrol must record the busy worker's stable name"
+    );
+    assert_eq!(
+        first_poll["last_poll_idle"], true,
+        "the first background poll must observe the busy worker as idle"
+    );
+    assert!(
+        first_poll["next_due_ms"].as_i64().unwrap()
+            > first_poll["idle_episode_start_ms"].as_i64().unwrap(),
+        "the first background poll must advance beyond its idle episode start"
+    );
+    println!("PUBLIC_CLI_FIRST_PATROL_GATE {first_poll}");
     let before = fixture.current_state();
 
     let board_output = fixture.command_public(&["board", "show"], THREAD_B);
+    assert_eq!(
+        fixture.current_state(),
+        before,
+        "board show must not mutate control state after the first patrol poll"
+    );
     let context_output = fixture.command_public(&["context"], THREAD_B);
     println!("PUBLIC_CLI_FIXTURE {}", fixture.root.display());
     println!(

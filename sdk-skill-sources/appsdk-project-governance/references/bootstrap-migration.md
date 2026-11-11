@@ -487,6 +487,22 @@ operator through its public interface or a real consumer before wiring it.
 The project's real entrypoint registers the operators and executes the compiled
 graph; a valid design graph alone does not prove that this happens.
 
+For a Rust consumer, obtain the `pipeline_runtime` library using the project's
+actual dependency source, then follow the [DAGPipe usage guide](https://github.com/Jasonzhangf/appsdk/blob/main/dagpipe/docs/usage.md)
+for operator implementation, graph configuration, registration, compilation,
+execution, and output and failure handling. The guide is hosted in the AppSDK
+source repository; the AppSDK Skill installer does not install DAGPipe's Rust
+library or its documentation. The notification example below demonstrates an
+existing SDK entrypoint, not registration of a consumer's own operator. Verify
+other language integrations against their actual supported interface.
+
+The runtime's `Object` type does not validate required business fields; those
+remain the capability owner's contract. Multiple input ARCs in `Whole` mode
+arrive as an array. An operator returns string errors wrapped by the runtime;
+check that the consumer entrypoint can preserve its required error contract.
+The graph has no general per-node business-parameter field. A consumer may
+construct an operator from declared project configuration before registration.
+
 ### New project
 
 Use the existing preparation fields to bind the modules, Operation, entrypoint,
@@ -516,9 +532,25 @@ evidence and recheck only the affected guarantees. A combination change updates
 the graph. A capability change updates the owning operator. Do not keep the old
 production path as a fallback.
 
-One invocation keeps one compiled graph. A later invocation may select a new
-configuration. Do not add in-flight hot switching unless a later contract
-requires it. Arrange state migration only when the state contract changes.
+One invocation keeps its selected compiled graph. If the business contract also
+requires configuration to remain stable during that invocation, the consumer
+owner must preserve the configuration and operator instance for its lifetime;
+prefer an immutable configured instance instead of mutating a shared instance.
+A fixed graph alone cannot keep external configuration or a process alive.
+Do not add in-flight hot switching unless a later contract requires it. Arrange
+state migration only when the state contract changes, and define how old
+invocations complete or exit during a state-format change.
+
+A failure still allows the other nodes in its scheduled wave to finish, even
+with the default single worker. Later waves do not start. When multiple nodes
+in that wave fail, the primary error follows stable node-ID order, not failure
+time or an implicit business priority. Cancellation does not interrupt a
+blocking operator or an `Items` iteration; an effect may still complete. Put
+an action that must not run after a failed check in a later wave through a real
+dependency. Effect capabilities are declarations and compile-time checks, not
+locks, OS permissions, a sandbox, automatic retry, or rollback. If these runtime
+boundaries cannot preserve a required error, cancellation, or transaction
+contract, keep the existing atomic owner boundary and redesign that connection.
 
 ### Ablation and evidence
 

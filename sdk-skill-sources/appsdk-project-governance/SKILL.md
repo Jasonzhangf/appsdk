@@ -44,6 +44,10 @@ A clause is enforceable only after exact user approval and binding to an
 executable edge or gate with one legal case, one illegal case, and a real
 observation path. `.appsdk/requirements.json` is a declaration, not
 enforcement. Non-rule project facts do not enter rule approval.
+Guidance manifests that claim ontology governance carry an
+`ontology_clause` reference and a complete `ontology.clauses` record.
+`appsdk guide compile` rejects a candidate, unapproved, unbound, or unresolved
+clause before writing the compiled manifest.
 
 While any rule or ontology candidate awaits user approval, do not arm, renew,
 or subscribe the next wake for that goal. Legacy memory without the

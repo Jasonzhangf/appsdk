@@ -108,6 +108,9 @@ current ledger version, and use the SDK review context for all applicable items.
 - An approved clause is enforceable only after it is bound to a declared DAG
   edge or gate with one legal case, one illegal case and a real observation
   path. The requirements ledger is a declaration, not enforcement.
+- A guidance manifest that claims ontology governance references an
+  `ontology_clause`. `appsdk guide compile` rejects candidate, unapproved,
+  unbound, or unresolved clauses.
 - Non-rule project facts do not enter rule approval.
 - While any rule or ontology candidate awaits user approval, do not arm,
   renew or subscribe the next wake for that goal.

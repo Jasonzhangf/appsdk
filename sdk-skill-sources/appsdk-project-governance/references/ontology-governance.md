@@ -175,7 +175,26 @@ never triggers a wake, and never acts as an enforceable gate.
 
 Each gate needs one legal case, one illegal case, and a real observation path.
 
-## 6. Rule ownership
+## 6. Executable guidance gate
+
+When an ontology-managed rule is distributed through an AppSDK guidance
+manifest, the rule carries an `ontology_clause` reference. The manifest's
+`ontology.clauses` entry records the complete clause, including its approval
+source and text, and its governance edge or gate.
+
+`appsdk guide compile` is the executable owner for that declaration. It
+rejects a referenced clause when approval is not `approved`, when approval
+source or text is missing, when a governance field is missing, or when the
+rule reference does not resolve. It compiles an approved and fully bound
+clause. The public observation is the command's JSON error or successful
+compiled manifest.
+
+The manifest schema is
+[`contracts/guidance/guidance-manifest.schema.json`](../../../contracts/guidance/guidance-manifest.schema.json).
+Do not describe a manifest-only clause as mandatory unless this compiler gate
+is present.
+
+## 7. Rule ownership
 
 Update only the owner of the rule:
 
@@ -190,7 +209,7 @@ Update only the owner of the rule:
 Do not claim that a Skill, AGENTS edit, or requirements entry enforced a rule.
 The enforcement receipt comes from the bound gate and its real observation.
 
-## 7. Candidate encoding
+## 8. Candidate encoding
 
 The optional JSON shape below is a modeling aid. The project may keep the same
 fields in Markdown until machine use exists.
@@ -253,7 +272,7 @@ fields in Markdown until machine use exists.
 }
 ```
 
-## 8. DAG boundary
+## 9. DAG boundary
 
 The ontology is the semantic input. The DAG is the executable topology. DAG
 edges and gates must not invent behavior that has no approved ontology clause.

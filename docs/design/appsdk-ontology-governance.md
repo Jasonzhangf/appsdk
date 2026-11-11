@@ -71,6 +71,10 @@ a confirmed rule.
   enforcement power.
 - The enforcement truth is an executable edge or gate plus its legal case,
   illegal case, and real observation path.
+- A guidance rule that claims ontology governance references an
+  `ontology_clause`. `appsdk guide compile` rejects candidate or unbound
+  clauses and validates the approval source, approval text, legal case,
+  illegal case, and observation path before writing the compiled manifest.
 - Non-rule project facts do not enter approval. They are recorded directly with
   their evidence at their normal owner.
 - If any rule or ontology candidate is waiting for user approval, do not arm,

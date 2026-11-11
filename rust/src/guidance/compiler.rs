@@ -22,7 +22,8 @@ fn validate_manifest(
     }
     required_string(manifest, "skill_id", "GUIDANCE_MANIFEST_INVALID");
     required_string(manifest, "guidance_version", "GUIDANCE_MANIFEST_INVALID");
-    for rule in required_array(manifest, "rules", "GUIDANCE_MANIFEST_INVALID") {
+    let rules = required_array(manifest, "rules", "GUIDANCE_MANIFEST_INVALID");
+    for rule in rules {
         let rule_id = required_string(rule, "rule_id", "GUIDANCE_RULE_INVALID");
         assert_id(rule_id, "GUIDANCE_RULE_ID_INVALID");
         if !rule_ids.insert(rule_id.to_string()) {
@@ -45,7 +46,12 @@ fn validate_manifest(
                 "use advisory, warning, or forbidden",
             );
         }
+        if rule.get("ontology_clause").is_some() {
+            let clause_id = required_string(rule, "ontology_clause", "GUIDANCE_RULE_INVALID");
+            assert_id(clause_id, "GUIDANCE_ONTOLOGY_CLAUSE_ID_INVALID");
+        }
     }
+    validate_ontology_clauses(manifest, rules);
     for workflow in required_array(manifest, "workflows", "GUIDANCE_MANIFEST_INVALID") {
         let domain = required_string(workflow, "domain", "GUIDANCE_WORKFLOW_INVALID");
         assert_id(domain, "GUIDANCE_DOMAIN_INVALID");
@@ -126,6 +132,152 @@ fn validate_manifest(
                     "keep one canonical edge",
                 );
             }
+        }
+    }
+}
+
+fn validate_ontology_clauses(manifest: &Value, rules: &[Value]) {
+    let mut referenced_clauses = HashSet::new();
+    let mut forbidden_rules = HashSet::new();
+    for rule in rules {
+        let rule_id = required_string(rule, "rule_id", "GUIDANCE_RULE_INVALID");
+        if rule.get("severity").and_then(Value::as_str) == Some("forbidden") {
+            forbidden_rules.insert(rule_id.to_string());
+        }
+        if let Some(clause_id) = rule.get("ontology_clause").and_then(Value::as_str) {
+            referenced_clauses.insert(clause_id.to_string());
+        }
+    }
+
+    let Some(ontology) = manifest.get("ontology") else {
+        if referenced_clauses.is_empty() {
+            return;
+        }
+        fail(
+            "GUIDANCE_ONTOLOGY_CLAUSES_MISSING",
+            "declare approved ontology clauses for rules that claim ontology governance",
+        );
+    };
+    if ontology.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        fail(
+            "GUIDANCE_ONTOLOGY_SCHEMA_INVALID",
+            "use ontology clause schema version 1",
+        );
+    }
+    let clauses = ontology
+        .get("clauses")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            fail(
+                "GUIDANCE_ONTOLOGY_CLAUSES_INVALID",
+                "declare ontology clauses as an array",
+            )
+        });
+    let mut clause_ids = HashSet::new();
+    for clause in clauses {
+        let clause_id = required_string(clause, "clause_id", "GUIDANCE_ONTOLOGY_CLAUSE_INVALID");
+        assert_id(clause_id, "GUIDANCE_ONTOLOGY_CLAUSE_ID_INVALID");
+        if !clause_ids.insert(clause_id.to_string()) {
+            fail(
+                format!("GUIDANCE_ONTOLOGY_CLAUSE_DUPLICATE:{}", clause_id),
+                "keep one approved clause per rule",
+            );
+        }
+        let rule_id = required_string(clause, "rule_id", "GUIDANCE_ONTOLOGY_CLAUSE_INVALID");
+        if !forbidden_rules.contains(rule_id) {
+            fail(
+                format!("GUIDANCE_ONTOLOGY_RULE_MISSING:{}", rule_id),
+                "bind each ontology clause to one declared forbidden rule",
+            );
+        }
+        let axis = required_string(clause, "axis", "GUIDANCE_ONTOLOGY_CLAUSE_INVALID");
+        if !matches!(axis, "object" | "behavior" | "relation") {
+            fail(
+                "GUIDANCE_ONTOLOGY_AXIS_INVALID",
+                "use object, behavior, or relation",
+            );
+        }
+        for field in [
+            "scope",
+            "scenario",
+            "trigger",
+            "state_before",
+            "state_after",
+            "owner",
+        ] {
+            required_string(clause, field, "GUIDANCE_ONTOLOGY_CLAUSE_INVALID");
+        }
+        for field in [
+            "allowed_actions",
+            "forbidden_actions",
+            "effects",
+            "evidence",
+        ] {
+            let entries = required_array(clause, field, "GUIDANCE_ONTOLOGY_CLAUSE_INVALID");
+            if entries.is_empty()
+                || entries
+                    .iter()
+                    .any(|entry| entry.as_str().filter(|value| !value.is_empty()).is_none())
+            {
+                fail(
+                    format!("GUIDANCE_ONTOLOGY_FIELD_INVALID:{}:{}", clause_id, field),
+                    "use a non-empty string array",
+                );
+            }
+        }
+        let approval = clause
+            .get("approval")
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| {
+                fail(
+                    "GUIDANCE_ONTOLOGY_APPROVAL_MISSING",
+                    "record exact user approval for the clause",
+                )
+            });
+        if approval.get("state").and_then(Value::as_str) != Some("approved") {
+            fail(
+                format!("GUIDANCE_ONTOLOGY_CLAUSE_UNAPPROVED:{}", clause_id),
+                "obtain exact user approval before binding the clause to a gate",
+            );
+        }
+        for field in ["source", "text"] {
+            required_string(approval, field, "GUIDANCE_ONTOLOGY_APPROVAL_INVALID");
+        }
+        let governance = clause
+            .get("governance")
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| {
+                fail(
+                    format!("GUIDANCE_ONTOLOGY_CLAUSE_UNBOUND:{}", clause_id),
+                    "bind the clause to one executable edge or gate",
+                )
+            });
+        let gate_kind = required_string(governance, "gate_kind", "GUIDANCE_ONTOLOGY_GATE_INVALID");
+        if !matches!(
+            gate_kind,
+            "identity"
+                | "attribute"
+                | "precondition"
+                | "transition"
+                | "relation"
+                | "terminal"
+                | "effect"
+        ) {
+            fail(
+                "GUIDANCE_ONTOLOGY_GATE_INVALID",
+                "use a declared ontology gate kind",
+            );
+        }
+        for field in ["edge", "check", "allow_case", "deny_case", "observation"] {
+            required_string(governance, field, "GUIDANCE_ONTOLOGY_GATE_INVALID");
+        }
+    }
+    for clause_id in referenced_clauses {
+        if !clause_ids.contains(&clause_id) {
+            fail(
+                format!("GUIDANCE_ONTOLOGY_CLAUSE_NOT_FOUND:{}", clause_id),
+                "declare the referenced ontology clause",
+            );
         }
     }
 }

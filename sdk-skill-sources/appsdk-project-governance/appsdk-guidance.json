@@ -18,9 +18,42 @@
     {"rule_id": "debug-notes-required", "severity": "warning", "description": "During debug exploration, append observations, hypotheses, and evidence to the active run notes before resolution."},
     {"rule_id": "map-gate-update", "severity": "advisory", "description": "Update function ownership and verification gates in the same change when the implementation changes them."},
     {"rule_id": "recommended-design", "severity": "warning", "description": "Record requirement, architecture, and detailed-design closure before feature implementation."},
-    {"rule_id": "ontology-approval-before-gate", "severity": "forbidden", "description": "A rule or ontology clause becomes mandatory only after exact user approval and binding to an executable governance edge or gate."},
+    {"rule_id": "ontology-approval-before-gate", "severity": "forbidden", "description": "A rule or ontology clause becomes mandatory only after exact user approval and binding to an executable governance edge or gate.", "ontology_clause": "ontology-approval-before-gate"},
     {"rule_id": "prior-record-search", "severity": "advisory", "description": "Check prior verified successes and failures before repeating exploration."}
   ],
+  "ontology": {
+    "schema_version": 1,
+    "clauses": [
+      {
+        "clause_id": "ontology-approval-before-gate",
+        "rule_id": "ontology-approval-before-gate",
+        "axis": "behavior",
+        "scope": "AppSDK guidance rules and ontology clauses that claim mandatory enforcement.",
+        "scenario": "A proposed rule or ontology clause is about to become mandatory governance.",
+        "trigger": "The clause is declared with forbidden severity and references ontology governance.",
+        "allowed_actions": ["Keep the clause advisory until exact user approval and gate binding are present.", "Compile an approved clause only when the bound gate defines legal, illegal, and observation cases."],
+        "forbidden_actions": ["Treat a candidate or unbound clause as mandatory.", "Bind a gate before exact user approval."],
+        "state_before": "candidate",
+        "state_after": "approved-and-bound",
+        "effects": ["The guidance compiler rejects candidate or unbound ontology clauses.", "The guidance compiler accepts approved clauses with executable gate evidence."],
+        "owner": "AppSDK guidance compiler",
+        "evidence": ["GUIDANCE_ONTOLOGY_CLAUSE_APPROVED_AND_BOUND", "rust/tests/cli_smoke/part_13.rs"],
+        "approval": {
+          "state": "approved",
+          "source": "Codex conversation 2026-11-11",
+          "text": "这个 ontology 规则要变成全局治理规则，你检查下还要做什么依赖迁移吗？理论上 appsdk 不升级版本号应该可以？"
+        },
+        "governance": {
+          "edge": "guidance rules -> appsdk guide compile",
+          "gate_kind": "precondition",
+          "check": "GUIDANCE_ONTOLOGY_CLAUSE_APPROVED_AND_BOUND",
+          "allow_case": "An approved clause references a declared forbidden rule and includes every gate field.",
+          "deny_case": "A candidate clause, missing approval source or text, missing gate field, or unresolved rule reference.",
+          "observation": "appsdk guide compile exits nonzero with a JSON error for the deny case and exits zero for the allow case."
+        }
+      }
+    ]
+  },
   "workflows": [
     {
       "domain": "bootstrap",

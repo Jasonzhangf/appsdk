@@ -972,6 +972,59 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
 }
 
 #[test]
+fn guidance_compile_enforces_approved_and_bound_ontology_clauses() {
+    let root = temp_root("guidance-ontology-gate");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+
+    let manifest_path = root.join(".appsdk/skills/appsdk-project-governance/appsdk-guidance.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    let clause = manifest["ontology"]["clauses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clause| clause["clause_id"] == "ontology-approval-before-gate")
+        .unwrap();
+    assert_eq!(clause["approval"]["state"], "approved");
+    assert_eq!(clause["governance"]["gate_kind"], "precondition");
+    assert!(manifest["rules"].as_array().unwrap().iter().any(|rule| {
+        rule["rule_id"] == "ontology-approval-before-gate"
+            && rule["ontology_clause"] == "ontology-approval-before-gate"
+    }));
+
+    manifest["ontology"]["clauses"][0]["approval"]["state"] = Value::String("candidate".into());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let unapproved = run(&["guide", "compile", root_text]);
+    assert!(!unapproved.status.success());
+    assert!(String::from_utf8_lossy(&unapproved.stderr)
+        .contains("GUIDANCE_ONTOLOGY_CLAUSE_UNAPPROVED:ontology-approval-before-gate"));
+
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    manifest["ontology"]["clauses"][0]["governance"]
+        .as_object_mut()
+        .unwrap()
+        .remove("observation");
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let unbound = run(&["guide", "compile", root_text]);
+    assert!(!unbound.status.success());
+    assert!(String::from_utf8_lossy(&unbound.stderr).contains("GUIDANCE_ONTOLOGY_GATE_INVALID"));
+
+    fs::write(&manifest_path, original).unwrap();
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guidance_init_projects_declared_context_and_commands() {
     let root = temp_root("guidance-init");
     let root_text = root.to_str().unwrap();

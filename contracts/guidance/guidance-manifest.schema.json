@@ -18,7 +18,80 @@
         "properties": {
           "rule_id": {"type": "string", "minLength": 1},
           "severity": {"enum": ["advisory", "warning", "forbidden"]},
-          "description": {"type": "string", "minLength": 1}
+          "description": {"type": "string", "minLength": 1},
+          "ontology_clause": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "ontology": {
+      "type": "object",
+      "required": ["schema_version", "clauses"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {"const": 1},
+        "clauses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "clause_id",
+              "rule_id",
+              "axis",
+              "scope",
+              "scenario",
+              "trigger",
+              "allowed_actions",
+              "forbidden_actions",
+              "state_before",
+              "state_after",
+              "effects",
+              "owner",
+              "evidence",
+              "approval",
+              "governance"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "clause_id": {"type": "string", "minLength": 1},
+              "rule_id": {"type": "string", "minLength": 1},
+              "axis": {"enum": ["object", "behavior", "relation"]},
+              "scope": {"type": "string", "minLength": 1},
+              "scenario": {"type": "string", "minLength": 1},
+              "trigger": {"type": "string", "minLength": 1},
+              "allowed_actions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "forbidden_actions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "state_before": {"type": "string", "minLength": 1},
+              "state_after": {"type": "string", "minLength": 1},
+              "effects": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "owner": {"type": "string", "minLength": 1},
+              "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "approval": {
+                "type": "object",
+                "required": ["state", "source", "text"],
+                "additionalProperties": false,
+                "properties": {
+                  "state": {"enum": ["candidate", "approved", "rejected"]},
+                  "source": {"type": "string", "minLength": 1},
+                  "text": {"type": "string", "minLength": 1}
+                }
+              },
+              "governance": {
+                "type": "object",
+                "required": ["edge", "gate_kind", "check", "allow_case", "deny_case", "observation"],
+                "additionalProperties": false,
+                "properties": {
+                  "edge": {"type": "string", "minLength": 1},
+                  "gate_kind": {
+                    "enum": ["identity", "attribute", "precondition", "transition", "relation", "terminal", "effect"]
+                  },
+                  "check": {"type": "string", "minLength": 1},
+                  "allow_case": {"type": "string", "minLength": 1},
+                  "deny_case": {"type": "string", "minLength": 1},
+                  "observation": {"type": "string", "minLength": 1}
+                }
+              }
+            }
+          }
         }
       }
     },

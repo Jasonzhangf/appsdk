@@ -767,3 +767,31 @@ TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递�
   `cargo check --tests`、`git diff --check` 通过。
 - 本地完整 `appserver_two_tui_integration` 并发运行在 `ulimit -n=256` 下触发
   `EMFILE` 级联失败，不是被修复用例的断言失败；本轮不以该环境结果冒充 CI。
+
+## 2026-11-11 cross-slot stale Execute recovery
+
+- 目标：闭合 `collab-rex-transport-rebind-20261110` 的剩余生命周期缺口。
+  task/assignment 已交接到新 slot 后，旧 slot 上无提交结果的 Running Execute
+  phase 不得继续阻止当前 owner 通过公开 `board claim` 恢复和交付。
+- 根因：`ticket_stale_active_claim_phase` 只收集当前 slot 的 Execute phase。
+  durable owner/assignment handoff 后，旧 slot 的 Claimed/Running phase 被过滤，
+  新 owner 因而得到 `BOARD_TASK_NOT_PENDING` 且没有公开恢复路径。
+- 唯一 owner：`collab/src/server/work_assignment.rs` 的
+  `ticket_stale_active_claim_phase`。收集最旧/最新 Execute phase 时不再限定当前
+  slot；同 slot 仍只按旧 binding generation 判定 stale，跨 slot 只在旧 phase
+  有 slot、非零 binding generation 且没有提交结果时判定 stale。
+  `ticket_recovery_claim_phase` 保留原 slot 语义，不回退 queued recovery。
+- 红绿用例：`collab/tests/board/work_roles.rs` 新增
+  `cross_slot_stale_execute_phase_is_reclaimed_by_current_assignment`。交接前其他
+  peer 仍被 `BOARD_TASK_NOT_PENDING` 拒绝；交接后新 owner 的公开 `board claim`
+  通过，旧 phase 变为 `revoked`，新 phase 为 `claimed`，后续 start/deliver
+  成功。
+- 证据：聚焦用例 1/1 PASS；`cargo fmt --manifest-path collab/Cargo.toml --
+  --check` PASS；隔离 harness 的 2/2 stale 回归 PASS。
+- 事件：一次未隔离测试环境的 broad Collab test 曾把 fixture 通知投递到真实
+  mailbox。测试已停止；本轮未消费、ACK、清理或改写 mailbox，也未再运行 broad
+  Collab test。后续只用于本用例的精确 filter、`--test-threads=1` 和隔离 host
+  identity 环境。
+- 剩余：需要独立 review 后提交/合并/推送；当前 Collab 身份命令在 REX anchor
+  冲突下不能安全执行 `task deliver`/`close`，该状态需由后续身份 owner 解决，
+  不通过编辑 identity-map、控制状态或 daemon 绕过。

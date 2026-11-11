@@ -30,8 +30,6 @@ mod context_minimality;
 mod degraded_user_maintenance;
 #[path = "board/directory_unknown_cli.rs"]
 mod directory_unknown_cli;
-#[path = "board/dispatch_gap_reminder.rs"]
-mod dispatch_gap_reminder;
 #[path = "board/manual_communication.rs"]
 mod manual_communication;
 #[path = "board/name_adjudication.rs"]

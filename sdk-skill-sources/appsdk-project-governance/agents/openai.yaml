@@ -1,4 +1,4 @@
 interface:
   display_name: "AppSDK Project Governance"
   short_description: "Guide and govern the full project lifecycle"
-  default_prompt: "Use $appsdk-project-governance to compare project rules, Skills, tests, and CI/hook entrypoints with the versioned template. Reuse covered authorization, run only affected checks, and use init only to refresh SDK resources; Guidance, freeze, and runtime flows apply only when selected."
+  default_prompt: "Use $appsdk-project-governance to compare project rules, Skills, tests, and CI/hook entrypoints with the versioned template. For rule changes, model the affected Objects, Behaviors and Relations, obtain per-clause user approval, and bind approved clauses to executable gates. Reuse covered authorization, run only affected checks, and use init only to refresh SDK resources; Guidance, freeze, and runtime flows apply only when selected."

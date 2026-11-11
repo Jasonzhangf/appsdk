@@ -1740,18 +1740,32 @@ fn handle_worker_snapshot(
     if !(1..=200).contains(&lines) {
         return Resp::err("snapshot lines must be 1..200");
     }
-    let endpoint = match transport.kind {
+    enum SnapshotTarget {
+        Tmux(crate::proto::TmuxEndpoint),
+        Rex(crate::proto::RexEndpoint),
+    }
+    let target_endpoint = match transport.kind {
         crate::proto::TransportKind::Tmux => match transport.tmux_endpoint.clone() {
-            Some(endpoint) => endpoint,
+            Some(endpoint) => SnapshotTarget::Tmux(endpoint),
             None => {
                 return Resp::err(format!(
                     "worker {target_id} has no registered tmux endpoint"
                 ))
             }
         },
-        crate::proto::TransportKind::DesktopBridge | crate::proto::TransportKind::AppServer | crate::proto::TransportKind::Dsh | crate::proto::TransportKind::Rex => {
+        crate::proto::TransportKind::Rex => match transport.rex_endpoint.clone() {
+            Some(endpoint) => SnapshotTarget::Rex(endpoint),
+            None => {
+                return Resp::err(format!(
+                    "worker {target_id} has no registered rex endpoint"
+                ))
+            }
+        },
+        crate::proto::TransportKind::DesktopBridge
+        | crate::proto::TransportKind::AppServer
+        | crate::proto::TransportKind::Dsh => {
             return Resp::err(
-                "WORKER_SNAPSHOT_UNSUPPORTED: only registered tmux peers expose transient pane buffers",
+                "WORKER_SNAPSHOT_UNSUPPORTED: only registered tmux and rex peers expose transient pane buffers",
             )
         }
     };
@@ -1759,9 +1773,30 @@ fn handle_worker_snapshot(
     // endpoint is the admitted route; the response describes that one capture,
     // not a later claim about the peer's state.
     drop(state);
-    let mut snapshot = match crate::client::adapters::tmux::snapshot(&endpoint, lines) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return Resp::err(error),
+    let mut snapshot = match target_endpoint {
+        SnapshotTarget::Tmux(endpoint) => {
+            match crate::client::adapters::tmux::snapshot(&endpoint, lines) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Resp::err(error),
+            }
+        }
+        SnapshotTarget::Rex(endpoint) => {
+            // The daemon dispatches wire requests from the Tokio blocking
+            // pool, so the current runtime handle is available for the Rex
+            // primitive's async process I/O.
+            let handle = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => handle,
+                Err(error) => {
+                    return Resp::err(format!(
+                        "REX_UNKNOWN: Tokio runtime unavailable for Rex snapshot: {error}"
+                    ))
+                }
+            };
+            match handle.block_on(crate::client::adapters::rex::snapshot(&endpoint, lines)) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Resp::err(error.to_string()),
+            }
+        }
     };
     snapshot["worker_id"] = target_id.into();
     Resp::data(snapshot)

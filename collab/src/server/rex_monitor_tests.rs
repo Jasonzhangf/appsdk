@@ -1,5 +1,7 @@
 use super::*;
-use crate::client::adapters::rex::{RexEvent, RexEventBatch, RexProgramStatusRecord};
+use crate::client::adapters::rex::{
+    RexEvent, RexEventBatch, RexProcessObservation, RexProgramStatusOwner, RexProgramStatusRecord,
+};
 use crate::proto::RexEndpoint;
 use crate::server::name_state::AgentActivity;
 use serde_json::json;
@@ -23,6 +25,21 @@ fn target() -> MonitorTarget {
 }
 
 fn record(state: &str, kind: Option<&str>) -> RexProgramStatusRecord {
+    owned_record(
+        state,
+        kind,
+        Some(RexProgramStatusOwner {
+            pid: 4242,
+            name: "python3".into(),
+        }),
+    )
+}
+
+fn owned_record(
+    state: &str,
+    kind: Option<&str>,
+    owner: Option<RexProgramStatusOwner>,
+) -> RexProgramStatusRecord {
     RexProgramStatusRecord {
         id: Some("agent".into()),
         state: Some(state.into()),
@@ -30,6 +47,7 @@ fn record(state: &str, kind: Option<&str>) -> RexProgramStatusRecord {
         app: Some("codex".into()),
         msg: None,
         updated_at: None,
+        owner,
     }
 }
 
@@ -38,7 +56,12 @@ fn observation(
 ) -> crate::client::adapters::rex::RexObservation {
     crate::client::adapters::rex::RexObservation {
         endpoint: endpoint("block:22222222-2222-2222-2222-222222222222"),
-        process: None,
+        process: Some(RexProcessObservation {
+            pid: Some(4242),
+            name: Some("python3".into()),
+            path: None,
+            cwd: None,
+        }),
         pwd: None,
         program_status: records,
         sources: vec!["com.superlogical.terminal.program_status".into()],
@@ -60,7 +83,7 @@ fn event(name: &str, block: &str, creator: &str) -> RexEvent {
 }
 
 #[test]
-fn status_mapping_covers_working_blocked_and_unknown() {
+fn status_mapping_covers_working_blocked_idle_and_unknown() {
     assert_eq!(
         project_observation(&observation(vec![record("working", None)])).0,
         AgentActivity::Busy
@@ -71,7 +94,7 @@ fn status_mapping_covers_working_blocked_and_unknown() {
     );
     assert_eq!(
         project_observation(&observation(vec![record("blocked", Some("approval"))])).0,
-        AgentActivity::Unknown
+        AgentActivity::WaitingUser
     );
     assert_eq!(
         project_observation(&observation(Vec::new())).0,
@@ -83,12 +106,13 @@ fn status_mapping_covers_working_blocked_and_unknown() {
             record("blocked", Some("question")),
         ]))
         .0,
-        AgentActivity::Unknown
+        AgentActivity::WaitingUser
     );
-    for state in ["clear", "done", "error"] {
+    for state in ["idle", "done", "error", "clear"] {
         assert_eq!(
             project_observation(&observation(vec![record(state, None)])).0,
-            AgentActivity::Unknown
+            AgentActivity::Idle,
+            "state {state} must project idle"
         );
     }
     let mut failed = observation(vec![record("working", None)]);
@@ -100,12 +124,104 @@ fn status_mapping_covers_working_blocked_and_unknown() {
 }
 
 #[test]
-fn projection_keeps_source_and_never_emits_idle() {
+fn stale_or_partial_owner_records_do_not_project_busy() {
+    // Same pid, different name: a reused PID must not revive an old working
+    // record once the foreground process changed.
+    let stale_name = owned_record(
+        "working",
+        None,
+        Some(RexProgramStatusOwner {
+            pid: 4242,
+            name: "other".into(),
+        }),
+    );
+    assert_eq!(
+        project_observation(&observation(vec![stale_name])).0,
+        AgentActivity::Unknown
+    );
+    // A different pid is also stale.
+    let stale_pid = owned_record(
+        "working",
+        None,
+        Some(RexProgramStatusOwner {
+            pid: 9999,
+            name: "python3".into(),
+        }),
+    );
+    assert_eq!(
+        project_observation(&observation(vec![stale_pid])).0,
+        AgentActivity::Unknown
+    );
+    // Unknown owner cannot be matched, so it stays out of the projection.
+    let no_owner = owned_record("working", None, None);
+    assert_eq!(
+        project_observation(&observation(vec![no_owner])).0,
+        AgentActivity::Unknown
+    );
+    // An idle record that matches the foreground owner must win over a stale
+    // working record from a previous process.
+    let current_idle = record("idle", None);
+    let stale_working = owned_record(
+        "working",
+        None,
+        Some(RexProgramStatusOwner {
+            pid: 9999,
+            name: "old".into(),
+        }),
+    );
+    assert_eq!(
+        project_observation(&observation(vec![stale_working, current_idle])).0,
+        AgentActivity::Idle
+    );
+}
+
+#[test]
+fn incomplete_foreground_identity_never_projects_busy_or_waiting() {
+    for foreground in [
+        (Some(0), Some("python3")),
+        (Some(4242), Some("")),
+        (Some(4242), Some("   ")),
+        (None, Some("python3")),
+        (Some(4242), None),
+    ] {
+        let mut observation = observation(vec![record("working", None)]);
+        observation.process = Some(RexProcessObservation {
+            pid: foreground.0,
+            name: foreground.1.map(str::to_owned),
+            path: None,
+            cwd: None,
+        });
+        assert_eq!(
+            project_observation(&observation).0,
+            AgentActivity::Unknown,
+            "incomplete foreground {foreground:?} must stay unknown"
+        );
+    }
+    let mut blocked = observation(vec![record("blocked", Some("question"))]);
+    blocked.process = Some(RexProcessObservation {
+        pid: Some(0),
+        name: Some("python3".into()),
+        path: None,
+        cwd: None,
+    });
+    assert_eq!(
+        project_observation(&blocked).0,
+        AgentActivity::Unknown,
+        "blocked record with incomplete foreground must stay unknown"
+    );
+}
+
+#[test]
+fn projection_keeps_source_and_emits_idle_or_busy() {
     let (activity, reason) = project_observation(&observation(vec![record("working", None)]));
     assert_eq!(activity, AgentActivity::Busy);
     assert!(reason.contains("rex.osc7501"));
     assert!(reason.contains("com.superlogical.terminal.program_status"));
-    assert!(!reason.contains("idle"));
+
+    let (activity, reason) = project_observation(&observation(vec![record("idle", None)]));
+    assert_eq!(activity, AgentActivity::Idle);
+    assert!(reason.contains("projection=idle"));
+    assert!(reason.contains("com.superlogical.terminal.program_status"));
 }
 
 #[test]

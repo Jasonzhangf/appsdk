@@ -245,6 +245,7 @@ def program_status() -> None:
                         "state": "working",
                         "app": "fixture",
                         "msg": "busy",
+                        "owner": {"pid": 4242, "name": "python3"},
                         "updated_at": "2026-11-08T00:00:00Z",
                     }
                 ]
@@ -260,6 +261,7 @@ def program_status() -> None:
                         "kind": "question",
                         "app": "fixture",
                         "msg": "need input",
+                        "owner": {"pid": 4242, "name": "python3"},
                         "updated_at": "2026-11-08T00:00:00Z",
                     }
                 ]
@@ -267,6 +269,22 @@ def program_status() -> None:
         )
     else:
         emit({"records": []})
+
+
+def capture() -> None:
+    mode = scenario()
+    if mode == "capture_fail":
+        sys.stderr.write("fixture: capture rejected\n")
+        raise SystemExit(8)
+    if mode == "capture_empty":
+        return
+    if mode == "capture_lines":
+        for index in range(1, 11):
+            sys.stdout.write(f"line-{index}\n")
+        sys.stdout.flush()
+        return
+    sys.stdout.write("screen line\n")
+    sys.stdout.flush()
 
 
 def block_event(name: str, payload: dict) -> dict:
@@ -334,6 +352,9 @@ def dispatch(method: str, stdin: str) -> None:
         return
     if method == "send-key":
         send_key()
+        return
+    if method == "capture":
+        capture()
         return
     if method == f"{TERMINAL}.process":
         process()

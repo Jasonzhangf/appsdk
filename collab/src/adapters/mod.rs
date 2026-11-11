@@ -12,7 +12,7 @@ pub use crate::proto::RexEndpoint as RexAdapterEndpoint;
 pub use codex_app_server::verify_candidate;
 pub use rex::{
     RexError, RexEvent, RexEventBatch, RexEventStream, RexInputStage, RexObservation,
-    RexProcessObservation, RexProgramStatusRecord, RexWriteReceipt,
+    RexProcessObservation, RexProgramStatusOwner, RexProgramStatusRecord, RexWriteReceipt,
     NOT_DELIVERED_PREFIX as REX_NOT_DELIVERED_PREFIX,
 };
 

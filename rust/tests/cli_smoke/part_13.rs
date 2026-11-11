@@ -840,6 +840,7 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
         ("project-context-binding", "warning"),
         ("debug-notes-required", "warning"),
         ("map-gate-update", "advisory"),
+        ("ontology-approval-before-gate", "forbidden"),
     ] {
         assert!(guidance["rules"]
             .as_array()
@@ -872,6 +873,33 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
     ] {
         assert!(develop_nodes.contains(&node), "missing develop node {node}");
     }
+
+    let rule_governance = workflows
+        .iter()
+        .find(|workflow| workflow["domain"] == "rule-governance")
+        .unwrap();
+    assert_eq!(
+        rule_governance["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["node_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "rule_inventory",
+            "ontology_model",
+            "clause_approval",
+            "gate_binding",
+            "red_test",
+            "implementation",
+            "public_entry_verification"
+        ]
+    );
+    assert!(rule_governance["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| { edge["from"] == "clause_approval" && edge["to"] == "gate_binding" }));
     for (from, to) in [
         ("map_check", "architecture"),
         ("map_check", "implementation"),

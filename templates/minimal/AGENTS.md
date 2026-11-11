@@ -97,6 +97,21 @@ current ledger version, and use the SDK review context for all applicable items.
   summaries. Current facts, rules and gates remain owned by project AGENTS,
   Skills and declared contracts; memory never overrides them.
 
+## Ontology Rule Governance
+
+- Rule and governance changes first model the affected objects, behaviors and
+  relations with the installed `appsdk-project-governance` Skill's
+  `references/ontology-governance.md`.
+- Every rule clause names its scenario, trigger, allowed actions, forbidden
+  actions, affected state or effect, owner and evidence.
+- A candidate remains a candidate until the user approves that exact clause.
+- An approved clause is enforceable only after it is bound to a declared DAG
+  edge or gate with one legal case, one illegal case and a real observation
+  path. The requirements ledger is a declaration, not enforcement.
+- Non-rule project facts do not enter rule approval.
+- While any rule or ontology candidate awaits user approval, do not arm,
+  renew or subscribe the next wake for that goal.
+
 ## Git Protection
 
 - Treat the protected mainline checkout as read-only. Develop in a clean owner

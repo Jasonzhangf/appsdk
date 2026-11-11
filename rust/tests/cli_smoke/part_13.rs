@@ -978,6 +978,16 @@ fn guidance_compile_enforces_approved_and_bound_ontology_clauses() {
     assert!(run(&["new", root_text]).status.success());
     assert!(run(&["guide", "compile", root_text]).status.success());
 
+    let compiled: Value =
+        serde_json::from_slice(&fs::read(root.join(".appsdk/guidance/compiled.json")).unwrap())
+            .unwrap();
+    for axis in ["objects", "behaviors", "relations", "clauses"] {
+        assert!(
+            !compiled["ontology"][axis].as_array().unwrap().is_empty(),
+            "compiled manifest must retain ontology {axis}"
+        );
+    }
+
     let manifest_path = root.join(".appsdk/skills/appsdk-project-governance/appsdk-guidance.json");
     let original = fs::read(&manifest_path).unwrap();
     let mut manifest: Value = serde_json::from_slice(&original).unwrap();
@@ -1005,6 +1015,17 @@ fn guidance_compile_enforces_approved_and_bound_ontology_clauses() {
                 && behavior["transition"]["to"] == "approved-and-bound"
                 && !behavior["must_have"].as_array().unwrap().is_empty()
         }));
+    let objects = manifest["ontology"]["objects"].as_array().unwrap();
+    let object_ids: Vec<&str> = objects
+        .iter()
+        .map(|object| object["id"].as_str().unwrap())
+        .collect();
+    assert!(object_ids.contains(&"ontology-clause"));
+    assert!(object_ids.contains(&"guidance-rule"));
+    let relation = &manifest["ontology"]["relations"][0];
+    assert!(object_ids.contains(&relation["from"].as_str().unwrap()));
+    assert!(object_ids.contains(&relation["to"].as_str().unwrap()));
+    assert_eq!(relation["cardinality"], "one-to-one");
 
     manifest["ontology"]["clauses"][0]["approval"]["state"] = Value::String("candidate".into());
     fs::write(

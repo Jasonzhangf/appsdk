@@ -467,6 +467,19 @@ fn validate_ontology_clauses(manifest: &Value, rules: &[Value]) {
     }
 }
 
+fn assert_unique_ontology_ids(entries: &[Value], field: &str, kind: &str) {
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let id = required_string(entry, field, "GUIDANCE_ONTOLOGY_MERGE_INVALID");
+        if !seen.insert(id.to_string()) {
+            fail(
+                format!("GUIDANCE_ONTOLOGY_MERGE_DUPLICATE:{}:{}", kind, id),
+                "keep one ontology entry per id across sources",
+            );
+        }
+    }
+}
+
 pub(super) fn compile(root: &Path) {
     assert_mutation_worktree(root);
     let project = read_project(root);
@@ -502,6 +515,11 @@ pub(super) fn compile(root: &Path) {
     let mut compiled_sources = Vec::new();
     let mut workflows = Vec::new();
     let mut rules = Vec::new();
+    let mut ontology_present = false;
+    let mut ontology_objects = Vec::new();
+    let mut ontology_behaviors = Vec::new();
+    let mut ontology_relations = Vec::new();
+    let mut ontology_clauses = Vec::new();
     let mut workflow_ids = HashSet::new();
     let mut rule_ids = HashSet::new();
     for source in sources {
@@ -574,6 +592,24 @@ pub(super) fn compile(root: &Path) {
             workflows.extend(
                 required_array(&manifest, "workflows", "GUIDANCE_MANIFEST_INVALID").clone(),
             );
+            if let Some(ontology) = manifest.get("ontology") {
+                ontology_present = true;
+                ontology_objects.extend(
+                    required_array(ontology, "objects", "GUIDANCE_ONTOLOGY_MODEL_INVALID").clone(),
+                );
+                ontology_behaviors.extend(
+                    required_array(ontology, "behaviors", "GUIDANCE_ONTOLOGY_MODEL_INVALID")
+                        .clone(),
+                );
+                ontology_relations.extend(
+                    required_array(ontology, "relations", "GUIDANCE_ONTOLOGY_MODEL_INVALID")
+                        .clone(),
+                );
+                ontology_clauses.extend(
+                    required_array(ontology, "clauses", "GUIDANCE_ONTOLOGY_CLAUSES_INVALID")
+                        .clone(),
+                );
+            }
             compiled_source["contract_path"] = Value::String(contract_text.to_string());
         }
         compiled_sources.push(compiled_source);
@@ -584,7 +620,7 @@ pub(super) fn compile(root: &Path) {
             "declare at least one Skill machine contract",
         );
     }
-    let compiled = serde_json::json!({
+    let mut compiled = serde_json::json!({
         "schema_version": 1,
         "harness": "appsdk-development-process-control",
         "enforcement": enforcement,
@@ -592,6 +628,19 @@ pub(super) fn compile(root: &Path) {
         "rules": rules,
         "workflows": workflows
     });
+    if ontology_present {
+        assert_unique_ontology_ids(&ontology_objects, "id", "object");
+        assert_unique_ontology_ids(&ontology_behaviors, "id", "behavior");
+        assert_unique_ontology_ids(&ontology_relations, "id", "relation");
+        assert_unique_ontology_ids(&ontology_clauses, "clause_id", "clause");
+        compiled["ontology"] = serde_json::json!({
+            "schema_version": 1,
+            "objects": ontology_objects,
+            "behaviors": ontology_behaviors,
+            "relations": ontology_relations,
+            "clauses": ontology_clauses
+        });
+    }
     let relative = compiled_relative(&project);
     assert_no_symlink(root, &relative, "GUIDANCE_COMPILED_SYMLINK");
     atomic_write(&root.join(relative), &compiled);

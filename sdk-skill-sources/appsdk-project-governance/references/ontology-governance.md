@@ -200,6 +200,12 @@ rule, an orphan clause, or a mismatched pair fails.
 It compiles an approved and fully bound clause. The public observation is the
 command's JSON error or successful compiled manifest.
 
+The published schema requires `ontology` whenever any rule declares
+`ontology_clause`. Cross-array identity, `axis_id` lookup, relation endpoint
+resolution, `must_have`/`must_not_have` contradiction, and the bidirectional
+binding are enforced by `appsdk guide compile`. The compiled manifest retains
+the validated `objects`, `behaviors`, `relations`, and `clauses`.
+
 The manifest schema is
 [`contracts/guidance/guidance-manifest.schema.json`](../../../contracts/guidance/guidance-manifest.schema.json).
 Do not describe a manifest-only clause as mandatory unless this compiler gate

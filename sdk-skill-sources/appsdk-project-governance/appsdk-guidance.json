@@ -23,7 +23,32 @@
   ],
   "ontology": {
     "schema_version": 1,
-    "objects": [],
+    "objects": [
+      {
+        "id": "ontology-clause",
+        "name": "Ontology rule clause",
+        "definition": "A rule clause that binds one guidance rule to approved ontology semantics and an executable governance gate.",
+        "identity": "Same clause_id within one guidance manifest source.",
+        "owner": "AppSDK guidance compiler",
+        "attributes": ["clause_id", "rule_id", "axis", "axis_id", "approval", "governance"],
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "must_have": ["exact user approval", "declared governance edge or gate", "legal case", "illegal case", "observation path"],
+        "must_not_have": ["candidate approval state", "missing governance field", "unmatched rule reference"],
+        "source": ["docs/design/appsdk-ontology-governance.md"]
+      },
+      {
+        "id": "guidance-rule",
+        "name": "Guidance rule",
+        "definition": "A rule declared in a guidance manifest with a severity and an optional ontology governance reference.",
+        "identity": "Same rule_id within one guidance manifest source.",
+        "owner": "AppSDK guidance compiler",
+        "attributes": ["rule_id", "severity", "description", "ontology_clause"],
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "must_have": ["unique rule_id", "declared severity"],
+        "must_not_have": ["duplicate rule_id"],
+        "source": ["docs/design/appsdk-ontology-governance.md"]
+      }
+    ],
     "behaviors": [
       {
         "id": "ontology-clause-approval",
@@ -50,7 +75,21 @@
         "source": ["Codex conversation 2026-11-11", "docs/design/appsdk-ontology-governance.md"]
       }
     ],
-    "relations": [],
+    "relations": [
+      {
+        "id": "ontology-clause-governs-rule",
+        "name": "Ontology clause governs rule",
+        "from": "ontology-clause",
+        "to": "guidance-rule",
+        "kind": "governs",
+        "direction": "directed",
+        "cardinality": "one-to-one",
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "must_have": ["the forbidden rule references exactly its bound clause", "the clause references exactly its governing rule"],
+        "must_not_have": ["a clause referenced by another rule", "a rule referenced by another clause", "an orphan clause or rule"],
+        "source": ["docs/design/appsdk-ontology-governance.md"]
+      }
+    ],
     "clauses": [
       {
         "clause_id": "ontology-approval-before-gate",

@@ -437,14 +437,21 @@ This section owns the project procedure for turning a business flow into a
 skeleton, Operations, reusable operators, and graph configuration. Other
 references route here; do not copy the procedure.
 
+AppSDK governs consumer projects through this procedure and the mechanisms it
+provides. The consumer owns its architecture, business semantics, operator
+implementations, configuration, and acceptance. DAGPipe owns graph compilation
+and execution. AppSDK's own Operations can serve as pilots; migrating one SDK
+command does not by itself establish or verify governance for other projects.
+
 ### Shape the skeleton
 
 1. Bind the user goal, accepted behavior, acceptance criteria, non-goals,
    owners, and allowed/forbidden paths first. For a new project, reuse the
    existing `appsdk prepare` fields. Do not add a second preparation record.
-2. Define modules, public entrypoints, external ARCs, success and failure
-   endpoints, and observable side effects. Keep the skeleton only as detailed
-   as the current contract requires.
+2. Map the whole project at skeleton level: modules, owners, Operations,
+   public entrypoints, external dependencies, success and failure endpoints,
+   and side effects. Mark unmigrated paths; refine and migrate each selected
+   Operation incrementally.
 3. Split a node only at a stable capability boundary. Do not turn ordinary
    functions into nodes mechanically. A function stays in the owner that
    provides the capability.
@@ -457,8 +464,9 @@ references route here; do not copy the procedure.
 An Operation is one user-visible business action with an input, result, error
 boundary, and declared side effects. It can compose several graph nodes. A
 node invokes one capability in that flow. An operator is the versioned
-implementation bound by the node. Operator ownership follows the capability
-owner.
+implementation bound by the node. Define each selected node's purpose, inputs,
+outputs, errors, side effects, and capability owner. Maintain reusable
+operators with their capability owners instead of duplicating them per node.
 
 ### Define and verify capabilities
 
@@ -474,7 +482,10 @@ declare Operation and node contract
 
 Define the acceptance before implementing a new operator. A graph-only change
 may reuse an already verified operator. A capability change updates its unique
-operator owner and only the affected bindings.
+operator owner and only the affected bindings. Verify each added or changed
+operator through its public interface or a real consumer before wiring it.
+The project's real entrypoint registers the operators and executes the compiled
+graph; a valid design graph alone does not prove that this happens.
 
 ### New project
 
@@ -499,9 +510,11 @@ current behavior and affected graph
 -> unique-entrypoint regression
 ```
 
-Reuse valid evidence and recheck only the affected guarantees. A combination
-change updates the graph. A capability change updates the owning operator.
-Do not keep the old production path as a fallback.
+Update the affected skeleton and Operation contract before changing the
+implementation. Explain intentional old/new behavior differences. Reuse valid
+evidence and recheck only the affected guarantees. A combination change updates
+the graph. A capability change updates the owning operator. Do not keep the old
+production path as a fallback.
 
 One invocation keeps one compiled graph. A later invocation may select a new
 configuration. Do not add in-flight hot switching unless a later contract

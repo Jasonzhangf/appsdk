@@ -37,6 +37,12 @@ gate.
 - **Relation** defines how objects relate: direction, cardinality, observable
   entrypoint, required and forbidden relations.
 
+The executable guidance manifest carries these axes as `ontology.objects`,
+`ontology.behaviors`, and `ontology.relations`. Each rule clause names a
+matching `axis_id`. A relation must resolve both endpoints to declared object
+ids, and one entry's `must_have` and `must_not_have` constraints must not
+contradict.
+
 The complete reusable template, including the rule clause fields, candidate
 JSON shape, and gate kinds, is
 [appsdk-project-governance ontology-governance.md](../../sdk-skill-sources/appsdk-project-governance/references/ontology-governance.md).
@@ -72,9 +78,11 @@ a confirmed rule.
 - The enforcement truth is an executable edge or gate plus its legal case,
   illegal case, and real observation path.
 - A guidance rule that claims ontology governance references an
-  `ontology_clause`. `appsdk guide compile` rejects candidate or unbound
-  clauses and validates the approval source, approval text, legal case,
-  illegal case, and observation path before writing the compiled manifest.
+  `ontology_clause`. `appsdk guide compile` validates the three-axis model
+  entry, the clause `axis_id`, the strict bidirectional one-to-one rule-clause
+  pair, the approval source, the approval text, the legal case, the illegal
+  case, and the observation path before writing the compiled manifest.
+  Candidate, unbound, duplicate, or mismatched clauses are rejected.
 - Non-rule project facts do not enter approval. They are recorded directly with
   their evidence at their normal owner.
 - If any rule or ontology candidate is waiting for user approval, do not arm,

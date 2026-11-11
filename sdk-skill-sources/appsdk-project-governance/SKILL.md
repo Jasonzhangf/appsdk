@@ -40,6 +40,11 @@ actions, affected state or effect, owner, evidence, approval state, and target
 governance edge or gate. Approving the overall model or flow does not approve
 each individual clause.
 
+The manifest carries the three axes as `ontology.objects`,
+`ontology.behaviors`, and `ontology.relations`. Each clause names an
+`axis_id` that resolves to one declared entry of its axis. Every forbidden
+rule and its clause bind in strict bidirectional one-to-one form.
+
 A clause is enforceable only after exact user approval and binding to an
 executable edge or gate with one legal case, one illegal case, and a real
 observation path. `.appsdk/requirements.json` is a declaration, not

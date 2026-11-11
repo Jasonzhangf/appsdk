@@ -989,10 +989,22 @@ fn guidance_compile_enforces_approved_and_bound_ontology_clauses() {
         .unwrap();
     assert_eq!(clause["approval"]["state"], "approved");
     assert_eq!(clause["governance"]["gate_kind"], "precondition");
+    assert_eq!(clause["axis"], "behavior");
     assert!(manifest["rules"].as_array().unwrap().iter().any(|rule| {
         rule["rule_id"] == "ontology-approval-before-gate"
             && rule["ontology_clause"] == "ontology-approval-before-gate"
     }));
+    let axis_id = clause["axis_id"].as_str().unwrap().to_string();
+    assert!(manifest["ontology"]["behaviors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|behavior| {
+            behavior["id"] == axis_id.as_str()
+                && behavior["transition"]["from"] == "candidate"
+                && behavior["transition"]["to"] == "approved-and-bound"
+                && !behavior["must_have"].as_array().unwrap().is_empty()
+        }));
 
     manifest["ontology"]["clauses"][0]["approval"]["state"] = Value::String("candidate".into());
     fs::write(
@@ -1018,6 +1030,50 @@ fn guidance_compile_enforces_approved_and_bound_ontology_clauses() {
     let unbound = run(&["guide", "compile", root_text]);
     assert!(!unbound.status.success());
     assert!(String::from_utf8_lossy(&unbound.stderr).contains("GUIDANCE_ONTOLOGY_GATE_INVALID"));
+
+    // Strict bidirectional one-to-one: one clause per rule.
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    let mut duplicate = manifest["ontology"]["clauses"][0].clone();
+    duplicate["clause_id"] = Value::String("ontology-approval-before-gate-copy".into());
+    manifest["ontology"]["clauses"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let duplicated = run(&["guide", "compile", root_text]);
+    assert!(!duplicated.status.success());
+    assert!(String::from_utf8_lossy(&duplicated.stderr)
+        .contains("GUIDANCE_ONTOLOGY_RULE_DUPLICATE_CLAUSE:ontology-approval-before-gate"));
+
+    // The clause axis_id must resolve to a declared three-axis model entry.
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    manifest["ontology"]["clauses"][0]["axis_id"] = Value::String("missing-behavior".into());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let unknown_axis = run(&["guide", "compile", root_text]);
+    assert!(!unknown_axis.status.success());
+    assert!(String::from_utf8_lossy(&unknown_axis.stderr)
+        .contains("GUIDANCE_ONTOLOGY_AXIS_ENTRY_NOT_FOUND:behavior:missing-behavior"));
+
+    // A clause ruled by a different forbidden rule breaks the bidirectional pair.
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    manifest["ontology"]["clauses"][0]["rule_id"] = Value::String("lifecycle-truth".into());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let mismatched = run(&["guide", "compile", root_text]);
+    assert!(!mismatched.status.success());
+    assert!(String::from_utf8_lossy(&mismatched.stderr)
+        .contains("GUIDANCE_ONTOLOGY_CLAUSE_RULE_MISMATCH"));
 
     fs::write(&manifest_path, original).unwrap();
     assert!(run(&["guide", "compile", root_text]).status.success());

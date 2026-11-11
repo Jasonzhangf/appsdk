@@ -23,11 +23,40 @@
   ],
   "ontology": {
     "schema_version": 1,
+    "objects": [],
+    "behaviors": [
+      {
+        "id": "ontology-clause-approval",
+        "name": "Ontology clause approval before gate binding",
+        "owner": "AppSDK guidance compiler",
+        "precondition": ["A guidance rule claims ontology governance with forbidden severity."],
+        "input": ["ontology clause declaration", "exact user approval", "governance edge or gate binding"],
+        "output": ["approved clause compiled into the manifest", "structured rejection error"],
+        "transition": {"from": "candidate", "to": "approved-and-bound"},
+        "effects": ["The compiler writes the compiled manifest only for an approved and fully bound clause."],
+        "perception": "appsdk guide compile JSON output",
+        "must_have": [
+          "approval.state approved",
+          "approval.source",
+          "approval.text",
+          "governance.edge",
+          "governance.gate_kind",
+          "governance.check",
+          "governance.allow_case",
+          "governance.deny_case",
+          "governance.observation"
+        ],
+        "must_not_have": ["candidate approval state", "missing governance field"],
+        "source": ["Codex conversation 2026-11-11", "docs/design/appsdk-ontology-governance.md"]
+      }
+    ],
+    "relations": [],
     "clauses": [
       {
         "clause_id": "ontology-approval-before-gate",
         "rule_id": "ontology-approval-before-gate",
         "axis": "behavior",
+        "axis_id": "ontology-clause-approval",
         "scope": "AppSDK guidance rules and ontology clauses that claim mandatory enforcement.",
         "scenario": "A proposed rule or ontology clause is about to become mandatory governance.",
         "trigger": "The clause is declared with forbidden severity and references ontology governance.",

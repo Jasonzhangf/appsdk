@@ -30,7 +30,7 @@ Every rule candidate describes all three axes that affect the change.
 Record:
 
 ```text
-object_id
+id
 name
 definition
 identity
@@ -40,20 +40,20 @@ perception
 must_have
 must_not_have
 source
-approval
-governance
 ```
 
 `identity` states when two instances are the same business object.
 `perception` names the public entrypoint, query, event, or receipt that makes
 the object observable. Attribute constraints must be observable.
+In the executable guidance manifest, approval and governance live on the
+clause that binds a rule to one three-axis entry.
 
 ### Behavior: what it does
 
 Record:
 
 ```text
-behavior_id
+id
 name
 owner
 precondition
@@ -65,8 +65,6 @@ perception
 must_have
 must_not_have
 source
-approval
-governance
 ```
 
 Write the state change as:
@@ -83,7 +81,7 @@ Failure, rejection, cancellation, and unknown result are distinct terminals.
 Record:
 
 ```text
-relation_id
+id
 name
 from
 to
@@ -94,13 +92,13 @@ perception
 must_have
 must_not_have
 source
-approval
-governance
 ```
 
 State the direction and cardinality. For example, one durable message may
 have exactly one current recipient. A relation without a checkable observation
 path is not enforceable.
+Both `from` and `to` must reference declared object ids in the executable
+guidance manifest.
 
 ## 3. Rule clause format
 
@@ -110,6 +108,7 @@ forbids, and what state or effect changes.
 ```text
 clause_id:
   axis: object | behavior | relation
+  axis_id:
   scope:
   rule:
   scenario:
@@ -179,15 +178,27 @@ Each gate needs one legal case, one illegal case, and a real observation path.
 
 When an ontology-managed rule is distributed through an AppSDK guidance
 manifest, the rule carries an `ontology_clause` reference. The manifest's
-`ontology.clauses` entry records the complete clause, including its approval
-source and text, and its governance edge or gate.
+`ontology` object declares `objects`, `behaviors`, and `relations` with their
+axis-specific fields. The `ontology.clauses` entry records the complete
+clause, including its `axis_id`, approval source and text, and its governance
+edge or gate.
 
 `appsdk guide compile` is the executable owner for that declaration. It
-rejects a referenced clause when approval is not `approved`, when approval
-source or text is missing, when a governance field is missing, or when the
-rule reference does not resolve. It compiles an approved and fully bound
-clause. The public observation is the command's JSON error or successful
-compiled manifest.
+validates the three-axis model entries, requires the clause `axis_id` to
+resolve to a declared entry of the matching axis, and rejects a referenced
+clause when approval is not `approved`, when approval source or text is
+missing, when a governance field is missing, or when the rule reference does
+not resolve. A relation must reference declared object ids. The
+`must_have` and `must_not_have` constraints of one entry must not contradict.
+
+The rule and clause binding is strict and bidirectional one-to-one. Every
+forbidden rule that declares `ontology_clause` must pair with exactly one
+clause whose `clause_id` matches and whose `rule_id` points back to the same
+rule. Every clause must be referenced by its rule. A duplicate clause for one
+rule, an orphan clause, or a mismatched pair fails.
+
+It compiles an approved and fully bound clause. The public observation is the
+command's JSON error or successful compiled manifest.
 
 The manifest schema is
 [`contracts/guidance/guidance-manifest.schema.json`](../../../contracts/guidance/guidance-manifest.schema.json).
@@ -228,9 +239,7 @@ fields in Markdown until machine use exists.
       "perception": "",
       "must_have": [],
       "must_not_have": [],
-      "source": [],
-      "approval": "candidate",
-      "governance": []
+      "source": []
     }
   ],
   "behaviors": [
@@ -246,9 +255,7 @@ fields in Markdown until machine use exists.
       "perception": "",
       "must_have": [],
       "must_not_have": [],
-      "source": [],
-      "approval": "candidate",
-      "governance": []
+      "source": []
     }
   ],
   "relations": [
@@ -263,12 +270,26 @@ fields in Markdown until machine use exists.
       "perception": "",
       "must_have": [],
       "must_not_have": [],
-      "source": [],
-      "approval": "candidate",
-      "governance": []
+      "source": []
     }
   ],
-  "clauses": []
+  "clauses": [
+    {
+      "clause_id": "",
+      "rule_id": "",
+      "axis": "behavior",
+      "axis_id": "",
+      "approval": {"state": "candidate", "source": "", "text": ""},
+      "governance": {
+        "edge": "",
+        "gate_kind": "",
+        "check": "",
+        "allow_case": "",
+        "deny_case": "",
+        "observation": ""
+      }
+    }
+  ]
 }
 ```
 

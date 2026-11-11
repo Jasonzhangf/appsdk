@@ -362,7 +362,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: Record toolchain and runner identity
+      - name: Record toolchain and runner environment
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -373,7 +373,6 @@ jobs:
           }
           [System.Environment]::OSVersion.VersionString
           "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
-          "checkout=$(git rev-parse HEAD)"
       - name: Build release binaries (MSVC)
         shell: pwsh
         run: |

@@ -13,7 +13,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -78,7 +78,6 @@ fn official_cli_path() -> String {
 pub enum RexInputStage {
     BeforeWrite,
     WriteQueued { bytes_written: usize },
-    EnterAccepted { bytes_written: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +171,21 @@ pub struct RexProgramStatusRecord {
     pub app: Option<String>,
     pub msg: Option<String>,
     pub updated_at: Option<String>,
+    /// Foreground process at the time the program reported its status. Both
+    /// pid and name are required; Rex reuses PIDs, so pid alone is stale.
+    pub owner: Option<RexProgramStatusOwner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RexProgramStatusOwner {
+    pub pid: u64,
+    pub name: String,
+}
+
+impl RexProgramStatusOwner {
+    fn is_complete(&self) -> bool {
+        self.pid > 0 && !self.name.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +255,8 @@ static TEST_CLI: std::sync::OnceLock<std::sync::RwLock<Option<PathBuf>>> =
 #[cfg(test)]
 static TEST_TIMEOUT: std::sync::OnceLock<std::sync::RwLock<Option<Duration>>> =
     std::sync::OnceLock::new();
+#[cfg(test)]
+pub(crate) static TEST_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 fn test_cli() -> Option<PathBuf> {
@@ -252,7 +268,7 @@ fn test_cli() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-fn set_test_cli(value: Option<PathBuf>) {
+pub(crate) fn set_test_cli(value: Option<PathBuf>) {
     *TEST_CLI
         .get_or_init(|| std::sync::RwLock::new(None))
         .write()
@@ -268,7 +284,7 @@ fn test_timeout() -> Option<Duration> {
 }
 
 #[cfg(test)]
-fn set_test_timeout(value: Option<Duration>) {
+pub(crate) fn set_test_timeout(value: Option<Duration>) {
     *TEST_TIMEOUT
         .get_or_init(|| std::sync::RwLock::new(None))
         .write()
@@ -294,6 +310,56 @@ async fn run_cli(
     deadline: Instant,
     command: &[String],
     stdin_body: Option<String>,
+) -> Result<CompletedCall, RexError> {
+    run_cli_with_capture(
+        operation,
+        cli_path,
+        server,
+        deadline,
+        command,
+        stdin_body,
+        StdoutCapture::All,
+    )
+    .await
+}
+
+async fn run_cli_tail(
+    operation: &'static str,
+    cli_path: &Path,
+    server: &str,
+    deadline: Instant,
+    command: &[String],
+    stdin_body: Option<String>,
+    lines: usize,
+) -> Result<CompletedCall, RexError> {
+    run_cli_with_capture(
+        operation,
+        cli_path,
+        server,
+        deadline,
+        command,
+        stdin_body,
+        StdoutCapture::LastLines(lines),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum StdoutCapture {
+    All,
+    LastLines(usize),
+}
+
+/// One CLI stage within its caller's absolute operation deadline. Dropping the
+/// future also terminates its owned child and cancels both owned pipe readers.
+async fn run_cli_with_capture(
+    operation: &'static str,
+    cli_path: &Path,
+    server: &str,
+    deadline: Instant,
+    command: &[String],
+    stdin_body: Option<String>,
+    stdout_capture: StdoutCapture,
 ) -> Result<CompletedCall, RexError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -341,10 +407,10 @@ async fn run_cli(
     let stdout = child.stdout.take().expect("child stdout captured");
     let stderr = child.stderr.take().expect("child stderr captured");
     let mut stdout_reader = OwnedReader {
-        task: tokio::spawn(drain_to_string(stdout)),
+        task: tokio::spawn(drain_stdout(stdout, stdout_capture)),
     };
     let mut stderr_reader = OwnedReader {
-        task: tokio::spawn(drain_to_string(stderr)),
+        task: tokio::spawn(drain_stdout(stderr, StdoutCapture::All)),
     };
     let mut phase = "stdin write";
     let completion = tokio::time::timeout_at(deadline, async {
@@ -400,12 +466,62 @@ async fn run_cli(
     ))
 }
 
-async fn drain_to_string(
+async fn drain_stdout(
     mut reader: impl AsyncRead + Unpin + Send + 'static,
+    capture: StdoutCapture,
 ) -> io::Result<String> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).await?;
-    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    use tokio::io::AsyncReadExt;
+
+    if let StdoutCapture::All = capture {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        return String::from_utf8(bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+    }
+    let StdoutCapture::LastLines(max_lines) = capture else {
+        unreachable!("StdoutCapture::All handled above");
+    };
+    let mut chunk = [0u8; 8192];
+    let mut carry: Vec<u8> = Vec::new();
+    let mut lines: std::collections::VecDeque<Vec<u8>> =
+        std::collections::VecDeque::with_capacity(max_lines.min(256));
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        carry.extend_from_slice(&chunk[..read]);
+        while let Some(newline) = carry.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = carry.drain(..=newline).collect();
+            line.pop();
+            push_tail_line(&mut lines, line, max_lines);
+        }
+    }
+    if !carry.is_empty() {
+        push_tail_line(&mut lines, carry, max_lines);
+    }
+    let mut output: Vec<u8> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            output.push(b'\n');
+        }
+        output.extend_from_slice(line);
+    }
+    String::from_utf8(output).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn push_tail_line(
+    lines: &mut std::collections::VecDeque<Vec<u8>>,
+    line: Vec<u8>,
+    max_lines: usize,
+) {
+    if max_lines == 0 {
+        return;
+    }
+    if lines.len() == max_lines {
+        lines.pop_front();
+    }
+    lines.push_back(line);
 }
 
 async fn kill_and_reap(child: &mut tokio::process::Child, deadline: Instant) -> io::Result<()> {
@@ -715,14 +831,16 @@ fn terminal_query_body(endpoint: &RexEndpoint) -> String {
     .expect("observe JSON")
 }
 
-fn send_key_argv(endpoint: &RexEndpoint) -> Vec<String> {
+fn capture_argv(endpoint: &RexEndpoint) -> Vec<String> {
     vec![
-        "send-key".to_string(),
+        "capture".to_string(),
         "-s".to_string(),
         endpoint.session_id.clone(),
         "-b".to_string(),
         endpoint.block_id.clone(),
-        "enter".to_string(),
+        "--format=text".to_string(),
+        "--unwrap".to_string(),
+        "--trim".to_string(),
     ]
 }
 
@@ -957,29 +1075,52 @@ async fn write_text_until(
     }
 }
 
-pub async fn send_enter(endpoint: &RexEndpoint) -> Result<(), RexError> {
-    send_enter_until(endpoint, Instant::now() + default_timeout()?).await
+/// Read the latest requested number of text lines from one verified endpoint.
+/// This is a read-only observation: it never writes input, never changes
+/// activity, and never persists the captured text.
+pub async fn snapshot(endpoint: &RexEndpoint, lines: usize) -> Result<Value, RexError> {
+    if !(1..=200).contains(&lines) {
+        return Err(RexError::known_not_delivered(
+            "snapshot",
+            RexInputStage::BeforeWrite,
+            "snapshot lines must be 1..200",
+        ));
+    }
+    let deadline = Instant::now() + default_timeout()?;
+    snapshot_until(endpoint, lines, deadline).await
 }
 
-async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
+async fn snapshot_until(
+    endpoint: &RexEndpoint,
+    lines: usize,
+    deadline: Instant,
+) -> Result<Value, RexError> {
     verify_service_until(endpoint, deadline).await?;
-    let call = run_cli(
-        "send_enter",
+    let call = run_cli_tail(
+        "snapshot",
         Path::new(&official_cli_path()),
         &endpoint.server,
         deadline,
-        &send_key_argv(endpoint),
+        &capture_argv(endpoint),
         None,
+        lines,
     )
     .await?;
     if !call.status.success() {
         return Err(native_failure(
-            "send_enter",
+            "snapshot",
             RexInputStage::BeforeWrite,
             &call,
         ));
     }
-    Ok(())
+    Ok(json!({
+        "transport": "rex",
+        "session_id": endpoint.session_id,
+        "block_id": endpoint.block_id,
+        "lines": lines,
+        "output": call.stdout,
+        "durable": false,
+    }))
 }
 
 pub async fn observe_current(endpoint: &RexEndpoint) -> Result<RexObservation, RexError> {
@@ -1089,6 +1230,18 @@ fn extract_status_records(value: &Value) -> Vec<RexProgramStatusRecord> {
                 .get("updated_at")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            owner: record
+                .get("owner")
+                .and_then(Value::as_object)
+                .and_then(|owner| {
+                    let pid = owner.get("pid").and_then(Value::as_u64)?;
+                    let name = owner.get("name").and_then(Value::as_str)?.to_owned();
+                    let owner = RexProgramStatusOwner {
+                        pid,
+                        name,
+                    };
+                    owner.is_complete().then_some(owner)
+                }),
         })
         .collect()
 }
@@ -1123,24 +1276,15 @@ pub async fn notify(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
-    let receipt = write_text_until(endpoint, text, deadline).await?;
-    let text_stage = RexInputStage::WriteQueued {
-        bytes_written: receipt.bytes_written,
-    };
-    if let Err(error) = send_enter_until(endpoint, deadline).await {
-        return Err(RexError {
-            operation: "notify",
-            class: NotificationDeliveryClass::Unknown,
-            stage: text_stage,
-            native_code: error.native_code,
-            detail: error.detail,
-        });
-    }
+    // One write queues the complete body plus its submission key. A separate
+    // send-key call can fail after the body is queued and strand the text.
+    let submission = format!("{text}\r");
+    let receipt = write_text_until(endpoint, &submission, deadline).await?;
     let value = json!({
         "transport": "rex",
         "bytes_written": receipt.bytes_written,
         "text_queued": true,
-        "enter_accepted": true,
+        "submission_queued": true,
         "consumed": false,
         "mode": mode.unwrap_or("immediate"),
     });
@@ -1295,7 +1439,7 @@ pub fn spawn_events(endpoint: RexEndpoint, on_event: mpsc::Sender<RexEvent>) -> 
         };
         let stderr = child.stderr.take().expect("events stderr captured");
         let mut stderr_reader = OwnedReader {
-            task: tokio::spawn(drain_to_string(stderr)),
+            task: tokio::spawn(drain_stdout(stderr, StdoutCapture::All)),
         };
         let stdout = child.stdout.take().expect("events stdout captured");
         let mut lines = BufReader::new(stdout).lines();

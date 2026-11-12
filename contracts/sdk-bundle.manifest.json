@@ -110,7 +110,8 @@
       "docs/architecture/development-process-control-harness.md",
       "docs/architecture/appsdk-governance-architecture.md",
       "docs/design/project-memory.md",
-      "docs/design/appsdk-global-registry.md"
+      "docs/design/appsdk-global-registry.md",
+      "docs/design/appsdk-ontology-governance.md"
     ],
     "rules": [
       "skills/appsdk-project-governance/SKILL.md"
@@ -125,6 +126,7 @@
       "skills/appsdk-project-governance/references/development-debug.md",
       "skills/appsdk-project-governance/references/goal-prompt.md",
       "skills/appsdk-project-governance/references/init-prompts.md",
+      "skills/appsdk-project-governance/references/ontology-governance.md",
       "skills/appsdk-project-governance/references/process-control-harness.md",
       "skills/appsdk-project-governance/references/review-delivery.md",
       "skills/appsdk-project-governance/references/authoritative-review-template.md",

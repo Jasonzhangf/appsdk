@@ -1,0 +1,60 @@
+{
+  "contract_version": "1",
+  "scope": {
+    "mode": "milestone",
+    "commit": null,
+    "base": "a2951311"
+  },
+  "module_boundary_evidence": [
+    {
+      "module": "Rex notification submission and snapshot adapter",
+      "owner": "collab/src/adapters/rex.rs",
+      "paths": "notify -> write_text_until; snapshot -> verify_service_until -> capture; observe_current -> process/program_status decoding",
+      "edges": "Validated Rex endpoint -> service-generation check -> one terminal.write containing text plus CR -> typed receipt; validated snapshot request -> official capture -> bounded temporary output; observation -> owner-aware status records",
+      "resources": ".appsdk/requirements.json active req-minimal-governance v1, req-collab-communication-notifications v6, req-collab-identity v2, req-command-logs v1; docs/evidence/rex-adapter-reliability-20261111/note.md; docs/evidence/rex-adapter-reliability-20261111/plan.md; docs/design/rex-collab-ontology-20261111.md",
+      "gates": "cargo build --manifest-path collab/Cargo.toml; cargo test --bin collab rex; cargo test --bin collab snapshot -- --test-threads=1; isolated Rex write and capture probe"
+    },
+    {
+      "module": "Worker snapshot public dispatch",
+      "owner": "collab/src/server/mod_parts/part_07.rs",
+      "paths": "Req::WorkerSnapshot -> handle_worker_snapshot -> Rex transport dispatch -> Rex capture primitive",
+      "edges": "Authenticated project worker route -> cloned transport outside state lock -> Rex capture -> transient response with durable=false and worker_id",
+      "resources": "docs/dagpipe/collab-rex-adaptor.graph.json v0.1.2; collab/src/server/peer_tests/part_04.rs; Rex fixture invocation log",
+      "gates": "Rex snapshot public-entry fixture test; line bounds 1..200; no write/send-key; state revision and durable snapshot storage unchanged"
+    },
+    {
+      "module": "Notification rejection labeling",
+      "owner": "collab/src/server/mod_parts/part_05.rs",
+      "paths": "notification delivery classification -> notification_rejected_label -> transport-specific external error",
+      "edges": "Rex KnownNotDelivered or Unknown result -> REX_NOTIFICATION_REJECTED prefix -> preserved underlying Rex error; other transport arms remain unchanged",
+      "resources": "collab/src/server/mod_parts/part_05.rs; notification label tests; active req-collab-communication-notifications v6",
+      "gates": "Rex label unit tests; existing tmux, DSH, Desktop Bridge, and AppServer label regression assertions"
+    },
+    {
+      "module": "Rex activity projection",
+      "owner": "collab/src/server/rex_monitor.rs",
+      "paths": "observe_current -> RexObservation -> process pid/name matching -> valid program-status aggregation -> AgentActivity projection",
+      "edges": "Complete process/program-status query -> current owner filtering -> blocked precedence -> working precedence -> idle projection; no valid record or incomplete evidence -> unknown",
+      "resources": "collab/src/server/rex_monitor_tests.rs; revision 11 owner schema recorded in docs/evidence/rex-adapter-reliability-20261111/plan.md; docs/design/rex-collab-ontology-20261111.md",
+      "gates": "owner pid/name matching tests; stale pid/name tests; blocked/working/idle/done/error/unknown state tests; source-error unknown projection"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "collab/src/adapters/rex.rs",
+      "line": 1231,
+      "rule": "A program-status owner is usable only when its pid and name are complete and can be reliably compared with the current foreground owner.",
+      "evidence": "The decoder accepts any numeric pid and any string name, including pid 0 or an empty/whitespace-only name. The monitor then compares these values directly at lines 231-233. A malformed owner with the same incomplete values as a malformed foreground process can therefore enter the current-record set and project working or waiting_user instead of remaining unknown. The plan requires incomplete owner evidence to be excluded, and the ontology requires pid/name owner identity to be complete before projection.",
+      "remediation": "Treat non-positive pid and blank owner names as incomplete during decoding, and treat blank foreground identity as unavailable. Preserve the record for diagnostics if required, but exclude it from activity aggregation or mark the observation incomplete so the public projection remains unknown."
+    },
+    {
+      "severity": "P1",
+      "file": "docs/evidence/rex-adapter-reliability-20261111/note.md",
+      "line": 66,
+      "rule": "A milestone cannot be released without the required real frontend and public-entry black-box evidence for the changed user path.",
+      "evidence": "The task note explicitly records that real Rex LLM consumption and frontend status refresh still require validation on the changed candidate. The plan requires real Rex frontend observation and public-entry evidence for notification failure labeling, worker snapshot behavior, status projection, foreground-owner changes, and waiting_user precedence. The supplied author evidence contains isolated Rex CLI probes and focused/unit tests, but no evidence for the required post-change frontend/status-refresh path.",
+      "remediation": "Run and record the required changed-candidate black-box acceptance through the real Rex frontend and the public Collab entry points. Cover one complete notification submission path, Rex worker snapshot through the public request, Rex rejection labeling, and status transitions for idle, working, waiting_user, stale owner, done, error, and unknown state. Keep the existing isolated probe evidence as lower-layer evidence; do not use it as a substitute."
+    }
+  ]
+}

@@ -5,6 +5,17 @@
   "type": "object",
   "required": ["schema_version", "skill_id", "guidance_version", "rules", "workflows"],
   "additionalProperties": false,
+  "if": {
+    "properties": {
+      "rules": {
+        "contains": {"required": ["ontology_clause"]}
+      }
+    }
+  },
+  "then": {
+    "required": ["ontology"]
+  },
+  "$comment": "When any rule declares ontology_clause, ontology is required. Cross-array identity, clause axis_id resolution, relation endpoint resolution, must_have/must_not_have contradiction, and the strict bidirectional one-to-one rule-clause binding are enforced by `appsdk guide compile`.",
   "properties": {
     "schema_version": {"const": 1},
     "skill_id": {"type": "string", "minLength": 1},
@@ -18,7 +29,189 @@
         "properties": {
           "rule_id": {"type": "string", "minLength": 1},
           "severity": {"enum": ["advisory", "warning", "forbidden"]},
-          "description": {"type": "string", "minLength": 1}
+          "description": {"type": "string", "minLength": 1},
+          "ontology_clause": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "ontology": {
+      "type": "object",
+      "required": ["schema_version", "objects", "behaviors", "relations", "clauses"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {"const": 1},
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "definition",
+              "identity",
+              "owner",
+              "attributes",
+              "perception",
+              "must_have",
+              "must_not_have",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "definition": {"type": "string", "minLength": 1},
+              "identity": {"type": "string", "minLength": 1},
+              "owner": {"type": "string", "minLength": 1},
+              "attributes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "perception": {"type": "string", "minLength": 1},
+              "must_have": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "must_not_have": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "source": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+            }
+          }
+        },
+        "behaviors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "owner",
+              "precondition",
+              "input",
+              "output",
+              "transition",
+              "effects",
+              "perception",
+              "must_have",
+              "must_not_have",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "owner": {"type": "string", "minLength": 1},
+              "precondition": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "input": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "output": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "transition": {
+                "type": "object",
+                "required": ["from", "to"],
+                "additionalProperties": false,
+                "properties": {
+                  "from": {"type": "string", "minLength": 1},
+                  "to": {"type": "string", "minLength": 1}
+                }
+              },
+              "effects": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "perception": {"type": "string", "minLength": 1},
+              "must_have": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "must_not_have": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "source": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+            }
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "from",
+              "to",
+              "kind",
+              "direction",
+              "cardinality",
+              "perception",
+              "must_have",
+              "must_not_have",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "from": {"type": "string", "minLength": 1},
+              "to": {"type": "string", "minLength": 1},
+              "kind": {"type": "string", "minLength": 1},
+              "direction": {"type": "string", "minLength": 1},
+              "cardinality": {"type": "string", "minLength": 1},
+              "perception": {"type": "string", "minLength": 1},
+              "must_have": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "must_not_have": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "source": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+            }
+          }
+        },
+        "clauses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "clause_id",
+              "rule_id",
+              "axis",
+              "axis_id",
+              "scope",
+              "scenario",
+              "trigger",
+              "allowed_actions",
+              "forbidden_actions",
+              "state_before",
+              "state_after",
+              "effects",
+              "owner",
+              "evidence",
+              "approval",
+              "governance"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "clause_id": {"type": "string", "minLength": 1},
+              "rule_id": {"type": "string", "minLength": 1},
+              "axis": {"enum": ["object", "behavior", "relation"]},
+              "axis_id": {"type": "string", "minLength": 1},
+              "scope": {"type": "string", "minLength": 1},
+              "scenario": {"type": "string", "minLength": 1},
+              "trigger": {"type": "string", "minLength": 1},
+              "allowed_actions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "forbidden_actions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "state_before": {"type": "string", "minLength": 1},
+              "state_after": {"type": "string", "minLength": 1},
+              "effects": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "owner": {"type": "string", "minLength": 1},
+              "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "approval": {
+                "type": "object",
+                "required": ["state", "source", "text"],
+                "additionalProperties": false,
+                "properties": {
+                  "state": {"enum": ["candidate", "approved", "rejected"]},
+                  "source": {"type": "string", "minLength": 1},
+                  "text": {"type": "string", "minLength": 1}
+                }
+              },
+              "governance": {
+                "type": "object",
+                "required": ["edge", "gate_kind", "check", "allow_case", "deny_case", "observation"],
+                "additionalProperties": false,
+                "properties": {
+                  "edge": {"type": "string", "minLength": 1},
+                  "gate_kind": {
+                    "enum": ["identity", "attribute", "precondition", "transition", "relation", "terminal", "effect"]
+                  },
+                  "check": {"type": "string", "minLength": 1},
+                  "allow_case": {"type": "string", "minLength": 1},
+                  "deny_case": {"type": "string", "minLength": 1},
+                  "observation": {"type": "string", "minLength": 1}
+                }
+              }
+            }
+          }
         }
       }
     },

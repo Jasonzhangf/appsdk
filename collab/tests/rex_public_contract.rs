@@ -206,7 +206,10 @@ fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
         "osc-status",
         "state=done:id=collab-live:app=collab-live",
     );
-    fixture.wait_agent_state(&receiver, "unknown");
+    // A valid done record for the current foreground owner is not working.
+    // Under the fixed projection it reports idle instead of the old unknown.
+    let done = fixture.wait_agent_state(&receiver, "idle");
+    assert_eq!(done["activity"], "idle");
 
     let notify_status = fixture.run_ok(&["notify", "status"], Some(&receiver.agent_session_id));
     let lease = direct_subscription(&notify_status, &receiver_id);

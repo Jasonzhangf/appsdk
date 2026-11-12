@@ -125,47 +125,25 @@ pub(super) fn append_notification_invocation(
     explicit_graph: bool,
     result: &Result<Value, String>,
 ) -> Result<(), String> {
-    use std::io::Write;
-
-    let path = root.join(".appsdk-control/command-invocations.jsonl");
-    crate::platform::validate_contained_path(root, &path)
-        .map_err(|_| "path:boundary".to_owned())?;
-    fs::create_dir_all(root.join(".appsdk-control"))
-        .map_err(|error| format!("mkdir:{:?}", error.kind()))?;
-    crate::platform::validate_contained_path(root, &path)
-        .map_err(|_| "path:boundary".to_owned())?;
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if !metadata.is_file() => return Err("path:not_regular_file".to_owned()),
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("path:{:?}", error.kind()));
-        }
-        _ => {}
-    }
-    let mut record = json!({
-        "command": "dagpipe.validate-notifications",
-        "started_at": started_at,
-        "elapsed_ms": elapsed_ms,
-        "graph_selection": if explicit_graph { "explicit" } else { "default" },
-        "outcome": if result.is_ok() { "success" } else { "error" },
-    });
-    if let Err(error) = result {
-        // Every error at this boundary starts with an owner-defined code.
-        record["error_code"] = json!(error.split(':').next().unwrap_or_default());
-    }
-    let mut line = serde_json::to_vec(&record).map_err(|_| "serialize:json".to_owned())?;
-    line.push(b'\n');
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| format!("open:{:?}", error.kind()))?;
-    crate::platform::try_lock_exclusive(&file).map_err(|error| match error {
-        crate::platform::LockAttemptError::WouldBlock => "lock:would_block".to_owned(),
-        crate::platform::LockAttemptError::Io(error) => format!("lock:{:?}", error.kind()),
-    })?;
-    file.write_all(&line)
-        .map_err(|error| format!("append:{:?}", error.kind()))
+    crate::command_invocation::append_command_invocation(
+        root,
+        "dagpipe.validate-notifications",
+        started_at,
+        Some(elapsed_ms),
+        Some((
+            "graph_selection",
+            if explicit_graph {
+                "explicit"
+            } else {
+                "default"
+            },
+        )),
+        if result.is_ok() { "success" } else { "error" },
+        result
+            .as_ref()
+            .err()
+            .map(|error| error.split(':').next().unwrap_or_default()),
+    )
 }
 
 fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {

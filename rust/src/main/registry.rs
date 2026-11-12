@@ -1,6 +1,10 @@
 use super::*;
 
 pub(super) fn assert_governance_maps(root: &Path) {
+    try_assert_governance_maps(root).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_assert_governance_maps(root: &Path) -> Result<(), String> {
     for (name, key) in [
         ("resource-map.json", "resources"),
         ("module-registry.json", "modules"),
@@ -9,11 +13,10 @@ pub(super) fn assert_governance_maps(root: &Path) {
         ("verification-map.json", "gates"),
     ] {
         let file = root.join(".appsdk/maps").join(name);
-        let value: Value = serde_json::from_str(
-            &fs::read_to_string(&file)
-                .unwrap_or_else(|_| fail(format!("MISSING_GOVERNANCE_MAP:{}", name))),
-        )
-        .unwrap_or_else(|_| fail(format!("INVALID_GOVERNANCE_MAP:{}", name)));
+        let text =
+            fs::read_to_string(&file).map_err(|_| format!("MISSING_GOVERNANCE_MAP:{}", name))?;
+        let value: Value =
+            serde_json::from_str(&text).map_err(|_| format!("INVALID_GOVERNANCE_MAP:{}", name))?;
         // Governance maps are project-owned projections. The SDK bundle
         // supplies schema/validation rules, but must not require byte-for-byte
         // equality with a generic SDK map; project modules may add or evolve
@@ -25,10 +28,10 @@ pub(super) fn assert_governance_maps(root: &Path) {
                 .map(|items| items.is_empty())
                 .unwrap_or(true)
         {
-            fail(format!("INVALID_GOVERNANCE_MAP:{}", name));
+            return Err(format!("INVALID_GOVERNANCE_MAP:{}", name));
         }
         if name == "mainline-call-map.json" {
-            for edge in record_array(&value, "/edges", name) {
+            for edge in try_record_array(&value, "/edges", name)? {
                 for field in [
                     "/chain_id",
                     "/owner",
@@ -39,61 +42,69 @@ pub(super) fn assert_governance_maps(root: &Path) {
                     "/output_resource_id",
                     "/error_resource_id",
                 ] {
-                    if record_str(edge, field, name).is_empty() {
-                        fail("UNBOUND_MAINLINE_EDGE");
+                    if try_record_str(edge, field, name)?.is_empty() {
+                        return Err("UNBOUND_MAINLINE_EDGE".to_owned());
                     }
                 }
             }
         }
     }
+    Ok(())
 }
 
 pub(super) fn assert_registry_binding_contract<'a>(
     module: &'a Value,
     module_id: &str,
 ) -> RegistryBinding<'a> {
+    try_assert_registry_binding_contract(module, module_id).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_assert_registry_binding_contract<'a>(
+    module: &'a Value,
+    module_id: &str,
+) -> Result<RegistryBinding<'a>, String> {
     let Some(binding) = module.get("registry_binding") else {
-        return RegistryBinding::Exact;
+        return Ok(RegistryBinding::Exact);
     };
-    let object = binding.as_object().unwrap_or_else(|| {
-        fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
-    });
+    let object = binding
+        .as_object()
+        .ok_or_else(|| format!("INVALID_REGISTRY_BINDING:{}", module_id))?;
     if object
         .keys()
         .any(|key| !matches!(key.as_str(), "mode" | "modules"))
     {
-        fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
+        return Err(format!("INVALID_REGISTRY_BINDING:{}", module_id));
     }
     let mode = object
         .get("mode")
         .and_then(Value::as_str)
-        .unwrap_or_else(|| fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)));
+        .ok_or_else(|| format!("INVALID_REGISTRY_BINDING:{}", module_id))?;
     match mode {
         "exact" => {
             if object.contains_key("modules") {
-                fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
+                return Err(format!("INVALID_REGISTRY_BINDING:{}", module_id));
             }
-            RegistryBinding::Exact
+            Ok(RegistryBinding::Exact)
         }
         "aggregate" => {
             let modules = object
                 .get("modules")
                 .and_then(Value::as_array)
                 .filter(|modules| !modules.is_empty())
-                .unwrap_or_else(|| fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)));
+                .ok_or_else(|| format!("INVALID_REGISTRY_BINDING:{}", module_id))?;
             let mut ids = std::collections::HashSet::new();
             for selected in modules {
                 let selected = selected
                     .as_str()
                     .filter(|selected| !selected.is_empty())
-                    .unwrap_or_else(|| fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)));
+                    .ok_or_else(|| format!("INVALID_REGISTRY_BINDING:{}", module_id))?;
                 if !ids.insert(selected) {
-                    fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
+                    return Err(format!("INVALID_REGISTRY_BINDING:{}", module_id));
                 }
             }
-            RegistryBinding::Aggregate(modules)
+            Ok(RegistryBinding::Aggregate(modules))
         }
-        _ => fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)),
+        _ => Err(format!("INVALID_REGISTRY_BINDING:{}", module_id)),
     }
 }
 
@@ -585,21 +596,34 @@ pub(super) fn assert_sdk_source_registry(root: &Path) {
 }
 
 pub(super) fn required_str<'a>(value: &'a Value, path: &str, error: &str) -> &'a str {
+    try_required_str(value, path, error).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_required_str<'a>(
+    value: &'a Value,
+    path: &str,
+    error: &str,
+) -> Result<&'a str, String> {
     value
         .pointer(path)
         .and_then(Value::as_str)
-        .unwrap_or_else(|| fail(error))
+        .ok_or_else(|| error.to_owned())
 }
 
 pub(super) fn assert_identifier(value: &str, error: &str) {
+    try_assert_identifier(value, error).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_assert_identifier(value: &str, error: &str) -> Result<(), String> {
     if value.is_empty()
         || !value.chars().next().is_some_and(|c| c.is_ascii_lowercase())
         || !value
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        fail(error);
+        return Err(error.to_owned());
     }
+    Ok(())
 }
 
 pub(super) fn canonical(value: &Value) -> String {

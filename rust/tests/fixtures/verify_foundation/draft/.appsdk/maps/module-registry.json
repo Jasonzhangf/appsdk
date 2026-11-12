@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "modules": [
+    {
+      "module_id": "fixture-module",
+      "status": "active",
+      "owner": "fixture::module"
+    }
+  ]
+}

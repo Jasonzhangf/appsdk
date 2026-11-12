@@ -66,6 +66,24 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
   Communication 变化在既有 `communication_cli`/schema 之外增加
   `--bin appsdk communication::lock_tests`。完整 `cli_smoke` 运行时，其覆盖的
   Guidance/Memory/Registry/资源 `cli_smoke` 分组步骤不再重复执行。
+- verify foundation 的图、算子 owner、公开 CLI target 和静态 fixture 选择
+  `rust_verify_foundation`。该组先做全部 target 的 compiler-only `cargo check`，
+  再要求 `verify_foundation::tests`、`command_invocation::tests`、嵌入式
+  graph/manifest 精确过滤、`verify_foundation_cli` 和五个 Unix notification
+  过滤均非空并通过。覆盖 `main.rs`、`main/` 的
+  project/governance/registry/compile/verification/promotion/command_invocation、
+  `dagpipe.rs`、`dagpipe_notification.rs`、foundation graph、公开 target 与静态
+  fixture；`docs/dagpipe/manifest.json` 同时保留 Docs。该选择不设置
+  `windows_appsdk`，不进入既有 Windows `new/init` smoke；同一 public CLI target
+  在 `windows-verify-foundation` 上原生执行。
+- 上述共享文件可能同时承载其他职责。只改其他职责时，必须在同一变更补对应
+  consumer 测试和选路，并由正常 Review 核对；selector 不解析源码符号、审批
+  marker 或额外 registry，不从测试名称推断扩大覆盖。
+- 仅 `rust/tests/cli_smoke/part_07.rs`、`part_08.rs` 和
+  `rust/tests/sdk_resource_refresh_cli.rs` 的纯删除净变化，可用 same-diff numeric
+  metadata 选择 compiler 加 replacement foundation suite。新增、rename、
+  binary/unknown metadata 或测试支持变化保留原有 broader route。解锁只表示允许
+  执行该替代选择，删除断言与替代语义 guard 仍须在 milestone Review 对照。
 - `rust/tests/registry_home_cli.rs` 使用单独选择器：Ubuntu 运行两个通用 home
   用例，Windows AppSDK job 运行并要求精确三个用例（包括 USERPROFILE-only 注册
   消费者）；过滤不到或实际数不符均失败。其余 `rust/src/*` / `rust/tests/*`、
@@ -79,9 +97,10 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 - 治理 Skill 的 `references/*.md` 参考正文变更选择 Docs 和 workflow-contract。
   后者使用正式安装器在隔离环境验证正文升级、导航和缺失目标拒绝。
   同一 diff 的机器 Guidance、schema、模板、源码和其他资源仍按各自路径选测。
-- 普通功能分支 push 在原 before 基线有效且默认分支引用可用时，按默认分支与
-  功能分支的共同祖先选择本分支改动，避免把合流带入的上游改动重复计入。
-  主线 push、PR、release 和缺失基线仍沿各自现有选择路径。
+- 普通功能分支 push 在精确默认分支 ref 可用时，按其与 head 的共同祖先选择
+  完整 feature contribution，包括首次 push 的空/全零 before；默认 ref 不可用时
+  才使用有效 before。两者都不可用或 contribution 为空时仍 full fallback。
+  主线 push、PR 和 release 沿各自现有选择路径。
 - 两个原生 Windows job 复用同一 selector：`windows_appsdk` 在 AppSDK 源码/测试、
   共享资源或 DAGPipe 库变化时运行 MSVC 构建、共享锁与公开入口定向测试（包括三例
   Windows `registry_home_cli`）及公开 consumer smoke；`windows_dagpipe` 在 DAGPipe

@@ -21,6 +21,7 @@ jobs:
       rust_memory: ${{ steps.scope.outputs.rust_memory }}
       rust_registry: ${{ steps.scope.outputs.rust_registry }}
       rust_producer: ${{ steps.scope.outputs.rust_producer }}
+      rust_verify_foundation: ${{ steps.scope.outputs.rust_verify_foundation }}
       rust_cli_smoke: ${{ steps.scope.outputs.rust_cli_smoke }}
       rust_platform_lock_cli: ${{ steps.scope.outputs.rust_platform_lock_cli }}
       rust_registry_home_cli: ${{ steps.scope.outputs.rust_registry_home_cli }}
@@ -100,6 +101,7 @@ jobs:
        needs.changes.outputs.rust_memory == 'true' ||
        needs.changes.outputs.rust_registry == 'true' ||
        needs.changes.outputs.rust_producer == 'true' ||
+       needs.changes.outputs.rust_verify_foundation == 'true' ||
        needs.changes.outputs.rust_cli_smoke == 'true' ||
        needs.changes.outputs.rust_platform_lock_cli == 'true' ||
        needs.changes.outputs.rust_registry_home_cli == 'true' ||
@@ -125,6 +127,7 @@ jobs:
           needs.changes.outputs.rust_memory == 'true' ||
           needs.changes.outputs.rust_registry == 'true' ||
           needs.changes.outputs.rust_producer == 'true' ||
+          needs.changes.outputs.rust_verify_foundation == 'true' ||
           needs.changes.outputs.rust_cli_smoke == 'true' ||
           needs.changes.outputs.rust_platform_lock_cli == 'true' ||
           needs.changes.outputs.rust_registry_home_cli == 'true'
@@ -190,6 +193,37 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- registration init_ --list \
             | grep -E ': test' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- registration init_
+      - name: Foundation compiler check
+        if: needs.changes.outputs.rust_verify_foundation == 'true'
+        run: cargo check --manifest-path rust/Cargo.toml --locked --all-targets
+      - name: Verify foundation tests
+        if: needs.changes.outputs.rust_verify_foundation == 'true'
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk verify_foundation::tests -- --list \
+            | grep -E 'verify_foundation::tests::.*: test$' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk verify_foundation::tests
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk command_invocation::tests -- --list \
+            | grep -E 'command_invocation::tests::.*: test$' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk command_invocation::tests
+          graph_filter='dagpipe::tests::graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs'
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk "$graph_filter" -- --list \
+            | grep -F "$graph_filter: test" > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk "$graph_filter" -- --exact
+          cargo test --manifest-path rust/Cargo.toml --locked --test verify_foundation_cli -- --list \
+            | grep -E ': test$' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test verify_foundation_cli
+          for notification_filter in \
+            dagpipe_validate_notifications_records_invocation_outcomes \
+            dagpipe_validate_notifications_isolates_invocation_log_failure \
+            dagpipe_validate_notifications_rejects_invocation_log_link \
+            dagpipe_validate_notifications_isolates_invocation_log_contention \
+            dagpipe_validate_notifications_accepts_relative_project_and_graph_paths
+          do
+            cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke "$notification_filter" -- --list \
+              | grep -F "$notification_filter: test" > /dev/null
+            cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke "$notification_filter" -- --exact
+          done
       - name: Producer lock tests
         if: needs.changes.outputs.rust_producer == 'true'
         run: |
@@ -215,6 +249,21 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
             | grep -E ': test' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke
+
+  windows-verify-foundation:
+    name: Windows verify foundation CLI (MSVC)
+    needs: changes
+    if: needs.changes.outputs.rust_verify_foundation == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify foundation public CLI tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --manifest-path rust/Cargo.toml --locked --test verify_foundation_cli
+          if ($LASTEXITCODE -ne 0) { throw "foundation CLI tests failed ($LASTEXITCODE)" }
 
   app-sdk-full:
     name: AppSDK full
@@ -350,7 +399,11 @@ jobs:
           HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
         run: |
           if [[ -n "$BASE_SHA" && "$BASE_SHA" != "$HEAD_SHA" ]]; then
-            git diff --check "$BASE_SHA" "$HEAD_SHA"
+            if [[ "$BASE_SHA" == refs/remotes/origin/* ]]; then
+              git diff --check "$BASE_SHA...$HEAD_SHA"
+            else
+              git diff --check "$BASE_SHA" "$HEAD_SHA"
+            fi
           else
             git show --check --oneline --format= "$HEAD_SHA"
           fi

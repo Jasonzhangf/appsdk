@@ -18,19 +18,35 @@ pub(super) fn produce_lifecycle_chain(root: &Path, module_id: &str, phase: &str,
 }
 
 pub(super) fn record_str<'a>(record: &'a Value, path: &str, name: &str) -> &'a str {
+    try_record_str(record, path, name).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_record_str<'a>(
+    record: &'a Value,
+    path: &str,
+    name: &str,
+) -> Result<&'a str, String> {
     record
         .pointer(path)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| fail(format!("INVALID_RECORD:{}:{}", name, path)))
+        .ok_or_else(|| format!("INVALID_RECORD:{}:{}", name, path))
 }
 
 pub(super) fn record_array<'a>(record: &'a Value, path: &str, name: &str) -> &'a Vec<Value> {
+    try_record_array(record, path, name).unwrap_or_else(|error| fail(error))
+}
+
+pub(super) fn try_record_array<'a>(
+    record: &'a Value,
+    path: &str,
+    name: &str,
+) -> Result<&'a Vec<Value>, String> {
     record
         .pointer(path)
         .and_then(Value::as_array)
         .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| fail(format!("INVALID_RECORD:{}:{}", name, path)))
+        .ok_or_else(|| format!("INVALID_RECORD:{}:{}", name, path))
 }
 
 pub(super) fn assert_record_schema(

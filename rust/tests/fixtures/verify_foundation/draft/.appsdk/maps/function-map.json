@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "functions": [
+    {
+      "function_id": "fixture-function",
+      "owner": "fixture::function"
+    }
+  ]
+}

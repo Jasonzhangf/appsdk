@@ -728,6 +728,184 @@ fn desktop_context_same_session_refreshes_native_thread_and_subscription() {
     );
 }
 
+#[test]
+fn public_context_rex_facts_skip_desktop_discovery() {
+    let fixture = Fixture::without_tmux("rex-explicit-transport");
+    let provide = json!({
+        "session_id": "rex-agent-session",
+        "rex": {
+            "server": "missing-rex-server",
+            "session_id": "session:missing-rex-session",
+            "block_id": "block:missing-rex-block",
+            "cwd": fixture.root.to_string_lossy(),
+        },
+    })
+    .to_string();
+    let output = fixture
+        .configured_command(
+            &[
+                "context",
+                "--op",
+                "rex-explicit-transport",
+                "--provide",
+                &provide,
+            ],
+            None,
+        )
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED"),
+        "a Rex-only report must not go through Desktop discovery: {stderr}"
+    );
+    assert!(
+        stderr.contains("REX_NOT_DELIVERED:") || stderr.contains("REX_UNKNOWN:"),
+        "the CLI must preserve the Rex adapter failure: {stderr}"
+    );
+}
+
+#[test]
+fn public_context_partial_rex_environment_skips_desktop_bridge() {
+    let fixture = Fixture::without_tmux("rex-partial-env");
+    let output = fixture
+        .configured_command(&["context", "--op", "rex-partial-env"], None)
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .env(
+            "REX_SESSION",
+            "session:01a1c47f-7e66-7df6-b484-e727bc9e1811",
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED")
+            && !stderr.contains("DESKTOP_BRIDGE_THREAD_REQUIRED"),
+        "a partial Rex environment must not go through Desktop discovery: {stderr}"
+    );
+}
+
+fn register_desktop_binding(
+    fixture: &Fixture,
+    host: &TestAppServer,
+    session_id: &str,
+    thread_id: &str,
+    operation: &str,
+) -> Value {
+    let provide = json!({
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "endpoint": host.endpoint(),
+        "namespace": "codex_app"
+    })
+    .to_string();
+    let output = fixture
+        .configured_command(&["context", "--op", operation, "--provide", &provide], None)
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "desktop register failed: {output:?}");
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    response
+}
+
+// Explicit Rex facts must reach the Rex adapter even when the name/session is
+// already bound to desktop_bridge and the old Desktop runtime is gone.
+#[test]
+fn public_context_rex_facts_reach_rex_adapter_after_desktop_binding() {
+    let fixture = Fixture::without_tmux("rex-facts-after-desktop");
+    let host = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "old-desktop.sock",
+        "rebind-agent-session",
+        "old-desktop-thread",
+        "completed_turn",
+    );
+    let _ = register_desktop_binding(
+        &fixture,
+        &host,
+        "rebind-agent-session",
+        "old-desktop-thread",
+        "rex-rebind-register-desktop",
+    );
+    drop(host);
+    let provide = json!({
+        "session_id": "rebind-agent-session",
+        "rex": {
+            "server": "missing-rex-server",
+            "session_id": "session:01a1baae-5766-7724-92d9-59a846daaf02",
+            "block_id": "block:01a1c455-1e66-73b5-a116-3f10212ab620",
+            "cwd": fixture.root.to_string_lossy()
+        }
+    })
+    .to_string();
+    let output = fixture
+        .configured_command(
+            &["context", "--op", "rex-rebind-explicit", "--provide", &provide],
+            None,
+        )
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("DESKTOP_BRIDGE_THREAD_REQUIRED"),
+        "a saved Desktop binding must not demand its old native thread when Rex facts are supplied: {stderr}"
+    );
+    assert!(
+        stderr.contains("REX_NOT_DELIVERED:") || stderr.contains("REX_UNKNOWN:"),
+        "the Rex adapter failure must be preserved: {stderr}"
+    );
+}
+
+// A name/session already mapped to desktop_bridge may migrate to Rex. Its old
+// native Desktop thread is gone, so a session-only restore must not fabricate a
+// Desktop thread requirement; the daemon owns restore and rebind.
+#[test]
+fn public_context_desktop_binding_session_restore_skips_old_native_thread() {
+    let fixture = Fixture::without_tmux("desktop-rebind-session-only");
+    let host = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "old-desktop.sock",
+        "rebind-agent-session",
+        "old-desktop-thread",
+        "completed_turn",
+    );
+    let _ = register_desktop_binding(
+        &fixture,
+        &host,
+        "rebind-agent-session",
+        "old-desktop-thread",
+        "rex-rebind-register-desktop-session",
+    );
+    drop(host);
+    let provide = json!({"session_id": "rebind-agent-session"}).to_string();
+    let output = fixture
+        .configured_command(
+            &["context", "--op", "rex-rebind-session", "--provide", &provide],
+            None,
+        )
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("DESKTOP_BRIDGE_THREAD_REQUIRED"),
+        "a mapped session must not require the gone Desktop native thread: {stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "a mapped session restore should reach the daemon: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+}
+
 // A master's public `collab context` snapshot must expose, in one read, the
 // durable subordinate managers of its scope: activity, open/blocked tasks and
 // whether each subordinate keeps a patrol armed. The child itself has no

@@ -311,11 +311,20 @@ pub enum BoardCommand {
         long_horizon: LongHorizonArgs,
     },
     /// Master-only repair: recreate the current Execute phase of an admitted
-    /// task that predates the ticket-phase machine, preserving its owner.
+    /// task that predates the ticket-phase machine, preserving its owner. With
+    /// `--admit-legacy`, explicitly admit one public, described, unadmitted
+    /// `working` or `rework` task that a stable owner already accepted and has
+    /// no phase records of its own.
     BackfillExecute {
         id: String,
         #[arg(long)]
         expected_revision: u64,
+        /// Explicitly admit an owned legacy task and record one claimed
+        /// Execute phase in the same batch. Without this flag the command only
+        /// repairs an already admitted ticket.
+        #[arg(long)]
+        #[serde(default)]
+        admit_legacy: bool,
     },
 }
 

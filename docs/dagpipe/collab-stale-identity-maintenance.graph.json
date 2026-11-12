@@ -61,7 +61,7 @@
       "id": "按证据分级当下可用性",
       "operator": "appsdk.collab_stale_identity.classify",
       "operator_version": "1",
-      "description": "按真实 adapter 证据分级为 Present、Cold、Missing 或 Unknown。明确不存在的 pane 或 thread 可以证明 Missing；连接失败、超时、权限拒绝和不完整回执均为 Unknown。观测不写持久身份状态，Cold 和 Unknown 均保留。",
+      "description": "按真实adapter证据分级为Present、Cold、DefinitiveMissing、TimedStale或Unknown。明确不存在的pane、thread或可证明缺席的Desktop端点才可判DefinitiveMissing；连接失败、超时、权限拒绝、不完整回执以及单独的endpoint_live=null/cold/notLoaded均为Unknown。TimedStale是与DefinitiveMissing不同的分支，只针对已派发attempt，固定观察键为(attempt_id, execution_generation, anchor_kind, anchor_id)，从首次持续无法感知且无响应时起算；当前状态可感知、收到真实响应或用户授权时立即退出。观测不写持久身份状态，Cold和Unknown均保留。",
       "inputs": [
         "candidate_bindings"
       ],
@@ -85,7 +85,7 @@
       "id": "核对责任与任务引用",
       "operator": "appsdk.collab_stale_identity.retention_check",
       "operator_version": "1",
-      "description": "观测后读取当前 worker、完整 RuntimeBinding 和目标，变更则保留。在同一 State 锁内核对任务、未读消息、有效用户订阅、激活 fence 与回复义务，再准入 Close。只有 mailbox owner 给出的精确默认收件订阅 ID 属于基础通信，保持完整 snapshot 与 fence，不视为用户待办。仅豁免精确复用操作自己的 fence，其他责任均保留。未完成操作只按完整目标复用，已完成操作不复用为新准入。",
+      "description": "观测后读取当前worker、完整RuntimeBinding和目标，变更则保留。在同一State锁内核对任务、未读消息、有效用户订阅、激活fence与回复义务，再准入Close。只有mailbox owner给出的精确默认收件订阅ID属于基础通信，保持完整snapshot与fence，不视为用户待办。仅豁免精确复用操作自己的fence，其他责任均保留。未完成操作只按完整目标复用，已完成操作不复用为新准入。timed stale只关闭本次执行关系与观察，不改写accepted/unknown attempt，也不把它判成可安全自动重投；peer身份、名字、任务ID、证据、资源和消息责任保留。",
       "inputs": [
         "classified_candidates"
       ],
@@ -109,7 +109,7 @@
       "id": "清理确定缺席的驻留执行绑定",
       "operator": "appsdk.collab_stale_identity.retire_definitive_missing",
       "operator_version": "1",
-      "description": "复用 Close owner 清理明确缺席且无待办责任的驻留 worker 与 route。私有 typed disposition 区分自动清理与显式注销。自动清理保持 active identity map、角色、凭据、消息和精确默认收件订阅，不归档宿主、不撤销 master。没有计划退役的订阅时回执为 NotApplicable。失败保留真实 cleanup-open 与对应 fence。普通 Context 随后按同一 identity map 补齐驻留执行关系。",
+      "description": "复用Close owner清理DefinitiveMissing且无待办责任的驻留worker与route；timed stale走独立分支，只退役当前执行关系、失效当前anchor并停止接受旧generation的start/result。私有typed disposition区分自动清理与显式注销。自动清理保持active identity map、peer身份、名字、角色、凭据、任务、消息和精确默认收件订阅，不归档宿主、不撤销master。端点缺席无法证明时保持Unknown，不退役；close公开终点保留PEER_LIFECYCLE_TARGET_UNPROVEN。没有计划退役的订阅时回执为NotApplicable。失败保留真实cleanup-open与对应fence。普通Context随后按同一identity map补齐驻留执行关系。",
       "inputs": [
         "maintenance_decisions"
       ],
@@ -133,7 +133,7 @@
       "id": "输出唯一维护结果",
       "operator": "appsdk.collab_stale_identity.emit_result",
       "operator_version": "1",
-      "description": "每轮输出唯一结果对象，聚合 retained、retired 与 unknown 及各候选原因和当前操作引用。无候选时输出空批次。结果不重放、不驱动恢复，下一轮由既有 timer 触发。",
+      "description": "每轮输出唯一结果对象，聚合retained、retired与unknown及各候选原因和当前操作引用。retired只表示当前执行关系/anchor退役，不表示身份注销、任务关闭或work可重投。无候选时输出空批次。结果不重放、不驱动恢复，下一轮由既有timer触发。",
       "inputs": [
         "retirement_outcomes"
       ],

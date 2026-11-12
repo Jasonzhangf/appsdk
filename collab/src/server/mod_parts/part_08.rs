@@ -2254,6 +2254,26 @@ fn handle_task_update(
     )
 }
 
+/// True when the board projects this task's owner as empty because the owner
+/// name or binding is no longer usable. This mirrors the `needs_reassignment`
+/// projection so master repair authority matches exactly what the board shows.
+fn task_owner_unavailable(server: &Server, state: &State, task: &TaskRec) -> bool {
+    let route = match server_route_scope(server, state) {
+        Ok(route) => route,
+        Err(_) => return false,
+    };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+    {
+        Ok(control) => control,
+        Err(_) => return false,
+    };
+    assignment_unavailability(state, &control, task, route.as_ref())
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 fn handle_task_update_full(
     server: &Server,
     worker_id: String,
@@ -2316,7 +2336,15 @@ fn task_update_locked(
         );
     }
     if task.owner != worker_id {
-        return Resp::err("only the task owner may update its lifecycle");
+        // A task whose owner name/binding is unavailable projects an empty
+        // owner and `needs_reassignment` on the board. The current project
+        // master owns that repair path so the task cannot stay stuck without a
+        // legal owner or wait state.
+        let master_repair = task_owner_unavailable(server, st, &task)
+            && board_check_master_locked(server, st, &worker_id).is_ok();
+        if !master_repair {
+            return Resp::err("only the task owner may update its lifecycle");
+        }
     }
     let original_status = task.status.clone();
     if status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed")) {

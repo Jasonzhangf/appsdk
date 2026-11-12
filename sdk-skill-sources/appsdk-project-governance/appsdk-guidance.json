@@ -18,8 +18,110 @@
     {"rule_id": "debug-notes-required", "severity": "warning", "description": "During debug exploration, append observations, hypotheses, and evidence to the active run notes before resolution."},
     {"rule_id": "map-gate-update", "severity": "advisory", "description": "Update function ownership and verification gates in the same change when the implementation changes them."},
     {"rule_id": "recommended-design", "severity": "warning", "description": "Record requirement, architecture, and detailed-design closure before feature implementation."},
+    {"rule_id": "ontology-approval-before-gate", "severity": "forbidden", "description": "A rule or ontology clause becomes mandatory only after exact user approval and binding to an executable governance edge or gate.", "ontology_clause": "ontology-approval-before-gate"},
     {"rule_id": "prior-record-search", "severity": "advisory", "description": "Check prior verified successes and failures before repeating exploration."}
   ],
+  "ontology": {
+    "schema_version": 1,
+    "objects": [
+      {
+        "id": "ontology-clause",
+        "name": "Ontology rule clause",
+        "definition": "A rule clause that binds one guidance rule to approved ontology semantics and an executable governance gate.",
+        "identity": "Same clause_id within one guidance manifest source.",
+        "owner": "AppSDK guidance compiler",
+        "attributes": ["clause_id", "rule_id", "axis", "axis_id", "approval", "governance"],
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "must_have": ["exact user approval", "declared governance edge or gate", "legal case", "illegal case", "observation path"],
+        "must_not_have": ["candidate approval state", "missing governance field", "unmatched rule reference"],
+        "source": ["docs/design/appsdk-ontology-governance.md"]
+      },
+      {
+        "id": "guidance-rule",
+        "name": "Guidance rule",
+        "definition": "A rule declared in a guidance manifest with a severity and an optional ontology governance reference.",
+        "identity": "Same rule_id within one guidance manifest source.",
+        "owner": "AppSDK guidance compiler",
+        "attributes": ["rule_id", "severity", "description", "ontology_clause"],
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "must_have": ["unique rule_id", "declared severity"],
+        "must_not_have": ["duplicate rule_id"],
+        "source": ["docs/design/appsdk-ontology-governance.md"]
+      }
+    ],
+    "behaviors": [
+      {
+        "id": "ontology-clause-approval",
+        "name": "Ontology clause approval before gate binding",
+        "owner": "AppSDK guidance compiler",
+        "precondition": ["A guidance rule claims ontology governance with forbidden severity."],
+        "input": ["ontology clause declaration", "exact user approval", "governance edge or gate binding"],
+        "output": ["approved clause compiled into the manifest", "structured rejection error"],
+        "transition": {"from": "candidate", "to": "approved-and-bound"},
+        "effects": ["The compiler writes the compiled manifest only for an approved and fully bound clause."],
+        "perception": "appsdk guide compile JSON output",
+        "must_have": [
+          "approval.state approved",
+          "approval.source",
+          "approval.text",
+          "governance.edge",
+          "governance.gate_kind",
+          "governance.check",
+          "governance.allow_case",
+          "governance.deny_case",
+          "governance.observation"
+        ],
+        "must_not_have": ["candidate approval state", "missing governance field"],
+        "source": ["Codex conversation 2026-11-11", "docs/design/appsdk-ontology-governance.md"]
+      }
+    ],
+    "relations": [
+      {
+        "id": "ontology-clause-governs-rule",
+        "name": "Ontology clause governs rule",
+        "from": "ontology-clause",
+        "to": "guidance-rule",
+        "kind": "governs",
+        "direction": "directed",
+        "cardinality": "one-to-one",
+        "perception": "appsdk guide compile JSON output and the compiled guidance manifest",
+        "must_have": ["the forbidden rule references exactly its bound clause", "the clause references exactly its governing rule"],
+        "must_not_have": ["a clause referenced by another rule", "a rule referenced by another clause", "an orphan clause or rule"],
+        "source": ["docs/design/appsdk-ontology-governance.md"]
+      }
+    ],
+    "clauses": [
+      {
+        "clause_id": "ontology-approval-before-gate",
+        "rule_id": "ontology-approval-before-gate",
+        "axis": "behavior",
+        "axis_id": "ontology-clause-approval",
+        "scope": "AppSDK guidance rules and ontology clauses that claim mandatory enforcement.",
+        "scenario": "A proposed rule or ontology clause is about to become mandatory governance.",
+        "trigger": "The clause is declared with forbidden severity and references ontology governance.",
+        "allowed_actions": ["Keep the clause advisory until exact user approval and gate binding are present.", "Compile an approved clause only when the bound gate defines legal, illegal, and observation cases."],
+        "forbidden_actions": ["Treat a candidate or unbound clause as mandatory.", "Bind a gate before exact user approval."],
+        "state_before": "candidate",
+        "state_after": "approved-and-bound",
+        "effects": ["The guidance compiler rejects candidate or unbound ontology clauses.", "The guidance compiler accepts approved clauses with executable gate evidence."],
+        "owner": "AppSDK guidance compiler",
+        "evidence": ["GUIDANCE_ONTOLOGY_CLAUSE_APPROVED_AND_BOUND", "rust/tests/cli_smoke/part_13.rs"],
+        "approval": {
+          "state": "approved",
+          "source": "Codex conversation 2026-11-11",
+          "text": "这个 ontology 规则要变成全局治理规则，你检查下还要做什么依赖迁移吗？理论上 appsdk 不升级版本号应该可以？"
+        },
+        "governance": {
+          "edge": "guidance rules -> appsdk guide compile",
+          "gate_kind": "precondition",
+          "check": "GUIDANCE_ONTOLOGY_CLAUSE_APPROVED_AND_BOUND",
+          "allow_case": "An approved clause references a declared forbidden rule and includes every gate field.",
+          "deny_case": "A candidate clause, missing approval source or text, missing gate field, or unresolved rule reference.",
+          "observation": "appsdk guide compile exits nonzero with a JSON error for the deny case and exits zero for the allow case."
+        }
+      }
+    ]
+  },
   "workflows": [
     {
       "domain": "bootstrap",
@@ -55,6 +157,21 @@
         {"node_id": "preflight_verify", "instruction": "Run the applicable AppSDK and project preflight checks.", "owner": "project", "evidence": ["verify-result"]}
       ],
       "edges": [{"from": "goal_scope", "to": "architecture_maps"}, {"from": "architecture_maps", "to": "owner_worktree"}, {"from": "owner_worktree", "to": "preflight_verify"}]
+    },
+    {
+      "domain": "rule-governance",
+      "objective": "Turn approved rule intent into executable governance without treating requirements, notes, or proposals as enforcement.",
+      "entry_node": "rule_inventory",
+      "nodes": [
+        {"node_id": "rule_inventory", "instruction": "Inventory the affected rules, code paths, DAGs, memories, and project facts; separate rule candidates from non-rule facts.", "owner": "project", "evidence": ["rule-inventory", "fact-separation"]},
+        {"node_id": "ontology_model", "instruction": "Model the affected Object, Behavior, and Relation semantics, including required and forbidden attributes, transitions, and relations.", "owner": "project", "evidence": ["ontology-model"]},
+        {"node_id": "clause_approval", "instruction": "Obtain exact user approval for each rule clause that changes enforcement; do not treat approval of the overall model or flow as approval of individual clauses.", "owner": "project", "evidence": ["ontology-approval-record"]},
+        {"node_id": "gate_binding", "instruction": "Bind every approved clause to an executable governance edge or gate with one legal case, one illegal case, and a real observation path.", "owner": "project", "evidence": ["governance-edge-binding", "legal-case", "illegal-case", "observation-path"]},
+        {"node_id": "red_test", "instruction": "Add the red test before changing the unique owner's code.", "owner": "project", "evidence": ["red-test"]},
+        {"node_id": "implementation", "instruction": "Modify only the unique owner's code.", "owner": "project", "evidence": ["source-diff"]},
+        {"node_id": "public_entry_verification", "instruction": "Run the real public entrypoint and record the result.", "owner": "project", "evidence": ["blackbox-evidence"]}
+      ],
+      "edges": [{"from": "rule_inventory", "to": "ontology_model"}, {"from": "ontology_model", "to": "clause_approval"}, {"from": "clause_approval", "to": "gate_binding"}, {"from": "gate_binding", "to": "red_test"}, {"from": "red_test", "to": "implementation"}, {"from": "implementation", "to": "public_entry_verification"}]
     },
     {
       "domain": "develop",

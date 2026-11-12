@@ -19,6 +19,87 @@ fn register_worker(state: &mut State, id: &str) {
     );
 }
 
+fn described_owner_task(
+    id: &str,
+    owner: &str,
+    status: &str,
+) -> (TaskRec, crate::board::BoardTaskDetails) {
+    let task = TaskRec {
+        id: id.into(),
+        owner: owner.into(),
+        created_by: owner.into(),
+        feature_id: None,
+        worktree_path: None,
+        branch: None,
+        base_commit: None,
+        priority: "p2".into(),
+        status: status.into(),
+        next_step: None,
+        wait: None,
+        isolation_mode: None,
+        created_ms: now_ms(),
+        updated_ms: now_ms(),
+    };
+    let details = crate::board::BoardTaskDetails {
+        title: "Legacy state ticket".into(),
+        description: "state reducer legacy admission".into(),
+        delivery_condition: "admission creates one claimed phase".into(),
+        test_condition: "state reducer admission test".into(),
+        public_visibility: true,
+        admitted: false,
+        revision: 1,
+        ..crate::board::BoardTaskDetails::default()
+    };
+    (task, details)
+}
+
+#[test]
+fn legacy_admission_rejects_any_phase_history_before_mutation() {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+    let mut state = State::default();
+    let (task, details) = described_owner_task("legacy-state-phase", "owner", "rework");
+    state
+        .apply_checked(&Event::TaskCreated { task: task.clone() })
+        .unwrap();
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: task.id.clone(),
+            details: details.clone(),
+        })
+        .unwrap();
+    // The described rework task is eligible while it has no phase history.
+    assert!(super::legacy_admission_eligibility(&state, &details, &task).is_ok());
+    // Any phase record, including revoked history, blocks admission.
+    state
+        .apply_checked(&Event::TicketPhaseRecorded {
+            phase: TicketPhaseRecord {
+                task_id: task.id.clone(),
+                phase: TicketPhaseKind::Execute,
+                batch: 0,
+                priority: "p2".into(),
+                status: TicketPhaseStatus::Revoked,
+                slot_name: None,
+                binding_generation: 0,
+                enqueue_seq: 1,
+                attempt_generation: 0,
+                depends_on: Vec::new(),
+                route_group: None,
+                wait_reason: None,
+                result: None,
+            },
+        })
+        .unwrap();
+    let rejection = super::legacy_admission_eligibility(&state, &details, &task).unwrap_err();
+    assert!(
+        rejection
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("TICKET_ADMISSION_PHASE_CONFLICT"),
+        "{rejection:?}"
+    );
+}
+
 fn register_managed_child(state: &mut State, id: &str, parent: &str, peer: &str) {
     state
         .apply_checked(&Event::SubagentUpdated {
@@ -59,6 +140,71 @@ fn task(id: &str, owner: &str) -> TaskRec {
         created_ms: now_ms(),
         updated_ms: now_ms(),
     }
+}
+
+#[test]
+fn reviewer_rebind_keeps_delivered_task_stable_and_updates_next_step() {
+    let (server, root) = test_server();
+    {
+        let mut state = server.state.lock().unwrap();
+        register_worker(&mut state, "author");
+        register_worker(&mut state, "master");
+        let mut delivered = task("reviewer-rebind", "author");
+        delivered.created_by = "master".into();
+        delivered.status = "delivered".into();
+        delivered.next_step =
+            Some("await review by Bob; use collab task review --accept or --rework".into());
+        state
+            .apply_checked(&Event::TaskCreated { task: delivered })
+            .unwrap();
+        state
+            .board_details
+            .get_mut("reviewer-rebind")
+            .unwrap()
+            .work_policy
+            .reviewer_name = Some("Bob".into());
+        state.task_lifecycle.insert(
+            "reviewer-rebind".into(),
+            state::TaskLifecycleRecord {
+                required_reviewer_name: Some("Bob".into()),
+                delivery_kind: state::TaskDeliveryKind::ReadOnly,
+                delivery_evidence: Some("delivery evidence".into()),
+                delivered_ms: Some(now_ms()),
+                review_subject_revision: 2,
+                ..Default::default()
+            },
+        );
+    }
+
+    let patch = crate::board::WorkPolicy {
+        reviewer_name: Some("Carol".into()),
+        ..Default::default()
+    };
+    let response = board_work_policy(
+        &server,
+        "author".into(),
+        "token-author".into(),
+        "task".into(),
+        Some("reviewer-rebind".into()),
+        patch,
+        Some(1),
+    );
+    assert!(response.ok, "{:?}", response.error);
+
+    let state = server.state.lock().unwrap();
+    let task = &state.tasks["reviewer-rebind"];
+    assert_eq!(task.status, "delivered");
+    assert_eq!(
+        task.next_step.as_deref(),
+        Some("await review by Carol; use collab task review --accept or --rework")
+    );
+    let lifecycle = &state.task_lifecycle["reviewer-rebind"];
+    assert_eq!(lifecycle.required_reviewer_name.as_deref(), Some("Carol"));
+    assert!(lifecycle.reviewer.is_none());
+    assert!(lifecycle.review_evidence.is_none());
+    assert_eq!(lifecycle.review_subject_revision, 3);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -170,8 +170,10 @@ Long-horizon goals belong to the invited or claiming peer. That peer
 orchestrates bounded execution and observation through independent
 `codex exec --profile gcm` workers. Master and peer have the same orchestration
 function at different goal levels: master coordinates the larger project goal,
-and peer coordinates a delegated subgoal. Bounded execution and observation go
-directly to subworkers regardless of peer idleness. `collab subagent dispatch`,
+and peer coordinates a delegated subgoal. Check idle, suitable authorized peers
+and available capacity first; use peer capacity that can take the ready work.
+Direct-dispatch independent GCM workers only when no suitable authorized peer
+can take the work. `collab subagent dispatch`,
 `collab subagent send`, and managed-subagent records are legacy compatibility
 for diagnosis or migration, not a production assignment path.
 

@@ -661,6 +661,98 @@ fn canonical_work_role_rules() -> Vec<String> {
     .collect()
 }
 
+fn collect_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => out.push(text.clone()),
+        Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
+        Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
+        _ => {}
+    }
+}
+
+#[test]
+fn shipped_workflow_asset_rejects_peer_busy_before_gcm_guidance() {
+    let asset: Value = serde_json::from_str(include_str!(
+        "../../skills/collab/references/workflow-templates.json"
+    ))
+    .expect("shipped workflow-templates.json must parse");
+    let mut strings = Vec::new();
+    collect_strings(&asset, &mut strings);
+    let old = "regardless of whether other peers are busy";
+    for text in &strings {
+        assert!(
+            !text.to_lowercase().contains(old),
+            "peer-busy-before-GCM guidance must be rejected: {text}"
+        );
+    }
+    for role in ["master", "peer"] {
+        let text = asset["identity_templates"][role].to_string().to_lowercase();
+        assert!(
+            text.contains("no suitable authorized peer can take the work"),
+            "{role} identity template must prefer idle authorized peer capacity: {text}"
+        );
+    }
+    for (name, text) in [
+        (
+            "operations.md",
+            include_str!("../../skills/collab/operations.md"),
+        ),
+        ("README.md", include_str!("../../README.md")),
+    ] {
+        let text = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            !text.contains("regardless of whether other peers are busy"),
+            "{name} must reject peer-busy-before-GCM guidance"
+        );
+        assert!(
+            !text.contains("regardless of peer idleness"),
+            "{name} must reject peer-idle-independent GCM dispatch"
+        );
+        assert!(
+            !text.contains("peer availability does not gate this routing"),
+            "{name} must reject peer-availability-independent GCM dispatch"
+        );
+        assert!(
+            !text.contains(
+                "send one-shot execution or observation directly to independent gcm workers"
+            ),
+            "{name} must reject direct-GCM-first guidance"
+        );
+        assert!(
+            text.contains("no suitable authorized peer can take the work"),
+            "{name} must require peer-first dispatch"
+        );
+        if name == "operations.md" {
+            for old in [
+                "bounded one-shot execution or observation always uses an independent",
+                "dispatch its bounded execution or observation directly to independent",
+                "run bounded work through independent",
+                "for bounded execution or observation, give an independent",
+                "use independent `codex exec --profile gcm` workers for bounded execution or observation",
+            ] {
+                assert!(
+                    !text.contains(old),
+                    "{name} must reject unconditional direct-GCM guidance: {old}"
+                );
+            }
+            assert!(
+                text.contains(
+                    "a peer may split an accepted goal into non-overlapping bounded scopes and dispatch those scopes directly to independent"
+                ),
+                "{name} must preserve direct GCM dispatch for a peer's own bounded subwork"
+            );
+            assert!(
+                text.contains("only when no suitable authorized peer can take the goal"),
+                "{name} must gate manager direct dispatch on eligible peer capacity"
+            );
+        }
+    }
+}
+
 fn static_operation_kinds(snapshot: &Value) -> Vec<String> {
     snapshot["operations"]
         .as_array()
@@ -685,6 +777,15 @@ fn context_role_guidance_reaches_master_and_peer_with_latest_dynamic_roles() {
 
     for (label, snapshot) in [("master", &master), ("peer", &peer)] {
         let brief = &snapshot["role_brief"];
+        let brief_lower = brief.to_string().to_lowercase();
+        assert!(
+            !brief_lower.contains("regardless of whether other peers are busy"),
+            "{label} role_brief must reject peer-busy-before-GCM guidance: {brief_lower}"
+        );
+        assert!(
+            brief_lower.contains("no suitable authorized peer can take the work"),
+            "{label} role_brief must prefer idle, suitable authorized peer capacity: {brief_lower}"
+        );
         assert!(
             brief.get("work_roles").is_none() && brief.get("tasks").is_none(),
             "{label} role_brief must reuse top-level dynamic values instead of mirroring them: {brief}"
@@ -1889,6 +1990,136 @@ fn admitted_ticket_missing_execute_phase_is_rejected_not_treated_as_legacy() {
         thread,
     );
     assert!(rejected.contains("TICKET_PHASE_MISSING"), "{rejected}");
+}
+
+#[test]
+fn cross_slot_stale_execute_phase_is_reclaimed_by_current_assignment() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "cross-slot stale fixture",
+        ],
+        THREAD_A,
+    );
+
+    let id = "cross-slot-stale";
+    let published = publish(&fixture, id, &[]);
+    let old_slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .expect("admitted ticket has an execution slot")
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let old_worker = slot_worker_id(&board, &old_slot);
+    let owner_thread = ticket_thread(&fixture, &old_worker);
+    let other_thread = [THREAD_B, THREAD_C]
+        .into_iter()
+        .find(|thread| *thread != owner_thread)
+        .expect("fixture must retain a second peer thread");
+    let other_identity = fixture.run_public(&["context"], other_thread);
+    let other_worker = other_identity["identity"]["worker_id"]
+        .as_str()
+        .expect("other peer has a worker id")
+        .to_owned();
+    let other_name = other_identity["identity"]["display_name"]
+        .as_str()
+        .expect("other peer has a stable slot name")
+        .to_owned();
+
+    let claimed = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        owner_thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+
+    // The other peer still cannot take a live claim while ownership and
+    // assignment remain with the original slot.
+    let refused = rejected(
+        &fixture,
+        &["board", "claim", id, "--expected-revision", "2"],
+        other_thread,
+    );
+    assert!(refused.contains("BOARD_TASK_NOT_PENDING"), "{refused}");
+
+    // Simulate the durable handoff committed by an earlier daemon: task and
+    // assignment now point at the new carrier, while the newest Execute phase
+    // remains Running on the old slot with no submitted result.
+    fixture.update_current_state(|state| {
+        state["tasks"][id]["owner"] = json!(other_worker);
+        state["tasks"][id]["status"] = json!("working");
+        state["task_assignments"][id]["name"] = json!(other_name);
+        state["task_assignments"][id]["session_id"] = json!(other_thread);
+    });
+
+    let recovered = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "2"],
+        other_thread,
+    );
+    assert_eq!(recovered["task"]["status"], "working");
+    assert_eq!(recovered["task"]["revision"], 3);
+    let recovered_state = fixture.current_state();
+    let phases: Vec<&Value> = recovered_state["ticket_phases"]
+        .as_array()
+        .expect("phase records persist")
+        .iter()
+        .filter(|phase| phase["task_id"] == id)
+        .collect();
+    assert_eq!(phases.len(), 2, "{phases:?}");
+    assert_eq!(phases[0]["status"], "revoked");
+    assert_eq!(phases[0]["slot_name"], old_slot.as_str());
+    assert_eq!(phases[0]["attempt_generation"], 1);
+    assert_eq!(phases[1]["status"], "claimed");
+    assert_eq!(phases[1]["slot_name"], other_name.as_str());
+    assert_eq!(
+        phases[1]["binding_generation"],
+        slot_generation(&fixture, &other_worker)
+    );
+    assert_eq!(phases[1]["attempt_generation"], 2);
+
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "3",
+            "--attempt",
+            "2",
+        ],
+        other_thread,
+    );
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--evidence",
+            "cross-slot recovery evidence",
+            "--attempt",
+            "2",
+            "--no-candidate",
+        ],
+        other_thread,
+    );
+    assert_eq!(delivered["status"], "delivered");
 }
 
 #[test]

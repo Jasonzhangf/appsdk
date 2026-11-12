@@ -315,7 +315,9 @@ pub(crate) fn ticket_recovery_claim_phase(
 /// recovery batch because no pending control effect exists to have queued one.
 /// The current stable-name carrier may still release the slot through the
 /// public claim path when the newest execute attempt is Claimed/Running at an
-/// older generation. `rework` is included because a reopened rework attempt
+/// older generation, or when assignment and task ownership already moved to
+/// this slot while the newest execute attempt is still on another slot with no
+/// submitted result. `rework` is included because a reopened rework attempt
 /// can be left at an older generation with no other recovery path.
 pub(crate) fn ticket_stale_active_claim_phase(
     state: &State,
@@ -350,7 +352,6 @@ pub(crate) fn ticket_stale_active_claim_phase(
         .filter(|phase| {
             phase.task_id == task_id
                 && phase.phase == TicketPhaseKind::Execute
-                && phase.slot_name.as_deref() == Some(slot_name)
         })
         .collect();
     execute.sort_by_key(|phase| phase.batch);
@@ -361,7 +362,14 @@ pub(crate) fn ticket_stale_active_claim_phase(
     ) {
         return None;
     }
-    if newest.binding_generation == 0 || newest.binding_generation >= current_generation {
+    let same_slot = newest.slot_name.as_deref() == Some(slot_name);
+    let stale_same_slot =
+        same_slot && newest.binding_generation > 0 && newest.binding_generation < current_generation;
+    let stale_cross_slot = !same_slot
+        && newest.slot_name.is_some()
+        && newest.binding_generation > 0
+        && newest.result.is_none();
+    if !stale_same_slot && !stale_cross_slot {
         return None;
     }
     Some((*newest).clone())
@@ -605,8 +613,18 @@ fn board_work_policy(
                     &mut record,
                     details.work_policy.reviewer_name.clone(),
                 ));
+                // A reviewer rebind invalidates the previous verdict, but it is
+                // not itself a typed rework decision. Keep a delivered (or
+                // accepted) task delivered so the new reviewer can decide, and
+                // point next_step at the current required reviewer.
                 if matches!(task.status.as_str(), "accepted" | "delivered") {
-                    task.status = "rework".into();
+                    task.status = "delivered".into();
+                    task.next_step = Some(match details.work_policy.reviewer_name.as_deref() {
+                        Some(name) => format!(
+                            "await review by {name}; use collab task review --accept or --rework"
+                        ),
+                        None => "task owner or live master reviews delivery with collab task review --accept or --rework".into(),
+                    });
                 }
                 if record.delivered_ms.is_some() {
                     events.push(Event::TaskLifecycleUpdated {
@@ -619,6 +637,7 @@ fn board_work_policy(
     }
     details.revision += 1;
     task.updated_ms = now_ms();
+    let resulting_status = task.status.clone();
     events.extend([
         Event::TaskUpdated { task },
         Event::BoardDetailsChanged {
@@ -626,8 +645,12 @@ fn board_work_policy(
             details,
         },
     ]);
-    if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
-        events.push(event);
+    // Only an executing state reopens a completed execute phase. A reviewer
+    // rebind that keeps the task delivered must not restart execution.
+    if matches!(resulting_status.as_str(), "working" | "verifying" | "rework") {
+        if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
+            events.push(event);
+        }
     }
     if let Err(error) = server.commit_locked_checked(&mut state, &events) {
         return Resp::err(format!("WORK_POLICY_DURABILITY_FAILED: {error}"));

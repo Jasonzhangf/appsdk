@@ -1,0 +1,35 @@
+{
+  "contract_version": "1",
+  "scope": {
+    "mode": "milestone",
+    "commit": null,
+    "base": "a2951311"
+  },
+  "module_boundary_evidence": [
+    {
+      "module": "Rex adapter owner decoding",
+      "owner": "collab/src/adapters/rex.rs",
+      "paths": "collab/src/adapters/rex.rs:174-188; collab/src/adapters/rex.rs:1233-1244; collab/src/adapters/rex/tests.rs:590-635",
+      "edges": "Rex program_status JSON -> owner decoding -> RexObservation -> monitor projection",
+      "resources": "RexProgramStatusOwner requires pid>0 and a non-blank name; incomplete owner objects are converted to None; complete pid/name pairs remain available for matching",
+      "gates": "observe_current_drops_incomplete_owner_identity covers missing pid, pid=0, missing name, empty name, and whitespace-only name; complete owner decoding remains covered"
+    },
+    {
+      "module": "Rex monitor activity projection",
+      "owner": "collab/src/server/rex_monitor.rs",
+      "paths": "collab/src/server/rex_monitor.rs:203-268; collab/src/server/rex_monitor_tests.rs:118-225",
+      "edges": "RexObservation foreground process -> complete foreground identity check -> exact owner pid/name match -> activity projection",
+      "resources": "foreground pid must be greater than zero and foreground name must be non-blank; records without an exact current-owner match are excluded; no matching records produce unknown",
+      "gates": "incomplete_foreground_identity_never_projects_busy_or_waiting covers zero, missing, empty, and whitespace-only foreground identity; stale pid/name and ownerless records do not project busy; valid working, blocked, and done/idle records are covered"
+    },
+    {
+      "module": "Rex public contract",
+      "owner": "collab/tests/rex_public_contract.rs",
+      "paths": "collab/tests/rex_public_contract.rs:33-35; collab/tests/rex_public_contract.rs:120-143; collab/tests/rex_public_contract.rs:162-373; collab/tests/support/rex_public_fixture.rs:206-216; collab/tests/support/rex_public_fixture.rs:292-337; collab/tests/support/rex_public_fixture.rs:401-455",
+      "edges": "explicit Rex server selection -> real Rex receiver sessions -> isolated Collab daemon -> public context/notify/sendmessage/recv/reply/restart commands -> receiver capture and state observations",
+      "resources": "COLLAB_REX_TEST_SERVER is required and non-empty; the fixture creates real Rex sessions with a Python receiver and starts a test-owned isolated daemon; the public path checks Rex transport binding, working to busy, blocked to waiting_user, done to idle, notification body fidelity, recv, reply, unread survival across daemon restart, and identity/binding preservation",
+      "gates": "rex_public_context_send_recv_reply_restart_and_body_fidelity is explicitly ignored unless the Rex server is selected, and the task evidence records execution with the local Rex server and a completed end-to-end run"
+    }
+  ],
+  "findings": []
+}

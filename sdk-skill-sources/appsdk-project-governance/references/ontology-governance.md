@@ -211,6 +211,45 @@ The manifest schema is
 Do not describe a manifest-only clause as mandatory unless this compiler gate
 is present.
 
+### 6.1 Consumer binding
+
+Compilation validates the declaration. A consumer makes an approved clause
+executable only when its real entry binds the declaration to its graph,
+operators, and commit owner through the `pipeline_runtime::governance` API.
+
+The optional `ontology.execution` extension declares object states and
+contracts, relation scopes and cardinalities, `(object, from-state, event)` operations,
+the graph and commit node, and the required clauses. A consumer normally uses:
+
+```rust
+let operation = pipeline_runtime::governance::bind_operation(
+    ontology,
+    behavior_id,
+    consumer_graph,
+    consumer_registry,
+    commit_owner,
+    &capabilities,
+)?;
+let result = operation.call(request, identity, &cancellation)?;
+```
+
+`bind_operation` resolves project operators through the existing
+`Registry`, protects the commit node from bypass, and returns the single
+operation entry. The `CommitOwner` owns the project consistency boundary. It
+constructs the complete candidate snapshot, calls the supplied validation
+closure while holding that boundary, and commits only after validation
+passes. The SDK does not provide a transaction engine, automatic rollback, or
+a second gate registry.
+
+The built-in gates are `ontology.object@1`, `ontology.behavior@1`,
+`ontology.relation@1`, and `ontology.transition@1` as a behavior alias.
+Project gates must accept an `Object`, return `Bool`, and declare no effects.
+The SDK reserves `governance.commit@1`; a project must not register it.
+
+An approved clause without a real graph binding remains a candidate. A
+manifest that passes `appsdk guide compile` does not by itself prove that the
+consumer process registered the operators or executed the gate.
+
 ## 7. Rule ownership
 
 Update only the owner of the rule:
@@ -233,7 +272,7 @@ fields in Markdown until machine use exists.
 
 ```json
 {
-  "ontology_version": 1,
+  "schema_version": 1,
   "objects": [
     {
       "id": "",
@@ -295,7 +334,37 @@ fields in Markdown until machine use exists.
         "observation": ""
       }
     }
-  ]
+  ],
+  "execution": {
+    "version": 1,
+    "objects": [
+      {
+        "object_id": "",
+        "states": [],
+        "contract": {"operator": "", "version": "1"}
+      }
+    ],
+    "relations": [
+      {
+        "relation_id": "",
+        "scope": "same_scope",
+        "forward": {"min": 0, "max": 1},
+        "create_by": [],
+        "replace_by": [],
+        "remove_by": []
+      }
+    ],
+    "operations": [
+      {
+        "behavior_id": "",
+        "object_id": "",
+        "event": "",
+        "graph_id": "",
+        "commit_node": "",
+        "clauses": []
+      }
+    ]
+  }
 }
 ```
 

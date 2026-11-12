@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "skill_id": "ontology-governance-legacy-fixture",
+  "guidance_version": "1",
+  "rules": [
+    {
+      "rule_id": "legacy-advisory",
+      "severity": "advisory",
+      "description": "Preserve advisory guidance without an ontology extension."
+    }
+  ],
+  "workflows": [
+    {
+      "domain": "develop",
+      "objective": "Compile legacy advisory guidance.",
+      "entry_node": "compile",
+      "nodes": [
+        {
+          "node_id": "compile",
+          "instruction": "Compile the legacy declaration.",
+          "owner": "ontology-guidance-fixture",
+          "evidence": [
+            "appsdk guide compile"
+          ]
+        }
+      ],
+      "edges": []
+    }
+  ]
+}

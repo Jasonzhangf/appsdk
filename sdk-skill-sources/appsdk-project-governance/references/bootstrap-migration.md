@@ -450,6 +450,59 @@ and Relation, record exact clause approval, and bind its executable edge or
 gate with legal and illegal cases and a real observation path. Keep proposed
 clauses marked as candidates until those conditions are met.
 
+For a Rust consumer that must execute an approved rule, put the executable
+extension in the same ontology declaration:
+
+```text
+static rule approval and three-axis model
+  -> ontology.execution operation and commit-node declaration
+  -> registry with the real project operators and gates
+  -> consumer CommitOwner under one consistency boundary
+  -> bind_operation
+  -> CompiledOperation::call
+```
+
+For a Guidance-style manifest, use the normal `appsdk guide compile` entry to
+compile the static declaration and preserve the ontology projection. Use a
+static project fixture to exercise declaration errors, execution projection,
+and legacy compatibility through that same public entry.
+
+For the executable path, follow the
+[ontology execution design](https://github.com/Jasonzhangf/appsdk/blob/main/docs/design/appsdk-ontology-governance.md).
+Use the actual public interfaces from the Rust consumer:
+
+```rust
+pipeline_runtime::governance::validate_execution_declaration(ontology)?;
+let operation = pipeline_runtime::governance::bind_operation(
+    ontology,
+    behavior_id,
+    graph,
+    registry,
+    owner,
+    capabilities,
+)?;
+let result = operation.call(
+    OperationRequest {
+        subject,
+        event,
+        data,
+    },
+    identity,
+    cancellation,
+)?;
+```
+
+Bind once at the real production entrypoint. Call
+`validate_execution_declaration` when a declaration may exist without
+execution, for example before compiling a Guidance projection. Call
+`bind_operation` when the operation must actually execute. The consumer's
+`CommitOwner` reads the current state, builds the complete affected candidate,
+invokes the supplied validation closure, and commits only after that closure
+succeeds. Keep this sequence under the consumer's existing storage consistency
+boundary; the SDK does not add a transaction, retry, or automatic rollback. The
+isolated `governed_catalog` example is a mechanism example, not approval of a
+production business clause.
+
 ### Shape the skeleton
 
 1. Bind the user goal, accepted behavior, acceptance criteria, non-goals,

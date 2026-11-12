@@ -76,6 +76,23 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
   fixture；`docs/dagpipe/manifest.json` 同时保留 Docs。该选择不设置
   `windows_appsdk`，不进入既有 Windows `new/init` smoke；同一 public CLI target
   在 `windows-verify-foundation` 上原生执行。
+- `rust_ontology_governance` 精确覆盖 `rust/src/guidance/compiler.rs`、
+  `ledger.rs` 的 atomic writer、
+  `rust/tests/ontology_governance_cli.rs`、`rust/tests/fixtures/ontology-governance/**`
+  和 `contracts/guidance/guidance-manifest.schema.json`。Ubuntu 运行
+  `ontology_governance_cli` 静态 fixture，覆盖 schema、新扩展、旧声明与重复替换，
+  并执行 journal 到 plan cache 的静态共享 writer consumer，再做全部
+  target 的编译检查。既有 Guidance 路由继续执行 scope/plan 回归。Windows 在既有
+  `windows-verify-foundation` job 中运行同一静态 target，foundation CLI 步骤仍由
+  `rust_verify_foundation` 控制。DAGPipe ontology 库、测试、示例和 fixture 选择
+  `dagpipe` 与 `windows_dagpipe`，两平台执行库、治理 consumer 与示例真实入口，
+  并用 `cargo check --all-targets` 检查其余调用者的编译兼容性。安装器 owner、
+  包依赖、未知路径和 release 选择 `dagpipe_installer`，继续执行包级测试及适用
+  原生安装黑盒。日常纯治理变更复用这一选择，减少无关安装及摘要用例。
+- `contracts/maps/module-registry.json` 与 `function-map.json` 选择
+  `source_registry`，检查 JSON 结构并从公开入口核对源码归属。其他 maps 继续沿既有
+  合同路由。DAGPipe 的 AppSDK consumer 运行模块单测和 `dagpipe_validate` 公开
+  用例。后者覆盖图与通知校验，生命周期记录链由其实际 owner 变化时选测。
 - 上述共享文件可能同时承载其他职责。只改其他职责时，必须在同一变更补对应
   consumer 测试和选路，并由正常 Review 核对；selector 不解析源码符号、审批
   marker 或额外 registry，不从测试名称推断扩大覆盖。
@@ -101,10 +118,11 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
   完整 feature contribution，包括首次 push 的空/全零 before；默认 ref 不可用时
   才使用有效 before。两者都不可用或 contribution 为空时仍 full fallback。
   主线 push、PR 和 release 沿各自现有选择路径。
-- 两个原生 Windows job 复用同一 selector：`windows_appsdk` 在 AppSDK 源码/测试、
-  共享资源或 DAGPipe 库变化时运行 MSVC 构建、共享锁与公开入口定向测试（包括三例
+- 两个原生 Windows job 复用同一 selector：`windows_appsdk` 在 AppSDK 源码/测试或
+  共享资源按现有路由变化时运行 MSVC 构建、共享锁与公开入口定向测试（包括三例
   Windows `registry_home_cli`）及公开 consumer smoke；`windows_dagpipe` 在 DAGPipe
-  源码、安装脚本或 PowerShell harness 变化时运行包测试、release 构建和安装黑盒。
+  源码变化时运行库与 consumer 测试。`dagpipe_installer` 另选包级测试、release
+  构建和安装黑盒，适用于安装器、依赖和需要扩大覆盖的路径。
   文档与 Collab-only 变化不触发它们。release run 的结果只绑定其 `head_sha`；
   任一适用 Review finding 修复后，须以修复候选重新执行受影响 job 和最终完整
   release matrix，不能将祖先 SHA 的产物当作当前发布证据。

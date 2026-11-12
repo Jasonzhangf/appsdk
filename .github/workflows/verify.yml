@@ -171,6 +171,10 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list \
             | grep -E ': test$' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli
+          cache_filter='guidance::ledger::tests::read_plan_rebuilds_cache_with_atomic_writer'
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk "$cache_filter" -- --list \
+            | grep -F "$cache_filter: test" > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk "$cache_filter" -- --exact
       - name: Resource consumer tests
         if: |
           needs.changes.outputs.resources == 'true' &&
@@ -298,6 +302,12 @@ jobs:
           if ($count -lt 1) { throw "expected at least one ontology Guidance test" }
           cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli
           if ($LASTEXITCODE -ne 0) { throw "ontology Guidance tests failed ($LASTEXITCODE)" }
+          $cacheFilter = 'guidance::ledger::tests::read_plan_rebuilds_cache_with_atomic_writer'
+          $cacheListed = & cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk $cacheFilter -- --list
+          if ($LASTEXITCODE -ne 0) { throw "Guidance cache test listing failed ($LASTEXITCODE)" }
+          if (@($cacheListed | Where-Object { $_ -match ': test$' }).Count -ne 1) { throw "expected one Guidance cache test" }
+          cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk $cacheFilter -- --exact
+          if ($LASTEXITCODE -ne 0) { throw "Guidance cache writer test failed ($LASTEXITCODE)" }
 
   app-sdk-full:
     name: AppSDK full

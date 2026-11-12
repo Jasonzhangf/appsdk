@@ -77,9 +77,11 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
   `windows_appsdk`，不进入既有 Windows `new/init` smoke；同一 public CLI target
   在 `windows-verify-foundation` 上原生执行。
 - `rust_ontology_governance` 精确覆盖 `rust/src/guidance/compiler.rs`、
+  `ledger.rs` 的 atomic writer、
   `rust/tests/ontology_governance_cli.rs`、`rust/tests/fixtures/ontology-governance/**`
   和 `contracts/guidance/guidance-manifest.schema.json`。Ubuntu 运行
-  `ontology_governance_cli` 静态 fixture，覆盖 schema、新扩展与旧声明，并做全部
+  `ontology_governance_cli` 静态 fixture，覆盖 schema、新扩展、旧声明与重复替换，
+  并执行 journal 到 plan cache 的静态共享 writer consumer，再做全部
   target 的编译检查。既有 Guidance 路由继续执行 scope/plan 回归。Windows 在既有
   `windows-verify-foundation` job 中运行同一静态 target，foundation CLI 步骤仍由
   `rust_verify_foundation` 控制。DAGPipe ontology 库、测试、示例和 fixture 选择

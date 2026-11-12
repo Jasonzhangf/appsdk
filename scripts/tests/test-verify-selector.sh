@@ -45,6 +45,7 @@ assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --
 assert_workflow_contains 'cargo build --release --manifest-path dagpipe/Cargo.toml --locked --bin dagpipe'
 assert_workflow_contains 'pwsh -NoProfile -File scripts/tests/test-windows-dagpipe.ps1'
 assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli'
+assert_workflow_contains 'guidance::ledger::tests::read_plan_rebuilds_cache_with_atomic_writer'
 assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list'
 assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli'
 [[ "$(grep -Fc -- 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli' "$workflow")" == 1 ]] ||
@@ -492,6 +493,13 @@ expect_only "dagpipe windows_dagpipe"
 
 run_scenario "ontology-guidance-compiler" "push" "branch" "1" "rust/src/guidance/compiler.rs"
 expect_only "rust_ontology_governance"
+
+run_scenario "guidance-atomic-writer" "push" "branch" "1" "rust/src/guidance/ledger.rs"
+expect_only "rust_ontology_governance"
+
+run_scenario "guidance-atomic-writer-mixed" "push" "branch" "1" \
+  $'rust/src/guidance/ledger.rs\nrust/src/communication.rs'
+expect_only "rust_ontology_governance rust_communication rust_platform_lock_cli windows_appsdk"
 
 run_scenario "ontology-guidance-cli" "push" "branch" "1" "rust/tests/ontology_governance_cli.rs"
 expect_only "rust_ontology_governance"

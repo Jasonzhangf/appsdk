@@ -228,7 +228,7 @@ while IFS= read -r path; do
         windows_appsdk=true
       fi
       ;;
-    rust/src/guidance/compiler.rs|rust/tests/ontology_governance_cli.rs|rust/tests/fixtures/ontology-governance/*)
+    rust/src/guidance/compiler.rs|rust/src/guidance/ledger.rs|rust/tests/ontology_governance_cli.rs|rust/tests/fixtures/ontology-governance/*)
       rust_ontology_governance=true
       ;;
     rust/src/main.rs|rust/src/main/project.rs|rust/src/main/governance.rs|rust/src/main/registry.rs|rust/src/main/compile.rs|rust/src/main/verification.rs|rust/src/main/promotion.rs|rust/src/main/command_invocation.rs|rust/src/dagpipe.rs|rust/src/dagpipe_notification.rs|rust/src/main/verify_foundation.rs|contracts/dagpipe/verify-foundation.graph.json|rust/tests/verify_foundation_cli.rs|rust/tests/fixtures/verify_foundation/*)

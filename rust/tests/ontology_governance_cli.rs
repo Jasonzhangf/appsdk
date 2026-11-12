@@ -172,6 +172,47 @@ fn guidance_execution_schema_and_compiler_use_the_shared_declaration() {
 }
 
 #[test]
+fn guidance_recompile_replaces_projection_and_rejection_preserves_it() {
+    let scratch = Scratch::new("execution-replace");
+    let mut contract = execution_contract();
+    let project = scratch.prepare_project(&contract);
+    assert_success(&scratch.compile(&project));
+    let first = scratch.compiled(&project);
+
+    contract["ontology"]["objects"][0]["definition"] = json!("Updated record definition");
+    fs::write(
+        project.join(".appsdk/skills/ontology-governance/appsdk-guidance.json"),
+        serde_json::to_vec_pretty(&contract).unwrap(),
+    )
+    .unwrap();
+    let second_output = scratch.compile(&project);
+    assert_success(&second_output);
+    let second = scratch.compiled(&project);
+    assert_ne!(first["ontology"], second["ontology"]);
+    assert_eq!(second["ontology"], contract["ontology"]);
+    assert_eq!(
+        second,
+        serde_json::from_slice::<Value>(&second_output.stdout).unwrap()
+    );
+
+    contract["ontology"]["execution"]["operations"][0]["clauses"] = json!(["missing-clause"]);
+    fs::write(
+        project.join(".appsdk/skills/ontology-governance/appsdk-guidance.json"),
+        serde_json::to_vec_pretty(&contract).unwrap(),
+    )
+    .unwrap();
+    assert_rejected(&scratch.compile(&project), "ONTOLOGY_REFERENCE_UNRESOLVED");
+    assert_eq!(scratch.compiled(&project), second);
+    assert!(fs::read_dir(project.join(".appsdk/guidance"))
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".staging.")));
+}
+
+#[test]
 fn guidance_execution_rejects_unresolved_references_before_writing() {
     let scratch = Scratch::new("execution-reference");
     let mut contract = execution_contract();

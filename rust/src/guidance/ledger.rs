@@ -85,9 +85,18 @@ fn stale_lock(path: &Path) -> bool {
 }
 
 pub(super) fn atomic_write(path: &Path, value: &Value) {
+    let write_failed = |stage: &str, error: std::io::Error| -> ! {
+        fail(
+            "GUIDANCE_WRITE_FAILED",
+            &format!(
+                "Guidance write failed during {stage}. {error}. kind={:?}, os={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ),
+        )
+    };
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+        fs::create_dir_all(parent).unwrap_or_else(|error| write_failed("create_parent", error));
     }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -98,16 +107,19 @@ pub(super) fn atomic_write(path: &Path, value: &Value) {
         &staging,
         serde_json::to_string_pretty(value).unwrap() + "\n",
     )
-    .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
-    File::open(&staging)
-        .and_then(|file| file.sync_all())
-        .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
-    fs::rename(staging, path)
-        .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+    .unwrap_or_else(|error| write_failed("write_staging", error));
+    let file =
+        File::open(&staging).unwrap_or_else(|error| write_failed("open_staging_for_sync", error));
+    file.sync_all()
+        .unwrap_or_else(|error| write_failed("sync_staging", error));
+    drop(file);
+    fs::rename(staging, path).unwrap_or_else(|error| write_failed("replace_target", error));
     if let Some(parent) = path.parent() {
-        fs::File::open(parent)
-            .and_then(|dir| dir.sync_all())
-            .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+        let directory =
+            File::open(parent).unwrap_or_else(|error| write_failed("open_parent_for_sync", error));
+        directory
+            .sync_all()
+            .unwrap_or_else(|error| write_failed("sync_parent", error));
     }
 }
 
@@ -286,5 +298,59 @@ fn quarantine_partial_tail(path: &Path, tail: &str) {
         File::open(parent)
             .and_then(|file| file.sync_all())
             .unwrap_or_else(|_| fail("GUIDANCE_EVENTS_RECOVERY_FAILED", "sync the task ledger"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_plan_rebuilds_cache_with_atomic_writer() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!(
+                "guidance-cache-writer-{}-{nonce}",
+                std::process::id()
+            ));
+        let task = "cache-writer";
+        let directory = task_dir(&root, task);
+        fs::create_dir_all(&directory).unwrap();
+        let first = json!({
+            "schema_version": 1, "record_type": "PlanRecord", "plan_id": "fixture-plan",
+            "task_id": task, "goal_id": "fixture-goal", "module_id": "fixture-module",
+            "mode": "develop", "objective": "Initial cached plan",
+            "scope_paths": ["src/**"],
+            "steps": [{"step_id": "prepare", "node_id": "prepare", "action": "prepare",
+                "owner": "fixture-module", "expected_evidence": []}],
+            "rule_context": {"goal_hash": "sha256:fixture-goal", "rule_sources": [], "owner": "fixture-module"},
+            "plan_hash": "sha256:fixture-plan", "created_at": "2026-11-12T00:00:00Z"
+        });
+        let events = event_file(&root, task);
+        fs::write(&events, format!("{first}\n")).unwrap();
+        let cache = directory.join("plan.json");
+        assert!(!cache.exists());
+        assert_eq!(read_plan(&root, task), first);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&cache).unwrap()).unwrap(),
+            first
+        );
+
+        let mut second = first.clone();
+        second["objective"] = json!("Updated cached plan");
+        second["plan_id"] = json!("fixture-plan-second");
+        second["plan_hash"] = json!("sha256:fixture-plan-second");
+        fs::write(&events, format!("{first}\n{second}\n")).unwrap();
+        assert_eq!(read_plan(&root, task), second);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&cache).unwrap()).unwrap(),
+            second
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "mode": "selected",
+  "objects": [
+    {
+      "object_id": "app-core",
+      "graph_id": "app-core",
+      "graph_version": "1",
+      "semantic_graph": {
+        "entry": "trigger",
+        "exit": "terminal",
+        "nodes": [
+          {
+            "id": "trigger",
+            "label": "receive external order request"
+          },
+          {
+            "id": "terminal",
+            "label": "complete acceptance and deliver result"
+          }
+        ],
+        "edges": [
+          {
+            "from": "trigger",
+            "to": "terminal"
+          }
+        ]
+      },
+      "scope_confirmation": {
+        "reference": "evidence://scope/app-core",
+        "confirmed_by": "test",
+        "confirmed_at": "2026-01-01T00:00:00Z"
+      },
+      "scenarios": [
+        {
+          "scenario_id": "scenario-1",
+          "semantic_name": "happy path",
+          "entrypoint": "POST /orders",
+          "preconditions": [
+            "isolated fixture"
+          ],
+          "stimulus": "submit order",
+          "observable_assertions": [
+            "returns accepted"
+          ],
+          "path_node_ids": [
+            "trigger",
+            "terminal"
+          ],
+          "expected_effects": [
+            "order created"
+          ],
+          "cleanup": "remove fixture",
+          "runner_ref": "runner-1",
+          "classification": [
+            "normal"
+          ]
+        }
+      ]
+    }
+  ],
+  "trusted_runners": [
+    {
+      "runner_ref": "runner-1",
+      "entrypoint": "POST /orders",
+      "owner": "app-core"
+    }
+  ],
+  "effect_authorizations": []
+}

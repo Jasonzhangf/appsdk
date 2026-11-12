@@ -57,6 +57,7 @@ rust_communication=false
 rust_memory=false
 rust_registry=false
 rust_producer=false
+rust_verify_foundation=false
 rust_cli_smoke=false
 rust_platform_lock_cli=false
 rust_registry_home_cli=false
@@ -87,17 +88,24 @@ if [[ -n "$base" && ! "$base" =~ ^0+$ ]] && git cat-file -e "$base^{commit}" 2>/
 fi
 
 changed=""
-if [[ "$baseline_ok" == true ]]; then
-  default_ref="refs/remotes/origin/${default_branch}"
-  if [[ "$release" != true && "$event_name" == "push" && "$ref_type" == "branch" &&
-        -n "$ref_name" && -n "$default_branch" && "$ref_name" != "$default_branch" ]] &&
-     git show-ref --verify --quiet "$default_ref"; then
-    # Select the feature's contribution, excluding changes inherited by a
-    # normal merge from the default branch. A diff error remains an error.
-    changed="$(git diff --name-only "$default_ref...$head_sha")"
-  else
-    changed="$(git diff --name-only "$base" "$head_sha")"
-  fi
+diff_args=()
+default_ref="refs/remotes/origin/${default_branch}"
+default_ref_available=false
+if [[ "$release" != true && "$event_name" == "push" && "$ref_type" == "branch" &&
+      -n "$ref_name" && -n "$default_branch" && "$ref_name" != "$default_branch" ]] &&
+   git show-ref --verify --quiet "$default_ref"; then
+  default_ref_available=true
+fi
+
+if [[ "$default_ref_available" == true ]]; then
+  # Select the complete feature contribution from the fetched default ref,
+  # including on first push. A diff error remains an error.
+  base="$default_ref"
+  diff_args=("$default_ref...$head_sha")
+  changed="$(git diff --name-only "${diff_args[@]}")"
+elif [[ "$baseline_ok" == true ]]; then
+  diff_args=("$base" "$head_sha")
+  changed="$(git diff --name-only "${diff_args[@]}")"
 elif [[ "$release" == true ]]; then
   base=""
 else
@@ -126,6 +134,25 @@ if [[ -z "$changed" && "$release" != true ]]; then
   workflow_contract=true
   npm=true
 fi
+
+is_deletion_only() {
+  local path="$1"
+  local name_status numstat status metadata_path extra
+  local additions deletions numeric_path
+
+  name_status="$(git diff --name-status --find-renames "${diff_args[@]}" -- "$path")"
+  [[ "$(printf '%s\n' "$name_status" | awk 'NF { count++ } END { print count + 0 }')" == 1 ]] ||
+    return 1
+  IFS=$'\t' read -r status metadata_path extra <<< "$name_status"
+  [[ ( "$status" == "M" || "$status" == "D" ) &&
+     "$metadata_path" == "$path" && -z "$extra" ]] || return 1
+
+  numstat="$(git diff --numstat --find-renames "${diff_args[@]}" -- "$path")"
+  [[ "$(printf '%s\n' "$numstat" | awk 'NF { count++ } END { print count + 0 }')" == 1 ]] ||
+    return 1
+  IFS=$'\t' read -r additions deletions numeric_path <<< "$numstat"
+  [[ "$additions" == "0" && "$deletions" =~ ^[1-9][0-9]*$ && "$numeric_path" == "$path" ]]
+}
 
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
@@ -174,6 +201,28 @@ while IFS= read -r path; do
       rust_cli_smoke=true
       rust_platform_lock_cli=true
       windows_appsdk=true
+      ;;
+    rust/tests/cli_smoke/part_07.rs|rust/tests/cli_smoke/part_08.rs|rust/tests/sdk_resource_refresh_cli.rs)
+      # These legacy targets are retained, so deletion-only changes select the
+      # replacement foundation contract plus all-target compilation. Any
+      # addition, rename, binary/unknown metadata, or mixed support change
+      # keeps the normal broader route.
+      if is_deletion_only "$path"; then
+        rust_verify_foundation=true
+      elif [[ "$path" == "rust/tests/sdk_resource_refresh_cli.rs" ]]; then
+        app_sdk_full=true
+        windows_appsdk=true
+      else
+        rust_cli_smoke=true
+        windows_appsdk=true
+      fi
+      ;;
+    rust/src/main.rs|rust/src/main/project.rs|rust/src/main/governance.rs|rust/src/main/registry.rs|rust/src/main/compile.rs|rust/src/main/verification.rs|rust/src/main/promotion.rs|rust/src/main/command_invocation.rs|rust/src/dagpipe.rs|rust/src/dagpipe_notification.rs|rust/src/main/verify_foundation.rs|contracts/dagpipe/verify-foundation.graph.json|rust/tests/verify_foundation_cli.rs|rust/tests/fixtures/verify_foundation/*)
+      rust_verify_foundation=true
+      ;;
+    docs/dagpipe/manifest.json)
+      rust_verify_foundation=true
+      docs=true
       ;;
     rust/src/guidance.rs|rust/src/guidance/*|rust/tests/guidance_ablation_cli.rs)
       rust_guidance=true
@@ -291,6 +340,7 @@ emit rust_communication "$rust_communication"
 emit rust_memory "$rust_memory"
 emit rust_registry "$rust_registry"
 emit rust_producer "$rust_producer"
+emit rust_verify_foundation "$rust_verify_foundation"
 emit rust_cli_smoke "$rust_cli_smoke"
 emit rust_platform_lock_cli "$rust_platform_lock_cli"
 emit rust_registry_home_cli "$rust_registry_home_cli"

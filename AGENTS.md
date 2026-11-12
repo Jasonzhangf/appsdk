@@ -59,6 +59,7 @@ AppSDK 图命令 → AppSDK DAG 接入 → pipeline_runtime
   [详细合同](docs/design/appsdk-guidance-framework.md)。
 - Communication：[通信接口](docs/design/apps-sdk-communication.md)。
 - DAGPipe：[模块职责](docs/design/dagpipe-internal-module.md)、[运行库入口](dagpipe/README.md)。
+- 本项目算子化采用见[本地 Operation 与迁移边界](docs/design/appsdk-local-operator-adoption.md)。
 - Collab：[模块入口](collab/README.md)、
   [验证映射](collab/docs/verification-map.md)、
   [原生投递架构](docs/codex-tui-collab-architecture.md)。

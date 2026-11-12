@@ -21,31 +21,23 @@ pub(super) const VERIFY_FOUNDATION_GRAPH: &str =
 
 /// Immutable per-invocation control resource for the verify foundation graph.
 ///
-/// `root` is the single project path used by every operator; `admission`
-/// records the requested selector and `reset_epoch` the reset-governance read
-/// performed once by the caller. Control fields stay out of the JSON payload,
-/// so the graph only ever carries the parsed project value.
+/// `root` is the single project path used by every operator; `reset_epoch`
+/// records the reset-governance read performed once by the caller. Control
+/// fields stay out of the JSON payload, so the graph only ever carries the
+/// parsed project value.
 #[derive(Debug)]
 pub(super) struct VerifyInvocation {
     root: PathBuf,
-    // Held for the invocation boundary; this capability slice never branches
-    // on mode or reset, so the CLI wiring slice is the first real consumer.
-    #[allow(dead_code)]
-    admission: bool,
     #[allow(dead_code)]
     reset_epoch: bool,
 }
 
 impl VerifyInvocation {
     /// Validates root safety and reads the reset record once, then owns both.
-    pub(super) fn new(root: PathBuf, admission: bool) -> Result<Self, String> {
+    pub(super) fn new(root: PathBuf) -> Result<Self, String> {
         try_assert_project_root_safe(&root)?;
         let reset_epoch = try_reset_governance_record_mode(&root)?.is_some();
-        Ok(Self {
-            root,
-            admission,
-            reset_epoch,
-        })
+        Ok(Self { root, reset_epoch })
     }
 
     pub(super) fn root(&self) -> &Path {
@@ -223,7 +215,6 @@ pub(super) fn register_verify_operators_for_validation(
         registry,
         Arc::new(VerifyInvocation {
             root: PathBuf::from("."),
-            admission: false,
             reset_epoch: false,
         }),
     )
@@ -309,7 +300,7 @@ mod tests {
     }
 
     fn invocation(project: &TestProject) -> Arc<VerifyInvocation> {
-        Arc::new(VerifyInvocation::new(project.root.clone(), false).unwrap())
+        Arc::new(VerifyInvocation::new(project.root.clone()).unwrap())
     }
 
     #[test]
@@ -318,6 +309,587 @@ mod tests {
         let output = run_verify_foundation(invocation(&project)).unwrap();
         assert_eq!(output.as_object().unwrap().len(), 1);
         assert_eq!(output["project"], project.read_json(".appsdk/project.json"));
+    }
+
+    #[test]
+    fn returning_string_and_identifier_contracts_have_exact_boundaries() {
+        assert_eq!(
+            try_required_str(&json!({"value": ""}), "/value", "MISSING"),
+            Ok("")
+        );
+        assert_eq!(
+            try_required_str(&json!({}), "/value", "MISSING"),
+            Err("MISSING".to_owned())
+        );
+        assert_eq!(
+            try_required_str(&json!({"value": 1}), "/value", "MISSING"),
+            Err("MISSING".to_owned())
+        );
+        assert_eq!(
+            try_record_str(&json!({"value": "present"}), "/value", "sample"),
+            Ok("present")
+        );
+        for record in [json!({}), json!({"value": ""}), json!({"value": 1})] {
+            assert_eq!(
+                try_record_str(&record, "/value", "sample"),
+                Err("INVALID_RECORD:sample:/value".to_owned())
+            );
+        }
+        assert_eq!(
+            try_record_array(&json!({"items": [1]}), "/items", "sample")
+                .unwrap()
+                .len(),
+            1
+        );
+        for record in [json!({}), json!({"items": []}), json!({"items": "x"})] {
+            assert_eq!(
+                try_record_array(&record, "/items", "sample"),
+                Err("INVALID_RECORD:sample:/items".to_owned())
+            );
+        }
+        for value in ["a", "a-1", "z9"] {
+            assert_eq!(try_assert_identifier(value, "BAD_ID"), Ok(()));
+        }
+        for value in ["", "A", "1a", "a_b", "a.b"] {
+            assert_eq!(
+                try_assert_identifier(value, "BAD_ID"),
+                Err("BAD_ID".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn safe_roots_and_owned_paths_reject_escape_and_symlinks() {
+        let project = TestProject::new("safe-paths");
+        let value = project.read_json(".appsdk/project.json");
+        assert_eq!(
+            try_contract_root(&project.root, &value, "/governance/generated_root").unwrap(),
+            project.root.join("generated")
+        );
+        for root in [".", "../outside", "/tmp/outside"] {
+            let mut root_value = value.clone();
+            root_value["governance"]["generated_root"] = json!(root);
+            assert_eq!(
+                try_contract_root(&project.root, &root_value, "/governance/generated_root"),
+                Err("INVALID_GOVERNANCE_ROOT:/governance/generated_root".to_owned())
+            );
+        }
+        for relative in ["playground", "active/lib/**", "."] {
+            assert!(try_safe_owned_path(&project.root, relative, "owned").is_ok());
+        }
+        for relative in ["", "../outside", "a/../outside", "/tmp/outside"] {
+            assert_eq!(
+                try_safe_owned_path(&project.root, relative, "owned"),
+                Err("INVALID_OWNED_PATH:owned".to_owned())
+            );
+        }
+        assert_eq!(
+            try_assert_no_symlink_components(&project.root, Path::new("/tmp/outside"), "owned"),
+            Err("GOVERNANCE_PATH_ESCAPE:owned".to_owned())
+        );
+
+        #[cfg(unix)]
+        {
+            let outside = project.root.with_extension("outside");
+            fs::create_dir_all(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, project.path("linked")).unwrap();
+            assert_eq!(
+                try_safe_owned_path(&project.root, "linked/child", "owned"),
+                Err("GOVERNANCE_PATH_SYMLINK:owned".to_owned())
+            );
+            fs::remove_dir_all(outside).unwrap();
+        }
+    }
+
+    #[test]
+    fn development_scenario_set_contract_reports_exact_failures() {
+        let cases: [(&str, Value, &'static str); 5] = [
+            ("canonical-empty", json!([]), "OK"),
+            (
+                "valid-pair",
+                json!(["multi_worker_collaboration", "multi_worktree_merge_queue"]),
+                "OK",
+            ),
+            (
+                "duplicate",
+                json!(["multi_worker_collaboration", "multi_worker_collaboration"]),
+                "DUPLICATE_DEVELOPMENT_SCENARIO",
+            ),
+            ("unknown", json!(["other"]), "UNKNOWN_DEVELOPMENT_SCENARIO"),
+            (
+                "merge-without-collaboration",
+                json!(["multi_worktree_merge_queue"]),
+                "MERGE_QUEUE_COLLABORATION_REQUIRED",
+            ),
+        ];
+        for (label, enabled, expected) in cases {
+            let project = TestProject::new(label);
+            let mut value = project.read_json(".appsdk/project.json");
+            value["development_scenarios"]["enabled"] = enabled;
+            if expected == "OK" {
+                assert!(try_assert_development_scenarios(&project.root, &value).is_ok());
+            } else {
+                match try_assert_development_scenarios(&project.root, &value) {
+                    Err(error) => assert_eq!(error, expected),
+                    Ok(_) => panic!("scenario case unexpectedly succeeded: {label}"),
+                }
+            }
+        }
+        let project = TestProject::new("manifest-mismatch");
+        let mut value = project.read_json(".appsdk/project.json");
+        fs::write(
+            project.path(".appsdk/contracts/development-scenarios.manifest.json"),
+            "{}",
+        )
+        .unwrap();
+        assert_eq!(
+            match try_assert_development_scenarios(&project.root, &value) {
+                Err(error) => error,
+                Ok(_) => panic!("scenario manifest unexpectedly succeeded"),
+            },
+            "DEVELOPMENT_SCENARIO_MANIFEST_MISMATCH"
+        );
+        value["development_scenarios"]["manifest"] = json!("contracts/other.json");
+        assert_eq!(
+            match try_assert_development_scenarios(&project.root, &value) {
+                Err(error) => error,
+                Ok(_) => panic!("scenario path unexpectedly succeeded"),
+            },
+            "NON_CANONICAL_DEVELOPMENT_SCENARIO_MANIFEST"
+        );
+    }
+
+    #[test]
+    fn maps_require_nonempty_fields_and_complete_mainline_edges() {
+        let project = TestProject::new("maps-contract");
+        assert_eq!(try_assert_governance_maps(&project.root), Ok(()));
+        for (name, value, expected) in [
+            (
+                "resource-map.json",
+                json!({"schema_version": 2, "resources": ["x"]}),
+                "INVALID_GOVERNANCE_MAP:resource-map.json",
+            ),
+            (
+                "function-map.json",
+                json!({"schema_version": 1, "functions": []}),
+                "INVALID_GOVERNANCE_MAP:function-map.json",
+            ),
+            (
+                "mainline-call-map.json",
+                json!({"schema_version": 1, "edges": [{
+                    "chain_id":"c", "owner":"o", "caller":"a", "callee":"b",
+                    "path":"p", "input_resource_id":"i", "error_resource_id":"e"
+                }]}),
+                "INVALID_RECORD:mainline-call-map.json:/output_resource_id",
+            ),
+            (
+                "mainline-call-map.json",
+                json!({"schema_version": 1, "edges": [{
+                    "chain_id":"c", "owner":"o", "caller":"a", "callee":"b",
+                    "path":"p", "input_resource_id":"i", "output_resource_id":"o",
+                    "error_resource_id":"e"
+                }]}),
+                "OK",
+            ),
+        ] {
+            let project = TestProject::new(name);
+            project.write_json(&format!(".appsdk/maps/{name}"), &value);
+            let result = try_assert_governance_maps(&project.root);
+            if expected == "OK" {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result.unwrap_err(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_record_schema_accepts_strengthening_and_rejects_weakening() {
+        let canonical = json!({
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["a", "b"],
+                    "minLength": 1,
+                    "if": {"properties": {"kind": {"const": "a"}}},
+                    "then": {"required": ["reason"]},
+                    "not": {"required": ["forbidden"]},
+                    "allOf": [{"properties": {"kind": {"type": "string"}}}]
+                },
+                "items": {"type": "array", "items": {"minimum": 1}}
+            }
+        });
+        let strengthened = json!({
+            "type": "object",
+            "required": ["kind", "extra"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["a"],
+                    "minLength": 2,
+                    "if": {"properties": {"kind": {"const": "a"}}},
+                    "then": {"required": ["reason", "detail"]},
+                    "not": {"required": ["forbidden", "other"]},
+                    "allOf": [{"properties": {"kind": {"type": "string", "minLength": 2}}}]
+                },
+                "items": {"type": "array", "items": {"minimum": 2}}
+            }
+        });
+        assert_eq!(
+            try_assert_schema_property_compatible(&canonical, &strengthened, "sample"),
+            Ok(())
+        );
+        let weakened: [(&str, fn(&mut Value)); 8] = [
+            ("required", |schema| {
+                schema["required"] = json!([]);
+            }),
+            ("bounds", |schema| {
+                schema["properties"]["kind"]["minLength"] = json!(0);
+            }),
+            ("enum", |schema| {
+                schema["properties"]["kind"]["enum"] = json!(["a", "b", "c"]);
+            }),
+            ("items", |schema| {
+                schema["properties"]["items"]["items"]["minimum"] = json!(0);
+            }),
+            ("if", |schema| {
+                schema["properties"]["kind"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("if");
+            }),
+            ("then", |schema| {
+                schema["properties"]["kind"]["then"]["required"] = json!([]);
+            }),
+            ("not", |schema| {
+                schema["properties"]["kind"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("not");
+            }),
+            ("allOf", |schema| {
+                schema["properties"]["kind"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("allOf");
+            }),
+        ];
+        for (label, weaken) in weakened {
+            let mut schema = strengthened.clone();
+            weaken(&mut schema);
+            assert!(
+                try_assert_schema_property_compatible(&canonical, &schema, "sample").is_err(),
+                "weakened {label} constraint was accepted: {schema}"
+            );
+        }
+
+        let promotion =
+            try_canonical_record_contract("contracts/records/promotion-record.schema.json")
+                .unwrap();
+        let mut compatible = promotion.clone();
+        compatible["required"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|name| name != "bug_closure_verified");
+        compatible["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bug_closure_verified");
+        assert_eq!(
+            try_assert_record_schema_minimum(
+                "contracts/records/promotion-record.schema.json",
+                &compatible
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn declared_zone_transitions_accept_aliases_and_reject_contract_changes() {
+        for alias in [
+            "contracts/transitions/zone-transition.manifest.json",
+            "contracts/transitions/zone-transition-manifest.json",
+        ] {
+            let project = TestProject::new("transition-alias");
+            let mut value = project.read_json(".appsdk/project.json");
+            value["governance"]["zone_transition_contract"] = json!(alias);
+            assert_eq!(try_assert_declared_contracts(&project.root, &value), Ok(()));
+        }
+        for (label, mutate, expected) in [
+            ("transition-missing", 0, "INVALID_DECLARED_ZONE_CONTRACT"),
+            ("transition-duplicate", 1, "INVALID_DECLARED_ZONE_CONTRACT"),
+            ("transition-changed", 2, "INVALID_DECLARED_ZONE_CONTRACT"),
+        ] {
+            let project = TestProject::new(label);
+            let path = project.path("contracts/transitions/zone-transition.manifest.json");
+            let mut zone: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            match mutate {
+                0 => zone["transitions"] = json!("bad"),
+                1 => {
+                    let first = zone["transitions"][0].clone();
+                    zone["transitions"].as_array_mut().unwrap().push(first);
+                }
+                _ => zone["transitions"][0]["owner"] = json!("other"),
+            }
+            project.write_json("contracts/transitions/zone-transition.manifest.json", &zone);
+            let value = project.read_json(".appsdk/project.json");
+            assert_eq!(
+                try_assert_declared_contracts(&project.root, &value).unwrap_err(),
+                expected
+            );
+        }
+        let project = TestProject::new("transition-noncanonical");
+        let mut value = project.read_json(".appsdk/project.json");
+        value["governance"]["zone_transition_contract"] =
+            json!("contracts/transitions/../zone-transition.manifest.json");
+        assert_eq!(
+            try_assert_declared_contracts(&project.root, &value).unwrap_err(),
+            "INVALID_GOVERNANCE_ROOT:/governance/zone_transition_contract"
+        );
+    }
+
+    #[test]
+    fn registry_binding_and_module_local_contracts_are_explicit() {
+        assert!(matches!(
+            try_assert_registry_binding_contract(&json!({}), "app-core").unwrap(),
+            RegistryBinding::Exact
+        ));
+        assert!(matches!(
+            try_assert_registry_binding_contract(
+                &json!({"registry_binding":{"mode":"exact"}}),
+                "app-core"
+            )
+            .unwrap(),
+            RegistryBinding::Exact
+        ));
+        assert!(matches!(
+            try_assert_registry_binding_contract(
+                &json!({"registry_binding":{"mode":"aggregate","modules":["a","b"]}}),
+                "app-core"
+            )
+            .unwrap(),
+            RegistryBinding::Aggregate(_)
+        ));
+        for binding in [
+            json!({"mode":"exact","modules":[]}),
+            json!({"mode":"exact","extra":true}),
+            json!({"mode":"aggregate","modules":[]}),
+            json!({"mode":"aggregate","modules":["a","a"]}),
+            json!({"mode":"aggregate","modules":[""]}),
+            json!({"mode":"aggregate","modules":[1]}),
+        ] {
+            match try_assert_registry_binding_contract(
+                &json!({"registry_binding":binding}),
+                "app-core",
+            ) {
+                Err(error) => assert_eq!(error, "INVALID_REGISTRY_BINDING:app-core"),
+                Ok(_) => panic!("registry binding unexpectedly succeeded: {binding}"),
+            }
+        }
+
+        assert_eq!(
+            try_module_deployment_operations(&json!({})).unwrap(),
+            vec!["install", "restart"]
+        );
+        assert_eq!(
+            try_module_deployment_operations(&json!({"deployment_operations":["install"]}))
+                .unwrap(),
+            vec!["install"]
+        );
+        for operations in [
+            json!("install"),
+            json!(["deploy"]),
+            json!(["install", "install"]),
+        ] {
+            assert_eq!(
+                try_module_deployment_operations(&json!({"deployment_operations":operations}))
+                    .unwrap_err(),
+                "INVALID_DEPLOYMENT_OPERATIONS"
+            );
+        }
+        assert_eq!(
+            try_assert_module_regression_contract(&json!({}), "draft", "app-core"),
+            Ok(())
+        );
+        assert_eq!(
+            try_assert_module_regression_contract(&json!({}), "frozen", "app-core"),
+            Err("REGRESSION_CONTRACT_REQUIRED:app-core".to_owned())
+        );
+        let regression = TestProject::new("regression-valid");
+        let valid_module = regression.read_json(".appsdk/project.json")["modules"][0].clone();
+        assert_eq!(
+            try_assert_module_regression_contract(&valid_module, "source_implemented", "app-core"),
+            Ok(())
+        );
+        let mut disabled_at_freeze = valid_module.clone();
+        disabled_at_freeze["regression"]["required_before_freeze"] = json!(false);
+        assert_eq!(
+            try_assert_module_regression_contract(&disabled_at_freeze, "frozen", "app-core"),
+            Err("INVALID_REGRESSION_CONTRACT:app-core".to_owned())
+        );
+        let mut bad = valid_module.clone();
+        bad["regression"]["command"]["args"] = json!([1]);
+        assert_eq!(
+            try_assert_module_regression_contract(&bad, "source_implemented", "app-core"),
+            Err("INVALID_REGRESSION_CONTRACT:app-core".to_owned())
+        );
+    }
+
+    #[test]
+    fn project_module_surfaces_stages_dependencies_and_build_fields_are_checked() {
+        let cases: [(&str, fn(&mut Value), &'static str); 9] = [
+            (
+                "bad-stage",
+                |p| p["modules"][0]["stage"] = json!("unknown"),
+                "INVALID_PROJECT_MODULE:app-core",
+            ),
+            (
+                "bad-owner",
+                |p| p["modules"][0]["source_owner"] = json!("other"),
+                "INVALID_PROJECT_MODULE:app-core",
+            ),
+            (
+                "bad-surface",
+                |p| p["modules"][0]["owned_paths"] = json!([]),
+                "INVALID_PROJECT_MODULE:app-core",
+            ),
+            (
+                "bad-dependency-type",
+                |p| p["modules"][0]["dependency_modules"] = json!([1]),
+                "INVALID_PROJECT_MODULE:app-core",
+            ),
+            (
+                "missing-dependency",
+                |p| p["modules"][0]["dependency_modules"] = json!(["missing"]),
+                "INVALID_PROJECT_MODULE:app-core:dependency",
+            ),
+            (
+                "bad-build",
+                |p| p["modules"][0]["build"]["program"] = json!(""),
+                "INVALID_PROJECT_MODULE:app-core:build/program",
+            ),
+            (
+                "duplicate-id",
+                |p| p["modules"] = json!([p["modules"][0].clone(), p["modules"][0].clone()]),
+                "INVALID_PROJECT_MODULE:app-core",
+            ),
+            (
+                "overlap",
+                |p| {
+                    let mut second = p["modules"][0].clone();
+                    second["module_id"] = json!("other");
+                    second["source_owner"] = json!("other");
+                    second["active_artifact"] = json!("active/lib/other/**");
+                    p["modules"] = json!([p["modules"][0].clone(), second]);
+                },
+                "OVERLAPPING_MODULE_OWNERSHIP",
+            ),
+            (
+                "version-base-equal",
+                |p| p["modules"][0]["version_base"] = json!({"previous_active_version":"v1","new_active_version":"v1","base_artifact_hash":"h","base_source_commit":"c"}),
+                "INVALID_MODULE_VERSION_BASE:app-core",
+            ),
+        ];
+        for (label, mutate, expected) in cases {
+            let project = TestProject::new(label);
+            let mut value = project.read_json(".appsdk/project.json");
+            mutate(&mut value);
+            assert_eq!(
+                try_assert_project_contract(&project.root, &value).unwrap_err(),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_record_accepts_only_transactional_receipts_without_git_lookup() {
+        let valid = json!({
+            "schema_version": 1,
+            "mode": "discard_legacy_control_plane",
+            "reset_id": "tx-123",
+            "transaction_id": "tx-123",
+            "branch": "codex/reset",
+            "created_at": "2020-01-01T00:00:00Z",
+            "preserved": ["protected"],
+            "removed": ["legacy"]
+        });
+        let project = TestProject::new("transactional-reset");
+        assert_eq!(
+            try_reset_governance_record_mode(&project.root).unwrap(),
+            None
+        );
+        project.write_json(".appsdk/records/reset-governance-record.json", &valid);
+        assert_eq!(
+            try_reset_governance_record_mode(&project.root).unwrap(),
+            Some("discard_legacy_control_plane".to_owned())
+        );
+        let mut fresh_init = valid.clone();
+        fresh_init["mode"] = json!("fresh_init");
+        project.write_json(".appsdk/records/reset-governance-record.json", &fresh_init);
+        assert_eq!(
+            try_reset_governance_record_mode(&project.root).unwrap(),
+            Some("fresh_init".to_owned())
+        );
+
+        let cases: [(&str, Value); 10] = [
+            ("schema", json!({"schema_version":2})),
+            ("mode", json!({"mode":"legacy"})),
+            ("transaction", json!({"reset_id":"a","transaction_id":"b"})),
+            ("timestamp", json!({"created_at":"not-a-date"})),
+            ("future", json!({"created_at":"2999-01-01T00:00:00Z"})),
+            ("arrays", json!({"preserved":[]})),
+            ("array-member", json!({"removed":[""]})),
+            ("invalid-json", json!({})),
+            ("missing-reset-id", json!({"reset_id":null})),
+            ("missing-branch", json!({"branch":null})),
+        ];
+        for (label, patch) in cases {
+            let project = TestProject::new(label);
+            let mut record = valid.clone();
+            for (key, value) in patch.as_object().unwrap() {
+                record[key] = value.clone();
+            }
+            if label == "invalid-json" {
+                fs::write(
+                    project.path(".appsdk/records/reset-governance-record.json"),
+                    "{",
+                )
+                .unwrap();
+            } else {
+                project.write_json(".appsdk/records/reset-governance-record.json", &record);
+            }
+            assert_eq!(
+                try_reset_governance_record_mode(&project.root).unwrap_err(),
+                "INVALID_RESET_GOVERNANCE_RECORD",
+                "{label}"
+            );
+        }
+
+        let project = TestProject::new("reset-record-directory");
+        fs::create_dir_all(project.path(".appsdk/records/reset-governance-record.json")).unwrap();
+        assert_eq!(
+            try_reset_governance_record_mode(&project.root).unwrap_err(),
+            "INVALID_RESET_GOVERNANCE_RECORD"
+        );
+
+        #[cfg(unix)]
+        {
+            let project = TestProject::new("reset-record-symlink");
+            let target = project.path("reset-record-target.json");
+            fs::write(&target, serde_json::to_vec(&valid).unwrap()).unwrap();
+            std::os::unix::fs::symlink(
+                target,
+                project.path(".appsdk/records/reset-governance-record.json"),
+            )
+            .unwrap();
+            assert_eq!(
+                try_reset_governance_record_mode(&project.root).unwrap_err(),
+                "GOVERNANCE_PATH_SYMLINK:reset_governance_record"
+            );
+        }
     }
 
     #[test]
@@ -337,9 +909,8 @@ mod tests {
             }),
         );
 
-        let invocation = Arc::new(VerifyInvocation::new(project.root.clone(), false).unwrap());
+        let invocation = Arc::new(VerifyInvocation::new(project.root.clone()).unwrap());
         assert!(invocation.reset_epoch);
-        assert!(!invocation.admission);
         fs::remove_file(project.path(".appsdk/records/reset-governance-record.json")).unwrap();
 
         let output = run_verify_foundation(invocation).unwrap();
@@ -488,7 +1059,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&missing);
         assert_eq!(
-            VerifyInvocation::new(missing, false).unwrap_err(),
+            VerifyInvocation::new(missing).unwrap_err(),
             "PROJECT_ROOT_MISSING"
         );
 
@@ -506,7 +1077,7 @@ mod tests {
         fs::rename(project.path(".appsdk"), &real).unwrap();
         std::os::unix::fs::symlink(&real, project.path(".appsdk")).unwrap();
         assert_eq!(
-            VerifyInvocation::new(project.root.clone(), false).unwrap_err(),
+            VerifyInvocation::new(project.root.clone()).unwrap_err(),
             "GOVERNANCE_PATH_SYMLINK:appsdk_control"
         );
     }
@@ -695,26 +1266,6 @@ mod tests {
             );
         });
         assert_eq!(graph.unwrap(), baseline.unwrap());
-    }
-
-    #[test]
-    fn foundation_outcome_is_admission_invariant() {
-        let valid = TestProject::new("admission-valid");
-        let default_result = run_verify_foundation(invocation(&valid));
-        let admission_result = run_verify_foundation(Arc::new(
-            VerifyInvocation::new(valid.root.clone(), true).unwrap(),
-        ));
-        assert_eq!(default_result, admission_result);
-
-        let broken = TestProject::new("admission-broken");
-        fs::write(broken.path(".appsdk/maps/resource-map.json"), "{ not json").unwrap();
-        let default_error = run_verify_foundation(invocation(&broken)).unwrap_err();
-        let admission_error = run_verify_foundation(Arc::new(
-            VerifyInvocation::new(broken.root.clone(), true).unwrap(),
-        ))
-        .unwrap_err();
-        assert_eq!(default_error, admission_error);
-        assert_eq!(default_error, "INVALID_GOVERNANCE_MAP:resource-map.json");
     }
 
     #[test]

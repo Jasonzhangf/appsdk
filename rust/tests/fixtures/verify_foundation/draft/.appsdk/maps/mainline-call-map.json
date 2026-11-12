@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "edges": [
+    {
+      "chain_id": "fixture-chain",
+      "owner": "fixture::chain",
+      "caller": "fixture::caller",
+      "callee": "fixture::callee",
+      "path": "fixture.rs",
+      "input_resource_id": "fixture-input",
+      "output_resource_id": "fixture-output",
+      "error_resource_id": "fixture-error"
+    }
+  ]
+}

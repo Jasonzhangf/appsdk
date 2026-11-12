@@ -835,9 +835,8 @@ pub(super) fn verify_internal(
     check_module_publications: bool,
     emit_result: bool,
 ) {
-    let invocation = Arc::new(
-        VerifyInvocation::new(root.to_path_buf(), admission).unwrap_or_else(|error| fail(error)),
-    );
+    let invocation =
+        Arc::new(VerifyInvocation::new(root.to_path_buf()).unwrap_or_else(|error| fail(error)));
     let root_path = invocation.root().to_path_buf();
     let reset_epoch = invocation.reset_epoch();
     let project_checked = run_verify_foundation(invocation).unwrap_or_else(|error| fail(error));
@@ -871,6 +870,19 @@ pub(super) fn verify_internal(
         Value::Null
     };
     let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
+    if !matches!(
+        stage,
+        "draft"
+            | "source_implemented"
+            | "contract_bound"
+            | "compiled"
+            | "controlled_verified"
+            | "architecture_stable"
+            | "frozen"
+            | "retired"
+    ) {
+        fail(format!("UNKNOWN_PROJECT_STAGE:{}", stage));
+    }
     assert_sdk_lock(root, &project);
     assert_sdk_resources_semantics(
         root,

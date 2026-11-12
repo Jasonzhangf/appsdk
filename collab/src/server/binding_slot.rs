@@ -84,6 +84,8 @@ pub(crate) struct BindingValue {
     pub(crate) physical_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) layout_binding_id: Option<String>,
+    #[serde(default)]
+    pub(crate) registration_number: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,7 @@ impl BindingValue {
             },
             physical_name: None,
             layout_binding_id: None,
+            registration_number: 0,
         }
     }
 
@@ -173,6 +176,7 @@ impl BindingValue {
             && self.invocation_cwd == other.invocation_cwd
             && self.physical_name == other.physical_name
             && self.layout_binding_id == other.layout_binding_id
+            && self.registration_number == other.registration_number
     }
 }
 
@@ -187,7 +191,10 @@ pub(crate) enum IdentityStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IdentityBindingSlot {
     pub(crate) identity_key: IdentityBindingKey,
-    pub(crate) display_slot: u32,
+    // Historical maps carry `display_slot: null`. Accept that shape instead of
+    // failing the whole identity map; the name-derived slot is authoritative.
+    #[serde(default)]
+    pub(crate) display_slot: Option<u32>,
     pub(crate) identity_status: IdentityStatus,
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
@@ -309,8 +316,10 @@ fn identity_key_label(key: &IdentityBindingKey) -> String {
 impl IdentityBindingSlot {
     pub(crate) fn new(identity_key: IdentityBindingKey) -> Self {
         Self {
-            display_slot: super::name_resolution::display_slot(&identity_key.name)
-                .expect("validated identity name"),
+            display_slot: Some(
+                super::name_resolution::display_slot(&identity_key.name)
+                    .expect("validated identity name"),
+            ),
             identity_key,
             identity_status: IdentityStatus::Unregistered,
             generation: 0,
@@ -416,13 +425,15 @@ impl IdentityBindingSlot {
 
     pub(crate) fn validate(&self) -> Result<(), SlotError> {
         self.validate_shape()?;
-        if super::name_resolution::display_slot(&self.identity_key.name)
-            .map_err(SlotError::Invalid)?
-            != self.display_slot
-        {
-            return Err(SlotError::Invariant(
-                "display slot differs from the registered name".into(),
-            ));
+        if let Some(display_slot) = self.display_slot {
+            if super::name_resolution::display_slot(&self.identity_key.name)
+                .map_err(SlotError::Invalid)?
+                != display_slot
+            {
+                return Err(SlotError::Invariant(
+                    "display slot differs from the registered name".into(),
+                ));
+            }
         }
         if let Some(current) = self.current.as_ref() {
             current.validate()?;
@@ -751,6 +762,25 @@ impl BindingControlSet {
         self.slots
             .iter()
             .filter_map(IdentityBindingSlot::active_binding)
+    }
+
+    /// Return the single active identity fact for a worker across all projects.
+    /// The server root is a delivery and project-management context; it must not
+    /// decide which active identity the caller owns.
+    pub(crate) fn unique_active_value_for_worker(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<&BindingValue>, String> {
+        let mut values = self
+            .active_values()
+            .filter(|value| value.binding.agent_id.as_str() == worker_id);
+        let Some(value) = values.next() else {
+            return Ok(None);
+        };
+        if values.next().is_some() {
+            return Err("IDENTITY_MAP_AMBIGUOUS: worker has several current app mappings".into());
+        }
+        Ok(Some(value))
     }
 
     pub(crate) fn commit(

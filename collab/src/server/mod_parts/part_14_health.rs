@@ -12,7 +12,16 @@ fn handle_capability_readiness(
 ) -> Resp {
     // Context: the pure serializer, not `handle_context` with its lease and
     // presence-edge writes. The payload is discarded after validation.
-    let context = context_projection(server, worker_id.clone(), token.clone());
+    let route_scope = project_context.map(|context| RouteScope {
+        project_scope_id: context.project_scope.clone(),
+        app_scope_id: context.app_scope_id.clone(),
+    });
+    let context = context_projection(
+        server,
+        worker_id.clone(),
+        token.clone(),
+        route_scope.as_ref(),
+    );
     if !context.ok {
         return context;
     }

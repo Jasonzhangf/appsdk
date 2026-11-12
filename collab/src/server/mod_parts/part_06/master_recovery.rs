@@ -444,23 +444,24 @@ fn base_role_brief(
 /// runtime constraints. The selected identity template adds its workflow text,
 /// then configured specialty cards are appended in the current work-role order.
 fn role_brief(
-    server: &Server,
     state: &State,
     control: &binding_slot::BindingControlSet,
     worker_id: &str,
+    route_scope: Option<&RouteScope>,
 ) -> Result<serde_json::Value, String> {
-    let project_scope =
-        GlobalState::canonical_project_scope(&server.root).map_err(|error| error.to_string())?;
-    let mut current = control.active_values().filter(|value| {
-        value.binding.project_scope == project_scope && value.binding.agent_id.as_str() == worker_id
-    });
-    let binding = current
-        .next()
-        .ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping")?;
-    if current.next().is_some() {
-        return Err("IDENTITY_MAP_AMBIGUOUS: worker has several current app mappings".into());
+    let binding = match route_scope {
+        Some(route_scope) => control
+            .current_for_worker(
+                &route_scope.project_scope_id,
+                &route_scope.app_scope_id,
+                worker_id,
+            )?
+            .and_then(binding_slot::IdentityBindingSlot::active_binding),
+        None => control.unique_active_value_for_worker(worker_id)?,
     }
+    .ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping")?;
     let route_scope = binding.binding.route_scope();
+    let project_scope = route_scope.project_scope_id.clone();
     let roles = worker_work_roles(state, control, Some(&route_scope), worker_id)?;
     // A peer that carries a built-in execution or standing specialty keeps the
     // shared identity, authorization and communication duties, but must not

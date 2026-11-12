@@ -637,7 +637,7 @@ fn dispatch_with_route_context_bound(
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .map(|worker_id| role_brief(&st, &control, worker_id, None).map(|brief| (worker_id.clone(), brief)))
                     .collect::<Result<std::collections::HashMap<_, _>, String>>();
                 let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
                 (
@@ -685,7 +685,7 @@ fn dispatch_with_route_context_bound(
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .map(|worker_id| role_brief(&st, &control, worker_id, None).map(|brief| (worker_id.clone(), brief)))
                     .collect::<Result<std::collections::HashMap<_, _>, String>>();
                 let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
                 (
@@ -794,7 +794,7 @@ fn dispatch_with_route_context_bound(
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .map(|worker_id| role_brief(&st, &control, worker_id, None).map(|brief| (worker_id.clone(), brief)))
                     .collect::<Result<std::collections::HashMap<_, _>, String>>();
                 let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
                 let mut tasks: Vec<serde_json::Value> =

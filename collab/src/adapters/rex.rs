@@ -34,6 +34,11 @@ pub const NATIVE_REJECTION_CODES: [&str; 7] = [
 ];
 
 const DEFAULT_TIMEOUT_SECS: f64 = 10.0;
+/// A Rex `terminal.write` returns when the bytes are queued, not when the
+/// target program has read them. Give the terminal a bounded moment to
+/// consume the body before the separate Enter key so a TUI editor submits the
+/// complete text instead of dropping a key that arrives mid-paste.
+const ENTER_SETTLE_SECS: f64 = 0.2;
 
 #[cfg(any(target_os = "macos", test))]
 fn installed_macos_cli(system_applications: &Path, user_home: Option<&Path>) -> PathBuf {
@@ -256,6 +261,9 @@ static TEST_CLI: std::sync::OnceLock<std::sync::RwLock<Option<PathBuf>>> =
 static TEST_TIMEOUT: std::sync::OnceLock<std::sync::RwLock<Option<Duration>>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
+static TEST_ENTER_SETTLE: std::sync::OnceLock<std::sync::RwLock<Option<Duration>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
 pub(crate) static TEST_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
@@ -289,6 +297,28 @@ pub(crate) fn set_test_timeout(value: Option<Duration>) {
         .get_or_init(|| std::sync::RwLock::new(None))
         .write()
         .expect("Rex test timeout lock") = value;
+}
+
+#[cfg(test)]
+fn enter_settle() -> Duration {
+    (*TEST_ENTER_SETTLE
+        .get_or_init(|| std::sync::RwLock::new(None))
+        .read()
+        .expect("Rex test enter settle lock"))
+    .unwrap_or_else(|| Duration::from_secs_f64(ENTER_SETTLE_SECS))
+}
+
+#[cfg(not(test))]
+fn enter_settle() -> Duration {
+    Duration::from_secs_f64(ENTER_SETTLE_SECS)
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_enter_settle(value: Option<Duration>) {
+    *TEST_ENTER_SETTLE
+        .get_or_init(|| std::sync::RwLock::new(None))
+        .write()
+        .expect("Rex test enter settle lock") = value;
 }
 
 struct OwnedReader {
@@ -818,6 +848,17 @@ fn terminal_write_argv(endpoint: &RexEndpoint) -> Vec<String> {
     )
 }
 
+fn send_key_argv(endpoint: &RexEndpoint) -> Vec<String> {
+    vec![
+        "send-key".to_string(),
+        "-s".to_string(),
+        endpoint.session_id.clone(),
+        "-b".to_string(),
+        endpoint.block_id.clone(),
+        "enter".to_string(),
+    ]
+}
+
 fn terminal_query_argv(endpoint: &RexEndpoint, method: &str) -> Vec<String> {
     api_call_argv(method, Some(endpoint.session_id.as_str()))
 }
@@ -1075,6 +1116,34 @@ async fn write_text_until(
     }
 }
 
+/// Send the real Enter key event after the body write. The write stage is
+/// passed in so an Enter failure is classified at the body-write boundary.
+async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let settle = enter_settle().min(remaining);
+    if !settle.is_zero() {
+        tokio::time::sleep(settle).await;
+    }
+    verify_service_until(endpoint, deadline).await?;
+    let call = run_cli(
+        "send_enter",
+        Path::new(&official_cli_path()),
+        &endpoint.server,
+        deadline,
+        &send_key_argv(endpoint),
+        None,
+    )
+    .await?;
+    if !call.status.success() {
+        return Err(native_failure(
+            "send_enter",
+            RexInputStage::BeforeWrite,
+            &call,
+        ));
+    }
+    Ok(())
+}
+
 /// Read the latest requested number of text lines from one verified endpoint.
 /// This is a read-only observation: it never writes input, never changes
 /// activity, and never persists the captured text.
@@ -1236,10 +1305,7 @@ fn extract_status_records(value: &Value) -> Vec<RexProgramStatusRecord> {
                 .and_then(|owner| {
                     let pid = owner.get("pid").and_then(Value::as_u64)?;
                     let name = owner.get("name").and_then(Value::as_str)?.to_owned();
-                    let owner = RexProgramStatusOwner {
-                        pid,
-                        name,
-                    };
+                    let owner = RexProgramStatusOwner { pid, name };
                     owner.is_complete().then_some(owner)
                 }),
         })
@@ -1276,15 +1342,28 @@ pub async fn notify(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
-    // One write queues the complete body plus its submission key. A separate
-    // send-key call can fail after the body is queued and strand the text.
-    let submission = format!("{text}\r");
-    let receipt = write_text_until(endpoint, &submission, deadline).await?;
+    // The body write and the real Enter key are separate stages. A text write
+    // ending in CR only queues characters; a real Codex TUI treats that CR as
+    // input text and leaves the prompt unsubmitted. If Enter fails after the
+    // body write, report the queued write boundary and never resend the body.
+    let receipt = write_text_until(endpoint, text, deadline).await?;
+    let text_stage = RexInputStage::WriteQueued {
+        bytes_written: receipt.bytes_written,
+    };
+    if let Err(error) = send_enter_until(endpoint, deadline).await {
+        return Err(RexError {
+            operation: "notify",
+            class: NotificationDeliveryClass::Unknown,
+            stage: text_stage,
+            native_code: error.native_code,
+            detail: error.detail,
+        });
+    }
     let value = json!({
         "transport": "rex",
         "bytes_written": receipt.bytes_written,
         "text_queued": true,
-        "submission_queued": true,
+        "enter_accepted": true,
         "consumed": false,
         "mode": mode.unwrap_or("immediate"),
     });

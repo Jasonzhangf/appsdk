@@ -767,7 +767,7 @@
 
         let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
         let board = handle_board_show(&server, Some("master"));
-        let context = context_projection(&server, "master".into(), "token-master".into());
+        let context = context_projection(&server, "master".into(), "token-master".into(), None);
         assert!(board.ok, "{board:?}");
         assert!(context.ok, "{context:?}");
         let after = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
@@ -908,9 +908,9 @@
         let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
         let board = handle_board_show(&server, Some("master"));
         let master_context =
-            context_projection(&server, "master".into(), "token-master".into());
+            context_projection(&server, "master".into(), "token-master".into(), None);
         let peer_context =
-            context_projection(&server, "free-peer".into(), "token-free-peer".into());
+            context_projection(&server, "free-peer".into(), "token-free-peer".into(), None);
         assert!(board.ok, "{board:?}");
         assert!(master_context.ok, "{master_context:?}");
         assert!(peer_context.ok, "{peer_context:?}");

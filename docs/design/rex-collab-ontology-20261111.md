@@ -14,7 +14,7 @@ Rex terminal endpoint 是通信地址。Collab agent sessionID 是身份执行�
 | 对象 | 身份 | 关键属性 | 唯一 owner | 可观察入口 |
 | --- | --- | --- | --- | --- |
 | Rex endpoint | server + service generation + session + block | host、instance、cwd | binding owner 与 Rex adaptor | 官方 CLI 参数、typed binding |
-| 通知提交 | 一次通知消息对一次 terminal write | 原始正文、追加 CR、排队字节 | `collab/src/adapters/rex.rs` | write receipt、fixture invocation |
+| 通知提交 | 一次通知消息对应一次正文 write 加一次真实 Enter 按键 | 原始正文、排队字节、Enter 回执 | `collab/src/adapters/rex.rs` | write receipt、send-key invocation |
 | 临时 snapshot | endpoint + 请求行数 + 一次 capture | 最新文本行、传输类型、非持久 | Rex adaptor 与 snapshot handler | `collab snapshot TARGET_ID` |
 | 程序状态记录 | 一条 Rex program-status record | id、state、kind、owner、updated_at | adaptor 解码，monitor 投影 | `program_status`、activity view |
 | foreground owner | 当前前台进程 | pid、name | 官方 `terminal.process` | process query |
@@ -24,11 +24,14 @@ Rex terminal endpoint 是通信地址。Collab agent sessionID 是身份执行�
 
 ### 通知提交
 
-`（已选择 endpoint，通知正文） -> （一次 write 排队正文与 CR，submission_queued，不消费）`
+`（已选择 endpoint，通知正文） -> （write 排队正文，send-key Enter 提交，不消费）`
 
-- 正文按 UTF-8 原样保留，只在末尾追加一个 `0x0D`。
-- write 字节数不匹配、超时、EOF 或坏 JSON 都是 unknown，不补 Enter、不重发。
-- 完整排队只表示输入进入 terminal，不表示程序读取或消息消费。
+- 正文按 UTF-8 原样保留，write 不追加 `0x0D`。真实 Codex TUI 会把正文
+  内的 CR 当作文本保留，不作为提交键；提交必须来自独立 Enter 按键事件。
+- write 返回只表示字节已排队。Enter 前有短暂有限等待，让目标终端先消费
+  正文，避免提交键在正文前丢失。
+- Enter 失败时保留 `WriteQueued` 阶段并报告 unknown，不重发正文，也不把
+  输入提交冒充消费。
 
 ### Snapshot 读取
 
@@ -72,10 +75,12 @@ flowchart TD
   M -->|否| NO([明确拒绝，不写终端]):::failure
   M -->|是| V[核实服务代际与目标]:::action
   V -->|失败| NO
-  V -->|通过| W[一次写入正文与回车]:::action
-  W -->|完整排队| OK([返回已排队，未消费]):::success
+  V -->|通过| W[写入正文]:::action
+  W -->|完整排队| E[发送真实 Enter]:::action
   W -->|拒绝| NO
   W -->|未知或不完整| UNK([保留 unknown]):::failure
+  E -->|已接受| OK([返回正文与 Enter 已接受，未消费]):::success
+  E -->|拒绝或未知| UNK
 
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px

@@ -444,6 +444,44 @@ fn slot_round_trips_through_json() {
 }
 
 #[test]
+fn slot_preserves_legacy_registration_number() {
+    let key = key("alice");
+    let mut binding = value(&key, "alice", "runtime-a", "endpoint-a");
+    binding.registration_number = 4242;
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    slot.commit(&key, binding, Some(0)).unwrap();
+
+    let encoded = serde_json::to_value(&slot).unwrap();
+    assert_eq!(encoded["current"]["registration_number"], 4242);
+
+    let decoded: IdentityBindingSlot = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.current.as_ref().unwrap().registration_number, 4242);
+}
+
+#[test]
+fn slot_accepts_legacy_null_display_slot_and_round_trips_it() {
+    let key = key("alice");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    slot.commit(
+        &key,
+        value(&key, "alice", "runtime-a", "endpoint-a"),
+        Some(0),
+    )
+    .unwrap();
+
+    let mut encoded = serde_json::to_value(&slot).unwrap();
+    encoded["display_slot"] = serde_json::Value::Null;
+
+    let decoded: IdentityBindingSlot = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded.display_slot, None);
+    assert_eq!(
+        serde_json::to_value(&decoded).unwrap()["display_slot"],
+        serde_json::Value::Null
+    );
+    decoded.validate().unwrap();
+}
+
+#[test]
 fn control_set_keeps_identity_slots_independent() {
     let alice = key("alice");
     let bob = key("bob");

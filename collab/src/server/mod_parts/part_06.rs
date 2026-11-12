@@ -993,7 +993,7 @@ fn consume_register_typed(
             };
             let (role_brief, _) = {
                 let st = server.state.lock().unwrap();
-                let brief = match role_brief(server, &st, &control, worker_id) {
+                let brief = match role_brief(&st, &control, worker_id, None) {
                     Ok(brief) => brief, Err(error) => return Resp::err_data(error, json!({"registration_committed":true})),
                 };
                 (brief, ())

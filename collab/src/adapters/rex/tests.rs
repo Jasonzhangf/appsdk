@@ -69,6 +69,7 @@ impl TestEnv {
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
         set_test_cli(Some(fixture));
         set_test_timeout(Some(Duration::from_secs(5)));
+        set_test_enter_settle(Some(Duration::ZERO));
         std::env::set_var("REXPRIMITIVE_LOG_DIR", &dir);
         std::env::set_var("REXPRIMITIVE_SCENARIO", scenario);
         Self { dir }
@@ -89,6 +90,7 @@ impl Drop for TestEnv {
     fn drop(&mut self) {
         set_test_cli(None);
         set_test_timeout(None);
+        set_test_enter_settle(None);
         std::env::remove_var("REXPRIMITIVE_LOG_DIR");
         std::env::remove_var("REXPRIMITIVE_SCENARIO");
         let _ = fs::remove_dir_all(&self.dir);
@@ -134,17 +136,18 @@ async fn candidate_deadline_is_shared_by_all_verification_steps() {
 }
 
 #[tokio::test]
-async fn notify_queues_body_and_cr_in_one_write_without_send_key() {
+async fn notify_writes_body_then_sends_a_real_enter_key() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("normal");
     let text = "期限正文\n第二行";
     let receipt = notify(&selected_transport(), text, Some("immediate"))
         .await
-        .expect("a single write that includes CR submits the notification");
+        .expect("body write plus a separate Enter submits the notification");
     let value: Value = serde_json::from_str(&receipt).expect("receipt JSON");
     assert_eq!(value["transport"], "rex");
-    assert_eq!(value["bytes_written"], (text.len() + 1) as u64);
-    assert_eq!(value["submission_queued"], true);
+    assert_eq!(value["bytes_written"], text.len() as u64);
+    assert_eq!(value["text_queued"], true);
+    assert_eq!(value["enter_accepted"], true);
     assert_eq!(value["consumed"], false);
     let calls = env.calls();
     let writes: Vec<&Value> = calls
@@ -154,11 +157,59 @@ async fn notify_queues_body_and_cr_in_one_write_without_send_key() {
     assert_eq!(writes.len(), 1, "notification must not retry the write");
     let request: Value =
         serde_json::from_str(writes[0]["stdin"].as_str().unwrap()).expect("write JSON");
-    assert_eq!(request["args"]["data"], format!("{text}\r"));
-    assert!(
-        !calls.iter().any(|call| method(call) == "send-key"),
-        "the notification path must not issue a separate Enter"
+    assert_eq!(
+        request["args"]["data"], text,
+        "the body write must not append CR; a Codex TUI keeps that CR as text"
     );
+    let enter = calls
+        .iter()
+        .find(|call| method(call) == "send-key")
+        .expect("notification must press Enter through the real key path");
+    let argv: Vec<&str> = enter["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    let send_key_at = argv
+        .iter()
+        .position(|arg| *arg == "send-key")
+        .expect("send-key argv");
+    assert_eq!(
+        &argv[send_key_at..],
+        [
+            "send-key",
+            "-s",
+            endpoint().session_id.as_str(),
+            "-b",
+            endpoint().block_id.as_str(),
+            "enter",
+        ]
+        .as_slice(),
+        "the notification must press the real Enter key on the bound target"
+    );
+}
+
+#[tokio::test]
+async fn failed_enter_keeps_the_queued_write_stage_and_never_resends() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::new("enter_fail");
+    let error = notify(&selected_transport(), "体已排队", Some("immediate"))
+        .await
+        .expect_err("a failed Enter must be reported, not hidden");
+    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+    assert_eq!(
+        error.stage,
+        RexInputStage::WriteQueued {
+            bytes_written: "体已排队".len(),
+        }
+    );
+    let writes = env
+        .calls()
+        .iter()
+        .filter(|call| method(call) == "com.superlogical.terminal.write")
+        .count();
+    assert_eq!(writes, 1, "a failed Enter must not resend the body");
 }
 
 #[tokio::test]
@@ -438,13 +489,13 @@ async fn allowed_modes_return_rex_receipt_json() {
             .unwrap_or_else(|error| panic!("allowed mode {mode:?} failed: {error}"));
         let value: Value = serde_json::from_str(&receipt).expect("receipt JSON");
         assert_eq!(value["transport"], "rex");
-        assert_eq!(value["bytes_written"], 3);
+        assert_eq!(value["bytes_written"], 2);
         assert_eq!(value["text_queued"], true);
-        assert_eq!(value["submission_queued"], true);
+        assert_eq!(value["enter_accepted"], true);
         assert_eq!(value["consumed"], false);
         assert!(value.get("queued").is_none());
     }
-    assert_eq!(env.calls().len(), 10);
+    assert_eq!(env.calls().len(), 20);
 }
 
 #[tokio::test]

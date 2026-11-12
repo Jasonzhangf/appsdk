@@ -215,8 +215,16 @@ impl ProjectRuntimeManager {
             Ok(communication) => communication,
             Err(error) => return (runtime, Resp::err(error)),
         };
-        let mut snapshot =
-            context_projection(&runtime, identity.worker_id.clone(), identity.token.clone());
+        let route_scope = RouteScope {
+            project_scope_id: context.project_scope.clone(),
+            app_scope_id: context.app_scope_id.clone(),
+        };
+        let snapshot = context_projection(
+            &runtime,
+            identity.worker_id.clone(),
+            identity.token.clone(),
+            Some(&route_scope),
+        );
         if !snapshot.ok {
             return (runtime, snapshot);
         }
@@ -275,7 +283,16 @@ impl ProjectRuntimeManager {
             Ok(communication) => communication,
             Err(error) => return (runtime, Resp::err(error)),
         };
-        let mut snapshot = context_projection(&runtime, identity.worker_id.clone(), identity.token);
+        let route_scope = RouteScope {
+            project_scope_id: context.project_scope.clone(),
+            app_scope_id: context.app_scope_id.clone(),
+        };
+        let snapshot = context_projection(
+            &runtime,
+            identity.worker_id.clone(),
+            identity.token,
+            Some(&route_scope),
+        );
         if !snapshot.ok {
             return (runtime, snapshot);
         }
@@ -410,7 +427,7 @@ impl ProjectRuntimeManager {
                     Ok(control) => control, Err(error) => return Resp::err(error),
                 };
                 let state = runtime.state.lock().unwrap();
-                let brief = match role_brief(runtime, &state, &control, worker) {
+                let brief = match role_brief(&state, &control, worker, Some(&route)) {
                     Ok(brief) => brief, Err(error) => return Resp::err(error),
                 };
                 let mut response = json!({"master":current_master_worker_id(&state, Some(&route)),"scope":scope_view(Some(&route)),

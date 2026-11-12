@@ -189,6 +189,39 @@ fn role_contract_is_identical_across_context_workers_and_status() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn context_projection_uses_worker_binding_when_daemon_root_differs() {
+    let (mut server, root) = test_server();
+    assert!(
+        register_synthetic_peer(&server, "root-scope-peer", "%root-scope-peer").ok,
+        "seed the peer while the daemon still owns its project root"
+    );
+    let route_scope = registered_binding(&server, "root-scope-peer").route_scope();
+    let foreign_root = root.join("foreign-root");
+    std::fs::create_dir_all(&foreign_root).unwrap();
+    server.root = foreign_root.clone();
+
+    let context = context_projection(
+        &server,
+        "root-scope-peer".into(),
+        "token-root-scope-peer".into(),
+        Some(&route_scope),
+    );
+    assert!(context.ok, "{context:?}");
+    assert_eq!(context.data["identity"]["worker_id"], "root-scope-peer");
+    assert_eq!(context.data["binding"]["agent_id"], "root-scope-peer");
+    assert_eq!(
+        context.data["role_brief"]["role"], "worker",
+        "the role brief must use the active worker binding, not the daemon root"
+    );
+    assert_eq!(
+        context.data["project_root"],
+        foreign_root.display().to_string()
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// A typed user-confirmed restore replaces an online current Jenny carrier.
 #[test]
 fn explicit_typed_restore_master_replaces_an_online_incumbent() {

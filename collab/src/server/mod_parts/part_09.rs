@@ -1364,11 +1364,16 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     }
     drop(st);
     record_ordinary_peer_presence_edges(server, None);
-    context_projection(server, worker_id, token)
+    context_projection(server, worker_id, token, None)
 }
 
 /// The current Context serializer without lease rearm or presence-edge writes.
-pub(crate) fn context_projection(server: &Server, worker_id: String, token: String) -> Resp {
+pub(crate) fn context_projection(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    route_scope: Option<&RouteScope>,
+) -> Resp {
     let control =
         match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
             Ok(control) => control,
@@ -1399,7 +1404,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         .map(|task| task_view(&st, task))
         .collect();
     tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    let current_role_brief = match role_brief(server, &st, &control, &worker_id) {
+    let current_role_brief = match role_brief(&st, &control, &worker_id, route_scope) {
         Ok(brief) => brief,
         Err(error) => return Resp::err(error),
     };
@@ -1412,25 +1417,24 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     // The caller's own runtime binding is the receipt that addresses this
     // route. `collab context` is the single bootstrap read, so it owns the
     // read-back path for a peer whose local copy of that receipt was lost.
-    // Read it from the ledger the daemon validates commands against, so the
-    // shape stays the `RuntimeBinding` the Register receipt already carries.
-    //
-    // This deliberately does not go through the resolved route scope. One root
-    // can hold several app scopes, and then no single route scope resolves
-    // even though the caller's own binding is unambiguous. Match the caller
-    // inside the project this root owns, and report null unless exactly one
-    // binding matches, so an ambiguous caller still gets null and not a guess.
-    let binding = GlobalState::canonical_project_scope(&server.root)
-        .ok()
-        .and_then(|project_scope| st.global.lookup_project(&project_scope))
-        .and_then(|project| {
-            let mut matches = project
-                .runtime_bindings
-                .values()
-                .filter(|binding| binding.agent_id.as_str() == worker_id);
-            let binding = matches.next()?.clone();
-            matches.next().is_none().then_some(binding)
-        });
+    // Resolve the caller from the identity map, not from the daemon's current
+    // project root: one daemon can serve several registered projects.
+    let binding = match route_scope {
+        Some(route_scope) => match control.current_for_worker(
+            &route_scope.project_scope_id,
+            &route_scope.app_scope_id,
+            &worker_id,
+        ) {
+            Ok(Some(slot)) => slot.active_binding().map(|value| value.binding.clone()),
+            Ok(None) => None,
+            Err(error) => return Resp::err(error),
+        },
+        None => match control.unique_active_value_for_worker(&worker_id) {
+            Ok(Some(value)) => Some(value.binding.clone()),
+            Ok(None) => None,
+            Err(error) => return Resp::err(error),
+        },
+    };
     // The authority projection is scoped to the caller's own binding when it is
     // unambiguous; otherwise to the resolved server route scope. A route or
     // reducer failure is an explicit error, never a silent empty authority.
@@ -1502,7 +1506,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         .workers
         .values()
         .map(|peer| {
-            let peer_role = role_brief(server, &st, &control, &peer.id)?
+            let peer_role = role_brief(&st, &control, &peer.id, None)?
                 .get("role")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("worker")

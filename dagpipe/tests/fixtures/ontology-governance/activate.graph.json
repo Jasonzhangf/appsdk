@@ -1,0 +1,90 @@
+{
+  "id": "catalog-activate",
+  "version": "1",
+  "inputs": [
+    {
+      "id": "request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "prepare",
+      "operator": "catalog.prepare",
+      "operator_version": "1",
+      "inputs": [
+        "request"
+      ],
+      "output": {
+        "id": "prepared",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": []
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": []
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit",
+      "operator": "governance.commit",
+      "operator_version": "1",
+      "inputs": [
+        "prepared"
+      ],
+      "output": {
+        "id": "committed",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": []
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": []
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "receipt",
+      "operator": "catalog.receipt",
+      "operator_version": "1",
+      "inputs": [
+        "committed"
+      ],
+      "output": {
+        "id": "receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": []
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": []
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "prepare",
+      "to": "commit",
+      "arc_id": "prepared"
+    },
+    {
+      "from": "commit",
+      "to": "receipt",
+      "arc_id": "committed"
+    }
+  ],
+  "outputs": [
+    "receipt"
+  ]
+}

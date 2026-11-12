@@ -1,0 +1,17 @@
+{
+  "project_id": "ontology-governance-guidance-fixture",
+  "guidance": {
+    "enforcement": "advisory",
+    "compiled_manifest": ".appsdk/guidance/compiled.json",
+    "rule_sources": [
+      {
+        "source_id": "ontology-governance",
+        "kind": "skill",
+        "path": ".appsdk/skills/ontology-governance/SKILL.md",
+        "contract_path": ".appsdk/skills/ontology-governance/appsdk-guidance.json",
+        "required": true,
+        "precedence": 200
+      }
+    ]
+  }
+}

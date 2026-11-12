@@ -2366,7 +2366,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             .values()
             .filter(|subscription| {
                 subscription.worker_id == peer.id
-                    && matches!(subscription.status.as_str(), "armed" | "notifying")
+                    && crate::server::state::subscription_status_is_active(&subscription.status)
                     && can_view_responsibility
             })
             .map(|subscription| subscription.id.clone())

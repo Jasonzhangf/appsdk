@@ -659,6 +659,7 @@ impl ProjectRuntimeManager {
         facts: Option<&crate::proto::IdentityFacts>,
         tmux_session_name: Option<&str>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        name_intent: Option<&crate::server::name_resolution::NameIntent>,
     ) -> Result<String, String> {
         let _register = self.register_gate.lock().unwrap();
         self.publish_register_control_locked(
@@ -668,6 +669,7 @@ impl ProjectRuntimeManager {
             tmux_session_name,
             pane_anchor,
             None,
+            name_intent,
         )
     }
 
@@ -691,6 +693,7 @@ impl ProjectRuntimeManager {
             tmux_session_name,
             pane_anchor,
             None,
+            None,
         )?;
         let control = self.binding_control_store().load()?;
         let outcome = runtime
@@ -707,6 +710,7 @@ impl ProjectRuntimeManager {
         tmux_session_name: Option<&str>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
         rex_recovery: Option<&crate::server::identity_context::RexRecoveryObservation>,
+        name_intent: Option<&crate::server::name_resolution::NameIntent>,
     ) -> Result<(String, state::TypedOutcome), String> {
         let _register = self.register_gate.lock().unwrap();
         let effect_id = self.publish_register_control_locked(
@@ -716,6 +720,7 @@ impl ProjectRuntimeManager {
             tmux_session_name,
             pane_anchor,
             rex_recovery,
+            name_intent,
         )?;
         let control = self.binding_control_store().load()?;
         let outcome = runtime
@@ -732,6 +737,7 @@ impl ProjectRuntimeManager {
         tmux_session_name: Option<&str>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
         rex_recovery: Option<&crate::server::identity_context::RexRecoveryObservation>,
+        name_intent: Option<&crate::server::name_resolution::NameIntent>,
     ) -> Result<String, String> {
         let crate::server::state::TypedCommand::RegisterWorker {
             binding, worker, ..
@@ -769,11 +775,16 @@ impl ProjectRuntimeManager {
         runtime.validate_typed_register(&candidate, &prepared.typed)
             .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
         let state = &candidate;
-        let name = name_resolution::name_for_registration(
-            &state,
-            &control,
-            binding,
-        )?;
+        let name = match name_intent {
+            Some(intent) => {
+                if !intent.user_authorized {
+                    return Err("NAME_AUTHORIZATION_REQUIRED".into());
+                }
+                name_resolution::display_slot(&intent.requested_name)?;
+                intent.requested_name.clone()
+            }
+            None => name_resolution::name_for_registration(&state, &control, binding)?,
+        };
         let target_session_id = binding
             .session_id
             .as_ref()
@@ -781,6 +792,9 @@ impl ProjectRuntimeManager {
             .as_str()
             .to_owned();
         let effect_id = format!("register-{}", prepared.nested_operation_id);
+        // Publish an authorized target directly. The displaced holder obtains
+        // an ordinary name only when it next registers; source work stays put.
+        let moves_existing_names = name_intent.is_some();
         let effect = Self::handoff_effect(
             &control,
             &state,
@@ -861,6 +875,16 @@ impl ProjectRuntimeManager {
             }),
         };
         let change = match effect {
+            Some(effect) if moves_existing_names => {
+                crate::server::binding_store::ControlChange::MoveNameWithEffect {
+                    target: key,
+                    value,
+                    source_names: Vec::new(),
+                    expected_generation: None,
+                    effect,
+                    companion: None,
+                }
+            }
             Some(effect) => crate::server::binding_store::ControlChange::CommitWithEffect {
                     key,
                     value,
@@ -1693,6 +1717,7 @@ impl ProjectRuntimeManager {
         tmux_session_name: Option<String>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
         rex_recovery: Option<crate::server::identity_context::RexRecoveryObservation>,
+        name_intent: Option<crate::server::name_resolution::NameIntent>,
         effect_id_out: &'a mut Option<String>,
     ) -> impl FnMut(
         &crate::server::PreparedRegisterEnvelope,
@@ -1706,6 +1731,7 @@ impl ProjectRuntimeManager {
                 tmux_session_name.as_deref(),
                 pane_anchor.clone(),
                 rex_recovery.as_ref(),
+                name_intent.as_ref(),
             )?;
             *effect_id_out = Some(effect_id);
             Ok(Some(outcome))

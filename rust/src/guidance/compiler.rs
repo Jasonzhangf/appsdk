@@ -465,6 +465,16 @@ fn validate_ontology_clauses(manifest: &Value, rules: &[Value]) {
             );
         }
     }
+    if ontology.get("execution").is_some() {
+        pipeline_runtime::governance::validate_execution_declaration(ontology).unwrap_or_else(
+            |error| {
+                fail(
+                    error.to_string(),
+                    "repair the ontology execution declaration",
+                );
+            },
+        );
+    }
 }
 
 fn assert_unique_ontology_ids(entries: &[Value], field: &str, kind: &str) {
@@ -478,6 +488,49 @@ fn assert_unique_ontology_ids(entries: &[Value], field: &str, kind: &str) {
             );
         }
     }
+}
+
+fn validate_merged_execution(ontology: &Value) {
+    if ontology.get("execution").is_some() {
+        pipeline_runtime::governance::validate_execution_declaration(ontology).unwrap_or_else(
+            |error| {
+                fail(
+                    error.to_string(),
+                    "repair the merged ontology execution declaration",
+                );
+            },
+        );
+    }
+}
+
+fn merge_execution(executions: &[Value]) -> Value {
+    let mut merged = serde_json::json!({
+        "version": 1,
+        "objects": [],
+        "relations": [],
+        "operations": []
+    });
+    for execution in executions {
+        if execution.get("version").and_then(Value::as_u64) != Some(1) {
+            fail(
+                "GUIDANCE_ONTOLOGY_EXECUTION_VERSION_INVALID",
+                "use ontology execution declaration version 1",
+            );
+        }
+        for field in ["objects", "relations", "operations"] {
+            let entries = required_array(execution, field, "GUIDANCE_ONTOLOGY_EXECUTION_INVALID");
+            merged[field]
+                .as_array_mut()
+                .unwrap_or_else(|| {
+                    fail(
+                        "GUIDANCE_ONTOLOGY_EXECUTION_INVALID",
+                        "declare ontology execution arrays",
+                    )
+                })
+                .extend(entries.iter().cloned());
+        }
+    }
+    merged
 }
 
 pub(super) fn compile(root: &Path) {
@@ -520,6 +573,7 @@ pub(super) fn compile(root: &Path) {
     let mut ontology_behaviors = Vec::new();
     let mut ontology_relations = Vec::new();
     let mut ontology_clauses = Vec::new();
+    let mut ontology_executions = Vec::new();
     let mut workflow_ids = HashSet::new();
     let mut rule_ids = HashSet::new();
     for source in sources {
@@ -609,6 +663,9 @@ pub(super) fn compile(root: &Path) {
                     required_array(ontology, "clauses", "GUIDANCE_ONTOLOGY_CLAUSES_INVALID")
                         .clone(),
                 );
+                if let Some(execution) = ontology.get("execution") {
+                    ontology_executions.push(execution.clone());
+                }
             }
             compiled_source["contract_path"] = Value::String(contract_text.to_string());
         }
@@ -633,13 +690,18 @@ pub(super) fn compile(root: &Path) {
         assert_unique_ontology_ids(&ontology_behaviors, "id", "behavior");
         assert_unique_ontology_ids(&ontology_relations, "id", "relation");
         assert_unique_ontology_ids(&ontology_clauses, "clause_id", "clause");
-        compiled["ontology"] = serde_json::json!({
+        let mut ontology = serde_json::json!({
             "schema_version": 1,
             "objects": ontology_objects,
             "behaviors": ontology_behaviors,
             "relations": ontology_relations,
             "clauses": ontology_clauses
         });
+        if !ontology_executions.is_empty() {
+            ontology["execution"] = merge_execution(&ontology_executions);
+        }
+        validate_merged_execution(&ontology);
+        compiled["ontology"] = ontology;
     }
     let relative = compiled_relative(&project);
     assert_no_symlink(root, &relative, "GUIDANCE_COMPILED_SYMLINK");

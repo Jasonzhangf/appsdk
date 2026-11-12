@@ -1191,7 +1191,7 @@ fn control_set_round_trips_and_rejects_duplicate_keys() {
 }
 
 #[test]
-fn pool_overflow_skips_peer_names_occupied_in_the_same_project() {
+fn pool_overflow_skips_occupied_peer_numbers_and_reuses_the_current_one() {
     let project = ProjectScopeId::new("/tmp/collab-binding-slot").unwrap();
     let app = AppServerId::new("appserver-cli").unwrap();
     let other_app = AppServerId::new("other-app").unwrap();
@@ -1228,6 +1228,28 @@ fn pool_overflow_skips_peer_names_occupied_in_the_same_project() {
 
     assert_eq!(
         set.ordinary_name(&project, &app, "generated-peer").unwrap(),
+        "peer-2"
+    );
+
+    let current = IdentityBindingKey::new(project.clone(), app, "peer-2");
+    set.commit(
+        &current,
+        value(
+            &current,
+            "generated-peer",
+            "generated-runtime",
+            "generated-endpoint",
+        ),
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(
+        set.ordinary_name(
+            &current.project_scope,
+            &current.app_scope_id,
+            "generated-peer"
+        )
+        .unwrap(),
         "peer-2"
     );
 }

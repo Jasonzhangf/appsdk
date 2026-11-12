@@ -117,6 +117,12 @@ impl ProjectRuntimeManager {
                 return self.human_retire_name(&context, &request, approval);
             }
         }
+        // Parse authorized target before any registration can publish a name.
+        let raw_authorization = request.grant_approval.as_ref().or(request.approval.as_ref());
+        let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
+            Ok(intent) => intent,
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        };
         let allow_explicit_rex_rebind = matches!(request
             .grant_approval
             .as_ref()
@@ -172,6 +178,7 @@ impl ProjectRuntimeManager {
                     .map(|(pane, cwd)| name_state::NamePaneAnchor { pane, cwd }),
             )
             .with_rex_recovery(rex_recovery)
+            .with_name_intent(intent.clone())
             .with_role_intent(&request);
         let reconciled = self.reconcile_identity_context(
             context.clone(),
@@ -204,14 +211,6 @@ impl ProjectRuntimeManager {
                     )
                 }
             };
-        let raw_authorization = request
-            .grant_approval
-            .as_ref()
-            .or(request.approval.as_ref());
-        let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
-            Ok(intent) => intent,
-            Err(error) => return (runtime, Resp::err(error)),
-        };
         if raw_authorization.is_some_and(|value| value["action"] == "restore_peer") {
             let name = match self.binding_control_store().load().and_then(|map| {
                 map.ordinary_name(

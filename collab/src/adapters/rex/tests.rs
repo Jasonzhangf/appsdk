@@ -134,16 +134,18 @@ async fn candidate_deadline_is_shared_by_all_verification_steps() {
 }
 
 #[tokio::test]
-async fn notify_queues_body_and_cr_in_one_write_without_send_key() {
+async fn notify_writes_body_then_sends_a_real_enter_key() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("normal");
     let text = "期限正文\n第二行";
     let receipt = notify(&selected_transport(), text, Some("immediate"))
         .await
-        .expect("a single write that includes CR submits the notification");
+        .expect("body write plus a separate Enter submits the notification");
     let value: Value = serde_json::from_str(&receipt).expect("receipt JSON");
     assert_eq!(value["transport"], "rex");
-    assert_eq!(value["bytes_written"], (text.len() + 1) as u64);
+    assert_eq!(value["bytes_written"], text.len() as u64);
+    assert_eq!(value["text_queued"], true);
+    assert_eq!(value["enter_accepted"], true);
     assert_eq!(value["submission_queued"], true);
     assert_eq!(value["consumed"], false);
     let calls = env.calls();
@@ -154,10 +156,84 @@ async fn notify_queues_body_and_cr_in_one_write_without_send_key() {
     assert_eq!(writes.len(), 1, "notification must not retry the write");
     let request: Value =
         serde_json::from_str(writes[0]["stdin"].as_str().unwrap()).expect("write JSON");
-    assert_eq!(request["args"]["data"], format!("{text}\r"));
-    assert!(
-        !calls.iter().any(|call| method(call) == "send-key"),
-        "the notification path must not issue a separate Enter"
+    assert_eq!(request["args"]["data"], text);
+    let enter = calls
+        .iter()
+        .find(|call| method(call) == "send-key")
+        .expect("notification must submit through the real key path");
+    let argv: Vec<&str> = enter["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    let send_key_at = argv
+        .iter()
+        .position(|arg| *arg == "send-key")
+        .expect("send-key argv");
+    assert_eq!(
+        &argv[send_key_at..],
+        [
+            "send-key",
+            "-s",
+            endpoint().session_id.as_str(),
+            "-b",
+            endpoint().block_id.as_str(),
+            "enter",
+        ]
+        .as_slice(),
+        "Enter must target the selected session and block"
+    );
+}
+
+#[tokio::test]
+async fn typed_enter_rejection_keeps_the_queued_stage_and_native_code() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::new("enter_typed_reject");
+    let text = "abc";
+    let error = notify(&selected_transport(), text, Some("immediate"))
+        .await
+        .expect_err("a typed Enter rejection must not become success");
+    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+    assert_eq!(error.native_code.as_deref(), Some("conflict"));
+    assert_eq!(
+        error.stage,
+        RexInputStage::WriteQueued {
+            bytes_written: text.len(),
+        }
+    );
+    assert_eq!(
+        env.calls()
+            .iter()
+            .filter(|call| method(call) == "send-key")
+            .count(),
+        1,
+        "a rejected Enter must not be retried"
+    );
+}
+
+#[tokio::test]
+async fn failed_enter_preserves_the_queued_write_stage_without_resending() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::new("enter_fail");
+    let text = "已排队正文";
+    let error = notify(&selected_transport(), text, Some("immediate"))
+        .await
+        .expect_err("a failed Enter after the body write must remain visible");
+    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+    assert_eq!(
+        error.stage,
+        RexInputStage::WriteQueued {
+            bytes_written: text.len(),
+        }
+    );
+    assert_eq!(
+        env.calls()
+            .iter()
+            .filter(|call| method(call) == "com.superlogical.terminal.write")
+            .count(),
+        1,
+        "the body must not be resent after Enter fails"
     );
 }
 
@@ -386,7 +462,12 @@ async fn write_unknown_and_short_write_never_enter() {
         let error = notify(&selected_transport(), "a complete body", Some("immediate"))
             .await
             .expect_err("write outcome must be unknown");
-        assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+        assert_eq!(
+            error.class,
+            NotificationDeliveryClass::Unknown,
+            "scenario={scenario}, error={error:?}, calls={:?}",
+            env.calls()
+        );
         assert_eq!(error.stage, stage);
         let calls = env.calls();
         assert_eq!(calls.len(), 2);
@@ -438,13 +519,14 @@ async fn allowed_modes_return_rex_receipt_json() {
             .unwrap_or_else(|error| panic!("allowed mode {mode:?} failed: {error}"));
         let value: Value = serde_json::from_str(&receipt).expect("receipt JSON");
         assert_eq!(value["transport"], "rex");
-        assert_eq!(value["bytes_written"], 3);
+        assert_eq!(value["bytes_written"], 2);
         assert_eq!(value["text_queued"], true);
+        assert_eq!(value["enter_accepted"], true);
         assert_eq!(value["submission_queued"], true);
         assert_eq!(value["consumed"], false);
         assert!(value.get("queued").is_none());
     }
-    assert_eq!(env.calls().len(), 10);
+    assert_eq!(env.calls().len(), 20);
 }
 
 #[tokio::test]
@@ -824,8 +906,11 @@ async fn event_cleanup_after_setup_expiry_does_not_wait_for_inherited_stderr() {
 async fn cancelling_an_operation_terminates_its_owned_cli_child() {
     let _fixture = fixture_guard().await;
     let env = TestEnv::new("hang");
+    // CI can briefly delay fixture startup; allow the full Rex budget while
+    // still requiring the exact owned PID to be logged before cancellation.
+    set_test_timeout(Some(Duration::from_secs(10)));
     let operation = tokio::spawn(async { write_text(&endpoint(), "hello").await });
-    let pid = tokio::time::timeout(Duration::from_secs(2), async {
+    let pid = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(pid) = env
                 .calls()

@@ -35,7 +35,7 @@ human fence 的真实 Rex 增量 QA 已通过；同 block 多 current 歧义是�
 | 角色授权 | project + grant | 普通注册默认 peer；已有合法角色自动恢复；新 master 需要人类明确指令，名字统一为 Jenny；顶替后旧 holder 失去目标名字的当前权限 | role/master grant owner | `context`、角色请求与 master grant 查询 |
 | 任务归属 | task ID + stable name | 同名未关闭任务接续新 session；重派后旧身份不再自动夺回；到 15 分钟仍未回归且存在合法 idle 才邀请，接受提交才转移 ownership | `name_stewardship`、`board_respond`、task owner | board/assignment revision、邀请、接受和回归交错用例 |
 | 消息与唤醒 | message/delivery/subscription ID | 未消费消息跟随当前名字；消费历史保留正文、ID和真实回执；迟到回执归原投递；任务唤醒跟随真实当前归属，保留内容、进度、剩余次数和节奏 | mailbox、delivery、notification/subscription owner | inbox、delivery/consume 回执、wake/subscription 回执 |
-| 退役 | project + name | 人类明确退役普通名字后释放名字和旧 holder 当前准入。任务、消息、资源和历史保留，名字立即具备重派资格。合法 idle 存在才邀请。Jenny 退役需明确人类指令并释放当前绑定。该操作撤销精确 holder 的 master grant。Jenny 保留 master 专用名和恢复入口 | identity-map 释放、current master grant 与 task reclaim/invite/accept owner | 普通名字释放和重新分配、等待 owner 静默、同名恢复和 self-close 物理复用已有公开回执。E3 产品准入与精确撤权已写入；公开退休任务 fixture 断言失败尚在处理，执行绑定与真实前端保持未验收 |
+| 退役 | project + name | 人类明确退役普通名字后释放名字和旧 holder 当前准入。任务、消息、资源和历史保留，名字立即具备重派资格。合法 idle 存在才邀请。Jenny 退役需明确人类指令并释放当前绑定。该操作撤销精确 holder 的 master grant。Jenny 保留 master 专用名和恢复入口 | identity-map 释放、current master grant 与 task reclaim/invite/accept owner | 普通名字释放与重新分配、同名恢复及 self-close 物理复用已有公开回执。`final-approvals-plan/e3-recovery-report.md` 与 `e3-frontend-report.md` 证明 Jenny 退役、精确撤权、资格持久化与旧请求重放保护 |
 | 资源与旧结果 | task current owner + resource | 交接保留代码、改动、证据和资源；旧结果不改变当前 owner；迟到结果交当前 owner 评估 | resource claim、task result/review owner | claim、真实 dirty/活动写入核对、result/review 回执 |
 
 状态迁移规则如下：
@@ -90,7 +90,7 @@ AGENTS。审批状态均为 approved。执行绑定状态另列。实际 gate �
 | A2–A5 | 依当前特征、适用sessionID、snapshot/master逐级补缺，充分即停 | `name_monitor`、`rex_monitor`、snapshot判断；事实来源/新鲜性/权限 gate | presence与activity分别保留；未知不推offline，静止不推idle，迟到判断不能覆盖新事实 | `rex-qa/report.md` 与 `rex-qa/public-error-parent/report.md`：真实 Rex Idle/Busy/Ask/Error 均按同一 foreground Codex PID 投影，Error 读回后未变 Idle。`snapshot-judgment-worker/parent-offline-classification-green.log`：当前 master 合法 Offline 和只补未知字段的公开组 5/5 通过。`tmux-restart-observation-qa/final-report.md`：精确退出后 Offline，原 pane 保留，等待 deadline 稳定，挂起和新执行对照通过。完整 A5 分层调用序列和 Rex 当前自动 admission 仍待验 |
 | T1 | 同名新anchor接替，尚属该名字的未关闭任务接续新session | name resolution、assignment；target任务续接 gate | ID、状态、证据、资源引用保留；闭合历史维持原记录 | `task-name-authority-worker/recovery-final3-same-name-continuation.log` 的 `context_names_same_name_new_session_continues_open_task_and_old_carrier_cannot_commit` 公开通过。`recovery-final6-takeover-serial.log` 另证目标名任务继续、源名变更被拒且任务不变。改用公开 worker snapshot 后，`parent-projection-current-facts.log` 的 `offline_name_holder_projects_empty_owner_then_name_reassignment_preserves_work` 与 `parent-projection-working-current-facts.log` 的 `working_resource_reassignment_allows_new_owner_to_resume` 均通过 |
 | T2 | daemon确认身份丢失，固定十五分钟等待回归 | typed调度、stewardship、timer；确认丢失到固定deadline | 重复丢失/重启保截止时间，有效同名在线回归结束等待；Unknown不能单独开等待 | `return-timeout-qa/report.md`：真实 TUI 确认丢失到 `deadline-started=900000ms`，测试 daemon 重启前后 deadline 不变，重复丢失不延期；到期前无邀请，Alice/Carol Busy 时保留 Bob owner，idle 后自动邀请 Alice 且 owner 仍 Bob，Bob return-first 撤邀，晚 accept 返回 `BOARD_STALE_REVISION` |
-| T2-M | daemon 已确认丢失且等待未到期，manager 要求普通邀请 | Board invitation/respond、name stewardship；等待到邀请、邀请到接单提交 | manager 可提前邀请合法目标；daemon 自动重派仍等原十五分钟；邀请不转 owner | 审批已通过。`e3-recovery-manager-after-launch.log` 的 `manager_can_invite_during_identity_return_wait_before_deadline` 1/1 PASS；真实前端仍待 worker 交回 |
+| T2-M | daemon 已确认丢失且等待未到期，manager 要求普通邀请 | Board invitation/respond、name stewardship；等待到邀请、邀请到接单提交 | manager 可提前邀请合法目标；daemon 自动重派仍等原十五分钟；邀请不转 owner | `e3-recovery-manager-after-launch.log` 公开通过。`final-approvals-plan/e3-frontend-report.md` 证明真实 Bob 退出后 daemon 建立原 deadline，Jenny 提前邀请 Alice，真实 Alice 接受提交才转 owner |
 | T3 | 原身份回归，按当前实际任务归属继续或领取新工作 | current assignment；回归到任务选择 gate | 未接受转交继续原任务；已提交新owner的任务保持新归属 | `return-timeout-qa/report.md` 覆盖接受前 return-first。`e2-final-report.md` 证 Bob 回归后任务仍归 Alice，Bob 随后领取并启动新工作。`task-name-authority-worker/report.md` 证副本旧 carrier 不能提交目标任务 |
 | D1 | 新owner接单且daemon提交才完成派发 | invite/respond、manager串行边；revision/current/idle/资源 gate | return-first撤自动邀请，accept-first保新owner；迟到接受或回归抢任务须拒绝 | `return-timeout-qa/report.md` 证 return-first 撤自动邀请并拒晚 accept。`e2-final-report.md` 的两个真实 TUI 场景均由 Alice 接受并提交 owner。`task-worker/parent-reflow-invitation-green.log` 的 board 组合 50 用例含换代拒绝和 accept-first |
 | R1 | 人类明确接替名字，接续该名字角色或按本次角色覆盖 | name intent、role grant；授权到目标角色 | 接替Jenny接master；源角色不能凭actor带入目标 | context和master-only公开请求 |
@@ -107,7 +107,7 @@ AGENTS。审批状态均为 approved。执行绑定状态另列。实际 gate �
 | M3 | 旧holder收件/消费或迟到delivery结果进入提交边 | inbox/ACK/notification结果；current与捕获投递归属 gate | 真实旧结果归原投递；误标新holder已消费或覆盖其证据须拦截 | `mailbox-worker/report.md`：`name_handoff_late_old_acceptance_*` 精确红转绿，`name_mailbox_tests` 9、`notification_batch_tests` 23 和 `parent-map-first-green.log` 公开 map-first 用例通过；跨 app source/actor 消息、消费与订阅公开组合已有通过证据；真实 TUI 源名消息排除仍缺 |
 | E1 | 人类明确退役普通名字，释放当前占用 | approval/UnregisterWithEffect；精确目标及退役操作 gate | 新普通注册可取得Bob，保留任务消息宿主资源；退役旧操作不能退继任holder | `human_retirement_` 公开回归 3 passed：无授权拒绝、明确退役释放并允许重新分配、旧 self-close 不进入明确退役路径。`physical-frontend-qa/report.md` 另证真实 TUI self-close 保留旧 host/label，新 Bob 普通 context 取得名字并完成双向通信；明确 human retire 本身与真实前端组合仍缺 |
 | E2 | 明确人类退役生效，未完成任务立即具备重派资格 | typed human retirement cause、调度；即时资格和合法idle gate | 有idle即邀请，全忙保资格；普通close不能冒充E2 | `e2-final-report.md` 与 `e2-final-cleanup.md` PASS。两种真实 TUI 场景均完成 Alice 接受和 daemon 提交。任务、非空资源与原订阅转 Alice。Bob 回归保持 Alice owner。`return-timeout-qa/report.md` 保留原失败和 return-first 证据 |
-| E3 | 人类明确退役 Jenny，释放 current 与精确 master grant | HumanRetire、current master grant、task scheduling；授权到精确名字与 grant 释放，再到 E2 | 释放该 holder 的 current 和 grant；保留工作、消息、资源与恢复入口；Jenny 保持 master 专用。普通注册取得 Jenny 或撤继任 grant 须拦截 | 审批已通过。产品准入与精确撤权已写入；公开退休任务 fixture 断言失败尚在处理，执行验收与真实前端保持未验收 |
+| E3 | 人类明确退役 Jenny，释放 current 与精确 master grant | HumanRetire、current master grant、task scheduling；授权到精确名字与 grant 释放，再到 E2 | 释放该 holder 的 current 和 grant；保留工作、消息、资源与恢复入口；Jenny 保持 master 专用。普通注册取得 Jenny 或撤继任 grant 须拦截 | `final-approvals-plan/e3-recovery-report.md` 公开通过，`e3-frontend-report.md` 真实 TUI 通过。无 master 时资格和工作重启保全，普通注册不取 Jenny，人类恢复后旧退役 receipt 不撤继任者，缺人类授权请求被拒绝 |
 | T4.1 | 任务已转交，核对资源与活动writer并完成写入交接 | 当前task owner、resource gate及源任务合同 | 保留dirty/untracked/证据后同路径接续；活动或未知writer时暂停受影响写入 | 真实Codex TUI T4.1 PASS：活动writer存在时只读，writer正常退出后同路径续写，旧/新/未跟踪内容均保留 |
 | T4.2 | 旧执行提交迟到产物，当前owner读取评估 | 普通发送、当前attempt/result gate及源任务合同 | 当前owner实际评估采用；产物本身不能转owner或覆盖当前状态 | private ordinary-message 路径端到端通过：迟到产物被当前owner读取并返回具体评估，任务owner/status/revision不变 |
 | W1 | 同名接替或已接受任务转交，更新后续wake接收目标 | goal schedule、assignment、subscription；提交归属到wake gate | 邀请期间仍归旧owner，接受提交后随新owner | `task-subscription-public-worker/report.md`：公开 `board invite` 不移 schedule，`board respond --accept` 提交后同一 subscription ID 和内容转到接受者；后续真实 timer wake 由新 holder 消费。不同 owner 的完整转交分支和真实前端未单独重跑 |
@@ -254,7 +254,7 @@ flowchart TD
  A --> B{只复用通信端点吗}:::decision
  B -->|是| C[保留旧名字 worker 任务和消息]:::action
  C --> D[只移交当前投递端点 不关闭逻辑身份]:::action
- B -->|否 人类明确退役| E[由身份 owner 释放普通名字及旧 holder 当前准入]:::action
+ B -->|否 人类明确退役| E[由身份 owner 释放名字及旧 holder 当前准入 Jenny 同时撤销精确 master grant]:::action
  E --> F[保留任务 消息 资源与历史 并记录立即重派资格]:::action
  D --> R[返回完成 待完成或真实错误]:::action
  F --> R
@@ -268,7 +268,8 @@ flowchart TD
 禁止把“别人接管了 pane”当作“这个项目的名字已注销”。
 自动探测失败、静态错误、unknown 或暂时离线也不是退役。它们保留尚未被替换的
 名字、恢复入口、任务、消息和订阅进度。只有人类明确退役才释放普通名字的当前
-占用；退役不等于终止宿主进程，也不删除未交付工作。
+占用。明确退役 Jenny 释放其当前绑定并撤销精确旧 grant，名字仍专用于 master。
+退役不等于终止宿主进程，也不删除未交付工作。
 当前候选的 active-map claimant 保护属于预防；补齐已有孤立关系属于恢复。
 两者不能互相替代。定向消费者审计已删除没有生产调用方的旧 route-failure
 注册包装与专属 cleanup。真实注册、创建 peer 和明确注销入口保留唯一 owner。

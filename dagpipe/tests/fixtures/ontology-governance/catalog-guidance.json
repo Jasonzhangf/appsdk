@@ -1,0 +1,381 @@
+{
+  "schema_version": 1,
+  "skill_id": "catalog-governance",
+  "guidance_version": "1",
+  "rules": [
+    {
+      "rule_id": "record-contract",
+      "severity": "forbidden",
+      "description": "提交非法目录记录",
+      "ontology_clause": "record-contract"
+    },
+    {
+      "rule_id": "group-contract",
+      "severity": "forbidden",
+      "description": "引用非法目录分组",
+      "ontology_clause": "group-contract"
+    },
+    {
+      "rule_id": "membership-contract",
+      "severity": "forbidden",
+      "description": "建立非法所属关系",
+      "ontology_clause": "membership-contract"
+    },
+    {
+      "rule_id": "activation-contract",
+      "severity": "forbidden",
+      "description": "从非法状态激活记录",
+      "ontology_clause": "activation-contract"
+    }
+  ],
+  "ontology": {
+    "schema_version": 1,
+    "objects": [
+      {
+        "id": "record",
+        "name": "记录",
+        "definition": "具有标题和状态的目录记录",
+        "identity": "type + scope + id",
+        "owner": "catalog",
+        "attributes": [
+          "title"
+        ],
+        "perception": "catalog query",
+        "must_have": [
+          "非空标题"
+        ],
+        "must_not_have": [
+          "重复身份"
+        ],
+        "source": [
+          "isolated example contract"
+        ]
+      },
+      {
+        "id": "group",
+        "name": "分组",
+        "definition": "记录可以加入的目录分组",
+        "identity": "type + scope + id",
+        "owner": "catalog",
+        "attributes": [
+          "name"
+        ],
+        "perception": "catalog query",
+        "must_have": [
+          "非空名称"
+        ],
+        "must_not_have": [
+          "重复身份"
+        ],
+        "source": [
+          "isolated example contract"
+        ]
+      }
+    ],
+    "behaviors": [
+      {
+        "id": "activate",
+        "name": "激活记录",
+        "owner": "catalog",
+        "precondition": [
+          "记录为 draft"
+        ],
+        "input": [
+          "record id",
+          "title",
+          "group id"
+        ],
+        "output": [
+          "已提交记录"
+        ],
+        "transition": {
+          "from": "draft",
+          "to": "active"
+        },
+        "effects": [
+          "更新记录和所属关系"
+        ],
+        "perception": "catalog apply and query",
+        "must_have": [
+          "提交前通过必需 gate"
+        ],
+        "must_not_have": [
+          "拒绝后写入"
+        ],
+        "source": [
+          "isolated example contract"
+        ]
+      }
+    ],
+    "relations": [
+      {
+        "id": "record-group",
+        "name": "记录所属分组",
+        "from": "record",
+        "to": "group",
+        "kind": "membership",
+        "direction": "record to group",
+        "cardinality": "每个记录至多一个分组，分组可有多个记录",
+        "perception": "catalog query",
+        "must_have": [
+          "端点存在且同作用域"
+        ],
+        "must_not_have": [
+          "悬挂端点"
+        ],
+        "source": [
+          "isolated example contract"
+        ]
+      }
+    ],
+    "clauses": [
+      {
+        "clause_id": "record-contract",
+        "rule_id": "record-contract",
+        "axis": "object",
+        "axis_id": "record",
+        "scope": "isolated catalog",
+        "scenario": "更新记录",
+        "trigger": "activate",
+        "allowed_actions": [
+          "提交合法记录"
+        ],
+        "forbidden_actions": [
+          "提交非法记录"
+        ],
+        "state_before": "当前记录",
+        "state_after": "候选记录",
+        "effects": [
+          "拒绝非法字段与身份"
+        ],
+        "owner": "catalog",
+        "evidence": [
+          "catalog object allow and deny cases"
+        ],
+        "approval": {
+          "state": "approved",
+          "source": "isolated test fixture only",
+          "text": "用于机制验收，不代表生产条款批准"
+        },
+        "governance": {
+          "edge": "catalog-activate/prepare->commit",
+          "gate_kind": "attribute",
+          "check": "ontology.object@1",
+          "allow_case": "valid-record",
+          "deny_case": "empty-title",
+          "observation": "catalog apply and query"
+        }
+      },
+      {
+        "clause_id": "group-contract",
+        "rule_id": "group-contract",
+        "axis": "object",
+        "axis_id": "group",
+        "scope": "isolated catalog",
+        "scenario": "引用分组",
+        "trigger": "activate",
+        "allowed_actions": [
+          "引用合法分组"
+        ],
+        "forbidden_actions": [
+          "引用非法分组"
+        ],
+        "state_before": "当前分组",
+        "state_after": "候选分组",
+        "effects": [
+          "拒绝非法分组实例"
+        ],
+        "owner": "catalog",
+        "evidence": [
+          "catalog group allow and deny cases"
+        ],
+        "approval": {
+          "state": "approved",
+          "source": "isolated test fixture only",
+          "text": "用于机制验收，不代表生产条款批准"
+        },
+        "governance": {
+          "edge": "catalog-activate/prepare->commit",
+          "gate_kind": "attribute",
+          "check": "ontology.object@1",
+          "allow_case": "valid-group",
+          "deny_case": "invalid-group",
+          "observation": "catalog apply and query"
+        }
+      },
+      {
+        "clause_id": "membership-contract",
+        "rule_id": "membership-contract",
+        "axis": "relation",
+        "axis_id": "record-group",
+        "scope": "isolated catalog",
+        "scenario": "建立记录所属关系",
+        "trigger": "activate",
+        "allowed_actions": [
+          "建立合法关系"
+        ],
+        "forbidden_actions": [
+          "建立非法关系"
+        ],
+        "state_before": "当前关系集合",
+        "state_after": "候选关系集合",
+        "effects": [
+          "拒绝错误端点和基数"
+        ],
+        "owner": "catalog",
+        "evidence": [
+          "catalog relation allow and deny cases"
+        ],
+        "approval": {
+          "state": "approved",
+          "source": "isolated test fixture only",
+          "text": "用于机制验收，不代表生产条款批准"
+        },
+        "governance": {
+          "edge": "catalog-activate/prepare->commit",
+          "gate_kind": "relation",
+          "check": "ontology.relation@1",
+          "allow_case": "valid-membership",
+          "deny_case": "missing-group",
+          "observation": "catalog apply and query"
+        }
+      },
+      {
+        "clause_id": "activation-contract",
+        "rule_id": "activation-contract",
+        "axis": "behavior",
+        "axis_id": "activate",
+        "scope": "isolated catalog",
+        "scenario": "激活记录",
+        "trigger": "activate",
+        "allowed_actions": [
+          "draft 迁移为 active"
+        ],
+        "forbidden_actions": [
+          "从其他状态激活"
+        ],
+        "state_before": "draft",
+        "state_after": "active",
+        "effects": [
+          "拒绝非法迁移"
+        ],
+        "owner": "catalog",
+        "evidence": [
+          "catalog transition allow and deny cases"
+        ],
+        "approval": {
+          "state": "approved",
+          "source": "isolated test fixture only",
+          "text": "用于机制验收，不代表生产条款批准"
+        },
+        "governance": {
+          "edge": "catalog-activate/prepare->commit",
+          "gate_kind": "transition",
+          "check": "ontology.transition@1",
+          "allow_case": "draft-activate",
+          "deny_case": "active-activate",
+          "observation": "catalog apply and query"
+        }
+      }
+    ],
+    "execution": {
+      "version": 1,
+      "objects": [
+        {
+          "object_id": "record",
+          "states": [
+            "draft",
+            "active"
+          ],
+          "contract": {
+            "operator": "catalog.record_contract",
+            "version": "1"
+          }
+        },
+        {
+          "object_id": "group",
+          "states": [
+            "open"
+          ],
+          "contract": {
+            "operator": "catalog.group_contract",
+            "version": "1"
+          }
+        }
+      ],
+      "relations": [
+        {
+          "relation_id": "record-group",
+          "scope": "same_scope",
+          "forward": {
+            "min": 0,
+            "max": 1
+          },
+          "create_by": [
+            "activate"
+          ],
+          "replace_by": [],
+          "remove_by": []
+        }
+      ],
+      "operations": [
+        {
+          "behavior_id": "activate",
+          "object_id": "record",
+          "event": "activate",
+          "graph_id": "catalog-activate",
+          "commit_node": "commit",
+          "clauses": [
+            "record-contract",
+            "group-contract",
+            "membership-contract",
+            "activation-contract"
+          ]
+        }
+      ]
+    }
+  },
+  "workflows": [
+    {
+      "domain": "catalog",
+      "objective": "在一致性边界内激活目录记录",
+      "entry_node": "prepare",
+      "nodes": [
+        {
+          "node_id": "prepare",
+          "instruction": "准备业务请求数据",
+          "owner": "catalog",
+          "evidence": [
+            "catalog-activate/prepare"
+          ]
+        },
+        {
+          "node_id": "commit",
+          "instruction": "在项目 owner 一致性边界内检查并提交候选变化",
+          "owner": "catalog",
+          "evidence": [
+            "catalog-activate/commit"
+          ]
+        },
+        {
+          "node_id": "receipt",
+          "instruction": "形成公开结果",
+          "owner": "catalog",
+          "evidence": [
+            "catalog-activate/receipt"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "prepare",
+          "to": "commit"
+        },
+        {
+          "from": "commit",
+          "to": "receipt"
+        }
+      ]
+    }
+  ]
+}

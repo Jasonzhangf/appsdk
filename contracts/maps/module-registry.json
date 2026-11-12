@@ -80,6 +80,9 @@
       "entry_symbols": [
         "pipeline_runtime::compile",
         "pipeline_runtime::Runtime::run",
+        "pipeline_runtime::governance::validate_execution_declaration",
+        "pipeline_runtime::governance::bind_operation",
+        "pipeline_runtime::governance::CompiledOperation::call",
         "dagpipe::main"
       ],
       "forbidden_paths": ["active/lib/**", "protected/**"],

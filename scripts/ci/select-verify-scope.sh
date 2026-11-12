@@ -52,17 +52,20 @@ elif [[ "$event_name" == "push" ]]; then
 fi
 
 app_sdk_full=false
+source_registry=false
 rust_guidance=false
 rust_communication=false
 rust_memory=false
 rust_registry=false
 rust_producer=false
 rust_verify_foundation=false
+rust_ontology_governance=false
 rust_cli_smoke=false
 rust_platform_lock_cli=false
 rust_registry_home_cli=false
 resources=false
 dagpipe=false
+dagpipe_installer=false
 collab=false
 installer=false
 docs=false
@@ -76,6 +79,8 @@ if [[ "$release" == true ]]; then
   resources=true
   installer=true
   dagpipe=true
+  dagpipe_installer=true
+  rust_ontology_governance=true
   windows_appsdk=true
   windows_dagpipe=true
   workflow_contract=true
@@ -112,9 +117,11 @@ else
   app_sdk_full=true
   resources=true
   dagpipe=true
+  dagpipe_installer=true
   collab=true
   installer=true
   docs=true
+  rust_ontology_governance=true
   windows_appsdk=true
   windows_dagpipe=true
   workflow_contract=true
@@ -126,9 +133,11 @@ if [[ -z "$changed" && "$release" != true ]]; then
   app_sdk_full=true
   resources=true
   dagpipe=true
+  dagpipe_installer=true
   collab=true
   installer=true
   docs=true
+  rust_ontology_governance=true
   windows_appsdk=true
   windows_dagpipe=true
   workflow_contract=true
@@ -177,9 +186,11 @@ while IFS= read -r path; do
       ;;
     scripts/install-global-dagpipe.sh)
       dagpipe=true
+      dagpipe_installer=true
       windows_dagpipe=true
       ;;
     scripts/tests/test-windows-dagpipe.ps1)
+      dagpipe_installer=true
       windows_dagpipe=true
       ;;
     scripts/tests/test-windows-appsdk-reset.ps1)
@@ -216,6 +227,9 @@ while IFS= read -r path; do
         rust_cli_smoke=true
         windows_appsdk=true
       fi
+      ;;
+    rust/src/guidance/compiler.rs|rust/tests/ontology_governance_cli.rs|rust/tests/fixtures/ontology-governance/*)
+      rust_ontology_governance=true
       ;;
     rust/src/main.rs|rust/src/main/project.rs|rust/src/main/governance.rs|rust/src/main/registry.rs|rust/src/main/compile.rs|rust/src/main/verification.rs|rust/src/main/promotion.rs|rust/src/main/command_invocation.rs|rust/src/dagpipe.rs|rust/src/dagpipe_notification.rs|rust/src/main/verify_foundation.rs|contracts/dagpipe/verify-foundation.graph.json|rust/tests/verify_foundation_cli.rs|rust/tests/fixtures/verify_foundation/*)
       rust_verify_foundation=true
@@ -258,6 +272,12 @@ while IFS= read -r path; do
       rust_registry_home_cli=true
       windows_appsdk=true
       ;;
+    contracts/guidance/guidance-manifest.schema.json)
+      rust_ontology_governance=true
+      ;;
+    contracts/maps/module-registry.json|contracts/maps/function-map.json)
+      source_registry=true
+      ;;
     rust/tests/reset_platform_cli.rs)
       windows_appsdk=true
       ;;
@@ -268,13 +288,23 @@ while IFS= read -r path; do
     dagpipe/docs/*|dagpipe/*.md)
       docs=true
       ;;
-    dagpipe/Cargo.toml|dagpipe/Cargo.lock|dagpipe/src/lib.rs)
+    dagpipe/src/lib.rs)
       dagpipe=true
+      windows_dagpipe=true
+      ;;
+    dagpipe/src/governance.rs|dagpipe/tests/ontology_governance.rs|dagpipe/tests/support/ontology_governance.rs|dagpipe/examples/governed_catalog.rs|dagpipe/tests/governed_catalog_cli.rs|dagpipe/tests/fixtures/ontology-governance/*)
+      dagpipe=true
+      windows_dagpipe=true
+      ;;
+    dagpipe/Cargo.toml|dagpipe/Cargo.lock)
+      dagpipe=true
+      dagpipe_installer=true
       windows_dagpipe=true
       windows_appsdk=true
       ;;
     dagpipe/src/bin/*)
       dagpipe=true
+      dagpipe_installer=true
       windows_dagpipe=true
       ;;
     dagpipe/src/*)
@@ -284,6 +314,7 @@ while IFS= read -r path; do
       ;;
     dagpipe/*)
       dagpipe=true
+      dagpipe_installer=true
       windows_dagpipe=true
       ;;
     collab/docs/*|collab/*.md)
@@ -328,6 +359,7 @@ while IFS= read -r path; do
       ;;
     *)
       app_sdk_full=true
+      dagpipe_installer=true
       windows_appsdk=true
       windows_dagpipe=true
       ;;
@@ -335,17 +367,20 @@ while IFS= read -r path; do
 done <<< "$changed"
 
 emit app_sdk_full "$app_sdk_full"
+emit source_registry "$source_registry"
 emit rust_guidance "$rust_guidance"
 emit rust_communication "$rust_communication"
 emit rust_memory "$rust_memory"
 emit rust_registry "$rust_registry"
 emit rust_producer "$rust_producer"
 emit rust_verify_foundation "$rust_verify_foundation"
+emit rust_ontology_governance "$rust_ontology_governance"
 emit rust_cli_smoke "$rust_cli_smoke"
 emit rust_platform_lock_cli "$rust_platform_lock_cli"
 emit rust_registry_home_cli "$rust_registry_home_cli"
 emit resources "$resources"
 emit dagpipe "$dagpipe"
+emit dagpipe_installer "$dagpipe_installer"
 emit collab "$collab"
 emit installer "$installer"
 emit docs "$docs"

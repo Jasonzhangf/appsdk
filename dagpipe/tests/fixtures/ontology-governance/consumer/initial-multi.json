@@ -1,0 +1,32 @@
+{
+  "objects": [
+    {
+      "type": "record",
+      "scope": "demo",
+      "id": "r1",
+      "state": "draft",
+      "data": {
+        "title": "Original one"
+      }
+    },
+    {
+      "type": "record",
+      "scope": "demo",
+      "id": "r2",
+      "state": "draft",
+      "data": {
+        "title": "Original two"
+      }
+    },
+    {
+      "type": "group",
+      "scope": "demo",
+      "id": "g1",
+      "state": "open",
+      "data": {
+        "name": "Shared group"
+      }
+    }
+  ],
+  "relations": []
+}

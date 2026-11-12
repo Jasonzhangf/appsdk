@@ -31,11 +31,24 @@ assert_workflow_contains 'bash scripts/tests/test-governance-reference-distribut
 assert_workflow_contains 'workflow_contract: ${{ steps.scope.outputs.workflow_contract }}'
 assert_workflow_contains 'npm: ${{ steps.scope.outputs.npm }}'
 assert_workflow_contains 'rust_verify_foundation: ${{ steps.scope.outputs.rust_verify_foundation }}'
+assert_workflow_contains 'rust_ontology_governance: ${{ steps.scope.outputs.rust_ontology_governance }}'
+assert_workflow_contains 'source_registry: ${{ steps.scope.outputs.source_registry }}'
+assert_workflow_contains 'dagpipe_installer: ${{ steps.scope.outputs.dagpipe_installer }}'
+assert_workflow_contains 'cargo run --manifest-path rust/Cargo.toml --locked --bin appsdk -- verify-sdk-source-registry .'
 assert_workflow_contains 'cargo check --manifest-path rust/Cargo.toml --locked --all-targets'
 assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk verify_foundation::tests'
 assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk command_invocation::tests'
 assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test verify_foundation_cli'
 assert_workflow_contains '  windows-verify-foundation:'
+assert_workflow_contains 'cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke dagpipe_validate'
+assert_workflow_contains 'cargo build --release --manifest-path dagpipe/Cargo.toml --locked --bin dagpipe'
+assert_workflow_contains 'pwsh -NoProfile -File scripts/tests/test-windows-dagpipe.ps1'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli'
+[[ "$(grep -Fc -- 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli' "$workflow")" == 1 ]] ||
+  fail "guidance_ablation_cli must run from one shared condition"
 assert_workflow_contains 'dagpipe::tests::graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs'
 assert_workflow_contains 'dagpipe_validate_notifications_records_invocation_outcomes'
 assert_workflow_contains 'dagpipe_validate_notifications_isolates_invocation_log_failure'
@@ -52,12 +65,67 @@ if ! awk '
   fail "windows-verify-foundation contains a prohibited smoke, package, broad test, digest, or identity probe"
 fi
 if ! awk '
+  /^  windows-verify-foundation:/ { active = 1; next }
+  active && /^  [A-Za-z0-9_-]+:/ { exit }
+  active && $0 == "      needs.changes.outputs.rust_verify_foundation == '\''true'\'' ||" { foundation = 1 }
+  active && $0 == "      needs.changes.outputs.rust_ontology_governance == '\''true'\''" { ontology = 1 }
+  END { exit !(foundation && ontology) }
+' "$workflow"; then
+  fail "windows-verify-foundation is missing its foundation or ontology selection"
+fi
+if ! awk '
+  /^      - / { active = 0 }
+  /^      - name: Verify foundation public CLI tests$/ { active = 1 }
+  active && $0 == "        if: needs.changes.outputs.rust_verify_foundation == '\''true'\''" { selected = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test verify_foundation_cli" { found = 1 }
+  END { exit !(selected && found) }
+' "$workflow"; then
+  fail "windows-verify-foundation does not scope the foundation CLI test to its own selection"
+fi
+if ! awk '
+  /^      - / { active = 0 }
+  /^      - name: Ontology Guidance static CLI tests$/ { active = 1 }
+  active && $0 == "        if: needs.changes.outputs.rust_ontology_governance == '\''true'\''" { ontology = 1 }
+  active && $0 == "          $listed = & cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list" { listed = 1 }
+  active && $0 == "          if ($count -lt 1) { throw \"expected at least one ontology Guidance test\" }" { nonempty = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli" { found = 1 }
+  END { exit !(ontology && listed && nonempty && found) }
+' "$workflow"; then
+  fail "windows-verify-foundation is missing the ontology Guidance static CLI test"
+fi
+if ! awk '
   /^      - / { guidance = 0 }
-  $0 == "        if: needs.changes.outputs.rust_guidance == '\''true'\''" { guidance = 1 }
+  /^      - name: Guidance ablation tests$/ { guidance = 1 }
+  guidance && $0 == "        if: needs.changes.outputs.rust_guidance == '\''true'\''" { rust_guidance = 1 }
   guidance && $0 == "        run: cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli" { found = 1 }
-  END { exit !found }
+  END { exit !(rust_guidance && found) }
 ' "$workflow"; then
   fail "workflow is missing guidance_ablation_cli under the Guidance condition"
+fi
+if ! awk '
+  /^      - / { active = 0 }
+  /^      - name: Ontology Guidance static tests$/ { active = 1 }
+  active && $0 == "        if: needs.changes.outputs.rust_ontology_governance == '\''true'\''" { ontology = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list \\" { listed = 1 }
+  active && $0 == "            | grep -E '\'': test$'\'' > /dev/null" { nonempty = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli" { static = 1 }
+  END { exit !(ontology && listed && nonempty && static) }
+' "$workflow"; then
+  fail "workflow is missing static ontology CLI consumers under the ontology condition"
+fi
+if ! awk '
+  /^  windows-dagpipe:/ { active = 1; next }
+  active && /^  [A-Za-z0-9_-]+:/ { exit }
+  active && $0 == "          cargo test --manifest-path dagpipe/Cargo.toml --locked --lib --test ontology_governance --test governed_catalog_cli --example governed_catalog" { tests = 1 }
+  active && $0 == "          cargo build --release --manifest-path dagpipe/Cargo.toml --locked --bin dagpipe" { build = 1 }
+  active && $0 == "      - name: DAGPipe Windows install black-box harness" { harness = 1 }
+  active && $0 == "        run: pwsh -NoProfile -File scripts/tests/test-windows-dagpipe.ps1" { smoke = 1 }
+  END { exit !(tests && build && harness && smoke) }
+' "$workflow"; then
+  fail "windows-dagpipe is missing package tests, build, or its existing native consumer harness"
+fi
+if awk '/^  windows-dagpipe:/ { active = 1; next } active && /^  [A-Za-z0-9_-]+:/ { exit } active && /git rev-parse HEAD/ { found = 1 } END { exit !found }' "$workflow"; then
+  fail "windows-dagpipe performs an unnecessary commit identity query"
 fi
 for job in workflow-contract npm macos-appsdk package-appsdk npm-consumers; do
   assert_workflow_contains "  $job:"
@@ -157,8 +225,9 @@ expect_false() {
 
 # Every flag the selector can emit, for the "nothing else selected" checks.
 all_flags=(
-  app_sdk_full rust_guidance rust_communication rust_memory rust_registry
-  rust_producer rust_verify_foundation rust_cli_smoke rust_platform_lock_cli rust_registry_home_cli
+  app_sdk_full source_registry dagpipe_installer rust_guidance rust_communication rust_memory rust_registry
+  rust_producer rust_verify_foundation rust_ontology_governance rust_cli_smoke
+  rust_platform_lock_cli rust_registry_home_cli
   resources dagpipe collab installer docs windows_appsdk windows_dagpipe
   workflow_contract npm
 )
@@ -255,7 +324,7 @@ expect_only "rust_verify_foundation rust_guidance resources windows_appsdk"
 
 run_scenario "verify-foundation-and-unknown" "push" "branch" "1" \
   $'rust/tests/verify_foundation_cli.rs\nunknown/file.txt'
-expect_only "rust_verify_foundation app_sdk_full windows_appsdk windows_dagpipe"
+expect_only "rust_verify_foundation app_sdk_full windows_appsdk windows_dagpipe dagpipe_installer"
 
 legacy_numstat=$'0\t49\trust/tests/cli_smoke/part_07.rs\n0\t19\trust/tests/cli_smoke/part_08.rs\n0\t27\trust/tests/sdk_resource_refresh_cli.rs'
 candidate_legacy_status=$'M\trust/tests/cli_smoke/part_07.rs\nM\trust/tests/cli_smoke/part_08.rs\nM\trust/tests/sdk_resource_refresh_cli.rs'
@@ -395,7 +464,90 @@ expect_false "workflow_contract"
 run_scenario "dagpipe-lib" "push" "branch" "1" "dagpipe/src/lib.rs"
 expect_true "dagpipe"
 expect_true "windows_dagpipe"
-expect_true "windows_appsdk"
+expect_false "app_sdk_full"
+expect_false "windows_appsdk"
+
+run_scenario "ontology-dagpipe-library" "push" "branch" "1" "dagpipe/src/governance.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "dagpipe-installer-owner" "push" "branch" "1" "dagpipe/src/bin/dagpipe.rs"
+expect_only "dagpipe windows_dagpipe dagpipe_installer"
+
+run_scenario "ontology-with-installer-owner" "push" "branch" "1" \
+  $'dagpipe/src/governance.rs\ndagpipe/src/bin/dagpipe.rs'
+expect_only "dagpipe windows_dagpipe dagpipe_installer"
+
+run_scenario "ontology-dagpipe-test" "push" "branch" "1" "dagpipe/tests/ontology_governance.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-dagpipe-example" "push" "branch" "1" "dagpipe/examples/governed_catalog.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-dagpipe-cli" "push" "branch" "1" "dagpipe/tests/governed_catalog_cli.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-dagpipe-fixture" "push" "branch" "1" \
+  "dagpipe/tests/fixtures/ontology-governance/consumer/illegal-session.jsonl"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-guidance-compiler" "push" "branch" "1" "rust/src/guidance/compiler.rs"
+expect_only "rust_ontology_governance"
+
+run_scenario "ontology-guidance-cli" "push" "branch" "1" "rust/tests/ontology_governance_cli.rs"
+expect_only "rust_ontology_governance"
+
+run_scenario "ontology-guidance-fixture" "push" "branch" "1" \
+  "rust/tests/fixtures/ontology-governance/project/.appsdk/project.json"
+expect_only "rust_ontology_governance"
+
+run_scenario "ontology-guidance-schema" "push" "branch" "1" \
+  "contracts/guidance/guidance-manifest.schema.json"
+expect_only "rust_ontology_governance"
+
+for map in contracts/maps/function-map.json contracts/maps/module-registry.json; do
+  run_scenario "source-map-$map" "push" "branch" "1" "$map"
+  expect_only "source_registry"
+done
+
+run_scenario "source-map-with-dependency" "push" "branch" "1" \
+  $'contracts/maps/module-registry.json\nrust/Cargo.toml'
+expect_only "source_registry app_sdk_full resources windows_appsdk"
+
+run_scenario "other-source-map" "push" "branch" "1" "contracts/maps/verification-map.json"
+expect_only "app_sdk_full resources windows_appsdk"
+
+run_scenario "ontology-guidance-and-dependency" "push" "branch" "1" \
+  $'rust/src/guidance/compiler.rs\nrust/Cargo.toml'
+expect_only "rust_ontology_governance app_sdk_full resources windows_appsdk"
+
+ontology_candidate_paths=$(printf '%s\n' \
+  '.agents/skills/appsdk-dev/SKILL.md' \
+  '.github/workflows/verify.yml' \
+  'contracts/guidance/guidance-manifest.schema.json' \
+  'contracts/maps/function-map.json' \
+  'contracts/maps/module-registry.json' \
+  'dagpipe/examples/governed_catalog.rs' \
+  'dagpipe/src/governance.rs' \
+  'dagpipe/src/lib.rs' \
+  'dagpipe/tests/fixtures/ontology-governance/activate.graph.json' \
+  'dagpipe/tests/fixtures/ontology-governance/binding/unknown-gate.json' \
+  'dagpipe/tests/fixtures/ontology-governance/catalog-guidance.json' \
+  'dagpipe/tests/fixtures/ontology-governance/consumer/illegal-session.jsonl' \
+  'dagpipe/tests/fixtures/ontology-governance/legal-session.jsonl' \
+  'dagpipe/tests/governed_catalog_cli.rs' \
+  'dagpipe/tests/ontology_governance.rs' \
+  'dagpipe/tests/support/ontology_governance.rs' \
+  'docs/design/appsdk-ontology-governance.md' \
+  'rust/src/guidance/compiler.rs' \
+  'rust/tests/fixtures/ontology-governance/project/.appsdk/project.json' \
+  'rust/tests/ontology_governance_cli.rs' \
+  'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md' \
+  'sdk-skill-sources/appsdk-project-governance/references/ontology-governance.md' \
+  'scripts/ci/select-verify-scope.sh' \
+  'scripts/tests/test-verify-selector.sh')
+run_scenario "ontology-candidate-diff" "push" "branch" "1" \
+  "$ontology_candidate_paths"
+expect_only "dagpipe rust_ontology_governance source_registry docs windows_dagpipe workflow_contract"
 expect_false "app_sdk_full"
 
 # 10. Unknown path stays fail-closed to the full repository.
@@ -473,7 +625,7 @@ expect_only "docs workflow_contract rust_verify_foundation"
 
 run_scenario "reference-and-unknown" "pull_request" "branch" "1" \
   $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\nunknown/file.txt'
-expect_only "docs workflow_contract app_sdk_full windows_appsdk windows_dagpipe"
+expect_only "docs workflow_contract app_sdk_full windows_appsdk windows_dagpipe dagpipe_installer"
 
 run_scenario "pr-workflow" "pull_request" "branch" "1" ".github/workflows/verify.yml"
 expect_only "workflow_contract"
@@ -485,7 +637,7 @@ expect_only "rust_guidance windows_appsdk"
 # 16. The Guidance milestone keeps its resource, installer, and workflow owners.
 run_scenario "guidance-selector-milestone" "pull_request" "branch" "1" \
   $'rust/tests/guidance_ablation_cli.rs\nrust/src/guidance/compiler.rs\nsdk-skill-sources/appsdk-project-governance/appsdk-guidance.json\nscripts/ci/select-verify-scope.sh\nscripts/tests/test-verify-selector.sh\n.github/workflows/verify.yml'
-expect_only "rust_guidance windows_appsdk resources installer workflow_contract"
+expect_only "rust_guidance rust_ontology_governance resources installer windows_appsdk workflow_contract"
 
 # Real Git history proves that a feature push excludes changes inherited from
 # main while preserving its own changes. Branch names provide the fixture refs.

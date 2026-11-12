@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "skill_id": "ontology-governance-fixture",
+  "guidance_version": "1",
+  "rules": [
+    {
+      "rule_id": "record-contract",
+      "severity": "forbidden",
+      "description": "Reject invalid record updates.",
+      "ontology_clause": "record-contract"
+    },
+    {
+      "rule_id": "group-contract",
+      "severity": "forbidden",
+      "description": "Reject invalid group references.",
+      "ontology_clause": "group-contract"
+    },
+    {
+      "rule_id": "membership-contract",
+      "severity": "forbidden",
+      "description": "Reject invalid record membership.",
+      "ontology_clause": "membership-contract"
+    },
+    {
+      "rule_id": "activation-contract",
+      "severity": "forbidden",
+      "description": "Reject invalid activations.",
+      "ontology_clause": "activation-contract"
+    }
+  ],
+  "workflows": [
+    {
+      "domain": "develop",
+      "objective": "Compile the ontology execution declaration.",
+      "entry_node": "compile",
+      "nodes": [
+        {
+          "node_id": "compile",
+          "instruction": "Compile the declared ontology.",
+          "owner": "ontology-guidance-fixture",
+          "evidence": [
+            "appsdk guide compile"
+          ]
+        }
+      ],
+      "edges": []
+    }
+  ]
+}

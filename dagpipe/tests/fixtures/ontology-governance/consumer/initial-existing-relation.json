@@ -1,0 +1,46 @@
+{
+  "objects": [
+    {
+      "type": "record",
+      "scope": "demo",
+      "id": "r1",
+      "state": "draft",
+      "data": {
+        "title": "Original title"
+      }
+    },
+    {
+      "type": "group",
+      "scope": "demo",
+      "id": "g1",
+      "state": "open",
+      "data": {
+        "name": "New target"
+      }
+    },
+    {
+      "type": "group",
+      "scope": "demo",
+      "id": "g2",
+      "state": "open",
+      "data": {
+        "name": "Existing target"
+      }
+    }
+  ],
+  "relations": [
+    {
+      "type": "record-group",
+      "from": {
+        "type": "record",
+        "scope": "demo",
+        "id": "r1"
+      },
+      "to": {
+        "type": "group",
+        "scope": "demo",
+        "id": "g2"
+      }
+    }
+  ]
+}

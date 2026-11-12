@@ -653,30 +653,46 @@ impl BindingControlSet {
         app: &AppServerId,
         worker: &str,
     ) -> Result<String, String> {
-        for name in super::name_resolution::ORDINARY_NAME_POOL {
-            if self.slots.iter().any(|slot| {
+        if let Some(name) = self.slots.iter().find_map(|slot| {
+            let name = slot.identity_key.name.as_str();
+            let ordinary = super::name_resolution::ORDINARY_NAME_POOL.contains(&name)
+                || super::name_resolution::peer_registration_number(name).is_some();
+            (&slot.identity_key.project_scope == project
+                && &slot.identity_key.app_scope_id == app
+                && ordinary
+                && slot
+                    .active_binding()
+                    .is_some_and(|value| value.binding.agent_id.as_str() == worker))
+            .then_some(name)
+        }) {
+            return Ok(name.into());
+        }
+        let occupied_by_anyone = |name: &str| {
+            self.slots.iter().any(|slot| {
                 &slot.identity_key.project_scope == project
                     && &slot.identity_key.app_scope_id == app
                     && slot.identity_key.name == name
-                    && slot
-                        .active_binding()
-                        .is_some_and(|value| value.binding.agent_id.as_str() == worker)
-            }) {
-                return Ok(name.into());
-            }
-        }
-        super::name_resolution::ORDINARY_NAME_POOL
-            .into_iter()
-            .find(|name| {
-                !self.slots.iter().any(|slot| {
-                    &slot.identity_key.project_scope == project
-                        && &slot.identity_key.app_scope_id == app
-                        && slot.identity_key.name == *name
-                        && slot.active_binding().is_some()
-                })
+                    && slot.active_binding().is_some()
             })
-            .map(str::to_owned)
-            .ok_or_else(|| "NAME_POOL_FULL: all ordinary names have active mappings".into())
+        };
+        if let Some(name) = super::name_resolution::ORDINARY_NAME_POOL
+            .into_iter()
+            .find(|name| !occupied_by_anyone(name))
+        {
+            return Ok(name.into());
+        }
+        let mut number = 1u32;
+        loop {
+            let name = format!("peer-{number}");
+            if !self.slots.iter().any(|slot| {
+                &slot.identity_key.project_scope == project && slot.identity_key.name == name
+            }) {
+                return Ok(name);
+            }
+            number = number.checked_add(1).ok_or_else(|| {
+                "PEER_NAME_EXHAUSTED: peer-<number> space is exhausted".to_string()
+            })?;
+        }
     }
 
     pub(crate) fn from_slots(slots: Vec<IdentityBindingSlot>) -> Self {

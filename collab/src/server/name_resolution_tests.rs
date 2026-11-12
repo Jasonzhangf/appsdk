@@ -14,3 +14,12 @@ fn physical_names_preserve_folder_and_include_the_display_slot() {
     );
     assert!(physical_tmux_name("/projects/app-sdk", "unknown").is_err());
 }
+
+#[test]
+fn generated_names_use_only_canonical_peer_numbers() {
+    assert_eq!(display_slot("peer-1").unwrap(), 22);
+    assert_eq!(display_slot("peer-42").unwrap(), 63);
+    for invalid in ["Peer1", "peer-0", "peer-01", "peer-", "peer-one"] {
+        assert!(display_slot(invalid).is_err(), "{invalid} must not be canonical");
+    }
+}

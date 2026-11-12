@@ -436,6 +436,7 @@ impl ProjectRuntimeManager {
         facts: Option<&crate::proto::IdentityFacts>,
         tmux_session_name: Option<&str>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        name_intent: Option<&crate::server::name_resolution::NameIntent>,
     ) -> Result<String, String> {
         let crate::server::state::TypedCommand::RegisterWorker {
             binding, worker, ..
@@ -466,11 +467,16 @@ impl ProjectRuntimeManager {
         runtime.validate_typed_register(&state, &prepared.typed)
             .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
         let control = self.binding_control_store().load()?;
-        let name = name_resolution::name_for_registration(
-            &state,
-            &control,
-            binding,
-        )?;
+        let name = match name_intent {
+            Some(intent) => {
+                if !intent.user_authorized {
+                    return Err("NAME_AUTHORIZATION_REQUIRED".into());
+                }
+                name_resolution::display_slot(&intent.requested_name)?;
+                intent.requested_name.clone()
+            }
+            None => name_resolution::name_for_registration(&state, &control, binding)?,
+        };
         let target_session_id = binding
             .session_id
             .as_ref()
@@ -478,6 +484,11 @@ impl ProjectRuntimeManager {
             .as_str()
             .to_owned();
         let effect_id = format!("register-{}", prepared.nested_operation_id);
+        // An explicit name intent moves the requested name to this carrier. A
+        // displaced holder must receive its replacement name in the same
+        // control commit, or its live runtime binding would be left without a
+        // current mapping.
+        let moves_existing_names = name_intent.is_some();
         let effect = Self::handoff_effect(
             &control,
             &state,
@@ -489,7 +500,7 @@ impl ProjectRuntimeManager {
             &effect_id,
             crate::server::binding_slot::PendingEffectKind::Register,
             Vec::new(),
-            false,
+            moves_existing_names,
             pane_anchor.clone(),
         );
         let key = crate::server::binding_slot::IdentityBindingKey::new(
@@ -497,6 +508,78 @@ impl ProjectRuntimeManager {
             context.app_scope_id.clone(),
             name.clone(),
         );
+        let companion = match (&effect, moves_existing_names) {
+            (Some(effect), true) => {
+                let previous = control
+                    .slot(&key)
+                    .and_then(|slot| slot.active_binding())
+                    .filter(|value| {
+                        Some(value.binding.agent_id.as_str()) == effect.previous_worker_id.as_deref()
+                            && value.binding.session_id.as_ref().map(|id| id.as_str())
+                                == effect.previous_session_id.as_deref()
+                    });
+                match previous {
+                    Some(previous) => {
+                        let mut candidate = control.clone();
+                        let moved = crate::server::binding_slot::BindingValue::new(
+                            binding.clone(),
+                            previous.transport.clone(),
+                        );
+                        candidate
+                            .move_name(&key, moved, &[], None)
+                            .map_err(|error| error.to_string())?;
+                        let ordinary = candidate.ordinary_name(
+                            &context.project_scope,
+                            &context.app_scope_id,
+                            previous.binding.agent_id.as_str(),
+                        )?;
+                        let outgoing_key = crate::server::binding_slot::IdentityBindingKey::new(
+                            context.project_scope.clone(),
+                            context.app_scope_id.clone(),
+                            &ordinary,
+                        );
+                        let mut outgoing = previous.clone();
+                        if let Some(endpoint) = &outgoing.binding.tmux_endpoint {
+                            outgoing.physical_name =
+                                crate::client::adapters::tmux::session_name_if_live(endpoint)
+                                    .and_then(|_| {
+                                        crate::server::tm_layout::physical_name(
+                                            &outgoing,
+                                            &outgoing.invocation_cwd,
+                                            &ordinary,
+                                        )
+                                    })?;
+                        }
+                        let outgoing_effect = crate::server::binding_slot::PendingEffect {
+                            kind: crate::server::binding_slot::PendingEffectKind::Name,
+                            role: None,
+                            effect_id: format!("{effect_id}:outgoing"),
+                            name: ordinary.clone(),
+                            previous_worker_id: None,
+                            previous_session_id: None,
+                            target_worker_id: outgoing.binding.agent_id.to_string(),
+                            target_session_id: outgoing
+                                .binding
+                                .session_id
+                                .as_ref()
+                                .ok_or("IDENTITY_SESSION_MISSING")?
+                                .to_string(),
+                            occupancy_revision: state
+                                .name_occupancy_revision(context.project_scope.as_str(), &ordinary)
+                                .checked_add(1)
+                                .ok_or("NAME_REVISION_EXHAUSTED")?,
+                            source_names: Vec::new(),
+                            moves_existing_names: false,
+                            pane_anchor: None,
+                            ..effect.clone()
+                        };
+                        Some((outgoing_key, outgoing, outgoing_effect))
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
         let mut value = crate::server::binding_slot::BindingValue::new(binding.clone(), transport);
         if let Some(facts) = facts {
             value.host.agent_kind = facts.agent_kind.clone();
@@ -528,7 +611,7 @@ impl ProjectRuntimeManager {
             &value,
             &value.invocation_cwd, &name,
             is_current_master,
-            None,
+            companion.as_ref().map(|(key, value, _)| (value, key.name.as_str())),
         ) {
             Ok(rename) => rename,
             Err(error) => return Err(match staged.map(|staged| staged.rollback()).transpose() {
@@ -537,6 +620,16 @@ impl ProjectRuntimeManager {
             }),
         };
         let change = match effect {
+            Some(effect) if moves_existing_names => {
+                crate::server::binding_store::ControlChange::MoveNameWithEffect {
+                    target: key,
+                    value,
+                    source_names: Vec::new(),
+                    expected_generation: None,
+                    effect,
+                    companion,
+                }
+            }
             Some(effect) => crate::server::binding_store::ControlChange::CommitWithEffect {
                     key,
                     value,
@@ -1186,6 +1279,7 @@ impl ProjectRuntimeManager {
         facts: Option<crate::proto::IdentityFacts>,
         tmux_session_name: Option<String>,
         pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+        name_intent: Option<crate::server::name_resolution::NameIntent>,
         effect_id_out: &'a mut Option<String>,
     ) -> impl FnMut(&crate::server::PreparedRegisterEnvelope) -> Result<(), String> + 'a {
         move |prepared| {
@@ -1195,6 +1289,7 @@ impl ProjectRuntimeManager {
                 facts.as_ref(),
                 tmux_session_name.as_deref(),
                 pane_anchor.clone(),
+                name_intent.as_ref(),
             )?);
             Ok(())
         }

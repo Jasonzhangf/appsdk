@@ -22,6 +22,11 @@ pub(crate) fn physical_tmux_name(cwd: &str, logical_name: &str) -> Result<String
 
 pub(crate) fn display_slot(name: &str) -> Result<u32, String> {
     if name == "Jenny" { return Ok(1); }
+    if let Some(number) = peer_registration_number(name) {
+        return number
+            .checked_add(21)
+            .ok_or_else(|| format!("NAME_INVALID: generated name slot exceeds range: {name}"));
+    }
     ORDINARY_NAME_POOL.iter().position(|candidate| *candidate == name)
         .map(|index| index as u32 + 2)
         .ok_or_else(|| format!("NAME_INVALID: unknown registered name {name}"))
@@ -99,13 +104,14 @@ pub(crate) fn name_for_registration(
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
-    if name == "Jenny" || ORDINARY_NAME_POOL.contains(&name) {
-        Ok(())
-    } else {
-        Err(format!(
-            "NAME_INVALID: {name}; expected Jenny or a fixed-pool name"
-        ))
-    }
+    display_slot(name).map(|_| ()).map_err(|_| {
+        format!("NAME_INVALID: {name}; expected Jenny, a fixed-pool name, or a canonical peer-<number> name")
+    })
+}
+
+pub(crate) fn peer_registration_number(name: &str) -> Option<u32> {
+    let number = name.strip_prefix("peer-")?.parse::<u32>().ok()?;
+    (number > 0 && format!("peer-{number}") == name).then_some(number)
 }
 
 /// Build one transaction after a successful decision. `rename_from` carries

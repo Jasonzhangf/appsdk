@@ -590,7 +590,7 @@ pub(crate) fn task_status_is_terminal(status: &str) -> bool {
 }
 
 /// A subscription status that still binds an obligation to its owner.
-fn subscription_status_is_active(status: &str) -> bool {
+pub(crate) fn subscription_status_is_active(status: &str) -> bool {
     matches!(status, "armed" | "notifying")
 }
 

@@ -542,90 +542,105 @@ impl BindingControlSet {
                 ),
             }
         }
-        let session_match = if let Some(session) = facts.session_id.as_deref() {
-            unique(
-                candidates
-                    .iter()
-                    .filter(|(_, value)| {
-                        value
-                            .binding
-                            .session_id
-                            .as_ref()
-                            .is_some_and(|saved| saved.as_str() == session)
-                    })
-                    .map(|(slot, _)| *slot)
-                    .collect(),
-            )?
+        let session_matches = if let Some(session) = facts.session_id.as_deref() {
+            candidates
+                .iter()
+                .filter(|(_, value)| {
+                    value
+                        .binding
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|saved| saved.as_str() == session)
+                })
+                .map(|(slot, _)| *slot)
+                .collect::<Vec<_>>()
         } else {
-            None
+            Vec::new()
         };
-        let anchor_match = if let Some(candidate) = facts.tmux.as_ref() {
-            unique(
-                candidates
-                    .iter()
-                    .filter(|(_, value)| {
-                        value.transport.kind == crate::proto::TransportKind::Tmux
-                            && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
-                                saved.tmux_session_id == candidate.endpoint.tmux_session_id
-                            })
-                    })
-                    .map(|(slot, _)| *slot)
-                    .collect(),
-            )?
+        let anchor_matches = if let Some(candidate) = facts.tmux.as_ref() {
+            candidates
+                .iter()
+                .filter(|(_, value)| {
+                    value.transport.kind == crate::proto::TransportKind::Tmux
+                        && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                            saved.tmux_session_id == candidate.endpoint.tmux_session_id
+                        })
+                })
+                .map(|(slot, _)| *slot)
+                .collect::<Vec<_>>()
         } else if let Some(candidate) = facts.rex.as_ref() {
-            unique(
-                candidates
-                    .iter()
-                    .filter(|(_, value)| {
-                        value.transport.kind == crate::proto::TransportKind::Rex
-                            && value
-                                .transport
-                                .rex_endpoint
-                                .as_ref()
-                                .is_some_and(|saved| saved.block_id == candidate.block_id)
-                    })
-                    .map(|(slot, _)| *slot)
-                    .collect(),
-            )?
+            candidates
+                .iter()
+                .filter(|(_, value)| {
+                    value.transport.kind == crate::proto::TransportKind::Rex
+                        && value
+                            .transport
+                            .rex_endpoint
+                            .as_ref()
+                            .is_some_and(|saved| saved.block_id == candidate.block_id)
+                })
+                .map(|(slot, _)| *slot)
+                .collect::<Vec<_>>()
         } else if let Some(session) = dsh_anchor {
-            unique(
-                candidates
-                    .iter()
-                    .filter(|(_, value)| {
-                        value.transport.kind == crate::proto::TransportKind::Dsh
-                            && value.transport.session_id.as_deref() == Some(session)
-                    })
-                    .map(|(slot, _)| *slot)
-                    .collect(),
-            )?
+            candidates
+                .iter()
+                .filter(|(_, value)| {
+                    value.transport.kind == crate::proto::TransportKind::Dsh
+                        && value.transport.session_id.as_deref() == Some(session)
+                })
+                .map(|(slot, _)| *slot)
+                .collect::<Vec<_>>()
         } else if let Some(candidate) = facts.desktop_bridge.as_ref() {
-            unique(
-                candidates
-                    .iter()
-                    .filter(|(_, value)| {
-                        value.transport.kind == crate::proto::TransportKind::DesktopBridge
-                            && value.transport.session_id.as_deref()
-                                == Some(candidate.session_id.as_str())
-                    })
-                    .map(|(slot, _)| *slot)
-                    .collect(),
-            )?
+            candidates
+                .iter()
+                .filter(|(_, value)| {
+                    value.transport.kind == crate::proto::TransportKind::DesktopBridge
+                        && value.transport.session_id.as_deref()
+                            == Some(candidate.session_id.as_str())
+                })
+                .map(|(slot, _)| *slot)
+                .collect::<Vec<_>>()
         } else {
-            None
+            Vec::new()
         };
-        if let (Some(session), Some(anchor)) = (session_match, anchor_match) {
-            if session.identity_key != anchor.identity_key {
+        let anchor_match = unique(anchor_matches.clone())?;
+        let session_match = match session_matches.as_slice() {
+            [] => None,
+            [slot] => Some(*slot),
+            _ => None,
+        };
+        let selected = match (session_match, anchor_match) {
+            (Some(session), Some(anchor)) if session.identity_key != anchor.identity_key => {
                 return Err(format!(
                     "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current runtime anchor selects {}",
                     session.identity_key.name, anchor.identity_key.name
                 ));
             }
-        }
-        if session_match.is_some() {
-            return Ok(session_match);
-        }
-        if anchor_match.is_some() {
-            return Ok(anchor_match);
+            (Some(session), _) => Some(session),
+            (None, Some(anchor)) if session_matches.len() > 1 => {
+                if session_matches
+                    .iter()
+                    .any(|slot| slot.identity_key == anchor.identity_key)
+                {
+                    Some(anchor)
+                } else {
+                    return Err(format!(
+                        "IDENTITY_ANCHOR_CONFLICT: current runtime anchor selects {}, outside the agent session matches",
+                        anchor.identity_key.name
+                    ));
+                }
+            }
+            (None, Some(anchor)) => Some(anchor),
+            (None, None) if session_matches.len() > 1 => {
+                return Err(
+                    "IDENTITY_MAP_AMBIGUOUS: multiple active mappings match the current caller"
+                        .into(),
+                );
+            }
+            (None, None) => None,
+        };
+        if selected.is_some() {
+            return Ok(selected);
         }
         if let (Some(candidate), Some(cwd)) = (facts.tmux.as_ref(), cwd) {
             return unique(

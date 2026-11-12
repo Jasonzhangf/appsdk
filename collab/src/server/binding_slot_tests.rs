@@ -153,6 +153,194 @@ fn current_lookup_rejects_a_rex_anchor_owned_by_a_different_subject() {
 }
 
 #[test]
+fn current_rex_anchor_disambiguates_a_reused_agent_session() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(
+            &alice,
+            rex_value(
+                &alice,
+                "alice",
+                "runtime-alice",
+                "reused-agent-session",
+                "block-alice",
+            ),
+            None,
+        )
+        .unwrap();
+    control
+        .commit(
+            &bob,
+            rex_value(
+                &bob,
+                "bob",
+                "runtime-bob",
+                "reused-agent-session",
+                "block-bob",
+            ),
+            None,
+        )
+        .unwrap();
+
+    let facts = IdentityFacts {
+        session_id: Some("reused-agent-session".into()),
+        rex: Some(RexCandidate {
+            server: "unix:///tmp/rex-test.sock".into(),
+            session_id: "rex-session".into(),
+            block_id: "block-bob".into(),
+            cwd: "/tmp/collab-binding-slot".into(),
+        }),
+        ..Default::default()
+    };
+
+    let selected = control
+        .lookup(&bob.project_scope, &bob.app_scope_id, &facts, None)
+        .unwrap()
+        .expect("the exact current Rex block disambiguates duplicate session history");
+    assert_eq!(selected.identity_key, bob);
+}
+
+#[test]
+fn current_lookup_rejects_reused_agent_session_without_matching_anchor() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(
+            &alice,
+            rex_value(
+                &alice,
+                "alice",
+                "runtime-alice",
+                "reused-agent-session",
+                "block-alice",
+            ),
+            None,
+        )
+        .unwrap();
+    control
+        .commit(
+            &bob,
+            rex_value(
+                &bob,
+                "bob",
+                "runtime-bob",
+                "reused-agent-session",
+                "block-bob",
+            ),
+            None,
+        )
+        .unwrap();
+    let before = serde_json::to_value(&control).unwrap();
+    let facts = IdentityFacts {
+        session_id: Some("reused-agent-session".into()),
+        ..Default::default()
+    };
+
+    let error = control
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .unwrap_err();
+    assert!(error.starts_with("IDENTITY_MAP_AMBIGUOUS:"), "{error}");
+    assert_eq!(serde_json::to_value(&control).unwrap(), before);
+}
+
+#[test]
+fn current_lookup_rejects_anchor_outside_reused_session_matches() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let carol = key("Carol");
+    let mut control = BindingControlSet::new();
+    for (key, agent, runtime, block) in [
+        (&alice, "alice", "runtime-alice", "block-alice"),
+        (&bob, "bob", "runtime-bob", "block-bob"),
+    ] {
+        control
+            .commit(
+                key,
+                rex_value(key, agent, runtime, "reused-agent-session", block),
+                None,
+            )
+            .unwrap();
+    }
+    control
+        .commit(
+            &carol,
+            rex_value(
+                &carol,
+                "carol",
+                "runtime-carol",
+                "carol-session",
+                "block-carol",
+            ),
+            None,
+        )
+        .unwrap();
+    let before = serde_json::to_value(&control).unwrap();
+    let facts = IdentityFacts {
+        session_id: Some("reused-agent-session".into()),
+        rex: Some(RexCandidate {
+            server: "unix:///tmp/rex-test.sock".into(),
+            session_id: "rex-session".into(),
+            block_id: "block-carol".into(),
+            cwd: "/tmp/collab-binding-slot".into(),
+        }),
+        ..Default::default()
+    };
+
+    let error = control
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .unwrap_err();
+    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
+    assert_eq!(serde_json::to_value(&control).unwrap(), before);
+}
+
+#[test]
+fn current_lookup_rejects_a_rex_anchor_shared_by_multiple_subjects() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(
+            &alice,
+            rex_value(
+                &alice,
+                "alice",
+                "runtime-alice",
+                "alice-session",
+                "shared-block",
+            ),
+            None,
+        )
+        .unwrap();
+    control
+        .commit(
+            &bob,
+            rex_value(&bob, "bob", "runtime-bob", "bob-session", "shared-block"),
+            None,
+        )
+        .unwrap();
+    let before = serde_json::to_value(&control).unwrap();
+    let facts = IdentityFacts {
+        session_id: Some("alice-session".into()),
+        rex: Some(RexCandidate {
+            server: "unix:///tmp/rex-test.sock".into(),
+            session_id: "rex-session".into(),
+            block_id: "shared-block".into(),
+            cwd: "/tmp/collab-binding-slot".into(),
+        }),
+        ..Default::default()
+    };
+
+    let error = control
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .unwrap_err();
+    assert!(error.starts_with("IDENTITY_MAP_AMBIGUOUS:"), "{error}");
+    assert_eq!(serde_json::to_value(&control).unwrap(), before);
+}
+
+#[test]
 fn current_lookup_allows_same_subject_to_move_to_a_new_rex_block() {
     let alice = key("alice");
     let mut control = BindingControlSet::new();

@@ -32,6 +32,75 @@ fn direct_subscription(status: &Value, worker_id: &str) -> Value {
 
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
+fn rex_public_context_automatically_discovers_current_block() {
+    let mut fixture = RexLiveFixture::new("auto-context");
+    let agent = fixture.create_receiver_session("auto-context");
+    fixture.wait_receiver_ready(&agent, Duration::from_secs(20));
+    fixture.start_daemon();
+
+    let operation = format!("ctx-rex-auto-{}", fixture.unique_token());
+    let output = fixture
+        .command(
+            &["context", "--op", operation.as_str()],
+            Some(&agent.agent_session_id),
+        )
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+        .env("REX_SERVER", &fixture.rex_server)
+        .env("REX_SESSION", &agent.session_id)
+        .env("REX_BLOCK", &agent.block_id)
+        .output()
+        .expect("run ordinary public Context in the test-owned Rex block");
+    assert!(
+        output.status.success(),
+        "ordinary Rex context failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("ordinary Rex context returns JSON");
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    let context = &response["result"]["snapshot"];
+    assert_eq!(
+        context["identity"]["transport"]["kind"], "rex",
+        "{response}"
+    );
+    assert_eq!(
+        context["identity"]["transport"]["session_id"], agent.agent_session_id,
+        "the agent session remains distinct from its Rex address"
+    );
+    assert_eq!(
+        context["identity"]["transport"]["rex_endpoint"]["server"],
+        fixture.rex_server
+    );
+    assert_eq!(
+        context["identity"]["transport"]["rex_endpoint"]["session_id"],
+        agent.session_id
+    );
+    assert_eq!(
+        context["identity"]["transport"]["rex_endpoint"]["block_id"],
+        agent.block_id
+    );
+    fixture.evidence(
+        "ordinary_context_auto_registered",
+        json!({
+            "operation": operation,
+            "agent_session_id": agent.agent_session_id,
+            "rex_session_id": agent.session_id,
+            "rex_block_id": agent.block_id,
+            "snapshot": context,
+        }),
+    );
+
+    let errors = fixture.finish();
+    assert!(
+        errors.is_empty(),
+        "owned Rex session cleanup failed: {errors:?}"
+    );
+    eprintln!("Rex live evidence: {}", fixture.evidence_path.display());
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
     let mut fixture = RexLiveFixture::new("contract");
     let receiver = fixture.create_receiver_session("receiver");

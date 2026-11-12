@@ -532,6 +532,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../docs/design/appsdk-global-registry.md"),
     ),
     (
+        "docs/design/appsdk-ontology-governance.md",
+        "docs",
+        include_str!("../../docs/design/appsdk-ontology-governance.md"),
+    ),
+    (
         "skills/appsdk-project-governance/SKILL.md",
         "rules",
         include_str!("../../sdk-skill-sources/appsdk-project-governance/SKILL.md"),
@@ -580,6 +585,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "skills/appsdk-project-governance/references/init-prompts.md",
         "skills",
         include_str!("../../sdk-skill-sources/appsdk-project-governance/references/init-prompts.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/ontology-governance.md",
+        "skills",
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/ontology-governance.md"),
     ),
     (
         "skills/appsdk-project-governance/references/process-control-harness.md",

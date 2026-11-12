@@ -1432,6 +1432,7 @@ fn notification_rejected_label(notification_method: &str, error: &str) -> String
         "desktop_bridge" => format!("DESKTOP_BRIDGE_NOTIFICATION_REJECTED: {error}"),
         "appserver" => format!("APPSERVER_NOTIFICATION_REJECTED: {error}"),
         "dsh" => format!("DSH_NOTIFICATION_REJECTED: {error}"),
+        "rex" => format!("REX_NOTIFICATION_REJECTED: {error}"),
         _ => format!("TMUX_NOTIFICATION_REJECTED: {error}"),
     }
 }
@@ -1737,4 +1738,40 @@ pub(crate) fn attempt_notification_with_default(
         },
     )
     .accepted()
+}
+
+#[cfg(test)]
+mod rex_notification_label_tests {
+    use super::notification_rejected_label;
+
+    #[test]
+    fn rex_rejections_use_rex_label_and_keep_native_error() {
+        let label = notification_rejected_label("rex", "REX_UNKNOWN: operation=notify");
+        assert_eq!(
+            label,
+            "REX_NOTIFICATION_REJECTED: REX_UNKNOWN: operation=notify"
+        );
+        assert!(!label.contains("TMUX_NOTIFICATION_REJECTED"));
+        assert!(!label.contains("DESKTOP_BRIDGE_NOTIFICATION_REJECTED"));
+    }
+
+    #[test]
+    fn existing_transport_labels_are_unchanged() {
+        assert!(
+            notification_rejected_label("desktop_bridge", "error")
+                .starts_with("DESKTOP_BRIDGE_NOTIFICATION_REJECTED:")
+        );
+        assert!(
+            notification_rejected_label("appserver", "error")
+                .starts_with("APPSERVER_NOTIFICATION_REJECTED:")
+        );
+        assert!(
+            notification_rejected_label("dsh", "error")
+                .starts_with("DSH_NOTIFICATION_REJECTED:")
+        );
+        assert!(
+            notification_rejected_label("tmux", "error")
+                .starts_with("TMUX_NOTIFICATION_REJECTED:")
+        );
+    }
 }

@@ -1993,6 +1993,136 @@ fn admitted_ticket_missing_execute_phase_is_rejected_not_treated_as_legacy() {
 }
 
 #[test]
+fn cross_slot_stale_execute_phase_is_reclaimed_by_current_assignment() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "cross-slot stale fixture",
+        ],
+        THREAD_A,
+    );
+
+    let id = "cross-slot-stale";
+    let published = publish(&fixture, id, &[]);
+    let old_slot = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .expect("admitted ticket has an execution slot")
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let old_worker = slot_worker_id(&board, &old_slot);
+    let owner_thread = ticket_thread(&fixture, &old_worker);
+    let other_thread = [THREAD_B, THREAD_C]
+        .into_iter()
+        .find(|thread| *thread != owner_thread)
+        .expect("fixture must retain a second peer thread");
+    let other_identity = fixture.run_public(&["context"], other_thread);
+    let other_worker = other_identity["identity"]["worker_id"]
+        .as_str()
+        .expect("other peer has a worker id")
+        .to_owned();
+    let other_name = other_identity["identity"]["display_name"]
+        .as_str()
+        .expect("other peer has a stable slot name")
+        .to_owned();
+
+    let claimed = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        owner_thread,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        owner_thread,
+    );
+
+    // The other peer still cannot take a live claim while ownership and
+    // assignment remain with the original slot.
+    let refused = rejected(
+        &fixture,
+        &["board", "claim", id, "--expected-revision", "2"],
+        other_thread,
+    );
+    assert!(refused.contains("BOARD_TASK_NOT_PENDING"), "{refused}");
+
+    // Simulate the durable handoff committed by an earlier daemon: task and
+    // assignment now point at the new carrier, while the newest Execute phase
+    // remains Running on the old slot with no submitted result.
+    fixture.update_current_state(|state| {
+        state["tasks"][id]["owner"] = json!(other_worker);
+        state["tasks"][id]["status"] = json!("working");
+        state["task_assignments"][id]["name"] = json!(other_name);
+        state["task_assignments"][id]["session_id"] = json!(other_thread);
+    });
+
+    let recovered = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "2"],
+        other_thread,
+    );
+    assert_eq!(recovered["task"]["status"], "working");
+    assert_eq!(recovered["task"]["revision"], 3);
+    let recovered_state = fixture.current_state();
+    let phases: Vec<&Value> = recovered_state["ticket_phases"]
+        .as_array()
+        .expect("phase records persist")
+        .iter()
+        .filter(|phase| phase["task_id"] == id)
+        .collect();
+    assert_eq!(phases.len(), 2, "{phases:?}");
+    assert_eq!(phases[0]["status"], "revoked");
+    assert_eq!(phases[0]["slot_name"], old_slot.as_str());
+    assert_eq!(phases[0]["attempt_generation"], 1);
+    assert_eq!(phases[1]["status"], "claimed");
+    assert_eq!(phases[1]["slot_name"], other_name.as_str());
+    assert_eq!(
+        phases[1]["binding_generation"],
+        slot_generation(&fixture, &other_worker)
+    );
+    assert_eq!(phases[1]["attempt_generation"], 2);
+
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "3",
+            "--attempt",
+            "2",
+        ],
+        other_thread,
+    );
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--evidence",
+            "cross-slot recovery evidence",
+            "--attempt",
+            "2",
+            "--no-candidate",
+        ],
+        other_thread,
+    );
+    assert_eq!(delivered["status"], "delivered");
+}
+
+#[test]
 fn master_backfills_missing_execute_phase_and_restores_start_deliver() {
     let mut fixture = setup_roles();
     let published = publish(&fixture, "ticket-backfill", &["--executor", "Alice"]);

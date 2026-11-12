@@ -840,6 +840,7 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
         ("project-context-binding", "warning"),
         ("debug-notes-required", "warning"),
         ("map-gate-update", "advisory"),
+        ("ontology-approval-before-gate", "forbidden"),
     ] {
         assert!(guidance["rules"]
             .as_array()
@@ -872,6 +873,33 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
     ] {
         assert!(develop_nodes.contains(&node), "missing develop node {node}");
     }
+
+    let rule_governance = workflows
+        .iter()
+        .find(|workflow| workflow["domain"] == "rule-governance")
+        .unwrap();
+    assert_eq!(
+        rule_governance["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["node_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "rule_inventory",
+            "ontology_model",
+            "clause_approval",
+            "gate_binding",
+            "red_test",
+            "implementation",
+            "public_entry_verification"
+        ]
+    );
+    assert!(rule_governance["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| { edge["from"] == "clause_approval" && edge["to"] == "gate_binding" }));
     for (from, to) in [
         ("map_check", "architecture"),
         ("map_check", "implementation"),
@@ -940,6 +968,136 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
     ] {
         assert!(!rendered.contains(project_specific));
     }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_compile_enforces_approved_and_bound_ontology_clauses() {
+    let root = temp_root("guidance-ontology-gate");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+
+    let compiled: Value =
+        serde_json::from_slice(&fs::read(root.join(".appsdk/guidance/compiled.json")).unwrap())
+            .unwrap();
+    for axis in ["objects", "behaviors", "relations", "clauses"] {
+        assert!(
+            !compiled["ontology"][axis].as_array().unwrap().is_empty(),
+            "compiled manifest must retain ontology {axis}"
+        );
+    }
+
+    let manifest_path = root.join(".appsdk/skills/appsdk-project-governance/appsdk-guidance.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    let clause = manifest["ontology"]["clauses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clause| clause["clause_id"] == "ontology-approval-before-gate")
+        .unwrap();
+    assert_eq!(clause["approval"]["state"], "approved");
+    assert_eq!(clause["governance"]["gate_kind"], "precondition");
+    assert_eq!(clause["axis"], "behavior");
+    assert!(manifest["rules"].as_array().unwrap().iter().any(|rule| {
+        rule["rule_id"] == "ontology-approval-before-gate"
+            && rule["ontology_clause"] == "ontology-approval-before-gate"
+    }));
+    let axis_id = clause["axis_id"].as_str().unwrap().to_string();
+    assert!(manifest["ontology"]["behaviors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|behavior| {
+            behavior["id"] == axis_id.as_str()
+                && behavior["transition"]["from"] == "candidate"
+                && behavior["transition"]["to"] == "approved-and-bound"
+                && !behavior["must_have"].as_array().unwrap().is_empty()
+        }));
+    let objects = manifest["ontology"]["objects"].as_array().unwrap();
+    let object_ids: Vec<&str> = objects
+        .iter()
+        .map(|object| object["id"].as_str().unwrap())
+        .collect();
+    assert!(object_ids.contains(&"ontology-clause"));
+    assert!(object_ids.contains(&"guidance-rule"));
+    let relation = &manifest["ontology"]["relations"][0];
+    assert!(object_ids.contains(&relation["from"].as_str().unwrap()));
+    assert!(object_ids.contains(&relation["to"].as_str().unwrap()));
+    assert_eq!(relation["cardinality"], "one-to-one");
+
+    manifest["ontology"]["clauses"][0]["approval"]["state"] = Value::String("candidate".into());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let unapproved = run(&["guide", "compile", root_text]);
+    assert!(!unapproved.status.success());
+    assert!(String::from_utf8_lossy(&unapproved.stderr)
+        .contains("GUIDANCE_ONTOLOGY_CLAUSE_UNAPPROVED:ontology-approval-before-gate"));
+
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    manifest["ontology"]["clauses"][0]["governance"]
+        .as_object_mut()
+        .unwrap()
+        .remove("observation");
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let unbound = run(&["guide", "compile", root_text]);
+    assert!(!unbound.status.success());
+    assert!(String::from_utf8_lossy(&unbound.stderr).contains("GUIDANCE_ONTOLOGY_GATE_INVALID"));
+
+    // Strict bidirectional one-to-one: one clause per rule.
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    let mut duplicate = manifest["ontology"]["clauses"][0].clone();
+    duplicate["clause_id"] = Value::String("ontology-approval-before-gate-copy".into());
+    manifest["ontology"]["clauses"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let duplicated = run(&["guide", "compile", root_text]);
+    assert!(!duplicated.status.success());
+    assert!(String::from_utf8_lossy(&duplicated.stderr)
+        .contains("GUIDANCE_ONTOLOGY_RULE_DUPLICATE_CLAUSE:ontology-approval-before-gate"));
+
+    // The clause axis_id must resolve to a declared three-axis model entry.
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    manifest["ontology"]["clauses"][0]["axis_id"] = Value::String("missing-behavior".into());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let unknown_axis = run(&["guide", "compile", root_text]);
+    assert!(!unknown_axis.status.success());
+    assert!(String::from_utf8_lossy(&unknown_axis.stderr)
+        .contains("GUIDANCE_ONTOLOGY_AXIS_ENTRY_NOT_FOUND:behavior:missing-behavior"));
+
+    // A clause ruled by a different forbidden rule breaks the bidirectional pair.
+    let mut manifest: Value = serde_json::from_slice(&original).unwrap();
+    manifest["ontology"]["clauses"][0]["rule_id"] = Value::String("lifecycle-truth".into());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let mismatched = run(&["guide", "compile", root_text]);
+    assert!(!mismatched.status.success());
+    assert!(String::from_utf8_lossy(&mismatched.stderr)
+        .contains("GUIDANCE_ONTOLOGY_CLAUSE_RULE_MISMATCH"));
+
+    fs::write(&manifest_path, original).unwrap();
+    assert!(run(&["guide", "compile", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();
 }
 

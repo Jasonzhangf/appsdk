@@ -29,6 +29,36 @@ Use this Skill only when an AppSDK-managed project performs governance bootstrap
    - When explicitly registered, follow the [Collab Skill](../collab/SKILL.md) for goal ownership, task routing, waits and patrols. Execution and review routing follow the current host contract.
    - This Skill owns AppSDK governance entrypoints. It does not duplicate Collab identity, role or scheduling rules.
 
+## Ontology rule governance
+
+Rule, governance, ontology, Skill, or old-memory renovation changes first model
+the affected Object, Behavior and Relation semantics with
+[references/ontology-governance.md](references/ontology-governance.md).
+
+Every rule clause records its scenario, trigger, allowed actions, forbidden
+actions, affected state or effect, owner, evidence, approval state, and target
+governance edge or gate. Approving the overall model or flow does not approve
+each individual clause.
+
+The manifest carries the three axes as `ontology.objects`,
+`ontology.behaviors`, and `ontology.relations`. Each clause names an
+`axis_id` that resolves to one declared entry of its axis. Every forbidden
+rule and its clause bind in strict bidirectional one-to-one form.
+
+A clause is enforceable only after exact user approval and binding to an
+executable edge or gate with one legal case, one illegal case, and a real
+observation path. `.appsdk/requirements.json` is a declaration, not
+enforcement. Non-rule project facts do not enter rule approval.
+Guidance manifests that claim ontology governance carry an
+`ontology_clause` reference and a complete `ontology.clauses` record.
+`appsdk guide compile` rejects a candidate, unapproved, unbound, or unresolved
+clause before writing the compiled manifest.
+
+While any rule or ontology candidate awaits user approval, do not arm, renew,
+or subscribe the next wake for that goal. Legacy memory without the
+object/behavior/relation fields must be renovated into candidate clauses, or
+recorded as a non-rule project fact, before it is used as rule input.
+
 ## Reference router (load on demand)
 
 Read only the reference matching the current action; do not preload all files:
@@ -44,4 +74,5 @@ Read only the reference matching the current action; do not preload all files:
 | Error contracts and failure classification | [references/contracts-and-failures.md](references/contracts-and-failures.md) |
 | Legacy managed-child compatibility, independent GCM workers, and process harness | [references/subagents-config.md](references/subagents-config.md) & [references/process-control-harness.md](references/process-control-harness.md) |
 | Initializer and long-horizon goal prompt templates | [references/init-prompts.md](references/init-prompts.md) & [references/goal-prompt.md](references/goal-prompt.md) |
+| Ontology/rule upgrade or old-memory renovation | [references/ontology-governance.md](references/ontology-governance.md) |
 | Control-plane migration, daemon maintenance, or authorized state reset | [`appsdk-migration`](../appsdk-migration/SKILL.md) |

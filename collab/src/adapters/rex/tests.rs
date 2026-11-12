@@ -7,10 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn fixture_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    FIXTURE_LOCK.lock().await
+    TEST_FIXTURE_LOCK.lock().await
 }
 
 fn endpoint() -> RexEndpoint {
@@ -106,6 +105,7 @@ fn method(call: &Value) -> String {
         "com.superlogical.terminal.process",
         "com.superlogical.terminal.pwd",
         "com.superlogical.terminal.program_status",
+        "capture",
         "send-key",
     ] {
         if argv.iter().any(|value| value.as_str() == Some(candidate)) {
@@ -134,29 +134,97 @@ async fn candidate_deadline_is_shared_by_all_verification_steps() {
 }
 
 #[tokio::test]
-async fn notify_deadline_retains_the_queued_write_and_skips_enter() {
+async fn notify_queues_body_and_cr_in_one_write_without_send_key() {
     let _guard = fixture_guard().await;
-    let env = TestEnv::new("slow_status");
-    set_test_timeout(Some(Duration::from_millis(2500)));
+    let env = TestEnv::new("normal");
     let text = "期限正文\n第二行";
-    let error = notify(&selected_transport(), text, Some("immediate"))
+    let receipt = notify(&selected_transport(), text, Some("immediate"))
         .await
-        .expect_err("Enter verification cannot start a fresh timeout budget");
-    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-    assert_eq!(
-        error.stage,
-        RexInputStage::WriteQueued {
-            bytes_written: text.len()
-        }
+        .expect("a single write that includes CR submits the notification");
+    let value: Value = serde_json::from_str(&receipt).expect("receipt JSON");
+    assert_eq!(value["transport"], "rex");
+    assert_eq!(value["bytes_written"], (text.len() + 1) as u64);
+    assert_eq!(value["submission_queued"], true);
+    assert_eq!(value["consumed"], false);
+    let calls = env.calls();
+    let writes: Vec<&Value> = calls
+        .iter()
+        .filter(|call| method(call) == "com.superlogical.terminal.write")
+        .collect();
+    assert_eq!(writes.len(), 1, "notification must not retry the write");
+    let request: Value =
+        serde_json::from_str(writes[0]["stdin"].as_str().unwrap()).expect("write JSON");
+    assert_eq!(request["args"]["data"], format!("{text}\r"));
+    assert!(
+        !calls.iter().any(|call| method(call) == "send-key"),
+        "the notification path must not issue a separate Enter"
     );
-    assert_eq!(
-        env.calls()
-            .iter()
-            .filter(|call| method(call) == "com.superlogical.terminal.write")
-            .count(),
-        1
+}
+
+#[tokio::test]
+async fn snapshot_reads_official_capture_and_returns_latest_lines() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::new("capture_lines");
+    let value = snapshot(&endpoint(), 3).await.expect("capture snapshot");
+    assert_eq!(value["transport"], "rex");
+    assert_eq!(value["session_id"], endpoint().session_id);
+    assert_eq!(value["block_id"], endpoint().block_id);
+    assert_eq!(value["lines"], 3);
+    assert_eq!(value["durable"], false);
+    assert_eq!(value["output"], "line-8\nline-9\nline-10");
+    let calls = env.calls();
+    let capture = calls
+        .iter()
+        .find(|call| method(call) == "capture")
+        .expect("capture call");
+    let argv: Vec<&str> = capture["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(argv.contains(&"--unwrap"));
+    assert!(argv.contains(&"--trim"));
+    assert!(argv.contains(&"--format=text"));
+    assert!(
+        !calls.iter().any(|call| {
+            matches!(
+                method(call).as_str(),
+                "com.superlogical.terminal.write" | "send-key"
+            )
+        }),
+        "snapshot must not write terminal input"
     );
-    assert!(!env.calls().iter().any(|call| method(call) == "send-key"));
+}
+
+#[tokio::test]
+async fn snapshot_empty_output_succeeds_and_failure_is_not_empty_success() {
+    let _guard = fixture_guard().await;
+    {
+        let _env = TestEnv::new("capture_empty");
+        let value = snapshot(&endpoint(), 5).await.expect("empty capture");
+        assert_eq!(value["output"], "");
+    }
+    {
+        let _env = TestEnv::new("capture_fail");
+        let error = snapshot(&endpoint(), 5)
+            .await
+            .expect_err("capture failure must not become empty success");
+        assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+    }
+}
+
+#[tokio::test]
+async fn snapshot_line_bounds_are_rejected_before_any_cli_call() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::new("normal");
+    for lines in [0usize, 201usize] {
+        let error = snapshot(&endpoint(), lines)
+            .await
+            .expect_err("lines outside 1..=200 must be rejected");
+        assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
+    }
+    assert!(env.calls().is_empty());
 }
 
 #[tokio::test]
@@ -182,7 +250,6 @@ async fn a_replaced_service_cannot_receive_input_or_authoritative_observations()
     selected.rex_endpoint.as_mut().unwrap().instance_id = "retired-instance".into();
     let target = selected.rex_endpoint.as_ref().unwrap();
     assert!(write_text(target, "must not be submitted").await.is_err());
-    assert!(send_enter(target).await.is_err());
     assert!(observe_current(target).await.is_err());
     assert!(
         notify(&selected, "must not be submitted", Some("immediate"))
@@ -329,31 +396,6 @@ async fn write_unknown_and_short_write_never_enter() {
 }
 
 #[tokio::test]
-async fn enter_failure_preserves_write_queued_stage() {
-    let _fixture = fixture_guard().await;
-    let env = TestEnv::new("enter_fail");
-    let error = notify(&selected_transport(), "abc", Some("immediate"))
-        .await
-        .expect_err("enter failure must be unknown");
-    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-    assert_eq!(
-        error.stage,
-        RexInputStage::WriteQueued { bytes_written: 3 },
-        "{error}"
-    );
-    let methods: Vec<String> = env.calls().iter().map(method).collect();
-    assert_eq!(
-        methods,
-        vec![
-            "server.status".to_string(),
-            "com.superlogical.terminal.write".to_string(),
-            "server.status".to_string(),
-            "send-key".to_string()
-        ]
-    );
-}
-
-#[tokio::test]
 async fn typed_native_rejections_keep_exact_code() {
     let _fixture = fixture_guard().await;
     {
@@ -365,25 +407,6 @@ async fn typed_native_rejections_keep_exact_code() {
         assert_eq!(error.native_code.as_deref(), Some("session_not_found"));
         assert_eq!(error.stage, RexInputStage::BeforeWrite);
         assert_eq!(env.calls().len(), 2);
-    }
-    {
-        let env = TestEnv::new("enter_typed_reject");
-        let error = notify(&selected_transport(), "abc", Some("immediate"))
-            .await
-            .expect_err("typed enter rejection after queued text");
-        assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-        assert_eq!(error.native_code.as_deref(), Some("conflict"));
-        assert_eq!(error.stage, RexInputStage::WriteQueued { bytes_written: 3 });
-        let methods: Vec<String> = env.calls().iter().map(method).collect();
-        assert_eq!(
-            methods,
-            vec![
-                "server.status".to_string(),
-                "com.superlogical.terminal.write".to_string(),
-                "server.status".to_string(),
-                "send-key".to_string()
-            ]
-        );
     }
 }
 
@@ -415,13 +438,13 @@ async fn allowed_modes_return_rex_receipt_json() {
             .unwrap_or_else(|error| panic!("allowed mode {mode:?} failed: {error}"));
         let value: Value = serde_json::from_str(&receipt).expect("receipt JSON");
         assert_eq!(value["transport"], "rex");
-        assert_eq!(value["bytes_written"], 2);
+        assert_eq!(value["bytes_written"], 3);
         assert_eq!(value["text_queued"], true);
-        assert_eq!(value["enter_accepted"], true);
+        assert_eq!(value["submission_queued"], true);
         assert_eq!(value["consumed"], false);
         assert!(value.get("queued").is_none());
     }
-    assert_eq!(env.calls().len(), 20);
+    assert_eq!(env.calls().len(), 10);
 }
 
 #[tokio::test]
@@ -561,6 +584,55 @@ async fn observe_current_preserves_sources_without_inferring_idle() {
     assert!(observation.source_errors.is_empty());
     assert!(!observation.gap_possible);
     assert_eq!(env.calls().len(), 4);
+}
+
+#[tokio::test]
+async fn observe_current_decodes_program_status_owner_without_loss() {
+    let _fixture = fixture_guard().await;
+    let _env = TestEnv::new("status_working");
+    let observation = observe_current(&endpoint())
+        .await
+        .expect("observe current Rex target");
+    let record = observation
+        .program_status
+        .first()
+        .expect("one program_status record");
+    assert_eq!(record.state.as_deref(), Some("working"));
+    let owner = record.owner.as_ref().expect("owner decoded");
+    assert_eq!(owner.pid, 4242);
+    assert_eq!(owner.name, "python3");
+    let process = observation.process.as_ref().expect("foreground process");
+    assert_eq!(process.pid, Some(4242));
+    assert_eq!(process.name.as_deref(), Some("python3"));
+}
+
+#[tokio::test]
+async fn observe_current_drops_incomplete_owner_identity() {
+    let _fixture = fixture_guard().await;
+    let incomplete = [
+        json!({"pid": 4242}),
+        json!({"pid": 4242, "name": ""}),
+        json!({"pid": 4242, "name": "   "}),
+        json!({"pid": 0, "name": "python3"}),
+        json!({"name": "python3"}),
+    ];
+    for owner in incomplete {
+        let value = json!({
+            "records": [
+                {"state": "working", "owner": owner, "updated_at": "2026-11-08T00:00:00Z"}
+            ]
+        });
+        assert!(
+            extract_status_records(&value)[0].owner.is_none(),
+            "incomplete owner must be dropped: {value}"
+        );
+    }
+    let complete = json!({
+        "records": [
+            {"state": "working", "owner": {"pid": 4242, "name": "python3"}, "updated_at": "2026-11-08T00:00:00Z"}
+        ]
+    });
+    assert!(extract_status_records(&complete)[0].owner.is_some());
 }
 
 #[tokio::test]

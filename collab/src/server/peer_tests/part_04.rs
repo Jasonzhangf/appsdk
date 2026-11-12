@@ -1523,6 +1523,115 @@ fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_snapshot_dispatches_rex_capture_without_writing_input() {
+    use crate::client::adapters::rex::{
+        set_test_cli, set_test_timeout, TEST_FIXTURE_LOCK,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = TEST_FIXTURE_LOCK.lock().await;
+    let (server, root) = test_server();
+    let fixture_dir = root.join("rex-fixture");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    let fixture = fixture_dir.join("rex-cli");
+    std::fs::write(
+        &fixture,
+        include_str!("../../adapters/rex/fixture_rex.py"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    set_test_cli(Some(fixture));
+    set_test_timeout(Some(Duration::from_secs(5)));
+    std::env::set_var("REXPRIMITIVE_LOG_DIR", &fixture_dir);
+    std::env::set_var("REXPRIMITIVE_SCENARIO", "capture_lines");
+
+    let transport = crate::proto::SelectedTransport {
+        kind: TransportKind::Rex,
+        endpoint: None,
+        namespace: None,
+        session_id: Some("agent-session-rex-snapshot".into()),
+        thread_id: None,
+        tmux_endpoint: None,
+        rex_endpoint: Some(crate::proto::RexEndpoint {
+            server: "unix:///tmp/rex-fixture.sock".into(),
+            session_id: "session:11111111-1111-1111-1111-111111111111".into(),
+            block_id: "block:22222222-2222-2222-2222-222222222222".into(),
+            host_id: Some("host-fixture".into()),
+            instance_id: "instance-fixture".into(),
+            cwd: root.display().to_string(),
+        }),
+        capabilities: vec!["send_message_to_block".into()],
+        self_check: "rex snapshot fixture".into(),
+    };
+    let registered = seed_committed_owner(
+        &server,
+        "rex-snapshot-peer",
+        "token-rex-snapshot-peer",
+        &transport,
+        &root.display().to_string(),
+        None,
+    );
+    assert!(registered.ok, "{registered:?}");
+
+    let revision_before = server.state.lock().unwrap().revision;
+    let state_before = std::fs::read(&server.state_path).unwrap();
+    let server = Arc::new(server);
+    let snapshot_server = server.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        super::handle_worker_snapshot(
+            &snapshot_server,
+            "rex-snapshot-peer".into(),
+            "token-rex-snapshot-peer".into(),
+            "rex-snapshot-peer".into(),
+            3,
+        )
+    })
+    .await
+    .unwrap();
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["transport"], "rex");
+    assert_eq!(response.data["worker_id"], "rex-snapshot-peer");
+    assert_eq!(response.data["lines"], 3);
+    assert_eq!(response.data["durable"], false);
+    assert_eq!(response.data["output"], "line-8\nline-9\nline-10");
+    assert!(!server
+        .state
+        .lock()
+        .unwrap()
+        .worker_snapshots
+        .contains_key("rex-snapshot-peer"));
+    assert_eq!(server.state.lock().unwrap().revision, revision_before);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), state_before);
+
+    let calls = std::fs::read_to_string(fixture_dir.join("invocations.jsonl")).unwrap();
+    let calls: Vec<Value> = calls
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(calls.iter().any(|call| {
+        call["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg.as_str() == Some("capture"))
+    }));
+    assert!(!calls.iter().any(|call| {
+        call["argv"].as_array().unwrap().iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                Some("com.superlogical.terminal.write") | Some("send-key")
+            )
+        })
+    }));
+
+    set_test_cli(None);
+    set_test_timeout(None);
+    std::env::remove_var("REXPRIMITIVE_LOG_DIR");
+    std::env::remove_var("REXPRIMITIVE_SCENARIO");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn master_wake_hold_requires_master_and_replaces_or_releases_the_gate() {
     let (server, root) = test_server();

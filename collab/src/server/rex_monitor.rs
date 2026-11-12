@@ -208,35 +208,64 @@ fn project_observation(observation: &RexObservation) -> (AgentActivity, String) 
             format!("rex.osc7501 query incomplete gap_possible=true source_errors={detail}"),
         );
     }
-    match observation.program_status.as_slice() {
-        [] => (
-            AgentActivity::Unknown,
-            "rex.osc7501 no program_status records".into(),
-        ),
-        [record] => project_record(record),
-        records => (
+    let Some((foreground_pid, foreground_name)) =
+        observation.process.as_ref().and_then(|process| {
+            let pid = process.pid.filter(|pid| *pid > 0)?;
+            let name = process
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())?;
+            Some((pid, name))
+        })
+    else {
+        return (
             AgentActivity::Unknown,
             format!(
-                "rex.osc7501 conflicting program_status records={}",
-                records.len()
+                "rex.osc7501 foreground process identity unavailable source={PROGRAM_STATUS_SOURCE}"
             ),
-        ),
-    }
-}
-
-fn project_record(record: &RexProgramStatusRecord) -> (AgentActivity, String) {
-    let id = record.id.as_deref().unwrap_or("unknown");
-    let app = record.app.as_deref().unwrap_or("unknown");
-    let state = record.state.as_deref().unwrap_or("none");
-    let kind = record.kind.as_deref().unwrap_or("none");
-    let reason = format!(
-        "rex.osc7501 record={id} state={state} kind={kind} app={app} source={PROGRAM_STATUS_SOURCE}"
-    );
-    let activity = match (record.state.as_deref(), record.kind.as_deref()) {
-        (Some("working"), _) => AgentActivity::Busy,
-        (Some("blocked"), Some("question")) => AgentActivity::WaitingUser,
-        _ => AgentActivity::Unknown,
+        );
     };
+    let current: Vec<&RexProgramStatusRecord> = observation
+        .program_status
+        .iter()
+        .filter(|record| {
+            record
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.pid == foreground_pid && owner.name == foreground_name)
+        })
+        .collect();
+    if current.is_empty() {
+        return (
+            AgentActivity::Unknown,
+            format!(
+                "rex.osc7501 no current-owner program_status records total={} foreground_pid={foreground_pid} foreground_name={foreground_name} source={PROGRAM_STATUS_SOURCE}",
+                observation.program_status.len()
+            ),
+        );
+    }
+    // Any blocked record means the foreground program is waiting for the user.
+    // A stale working record from a previous foreground process is already
+    // filtered above, so a current blocked/idle record is not overridden.
+    let (activity, projection) = if current
+        .iter()
+        .any(|record| record.state.as_deref() == Some("blocked"))
+    {
+        (AgentActivity::WaitingUser, "waiting_user")
+    } else if current
+        .iter()
+        .any(|record| record.state.as_deref() == Some("working"))
+    {
+        (AgentActivity::Busy, "busy")
+    } else {
+        // idle, done, error and any state Rex does not recognize all project
+        // as non-working. Rex's API defines unknown states as idle.
+        (AgentActivity::Idle, "idle")
+    };
+    let reason = format!(
+        "rex.osc7501 projection={projection} records={} foreground_pid={foreground_pid} foreground_name={foreground_name} source={PROGRAM_STATUS_SOURCE}",
+        current.len()
+    );
     (activity, reason)
 }
 

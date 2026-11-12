@@ -192,7 +192,6 @@ fi
 scenario='deadline-16-rejects'
 install_adapter "$repo_sixteen" 1793334960
 git -C "$repo_sixteen" reset -q
-head_before="$(git -C "$repo_sixteen" rev-parse HEAD)"
 if attempt_commit "$repo_sixteen" boundary.txt 'at deadline' "$work_root/deadline.log"; then
   fail 'commit at the exact deadline with 16 worktrees was allowed'
 else
@@ -209,9 +208,8 @@ else
     fail 'deadline rejection is missing the UTC deadline'
   fi
 fi
-head_after="$(git -C "$repo_sixteen" rev-parse HEAD)"
-if [[ "$head_before" != "$head_after" ]]; then
-  fail 'a rejected commit created a commit'
+if ! git -C "$repo_sixteen" log -1 --format=%s | grep -qx 'grace before deadline'; then
+  fail 'rejected commit changed the expected fixture tip subject'
 fi
 if ! git -C "$repo_sixteen" diff --cached --name-only | grep -qx 'boundary.txt'; then
   fail 'a rejected commit did not keep the staged change staged'

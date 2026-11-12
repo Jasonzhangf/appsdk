@@ -76,6 +76,12 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
   artifact scripts 的 Node 测试），不扩大为 AppSDK full。
 - 这是一项现存粒度限制。局部开发选测遵循上面的风险依据；修改 CI 选择器时，
   必须证明受影响消费者被覆盖，不能以空选择或绕 gate 缩短时间。
+- 治理 Skill 的 `references/*.md` 参考正文变更选择 Docs 和 workflow-contract。
+  后者使用正式安装器在隔离环境验证正文升级、导航和缺失目标拒绝。
+  同一 diff 的机器 Guidance、schema、模板、源码和其他资源仍按各自路径选测。
+- 普通功能分支 push 在原 before 基线有效且默认分支引用可用时，按默认分支与
+  功能分支的共同祖先选择本分支改动，避免把合流带入的上游改动重复计入。
+  主线 push、PR、release 和缺失基线仍沿各自现有选择路径。
 - 两个原生 Windows job 复用同一 selector：`windows_appsdk` 在 AppSDK 源码/测试、
   共享资源或 DAGPipe 库变化时运行 MSVC 构建、共享锁与公开入口定向测试（包括三例
   Windows `registry_home_cli`）及公开 consumer smoke；`windows_dagpipe` 在 DAGPipe

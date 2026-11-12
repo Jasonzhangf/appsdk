@@ -631,7 +631,7 @@ fn context_names_online_replacement_approves_directly() {
 }
 
 #[test]
-fn context_names_full_pool_reuses_the_released_source_and_refuses_true_exhaustion() {
+fn context_names_full_pool_reuses_the_released_source_or_allocates_generated_name() {
     let fixture = AppFixture::new();
     let mut contexts = Vec::new();
     for index in 0..20 {
@@ -673,29 +673,255 @@ fn context_names_full_pool_reuses_the_released_source_and_refuses_true_exhaustio
         &contexts[19].0,
     );
     fixture.run_public(&["context"], "ordinary-pool-extra");
-    let before = std::fs::read(&map_path).unwrap();
-    let authority = fixture.run_public(&["master", "status"], &contexts[19].0);
-    let exhausted =
-        fixture.command_public(&["context", "--approve-grant", &approval], &contexts[19].0);
-    assert!(!exhausted.status.success());
-    assert!(String::from_utf8_lossy(&exhausted.stderr).contains("NAME_POOL_FULL"));
-    assert_eq!(std::fs::read(&map_path).unwrap(), before);
+    // The ordinary pool is now full again, but an explicit name handoff must
+    // still complete: the displaced holder takes a generated name instead of
+    // blocking the authorized restore with NAME_POOL_FULL.
+    let replaced = fixture.run_public(&["context", "--approve-grant", &approval], &contexts[19].0);
+    assert_eq!(replaced["name"], target, "{replaced}");
+    let displaced_target = fixture.run_public(&["context"], &contexts[1].0);
+    let displaced_name = displaced_target["name"].as_str().unwrap();
+    assert!(
+        displaced_name.starts_with("peer-") && displaced_name != target,
+        "the prior target holder must take a generated name: {displaced_target}"
+    );
+    assert_ne!(
+        displaced_target["identity"]["worker_id"], contexts[19].1["identity"]["worker_id"],
+        "generated name must not move the target work back to the restoring worker"
+    );
     let after = fixture.run_public(&["master", "status"], &contexts[19].0);
-    for field in [
-        "worker_id",
-        "grant_id",
-        "grant_generation",
-        "binding_id",
-        "assigned_by",
-        "assigned_ms",
-        "approval",
-        "scope",
-    ] {
-        assert_eq!(
-            after["master"][field], authority["master"][field],
-            "{field}"
-        );
+    assert!(
+        after["master"].is_null(),
+        "renaming the master away from Jenny clears the master role: {after}"
+    );
+}
+
+#[test]
+fn context_recovery_pool_overflow_registers_generated_names() {
+    let fixture = AppFixture::new();
+    let mut registered = Vec::new();
+    for index in 0..20 {
+        let thread = format!("generated-pool-{index}");
+        registered.push(fixture.run_public(&["context"], &thread));
     }
+    let first_extra = fixture.run_public(&["context"], "generated-pool-extra-one");
+    let second_extra = fixture.run_public(&["context"], "generated-pool-extra-two");
+    let first_name = first_extra["name"].as_str().expect("generated name");
+    let second_name = second_extra["name"].as_str().expect("generated name");
+    assert_eq!(first_name, "peer-1", "{first_extra}");
+    assert_eq!(second_name, "peer-2", "{second_extra}");
+    assert_ne!(first_name, second_name, "{first_extra} {second_extra}");
+    // Repeating the same session must reuse its generated name and worker.
+    let repeated = fixture.run_public(&["context"], "generated-pool-extra-one");
+    assert_eq!(repeated["name"], first_name, "{repeated}");
+    assert_eq!(
+        repeated["identity"]["worker_id"], first_extra["identity"]["worker_id"],
+        "{repeated}"
+    );
+    // No original ordinary holder may be displaced by overflow registration.
+    for original in &registered {
+        let replayed = fixture.run_public(
+            &["context"],
+            original["binding"]["session_id"].as_str().unwrap(),
+        );
+        assert_eq!(
+            replayed["identity"]["worker_id"], original["identity"]["worker_id"],
+            "overflow registration must not retire an ordinary holder"
+        );
+        assert_eq!(replayed["name"], original["name"]);
+    }
+}
+
+#[test]
+fn context_recovery_first_restore_master_with_full_pool_is_not_blocked() {
+    let fixture = AppFixture::new();
+    let mut contexts = Vec::new();
+    for index in 0..20 {
+        contexts.push(fixture.run_public(&["context"], &format!("first-restore-master-{index}")));
+    }
+    // Promote one ordinary holder to Jenny, freeing its ordinary slot, then
+    // refill that slot so the fixed ordinary pool is full again.
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "assign the full-pool master",
+        ],
+        "first-restore-master-0",
+    );
+    fixture.run_public(&["context"], "first-restore-master-refill");
+    let approval = r#"{"action":"restore_master","authorization":"user requires current session master","replace_confirmed":true}"#;
+    let restored = fixture.run_public(
+        &["context", "--approve-grant", approval],
+        "first-restore-master-new-session",
+    );
+    assert_eq!(restored["name"], "Jenny", "{restored}");
+    assert_eq!(
+        restored["master"]["worker_id"], restored["identity"]["worker_id"],
+        "the restoring session must hold the master grant: {restored}"
+    );
+    // The previous Jenny holder keeps its identity under a generated name.
+    let previous = fixture.run_public(&["context"], "first-restore-master-0");
+    assert_ne!(previous["name"], "Jenny", "{previous}");
+    assert!(
+        previous["name"].as_str().unwrap().starts_with("peer-"),
+        "the displaced master keeps a generated name: {previous}"
+    );
+}
+
+#[test]
+fn context_recovery_missing_peer_map_row_does_not_block_current_context() {
+    let mut fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    let second = fixture.run_public(&["context"], THREAD_B);
+    let first_worker = first["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let active_subscription_id = "unmapped-active-subscription";
+    let consumed_subscription_id = "unmapped-consumed-subscription";
+    assert_ne!(
+        first_worker,
+        second["identity"]["worker_id"].as_str().unwrap()
+    );
+    let task_id = "unmapped-peer-resource";
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "preserve unmapped work",
+        ],
+        THREAD_A,
+    );
+    fixture.update_current_state(|state| {
+        let task = state["tasks"][task_id].as_object_mut().unwrap();
+        task.insert("status".into(), json!("working"));
+        task.insert("worktree_path".into(), json!("/tmp/unmapped-peer-resource"));
+        task.insert("branch".into(), json!("codex/unmapped-peer-resource"));
+        state["board_details"][task_id]["public_visibility"] = json!(true);
+        state["worktree_bindings"]["binding-unmapped-peer-resource"] = json!({
+            "worktree_root": "/tmp/unmapped-peer-resource",
+            "owning_project_scope": first["project_root"],
+            "task_id": task_id,
+            "owner_agent_id": first_worker,
+            "binding_id": "binding-unmapped-peer-resource",
+            "base_commit": "base",
+        });
+        for (id, status) in [
+            (active_subscription_id, "armed"),
+            (consumed_subscription_id, "consumed"),
+        ] {
+            state["notification_subscriptions"][id] = json!({
+                "id":id, "worker_id":first_worker, "event":"deadline", "subject":id,
+                "target":THREAD_A, "method":"appserver", "trigger_ms":null,
+                "trigger_times_ms":[], "interval_ms":null, "repeat_count":1,
+                "fired_count":1, "expires_ms":1_900_000_000_000_i64, "status":status,
+                "created_ms":1_900_000_000_000_i64, "updated_ms":1_900_000_000_000_i64
+            });
+        }
+    });
+    // Remove only the other peer's map row. The current caller's row stays.
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|slot| slot["current"]["binding"]["agent_id"] != json!(first_worker));
+    std::fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+
+    // The current peer must still get a usable context and board view even
+    // though another registered worker lost its map row.
+    let context = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(
+        context["identity"]["worker_id"], second["identity"]["worker_id"],
+        "the current peer keeps its identity: {context}"
+    );
+    let board = fixture.command_public(&["board", "show"], THREAD_B);
+    assert!(
+        board.status.success(),
+        "board show must not be blocked by a peer missing its map row: stdout={} stderr={}",
+        String::from_utf8_lossy(&board.stdout),
+        String::from_utf8_lossy(&board.stderr)
+    );
+    let board: Value = serde_json::from_slice(&board.stdout).unwrap();
+    let workers = board["workers"].as_array().unwrap();
+    let unmapped = workers
+        .iter()
+        .find(|worker| worker["id"] == json!(first_worker.clone()))
+        .expect("unmapped durable worker must remain visible on the board");
+    assert_eq!(unmapped["identity_status"], "unmapped");
+    assert!(unmapped["display_name"].is_null(), "{unmapped}");
+    assert!(unmapped["role"].is_null(), "{unmapped}");
+    assert_eq!(unmapped["task_ids"], json!([task_id]));
+    assert_eq!(unmapped["resource_task_ids"], json!([task_id]));
+    assert!(
+        unmapped["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(active_subscription_id)),
+        "the unmapped worker keeps its active subscription visible: {unmapped}"
+    );
+    assert!(
+        !unmapped["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(consumed_subscription_id)),
+        "the unmapped worker must not expose terminal subscription history: {unmapped}"
+    );
+    let mapped = workers
+        .iter()
+        .find(|worker| worker["id"] == json!(second["identity"]["worker_id"]))
+        .expect("current mapped peer remains visible");
+    assert_eq!(mapped["identity_status"], "mapped");
+    assert_eq!(mapped["role"], "peer");
+    assert!(
+        workers
+            .iter()
+            .find(|worker| worker["id"] == json!(first_worker.clone()))
+            .is_some_and(|worker| worker["role"] != "peer" && worker["role"] != "master"),
+        "an unmapped worker must not be assigned a fabricated role: {board}"
+    );
+    let peers = context["peers"].as_array().unwrap();
+    let context_peer = peers
+        .iter()
+        .find(|peer| peer["worker_id"] == json!(first_worker))
+        .expect("unmapped peer must remain visible in context");
+    assert_eq!(context_peer["identity_status"], "unmapped");
+    assert!(context_peer["display_name"].is_null(), "{context_peer}");
+    assert!(context_peer["role"].is_null(), "{context_peer}");
+    assert_eq!(context_peer["open_task_ids"], json!([task_id]));
+    assert_eq!(context_peer["resource_task_ids"], json!([task_id]));
+    assert!(
+        context_peer["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(active_subscription_id)),
+        "the unmapped peer keeps its active subscription visible: {context_peer}"
+    );
+    assert!(
+        !context_peer["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(consumed_subscription_id)),
+        "the unmapped peer must not expose terminal subscription history: {context_peer}"
+    );
+    assert!(
+        !board.to_string().contains(consumed_subscription_id),
+        "terminal subscription leaked on board: {board}"
+    );
+    assert!(
+        !context.to_string().contains(consumed_subscription_id),
+        "terminal subscription leaked in context: {context}"
+    );
+    assert!(
+        context_peer["role"] != "peer" && context_peer["role"] != "master",
+        "the missing-map peer must not appear as an invented worker role: {context}"
+    );
+    assert!(
+        workers
+            .iter()
+            .any(|worker| worker["id"] == second["identity"]["worker_id"]),
+        "the current peer remains on the board: {board}"
+    );
 }
 
 #[test]
@@ -1049,6 +1275,9 @@ impl AppFixture {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run collab CLI")
@@ -1072,6 +1301,9 @@ impl AppFixture {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env("CODEX_HOME", self.root.join("home"))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1094,6 +1326,9 @@ impl AppFixture {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run collab CLI with a continuously missing thread fact")
@@ -1114,6 +1349,9 @@ impl AppFixture {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run Desktop collab CLI")
@@ -1136,6 +1374,9 @@ impl AppFixture {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run Desktop collab CLI without an explicit endpoint")
@@ -1156,6 +1397,9 @@ impl AppFixture {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run TUI collab CLI without an explicit endpoint")
@@ -1179,6 +1423,9 @@ impl AppFixture {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run collab CLI without native facts")
@@ -1257,6 +1504,9 @@ impl AppFixture {
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("COLLAB_WORKER")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .stdin(std::process::Stdio::null())
             .stdout(daemon_log.try_clone().expect("clone serve log"))
             .stderr(daemon_log);
@@ -2349,6 +2599,9 @@ fn wrong_appserver_endpoint_fails_closed() {
         .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
         .env("CODEX_SESSION_ID", THREAD_A)
         .env("CODEX_THREAD_ID", THREAD_A)
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
         .env("CODEX_HOME", root.join("home"))
         .output()
         .expect("run collab init");
@@ -3046,6 +3299,9 @@ fn forged_appserver_endpoint_and_missing_project_context_fail_closed() {
         .env_remove("CODEX_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("COLLAB_WORKER")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
         .output()
         .expect("run context with forged endpoint");
     let combined = format!(

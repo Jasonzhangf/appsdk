@@ -1498,23 +1498,69 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             })
             .collect()
     };
-    let peer_snapshots = st
-        .workers
-        .values()
-        .map(|peer| {
-            let peer_role = role_brief(server, &st, &control, &peer.id)?
-                .get("role")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("worker")
-                .to_owned();
-            let display_name = worker_display_name(&control, route_scope.as_ref(), &peer.id)?;
-            Ok((peer.clone(), peer_role, display_name))
-        })
-        .collect::<Result<Vec<_>, String>>();
-    let mut peer_snapshots = match peer_snapshots {
-        Ok(peers) => peers,
-        Err(error) => return Resp::err(error),
-    };
+    // The caller's own mapping above stays strict. A stale business worker
+    // without a current name remains visible as an explicitly unmapped member;
+    // its tasks and resources stay attached, while the display name and role
+    // remain absent. Other map errors stay explicit.
+    let mut peer_snapshots: Vec<_> = Vec::new();
+    for peer in st.workers.values() {
+        let peer_role = match role_brief(server, &st, &control, &peer.id) {
+            Ok(brief) => Some(
+                brief
+                    .get("role")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("worker")
+                    .to_owned(),
+            ),
+            Err(error) if error.starts_with("IDENTITY_MAP_NOT_FOUND") => None,
+            Err(error) => return Resp::err(error),
+        };
+        let display_name = match peer_role.as_ref() {
+            Some(_) => match worker_display_name(&control, route_scope.as_ref(), &peer.id) {
+                Ok(display_name) => Some(display_name),
+                Err(error) => return Resp::err(error),
+            },
+            None => None,
+        };
+        let mut open_task_ids: Vec<String> = st
+            .tasks
+            .values()
+            .filter(|task| {
+                task.owner == peer.id && !matches!(task.status.as_str(), "closed" | "cancelled")
+            })
+            .map(|task| task.id.clone())
+            .collect();
+        open_task_ids.sort();
+        let mut resource_task_ids: Vec<String> = st
+            .tasks
+            .values()
+            .filter(|task| {
+                task.owner == peer.id
+                    && task.worktree_path.is_some()
+                    && crate::server::state::task_resource_active(&task.status)
+            })
+            .map(|task| task.id.clone())
+            .collect();
+        resource_task_ids.sort();
+        let mut subscription_ids: Vec<String> = st
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.worker_id == peer.id
+                    && crate::server::state::subscription_status_is_active(&subscription.status)
+            })
+            .map(|subscription| subscription.id.clone())
+            .collect();
+        subscription_ids.sort();
+        peer_snapshots.push((
+            peer.clone(),
+            peer_role,
+            display_name,
+            open_task_ids,
+            resource_task_ids,
+            subscription_ids,
+        ));
+    }
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
     // Manager scope digest. A manager's default context read must answer, in
     // one snapshot, whether each durable subordinate manager is covered by a
@@ -1527,8 +1573,8 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         let now = now_ms();
         let mut digest = Vec::new();
         let mut activities = std::collections::HashMap::new();
-        for (peer, peer_role, peer_display_name) in &peer_snapshots {
-            if peer.id == worker_id || peer_role != "worker" {
+        for (peer, peer_role, peer_display_name, _, _, _) in &peer_snapshots {
+            if peer.id == worker_id || peer_role.as_deref().is_some_and(|role| role != "worker") {
                 continue;
             }
             let (_, activity_fact) = worker_agent_facts(server, &st, peer);
@@ -1792,7 +1838,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     endpoint_live_by_worker.insert(worker.id.clone(), caller_endpoint_live);
     let peers: Vec<_> = peer_snapshots
         .into_iter()
-        .map(|(peer, peer_role, display_name)| {
+        .map(|(peer, peer_role, display_name, open_task_ids, resource_task_ids, subscription_ids)| {
             let peer_presence = worker_presence(server, &peer);
             let (_, peer_endpoint_live) = worker_identity_and_endpoint(server, &peer);
             endpoint_live_by_worker.insert(peer.id.clone(), peer_endpoint_live);
@@ -1811,6 +1857,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             };
             json!({
                 "worker_id": peer.id,
+                "identity_status": if peer_role.is_some() { "mapped" } else { "unmapped" },
                 "display_name": display_name,
                 "id": peer.id,
                 "role": peer_role,
@@ -1824,6 +1871,9 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                 "endpoint_live": peer_endpoint_live,
                 "activity": activity_str,
                 "availability": availability,
+                "open_task_ids": open_task_ids,
+                "resource_task_ids": resource_task_ids,
+                "subscription_ids": subscription_ids,
             })
         })
         .collect();

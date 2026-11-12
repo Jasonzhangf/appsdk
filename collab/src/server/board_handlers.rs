@@ -225,19 +225,65 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
     let mut workers = Vec::new();
     for worker in state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)) {
-        let display_name = match worker_display_name(&control, route.as_ref(), &worker.id) {
-            Ok(name) => name, Err(error) => return Resp::err(error),
+        let slot = match route.as_ref() {
+            Some(route) => match control.current_for_worker(
+                &route.project_scope_id,
+                &route.app_scope_id,
+                worker.id.as_str(),
+            ) {
+                Ok(slot) => slot,
+                Err(error) => return Resp::err(error),
+            },
+            None => None,
         };
-        let work_roles = match worker_work_roles(&state, &control, route.as_ref(), &worker.id) {
-            Ok(roles) => roles, Err(error) => return Resp::err(error),
+        // A durable worker without a current map row remains visible as an
+        // explicitly unmapped member. Its tasks and resources stay attached;
+        // neither display name nor role is invented from the raw worker ID.
+        let (identity_status, display_name, role, work_roles) = match slot {
+            Some(slot) => {
+                let work_roles = match worker_work_roles(&state, &control, route.as_ref(), &worker.id) {
+                    Ok(roles) => roles, Err(error) => return Resp::err(error),
+                };
+                (
+                    "mapped".to_string(),
+                    Some(slot.identity_key.name.clone()),
+                    Some(if master.as_deref() == Some(worker.id.as_str()) { "master" } else { "peer" }.to_string()),
+                    work_roles,
+                )
+            }
+            None => ("unmapped".to_string(), None, None, Vec::new()),
         };
+        let mut resource_task_ids: Vec<String> = state
+            .tasks
+            .values()
+            .filter(|task| {
+                task.owner == worker.id
+                    && task.worktree_path.is_some()
+                    && crate::server::state::task_resource_active(&task.status)
+            })
+            .map(|task| task.id.clone())
+            .collect();
+        resource_task_ids.sort();
+        let mut subscription_ids: Vec<String> = state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.worker_id == worker.id
+                    && crate::server::state::subscription_status_is_active(&subscription.status)
+            })
+            .map(|subscription| subscription.id.clone())
+            .collect();
+        subscription_ids.sort();
         workers.push(BoardMemberView {
             id: worker.id.clone(),
+            identity_status,
             display_name,
-            role: if master.as_deref() == Some(worker.id.as_str()) { "master" } else { "peer" }.into(),
+            role,
             work_roles,
             status: observations.get(&worker.id).map(|(status, _)| *status).unwrap_or("unknown").into(),
             task_ids: tasks.iter().filter(|task| task.owner == worker.id && board_execution_responsibility(&task.status)).map(|task| task.id.clone()).collect(),
+            resource_task_ids,
+            subscription_ids,
             invitation_ids: tasks.iter().filter(|task| task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),
         });
     }

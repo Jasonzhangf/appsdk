@@ -27,6 +27,11 @@ pub(crate) struct RegisterOuterBinding {
     /// later context name resolution will use.
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     identity_facts: Option<crate::proto::IdentityFacts>,
+    /// The parsed explicit name target for this context invocation. It must
+    /// reach the Register publish boundary so `restore_master`/`restore_name`
+    /// publish the requested name as the first mapping instead of allocating a
+    /// pool name and renaming afterwards.
+    name_intent: Option<crate::server::name_resolution::NameIntent>,
 }
 
 impl RegisterOuterBinding {
@@ -37,7 +42,20 @@ impl RegisterOuterBinding {
             name_tmux_session_name: None,
             name_pane_anchor: None,
             identity_facts: None,
+            name_intent: None,
         }
+    }
+
+    pub(crate) fn with_name_intent(
+        mut self,
+        intent: Option<crate::server::name_resolution::NameIntent>,
+    ) -> Self {
+        self.name_intent = intent;
+        self
+    }
+
+    pub(crate) fn name_intent(&self) -> Option<&crate::server::name_resolution::NameIntent> {
+        self.name_intent.as_ref()
     }
 
     pub(crate) fn with_identity_facts(mut self, facts: crate::proto::IdentityFacts) -> Self {
@@ -829,7 +847,8 @@ mod scoped_register_tests {
         std::fs::create_dir_all(credential.parent().unwrap()).unwrap();
         let permissions = std::fs::metadata(parent).unwrap().permissions();
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let result = manager.publish_register_control_before_consume(&server, &prepared, None, None, None);
+        let result =
+            manager.publish_register_control_before_consume(&server, &prepared, None, None, None, None);
         std::fs::set_permissions(parent, permissions).unwrap();
         let error = result.unwrap_err();
         assert!(error.starts_with("BINDING_CONTROL_SAVE_FAILED: create temp"), "{error}");
@@ -851,7 +870,8 @@ mod scoped_register_tests {
         std::fs::create_dir_all(parent).unwrap();
         let permissions = std::fs::metadata(parent).unwrap().permissions();
         std::fs::set_permissions(parent,std::fs::Permissions::from_mode(0o500)).unwrap();
-        let result = manager.publish_register_control_before_consume(&server,&prepared,None,None,None);
+        let result =
+            manager.publish_register_control_before_consume(&server, &prepared, None, None, None, None);
         std::fs::set_permissions(parent,permissions).unwrap();
         let error = result.unwrap_err();
         assert!(error.starts_with("REGISTER_CREDENTIAL_STAGE_FAILED:"),"{error}");
@@ -895,7 +915,7 @@ mod scoped_register_tests {
             ).unwrap();
             test_hooks::fail_next_parent_sync();
             let error = manager.publish_register_control_before_consume(
-                &server, &prepared, None, None, None,
+                &server, &prepared, None, None, None, None,
             ).unwrap_err();
             assert!(error.starts_with("BINDING_CONTROL_DURABILITY_UNKNOWN:"), "{error}");
             let credential = crate::identity::read_persisted(&server.host_paths, &worker.id).unwrap().unwrap();
@@ -916,7 +936,9 @@ mod scoped_register_tests {
         let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
         let endpoint = tmux.endpoints().remove(0);
         test_hooks::fail_next_parent_sync();
-        let error = manager.publish_register_control_before_consume(&server, &prepared, None, None, None).unwrap_err();
+        let error = manager
+            .publish_register_control_before_consume(&server, &prepared, None, None, None, None)
+            .unwrap_err();
         assert!(error.starts_with("BINDING_CONTROL_DURABILITY_UNKNOWN:"), "{error}");
         let map = manager.binding_control_store().load().unwrap();
         let values: Vec<_> = map.active_values().collect();
@@ -943,7 +965,9 @@ mod scoped_register_tests {
             binding.project_scope.as_str().to_owned(),
         ), server.clone(), None);
         let mut transport = worker.transport.clone().unwrap();
-        let first_effect = manager.publish_register_control_before_consume(&server, &first, None, None, None).unwrap();
+        let first_effect = manager
+            .publish_register_control_before_consume(&server, &first, None, None, None, None)
+            .unwrap();
         server.consume_register(first).unwrap();
         manager.consume_register_effect(Some(&first_effect)).unwrap();
         let before = server.state.lock().unwrap().workers["rename-owner"].clone();
@@ -962,7 +986,9 @@ mod scoped_register_tests {
             GlobalState::canonical_project_scope(&root).unwrap(), root.to_str().unwrap(),
             AppServerId::new("tui-default").unwrap(), false,
         ).unwrap();
-        let second_effect = manager.publish_register_control_before_consume(&server, &second, None, None, None).unwrap();
+        let second_effect = manager
+            .publish_register_control_before_consume(&server, &second, None, None, None, None)
+            .unwrap();
         server.consume_register(second).unwrap();
         manager.consume_register_effect(Some(&second_effect)).unwrap();
         let state = server.state.lock().unwrap();

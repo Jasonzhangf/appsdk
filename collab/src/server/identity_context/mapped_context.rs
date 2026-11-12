@@ -100,10 +100,26 @@ impl ProjectRuntimeManager {
                 );
             }
         }
+        // Resolve the explicit name intent before any registration step. The
+        // Register publish boundary consumes it, so an authorized target is
+        // the first published mapping and never an intermediate pool name.
+        let raw_authorization = request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref());
+        let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
+            Ok(intent) => intent,
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        };
+        // Materialization may recreate an existing mapped worker. It still runs
+        // only after an authorized target is parsed, so invalid Jenny/name
+        // intent cannot cause a pre-publication business registration.
         {
             let _identity = self.identity_gate.lock().unwrap();
             if let Err(error) = self.ensure_current_worker_for_context(
-                &context, &facts, request.invocation_cwd.as_deref(),
+                &context,
+                &facts,
+                request.invocation_cwd.as_deref(),
             ) {
                 return (self.host.clone(), Resp::err(error));
             }
@@ -126,6 +142,7 @@ impl ProjectRuntimeManager {
                     .zip(request.invocation_cwd.clone())
                     .map(|(pane, cwd)| name_state::NamePaneAnchor { pane, cwd }),
             )
+            .with_name_intent(intent.clone())
             .with_role_intent(&request);
         let reconciled = self.reconcile_identity_context(
             context.clone(),
@@ -157,14 +174,6 @@ impl ProjectRuntimeManager {
                     )
                 }
             };
-        let raw_authorization = request
-            .grant_approval
-            .as_ref()
-            .or(request.approval.as_ref());
-        let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
-            Ok(intent) => intent,
-            Err(error) => return (runtime, Resp::err(error)),
-        };
         if raw_authorization.is_some_and(|value| value["action"] == "restore_peer") {
             let name = match self.binding_control_store().load().and_then(|map| {
                 map.ordinary_name(

@@ -427,10 +427,13 @@ pub struct BoardTaskView {
 #[derive(Debug, Serialize)]
 pub struct BoardMemberView {
     pub id: String,
-    pub display_name: String,
-    pub role: String,
+    pub identity_status: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
     pub work_roles: Vec<String>,
     pub status: String,
     pub task_ids: Vec<String>,
+    pub resource_task_ids: Vec<String>,
+    pub subscription_ids: Vec<String>,
     pub invitation_ids: Vec<String>,
 }

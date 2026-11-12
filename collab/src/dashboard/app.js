@@ -75,9 +75,10 @@ function render() {
   for (const member of snapshot.workers) {
     const item = element("div", undefined, "member");
     const status = { online: "在线", cold: "未驻留", offline: "离线", unknown: "未知" }[member.status] || member.status;
-    const name = element("strong", member.display_name);
+    const unmapped = member.identity_status === "unmapped";
+    const name = element("strong", member.display_name || "身份未映射");
     name.title = member.id;
-    item.append(name, element("span", member.role === "master" ? "Master" : "Peer", "role"));
+    item.append(name, element("span", unmapped ? "身份未映射" : member.role === "master" ? "Master" : "Peer", "role"));
     item.append(element("small", `${status} · ${member.task_ids.length ? `负责 ${member.task_ids.length} 个任务` : "无执行任务"}${member.invitation_ids.length ? ` · ${member.invitation_ids.length} 个邀请` : ""}`));
     members.append(item);
   }

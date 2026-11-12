@@ -867,6 +867,7 @@ impl ProjectRuntimeManager {
                 register_binding
                     .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
             let response = if let Err(error) = validate_request_context(
@@ -915,6 +916,7 @@ impl ProjectRuntimeManager {
                 register_binding
                     .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
             let response = if let Err(error) = validate_request_context(
@@ -968,6 +970,7 @@ impl ProjectRuntimeManager {
                 register_binding
                     .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
             let response = if let Err(error) = validate_request_context(
@@ -1041,6 +1044,7 @@ impl ProjectRuntimeManager {
             register_binding.and_then(|binding| binding.identity_facts().cloned()),
             register_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            register_binding.and_then(|binding| binding.name_intent().cloned()),
             &mut register_effect_id,
         );
         let response = if let Err(error) = validate_request_context(

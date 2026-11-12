@@ -818,6 +818,17 @@ fn terminal_write_argv(endpoint: &RexEndpoint) -> Vec<String> {
     )
 }
 
+fn send_key_argv(endpoint: &RexEndpoint) -> Vec<String> {
+    vec![
+        "send-key".to_string(),
+        "-s".to_string(),
+        endpoint.session_id.clone(),
+        "-b".to_string(),
+        endpoint.block_id.clone(),
+        "enter".to_string(),
+    ]
+}
+
 fn terminal_query_argv(endpoint: &RexEndpoint, method: &str) -> Vec<String> {
     api_call_argv(method, Some(endpoint.session_id.as_str()))
 }
@@ -1075,6 +1086,27 @@ async fn write_text_until(
     }
 }
 
+async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
+    verify_service_until(endpoint, deadline).await?;
+    let call = run_cli(
+        "send_enter",
+        Path::new(&official_cli_path()),
+        &endpoint.server,
+        deadline,
+        &send_key_argv(endpoint),
+        None,
+    )
+    .await?;
+    if !call.status.success() {
+        return Err(native_failure(
+            "send_enter",
+            RexInputStage::BeforeWrite,
+            &call,
+        ));
+    }
+    Ok(())
+}
+
 /// Read the latest requested number of text lines from one verified endpoint.
 /// This is a read-only observation: it never writes input, never changes
 /// activity, and never persists the captured text.
@@ -1236,10 +1268,7 @@ fn extract_status_records(value: &Value) -> Vec<RexProgramStatusRecord> {
                 .and_then(|owner| {
                     let pid = owner.get("pid").and_then(Value::as_u64)?;
                     let name = owner.get("name").and_then(Value::as_str)?.to_owned();
-                    let owner = RexProgramStatusOwner {
-                        pid,
-                        name,
-                    };
+                    let owner = RexProgramStatusOwner { pid, name };
                     owner.is_complete().then_some(owner)
                 }),
         })
@@ -1276,14 +1305,24 @@ pub async fn notify(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
-    // One write queues the complete body plus its submission key. A separate
-    // send-key call can fail after the body is queued and strand the text.
-    let submission = format!("{text}\r");
-    let receipt = write_text_until(endpoint, &submission, deadline).await?;
+    let receipt = write_text_until(endpoint, text, deadline).await?;
+    let text_stage = RexInputStage::WriteQueued {
+        bytes_written: receipt.bytes_written,
+    };
+    if let Err(error) = send_enter_until(endpoint, deadline).await {
+        return Err(RexError {
+            operation: "notify",
+            class: NotificationDeliveryClass::Unknown,
+            stage: text_stage,
+            native_code: error.native_code,
+            detail: error.detail,
+        });
+    }
     let value = json!({
         "transport": "rex",
         "bytes_written": receipt.bytes_written,
         "text_queued": true,
+        "enter_accepted": true,
         "submission_queued": true,
         "consumed": false,
         "mode": mode.unwrap_or("immediate"),

@@ -1063,23 +1063,26 @@ mod tests {
             "PROJECT_ROOT_MISSING"
         );
 
-        let project = TestProject::new("symlink");
-        let real = project.path(".appsdk/project.json.real");
-        fs::rename(project.path(".appsdk/project.json"), &real).unwrap();
-        std::os::unix::fs::symlink(&real, project.path(".appsdk/project.json")).unwrap();
-        assert_eq!(
-            run_verify_foundation(invocation(&project)).unwrap_err(),
-            "GOVERNANCE_PATH_SYMLINK:project"
-        );
+        #[cfg(unix)]
+        {
+            let project = TestProject::new("symlink");
+            let real = project.path(".appsdk/project.json.real");
+            fs::rename(project.path(".appsdk/project.json"), &real).unwrap();
+            std::os::unix::fs::symlink(&real, project.path(".appsdk/project.json")).unwrap();
+            assert_eq!(
+                run_verify_foundation(invocation(&project)).unwrap_err(),
+                "GOVERNANCE_PATH_SYMLINK:project"
+            );
 
-        let project = TestProject::new("appsdk-symlink");
-        let real = project.path(".appsdk.real");
-        fs::rename(project.path(".appsdk"), &real).unwrap();
-        std::os::unix::fs::symlink(&real, project.path(".appsdk")).unwrap();
-        assert_eq!(
-            VerifyInvocation::new(project.root.clone()).unwrap_err(),
-            "GOVERNANCE_PATH_SYMLINK:appsdk_control"
-        );
+            let project = TestProject::new("appsdk-symlink");
+            let real = project.path(".appsdk.real");
+            fs::rename(project.path(".appsdk"), &real).unwrap();
+            std::os::unix::fs::symlink(&real, project.path(".appsdk")).unwrap();
+            assert_eq!(
+                VerifyInvocation::new(project.root.clone()).unwrap_err(),
+                "GOVERNANCE_PATH_SYMLINK:appsdk_control"
+            );
+        }
     }
 
     #[test]

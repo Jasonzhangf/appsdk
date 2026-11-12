@@ -505,14 +505,19 @@ fn task_goal_receipt(state: &State, task_id: &str) -> serde_json::Value {
     json!({ "armed": subscription.is_some_and(|subscription| subscription.status == "armed"), "subscription": subscription })
 }
 
-fn task_schedule_target(
-    server: &Server,
+#[derive(PartialEq, Eq)]
+enum TaskScheduleSelection {
+    Worker(String),
+    Name(String),
+}
+
+fn task_schedule_selection(
     state: &State,
     task: &TaskRec,
     details: &crate::board::BoardTaskDetails,
-) -> Result<Option<String>, Resp> {
+) -> Option<TaskScheduleSelection> {
     if let Some(invite) = &details.invitation {
-        return Ok(Some(invite.peer_id.clone()));
+        return Some(TaskScheduleSelection::Worker(invite.peer_id.clone()));
     }
     if let Some(phase) = state
         .ticket_phases
@@ -524,19 +529,39 @@ fn task_schedule_target(
         })
         .max_by_key(|phase| phase.batch)
     {
-        if !matches!(
-            phase.status,
-            ticket_state::TicketPhaseStatus::Queued
-                | ticket_state::TicketPhaseStatus::WaitingAssignment
-        ) {
+        if phase.status == ticket_state::TicketPhaseStatus::WaitingAssignment {
+            return None;
+        }
+        if phase.status != ticket_state::TicketPhaseStatus::Queued {
             return phase
                 .slot_name
-                .as_deref()
-                .map(|name| goal_schedule_target(server, state, name))
-                .transpose();
+                .clone()
+                .map(TaskScheduleSelection::Name);
         }
     }
-    Ok((!matches!(task.status.as_str(), "pending" | "invited")).then(|| task.owner.clone()))
+    (!matches!(task.status.as_str(), "pending" | "invited"))
+        .then(|| TaskScheduleSelection::Worker(task.owner.clone()))
+}
+
+fn resolve_task_schedule_selection(
+    server: &Server,
+    state: &State,
+    selection: Option<TaskScheduleSelection>,
+) -> Result<Option<String>, Resp> {
+    match selection {
+        Some(TaskScheduleSelection::Name(name)) => goal_schedule_target(server, state, &name).map(Some),
+        Some(TaskScheduleSelection::Worker(worker)) => Ok(Some(worker)),
+        None => Ok(None),
+    }
+}
+
+fn task_schedule_target(
+    server: &Server,
+    state: &State,
+    task: &TaskRec,
+    details: &crate::board::BoardTaskDetails,
+) -> Result<Option<String>, Resp> {
+    resolve_task_schedule_selection(server, state, task_schedule_selection(state, task, details))
 }
 
 /// Extend the existing candidate-state transaction with linked task schedules.
@@ -593,20 +618,50 @@ fn task_goal_transition_events(
             && details.invitation.is_none();
         let ended =
             first_invitation_ended || matches!(task.status.as_str(), "closed" | "cancelled");
-        let target = if ended {
+        let selection = if ended {
             None
         } else {
-            task_schedule_target(server, after, task, details)?
+            task_schedule_selection(after, task, details)
         };
-        let old_target = match (old_task.filter(|_| !ended), old_details) {
-            (Some(task), Some(details)) => task_schedule_target(server, before, task, details)?,
+        let old_selection = match (old_task.filter(|_| !ended), old_details) {
+            (Some(task), Some(details)) => task_schedule_selection(before, task, details),
             _ => None,
         };
         let form_changed = old_details.and_then(|details| details.long_horizon.as_ref())
             != details.long_horizon.as_ref();
-        if !ended && !form_changed && old_target == target {
+        if !ended && !form_changed && old_selection == selection {
             continue;
         }
+        if !ended
+            && !form_changed
+            && old_details.is_some_and(|details| details.invitation.is_some())
+            && details.invitation.is_none()
+        {
+            if let (Some(old_task), Some(old_details), Some(TaskScheduleSelection::Name(name))) =
+                (old_task, old_details, selection.as_ref())
+            {
+                let mut historical_details = old_details.clone();
+                historical_details.invitation = None;
+                if task_schedule_selection(before, old_task, &historical_details) == selection {
+                    let route = server_route_scope(server, after)
+                        .map_err(Resp::err)?
+                        .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
+                    let control =
+                        binding_store::BindingControlStore::new(server.host_paths.state_root())
+                            .load()
+                            .map_err(Resp::err)?;
+                    if control
+                        .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
+                        .map_err(Resp::err)?
+                        .and_then(|slot| slot.active_binding())
+                        .is_none()
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
+        let target = resolve_task_schedule_selection(server, after, selection)?;
         if !ended && target.is_none() {
             continue;
         }

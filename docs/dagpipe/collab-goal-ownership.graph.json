@@ -18,7 +18,7 @@
     },
     {
       "id":"执行本人目标转换","operator":"appsdk.collab_goal.apply_transition","operator_version":"1",
-      "description":"校验目标范围、任务版本、完整长程内容与明确周期。读取不写记录。重试、内容修改和同名换载体保留订阅ID、已消费次数和有效期。取消和关闭只结束该goal的有限计划，终态不被普通恢复复活。拒绝在提交前返回同一结果出口。",
+      "description":"校验目标范围、任务版本、完整长程内容与明确周期。任务派发先比较改派前后的符号化 schedule selection；选择未变时不解析旧绑定。显式 WaitingAssignment 不回退旧 owner，新邀请仍优先。撤回邀请只暴露未变的历史执行归属且历史名字无 active binding 时保留原计划；store、scope 和歧义错误仍传播。新目标的绑定与 transport 严格校验。读取不写记录。重试、内容修改和同名换载体保留订阅ID、已消费次数和有效期。取消和关闭只结束该goal的有限计划，终态不被普通恢复复活。拒绝在提交前返回同一结果出口。",
       "inputs":["owned_goal"],"output":{"id":"goal_transition_request","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },

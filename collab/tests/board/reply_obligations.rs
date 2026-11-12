@@ -332,3 +332,79 @@ fn mutually_exclusive_reply_flags_are_rejected_explicitly() {
         "{conflict}"
     );
 }
+
+#[test]
+fn read_message_uses_current_recipient_name_only_while_obligation_is_open() {
+    const THREAD_C: &str = "01a0d63a-0000-7000-8000-000000000003";
+    const THREAD_D: &str = "01a0d63b-0000-7000-8000-000000000004";
+
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Alice",
+            "--subject",
+            "handoff",
+            "--reply-required",
+            "Read and answer",
+        ],
+        THREAD_B,
+    );
+    let msg_id = sent["msg_id"].as_str().unwrap();
+    let received = fixture.run_public(
+        &["recv", "--receive-id", "handoff-original", "--timeout", "0"],
+        THREAD_A,
+    );
+    assert_eq!(received["count"], 1, "{received}");
+    fixture.run_public(&["ack", msg_id], THREAD_A);
+    assert_eq!(
+        fixture.run_public(&["msg", msg_id], THREAD_A)["state"],
+        "read"
+    );
+
+    let unrelated = rejected(&fixture, &["msg", msg_id], THREAD_C);
+    assert!(
+        unrelated.contains("CALLER_NOT_PERMITTED"),
+        "unrelated stable name must not read the original: {unrelated}"
+    );
+
+    let current = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture continues named reply work"}"#,
+        ],
+        THREAD_D,
+    );
+    assert_eq!(current["name"], "Alice");
+    let read = fixture.run_public(&["msg", msg_id], THREAD_D);
+    assert_eq!(
+        read["to"], alice["identity"]["worker_id"],
+        "the read original remains owned by its original session"
+    );
+    assert_eq!(read["reply_obligation"]["recipient_name"], "Alice");
+
+    fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "done",
+            "--in-reply-to",
+            msg_id,
+            "Completed by the current Alice",
+        ],
+        THREAD_D,
+    );
+    let cleared = rejected(&fixture, &["msg", msg_id], THREAD_D);
+    assert!(
+        cleared.contains("CALLER_NOT_PERMITTED"),
+        "a cleared obligation must not keep the old message open: {cleared}"
+    );
+}

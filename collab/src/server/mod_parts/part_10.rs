@@ -332,6 +332,24 @@ fn handle_task_wait(
     }))
 }
 
+fn worker_role_briefs(
+    server: &Server,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    let mut briefs = std::collections::HashMap::new();
+    for worker_id in state.workers.keys() {
+        match role_brief(server, state, control, worker_id) {
+            Ok(brief) => {
+                briefs.insert(worker_id.clone(), brief);
+            }
+            Err(error) if error.starts_with("IDENTITY_MAP_NOT_FOUND") => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(briefs)
+}
+
 fn worker_status_summary_with_maps(
     server: &Server,
     control: &binding_slot::BindingControlSet,
@@ -391,15 +409,21 @@ fn worker_status_summary_with_maps(
     } else {
         None
     };
-    let (display_name, work_roles) = {
+    let (display_name, identity_status, work_roles) = {
         let state = server.state.lock().unwrap();
         let route=server_route_scope(server,&state)?;
-        (worker_display_name(control, route.as_ref(), &w.id)?,
-         worker_work_roles(&state, control, route.as_ref(), &w.id)?)
+        let name = worker_display_name(control, route.as_ref(), &w.id)?;
+        let mapped = !name.is_empty();
+        (
+            mapped.then_some(name),
+            if mapped { "mapped" } else { "unmapped" },
+            worker_work_roles(&state, control, route.as_ref(), &w.id)?,
+        )
     };
     Ok(json!({
         "id": w.id,
         "display_name": display_name,
+        "identity_status": identity_status,
         "work_roles": work_roles,
         "role": role_brief["role"].clone(),
         "role_brief": role_brief,

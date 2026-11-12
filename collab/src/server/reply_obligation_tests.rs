@@ -1,7 +1,14 @@
+use super::super::binding_slot::{BindingControlSet, BindingValue, IdentityBindingKey};
+use super::super::global_state::RuntimeBinding;
 use super::super::name_state::NameOccupancy;
 use super::super::state::{Event, Message, ReplyObligation, State, WorkerRec};
-use super::{build_obligation, resolve_scope, stable_name, validate_reply};
-use crate::proto::ReplyPolicy;
+use super::{
+    build_obligation, current_obligation_recipient_can_read, resolve_scope, stable_name,
+    validate_reply,
+};
+use crate::identity::{AgentId, AppServerId, BindingId, RuntimeId, SessionId};
+use crate::proto::{ReplyPolicy, SelectedTransport, TransportKind};
+use crate::scope::ProjectScopeId;
 
 fn obligation(
     message_id: &str,
@@ -50,6 +57,94 @@ fn message(id: &str, from: &str, to: &str) -> Message {
         last_wake_attempt_ms: 0,
         retry_attempted: false,
     }
+}
+
+fn control_with_name(project: &str, app: &str, name: &str, agent: &str) -> BindingControlSet {
+    let project = ProjectScopeId::new(project).unwrap();
+    let app = AppServerId::new(app).unwrap();
+    let key = IdentityBindingKey::new(project.clone(), app.clone(), name);
+    let binding = RuntimeBinding::new_with_session(
+        project,
+        app,
+        AgentId::new(agent).unwrap(),
+        RuntimeId::new("runtime").unwrap(),
+        BindingId::new("binding").unwrap(),
+        Some(SessionId::new("session").unwrap()),
+        None,
+    )
+    .unwrap();
+    let transport = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/collab-test.sock".into()),
+        namespace: Some("test".into()),
+        session_id: Some("session".into()),
+        thread_id: None,
+        tmux_endpoint: None,
+        rex_endpoint: None,
+        capabilities: Vec::new(),
+        self_check: "ok".into(),
+    };
+    let mut control = BindingControlSet::new();
+    control
+        .commit(&key, BindingValue::new(binding, transport), None)
+        .unwrap();
+    control
+}
+
+#[test]
+fn current_name_can_read_only_an_open_obligation_in_the_exact_route() {
+    let project = "/tmp/collab-reply-project";
+    let app = "appserver-cli";
+    let project_scope = ProjectScopeId::new(project).unwrap();
+    let app_scope = AppServerId::new(app).unwrap();
+    let control = control_with_name(project, app, "Alice", "alice-new");
+    let open = obligation("m1", project, "requester", "alice-old", Some("Alice"));
+
+    assert!(current_obligation_recipient_can_read(
+        &control,
+        &project_scope,
+        &app_scope,
+        "m1",
+        Some(&open),
+        "alice-new",
+    )
+    .unwrap());
+    assert!(!current_obligation_recipient_can_read(
+        &control,
+        &project_scope,
+        &AppServerId::new("other-app").unwrap(),
+        "m1",
+        Some(&open),
+        "alice-new",
+    )
+    .unwrap());
+    assert!(!current_obligation_recipient_can_read(
+        &control,
+        &ProjectScopeId::new("/tmp/other-project").unwrap(),
+        &app_scope,
+        "m1",
+        Some(&open),
+        "alice-new",
+    )
+    .unwrap());
+    assert!(!current_obligation_recipient_can_read(
+        &control,
+        &project_scope,
+        &app_scope,
+        "m1",
+        Some(&open),
+        "alice-old",
+    )
+    .unwrap());
+    assert!(!current_obligation_recipient_can_read(
+        &control,
+        &project_scope,
+        &app_scope,
+        "m1",
+        None,
+        "alice-new",
+    )
+    .unwrap());
 }
 
 #[test]

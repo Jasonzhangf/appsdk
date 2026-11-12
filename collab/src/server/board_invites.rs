@@ -164,8 +164,9 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
                         };
                         claimed.wait_reason = None;
                         events.push(Event::TicketPhaseRecorded { phase: claimed });
-                    } else if phase.status
-                        == crate::server::ticket_state::TicketPhaseStatus::Claimed
+                    } else if matches!(phase.status,
+                        crate::server::ticket_state::TicketPhaseStatus::Claimed
+                            | crate::server::ticket_state::TicketPhaseStatus::Running)
                         && phase.slot_name.as_deref()
                             != Some(slot.identity_key.name.as_str())
                     {

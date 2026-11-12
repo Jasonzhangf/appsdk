@@ -634,12 +634,10 @@ fn dispatch_with_route_context_bound(
             record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
-                let role_briefs = st
-                    .workers
-                    .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
-                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
-                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                let role_briefs = match worker_role_briefs(server, &st, &control) {
+                    Ok(briefs) => briefs,
+                    Err(error) => return Resp::err(error),
+                };
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -682,12 +680,10 @@ fn dispatch_with_route_context_bound(
             record_ordinary_peer_presence_edges(server, worker_id.as_deref());
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
-                let role_briefs = st
-                    .workers
-                    .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
-                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
-                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                let role_briefs = match worker_role_briefs(server, &st, &control) {
+                    Ok(briefs) => briefs,
+                    Err(error) => return Resp::err(error),
+                };
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -791,12 +787,10 @@ fn dispatch_with_route_context_bound(
             ) = {
                 let st = server.state.lock().unwrap();
                 let workers_rec: Vec<WorkerRec> = st.workers.values().cloned().collect();
-                let role_briefs = st
-                    .workers
-                    .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
-                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
-                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                let role_briefs = match worker_role_briefs(server, &st, &control) {
+                    Ok(briefs) => briefs,
+                    Err(error) => return Resp::err(error),
+                };
                 let mut tasks: Vec<serde_json::Value> =
                     st.tasks.values().map(|task| task_view(&st, task)).collect();
                 tasks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -1037,16 +1031,50 @@ fn handle_msg_status(
             ));
         }
     };
+    let reply_obligation = st.reply_obligations.get(&msg_id).cloned();
     if let Some(caller) = caller {
         if msg.from != caller.id && msg.to != caller.id {
-            return Resp::err(format!(
-                "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id}; next: query only messages sent by or addressed to this caller"
-            ));
+            let Some(context) = project_context else {
+                return Resp::err(format!(
+                    "CALLER_NOT_PERMITTED: caller context is missing for message {msg_id}; next: run `collab context` and retry"
+                ));
+            };
+            let control = match binding_store::BindingControlStore::new(
+                server.host_paths.state_root(),
+            )
+            .load()
+            {
+                Ok(control) => control,
+                Err(error) => {
+                    return Resp::err(format!(
+                        "CALLER_NOT_PERMITTED: current obligation binding could not be verified ({error}); next: retry after the current binding is available"
+                    ));
+                }
+            };
+            let allowed = match reply_obligation::current_obligation_recipient_can_read(
+                &control,
+                &context.project_scope,
+                &context.app_scope_id,
+                &msg_id,
+                reply_obligation.as_ref(),
+                &caller.id,
+            ) {
+                Ok(allowed) => allowed,
+                Err(error) => {
+                    return Resp::err(format!(
+                        "CALLER_NOT_PERMITTED: current obligation binding could not be verified ({error}); next: retry after the current binding is available"
+                    ));
+                }
+            };
+            if !allowed {
+                return Resp::err(format!(
+                    "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id}; next: query only messages sent by or addressed to this caller"
+                ));
+            }
         }
     }
     let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
     let answered = st.answered(&msg_id);
-    let reply_obligation = st.reply_obligations.get(&msg_id).cloned();
     let consumed = st.receive_receipts.values().any(|receipt| {
         receipt.message_ids.iter().any(|received| received == &msg_id)
     });
@@ -1171,10 +1199,30 @@ fn validate_wire_route_principals(
             (current.binding.agent_id.as_str() == worker_id).then_some(&current.binding)
         });
         let Some(binding) = matches.next() else {
-            return Err(format!(
-                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no registered runtime binding",
-                worker_id
-            ));
+            // A durable worker can remain resident after its identity-map row
+            // is removed. Keep the read-only projection available when its cwd
+            // proves it belongs to the requested project.
+            let state = server.state.lock().unwrap();
+            let Some(worker) = state.workers.get(worker_id) else {
+                return Err(format!(
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no resident identity",
+                    worker_id
+                ));
+            };
+            let worker_scope = GlobalState::canonical_project_scope(Path::new(&worker.cwd))
+                .map_err(|error| {
+                    format!(
+                        "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} cwd is not a project route: {}",
+                        worker_id, error
+                    )
+                })?;
+            if worker_scope != route_scope.project_scope_id {
+                return Err(format!(
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} cwd does not match request project route",
+                    worker_id
+                ));
+            }
+            return Ok(());
         };
         if matches.next().is_some() {
             return Err("IDENTITY_MAP_AMBIGUOUS: worker carries multiple active mappings".into());

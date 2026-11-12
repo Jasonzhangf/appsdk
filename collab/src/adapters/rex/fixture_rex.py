@@ -39,6 +39,7 @@ import time
 SERVER = "unix:///tmp/rex-fixture.sock"
 SESSION = "session:11111111-1111-1111-1111-111111111111"
 BLOCK = "block:22222222-2222-2222-2222-222222222222"
+SECOND_BLOCK = "block:44444444-4444-4444-4444-444444444444"
 OTHER_SESSION = "session:33333333-3333-3333-3333-333333333333"
 TERMINAL = "com.superlogical.terminal"
 
@@ -162,20 +163,28 @@ def session_list() -> None:
 
 def list_blocks() -> None:
     creator = "com.other.creator" if scenario() == "non_terminal_block" else TERMINAL
-    emit(
+    blocks = [
         {
-            "blocks": [
-                {
-                    "block_id": BLOCK,
-                    "creator_name": creator,
-                    "flavor": "com.superlogical.terminal.shell",
-                    "placement": "window",
-                    "window_id": "window-fixture",
-                    "host_id": "host-fixture",
-                }
-            ]
+            "block_id": BLOCK,
+            "creator_name": creator,
+            "flavor": "com.superlogical.terminal.shell",
+            "placement": "window",
+            "window_id": "window-fixture",
+            "host_id": "host-fixture",
         }
-    )
+    ]
+    if scenario() == "two_blocks":
+        blocks.append(
+            {
+                "block_id": SECOND_BLOCK,
+                "creator_name": TERMINAL,
+                "flavor": "com.superlogical.terminal.shell",
+                "placement": "window",
+                "window_id": "window-fixture",
+                "host_id": "host-fixture",
+            }
+        )
+    emit({"blocks": blocks})
 
 
 def write(stdin: str) -> None:

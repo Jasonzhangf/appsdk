@@ -502,6 +502,951 @@ fn rejected(fixture: &AppFixture, args: &[&str], thread: &str) -> String {
     )
 }
 
+struct StaleHandoffFixture {
+    fixture: AppFixture,
+    task_id: &'static str,
+    old_worker: String,
+    old_name: String,
+    new_worker: String,
+    new_name: String,
+    subscription: Value,
+    duplicate_id: Option<String>,
+}
+
+fn stale_handoff_fixture(
+    phase: &str,
+    old_worker_present: bool,
+    install_duplicate: bool,
+) -> StaleHandoffFixture {
+    stale_handoff_fixture_with_admin_state(phase, old_worker_present, install_duplicate, None)
+}
+
+fn stale_handoff_fixture_with_admin_state(
+    phase: &str,
+    old_worker_present: bool,
+    install_duplicate: bool,
+    admin_state: Option<&str>,
+) -> StaleHandoffFixture {
+    let mut fixture = setup_roles();
+    let old = fixture.run_public(&["context"], THREAD_B);
+    let new = fixture.run_public(&["context"], THREAD_C);
+    let old_worker = old["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let old_name = old["identity"]["display_name"].as_str().unwrap().to_owned();
+    let new_worker = new["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let new_name = new["identity"]["display_name"].as_str().unwrap().to_owned();
+    let task_id = "stale-handoff";
+
+    publish(
+        &fixture,
+        task_id,
+        &[
+            "--executor",
+            &old_name,
+            "--long-horizon-content",
+            "Continue the stale executor handoff task with its existing progress",
+            "--long-horizon-every-ms",
+            "1200000",
+            "--long-horizon-repeat",
+            "100",
+            "--long-horizon-ttl-seconds",
+            "172800",
+        ],
+    );
+    let dispatched = fixture.run_public(
+        &["board", "dispatch", task_id, "--expected-revision", "1"],
+        THREAD_A,
+    );
+    let dispatched_revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            task_id,
+            "--accept",
+            "--expected-revision",
+            &dispatched_revision,
+        ],
+        THREAD_B,
+    );
+    if phase == "running" {
+        let accepted_revision = accepted["task"]["revision"].as_u64().unwrap().to_string();
+        fixture.run_public(
+            &[
+                "board",
+                "start",
+                task_id,
+                "--expected-revision",
+                &accepted_revision,
+                "--attempt",
+                "1",
+            ],
+            THREAD_B,
+        );
+    } else {
+        assert_eq!(phase, "claimed");
+    }
+
+    match admin_state {
+        Some("invitation") => {
+            let board = fixture.run_public(&["board", "show"], THREAD_A);
+            let revision = task(&board, task_id)["revision"]
+                .as_u64()
+                .unwrap()
+                .to_string();
+            fixture.run_public(
+                &[
+                    "board",
+                    "invite",
+                    task_id,
+                    "--to",
+                    &old_name,
+                    "--expected-revision",
+                    &revision,
+                ],
+                THREAD_A,
+            );
+        }
+        Some("delivered") => {
+            assert_eq!(phase, "running");
+            fixture.run_public(
+                &[
+                    "task",
+                    "deliver",
+                    task_id,
+                    "--no-candidate",
+                    "--evidence",
+                    "public observation needs a narrower conclusion",
+                    "--attempt",
+                    "1",
+                ],
+                THREAD_B,
+            );
+        }
+        None => {}
+        Some(other) => panic!("unsupported admin fixture state: {other}"),
+    }
+
+    let before = fixture.current_state();
+    let (subscription_id, subscription) = before["notification_subscriptions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, subscription)| subscription["subject"] == format!("goal:task:{task_id}"))
+        .map(|(id, subscription)| (id.clone(), subscription.clone()))
+        .expect("accepted task has a linked deadline subscription");
+    let created_ms = subscription["created_ms"].as_i64().unwrap();
+    let duplicate_id = install_duplicate.then(|| format!("sub-stale-duplicate-{task_id}"));
+
+    fixture.stop_daemon();
+    let state_path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    {
+        let state = document["state"].as_object_mut().unwrap();
+        let survivor = state["notification_subscriptions"]
+            .get_mut(&subscription_id)
+            .expect("task subscription survives fixture setup");
+        survivor["fired_count"] = json!(7);
+        survivor["trigger_ms"] = json!(created_ms + 3_600_000);
+        survivor["expires_ms"] = json!(created_ms + 172_800_000);
+        survivor["interval_ms"] = json!(1_200_000);
+        survivor["repeat_count"] = json!(100);
+        // Missing workers are classified by the background timer. Seed its
+        // settled state so that the policy assertion does not race that tick.
+        survivor["status"] = json!(if old_worker_present {
+            "armed"
+        } else {
+            "transport-lost"
+        });
+        survivor["periodic_declared"] = json!(true);
+    }
+    if install_duplicate {
+        let duplicate_id = duplicate_id.as_ref().unwrap();
+        let mut duplicate =
+            document["state"]["notification_subscriptions"][&subscription_id].clone();
+        duplicate["id"] = json!(duplicate_id);
+        duplicate["created_ms"] = json!(created_ms - 1_000);
+        duplicate["updated_ms"] = json!(created_ms - 1_000);
+        duplicate["fired_count"] = json!(2);
+        duplicate["trigger_ms"] = json!(created_ms + 2_400_000);
+        document["state"]["notification_subscriptions"][duplicate_id] = duplicate;
+    }
+    if !old_worker_present {
+        document["state"]["workers"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&old_worker);
+    }
+    std::fs::write(&state_path, serde_json::to_vec(&document).unwrap()).unwrap();
+    let subscription = document["state"]["notification_subscriptions"][&subscription_id].clone();
+
+    let mut map = identity_map(&fixture);
+    let mut matched = 0;
+    for slot in map["slots"].as_array_mut().unwrap() {
+        if slot["identity_key"]["name"] == old_name.as_str() {
+            slot["identity_status"] = json!("unregistered");
+            slot["current"] = Value::Null;
+            slot["previous"] = Value::Null;
+            matched += 1;
+        }
+    }
+    assert_eq!(matched, 1, "fixture retires exactly the old stable name");
+    std::fs::write(
+        fixture.host_state.join("identity-map.json"),
+        serde_json::to_vec(&map).unwrap(),
+    )
+    .unwrap();
+    fixture.start_daemon();
+
+    StaleHandoffFixture {
+        fixture,
+        task_id,
+        old_worker,
+        old_name,
+        new_worker,
+        new_name,
+        subscription,
+        duplicate_id,
+    }
+}
+
+fn task_is_armed(subscription: &Value) -> bool {
+    subscription["event"] == "deadline" && subscription["status"] == "armed"
+}
+
+fn stale_policy(stale: &StaleHandoffFixture) -> Value {
+    let board = stale.fixture.run_public(&["board", "show"], THREAD_A);
+    let revision = task(&board, stale.task_id)["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    stale.fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            stale.task_id,
+            "--executor",
+            &stale.new_name,
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    )
+}
+
+fn assert_stale_admin_owner_absent(stale: &StaleHandoffFixture) {
+    let state = stale.fixture.current_state();
+    assert!(state["workers"].get(&stale.old_worker).is_none());
+    assert_eq!(state["tasks"][stale.task_id]["owner"], stale.old_worker);
+    let map = identity_map(&stale.fixture);
+    assert!(map["slots"].as_array().unwrap().iter().all(|slot| {
+        slot["identity_key"]["name"] != stale.old_name
+            || (slot["identity_status"] != "active" && slot["current"].is_null())
+    }));
+}
+
+#[test]
+fn stale_owner_admin_withdraw_then_handoff_preserves_progress() {
+    let stale = stale_handoff_fixture_with_admin_state("running", false, false, Some("invitation"));
+    assert_stale_admin_owner_absent(&stale);
+    let fixture = &stale.fixture;
+    let before = fixture.current_state();
+    assert_eq!(before["tasks"][stale.task_id]["status"], "working");
+    let invitation = &before["board_details"][stale.task_id]["invitation"];
+    assert_eq!(invitation["peer_id"], stale.old_worker);
+    let revision = before["board_details"][stale.task_id]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let policy_error = rejected(
+        fixture,
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            stale.task_id,
+            "--executor",
+            &stale.new_name,
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert!(
+        policy_error.contains("withdraw the invitation"),
+        "{policy_error}"
+    );
+    let output = fixture.command_public(
+        &[
+            "board",
+            "withdraw",
+            stale.task_id,
+            "--expected-revision",
+            &revision,
+            "--reason",
+            "obsolete invitation recipient and owner are absent",
+        ],
+        THREAD_A,
+    );
+    let raw = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("ADMIN WITHDRAW first result: {raw}");
+    let after = fixture.current_state();
+    if !output.status.success() {
+        for key in ["tasks", "board_details", "ticket_phases", "task_lifecycle"] {
+            assert_eq!(after[key], before[key], "failed withdraw changed {key}");
+        }
+        let id = stale.subscription["id"].as_str().unwrap();
+        for key in [
+            "id",
+            "worker_id",
+            "created_ms",
+            "fired_count",
+            "trigger_ms",
+            "interval_ms",
+            "repeat_count",
+            "expires_ms",
+        ] {
+            assert_eq!(
+                after["notification_subscriptions"][id][key],
+                before["notification_subscriptions"][id][key],
+                "failed withdraw changed linked schedule {key}"
+            );
+        }
+        for (id, msg) in before["msgs"].as_object().unwrap() {
+            let saved = &after["msgs"][id];
+            for key in ["id", "from", "to", "body", "subject"] {
+                assert_eq!(
+                    saved[key], msg[key],
+                    "failed withdraw changed message {id} {key}"
+                );
+            }
+        }
+        println!("ADMIN WITHDRAW rollback: task, invitation, phases, lifecycle, schedules and historical messages preserved");
+    }
+    assert!(
+        output.status.success(),
+        "public stale-owner withdraw failed: {raw}"
+    );
+    assert!(after["board_details"][stale.task_id]["invitation"].is_null());
+    assert_eq!(
+        after["tasks"][stale.task_id],
+        before["tasks"][stale.task_id]
+    );
+    let id = stale.subscription["id"].as_str().unwrap();
+    for key in [
+        "id",
+        "created_ms",
+        "fired_count",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "expires_ms",
+    ] {
+        assert_eq!(
+            after["notification_subscriptions"][id][key],
+            stale.subscription[key]
+        );
+    }
+    let policy = stale_policy(&stale);
+    let revision = policy["task"]["revision"].as_u64().unwrap().to_string();
+    let invalid = rejected(
+        fixture,
+        &[
+            "board",
+            "invite",
+            stale.task_id,
+            "--to",
+            "absent-admin-target",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert!(invalid.contains("peer not registered"), "{invalid}");
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            stale.task_id,
+            "--to",
+            &stale.new_name,
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        invited["goal_schedule"]["subscription"]["id"],
+        stale.subscription["id"]
+    );
+    let revision = invited["task"]["revision"].as_u64().unwrap().to_string();
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            stale.task_id,
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_C,
+    );
+    assert_eq!(accepted["task"]["owner"], stale.new_worker);
+    assert_eq!(accepted["task"]["status"], "working");
+    let final_state = fixture.current_state();
+    let subscriptions = final_state["notification_subscriptions"]
+        .as_object()
+        .unwrap();
+    let linked: Vec<_> = subscriptions
+        .values()
+        .filter(|sub| sub["subject"] == format!("goal:task:{}", stale.task_id))
+        .collect();
+    assert_eq!(
+        linked.len(),
+        1,
+        "handoff must not create another scheduled batch"
+    );
+    assert_eq!(linked[0]["worker_id"], stale.new_worker);
+    assert!(task_is_armed(linked[0]));
+    for key in [
+        "id",
+        "created_ms",
+        "fired_count",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "expires_ms",
+    ] {
+        assert_eq!(
+            linked[0][key], stale.subscription[key],
+            "handoff changed {key}"
+        );
+    }
+    for (id, msg) in before["msgs"].as_object().unwrap() {
+        for key in ["id", "from", "to", "body", "subject"] {
+            assert_eq!(final_state["msgs"][id][key], msg[key]);
+        }
+    }
+}
+
+#[test]
+fn stale_owner_admin_delivered_review_rework_ignores_old_schedule() {
+    let stale = stale_handoff_fixture_with_admin_state("running", false, false, Some("delivered"));
+    assert_stale_admin_owner_absent(&stale);
+    let fixture = &stale.fixture;
+    let before = fixture.current_state();
+    assert_eq!(before["tasks"][stale.task_id]["status"], "delivered");
+    assert_eq!(
+        before["task_lifecycle"][stale.task_id]["delivery_kind"],
+        "read_only"
+    );
+    let output = fixture.command_public(
+        &[
+            "task",
+            "review",
+            stale.task_id,
+            "--rework",
+            "--evidence",
+            "narrow the unsupported root-cause claim to typed unknown",
+        ],
+        THREAD_A,
+    );
+    let raw = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("ADMIN REVIEW REWORK first result: {raw}");
+    let after = fixture.current_state();
+    let id = stale.subscription["id"].as_str().unwrap();
+    for key in [
+        "id",
+        "created_ms",
+        "fired_count",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "expires_ms",
+    ] {
+        assert_eq!(
+            after["notification_subscriptions"][id][key],
+            stale.subscription[key]
+        );
+    }
+    assert!(output.status.success(), "authorized rework failed: {raw}");
+    assert_eq!(after["tasks"][stale.task_id]["status"], "rework");
+    assert_eq!(
+        after["task_lifecycle"][stale.task_id]["review_evidence"],
+        "narrow the unsupported root-cause claim to typed unknown"
+    );
+    let waiting = after["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == stale.task_id && phase["phase"] == "execute")
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap())
+        .unwrap();
+    assert_eq!(waiting["status"], "waiting_assignment");
+    assert!(waiting["slot_name"].is_null());
+    let policy = stale_policy(&stale);
+    let revision = policy["task"]["revision"].as_u64().unwrap().to_string();
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            stale.task_id,
+            "--to",
+            &stale.new_name,
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        invited["goal_schedule"]["subscription"]["id"],
+        stale.subscription["id"]
+    );
+    let revision = invited["task"]["revision"].as_u64().unwrap().to_string();
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            stale.task_id,
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_C,
+    );
+    assert_eq!(accepted["task"]["owner"], stale.new_worker);
+    let final_state = fixture.current_state();
+    let linked: Vec<_> = final_state["notification_subscriptions"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|sub| sub["subject"] == format!("goal:task:{}", stale.task_id))
+        .collect();
+    assert_eq!(linked.len(), 1, "rework must reuse the existing batch");
+    assert_eq!(linked[0]["worker_id"], stale.new_worker);
+    assert!(task_is_armed(linked[0]));
+    for key in [
+        "id",
+        "created_ms",
+        "fired_count",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "expires_ms",
+    ] {
+        assert_eq!(
+            linked[0][key], stale.subscription[key],
+            "rework handoff changed {key}"
+        );
+    }
+}
+
+#[test]
+fn stale_executor_handoff_rejects_invalid_new_target_atomically() {
+    for (admin, missing) in [
+        (None, true),
+        (None, false),
+        (Some("invitation"), true),
+        (Some("invitation"), false),
+        (Some("delivered"), true),
+        (Some("delivered"), false),
+    ] {
+        let mut stale = match admin {
+            Some(admin) => {
+                stale_handoff_fixture_with_admin_state("running", false, false, Some(admin))
+            }
+            None => stale_handoff_fixture("claimed", true, false),
+        };
+        match admin {
+            Some("invitation") => {
+                let before = stale.fixture.current_state();
+                let revision = before["board_details"][stale.task_id]["revision"]
+                    .as_u64()
+                    .unwrap()
+                    .to_string();
+                stale.fixture.run_public(
+                    &[
+                        "board",
+                        "withdraw",
+                        stale.task_id,
+                        "--expected-revision",
+                        &revision,
+                        "--reason",
+                        "obsolete absent invitation",
+                    ],
+                    THREAD_A,
+                );
+            }
+            Some("delivered") => {
+                stale.fixture.run_public(
+                    &[
+                        "task",
+                        "review",
+                        stale.task_id,
+                        "--rework",
+                        "--evidence",
+                        "authorized rework before invalid replacement",
+                    ],
+                    THREAD_A,
+                );
+            }
+            _ => {}
+        }
+        let policy = stale_policy(&stale);
+        let revision = policy["task"]["revision"].as_u64().unwrap().to_string();
+        if missing {
+            stale.fixture.stop_daemon();
+            let mut map = identity_map(&stale.fixture);
+            for slot in map["slots"].as_array_mut().unwrap() {
+                if slot["identity_key"]["name"] == stale.new_name {
+                    slot["identity_status"] = json!("unregistered");
+                    slot["current"] = Value::Null;
+                    slot["previous"] = Value::Null;
+                }
+            }
+            std::fs::write(
+                stale.fixture.host_state.join("identity-map.json"),
+                serde_json::to_vec(&map).unwrap(),
+            )
+            .unwrap();
+            stale.fixture.start_daemon();
+        } else {
+            let worker = stale.new_worker.clone();
+            stale.fixture.update_current_state(|state| {
+                state["workers"][&worker]["transport"] = Value::Null;
+            });
+        }
+        let before = stale.fixture.current_state();
+        let error = rejected(
+            &stale.fixture,
+            &[
+                "board",
+                "invite",
+                stale.task_id,
+                "--to",
+                &stale.new_name,
+                "--expected-revision",
+                &revision,
+            ],
+            THREAD_A,
+        );
+        assert!(
+            error.contains(if missing {
+                "peer not registered"
+            } else {
+                "transport"
+            }),
+            "{error}"
+        );
+        let after = stale.fixture.current_state();
+        for key in ["tasks", "board_details", "ticket_phases"] {
+            assert_eq!(after[key], before[key], "rejected target changed {key}");
+        }
+        for key in ["name", "session_id"] {
+            assert_eq!(
+                after["task_assignments"][stale.task_id][key],
+                before["task_assignments"][stale.task_id][key]
+            );
+        }
+        let invitations = |state: &Value| -> Vec<Value> {
+            state["msgs"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|msg| msg["subject"] == format!("task-invitation:{}", stale.task_id))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(invitations(&after), invitations(&before));
+        let id = stale.subscription["id"].as_str().unwrap();
+        assert_eq!(
+            after["notification_subscriptions"][id],
+            before["notification_subscriptions"][id]
+        );
+    }
+}
+
+#[test]
+fn stale_executor_handoff_retires_duplicate_without_resetting_survivor() {
+    let stale = stale_handoff_fixture("claimed", true, true);
+    let policy = stale_policy(&stale);
+    let revision = policy["task"]["revision"].as_u64().unwrap().to_string();
+    stale.fixture.run_public(
+        &[
+            "board",
+            "invite",
+            stale.task_id,
+            "--to",
+            &stale.new_name,
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_A,
+    );
+    let state = stale.fixture.current_state();
+    let subscriptions = state["notification_subscriptions"].as_object().unwrap();
+    let armed: Vec<_> = subscriptions
+        .values()
+        .filter(|sub| {
+            sub["subject"] == format!("goal:task:{}", stale.task_id) && task_is_armed(sub)
+        })
+        .collect();
+    assert_eq!(armed.len(), 1);
+    for key in [
+        "id",
+        "created_ms",
+        "fired_count",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "expires_ms",
+    ] {
+        assert_eq!(
+            armed[0][key], stale.subscription[key],
+            "survivor changed {key}"
+        );
+    }
+    assert_eq!(armed[0]["worker_id"], stale.new_worker);
+    assert!(!task_is_armed(
+        &subscriptions[stale.duplicate_id.as_ref().unwrap()]
+    ));
+}
+
+#[test]
+fn stale_executor_policy_invite_accept_preserves_existing_schedule() {
+    for (phase, old_worker_present) in [("claimed", true), ("running", false)] {
+        let stale = stale_handoff_fixture(phase, old_worker_present, false);
+        let fixture = &stale.fixture;
+        let state = fixture.current_state();
+        assert_eq!(
+            state["tasks"][stale.task_id]["owner"],
+            stale.old_worker.as_str(),
+            "{phase}: task owner must remain stable before policy"
+        );
+        let identity = identity_map(fixture);
+        assert!(
+            identity["slots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(
+                    |slot| slot["identity_key"]["name"] != stale.old_name.as_str()
+                        || slot["identity_status"] != "active"
+                ),
+            "{phase}: fixture must have no active old binding"
+        );
+
+        let board = fixture.run_public(&["board", "show"], THREAD_A);
+        let revision = task(&board, stale.task_id)["revision"]
+            .as_u64()
+            .unwrap()
+            .to_string();
+        let policy = fixture.run_public(
+            &[
+                "board",
+                "policy",
+                "--scope",
+                "task",
+                "--id",
+                stale.task_id,
+                "--executor",
+                &stale.new_name,
+                "--expected-revision",
+                &revision,
+            ],
+            THREAD_A,
+        );
+        assert_eq!(policy["task"]["executor_name"], stale.new_name.as_str());
+        let after_policy = fixture.current_state();
+        assert_eq!(
+            after_policy["tasks"][stale.task_id]["owner"],
+            stale.old_worker.as_str(),
+            "{phase}: policy must not transfer ownership"
+        );
+        assert_eq!(
+            after_policy["notification_subscriptions"][stale.subscription["id"].as_str().unwrap()],
+            state["notification_subscriptions"][stale.subscription["id"].as_str().unwrap()],
+            "{phase}: policy-only change must preserve the schedule exactly"
+        );
+        let old_phase = after_policy["ticket_phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| {
+                record["task_id"] == stale.task_id
+                    && record["phase"] == "execute"
+                    && record["status"] != "revoked"
+            })
+            .max_by_key(|record| record["batch"].as_u64().unwrap())
+            .expect("old execute phase remains effective after policy");
+        assert_eq!(old_phase["status"], phase);
+
+        let revision = policy["task"]["revision"].as_u64().unwrap().to_string();
+        let invited = fixture.run_public(
+            &[
+                "board",
+                "invite",
+                stale.task_id,
+                "--to",
+                &stale.new_name,
+                "--expected-revision",
+                &revision,
+            ],
+            THREAD_A,
+        );
+        assert_eq!(
+            invited["goal_schedule"]["subscription"]["id"],
+            stale.subscription["id"]
+        );
+        let after_invite = fixture.current_state();
+        assert_eq!(
+            after_invite["tasks"][stale.task_id]["owner"],
+            stale.old_worker.as_str(),
+            "{phase}: invitation alone must not transfer ownership"
+        );
+        let moved =
+            &after_invite["notification_subscriptions"][stale.subscription["id"].as_str().unwrap()];
+        assert_eq!(moved["worker_id"], stale.new_worker.as_str());
+        assert_eq!(moved["fired_count"], stale.subscription["fired_count"]);
+        assert_eq!(moved["created_ms"], stale.subscription["created_ms"]);
+        assert_eq!(moved["trigger_ms"], stale.subscription["trigger_ms"]);
+        assert_eq!(moved["interval_ms"], stale.subscription["interval_ms"]);
+        assert_eq!(moved["repeat_count"], stale.subscription["repeat_count"]);
+        assert_eq!(moved["expires_ms"], stale.subscription["expires_ms"]);
+        assert_eq!(
+            moved["status"], "armed",
+            "{phase}: moved schedule must remain armed"
+        );
+
+        let revision = invited["task"]["revision"].as_u64().unwrap().to_string();
+        let accepted = fixture.run_public(
+            &[
+                "board",
+                "respond",
+                stale.task_id,
+                "--accept",
+                "--expected-revision",
+                &revision,
+            ],
+            THREAD_C,
+        );
+        assert_eq!(accepted["task"]["owner"], stale.new_worker.as_str());
+        assert_eq!(accepted["task"]["status"], "working");
+        let after_accept = fixture.current_state();
+        assert_eq!(
+            after_accept["task_assignments"][stale.task_id]["name"],
+            stale.new_name.as_str()
+        );
+        let effective = after_accept["ticket_phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| {
+                record["task_id"] == stale.task_id
+                    && record["phase"] == "execute"
+                    && record["status"] != "revoked"
+            })
+            .max_by_key(|record| record["batch"].as_u64().unwrap())
+            .expect("handoff leaves one effective execute phase");
+        assert_eq!(effective["slot_name"], stale.new_name.as_str());
+        assert_eq!(effective["status"], "claimed");
+        assert_eq!(effective["attempt_generation"], 2);
+        let retired = after_accept["ticket_phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| {
+                record["task_id"] == stale.task_id
+                    && record["phase"] == "execute"
+                    && record["slot_name"] == stale.old_name.as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retired.len(), 1, "{phase}: {retired:?}");
+        assert_eq!(retired[0]["status"], "revoked");
+
+        let armed = after_accept["notification_subscriptions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|subscription| {
+                subscription["subject"] == format!("goal:task:{}", stale.task_id)
+                    && task_is_armed(subscription)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(armed.len(), 1, "{phase}: expected one armed schedule");
+        assert_eq!(armed[0]["id"], stale.subscription["id"]);
+        assert_eq!(armed[0]["fired_count"], 7);
+        assert_eq!(armed[0]["worker_id"], stale.new_worker.as_str());
+        let notify = fixture.run_public(&["notify", "status"], THREAD_C);
+        assert!(notify["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|subscription| subscription["id"] == stale.subscription["id"]));
+
+        let revision = accepted["task"]["revision"].as_u64().unwrap().to_string();
+        let repeated = rejected(
+            fixture,
+            &[
+                "board",
+                "respond",
+                stale.task_id,
+                "--accept",
+                "--expected-revision",
+                &revision,
+            ],
+            THREAD_C,
+        );
+        assert!(repeated.contains("invitation"), "{repeated}");
+        assert_eq!(
+            fixture.current_state()["ticket_phases"],
+            after_accept["ticket_phases"]
+        );
+        let stale_attempt = rejected(
+            fixture,
+            &[
+                "board",
+                "start",
+                stale.task_id,
+                "--expected-revision",
+                &revision,
+                "--attempt",
+                "1",
+            ],
+            THREAD_C,
+        );
+        assert!(
+            stale_attempt.contains("TICKET_STALE_ATTEMPT")
+                || stale_attempt.contains("TICKET_STALE_BINDING"),
+            "{phase}: old attempt must not gain authority: {stale_attempt}"
+        );
+        fixture.run_public(
+            &[
+                "board",
+                "start",
+                stale.task_id,
+                "--expected-revision",
+                &revision,
+                "--attempt",
+                "2",
+            ],
+            THREAD_C,
+        );
+    }
+}
+
 #[test]
 fn named_reviewer_accepts_a_delivered_task_without_being_owner_or_master() {
     let mut fixture = AppFixture::new();

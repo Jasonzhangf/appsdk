@@ -48,6 +48,29 @@ fn name_holder<'a>(
         .map(|current| current.binding.agent_id.as_str()))
 }
 
+/// Allow the current carrier of an open obligation's recipient name to read
+/// the original message. The check uses only the typed obligation and the
+/// caller's exact current project/app binding; read/ack state is irrelevant.
+pub(crate) fn current_obligation_recipient_can_read(
+    control: &super::binding_slot::BindingControlSet,
+    project_scope: &crate::scope::ProjectScopeId,
+    app: &crate::identity::AppServerId,
+    message_id: &str,
+    obligation: Option<&ReplyObligation>,
+    caller_worker_id: &str,
+) -> Result<bool, String> {
+    let Some(obligation) = obligation else {
+        return Ok(false);
+    };
+    if obligation.message_id != message_id || obligation.project != project_scope.as_str() {
+        return Ok(false);
+    }
+    let Some(recipient_name) = obligation.recipient_name.as_deref() else {
+        return Ok(false);
+    };
+    Ok(name_holder(control, &obligation.project, app, recipient_name)? == Some(caller_worker_id))
+}
+
 /// Verify that `from` is the original recipient (or the current carrier of the
 /// recipient name) replying to `to`, the original sender (or the current
 /// carrier of the sender name). Anything else must be rejected before enqueue.

@@ -828,6 +828,37 @@ fn context_recovery_missing_peer_map_row_does_not_block_current_context() {
         .retain(|slot| slot["current"]["binding"]["agent_id"] != json!(first_worker));
     std::fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
 
+    // Read-only worker projections must tolerate a durable worker whose map
+    // row was removed. The unmapped member stays visible without inventing a
+    // name or role, and one historical row must not fail the whole read.
+    for args in [
+        &["who"][..],
+        &["status", "--all"][..],
+        &["worker", "status", first_worker.as_str()][..],
+    ] {
+        let output = fixture.command_public(args, THREAD_B);
+        assert!(
+            output.status.success(),
+            "collab {args:?} must tolerate an unmapped durable worker: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let unmapped = value["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worker| worker["id"] == json!(first_worker))
+            .unwrap_or_else(|| panic!("{args:?} must keep the unmapped worker visible: {value}"));
+        assert_eq!(
+            unmapped["identity_status"], "unmapped",
+            "{args:?}: {unmapped}"
+        );
+        assert!(unmapped["display_name"].is_null(), "{args:?}: {unmapped}");
+        assert!(unmapped["role"].is_null(), "{args:?}: {unmapped}");
+        assert_eq!(unmapped["work_roles"], json!([]), "{args:?}: {unmapped}");
+    }
+
     // The current peer must still get a usable context and board view even
     // though another registered worker lost its map row.
     let context = fixture.run_public(&["context"], THREAD_B);
@@ -1002,6 +1033,24 @@ fn context_recovery_missing_peer_map_row_does_not_block_current_context() {
             .unwrap()
             .contains(&json!(consumed_subscription_id)),
         "terminal subscription history stays hidden on the master board: {master_unmapped}"
+    );
+
+    let foreign_project = fixture.root.join("foreign-project");
+    std::fs::create_dir_all(&foreign_project).unwrap();
+    let foreign_project = foreign_project.canonicalize().unwrap();
+    fixture.update_current_state(|state| {
+        state["workers"][first_worker.as_str()]["cwd"] = json!(foreign_project);
+    });
+    let foreign_status =
+        fixture.command_public(&["worker", "status", first_worker.as_str()], THREAD_B);
+    assert!(
+        !foreign_status.status.success(),
+        "an unmapped worker from another project must remain outside this route"
+    );
+    let foreign_error = String::from_utf8_lossy(&foreign_status.stderr);
+    assert!(
+        foreign_error.contains("cwd does not match request project route"),
+        "cross-project status must fail on the proven route mismatch: {foreign_error}"
     );
 }
 

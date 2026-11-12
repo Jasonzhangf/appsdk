@@ -1,7 +1,10 @@
 use super::*;
+use crate::client::adapters::rex::{set_test_cli, set_test_timeout, TEST_FIXTURE_LOCK};
 use crate::proto::RexEndpoint;
 use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn test_server() -> (Arc<Server>, std::path::PathBuf) {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -104,6 +107,184 @@ fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
         },
     ]);
     subscription_id
+}
+
+struct RexFixtureEnv {
+    dir: PathBuf,
+}
+
+impl RexFixtureEnv {
+    fn new(scenario: &str) -> Self {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "collab-notification-rex-fixture-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = dir.join("rex-cli");
+        std::fs::write(&fixture, include_str!("../adapters/rex/fixture_rex.py")).unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+        set_test_cli(Some(fixture));
+        set_test_timeout(Some(Duration::from_secs(5)));
+        std::env::set_var("REXPRIMITIVE_LOG_DIR", &dir);
+        std::env::set_var("REXPRIMITIVE_SCENARIO", scenario);
+        Self { dir }
+    }
+
+    fn calls(&self) -> Vec<serde_json::Value> {
+        let path = self.dir.join("invocations.jsonl");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(|line| serde_json::from_str(line).expect("Rex fixture invocation"))
+            .collect()
+    }
+}
+
+impl Drop for RexFixtureEnv {
+    fn drop(&mut self) {
+        set_test_cli(None);
+        set_test_timeout(None);
+        std::env::remove_var("REXPRIMITIVE_LOG_DIR");
+        std::env::remove_var("REXPRIMITIVE_SCENARIO");
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn rex_transport(block_id: &str) -> SelectedTransport {
+    SelectedTransport {
+        kind: TransportKind::Rex,
+        endpoint: None,
+        namespace: None,
+        session_id: Some("agent-session-rex".into()),
+        thread_id: None,
+        tmux_endpoint: None,
+        rex_endpoint: Some(RexEndpoint {
+            server: "unix:///tmp/rex-fixture.sock".into(),
+            session_id: "session:11111111-1111-1111-1111-111111111111".into(),
+            block_id: block_id.into(),
+            host_id: Some("host-fixture".into()),
+            instance_id: "instance-fixture".into(),
+            cwd: "/tmp/rex-fixture-cwd".into(),
+        }),
+        capabilities: vec!["send_message_to_block".into()],
+        self_check: "test rex transport".into(),
+    }
+}
+
+fn register_rex_and_subscribe(server: &Server, worker_id: &str, block_id: &str) -> String {
+    let now = now_ms();
+    let transport = rex_transport(block_id);
+    let target = notification_target(&transport)
+        .expect("Rex transport target")
+        .into_owned();
+    let subscription_id = super::mailbox::default_direct_message_id(worker_id);
+    server.commit(&[
+        Event::Registered {
+            worker: WorkerRec {
+                id: worker_id.into(),
+                token: format!("token-{worker_id}"),
+                cwd: "/tmp".into(),
+                registered_ms: now,
+                transport: Some(transport),
+            },
+        },
+        Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.clone(),
+                worker_id: worker_id.into(),
+                event: "direct-message".into(),
+                subject: None,
+                target,
+                method: "rex".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now + 300_000,
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+                periodic_declared: false,
+                goal_content: None,
+            },
+        },
+    ]);
+    subscription_id
+}
+
+fn rebind_rex_worker(server: &Server, worker_id: &str, block_id: &str) {
+    let transport = rex_transport(block_id);
+    server.commit(&[Event::Registered {
+        worker: WorkerRec {
+            id: worker_id.into(),
+            token: format!("token-{worker_id}"),
+            cwd: "/tmp".into(),
+            registered_ms: now_ms(),
+            transport: Some(transport),
+        },
+    }]);
+}
+
+fn queue_immediate_message(
+    server: &Server,
+    worker_id: &str,
+    subscription_id: &str,
+    message_id: &str,
+    created_ms: i64,
+) {
+    queue_message(server, worker_id, subscription_id, message_id, created_ms);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: message_id.into(),
+        mode: "immediate".into(),
+        source_thread_id: None,
+    }]);
+}
+
+fn rex_write_targets(env: &RexFixtureEnv) -> Vec<(String, String)> {
+    env.calls()
+        .iter()
+        .filter(|call| {
+            call["argv"].as_array().is_some_and(|argv| {
+                argv.contains(&serde_json::json!("com.superlogical.terminal.write"))
+            })
+        })
+        .map(|call| {
+            let request: serde_json::Value =
+                serde_json::from_str(call["stdin"].as_str().expect("write stdin"))
+                    .expect("write request");
+            (
+                request["block_id"].as_str().expect("block").to_owned(),
+                request["args"]["data"].as_str().expect("body").to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn rex_enter_targets(env: &RexFixtureEnv) -> Vec<String> {
+    env.calls()
+        .iter()
+        .filter(|call| {
+            call["argv"]
+                .as_array()
+                .is_some_and(|argv| argv.contains(&serde_json::json!("send-key")))
+        })
+        .map(|call| {
+            let argv = call["argv"].as_array().expect("send-key argv");
+            let index = argv
+                .iter()
+                .position(|value| value.as_str() == Some("-b"))
+                .expect("-b present")
+                + 1;
+            argv[index].as_str().expect("block id").to_owned()
+        })
+        .collect()
 }
 
 fn queue_message(
@@ -319,6 +500,115 @@ fn rex_notification_target_is_the_full_service_scoped_terminal_address() {
         "thread-id",
         "old transports must keep borrowing their thread id"
     );
+}
+
+#[test]
+fn rex_notifications_follow_each_recipients_current_block_after_rebind() {
+    let _fixture_guard = TEST_FIXTURE_LOCK.blocking_lock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _runtime_guard = runtime.enter();
+    let env = RexFixtureEnv::new("two_blocks");
+    let (mut server, root) = test_server();
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink = default_appserver_notification_sink();
+    let first_block = "block:22222222-2222-2222-2222-222222222222";
+    let second_block = "block:44444444-4444-4444-4444-444444444444";
+    let rebound_block = "block:55555555-5555-5555-5555-555555555555";
+    let first_subscription = register_rex_and_subscribe(&server, "rex-a", first_block);
+    let second_subscription = register_rex_and_subscribe(&server, "rex-b", second_block);
+    let now = now_ms();
+    queue_immediate_message(&server, "rex-a", &first_subscription, "rex-a", now);
+    queue_immediate_message(&server, "rex-b", &second_subscription, "rex-b", now + 1);
+    assert!(matches!(
+        attempt_notification_detailed_with_at(&server, "rex-a", &first_subscription, now + 2),
+        NotificationAttempt::Accepted
+    ));
+    assert!(matches!(
+        attempt_notification_detailed_with_at(&server, "rex-b", &second_subscription, now + 3,),
+        NotificationAttempt::Accepted
+    ));
+    let initial_writes = rex_write_targets(&env);
+    assert_eq!(
+        initial_writes
+            .iter()
+            .map(|(block, _)| block.as_str())
+            .collect::<Vec<_>>(),
+        [first_block, second_block],
+        "same session notifications must stay on their recipient blocks"
+    );
+    assert!(initial_writes[0].1.contains("DETAIL-rex-a"));
+    assert!(!initial_writes[0].1.contains("DETAIL-rex-b"));
+    assert!(initial_writes[1].1.contains("DETAIL-rex-b"));
+    assert!(!initial_writes[1].1.contains("DETAIL-rex-a"));
+    assert_eq!(
+        rex_enter_targets(&env),
+        [first_block.to_owned(), second_block.to_owned()],
+        "each Enter must target the same block as its body"
+    );
+
+    rebind_rex_worker(&server, "rex-a", rebound_block);
+    queue_immediate_message(
+        &server,
+        "rex-a",
+        &first_subscription,
+        "rex-a-reminder",
+        now + 4,
+    );
+    assert!(matches!(
+        attempt_notification_detailed_with_at(
+            &server,
+            "rex-a-reminder",
+            &first_subscription,
+            now + 5,
+        ),
+        NotificationAttempt::Accepted
+    ));
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.notification_subscriptions[&first_subscription].target,
+            notification_target(&rex_transport(rebound_block))
+                .unwrap()
+                .into_owned()
+        );
+        assert_eq!(
+            state.notification_subscriptions[&second_subscription].target,
+            notification_target(&rex_transport(second_block))
+                .unwrap()
+                .into_owned()
+        );
+        assert!(
+            state
+                .notification_delivery_accepted
+                .contains_key("rex-a-reminder"),
+            "the reminder must be accepted for the rebound identity"
+        );
+    }
+    let writes = rex_write_targets(&env);
+    assert_eq!(
+        writes
+            .iter()
+            .map(|(block, _)| block.as_str())
+            .collect::<Vec<_>>(),
+        [first_block, second_block, rebound_block],
+        "the reminder must use the current block and must not touch the other recipient"
+    );
+    assert!(writes[2].1.contains("DETAIL-rex-a-reminder"));
+    assert!(!writes[2].1.contains("DETAIL-rex-b"));
+    assert_eq!(
+        rex_enter_targets(&env),
+        [
+            first_block.to_owned(),
+            second_block.to_owned(),
+            rebound_block.to_owned(),
+        ],
+        "the rebound reminder Enter must target its current block"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

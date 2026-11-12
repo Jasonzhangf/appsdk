@@ -216,6 +216,53 @@ fn board_reassign_closed_rejects_accept() {
 }
 
 #[test]
+fn stale_executor_handoff_failure_preserves_task_and_schedule() {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+    let (server, root, _) = reassign_fixture("working");
+    {
+        let mut state = server.state.lock().unwrap();
+        let details = state.board_details.get_mut("named-work").unwrap();
+        details.admitted = true;
+        details.long_horizon = Some(crate::board::LongHorizonTaskSpec {
+            content: "continue existing handoff".into(),
+            interval_ms: 1_200_000,
+            repeat_count: 100,
+            ttl_seconds: 172_800,
+        });
+        let events = task_goal_events(&server, &state, &state.tasks["named-work"],
+            &state.board_details["named-work"], Some("current"), false, false).unwrap().0;
+        for event in events { state.apply_checked(&event).unwrap(); }
+        state.notification_subscriptions.values_mut().find(|sub| {
+            sub.subject.as_deref() == Some("goal:task:named-work")
+        }).unwrap().fired_count = 7;
+        state.ticket_phases.push(TicketPhaseRecord {
+            task_id: "named-work".into(), phase: TicketPhaseKind::Execute,
+            batch: 1, priority: "p2".into(), status: TicketPhaseStatus::Running,
+            slot_name: Some("Alice".into()), binding_generation: 1,
+            enqueue_seq: 1, attempt_generation: 1, depends_on: vec![],
+            route_group: None, wait_reason: None, result: None,
+        });
+        state.workers.remove("old");
+    }
+    let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+    // Existing deterministic persistence-failure mechanism: rename cannot
+    // publish a state document over a directory. No daemon or timing needed.
+    if server.state_path.exists() { std::fs::remove_file(&server.state_path).unwrap(); }
+    std::fs::create_dir(&server.state_path).unwrap();
+    let response = board_respond(&server, "current".into(), "token-current".into(),
+        "named-work".into(), 1, true, None);
+    assert!(!response.ok, "{response:?}");
+    assert!(response.error.as_deref().unwrap().contains("BOARD_DURABILITY_FAILED"), "{response:?}");
+    let after = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+    assert_eq!(after, before, "failed acceptance must publish no partial state");
+    std::fs::remove_dir(&server.state_path).unwrap();
+    let response = board_respond(&server, "current".into(), "token-current".into(),
+        "named-work".into(), 1, true, None);
+    assert!(response.ok, "retry without persistence fault: {response:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn board_reassign_exclusive_resource_conflict_is_not_a_peer_capacity_limit() {
     let (server, root, _) = reassign_fixture("working");
     {

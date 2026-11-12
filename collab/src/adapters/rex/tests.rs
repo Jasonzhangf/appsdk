@@ -13,10 +13,14 @@ async fn fixture_guard() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 fn endpoint() -> RexEndpoint {
+    endpoint_with_block("block:22222222-2222-2222-2222-222222222222")
+}
+
+fn endpoint_with_block(block_id: &str) -> RexEndpoint {
     RexEndpoint {
         server: "unix:///tmp/rex-fixture.sock".into(),
         session_id: "session:11111111-1111-1111-1111-111111111111".into(),
-        block_id: "block:22222222-2222-2222-2222-222222222222".into(),
+        block_id: block_id.into(),
         host_id: Some("host-fixture".into()),
         instance_id: "instance-fixture".into(),
         cwd: "/tmp/rex-fixture-cwd".into(),
@@ -33,6 +37,10 @@ fn candidate() -> RexCandidate {
 }
 
 fn selected_transport() -> SelectedTransport {
+    selected_transport_with_block("block:22222222-2222-2222-2222-222222222222")
+}
+
+fn selected_transport_with_block(block_id: &str) -> SelectedTransport {
     SelectedTransport {
         kind: TransportKind::Rex,
         endpoint: None,
@@ -40,7 +48,7 @@ fn selected_transport() -> SelectedTransport {
         session_id: Some("agent-session".into()),
         thread_id: None,
         tmux_endpoint: None,
-        rex_endpoint: Some(endpoint()),
+        rex_endpoint: Some(endpoint_with_block(block_id)),
         capabilities: vec!["send_message_to_block".into()],
         self_check: "fixture".into(),
     }
@@ -183,6 +191,79 @@ async fn notify_writes_body_then_sends_a_real_enter_key() {
         ]
         .as_slice(),
         "Enter must target the selected session and block"
+    );
+}
+
+#[tokio::test]
+async fn notify_keeps_two_blocks_in_one_session_on_distinct_input_targets() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::new("two_blocks");
+    let first_block = "block:22222222-2222-2222-2222-222222222222";
+    let second_block = "block:44444444-4444-4444-4444-444444444444";
+    resolve_target(&endpoint_with_block(first_block))
+        .await
+        .expect("fixture exposes the first block in the shared session");
+    resolve_target(&endpoint_with_block(second_block))
+        .await
+        .expect("fixture exposes the second block in the same session");
+
+    let first = notify(
+        &selected_transport_with_block(first_block),
+        "first-block-body",
+        Some("immediate"),
+    )
+    .await
+    .expect("first block notification");
+    let second = notify(
+        &selected_transport_with_block(second_block),
+        "second-block-body",
+        Some("immediate"),
+    )
+    .await
+    .expect("second block notification");
+    assert_eq!(
+        serde_json::from_str::<Value>(&first).unwrap()["bytes_written"],
+        "first-block-body".len()
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&second).unwrap()["bytes_written"],
+        "second-block-body".len()
+    );
+
+    let calls = env.calls();
+    let writes = calls
+        .iter()
+        .filter(|call| method(call) == "com.superlogical.terminal.write")
+        .map(|call| {
+            serde_json::from_str::<Value>(call["stdin"].as_str().expect("write stdin"))
+                .expect("write request JSON")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(writes.len(), 2, "each recipient needs one exact write");
+    assert_eq!(writes[0]["session_id"], endpoint().session_id);
+    assert_eq!(writes[0]["block_id"], first_block);
+    assert_eq!(writes[0]["args"]["data"], "first-block-body");
+    assert_eq!(writes[1]["session_id"], endpoint().session_id);
+    assert_eq!(writes[1]["block_id"], second_block);
+    assert_eq!(writes[1]["args"]["data"], "second-block-body");
+
+    let enter_blocks = calls
+        .iter()
+        .filter(|call| method(call) == "send-key")
+        .map(|call| {
+            let argv = call["argv"].as_array().expect("send-key argv");
+            let block = argv
+                .iter()
+                .position(|value| value.as_str() == Some("-b"))
+                .expect("-b present")
+                + 1;
+            argv[block].as_str().expect("block id").to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        enter_blocks,
+        [first_block.to_owned(), second_block.to_owned()],
+        "Enter must follow the same block as its body write"
     );
 }
 

@@ -2567,6 +2567,19 @@ fn resource_reassignment_consumer(status: &str) {
         });
     });
 
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_B)
+        .unwrap()
+        .reject_as_missing = true;
+    let source_status = fixture.run_public(&["worker", "snapshot", &peer], THREAD_A);
+    assert_eq!(
+        source_status["judgment_status"], "satisfied",
+        "{source_status}"
+    );
+    fixture.run_public(&["worker", "snapshot", &carol], THREAD_A);
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let task = board["tasks"]
         .as_array()

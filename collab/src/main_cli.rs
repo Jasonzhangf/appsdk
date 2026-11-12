@@ -254,8 +254,12 @@ pub(crate) enum MasterCmd {
         #[arg(long)]
         approval: String,
     },
-    /// Delegate master authority to another registered peer (current master only)
-    Delegate { target: String },
+    /// Delegate master authority with the user's explicit approval (current master only)
+    Delegate {
+        target: String,
+        #[arg(long)]
+        approval: Option<String>,
+    },
     /// Send a durable message to the master of another explicit project
     Send {
         #[arg(long)]
@@ -486,6 +490,21 @@ pub(crate) enum WorkerCmd {
         /// Maximum number of recent tmux buffer lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,
+    },
+    /// Let the current project master commit a typed judgment for one snapshot capture
+    Judge {
+        /// The judgment_capture object returned by `worker snapshot`
+        #[arg(long)]
+        capture: String,
+        /// Master's presence judgment: online or unknown
+        #[arg(long)]
+        presence: Option<String>,
+        /// Master's activity judgment: busy, idle, waiting_user, error, or unknown
+        #[arg(long)]
+        activity: Option<String>,
+        /// The visible evidence used for this judgment
+        #[arg(long)]
+        basis: String,
     },
     /// Read one exact peer lifecycle target (defaults to the caller)
     Read {

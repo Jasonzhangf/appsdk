@@ -199,6 +199,57 @@ pub struct RexObservation {
     pub gap_possible: bool,
 }
 
+impl RexObservation {
+    /// Extract the one foreground Codex owner only when all current terminal
+    /// sources are complete and the program-status owner matches foreground.
+    pub(crate) fn current_foreground_codex_owner(&self) -> Result<RexProgramStatusOwner, String> {
+        if self.gap_possible || !self.source_errors.is_empty() {
+            return Err(format!(
+                "REX_EXECUTION_UNVERIFIED: current Rex observation has source gaps: {}",
+                self.source_errors.join("; ")
+            ));
+        }
+        for required in [
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.pwd",
+            "com.superlogical.terminal.program_status",
+        ] {
+            if !self.sources.iter().any(|source| source == required) {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: current Rex observation is missing {required}"
+                ));
+            }
+        }
+        let process = self.process.as_ref().ok_or_else(|| {
+            "REX_EXECUTION_UNVERIFIED: Rex foreground process is missing".to_owned()
+        })?;
+        let pid = process
+            .pid
+            .filter(|pid| *pid > 1)
+            .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: Rex foreground PID is missing".to_owned())?;
+        let name = process
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: Rex foreground name is missing".to_owned())?;
+        if !crate::host_runtime::is_codex_command(name) {
+            return Err(format!(
+                "REX_EXECUTION_UNVERIFIED: Rex foreground is not Codex ({name})"
+            ));
+        }
+        self.program_status
+            .iter()
+            .filter_map(|record| record.owner.as_ref())
+            .find(|owner| owner.pid == pid && owner.name == name)
+            .cloned()
+            .ok_or_else(|| {
+                "REX_EXECUTION_UNVERIFIED: program_status owner does not match the Rex foreground"
+                    .to_owned()
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RexEvent {
     pub source: String,
@@ -1236,10 +1287,7 @@ fn extract_status_records(value: &Value) -> Vec<RexProgramStatusRecord> {
                 .and_then(|owner| {
                     let pid = owner.get("pid").and_then(Value::as_u64)?;
                     let name = owner.get("name").and_then(Value::as_str)?.to_owned();
-                    let owner = RexProgramStatusOwner {
-                        pid,
-                        name,
-                    };
+                    let owner = RexProgramStatusOwner { pid, name };
                     owner.is_complete().then_some(owner)
                 }),
         })

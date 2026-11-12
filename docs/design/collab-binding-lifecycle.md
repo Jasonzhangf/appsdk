@@ -1,6 +1,6 @@
 # 绑定与通信恢复生命周期
 
-状态：候选设计。图与 gate 通过只证明模型闭合，运行验收另记任务证据。
+状态：正式源合同。图与 gate 通过只证明模型闭合，运行验收另记任务证据。
 机器图：[collab-binding-lifecycle.graph.json](../dagpipe/collab-binding-lifecycle.graph.json)。
 
 Collab 持久身份是工作归属的真源。宿主提供当前会话与通信端点事实。
@@ -9,9 +9,13 @@ gateway runtime UUID 是当前连接地址，不是 Collab runtime identity。
 
 DSH gateway 仅在 `unknown-agent` 时明确表示当前 worker 缺席。收敛 owner
 退役这条当前路由并增加无端点的绑定代际，同时保留 worker、名字、任务和
-持久消息。该调用以 `retired` 结束，后续维护不再选择这条绑定。
-`unknown-runtime`、超时、畸形回复和其他不确定结果不是缺席，保留 pending
-供下一次独立维护调用收敛。
+持久消息。该调用以 `retired` 结束，后续维护不再选择这条失效路由。
+稳定名字保留恢复入口，同名新 session 或同 session 新地址按 B2 核实后续接。
+`unknown-runtime`、超时、畸形回复和其他不确定结果保持 pending。
+
+只有人类明确退役命令才按 E1 释放普通名字的当前占用。自动 identity loss
+保留 current name 与恢复入口，等待回归；15 分钟到期只使未完成任务具备按 D1
+邀请重派的资格，不删除名字或伪装宿主已结束。
 
 ## Collab：读取与收敛
 
@@ -33,8 +37,8 @@ flowchart TD
   C -->|未变| A[恢复当前适配器收件能力]:::action
   U --> A
   A --> D{收件能力结果}:::decision
-  D -->|明确 unknown-agent| X[退役当前路由并保留身份与持久消息]:::action
-  D -->|就绪、pending 或错误| E([输出就绪、待恢复、已退役或明确错误]):::boundary
+  D -->|明确 unknown-agent| X[退役当前路由并保留名字与恢复入口]:::action
+  D -->|就绪、pending 或错误| E([输出就绪、待恢复、路由已退役或明确错误]):::boundary
   X --> E
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
@@ -78,14 +82,14 @@ flowchart TD
 | gateway 重启，连接 UUID 变化 | 宿主核实当前 session，更新原绑定端点与代际，停止旧地址投递 | 不从旧 UUID 推导新 UUID，不注销身份 |
 | bridge 重启或端点变化 | 共享服务恢复持久 session/thread 绑定，经 native 核实后发布并同步入口 | 不要求 agent 调 MCP 或重注册，不重启 Desktop |
 | 端点暂不可用或先后启动 | 保持原身份和消息，按既有维护机制继续收敛 | 不把不可达当成身份丢失，不阻断其他绑定 |
-| gateway 明确返回 `unknown-agent` | 退役当前路由并增加空端点代际；worker、名字、任务和持久消息保留 | 不把确定缺席当作暂时断线继续重试；不删除历史 |
+| gateway 明确返回 `unknown-agent` | 退役当前路由并增加空端点代际；worker、名字、任务和持久消息保留 | 保留恢复入口和历史，稳定名字释放沿人类明确退役入口 |
 | 显式换绑 | 读取当前宿主事实，沿同一 owner 更新原绑定 | 不调用 `worker close --self` 或 `UnregisterSelf` |
 
 名字、master/peer、任务、未读消息及已消费历史在恢复中保持。
 gateway 没有任何就绪 runtime 时，没有证据判断 agent 缺席，必须返回
-`unknown-runtime` 并保持 pending。真正退役的绑定不自动复活；随后显式执行
-`collab context` 时，按保留的精确 session 和 typed transport 重新核实宿主，
-核实成功后恢复原 worker 的有效端点。没有地址的退役绑定不重复提交路由退役事件。
+`unknown-runtime` 并保持 pending。路由退役后，恢复入口保留于稳定名字及当前
+精确 session 和 typed transport。`collab context` 核实当前宿主成功后恢复原 worker
+的有效端点。没有地址的退役路由不重复提交路由退役事件。
 Desktop 仅在 socket connect 返回 ENOENT 或 ECONNREFUSED、确定没有写出任何字节时，
 记录可重试的未提交失败。bridge 恢复后，既有维护周期在当前绑定上自动补派，
 保留真实尝试次数，并使用原生渠道的即时投递策略。请求写出后的超时、断连、
@@ -93,4 +97,9 @@ Desktop 仅在 socket connect 返回 ENOENT 或 ECONNREFUSED、确定没有写�
 后台换绑先持久化新凭据，再公布当前路由。原生路由查询与换绑共享身份锁，
 避免业务命令读到尚未完成凭据持久化的新路由。
 实际 session 续接按既有名字交接合同处理；不能只凭名字认领外部会话。
+同名接替时，目标名字的任务、未消费消息和唤醒按当前归属交接；同 actor 的
+其他源名字任务不跟 session 搬走。被顶替旧 holder 不即时获得 companion 名字，
+只有在后续真实普通 context 时注册可用名。
+Rex 绑定使用当前 block，不套用 tmux pane 位置 1；Rex session 名由项目 cwd
+末级目录确定，身份和角色变化不改 session 名。
 重启服务由其原 owner 管理。Collab 不拥有 tmux server 或宿主 pane 的生命周期。

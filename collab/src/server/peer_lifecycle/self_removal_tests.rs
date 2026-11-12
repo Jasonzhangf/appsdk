@@ -7,6 +7,39 @@ fn project_context(root: &Path) -> ProjectContext {
         .unwrap()
 }
 
+fn open_task(owner: &str, id: &str) -> state::TaskRec {
+    state::TaskRec {
+        id: id.into(),
+        owner: owner.into(),
+        created_by: owner.into(),
+        feature_id: None,
+        worktree_path: None,
+        branch: None,
+        base_commit: None,
+        priority: "P1".into(),
+        status: "working".into(),
+        next_step: Some("continue after control-plane removal".into()),
+        wait: None,
+        isolation_mode: None,
+        created_ms: now_ms(),
+        updated_ms: now_ms(),
+    }
+}
+
+fn binding_for(server: &Server, worker_id: &str) -> crate::server::RuntimeBinding {
+    server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == worker_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("current binding for {worker_id}"))
+}
+
 fn self_close_request(
     server: &Server,
     context: &ProjectContext,
@@ -156,6 +189,133 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
         .global
         .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
         .is_none());
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn self_close_preserves_a_task_linked_subscription_for_the_next_owner() {
+    let (server, root) = test_server();
+    let context = project_context(&root);
+    let peer = "peer-task-owner";
+    let next = "peer-task-next";
+    assert!(register_synthetic_peer(&server, peer, "%task-owner").ok);
+    assert!(register_synthetic_peer(&server, next, "%task-next").ok);
+
+    let binding = binding_for(&server, peer);
+    let endpoint = binding.tmux_endpoint.clone().expect("tmux endpoint");
+    let now = now_ms();
+    let mut task = open_task(peer, "task-linked-subscription");
+    server.commit(&[
+        state::Event::TaskUpdated { task: task.clone() },
+        state::Event::BoardDetailsChanged {
+            task_id: task.id.clone(),
+            details: crate::board::BoardTaskDetails {
+                title: "task-linked subscription".into(),
+                description: "preserve the task wake while no holder exists".into(),
+                delivery_condition: "deliver once".into(),
+                test_condition: "verify continuation".into(),
+                long_horizon: Some(crate::board::LongHorizonTaskSpec {
+                    content: "continue the same task".into(),
+                    interval_ms: 60_000,
+                    repeat_count: 8,
+                    ttl_seconds: 86_400,
+                }),
+                revision: 2,
+                public_visibility: true,
+                ..crate::board::BoardTaskDetails::default()
+            },
+        },
+        state::Event::NotificationSubscribed {
+            subscription: state::NotificationSubscription {
+                id: "task-linked-sub".into(),
+                worker_id: peer.into(),
+                event: "deadline".into(),
+                subject: Some(format!("goal:task:{}", task.id)),
+                target: endpoint.pane_id.clone(),
+                method: "tmux".into(),
+                trigger_ms: Some(now + 60_000),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(60_000),
+                repeat_count: 8,
+                fired_count: 3,
+                expires_ms: now + 86_400_000,
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+                periodic_declared: true,
+                goal_content: Some(state::GoalScheduleBinding {
+                    source: Some(state::GoalScheduleContent::BoardTask {
+                        task_id: task.id.clone(),
+                    }),
+                    ttl_seconds: 86_400,
+                }),
+            },
+        },
+        state::Event::Sent {
+            msg: state::Message {
+                id: "task-linked-wake".into(),
+                from: "daemon".into(),
+                to: peer.into(),
+                mtype: "notification".into(),
+                subject: Some(format!("goal:task:{}", task.id)),
+                body: "continue the task".into(),
+                in_reply_to: None,
+                created_ms: now,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        state::Event::WakeBound {
+            message_id: "task-linked-wake".into(),
+            subscription_id: "task-linked-sub".into(),
+        },
+    ]);
+
+    let response = handle(
+        &server,
+        Some(&context),
+        self_close_request(&server, &context, peer, "self-with-task-subscription"),
+        None,
+    );
+    assert_eq!(
+        response.data["result"]["outcome"], "complete",
+        "{response:?}"
+    );
+    {
+        let state = server.state.lock().unwrap();
+        let subscription = &state.notification_subscriptions["task-linked-sub"];
+        assert_eq!(subscription.status, "waiting-owner");
+        assert_eq!(subscription.fired_count, 3);
+        assert_eq!(subscription.repeat_count, 8);
+        assert_eq!(subscription.interval_ms, Some(60_000));
+        assert_eq!(
+            subscription.goal_content,
+            Some(state::GoalScheduleBinding {
+                source: Some(state::GoalScheduleContent::BoardTask {
+                    task_id: task.id.clone(),
+                }),
+                ttl_seconds: 86_400,
+            })
+        );
+        assert_ne!(state.msgs["task-linked-wake"].state, "pending");
+    }
+
+    task.owner = next.into();
+    task.updated_ms = now + 1;
+    server.commit(&[state::Event::TaskUpdated { task }]);
+    let state = server.state.lock().unwrap();
+    let subscription = &state.notification_subscriptions["task-linked-sub"];
+    assert_eq!(subscription.status, "armed");
+    assert_eq!(subscription.worker_id, next);
+    assert_eq!(subscription.fired_count, 3);
+    assert_eq!(subscription.repeat_count, 8);
+    assert_eq!(subscription.interval_ms, Some(60_000));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

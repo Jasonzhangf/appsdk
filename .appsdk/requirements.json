@@ -377,9 +377,90 @@
         "version": 3
       },
       "version": 14
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "这四条同意。旧会话一定会被新的替换,如果没有替换,可以保持,等待恢复。如果可以静态通过特征鉴别最好,其次可以通过sessionID探测,再次可以snapshot。等待丢失的身份回归。daemon确定身份丢失,不是master。15分钟。新 owner 已接单，daemon 已更新任务归属。项目 master 统一叫 Jenny，按角色改名。Bob 原任务留在原名字下，等待恢复或重派。采用，旧持有者再次出现时再注册。同意,任务跟名字走。释放 Bob，允许后续普通注册自动取得这个名字。退役生效后立即具备重派资格，有合法 idle peer 就派发。你需要全力推进任务，保证ontology设计落实到项目。",
+          "role": "user",
+          "source": "2026-11-12 current Codex conversation, Jason's object-by-object approvals recorded in task-runs/collab-identity-lifecycle-ontology-20261112/semantics.md and the user-supplied AGENTS.md"
+        },
+        "base_version": 2,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-identity-lifecycle-20261112",
+        "requirement_id": "req-collab-identity",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和退役使用同一个 map owner。名字在同一项目内承载持续工作归属，一个已分配名字至多一个当前 anchor。普通名字池耗尽后继续分配未占用的 peer-数字。daemon 重启保留名字、工作和合法角色，当前宿主事实唯一时自动续接并更新 sessionID 与端点。Rex 以当前 block 绑定，项目 Rex session 使用项目 cwd 目录名，peer 不因身份、角色或任务改 session 名。tmux 的固定位置来自共享布局 manifest，位置不移动，只有项目固定位置 1 可升 Jenny，该 pane 限制只作用于 tmux。物理位置不从普通名字池或 peer 数字推导。\n人类明确指令可以指定任意已有名字恢复或顶替并指定角色。新 master 需要人类明确指令，项目 master 统一叫 Jenny。接替目标名字时接续目标角色和仍归该名字的工作，源名字任务保留在源名字下。旧 holder 当下失去目标 current 和当前权限，后续真实普通 context 再按普通注册取得可用名字。旧 session、历史文件和迟到事件不能夺回新 current。合法同名接替保留任务 ID、状态、历史、证据和资源。\nadaptor 分开维护 presence 与 activity。先用当前确定性特征，仍缺事实时用适用 agent sessionID 查询，再用当前 snapshot 交合法 master 鉴别，事实充分即停。busy 与 live 可同时成立，静态界面按特征分 error、ask、idle，事实不足为 unknown。确认退出或不存在才 offline，单次失败不能证明丢失。被替换绑定为 stale。daemon 确认身份丢失后开始固定 15 分钟回归等待，重复探测和重启保持原截止时间。当前有效 holder 或同名合法新 holder 在线结束等待。到期仍未回归且有合法 idle peer 时才邀请重派，全忙保留原归属和到期资格。派发完成点是新 owner 接单且 daemon 提交归属，邀请本身不转 owner。回归先提交则继续尚未转交的任务并撤本轮自动邀请，接受先提交则保留新 owner，旧身份回归领取新工作。\n人类明确退役普通名字释放名字，后续普通注册可以取得，未完成任务立即具备重派资格，有合法 idle peer 就邀请。退役保留宿主、代码、未提交改动、任务、消息、证据、资源和恢复引用。资源当前 owner 核对活动 writer 并完成交接后接续写入。迟到执行结果交当前 task owner 实际评估采用，结果本身不改变当前归属或已提交任务状态。\n未消费消息包括已投递未消费的消息随名字交当前 holder。已消费正文、消息 ID 和真实消费回执保留，旧 holder 迟到回执归原投递，不能成为新 holder 消费。任务唤醒与订阅随实际当前 task owner 和当前 holder 端点，交接和重启保持内容、进度、剩余次数、节奏并续用原订阅。退役后停止旧 holder 的名字唤醒，无合法 holder 时任务订阅保留待接续。\n交接失败或中断时，查询显示实际名字、holder、角色、任务归属、已提交阶段、未完成部分和具体错误。重试只续剩余效果，不重复或回退已生效任务、消息、授权和订阅。可选物理显示失败明确返回其真实结果，已生效身份与基础通信继续可用。\nCodex TUI、AGY TUI、Codex Desktop、DSH 和 Rex 共用同一身份表，各宿主提供其真实 transport。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除，不用改名日志或事件历史替代。一次迁移只用旧版当前绑定及可核实当前事实生成新表，正常运行不读旧身份文件或历史。daemon 维护当前关系与消息投递，按实际需要保存当前消息、投递、消费和未完成有界效果，保留真实认证与必要资源版本。上述逐条批准语义的 Object、Behavior、Relation、edge/gate 与正反例由现有正式生命周期合同承载，需求声明本身不证明程序实现或行为验收。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "这四条同意。旧会话一定会被新的替换,如果没有替换,可以保持,等待恢复。如果可以静态通过特征鉴别最好,其次可以通过sessionID探测,再次可以snapshot。等待丢失的身份回归。daemon确定身份丢失,不是master。15分钟。新 owner 已接单，daemon 已更新任务归属。项目 master 统一叫 Jenny，按角色改名。Bob 原任务留在原名字下，等待恢复或重派。采用，旧持有者再次出现时再注册。同意,任务跟名字走。释放 Bob，允许后续普通注册自动取得这个名字。退役生效后立即具备重派资格，有合法 idle peer 就派发。你需要全力推进任务，保证ontology设计落实到项目。",
+          "role": "user",
+          "source": "2026-11-12 current Codex conversation, Jason's object-by-object approvals recorded in task-runs/collab-identity-lifecycle-ontology-20261112/semantics.md and the user-supplied AGENTS.md"
+        },
+        "requirement_id": "req-collab-identity",
+        "status": "active",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和退役使用同一个 map owner。名字在同一项目内承载持续工作归属，一个已分配名字至多一个当前 anchor。普通名字池耗尽后继续分配未占用的 peer-数字。daemon 重启保留名字、工作和合法角色，当前宿主事实唯一时自动续接并更新 sessionID 与端点。Rex 以当前 block 绑定，项目 Rex session 使用项目 cwd 目录名，peer 不因身份、角色或任务改 session 名。tmux 的固定位置来自共享布局 manifest，位置不移动，只有项目固定位置 1 可升 Jenny，该 pane 限制只作用于 tmux。物理位置不从普通名字池或 peer 数字推导。\n人类明确指令可以指定任意已有名字恢复或顶替并指定角色。新 master 需要人类明确指令，项目 master 统一叫 Jenny。接替目标名字时接续目标角色和仍归该名字的工作，源名字任务保留在源名字下。旧 holder 当下失去目标 current 和当前权限，后续真实普通 context 再按普通注册取得可用名字。旧 session、历史文件和迟到事件不能夺回新 current。合法同名接替保留任务 ID、状态、历史、证据和资源。\nadaptor 分开维护 presence 与 activity。先用当前确定性特征，仍缺事实时用适用 agent sessionID 查询，再用当前 snapshot 交合法 master 鉴别，事实充分即停。busy 与 live 可同时成立，静态界面按特征分 error、ask、idle，事实不足为 unknown。确认退出或不存在才 offline，单次失败不能证明丢失。被替换绑定为 stale。daemon 确认身份丢失后开始固定 15 分钟回归等待，重复探测和重启保持原截止时间。当前有效 holder 或同名合法新 holder 在线结束等待。到期仍未回归且有合法 idle peer 时才邀请重派，全忙保留原归属和到期资格。派发完成点是新 owner 接单且 daemon 提交归属，邀请本身不转 owner。回归先提交则继续尚未转交的任务并撤本轮自动邀请，接受先提交则保留新 owner，旧身份回归领取新工作。\n人类明确退役普通名字释放名字，后续普通注册可以取得，未完成任务立即具备重派资格，有合法 idle peer 就邀请。退役保留宿主、代码、未提交改动、任务、消息、证据、资源和恢复引用。资源当前 owner 核对活动 writer 并完成交接后接续写入。迟到执行结果交当前 task owner 实际评估采用，结果本身不改变当前归属或已提交任务状态。\n未消费消息包括已投递未消费的消息随名字交当前 holder。已消费正文、消息 ID 和真实消费回执保留，旧 holder 迟到回执归原投递，不能成为新 holder 消费。任务唤醒与订阅随实际当前 task owner 和当前 holder 端点，交接和重启保持内容、进度、剩余次数、节奏并续用原订阅。退役后停止旧 holder 的名字唤醒，无合法 holder 时任务订阅保留待接续。\n交接失败或中断时，查询显示实际名字、holder、角色、任务归属、已提交阶段、未完成部分和具体错误。重试只续剩余效果，不重复或回退已生效任务、消息、授权和订阅。可选物理显示失败明确返回其真实结果，已生效身份与基础通信继续可用。\nCodex TUI、AGY TUI、Codex Desktop、DSH 和 Rex 共用同一身份表，各宿主提供其真实 transport。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除，不用改名日志或事件历史替代。一次迁移只用旧版当前绑定及可核实当前事实生成新表，正常运行不读旧身份文件或历史。daemon 维护当前关系与消息投递，按实际需要保存当前消息、投递、消费和未完成有界效果，保留真实认证与必要资源版本。上述逐条批准语义的 Object、Behavior、Relation、edge/gate 与正反例由现有正式生命周期合同承载，需求声明本身不证明程序实现或行为验收。",
+        "version": 3
+      },
+      "version": 15
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "此前逐对象批准保持有效。十五分钟只约束 daemon 自动重派，manager 可提前邀请。采用上述 Jenny 退役语义。新 owner 已接单，daemon 已更新任务归属。同意,任务跟名字走。你需要全力推进任务，保证ontology设计落实到项目。",
+          "role": "user",
+          "source": "2026-11-12 current Codex conversation, Jason's object-by-object approvals in task-runs/collab-identity-lifecycle-ontology-20261112/semantics.md, including T2-M and E3"
+        },
+        "base_version": 3,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-identity-final-approvals-20261112",
+        "requirement_id": "req-collab-identity",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和退役使用同一个 map owner。名字在同一项目内承载持续工作归属，一个已分配名字至多一个当前 anchor。普通名字池耗尽后继续分配未占用的 peer-数字。daemon 重启保留名字、工作和合法角色，当前宿主事实唯一时自动续接并更新 sessionID 与端点。Rex 以当前 block 绑定，项目 Rex session 使用项目 cwd 目录名，peer 不因身份、角色或任务改 session 名。tmux 的固定位置来自共享布局 manifest，位置不移动，只有项目固定位置 1 可升 Jenny，该 pane 限制只作用于 tmux。物理位置不从普通名字池或 peer 数字推导。\n人类明确指令可以指定任意已有名字恢复或顶替并指定角色。新 master 需要人类明确指令，项目 master 统一叫 Jenny。接替目标名字时接续目标角色和仍归该名字的工作，源名字任务保留在源名字下。旧 holder 当下失去目标 current 和当前权限，后续真实普通 context 再按普通注册取得可用名字。旧 session、历史文件和迟到事件不能夺回新 current。合法同名接替保留任务 ID、状态、历史、证据和资源。\nadaptor 分开维护 presence 与 activity。先用当前确定性特征，仍缺事实时用适用 agent sessionID 查询，再用当前 snapshot 交合法 master 鉴别，事实充分即停。busy 与 live 可同时成立，静态界面按特征分 error、ask、idle，事实不足为 unknown。确认退出或不存在才 offline，单次失败不能证明丢失。被替换绑定为 stale。daemon 确认身份丢失后开始固定 15 分钟回归等待，重复探测和重启保持原截止时间。当前有效 holder 或同名合法新 holder 在线结束等待。十五分钟等待只约束 daemon 自动重派，manager 可以提前邀请。daemon 到期仍未回归且有合法 idle peer 时才邀请重派，全忙保留原归属和到期资格。派发完成点是新 owner 接单且 daemon 提交归属，邀请本身不转 owner。回归先提交则继续尚未转交的任务并撤本轮自动邀请，接受先提交则保留新 owner，旧身份回归领取新工作。\n人类明确退役普通名字释放名字，后续普通注册可以取得，未完成任务立即具备重派资格，有合法 idle peer 就邀请。人类明确退役 Jenny 时释放当前绑定，撤销该精确 holder 的 master 授权，未完成任务立即具备重派资格，保留工作和恢复入口。Jenny 继续作为 master 专用名字，普通注册不会分配 Jenny。退役保留宿主、代码、未提交改动、任务、消息、证据、资源和恢复引用。资源当前 owner 核对活动 writer 并完成交接后接续写入。迟到执行结果交当前 task owner 实际评估采用，结果本身不改变当前归属或已提交任务状态。\n未消费消息包括已投递未消费的消息随名字交当前 holder。已消费正文、消息 ID 和真实消费回执保留，旧 holder 迟到回执归原投递，不能成为新 holder 消费。任务唤醒与订阅随实际当前 task owner 和当前 holder 端点，交接和重启保持内容、进度、剩余次数、节奏并续用原订阅。退役后停止旧 holder 的名字唤醒，无合法 holder 时任务订阅保留待接续。\n交接失败或中断时，查询显示实际名字、holder、角色、任务归属、已提交阶段、未完成部分和具体错误。重试只续剩余效果，不重复或回退已生效任务、消息、授权和订阅。可选物理显示失败明确返回其真实结果，已生效身份与基础通信继续可用。\nCodex TUI、AGY TUI、Codex Desktop、DSH 和 Rex 共用同一身份表，各宿主提供其真实 transport。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除，不用改名日志或事件历史替代。一次迁移只用旧版当前绑定及可核实当前事实生成新表，正常运行不读旧身份文件或历史。daemon 维护当前关系与消息投递，按实际需要保存当前消息、投递、消费和未完成有界效果，保留真实认证与必要资源版本。上述逐条批准语义的 Object、Behavior、Relation、edge/gate 与正反例由现有正式生命周期合同承载，需求声明本身不证明程序实现或行为验收。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "此前逐对象批准保持有效。十五分钟只约束 daemon 自动重派，manager 可提前邀请。采用上述 Jenny 退役语义。新 owner 已接单，daemon 已更新任务归属。同意,任务跟名字走。你需要全力推进任务，保证ontology设计落实到项目。",
+          "role": "user",
+          "source": "2026-11-12 current Codex conversation, Jason's object-by-object approvals in task-runs/collab-identity-lifecycle-ontology-20261112/semantics.md, including T2-M and E3"
+        },
+        "requirement_id": "req-collab-identity",
+        "status": "active",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和退役使用同一个 map owner。名字在同一项目内承载持续工作归属，一个已分配名字至多一个当前 anchor。普通名字池耗尽后继续分配未占用的 peer-数字。daemon 重启保留名字、工作和合法角色，当前宿主事实唯一时自动续接并更新 sessionID 与端点。Rex 以当前 block 绑定，项目 Rex session 使用项目 cwd 目录名，peer 不因身份、角色或任务改 session 名。tmux 的固定位置来自共享布局 manifest，位置不移动，只有项目固定位置 1 可升 Jenny，该 pane 限制只作用于 tmux。物理位置不从普通名字池或 peer 数字推导。\n人类明确指令可以指定任意已有名字恢复或顶替并指定角色。新 master 需要人类明确指令，项目 master 统一叫 Jenny。接替目标名字时接续目标角色和仍归该名字的工作，源名字任务保留在源名字下。旧 holder 当下失去目标 current 和当前权限，后续真实普通 context 再按普通注册取得可用名字。旧 session、历史文件和迟到事件不能夺回新 current。合法同名接替保留任务 ID、状态、历史、证据和资源。\nadaptor 分开维护 presence 与 activity。先用当前确定性特征，仍缺事实时用适用 agent sessionID 查询，再用当前 snapshot 交合法 master 鉴别，事实充分即停。busy 与 live 可同时成立，静态界面按特征分 error、ask、idle，事实不足为 unknown。确认退出或不存在才 offline，单次失败不能证明丢失。被替换绑定为 stale。daemon 确认身份丢失后开始固定 15 分钟回归等待，重复探测和重启保持原截止时间。当前有效 holder 或同名合法新 holder 在线结束等待。十五分钟等待只约束 daemon 自动重派，manager 可以提前邀请。daemon 到期仍未回归且有合法 idle peer 时才邀请重派，全忙保留原归属和到期资格。派发完成点是新 owner 接单且 daemon 提交归属，邀请本身不转 owner。回归先提交则继续尚未转交的任务并撤本轮自动邀请，接受先提交则保留新 owner，旧身份回归领取新工作。\n人类明确退役普通名字释放名字，后续普通注册可以取得，未完成任务立即具备重派资格，有合法 idle peer 就邀请。人类明确退役 Jenny 时释放当前绑定，撤销该精确 holder 的 master 授权，未完成任务立即具备重派资格，保留工作和恢复入口。Jenny 继续作为 master 专用名字，普通注册不会分配 Jenny。退役保留宿主、代码、未提交改动、任务、消息、证据、资源和恢复引用。资源当前 owner 核对活动 writer 并完成交接后接续写入。迟到执行结果交当前 task owner 实际评估采用，结果本身不改变当前归属或已提交任务状态。\n未消费消息包括已投递未消费的消息随名字交当前 holder。已消费正文、消息 ID 和真实消费回执保留，旧 holder 迟到回执归原投递，不能成为新 holder 消费。任务唤醒与订阅随实际当前 task owner 和当前 holder 端点，交接和重启保持内容、进度、剩余次数、节奏并续用原订阅。退役后停止旧 holder 的名字唤醒，无合法 holder 时任务订阅保留待接续。\n交接失败或中断时，查询显示实际名字、holder、角色、任务归属、已提交阶段、未完成部分和具体错误。重试只续剩余效果，不重复或回退已生效任务、消息、授权和订阅。可选物理显示失败明确返回其真实结果，已生效身份与基础通信继续可用。\nCodex TUI、AGY TUI、Codex Desktop、DSH 和 Rex 共用同一身份表，各宿主提供其真实 transport。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除，不用改名日志或事件历史替代。一次迁移只用旧版当前绑定及可核实当前事实生成新表，正常运行不读旧身份文件或历史。daemon 维护当前关系与消息投递，按实际需要保存当前消息、投递、消费和未完成有界效果，保留真实认证与必要资源版本。上述逐条批准语义的 Object、Behavior、Relation、edge/gate 与正反例由现有正式生命周期合同承载，需求声明本身不证明程序实现或行为验收。",
+        "version": 4
+      },
+      "version": 16
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "十五分钟只约束 daemon 自动重派，manager 可提前邀请。采用上述 Jenny 退役语义。新 owner 已接单，daemon 已更新任务归属。同意,任务跟名字走。你需要全力推进任务，保证ontology设计落实到项目。",
+          "role": "user",
+          "source": "2026-11-12 current Codex conversation, Jason's object-by-object approvals in task-runs/collab-identity-lifecycle-ontology-20261112/semantics.md, including T2-M and E3"
+        },
+        "base_version": 4,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-identity-final-approvals-source-correction-20261112",
+        "requirement_id": "req-collab-identity",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和退役使用同一个 map owner。名字在同一项目内承载持续工作归属，一个已分配名字至多一个当前 anchor。普通名字池耗尽后继续分配未占用的 peer-数字。daemon 重启保留名字、工作和合法角色，当前宿主事实唯一时自动续接并更新 sessionID 与端点。Rex 以当前 block 绑定，项目 Rex session 使用项目 cwd 目录名，peer 不因身份、角色或任务改 session 名。tmux 的固定位置来自共享布局 manifest，位置不移动，只有项目固定位置 1 可升 Jenny，该 pane 限制只作用于 tmux。物理位置不从普通名字池或 peer 数字推导。\n人类明确指令可以指定任意已有名字恢复或顶替并指定角色。新 master 需要人类明确指令，项目 master 统一叫 Jenny。接替目标名字时接续目标角色和仍归该名字的工作，源名字任务保留在源名字下。旧 holder 当下失去目标 current 和当前权限，后续真实普通 context 再按普通注册取得可用名字。旧 session、历史文件和迟到事件不能夺回新 current。合法同名接替保留任务 ID、状态、历史、证据和资源。\nadaptor 分开维护 presence 与 activity。先用当前确定性特征，仍缺事实时用适用 agent sessionID 查询，再用当前 snapshot 交合法 master 鉴别，事实充分即停。busy 与 live 可同时成立，静态界面按特征分 error、ask、idle，事实不足为 unknown。确认退出或不存在才 offline，单次失败不能证明丢失。被替换绑定为 stale。daemon 确认身份丢失后开始固定 15 分钟回归等待，重复探测和重启保持原截止时间。当前有效 holder 或同名合法新 holder 在线结束等待。十五分钟等待只约束 daemon 自动重派，manager 可以提前邀请。daemon 到期仍未回归且有合法 idle peer 时才邀请重派，全忙保留原归属和到期资格。派发完成点是新 owner 接单且 daemon 提交归属，邀请本身不转 owner。回归先提交则继续尚未转交的任务并撤本轮自动邀请，接受先提交则保留新 owner，旧身份回归领取新工作。\n人类明确退役普通名字释放名字，后续普通注册可以取得，未完成任务立即具备重派资格，有合法 idle peer 就邀请。人类明确退役 Jenny 时释放当前绑定，撤销该精确 holder 的 master 授权，未完成任务立即具备重派资格，保留工作和恢复入口。Jenny 继续作为 master 专用名字，普通注册不会分配 Jenny。退役保留宿主、代码、未提交改动、任务、消息、证据、资源和恢复引用。资源当前 owner 核对活动 writer 并完成交接后接续写入。迟到执行结果交当前 task owner 实际评估采用，结果本身不改变当前归属或已提交任务状态。\n未消费消息包括已投递未消费的消息随名字交当前 holder。已消费正文、消息 ID 和真实消费回执保留，旧 holder 迟到回执归原投递，不能成为新 holder 消费。任务唤醒与订阅随实际当前 task owner 和当前 holder 端点，交接和重启保持内容、进度、剩余次数、节奏并续用原订阅。退役后停止旧 holder 的名字唤醒，无合法 holder 时任务订阅保留待接续。\n交接失败或中断时，查询显示实际名字、holder、角色、任务归属、已提交阶段、未完成部分和具体错误。重试只续剩余效果，不重复或回退已生效任务、消息、授权和订阅。可选物理显示失败明确返回其真实结果，已生效身份与基础通信继续可用。\nCodex TUI、AGY TUI、Codex Desktop、DSH 和 Rex 共用同一身份表，各宿主提供其真实 transport。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除，不用改名日志或事件历史替代。一次迁移只用旧版当前绑定及可核实当前事实生成新表，正常运行不读旧身份文件或历史。daemon 维护当前关系与消息投递，按实际需要保存当前消息、投递、消费和未完成有界效果，保留真实认证与必要资源版本。上述逐条批准语义的 Object、Behavior、Relation、edge/gate 与正反例由现有正式生命周期合同承载，需求声明本身不证明程序实现或行为验收。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "十五分钟只约束 daemon 自动重派，manager 可提前邀请。采用上述 Jenny 退役语义。新 owner 已接单，daemon 已更新任务归属。同意,任务跟名字走。你需要全力推进任务，保证ontology设计落实到项目。",
+          "role": "user",
+          "source": "2026-11-12 current Codex conversation, Jason's object-by-object approvals in task-runs/collab-identity-lifecycle-ontology-20261112/semantics.md, including T2-M and E3"
+        },
+        "requirement_id": "req-collab-identity",
+        "status": "active",
+        "text": "Collab 帮助 master 和 peer 沟通，不增加无必要且阻碍使用的权限或认证流程。当前身份和绑定关系由唯一 identity-map.json 维护。context、注册、sessionID 换绑、改名、角色变化、恢复和退役使用同一个 map owner。名字在同一项目内承载持续工作归属，一个已分配名字至多一个当前 anchor。普通名字池耗尽后继续分配未占用的 peer-数字。daemon 重启保留名字、工作和合法角色，当前宿主事实唯一时自动续接并更新 sessionID 与端点。Rex 以当前 block 绑定，项目 Rex session 使用项目 cwd 目录名，peer 不因身份、角色或任务改 session 名。tmux 的固定位置来自共享布局 manifest，位置不移动，只有项目固定位置 1 可升 Jenny，该 pane 限制只作用于 tmux。物理位置不从普通名字池或 peer 数字推导。\n人类明确指令可以指定任意已有名字恢复或顶替并指定角色。新 master 需要人类明确指令，项目 master 统一叫 Jenny。接替目标名字时接续目标角色和仍归该名字的工作，源名字任务保留在源名字下。旧 holder 当下失去目标 current 和当前权限，后续真实普通 context 再按普通注册取得可用名字。旧 session、历史文件和迟到事件不能夺回新 current。合法同名接替保留任务 ID、状态、历史、证据和资源。\nadaptor 分开维护 presence 与 activity。先用当前确定性特征，仍缺事实时用适用 agent sessionID 查询，再用当前 snapshot 交合法 master 鉴别，事实充分即停。busy 与 live 可同时成立，静态界面按特征分 error、ask、idle，事实不足为 unknown。确认退出或不存在才 offline，单次失败不能证明丢失。被替换绑定为 stale。daemon 确认身份丢失后开始固定 15 分钟回归等待，重复探测和重启保持原截止时间。当前有效 holder 或同名合法新 holder 在线结束等待。十五分钟等待只约束 daemon 自动重派，manager 可以提前邀请。daemon 到期仍未回归且有合法 idle peer 时才邀请重派，全忙保留原归属和到期资格。派发完成点是新 owner 接单且 daemon 提交归属，邀请本身不转 owner。回归先提交则继续尚未转交的任务并撤本轮自动邀请，接受先提交则保留新 owner，旧身份回归领取新工作。\n人类明确退役普通名字释放名字，后续普通注册可以取得，未完成任务立即具备重派资格，有合法 idle peer 就邀请。人类明确退役 Jenny 时释放当前绑定，撤销该精确 holder 的 master 授权，未完成任务立即具备重派资格，保留工作和恢复入口。Jenny 继续作为 master 专用名字，普通注册不会分配 Jenny。退役保留宿主、代码、未提交改动、任务、消息、证据、资源和恢复引用。资源当前 owner 核对活动 writer 并完成交接后接续写入。迟到执行结果交当前 task owner 实际评估采用，结果本身不改变当前归属或已提交任务状态。\n未消费消息包括已投递未消费的消息随名字交当前 holder。已消费正文、消息 ID 和真实消费回执保留，旧 holder 迟到回执归原投递，不能成为新 holder 消费。任务唤醒与订阅随实际当前 task owner 和当前 holder 端点，交接和重启保持内容、进度、剩余次数、节奏并续用原订阅。退役后停止旧 holder 的名字唤醒，无合法 holder 时任务订阅保留待接续。\n交接失败或中断时，查询显示实际名字、holder、角色、任务归属、已提交阶段、未完成部分和具体错误。重试只续剩余效果，不重复或回退已生效任务、消息、授权和订阅。可选物理显示失败明确返回其真实结果，已生效身份与基础通信继续可用。\nCodex TUI、AGY TUI、Codex Desktop、DSH 和 Rex 共用同一身份表，各宿主提供其真实 transport。Collab 的 journal 代码、写入、读取、重放、压缩、修复、维护引用和相关测试全部直接移除，不用改名日志或事件历史替代。一次迁移只用旧版当前绑定及可核实当前事实生成新表，正常运行不读旧身份文件或历史。daemon 维护当前关系与消息投递，按实际需要保存当前消息、投递、消费和未完成有界效果，保留真实认证与必要资源版本。上述逐条批准语义的 Object、Behavior、Relation、edge/gate 与正反例由现有正式生命周期合同承载，需求声明本身不证明程序实现或行为验收。",
+        "version": 5
+      },
+      "version": 17
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 14
+  "version": 17
 }

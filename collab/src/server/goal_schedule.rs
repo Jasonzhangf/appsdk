@@ -39,12 +39,21 @@ fn handle_goal_schedule_for_actor(
 }
 
 fn goal_schedule_target(server: &Server, state: &State, name: &str) -> Result<String, Resp> {
-    let route = server_route_scope(server, state)
-        .map_err(Resp::err)?
-        .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
     let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
         .load()
         .map_err(Resp::err)?;
+    goal_schedule_target_with_control(server, state, name, &control)
+}
+
+fn goal_schedule_target_with_control(
+    server: &Server,
+    state: &State,
+    name: &str,
+    control: &binding_slot::BindingControlSet,
+) -> Result<String, Resp> {
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
     let slot = control
         .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
         .map_err(Resp::err)?
@@ -77,7 +86,7 @@ fn commit_goal_schedule(
         if details.long_horizon.is_none() {
             return Resp::err("BOARD_LONG_HORIZON_CONTENT_REQUIRED");
         }
-        let current = task_schedule_target(server, state, task, &details);
+        let current = task_schedule_target(server, state, task, &details, None);
         match current {
             Ok(Some(current)) if current == target => {}
             Ok(_) => return Resp::err("GOAL_SCHEDULE_TASK_OWNER_MISMATCH"),
@@ -112,6 +121,7 @@ fn commit_goal_schedule(
             Some(target),
             change.desired == "ended",
             true,
+            None,
         ) {
             Ok(result) => result,
             Err(error) => return error,
@@ -239,6 +249,16 @@ fn prepare_goal_schedule(
                         && subscription.periodic_declared
                         && subscription.status == "transport-lost"
                         && subscription.expires_ms > now
+                })
+            })
+            .or_else(|| {
+                // A task-linked schedule whose holder retired keeps its
+                // identity, content, progress and cadence while it waits for
+                // the next committed owner.
+                matching.iter().find(|subscription| {
+                    task_id.is_some()
+                        && subscription.status == "waiting-owner"
+                        && subscription.periodic_declared
                 })
             });
         if task_id.is_some() && existing.is_none() && !matching.is_empty() && !change.renew_ended {
@@ -393,7 +413,10 @@ fn prepare_goal_schedule(
         if active.as_ref().is_some_and(|current| current.id == old.id) {
             continue;
         }
-        if matches!(old.status.as_str(), "armed" | "transport-lost") {
+        if matches!(
+            old.status.as_str(),
+            "armed" | "transport-lost" | "waiting-owner"
+        ) {
             retired.push(old.id.clone());
             events.push(Event::NotificationSuppressed {
                 subscription_id: old.id.clone(),
@@ -435,6 +458,7 @@ fn task_goal_events(
     selected: Option<&str>,
     ended: bool,
     renew_ended: bool,
+    current_control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<(Vec<Event>, serde_json::Value), Resp> {
     let Some(spec) = &details.long_horizon else {
         return Ok((Vec::new(), serde_json::Value::Null));
@@ -444,13 +468,9 @@ fn task_goal_events(
         .notification_subscriptions
         .values()
         .find(|subscription| subscription.subject.as_deref() == Some(subject.as_str()));
+    // The committed task owner is the only implicit target. A pending
+    // invitation is not ownership and must not move the schedule.
     let target = selected
-        .or_else(|| {
-            details
-                .invitation
-                .as_ref()
-                .map(|invite| invite.peer_id.as_str())
-        })
         .or_else(|| existing.map(|subscription| subscription.worker_id.as_str()))
         .or_else(|| {
             (!matches!(task.status.as_str(), "pending" | "invited")).then_some(task.owner.as_str())
@@ -458,12 +478,30 @@ fn task_goal_events(
     let Some(target) = target else {
         return Ok((Vec::new(), serde_json::Value::Null));
     };
+    // A task-linked schedule whose holder retired keeps waiting when the new
+    // committed owner has no live transport yet. The business commit for that
+    // task must still succeed.
+    if !state.workers.contains_key(target)
+        && state.notification_subscriptions.values().any(|subscription| {
+            subscription.subject.as_deref() == Some(subject.as_str())
+                && subscription.status == "waiting-owner"
+        })
+    {
+        return Ok((Vec::new(), serde_json::Value::Null));
+    }
     let route = server_route_scope(server, state)
         .map_err(Resp::err)?
         .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
-    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
-        .load()
-        .map_err(Resp::err)?;
+    let loaded;
+    let control = match current_control {
+        Some(control) => control,
+        None => {
+            loaded = binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .map_err(Resp::err)?;
+            &loaded
+        }
+    };
     let name = control
         .current_for_worker(&route.project_scope_id, &route.app_scope_id, target)
         .map_err(Resp::err)?
@@ -509,11 +547,9 @@ fn task_schedule_target(
     server: &Server,
     state: &State,
     task: &TaskRec,
-    details: &crate::board::BoardTaskDetails,
+    _details: &crate::board::BoardTaskDetails,
+    control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<Option<String>, Resp> {
-    if let Some(invite) = &details.invitation {
-        return Ok(Some(invite.peer_id.clone()));
-    }
     if let Some(phase) = state
         .ticket_phases
         .iter()
@@ -532,7 +568,10 @@ fn task_schedule_target(
             return phase
                 .slot_name
                 .as_deref()
-                .map(|name| goal_schedule_target(server, state, name))
+                .map(|name| match control {
+                    Some(control) => goal_schedule_target_with_control(server, state, name, control),
+                    None => goal_schedule_target(server, state, name),
+                })
                 .transpose();
         }
     }
@@ -546,6 +585,7 @@ fn task_goal_transition_events(
     before: &State,
     after: &State,
     changes: &[Event],
+    control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<Vec<Event>, Resp> {
     let mut task_ids = std::collections::BTreeSet::new();
     for change in changes {
@@ -596,10 +636,10 @@ fn task_goal_transition_events(
         let target = if ended {
             None
         } else {
-            task_schedule_target(server, after, task, details)?
+            task_schedule_target(server, after, task, details, control)?
         };
         let old_target = match (old_task.filter(|_| !ended), old_details) {
-            (Some(task), Some(details)) => task_schedule_target(server, before, task, details)?,
+            (Some(task), Some(details)) => task_schedule_target(server, before, task, details, control)?,
             _ => None,
         };
         let form_changed = old_details.and_then(|details| details.long_horizon.as_ref())
@@ -610,8 +650,10 @@ fn task_goal_transition_events(
         if !ended && target.is_none() {
             continue;
         }
-        let explicit_invitation = old_details.is_some_and(|details| details.invitation.is_none())
-            && details.invitation.is_some();
+        // A committed ownership change may renew a fully consumed task batch.
+        // An invitation alone is not a transfer and must not renew or move the
+        // schedule.
+        let owner_transfer = old_task.is_some_and(|old| old.owner != task.owner);
         let (goal_events, _) = task_goal_events(
             server,
             after,
@@ -619,7 +661,8 @@ fn task_goal_transition_events(
             details,
             target.as_deref(),
             ended,
-            explicit_invitation,
+            owner_transfer,
+            control,
         )?;
         events.extend(goal_events);
     }

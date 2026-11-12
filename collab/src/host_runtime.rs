@@ -84,6 +84,100 @@ pub(crate) fn is_antigravity_command(name: &str) -> bool {
         || name.starts_with("antigravity-")
 }
 
+/// Return the nearest live agent on one explicit caller's ancestry. Unlike
+/// daemon-local host detection, this walks the PID the daemon received from
+/// the CLI. The returned PID is the process that must own the Rex foreground.
+pub(crate) fn caller_nearest_agent(caller_pid: u32) -> Result<Option<(u32, AgentKind)>, String> {
+    if caller_pid <= 1 {
+        return Err("REX_EXECUTION_UNVERIFIED: caller PID is invalid".into());
+    }
+    let mut pid = caller_pid;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..16 {
+        if pid <= 1 || !seen.insert(pid) {
+            break;
+        }
+        let output = std::process::Command::new("ps")
+            .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+            .output()
+            .map_err(|error| format!("REX_EXECUTION_UNVERIFIED: read caller ancestry: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "REX_EXECUTION_UNVERIFIED: caller ancestry ended before agent owner (pid={pid})"
+            ));
+        }
+        let text = String::from_utf8(output.stdout)
+            .map_err(|_| "REX_EXECUTION_UNVERIFIED: non-UTF-8 caller ancestry".to_owned())?;
+        let (parent, comm) = parse_ppid_and_comm(&text)
+            .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: malformed caller ancestry".to_owned())?;
+        if let Some(kind) = classify_nearest_agent([comm]) {
+            return Ok(Some((pid, kind)));
+        }
+        pid = parent;
+    }
+    Ok(None)
+}
+
+/// Unix wall time at microsecond precision, matching macOS process starts.
+pub(crate) fn current_rex_execution_boundary(
+) -> Result<crate::server::binding_slot::RexExecutionFence, String> {
+    // macOS proc_bsdinfo start_tvsec/start_tvusec uses Unix wall time.
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("REX_EXECUTION_BOUNDARY_UNAVAILABLE: {error}"))?;
+    Ok(crate::server::binding_slot::RexExecutionFence {
+        seconds: elapsed.as_secs(),
+        microseconds: elapsed.subsec_micros(),
+    })
+}
+
+/// Read the exact macOS process start tuple. A missing process is distinct
+/// from an observation error, so PID reuse cannot masquerade as the old owner.
+pub(crate) fn exact_process_start_id(pid: u32) -> Result<Option<String>, String> {
+    if pid == 0 {
+        return Ok(None);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let expected = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut libc::proc_bsdinfo as *mut libc::c_void,
+                expected,
+            )
+        };
+        if read == expected {
+            return Ok(Some(format!(
+                "{}:{}",
+                info.pbi_start_tvsec, info.pbi_start_tvusec
+            )));
+        }
+        if read == 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::ENOENT)) {
+                return Ok(None);
+            }
+        }
+        Err("REX_EXECUTION_UNVERIFIED: exact process start query failed".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        Err("REX_EXECUTION_UNVERIFIED: exact process start identity is unavailable on this platform"
+            .into())
+    }
+}
+
+/// A persisted execution is still alive only while the same PID carries the
+/// same exact start tuple. PID reuse is therefore a different, ended execution.
+pub(crate) fn execution_is_alive(owner_pid: u32, expected_start_id: &str) -> Result<bool, String> {
+    Ok(exact_process_start_id(owner_pid)?.is_some_and(|current| current == expected_start_id))
+}
+
 /// Parse ppid and the full comm remainder from a `ps -o ppid=,comm=` line.
 /// Preserves path with spaces and avoids truncating comm on whitespace.
 pub(crate) fn parse_ppid_and_comm(line: &str) -> Option<(u32, &str)> {

@@ -329,6 +329,17 @@ pub enum BoardCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardInvitationSource {
+    pub project_scope: String,
+    pub name: String,
+    #[serde(default)]
+    /// Source assignment generation captured before this invitation.
+    pub assignment_revision: u64,
+    #[serde(default)]
+    pub schedule_round_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoardInvitation {
     pub peer_id: String,
     pub binding_id: String,
@@ -338,6 +349,8 @@ pub struct BoardInvitation {
     pub original_status: Option<String>,
     #[serde(default)]
     pub original_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_source: Option<BoardInvitationSource>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

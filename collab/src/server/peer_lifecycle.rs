@@ -959,7 +959,10 @@ fn close_phase(close: &PeerLifecycleClose) -> PeerLifecyclePhase {
     }
 }
 
-fn target_for_self_binding(state: &State, binding: &RuntimeBinding) -> PeerLifecycleTarget {
+/// Derive the exact lifecycle target for one binding. The caller already holds
+/// the exact binding from the control map; this only projects the current
+/// State facts (transport and session) onto it.
+pub(super) fn target_for_binding(state: &State, binding: &RuntimeBinding) -> PeerLifecycleTarget {
     let selected = state
         .workers
         .get(binding.agent_id.as_str())
@@ -1077,7 +1080,7 @@ fn sample_candidate(
     worker: &WorkerRec,
     binding: RuntimeBinding,
 ) -> DefinitiveMissingCandidate {
-    let target = target_for_self_binding(state, &binding);
+    let target = target_for_binding(state, &binding);
     let snapshot = state::responsibility_snapshot(state, &worker.id);
     let snapshot_captured_ms = target.transport.thread_id.as_deref().and_then(|thread_id| {
         state
@@ -1481,7 +1484,7 @@ pub(super) fn unregister_self(
         {
             return Resp::err("SELF_BINDING_SCOPE_MISMATCH");
         }
-        let target = target_for_self_binding(&state, &binding);
+        let target = target_for_binding(&state, &binding);
         let snapshot = state::responsibility_snapshot(&state, binding.agent_id.as_str());
         let snapshot_captured_ms = state
             .workers
@@ -1558,6 +1561,138 @@ enum IdentityCleanup {
     Unregister,
 }
 
+pub(super) enum RetireTargetError {
+    Changed,
+    BindingMissing,
+}
+
+pub(super) struct ExactBindingRetirement {
+    pub(super) events: Vec<state::Event>,
+    pub(super) binding: RuntimeBinding,
+    pub(super) subscription_ids: Vec<String>,
+}
+
+/// Build the State events that retire one exact binding. The caller owns the
+/// admission gate and commits the returned events. This builder reads only the
+/// current State projection: it never reads a target token and never calls the
+/// public `unregister_self` wrapper, so an authorized human retirement can
+/// reuse the same exact-binding effect.
+pub(super) fn exact_binding_retirement_events(
+    state: &State,
+    target: &PeerLifecycleTarget,
+    actor_id: &str,
+    operation_id: &str,
+    snapshot: &state::ResponsibilitySnapshot,
+    snapshot_captured_ms: Option<i64>,
+    include_default_reception: bool,
+    preserve_default_messages: bool,
+    self_unregister: bool,
+) -> Result<ExactBindingRetirement, RetireTargetError> {
+    let target_still_current = state.workers.get(&target.worker_id).is_some_and(|worker| {
+        worker.transport.as_ref().is_some_and(|transport| {
+            transport.kind == target.transport.kind
+                && transport.endpoint == target.transport.endpoint
+                && transport.namespace == target.transport.namespace
+                && transport.session_id == target.transport.session_id
+                && transport.thread_id == target.transport.thread_id
+                && transport.tmux_endpoint == target.transport.tmux_endpoint
+        })
+    });
+    if !target_still_current {
+        return Err(RetireTargetError::Changed);
+    }
+    let route_scope = RouteScope {
+        app_scope_id: target.app_scope_id.clone(),
+        project_scope_id: target.project_scope.clone(),
+    };
+    let binding = state
+        .global
+        .lookup_binding_for(&route_scope, &target.binding_id)
+        .filter(|binding| binding.agent_id.as_str() == target.worker_id)
+        .cloned()
+        .ok_or(RetireTargetError::BindingMissing)?;
+    let default_reception = mailbox::default_direct_message_id(&target.worker_id);
+    let subscription_ids: Vec<_> = snapshot
+        .subscription_ids
+        .iter()
+        .filter(|id| include_default_reception || *id != &default_reception)
+        .cloned()
+        .collect();
+    let now = now_ms();
+    let mut retired = binding.clone();
+    retired.native_thread_id = None;
+    retired.tmux_endpoint = None;
+    let mut events = Vec::new();
+    let mut superseded = Vec::new();
+    for subscription_id in &subscription_ids {
+        let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
+            continue;
+        };
+        if !matches!(subscription.status.as_str(), "armed" | "notifying") {
+            continue;
+        }
+        // A task-linked schedule survives its holder. Keep its content,
+        // progress, remaining count and cadence, and wait for the next
+        // committed task owner instead of cancelling it. Unrelated personal
+        // subscriptions keep the existing cancellation behavior.
+        let task_linked = matches!(
+            subscription
+                .goal_content
+                .as_ref()
+                .and_then(|binding| binding.source.as_ref()),
+            Some(state::GoalScheduleContent::BoardTask { .. })
+        );
+        if !(preserve_default_messages && subscription_id == &default_reception) {
+            superseded.extend(super::pending_messages_for_subscription(
+                state,
+                subscription_id,
+            ));
+        }
+        events.push(state::Event::NotificationSuppressed {
+            subscription_id: subscription_id.clone(),
+            status: if task_linked {
+                "waiting-owner"
+            } else {
+                "cancelled"
+            }
+            .into(),
+            reason: if task_linked {
+                format!("task-linked schedule awaits the next committed owner ({operation_id})")
+            } else {
+                format!("peer lifecycle close {operation_id}")
+            },
+            updated_ms: now,
+        });
+    }
+    if !superseded.is_empty() {
+        superseded.sort();
+        superseded.dedup();
+        events.push(state::Event::Superseded { ids: superseded });
+    }
+    events.push(state::Event::GlobalCurrentThreadRouteRetired {
+        binding: binding.clone(),
+    });
+    events.push(state::Event::GlobalRuntimeBound { binding: retired });
+    events.push(state::Event::WorkerClosed {
+        worker_id: target.worker_id.clone(),
+        closed_by: actor_id.to_owned(),
+        reason: format!("peer lifecycle close {operation_id}"),
+        snapshot_captured_ms,
+        at_ms: now,
+    });
+    if self_unregister {
+        events.push(state::Event::GlobalMasterRevoked {
+            project_scope: target.project_scope.clone(),
+            binding_id: target.binding_id.clone(),
+        });
+    }
+    Ok(ExactBindingRetirement {
+        events,
+        binding,
+        subscription_ids,
+    })
+}
+
 fn retire_control_plane_target(
     server: &Server,
     actor_id: &str,
@@ -1572,15 +1707,7 @@ fn retire_control_plane_target(
     let mut close = close_readback("cleanup-open");
     close.runtime_archive.state = runtime_archive.clone();
     let self_unregister = actor_id == target.worker_id;
-    let default_reception = mailbox::default_direct_message_id(&target.worker_id);
-    let subscription_ids: Vec<_> = snapshot
-        .subscription_ids
-        .iter()
-        .filter(|id| identity_cleanup == IdentityCleanup::Unregister || *id != &default_reception)
-        .cloned()
-        .collect();
-    let now = now_ms();
-    let (events, route_binding) = {
+    let (events, route_binding, subscription_ids) = {
         let state = server.state.lock().unwrap();
         let target_still_current = state.workers.get(&target.worker_id).is_some_and(|worker| {
             worker.transport.as_ref().is_some_and(|transport| {
@@ -1600,60 +1727,34 @@ fn retire_control_plane_target(
             close.close_outcome = "cleanup-open: PEER_LIFECYCLE_TARGET_CHANGED".into();
             return close;
         }
-        let route_scope = RouteScope {
-            app_scope_id: target.app_scope_id.clone(),
-            project_scope_id: target.project_scope.clone(),
-        };
-        let Some(binding) = state
-            .global
-            .lookup_binding_for(&route_scope, &target.binding_id)
-            .filter(|binding| binding.agent_id.as_str() == target.worker_id)
-            .cloned()
-        else {
-            close.worker_retirement.state = PeerLifecycleStage::Failed;
-            close.binding_retirement.state = PeerLifecycleStage::Missing;
-            close.route_retirement.state = PeerLifecycleStage::Missing;
-            close.subscription_retirement.state = PeerLifecycleStage::Failed;
-            return close;
-        };
-        let mut retired = binding.clone();
-        retired.native_thread_id = None;
-        retired.tmux_endpoint = None;
-        let mut events = Vec::new();
-        for subscription_id in &subscription_ids {
-            if state
-                .notification_subscriptions
-                .get(subscription_id)
-                .is_some_and(|subscription| {
-                    matches!(subscription.status.as_str(), "armed" | "notifying")
-                })
-            {
-                events.push(state::Event::NotificationSuppressed {
-                    subscription_id: subscription_id.clone(),
-                    status: "cancelled".into(),
-                    reason: format!("peer lifecycle close {operation_id}"),
-                    updated_ms: now,
-                });
+        match exact_binding_retirement_events(
+            &state,
+            target,
+            actor_id,
+            operation_id,
+            snapshot,
+            snapshot_captured_ms,
+            identity_cleanup == IdentityCleanup::Unregister,
+            false,
+            self_unregister,
+        ) {
+            Ok(prepared) => (prepared.events, prepared.binding, prepared.subscription_ids),
+            Err(RetireTargetError::Changed) => {
+                close.worker_retirement.state = PeerLifecycleStage::Failed;
+                close.binding_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.route_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.subscription_retirement.state = PeerLifecycleStage::NotAttempted;
+                close.close_outcome = "cleanup-open: PEER_LIFECYCLE_TARGET_CHANGED".into();
+                return close;
+            }
+            Err(RetireTargetError::BindingMissing) => {
+                close.worker_retirement.state = PeerLifecycleStage::Failed;
+                close.binding_retirement.state = PeerLifecycleStage::Missing;
+                close.route_retirement.state = PeerLifecycleStage::Missing;
+                close.subscription_retirement.state = PeerLifecycleStage::Failed;
+                return close;
             }
         }
-        events.push(state::Event::GlobalCurrentThreadRouteRetired {
-            binding: binding.clone(),
-        });
-        events.push(state::Event::GlobalRuntimeBound { binding: retired });
-        events.push(state::Event::WorkerClosed {
-            worker_id: target.worker_id.clone(),
-            closed_by: actor_id.to_owned(),
-            reason: format!("peer lifecycle close {operation_id}"),
-            snapshot_captured_ms,
-            at_ms: now,
-        });
-        if self_unregister {
-            events.push(state::Event::GlobalMasterRevoked {
-                project_scope: target.project_scope.clone(),
-                binding_id: target.binding_id.clone(),
-            });
-        }
-        (events, binding)
     };
     let retirement = match identity_cleanup {
         IdentityCleanup::Preserve => Ok(()),

@@ -180,9 +180,43 @@ for diagnosis or migration, not a production assignment path.
 ## Stable names and session handoff
 
 Names own project work; the reported agent sessionID is the current execution
-carrier. Same-name session changes update all unclosed board assignments while
-preserving task identity, status, evidence and resources. Closed history stays
-unchanged. tmux session, pane and socket are transport placement only.
+carrier. A project-scoped name has at most one current anchor. Session changes
+update only unclosed assignments when the current project/session/host fact is
+unique; ambiguous or missing facts return an explicit error and do not move
+another name's work. Task IDs, status, evidence and resources are preserved.
+Closed history stays unchanged. tmux session, pane and socket are transport
+placement only. A Rex block is the current Rex transport placement; it is not a
+tmux position-1 gate. Rex project sessions use the project cwd's final directory
+name, and peers do not rename them for identity, role, or task changes.
+
+The source name's unfinished work does not follow the session when a source
+carrier is authorized to take another name. The target name's work continues;
+the source name retains its own task. A replaced holder does not receive a
+companion name immediately; it registers an available name only on a later
+ordinary context.
+
+Automatic loss and explicit retirement are separate:
+
+1. A daemon-confirmed identity loss preserves the name and recovery path and
+   starts a 15-minute return window.
+2. A valid same-name return or authorized same-name replacement ends the wait.
+3. At expiry, unresolved work is eligible for reassignment, but ownership moves
+   only after the new owner accepts and the daemon commits.
+4. A manager may invite a legitimate idle target before the daemon deadline.
+   The invitation does not transfer ownership.
+5. Human retirement releases an ordinary name immediately and starts reassignment
+   without waiting the 15-minute return window.
+6. Jenny is a master-only name. An explicit human Jenny retirement releases its
+   current binding and revokes that holder's exact master grant. Work, messages,
+   resources and the recovery entry remain.
+7. If no legitimate idle peer exists, work stays assigned until valid capacity is
+   available. Error, ask, unknown, busy, and static silence are not idle.
+
+T2-M and E3 are approved. T2-M limits only the daemon automatic wait.
+E3 implementation acceptance remains pending.
+
+The full source contract is
+[Collab identity lifecycle consistency](../docs/design/collab-identity-lifecycle-consistency.md).
 
 The old pane-default display-label model is retired. Read the current
 [name and work ownership contract](../docs/design/collab-stable-name-work-ownership-20261020.md)
@@ -259,7 +293,9 @@ For an ordinary long-horizon assignment, publish the task with delivery and
 test conditions, then claim it or invite a suitable peer and respond with the
 observed board revision. Collab master is not Codex root. Protocol:
 `collab master status`, user-authorized `collab master promote --approval`, and
-`collab master delegate` by the current master grant holder. Init and register
+`collab master delegate <peer> --approval "<user text>"` by the current master grant holder.
+Each new master grant requires explicit human authorization. Existing legitimate roles
+recover with their current name. Init and register
 never create a master. Independent peers may decline a master collaboration
 invite. A legacy managed-subagent record does not turn its holder into an
 active production worker; master-only rules still require an explicitly
@@ -430,8 +466,11 @@ An explicitly authorized one-time handoff prepares the new identity map from
 verified current bindings and preserves compatible current Board/task data.
 The new runtime does not import old identity files or replay historical data.
 Normal registration, role changes, session replacement and recovery share the
-same map owner. Old names, registrations and archives cannot veto a valid new
-authorization. Invalid current files return their actual read/decode error.
+same map owner. An explicit user authorization can replace the current mapping;
+automatic recovery requalifies only the unique current session/block fact and
+does not use an old holder record to reclaim a replaced name. Old registrations
+and archives cannot veto a valid new authorization. Invalid current files return
+their actual read/decode error.
 
 Do not edit live control files, copy tokens, start a second daemon or invent an
 owner. Global installation needs approval for that installation. The installer

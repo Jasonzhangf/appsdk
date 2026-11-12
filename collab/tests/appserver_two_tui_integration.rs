@@ -40,6 +40,8 @@ mod name_adjudication;
 mod name_confirmed_takeover;
 #[path = "board/name_runtime.rs"]
 mod name_runtime_cli;
+#[path = "board/name_subscription_lifecycle.rs"]
+mod name_subscription_lifecycle;
 #[path = "board/patrol_runtime.rs"]
 mod patrol_runtime;
 #[path = "board/patrol_subscriptions.rs"]
@@ -55,6 +57,52 @@ mod workflow_templates;
 
 const THREAD_A: &str = "01a0d637-75e2-71b2-8634-2be0c08a9adc";
 const THREAD_B: &str = "01a0d639-dafc-7571-a0aa-bbc2bbbc04ce";
+
+#[test]
+fn runtime_restart_public_status_waits_for_a_current_observation() {
+    let mut fixture = AppFixture::new();
+    let context = fixture.run_public(&["context"], THREAD_A);
+    let worker = context["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let project = context["binding"]["project_scope"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture.update_current_state(|state| {
+        state["agent_presence"][&project][&worker] = json!({
+            "project_scope":project, "worker_id":worker, "session_id":THREAD_A,
+            "presence":"online", "reason":"persisted sample before restart", "observed_ms":1
+        });
+        state["agent_activity"][&project][&worker] = json!({
+            "project_scope":project, "worker_id":worker, "session_id":THREAD_A,
+            "activity":"idle", "background":false, "reason":"persisted sample before restart",
+            "observed_ms":1, "idle_since_ms":1
+        });
+    });
+    let status = fixture.run_public(&["worker", "status", &worker], THREAD_A);
+    let row = status["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == worker)
+        .unwrap();
+    assert_eq!(row["presence"], "unknown", "{status}");
+    assert_eq!(row["agent_state"], "unknown", "{status}");
+    let state = fixture.current_state();
+    assert_eq!(
+        state["agent_presence"][&project][&worker]["presence"],
+        "unknown"
+    );
+    assert_eq!(
+        state["agent_activity"][&project][&worker]["idle_since_ms"],
+        Value::Null
+    );
+    let recovered = fixture.run_public(&["context", "--query"], THREAD_A);
+    assert_eq!(recovered["identity"]["worker_id"], worker, "{recovered}");
+    assert_eq!(recovered["name"], context["name"], "{recovered}");
+}
 
 #[test]
 fn name_mailbox_public_repeated_release_reallocation_keeps_current_carrier() {
@@ -147,6 +195,114 @@ fn name_mailbox_public_repeated_release_reallocation_keeps_current_carrier() {
     assert_eq!(received["messages"][0]["id"], id);
     fixture.restart_daemon();
     assert_eq!(fixture.run_public(&["msg", id], THREAD_B)["state"], "read");
+}
+
+#[test]
+fn context_query_reports_published_registration_with_pending_business_commit() {
+    use std::os::unix::fs::PermissionsExt;
+    const THREAD_C: &str = "01a0d63b-2f2c-72cf-93c1-2a4a1e2cf1cc";
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    let path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let directory = path.parent().unwrap();
+    let permissions = std::fs::metadata(directory).unwrap().permissions();
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let attempted =
+            fixture.command_public(&["context", "--op", "register-pending-query"], THREAD_C);
+        assert!(!attempted.status.success());
+        let map: Value = serde_json::from_slice(
+            &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        )
+        .unwrap();
+        let current = map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|slot| slot["identity_key"]["name"] == "Carol")
+            .unwrap();
+        assert!(
+            !current["current"].is_null(),
+            "the name publication must precede this failure: {map}"
+        );
+        let worker = current["current"]["binding"]["agent_id"].as_str().unwrap();
+        let generation = current["generation"].as_u64().unwrap();
+        assert!(fixture.current_state()["workers"][worker].is_null());
+        let map_before_query = fixture.host_state.join("identity-map.json");
+        let map_bytes = std::fs::read(&map_before_query).unwrap();
+        let query = fixture.command_public(
+            &["context", "--query", "--op", "register-pending-query"],
+            THREAD_C,
+        );
+        assert!(
+            query.status.success(),
+            "query must show the published current and pending effects: stdout={} stderr={}",
+            String::from_utf8_lossy(&query.stdout),
+            String::from_utf8_lossy(&query.stderr)
+        );
+        let result: Value = serde_json::from_slice(&query.stdout).unwrap();
+        assert_eq!(result["result"]["snapshot"]["name"], "Carol", "{result}");
+        assert_eq!(
+            result["result"]["snapshot"]["identity"]["worker_id"], worker,
+            "{result}"
+        );
+        assert_eq!(result["result"]["outcome"], "partial", "{result}");
+        assert_eq!(
+            result["result"]["phase"], "business_effects_pending",
+            "{result}"
+        );
+        let pending = result["result"]["owner_readback"]["pending_effects"]
+            .as_array()
+            .unwrap();
+        assert!(
+            pending
+                .iter()
+                .any(|effect| effect["kind"] == "register" && effect["target_worker_id"] == worker),
+            "{result}"
+        );
+        let unrelated =
+            fixture.command_public(&["context", "--query"], "pending-query-unrelated-caller");
+        assert!(
+            !unrelated.status.success(),
+            "the partial projection must stay scoped to the mapped caller: stdout={}",
+            String::from_utf8_lossy(&unrelated.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&unrelated.stderr).contains("IDENTITY_MAP_NOT_FOUND"),
+            "an unrelated caller keeps the existing rejection: stderr={}",
+            String::from_utf8_lossy(&unrelated.stderr)
+        );
+        assert_eq!(
+            std::fs::read(&map_before_query).unwrap(),
+            map_bytes,
+            "the read-only query must not rewrite the published map"
+        );
+        assert!(
+            fixture.current_state()["workers"][worker].is_null(),
+            "the read-only query must not invent a State worker"
+        );
+        (worker.to_owned(), generation)
+    }));
+    std::fs::set_permissions(directory, permissions).unwrap();
+    let (worker, generation) = failed.unwrap();
+    let recovered = fixture.run_public(&["context", "--op", "register-pending-query"], THREAD_C);
+    assert_eq!(recovered["name"], "Carol");
+    assert_eq!(recovered["identity"]["worker_id"], worker);
+    let map_after: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let current_after = map_after["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Carol")
+        .unwrap();
+    assert_eq!(
+        current_after["generation"], generation,
+        "the retry must preserve the published map generation"
+    );
 }
 
 #[test]
@@ -511,12 +667,19 @@ fn context_names_explicit_restore_commits_directly_and_query_is_read_only() {
         current_routes
     );
     assert_eq!(fixture.current_state()["workers"], current_workers);
-    // The displaced original holder keeps its identity worker; only the name
-    // was moved by the explicit change.
+    // The displaced carrier registers normally when it returns. Its previous
+    // worker remains historical business state while Alice stays with Bob's
+    // explicitly approved successor.
     let after = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(after["name"], "Bob", "{after}");
+    assert_ne!(after["identity"]["worker_id"], bob["identity"]["worker_id"]);
+    let old_worker = alice["identity"]["worker_id"].as_str().unwrap();
+    assert!(!fixture.current_state()["workers"][old_worker].is_null());
+    let successor = fixture.run_public(&["context", "--query"], THREAD_B);
+    assert_eq!(successor["name"], "Alice", "{successor}");
     assert_eq!(
-        after["identity"]["worker_id"],
-        alice["identity"]["worker_id"]
+        successor["identity"]["worker_id"],
+        bob["identity"]["worker_id"]
     );
 }
 
@@ -597,6 +760,248 @@ fn context_names_authorized_new_session_continues_named_open_tasks_and_preserves
 }
 
 #[test]
+fn context_names_same_name_new_session_continues_open_task_and_old_carrier_cannot_commit() {
+    let mut fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(first["name"], "Alice", "{first}");
+    let task_id = "same-name-continuation";
+    fixture.run_public(
+        &["task", "register", task_id, "--next", "continue named work"],
+        THREAD_A,
+    );
+    let second = fixture.run_public(&["context"], THREAD_B);
+    assert_ne!(second["name"], "Alice", "{second}");
+    let restored = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_name","requested_name":"Alice","authorization":"user continues named work in the new session"}"#,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(restored["name"], "Alice", "{restored}");
+    assert_eq!(
+        restored["identity"]["worker_id"],
+        second["identity"]["worker_id"]
+    );
+    let state = fixture.current_state();
+    assert_eq!(state["task_assignments"][task_id]["name"], "Alice");
+    assert_eq!(
+        state["task_assignments"][task_id]["session_id"], THREAD_B,
+        "the open task follows the current name holder's session"
+    );
+    assert_eq!(
+        state["tasks"][task_id]["owner"], second["identity"]["worker_id"],
+        "the current name holder becomes the task owner"
+    );
+    let continued = fixture.run_public(
+        &[
+            "task",
+            "update",
+            task_id,
+            "--next",
+            "continue in the new session",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(continued["owner"], second["identity"]["worker_id"]);
+    let baseline = fixture.current_state();
+    let rejected = fixture.command_public(
+        &[
+            "task",
+            "update",
+            task_id,
+            "--next",
+            "the displaced carrier must not commit work",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        !rejected.status.success(),
+        "the displaced carrier must not continue the retained task: stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    let after = fixture.current_state();
+    assert_eq!(
+        after["tasks"][task_id], baseline["tasks"][task_id],
+        "a rejected old-carrier update must not mutate the task"
+    );
+    assert_eq!(
+        after["task_assignments"][task_id], baseline["task_assignments"][task_id],
+        "a rejected old-carrier update must not move the assignment"
+    );
+}
+
+#[test]
+fn context_names_map_first_task_mutation_denies_old_holder_before_effect_commit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    assert_eq!(first["name"], "Alice", "{first}");
+    let task_id = "map-first-task";
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "continue after map publication",
+        ],
+        THREAD_A,
+    );
+    let second = fixture.run_public(&["context"], THREAD_B);
+    assert_ne!(second["name"], "Alice", "{second}");
+    let before = fixture.current_state();
+    let state_path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let directory = state_path.parent().unwrap();
+    let permissions = std::fs::metadata(directory).unwrap().permissions();
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let window_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let attempted = fixture.command_public(
+            &[
+                "context",
+                "--op",
+                "task-map-first-pending",
+                "--approve-grant",
+                r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture user authorizes Alice takeover"}"#,
+            ],
+            THREAD_B,
+        );
+        assert!(!attempted.status.success());
+        assert!(
+            String::from_utf8_lossy(&attempted.stderr)
+                .contains("CONTROL_COMMITTED_EFFECTS_PENDING"),
+            "the interrupted context must leave a real pending effect: {}",
+            String::from_utf8_lossy(&attempted.stderr)
+        );
+        let map: Value = serde_json::from_slice(
+            &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        )
+        .unwrap();
+        let current = map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|slot| slot["identity_key"]["name"] == "Alice")
+            .unwrap();
+        assert_eq!(
+            current["current"]["binding"]["agent_id"], second["identity"]["worker_id"],
+            "the current map publishes before the business effect commits"
+        );
+        assert!(map["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|effect| effect["operation_id"] == "task-map-first-pending"));
+        let failed_state = fixture.current_state();
+        assert_eq!(
+            failed_state["tasks"][task_id], before["tasks"][task_id],
+            "the interrupted context must not update the task before recovery"
+        );
+        assert_eq!(
+            failed_state["task_assignments"][task_id], before["task_assignments"][task_id],
+            "the interrupted context must not rebase the assignment before recovery"
+        );
+        let old_holder = fixture.command_public(
+            &[
+                "task",
+                "update",
+                task_id,
+                "--next",
+                "the old holder must lose authority as soon as the map publishes",
+            ],
+            THREAD_A,
+        );
+        assert!(
+            !old_holder.status.success(),
+            "the old holder must be denied before the pending effect completes: stdout={} stderr={}",
+            String::from_utf8_lossy(&old_holder.stdout),
+            String::from_utf8_lossy(&old_holder.stderr)
+        );
+        let after_denial = fixture.current_state();
+        assert_eq!(
+            after_denial["tasks"][task_id], before["tasks"][task_id],
+            "the denied old-holder mutation must not change the task"
+        );
+        assert_eq!(
+            after_denial["task_assignments"][task_id], before["task_assignments"][task_id],
+            "the denied old-holder mutation must not move the assignment"
+        );
+    }));
+    std::fs::set_permissions(directory, permissions).unwrap();
+    window_result.unwrap();
+
+    let resumed = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(resumed["name"], "Alice", "{resumed}");
+    let recovered = fixture.current_state();
+    assert_eq!(
+        recovered["task_assignments"][task_id]["session_id"],
+        THREAD_B
+    );
+    assert_eq!(
+        recovered["tasks"][task_id]["owner"],
+        second["identity"]["worker_id"]
+    );
+    let continued = fixture.run_public(
+        &[
+            "task",
+            "update",
+            task_id,
+            "--next",
+            "new holder continues after recovery",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(continued["owner"], second["identity"]["worker_id"]);
+}
+
+#[test]
+fn task_register_current_owner_records_stable_name_and_session() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let task_id = "task-register-current-owner";
+    let registered = fixture.run_public(
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "fixture task register assignment",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(registered["task"], task_id);
+    let state = fixture.current_state();
+    assert_eq!(
+        state["tasks"][task_id]["owner"],
+        alice["identity"]["worker_id"]
+    );
+    assert_eq!(state["task_assignments"][task_id]["name"], alice["name"]);
+    assert_eq!(state["task_assignments"][task_id]["session_id"], THREAD_A);
+
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let slot = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active" && slot["identity_key"]["name"] == alice["name"]
+        })
+        .expect("registered stable name has a current slot");
+    assert_eq!(
+        slot["current"]["binding"]["agent_id"],
+        alice["identity"]["worker_id"]
+    );
+    assert_eq!(slot["current"]["binding"]["session_id"], THREAD_A);
+    drop(fixture);
+}
+
+#[test]
 fn context_names_online_replacement_approves_directly() {
     let mut fixture = AppFixture::new();
     let alice = fixture.run_public(&["context"], THREAD_A);
@@ -631,8 +1036,8 @@ fn context_names_online_replacement_approves_directly() {
 }
 
 #[test]
-fn context_names_full_pool_reuses_the_released_source_and_refuses_true_exhaustion() {
-    let fixture = AppFixture::new();
+fn context_names_full_pool_allocates_unique_generated_names_and_reloads_them() {
+    let mut fixture = AppFixture::new();
     let mut contexts = Vec::new();
     for index in 0..20 {
         let thread = format!("ordinary-pool-{index}");
@@ -673,29 +1078,635 @@ fn context_names_full_pool_reuses_the_released_source_and_refuses_true_exhaustio
         &contexts[19].0,
     );
     fixture.run_public(&["context"], "ordinary-pool-extra");
-    let before = std::fs::read(&map_path).unwrap();
-    let authority = fixture.run_public(&["master", "status"], &contexts[19].0);
-    let exhausted =
-        fixture.command_public(&["context", "--approve-grant", &approval], &contexts[19].0);
-    assert!(!exhausted.status.success());
-    assert!(String::from_utf8_lossy(&exhausted.stderr).contains("NAME_POOL_FULL"));
-    assert_eq!(std::fs::read(&map_path).unwrap(), before);
-    let after = fixture.run_public(&["master", "status"], &contexts[19].0);
-    for field in [
-        "worker_id",
-        "grant_id",
-        "grant_generation",
-        "binding_id",
-        "assigned_by",
-        "assigned_ms",
-        "approval",
-        "scope",
-    ] {
+    let before_generation: Value =
+        serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let active_before_generation = before_generation["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| slot["identity_status"] == "active")
+        .count();
+    assert_eq!(active_before_generation, 21);
+    let generated_a = fixture.spawn_public(&["context"], "ordinary-pool-generated-a");
+    let generated_b = fixture.spawn_public(&["context"], "ordinary-pool-generated-b");
+    let output_a = generated_a.wait_with_output().unwrap();
+    let output_b = generated_b.wait_with_output().unwrap();
+    assert!(
+        output_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output_a.stderr)
+    );
+    assert!(
+        output_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output_b.stderr)
+    );
+    let generated_a: Value = serde_json::from_slice(&output_a.stdout).unwrap();
+    let generated_a = generated_a["result"]["snapshot"].clone();
+    let generated_b: Value = serde_json::from_slice(&output_b.stdout).unwrap();
+    let generated_b = generated_b["result"]["snapshot"].clone();
+    let mut generated_names = [
+        generated_a["name"].as_str().unwrap(),
+        generated_b["name"].as_str().unwrap(),
+    ];
+    generated_names.sort_unstable();
+    assert_eq!(generated_names, ["peer-1", "peer-2"]);
+    assert_ne!(
+        generated_a["identity"]["worker_id"],
+        generated_b["identity"]["worker_id"]
+    );
+
+    fixture.restart_daemon();
+    let recovered_a = fixture.run_public(&["context"], "ordinary-pool-generated-a");
+    let recovered_b = fixture.run_public(&["context"], "ordinary-pool-generated-b");
+    for (before, after) in [(&generated_a, &recovered_a), (&generated_b, &recovered_b)] {
+        assert_eq!(after["name"], before["name"]);
         assert_eq!(
-            after["master"][field], authority["master"][field],
-            "{field}"
+            after["identity"]["worker_id"],
+            before["identity"]["worker_id"]
         );
     }
+    let master = fixture.run_public(&["master", "status"], &contexts[19].0);
+    assert_eq!(
+        master["master"]["worker_id"],
+        contexts[19].1["identity"]["worker_id"]
+    );
+    let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let entries = map["slots"].as_array().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|slot| slot["identity_status"] == "active")
+            .count(),
+        active_before_generation + 2
+    );
+    for (name, session_id) in [
+        (target, &contexts[1].0),
+        (released.as_str().unwrap(), &contexts[0].0),
+    ] {
+        let slot = entries
+            .iter()
+            .find(|slot| {
+                slot["identity_status"] == "active" && slot["identity_key"]["name"] == name
+            })
+            .unwrap_or_else(|| panic!("missing active identity {name}"));
+        assert_eq!(&slot["current"]["binding"]["session_id"], session_id);
+    }
+    for name in ["Alice", "Tina", "peer-1", "peer-2"] {
+        let slot = entries
+            .iter()
+            .find(|slot| {
+                slot["identity_status"] == "active" && slot["identity_key"]["name"] == name
+            })
+            .unwrap_or_else(|| panic!("missing active identity {name}"));
+        assert_eq!(slot["display_slot"].is_null(), name.starts_with("peer-"));
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|slot| slot["identity_status"] == "active"
+                    && slot["identity_key"]["name"] == name)
+                .count(),
+            1,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn context_names_takeover_keeps_source_name_work_and_continues_target_name_work() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "source-alice-work",
+            "--next",
+            "keep Alice work",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "target-bob-work",
+            "--next",
+            "continue Bob work",
+        ],
+        THREAD_B,
+    );
+    fixture.update_current_state(|state| {
+        for (id, name, session) in [
+            ("source-alice-work", "Alice", THREAD_A),
+            ("target-bob-work", "Bob", THREAD_B),
+        ] {
+            state["task_assignments"][id] = json!({
+                "task_id": id,
+                "name": name,
+                "session_id": session,
+                "assignment_revision": 1,
+                "updated_ms": 1
+            });
+        }
+    });
+    let before = fixture.current_state();
+    assert_eq!(
+        before["task_assignments"]["source-alice-work"]["name"],
+        "Alice"
+    );
+    assert_eq!(before["task_assignments"]["target-bob-work"]["name"], "Bob");
+
+    let takeover = fixture.run_public(
+        &["context", "--op", "r8-source-work-stays", "--approve-grant",
+            r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture user authorizes Bob takeover"}"#],
+        THREAD_A,
+    );
+    assert_eq!(takeover["name"], "Bob");
+    assert_eq!(
+        takeover["identity"]["worker_id"],
+        alice["identity"]["worker_id"]
+    );
+    assert!(takeover["master"].is_null());
+    let after = fixture.current_state();
+    let source_assignment = &after["task_assignments"]["source-alice-work"];
+    let before_source_assignment = &before["task_assignments"]["source-alice-work"];
+    assert_eq!(
+        source_assignment["task_id"], before_source_assignment["task_id"],
+        "source-name work stays with its original task when the carrier takes Bob"
+    );
+    assert_eq!(
+        source_assignment["name"], before_source_assignment["name"],
+        "the source assignment keeps the Alice name"
+    );
+    assert_eq!(
+        source_assignment["session_id"], before_source_assignment["session_id"],
+        "the source assignment keeps its original execution carrier"
+    );
+    assert_eq!(
+        after["tasks"]["source-alice-work"]["owner"],
+        alice["identity"]["worker_id"]
+    );
+    assert_eq!(
+        after["tasks"]["source-alice-work"]["status"],
+        before["tasks"]["source-alice-work"]["status"]
+    );
+    assert_eq!(after["task_assignments"]["target-bob-work"]["name"], "Bob");
+    assert_eq!(
+        after["tasks"]["target-bob-work"]["owner"],
+        alice["identity"]["worker_id"]
+    );
+    assert_ne!(
+        after["tasks"]["target-bob-work"]["owner"],
+        bob["identity"]["worker_id"]
+    );
+    let source_update = fixture.command_public(
+        &[
+            "task",
+            "update",
+            "source-alice-work",
+            "--status",
+            "working",
+            "--next",
+            "must stay with Alice",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        !source_update.status.success(),
+        "the current Bob holder cannot execute Alice's retained work: {}",
+        String::from_utf8_lossy(&source_update.stdout)
+    );
+    assert_eq!(
+        fixture.current_state()["tasks"]["source-alice-work"],
+        after["tasks"]["source-alice-work"]
+    );
+    let source_next = fixture.command_public(
+        &[
+            "task",
+            "update",
+            "source-alice-work",
+            "--next",
+            "next-only must stay with Alice",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        !source_next.status.success(),
+        "a next-step-only update must use the same current-name owner gate: stdout={} stderr={}",
+        String::from_utf8_lossy(&source_next.stdout),
+        String::from_utf8_lossy(&source_next.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&source_next.stderr).contains("TASK_OWNER_REQUIRED"),
+        "next-only rejection must be the owner gate: {}",
+        String::from_utf8_lossy(&source_next.stderr)
+    );
+    assert_eq!(
+        fixture.current_state()["tasks"]["source-alice-work"],
+        after["tasks"]["source-alice-work"]
+    );
+    let source_block = fixture.command_public(
+        &[
+            "task",
+            "update",
+            "source-alice-work",
+            "--status",
+            "blocked",
+            "--next",
+            "block application must stay with Alice",
+        ],
+        THREAD_A,
+    );
+    assert!(!source_block.status.success(),
+        "a source-name block application must be rejected before the block side effect: stdout={} stderr={}",
+        String::from_utf8_lossy(&source_block.stdout),
+        String::from_utf8_lossy(&source_block.stderr));
+    assert!(
+        String::from_utf8_lossy(&source_block.stderr).contains("TASK_OWNER_REQUIRED"),
+        "block application rejection must be the owner gate: {}",
+        String::from_utf8_lossy(&source_block.stderr)
+    );
+    let after_rejections = fixture.current_state();
+    assert_eq!(
+        after_rejections["tasks"]["source-alice-work"],
+        after["tasks"]["source-alice-work"]
+    );
+    assert!(
+        after_rejections["task_block_requests"]
+            .get("source-alice-work")
+            .is_none(),
+        "source-name block application must not create a pending request: {after_rejections}"
+    );
+    for (label, expected, args) in [
+        (
+            "relocate",
+            "TASK_OWNER_REQUIRED",
+            vec![
+                "task",
+                "relocate",
+                "source-alice-work",
+                "--worktree",
+                "/tmp/source-alice-relocate-must-stay",
+            ],
+        ),
+        (
+            "accept",
+            "TASK_OWNER_REQUIRED",
+            vec!["task", "accept", "source-alice-work"],
+        ),
+        (
+            "wait",
+            "TASK_OWNER_REQUIRED",
+            vec![
+                "task",
+                "wait",
+                "source-alice-work",
+                "--for",
+                "target-bob-work",
+            ],
+        ),
+        (
+            "deliver",
+            "TASK_OWNER_REQUIRED",
+            vec![
+                "task",
+                "deliver",
+                "source-alice-work",
+                "--evidence",
+                "source delivery must stay with Alice",
+                "--worktree",
+                "/tmp/source-alice-deliver-must-stay",
+            ],
+        ),
+        (
+            "close",
+            "task close requires task owner or current master authority",
+            vec!["task", "close", "source-alice-work"],
+        ),
+    ] {
+        let rejected = fixture.command_public(&args, THREAD_A);
+        assert!(
+            !rejected.status.success(),
+            "{label} from the old name must be rejected: {}",
+            String::from_utf8_lossy(&rejected.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            stderr.contains(expected),
+            "{label} must be rejected by the current-name owner gate ({expected}): {stderr}"
+        );
+        let after_mutation = fixture.current_state();
+        assert_eq!(
+            after_mutation["tasks"]["source-alice-work"], after["tasks"]["source-alice-work"],
+            "{label} must not mutate the source task"
+        );
+        assert_eq!(
+            after_mutation["task_assignments"]["source-alice-work"],
+            after["task_assignments"]["source-alice-work"],
+            "{label} must not move the source assignment"
+        );
+    }
+    // Closing is not the last owner-only entry. A closed task still refuses
+    // cleanup finalization by the name that lost the assignment.
+    fixture.update_current_state(|state| {
+        state["tasks"]["source-alice-work"]["status"] = json!("closed");
+    });
+    let closed_source = fixture.current_state();
+    let source_finalize = fixture.command_public(
+        &[
+            "task",
+            "finalize-cleanup",
+            "source-alice-work",
+            "--commit",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        !source_finalize.status.success(),
+        "finalizing cleanup for the retained source task must stay with its current name holder: stdout={} stderr={}",
+        String::from_utf8_lossy(&source_finalize.stdout),
+        String::from_utf8_lossy(&source_finalize.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&source_finalize.stderr)
+            .contains("cleanup finalization is not authorized for this caller"),
+        "finalize rejection must come from the owner admission, not a fixture precondition: {}",
+        String::from_utf8_lossy(&source_finalize.stderr)
+    );
+    assert_eq!(
+        fixture.current_state()["tasks"]["source-alice-work"],
+        closed_source["tasks"]["source-alice-work"],
+        "rejected cleanup finalization must not mutate the closed source task"
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "update",
+            "target-bob-work",
+            "--status",
+            "working",
+            "--next",
+            "continue current Bob work",
+        ],
+        THREAD_A,
+    );
+    let target_block = fixture.run_public(
+        &[
+            "task",
+            "block",
+            "target-bob-work",
+            "--next",
+            "current holder may apply a block",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        target_block["block_request"]["requester"],
+        alice["identity"]["worker_id"],
+        "a block request belongs to the current stable-name holder, not the legacy owner: {target_block}"
+    );
+    assert_eq!(
+        target_block["block_request"]["state"], "pending",
+        "{target_block}"
+    );
+    assert_eq!(target_block["status"], "working", "{target_block}");
+}
+
+#[test]
+fn context_names_takeover_preserves_legacy_source_task_attribution() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "legacy-alice-work",
+            "--next",
+            "preserve source attribution",
+        ],
+        THREAD_A,
+    );
+    fixture.update_current_state(|state| {
+        state["task_assignments"]
+            .as_object_mut()
+            .unwrap()
+            .remove("legacy-alice-work");
+    });
+    let before = fixture.current_state();
+    assert!(before["task_assignments"]["legacy-alice-work"].is_null());
+    let takeover = fixture.run_public(
+        &["context", "--op", "r8-legacy-source-work", "--approve-grant",
+            r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture user authorizes Bob takeover"}"#],
+        THREAD_A,
+    );
+    assert_eq!(takeover["name"], "Bob");
+    let after = fixture.current_state();
+    assert_eq!(
+        after["task_assignments"]["legacy-alice-work"]["name"],
+        "Alice"
+    );
+    assert_eq!(
+        after["task_assignments"]["legacy-alice-work"]["session_id"],
+        THREAD_A
+    );
+    assert_eq!(
+        after["tasks"]["legacy-alice-work"]["owner"],
+        alice["identity"]["worker_id"]
+    );
+    assert_eq!(
+        after["tasks"]["legacy-alice-work"]["status"],
+        before["tasks"]["legacy-alice-work"]["status"]
+    );
+}
+
+#[test]
+fn role_new_master_delegation_requires_user_authorization() {
+    let fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user assigns initial master",
+        ],
+        THREAD_A,
+    );
+    let target = bob["identity"]["worker_id"].as_str().unwrap();
+    let _attempted = fixture.command_public(&["master", "delegate", target], THREAD_A);
+    let current = fixture.run_public(&["master", "status"], THREAD_A);
+    assert_eq!(
+        current["master"]["worker_id"], alice["identity"]["worker_id"],
+        "a current grant does not supply the user's new-master instruction"
+    );
+    let accepted = fixture.command_public(
+        &[
+            "master",
+            "delegate",
+            target,
+            "--approval",
+            "user explicitly assigns this peer as master",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let current = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(current["name"], "Jenny");
+    assert_eq!(current["identity"]["role"], "master");
+}
+
+#[test]
+fn name_mailbox_public_map_published_effect_pending_denies_old_holder_inbox() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = AppFixture::new();
+    let first = fixture.run_public(&["context"], THREAD_A);
+    let second = fixture.run_public(&["context"], THREAD_B);
+    let worker = first["identity"]["worker_id"].as_str().unwrap();
+    let credential: Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .host_state
+                .join("identities")
+                .join(worker)
+                .join("identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let root = fixture.project.canonicalize().unwrap();
+    let request = json!({
+        "op": "Inbox",
+        "worker_id": worker,
+        "token": credential["token"],
+        "project_context": {
+            "canonical_root": root,
+            "project_scope": root,
+            "app_scope_id": "appserver-cli",
+            "runtime_context": credential["runtime"]
+        }
+    });
+    let inbox = || {
+        let mut stream = UnixStream::connect(fixture.host_state.join("server.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream)
+            .read_line(&mut line)
+            .unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    };
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Alice",
+            "--subject",
+            "map-first-inbox",
+            "map-first inbox sentinel",
+        ],
+        THREAD_B,
+    );
+    let message_id = sent["msg_id"].as_str().unwrap();
+    let before = inbox();
+    assert_eq!(before["ok"], true, "{before}");
+    assert!(before["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == message_id));
+
+    let state_before = fixture.current_state();
+    let state_path = fixture.project_state_for(&fixture.project, "appserver-cli");
+    let directory = state_path.parent().unwrap();
+    let permissions = std::fs::metadata(directory).unwrap().permissions();
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let window_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let attempted = fixture.command_public(
+            &["context", "--op", "mailbox-map-first-pending", "--approve-grant",
+                r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture user authorizes Alice takeover"}"#],
+            THREAD_B,
+        );
+        assert!(!attempted.status.success());
+        assert!(String::from_utf8_lossy(&attempted.stderr)
+            .contains("CONTROL_COMMITTED_EFFECTS_PENDING"));
+        let map: Value = serde_json::from_slice(
+            &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        )
+        .unwrap();
+        let current = map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|slot| slot["identity_key"]["name"] == "Alice")
+            .unwrap();
+        assert_eq!(
+            current["current"]["binding"]["agent_id"],
+            second["identity"]["worker_id"]
+        );
+        assert!(map["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|effect| effect["operation_id"] == "mailbox-map-first-pending"));
+        let failed_state = fixture.current_state();
+        assert_eq!(
+            failed_state["name_occupancies"],
+            state_before["name_occupancies"]
+        );
+        assert_eq!(failed_state["msgs"], state_before["msgs"]);
+
+        let after = inbox();
+        if after["ok"] == false {
+            let error = after["error"].as_str().unwrap();
+            assert!(
+                error.contains("CURRENT") || error.contains("IDENTITY_MAP"),
+                "{after}"
+            );
+        } else {
+            assert!(
+                after["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|message| message["id"] != message_id),
+                "old holder must not see target-name mail after current map publication: {after}"
+            );
+        }
+    }));
+    std::fs::set_permissions(directory, permissions).unwrap();
+    window_result.unwrap();
+
+    let resumed = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(resumed["name"], "Alice");
+    let received = fixture.run_public(
+        &[
+            "recv",
+            "--receive-id",
+            "map-first-current-receive",
+            "--timeout",
+            "0",
+        ],
+        THREAD_B,
+    );
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |message| message["id"] == message_id && message["body"] == "map-first inbox sentinel"
+        ));
 }
 
 #[test]
@@ -845,6 +1856,748 @@ fn context_names_master_commands_and_peer_restore_keep_jenny_authority_consisten
     let cleared = fixture.run_public(&["context"], THREAD_A);
     assert_ne!(cleared["name"], "Jenny");
     assert!(cleared["master"].is_null(), "{cleared}");
+}
+
+#[test]
+fn human_retirement_releases_ordinary_name_and_allows_reallocation() {
+    const THREAD_C: &str = "01a0d63b-2f2c-72cf-93c1-2a4a1e2cf1cc";
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(alice["name"], "Alice", "{alice}");
+    assert_eq!(bob["name"], "Bob", "{bob}");
+    let bob_worker = bob["identity"]["worker_id"].as_str().unwrap();
+
+    // Legal task assignment and a queued message belong to Bob's name.
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "bob-retire-keeps-work",
+            "--next",
+            "survive explicit retirement",
+        ],
+        THREAD_B,
+    );
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Bob",
+            "--subject",
+            "retire-keep",
+            "queued for Bob",
+        ],
+        THREAD_A,
+    );
+    let msg_id = sent["msg_id"].as_str().unwrap().to_owned();
+
+    // Without the explicit human authorization the release is refused.
+    let refused = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-bob-noauth",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Bob"}"#,
+        ],
+        THREAD_A,
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("IDENTITY_AUTHORIZATION_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let map_before: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let bob_before = map_before["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Bob")
+        .expect("Bob slot exists");
+    assert_eq!(
+        bob_before["current"]["binding"]["agent_id"], bob_worker,
+        "a refused retirement must not release Bob: {bob_before}"
+    );
+
+    // Explicit human retirement releases the ordinary name.
+    let retired = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-bob",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Bob","authorization":"本次人类明确指令"}"#,
+        ],
+        THREAD_A,
+    );
+    assert!(
+        retired.status.success(),
+        "explicit retirement: stdout={} stderr={}",
+        String::from_utf8_lossy(&retired.stdout),
+        String::from_utf8_lossy(&retired.stderr)
+    );
+    let retired: Value = serde_json::from_slice(&retired.stdout).unwrap();
+    assert_eq!(retired["ok"], true, "{retired}");
+    assert_eq!(retired["result"]["action"], "retire_name", "{retired}");
+    assert_eq!(retired["result"]["outcome"], "completed", "{retired}");
+    let map_after: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let bob_after = map_after["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Bob")
+        .expect("Bob slot exists");
+    assert!(
+        bob_after["current"].is_null(),
+        "Bob current released: {bob_after}"
+    );
+    assert_eq!(
+        bob_after["previous"]["binding"]["agent_id"], bob_worker,
+        "retired binding is retained as history, not erased: {bob_after}"
+    );
+    assert!(
+        map_after["effects"]
+            .as_array()
+            .map_or(true, |effects| effects.is_empty()),
+        "the bounded human-retire effect must be consumed: {map_after}"
+    );
+
+    // Task, message and host are preserved; only the current name is released.
+    let state = fixture.current_state();
+    assert!(
+        state["tasks"]["bob-retire-keeps-work"].is_object(),
+        "the unfinished task survives retirement: {state}"
+    );
+    assert_eq!(
+        state["task_assignments"]["bob-retire-keeps-work"]["name"], "Bob",
+        "the task stays attributed to the retired name: {state}"
+    );
+    let message = fixture.run_public(&["msg", &msg_id], THREAD_A);
+    assert_eq!(message["state"], "pending", "{message}");
+    assert_eq!(
+        message["to"], bob_worker,
+        "the queued message is not re-addressed: {message}"
+    );
+
+    // A later ordinary context acquires the freed ordinary name.
+    let reallocated = fixture.run_public(&["context"], THREAD_C);
+    assert_eq!(reallocated["name"], "Bob", "{reallocated}");
+    assert_ne!(
+        reallocated["identity"]["worker_id"], bob_worker,
+        "the free name goes to a new carrier: {reallocated}"
+    );
+
+    // Replaying the original operation does not retire the successor.
+    let replay = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-bob",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Bob","authorization":"本次人类明确指令"}"#,
+        ],
+        THREAD_A,
+    );
+    assert!(
+        replay.status.success(),
+        "retire replay: stdout={} stderr={}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let map_replayed: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let bob_replayed = map_replayed["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Bob")
+        .expect("Bob slot exists");
+    assert_eq!(
+        bob_replayed["current"]["binding"]["agent_id"], reallocated["identity"]["worker_id"],
+        "a retry must not retire the later holder: {bob_replayed}"
+    );
+}
+
+#[test]
+fn human_retirement_jenny_revokes_exact_grant_and_replay_preserves_successor() {
+    const THREAD_C: &str = "01a0d63f-5d9a-72cf-93c1-2a4a1e2cf2dd";
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    let jenny = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"fixture explicitly requests Jenny"}"#,
+        ],
+        THREAD_A,
+    );
+    assert_eq!(jenny["name"], "Jenny", "{jenny}");
+    let jenny_worker = jenny["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let bob_worker = bob["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let project_scope = jenny["binding"]["project_scope"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let published = fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "jenny-retire-keeps-work",
+            "--title",
+            "Jenny retirement",
+            "--description",
+            "preserve work through explicit retirement",
+            "--delivery-condition",
+            "work remains attachable",
+            "--test-condition",
+            "public retirement regression",
+            "--priority",
+            "p1",
+            "--long-horizon-content",
+            "Continue the retired Jenny task from its preserved board state",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        published["task"]["owner_display_name"], "Jenny",
+        "{published}"
+    );
+    // Publishing alone does not create an owned unfinished task.
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "jenny-retire-keeps-work",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "jenny-retire-keeps-work",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_A,
+    );
+    let owned = fixture.run_public(&["task", "status", "jenny-retire-keeps-work"], THREAD_A);
+    assert_eq!(owned["owner"], jenny_worker, "{owned}");
+
+    let unauthorized = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-jenny-noauth",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Jenny"}"#,
+        ],
+        THREAD_B,
+    );
+    assert!(!unauthorized.status.success());
+    assert!(
+        String::from_utf8_lossy(&unauthorized.stderr).contains("IDENTITY_AUTHORIZATION_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&unauthorized.stderr)
+    );
+
+    let retired = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-jenny",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Jenny","authorization":"human approved Jenny retirement"}"#,
+        ],
+        THREAD_B,
+    );
+    assert!(
+        retired.status.success(),
+        "explicit Jenny retirement: stdout={} stderr={}",
+        String::from_utf8_lossy(&retired.stdout),
+        String::from_utf8_lossy(&retired.stderr)
+    );
+    let retired: Value = serde_json::from_slice(&retired.stdout).unwrap();
+    assert_eq!(retired["result"]["action"], "retire_name", "{retired}");
+    assert_eq!(retired["result"]["outcome"], "completed", "{retired}");
+    assert_eq!(
+        retired["result"]["snapshot"]["identity"]["status"], "released",
+        "{retired}"
+    );
+
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let jenny_slot = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Jenny")
+        .expect("Jenny slot exists");
+    assert!(jenny_slot["current"].is_null(), "{jenny_slot}");
+    assert_eq!(
+        jenny_slot["previous"]["binding"]["agent_id"], jenny_worker,
+        "only the exact retired binding is retained: {jenny_slot}"
+    );
+    let no_master = fixture.run_public(&["master", "status"], THREAD_B);
+    assert!(no_master["master"].is_null(), "{no_master}");
+    assert_eq!(
+        fixture.current_state()["global"]["master_grants"]
+            .as_array()
+            .map_or(0, Vec::len),
+        0,
+        "explicit Jenny retirement revokes its exact old grant"
+    );
+
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "jenny-retire-keeps-work")
+        .unwrap();
+    assert_eq!(task["owner"], "", "{task}");
+    assert_eq!(task["owner_name"], "Jenny", "{task}");
+    assert_eq!(task["needs_reassignment"], true, "{task}");
+    let state = fixture.current_state();
+    let schedule = &state["name_reassignments"][&project_scope]["Jenny"];
+    assert_eq!(schedule["kind"], "eligible-after-retirement", "{schedule}");
+
+    fixture.restart_daemon();
+    let no_master_after_restart = fixture.run_public(&["master", "status"], THREAD_B);
+    assert!(
+        no_master_after_restart["master"].is_null(),
+        "{no_master_after_restart}"
+    );
+    let board_after_restart = fixture.run_public(&["board", "show"], THREAD_B);
+    let task_after_restart = board_after_restart["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "jenny-retire-keeps-work")
+        .unwrap();
+    assert_eq!(
+        task_after_restart["needs_reassignment"], true,
+        "{task_after_restart}"
+    );
+    let restarted_state = fixture.current_state();
+    let restarted_schedule = &restarted_state["name_reassignments"][&project_scope]["Jenny"];
+    assert_eq!(
+        restarted_schedule["kind"], "eligible-after-retirement",
+        "no master and a restart must preserve immediate eligibility: {restarted_schedule}"
+    );
+
+    let ordinary = fixture.run_public(&["context"], THREAD_C);
+    assert_ne!(ordinary["name"], "Jenny", "{ordinary}");
+    let successor = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"human approved the successor Jenny"}"#,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(successor["name"], "Jenny", "{successor}");
+    assert_eq!(
+        successor["identity"]["worker_id"], bob_worker,
+        "{successor}"
+    );
+
+    let replay = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-jenny",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Jenny","authorization":"human approved Jenny retirement"}"#,
+        ],
+        THREAD_A,
+    );
+    assert!(
+        replay.status.success(),
+        "retire replay: stdout={} stderr={}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["result"]["outcome"], "completed", "{replay}");
+    let map_after_replay: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let successor_slot = map_after_replay["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Jenny")
+        .expect("successor Jenny slot exists");
+    assert_eq!(
+        successor_slot["current"]["binding"]["agent_id"], bob_worker,
+        "old operation replay must not retire the successor: {successor_slot}"
+    );
+    let successor_master = fixture.run_public(&["master", "status"], THREAD_B);
+    assert_eq!(
+        successor_master["master"]["worker_id"], bob_worker,
+        "old operation replay must not revoke the successor grant: {successor_master}"
+    );
+}
+
+#[test]
+fn human_retirement_jenny_requires_authorization_and_a_current_holder() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    let jenny = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"fixture explicitly requests Jenny"}"#,
+        ],
+        THREAD_A,
+    );
+    let jenny_worker = jenny["identity"]["worker_id"].as_str().unwrap().to_owned();
+
+    let missing_authorization = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-jenny-negative-noauth",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Jenny"}"#,
+        ],
+        THREAD_B,
+    );
+    assert!(!missing_authorization.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_authorization.stderr)
+            .contains("IDENTITY_AUTHORIZATION_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&missing_authorization.stderr)
+    );
+
+    let missing_holder = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            "retire-tina-not-held",
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Tina","authorization":"human approved Tina retirement"}"#,
+        ],
+        THREAD_A,
+    );
+    assert!(!missing_holder.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_holder.stderr).contains("IDENTITY_RETIRE_NAME_NOT_HELD"),
+        "stderr={}",
+        String::from_utf8_lossy(&missing_holder.stderr)
+    );
+
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let jenny_slot = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Jenny")
+        .expect("Jenny slot exists");
+    assert_eq!(
+        jenny_slot["current"]["binding"]["agent_id"], jenny_worker,
+        "failed retirement attempts must not release Jenny: {jenny_slot}"
+    );
+    let master = fixture.run_public(&["master", "status"], THREAD_A);
+    assert_eq!(master["master"]["worker_id"], jenny_worker, "{master}");
+}
+
+#[test]
+fn manager_can_invite_during_identity_return_wait_before_deadline() {
+    const THREAD_C: &str = "01a0d63e-5c31-7f30-8661-339018e7c2a3";
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    let owner = fixture.run_public(&["context"], THREAD_B);
+    let recipient = fixture.run_public(&["context"], THREAD_C);
+    let owner_worker = owner["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let recipient_worker = recipient["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let owner_name = owner["name"].as_str().unwrap().to_owned();
+    let project_scope = owner["binding"]["project_scope"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "fixture approves the waiting-period manager",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "manager-before-timeout",
+            "--title",
+            "manager early invitation",
+            "--description",
+            "manager invitation is independent from automatic deadline",
+            "--delivery-condition",
+            "invite then accept",
+            "--test-condition",
+            "public board regression",
+            "--priority",
+            "p1",
+            "--long-horizon-content",
+            "Continue the task after the manager invitation is accepted",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_A,
+    );
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "manager-before-timeout",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["owner"], owner_worker, "{claimed}");
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "manager-before-timeout",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_B,
+    );
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_B)
+        .unwrap()
+        .reject_as_missing = true;
+    let missing = fixture.run_public(&["worker", "snapshot", &owner_worker], THREAD_A);
+    assert_eq!(missing["judgment_status"], "satisfied", "{missing}");
+    fixture.run_public(&["worker", "snapshot", &recipient_worker], THREAD_A);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let waiting = loop {
+        let state = fixture.current_state();
+        let schedule = &state["name_reassignments"][&project_scope][&owner_name];
+        if schedule["kind"] == "waiting-return" {
+            break schedule.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no real loss schedule: {schedule}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(waiting["deadline_ms"].as_i64().unwrap() > now, "{waiting}");
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "manager-before-timeout")
+        .unwrap();
+    let revision = task["revision"].as_u64().unwrap();
+    assert_eq!(task["needs_reassignment"], true, "{task}");
+    assert_eq!(task["owner_name"], owner_name, "{task}");
+    assert!(task["invited_peer"].is_null(), "{task}");
+
+    let durable_owner = fixture.run_public(&["task", "status", "manager-before-timeout"], THREAD_A);
+    assert_eq!(durable_owner["owner"], owner_worker, "{durable_owner}");
+
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "manager-before-timeout",
+            "--to",
+            &recipient_worker,
+            "--expected-revision",
+            &revision.to_string(),
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        invited["task"]["invited_peer"], recipient_worker,
+        "{invited}"
+    );
+    let before_accept = fixture.run_public(&["task", "status", "manager-before-timeout"], THREAD_A);
+    assert_eq!(
+        before_accept["owner"], owner_worker,
+        "an invitation must not transfer ownership: {before_accept}"
+    );
+
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "manager-before-timeout",
+            "--accept",
+            "--expected-revision",
+            &invited["task"]["revision"].to_string(),
+        ],
+        THREAD_C,
+    );
+    assert_eq!(
+        accepted["task"]["owner"], recipient_worker,
+        "acceptance commits the new owner: {accepted}"
+    );
+    let after_accept = fixture.run_public(&["task", "status", "manager-before-timeout"], THREAD_A);
+    assert_eq!(after_accept["owner"], recipient_worker, "{after_accept}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(
+        waiting["deadline_ms"].as_i64().unwrap() > now,
+        "acceptance occurred before the automatic deadline: {waiting}"
+    );
+}
+
+#[test]
+fn human_retirement_legacy_self_close_does_not_enter_explicit_path() {
+    const THREAD_D: &str = "01a0d63c-1a3e-7a55-8f47-5b6c7d8e9f10";
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    let carol = fixture.run_public(&["context"], THREAD_D);
+    assert_eq!(carol["name"], "Bob", "{carol}");
+    let close = fixture.command_public(&["worker", "close", "--self"], THREAD_D);
+    assert!(
+        close.status.success(),
+        "legacy self close: stdout={} stderr={}",
+        String::from_utf8_lossy(&close.stdout),
+        String::from_utf8_lossy(&close.stderr)
+    );
+    // The legacy self-unregister path is not the explicit human retirement:
+    // it records no `retire_name:` command receipt and leaves no HumanRetire
+    // effect behind.
+    let state = fixture.current_state();
+    let receipts = state["global"]["command_receipts"].clone();
+    assert!(
+        receipts
+            .as_object()
+            .is_none_or(|receipts| receipts.keys().all(|key| !key.starts_with("retire_name:"))),
+        "legacy self close must not record an explicit retirement receipt: {receipts}"
+    );
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        map["effects"].as_array().is_none_or(|effects| effects
+            .iter()
+            .all(|effect| { effect["kind"] != "human_retire" })),
+        "legacy self close must not publish a HumanRetire effect: {map}"
+    );
+}
+
+#[test]
+fn human_retirement_rejects_operation_id_owned_by_another_command() {
+    const THREAD_C: &str = "01a0d63e-dafc-7571-a0aa-bbc2bbbc04ce";
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    let bob = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(bob["name"], "Bob", "{bob}");
+    let bob_worker = bob["identity"]["worker_id"].as_str().unwrap().to_owned();
+    // A first registration records a durable register receipt. Context does
+    // not persist its own outer operation receipt, so reuse the real receipt
+    // that the public registration committed.
+    let context = fixture.command_public(&["context"], THREAD_C);
+    assert!(
+        context.status.success(),
+        "context receipt: stdout={} stderr={}",
+        String::from_utf8_lossy(&context.stdout),
+        String::from_utf8_lossy(&context.stderr)
+    );
+    let state = fixture.current_state();
+    let operation = state["global"]["command_receipts"]
+        .as_object()
+        .and_then(|receipts| {
+            receipts.values().find_map(|receipt| {
+                receipt["command_id"]
+                    .as_str()
+                    .is_some_and(|command| command.starts_with("register-"))
+                    .then(|| receipt["operation_id"].as_str())
+                    .flatten()
+            })
+        })
+        .expect("the public registration recorded an operation receipt")
+        .to_owned();
+
+    let refused = fixture.command_public(
+        &[
+            "context",
+            "--op",
+            operation.as_str(),
+            "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Bob","authorization":"本次人类明确指令"}"#,
+        ],
+        THREAD_A,
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("IDENTITY_OPERATION_CONFLICT"),
+        "stderr={}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let map: Value = serde_json::from_slice(
+        &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+    )
+    .unwrap();
+    let bob_after = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Bob")
+        .expect("Bob slot exists");
+    assert_eq!(
+        bob_after["current"]["binding"]["agent_id"], bob_worker,
+        "an operation conflict must not release Bob: {bob_after}"
+    );
+    assert!(
+        map["effects"]
+            .as_array()
+            .is_none_or(|effects| effects.is_empty()),
+        "an operation conflict must not publish a retirement effect: {map}"
+    );
 }
 
 fn unique_root() -> PathBuf {
@@ -1443,6 +3196,9 @@ fn thread_read(
     let entry = locked
         .entry(thread_id.clone())
         .or_insert_with(ThreadState::new);
+    if entry.reject_as_missing {
+        return json!({"id":id,"error":{"code":-32000,"message":format!("thread not found: {thread_id}")}});
+    }
     json!({
         "id": id,
         "result": {

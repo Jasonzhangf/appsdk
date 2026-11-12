@@ -1,5 +1,6 @@
 use super::binding_slot::{
-    BindingControlSet, BindingValue, IdentityBindingKey, PendingEffect, PendingEffectKind,
+    BindingControlSet, BindingValue, CrossScopeSourceRef, IdentityBindingKey, IdentityBindingSlot,
+    PendingEffect, PendingEffectKind,
 };
 use super::binding_store::{BindingControlStore, ControlChange, Durability, StoreChangeOutcome};
 use super::{project_reset::delete_route, HostRouteRecord};
@@ -60,6 +61,86 @@ fn missing_file_loads_an_empty_set() {
     let store = BindingControlStore::new(&root);
     assert_eq!(store.load().unwrap(), BindingControlSet::new());
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn rex_human_fence_survives_restart_rebuild_and_effect_clear() {
+    use super::binding_slot::RexExecutionFence;
+    let root = temp_root("human-fence");
+    let store = BindingControlStore::new(&root);
+    let key = key();
+    let mut current = value(&key, "actor", "runtime");
+    current.rex_execution_fence = RexExecutionFence::from_start_id("12:999999");
+    store
+        .commit(ControlChange::Commit {
+            key: key.clone(),
+            value: current.clone(),
+            expected_generation: Some(0),
+        })
+        .unwrap();
+    let restarted = BindingControlStore::new(&root);
+    assert_eq!(
+        restarted
+            .load()
+            .unwrap()
+            .slot(&key)
+            .unwrap()
+            .active_binding()
+            .unwrap(),
+        &current
+    );
+    let mut rebuilt = current.clone();
+    rebuilt.rex_execution_fence = None;
+    restarted
+        .commit(ControlChange::Commit {
+            key: key.clone(),
+            value: rebuilt.clone(),
+            expected_generation: Some(1),
+        })
+        .unwrap();
+    assert_eq!(
+        restarted.load().unwrap().slot(&key).unwrap().generation(),
+        1,
+        "dropping fence is an identical retry after preservation"
+    );
+    let effect = effect_for(&key, "fence-effect", "runtime-session");
+    restarted
+        .commit(ControlChange::CommitWithEffect {
+            key: key.clone(),
+            value: rebuilt,
+            expected_generation: Some(1),
+            effect,
+        })
+        .unwrap();
+    restarted
+        .commit(ControlChange::ClearEffect {
+            effect_id: "fence-effect".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        restarted
+            .load()
+            .unwrap()
+            .slot(&key)
+            .unwrap()
+            .active_binding()
+            .unwrap()
+            .rex_execution_fence,
+        current.rex_execution_fence
+    );
+    // Old schema is still read without a migration or identity-history scan.
+    let mut legacy = serde_json::to_value(current).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("rex_execution_fence");
+    assert_eq!(
+        serde_json::from_value::<BindingValue>(legacy)
+            .unwrap()
+            .rex_execution_fence,
+        None
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -258,6 +339,484 @@ fn store_commit_is_one_entry_point_for_stable_name_handoff() {
     assert_eq!(
         slot.reference_previous().unwrap().binding.agent_id.as_str(),
         "alice-s1"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn publication_guard_rejects_cross_app_duplicate_names_and_allows_other_projects() {
+    let root = temp_root("project-name-publication-guard");
+    let store = BindingControlStore::new(&root);
+    let project = ProjectScopeId::new("/tmp/collab-binding-store-project-name").unwrap();
+    let alice_app_a =
+        IdentityBindingKey::new(project.clone(), AppServerId::new("app-a").unwrap(), "Alice");
+    let alice_app_b =
+        IdentityBindingKey::new(project.clone(), AppServerId::new("app-b").unwrap(), "Alice");
+    let other_project_alice = IdentityBindingKey::new(
+        ProjectScopeId::new("/tmp/collab-binding-store-project-name-other").unwrap(),
+        AppServerId::new("app-b").unwrap(),
+        "Alice",
+    );
+    store
+        .commit(ControlChange::Commit {
+            key: alice_app_a.clone(),
+            value: value(&alice_app_a, "alice-a", "runtime-a"),
+            expected_generation: Some(0),
+        })
+        .unwrap();
+
+    let duplicate = store.commit(ControlChange::Commit {
+        key: alice_app_b.clone(),
+        value: value(&alice_app_b, "alice-b", "runtime-b"),
+        expected_generation: Some(0),
+    });
+    let error = duplicate.expect_err("a raw Commit cannot bypass project-name uniqueness");
+    assert!(error.contains("IDENTITY_PROJECT_NAME_DUPLICATE"), "{error}");
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.active_values().count(), 1);
+    assert!(loaded
+        .slot(&IdentityBindingKey::new(
+            project.clone(),
+            AppServerId::new("app-b").unwrap(),
+            "Alice"
+        ))
+        .and_then(|slot| slot.active_binding())
+        .is_none());
+
+    let bob_app_b =
+        IdentityBindingKey::new(project.clone(), AppServerId::new("app-b").unwrap(), "Bob");
+    store
+        .commit(ControlChange::Commit {
+            key: bob_app_b.clone(),
+            value: value(&bob_app_b, "bob-b", "runtime-c"),
+            expected_generation: Some(0),
+        })
+        .unwrap();
+    let bob_app_a =
+        IdentityBindingKey::new(project.clone(), AppServerId::new("app-a").unwrap(), "Bob");
+    let duplicate_move = store.commit(ControlChange::MoveName {
+        target: bob_app_a.clone(),
+        value: value(&bob_app_a, "bob-a", "runtime-d"),
+        source_names: Vec::new(),
+        expected_generation: Some(0),
+    });
+    let error = duplicate_move.expect_err("a raw MoveName cannot bypass project-name uniqueness");
+    assert!(error.contains("IDENTITY_PROJECT_NAME_DUPLICATE"), "{error}");
+
+    store
+        .commit(ControlChange::Commit {
+            key: other_project_alice.clone(),
+            value: value(&other_project_alice, "other-alice", "runtime-e"),
+            expected_generation: Some(0),
+        })
+        .unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        loaded
+            .slot(&other_project_alice)
+            .and_then(|slot| slot.active_binding())
+            .unwrap()
+            .binding
+            .agent_id
+            .as_str(),
+        "other-alice"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+fn cross_scope_pending_effect(
+    target: &IdentityBindingKey,
+    source: CrossScopeSourceRef,
+    effect_id: &str,
+    target_worker: &str,
+    target_session: &str,
+) -> PendingEffect {
+    cross_scope_pending_effect_with_sources(
+        target,
+        vec![source],
+        effect_id,
+        target_worker,
+        target_session,
+    )
+}
+
+fn cross_scope_pending_effect_with_sources(
+    target: &IdentityBindingKey,
+    sources: Vec<CrossScopeSourceRef>,
+    effect_id: &str,
+    target_worker: &str,
+    target_session: &str,
+) -> PendingEffect {
+    PendingEffect {
+        role: None,
+        kind: PendingEffectKind::NameAcrossScopes { sources },
+        effect_id: effect_id.to_owned(),
+        operation_id: effect_id.to_owned(),
+        project_scope: target.project_scope.clone(),
+        app_scope_id: target.app_scope_id.clone(),
+        name: target.name.clone(),
+        previous_worker_id: Some("alice-old".to_owned()),
+        previous_session_id: Some("runtime-a-old-session".to_owned()),
+        target_worker_id: target_worker.to_owned(),
+        target_session_id: target_session.to_owned(),
+        occupancy_revision: 1,
+        source_names: Vec::new(),
+        moves_existing_names: false,
+        pane_anchor: None,
+        created_ms: 1,
+    }
+}
+
+fn cross_scope_store_fixture(
+    label: &str,
+) -> (
+    std::path::PathBuf,
+    BindingControlStore,
+    IdentityBindingKey,
+    IdentityBindingKey,
+) {
+    let root = temp_root(label);
+    let store = BindingControlStore::new(&root);
+    let project = ProjectScopeId::new("/tmp/collab-binding-store-cross-scope").unwrap();
+    let alice_app_a =
+        IdentityBindingKey::new(project.clone(), AppServerId::new("app-a").unwrap(), "Alice");
+    let frank_app_b = IdentityBindingKey::new(project, AppServerId::new("app-b").unwrap(), "Frank");
+    store
+        .commit(ControlChange::Commit {
+            key: alice_app_a.clone(),
+            value: value(&alice_app_a, "alice-old", "runtime-a-old"),
+            expected_generation: Some(0),
+        })
+        .unwrap();
+    store
+        .commit(ControlChange::Commit {
+            key: frank_app_b.clone(),
+            value: value(&frank_app_b, "frank-b", "runtime-frank-b"),
+            expected_generation: Some(0),
+        })
+        .unwrap();
+    (root, store, alice_app_a, frank_app_b)
+}
+
+#[test]
+fn cross_scope_takeover_releases_source_and_publishes_target_in_one_candidate() {
+    let (root, store, alice_app_a, frank_app_b) = cross_scope_store_fixture("cross-scope-takeover");
+    let source_slot = store.load().unwrap().slot(&frank_app_b).cloned().unwrap();
+    let source = BindingControlSet::cross_scope_source_ref(&source_slot).unwrap();
+    assert_eq!(source.generation, 1);
+    let effect = cross_scope_pending_effect(
+        &alice_app_a,
+        source,
+        "cross-scope-takeover:operation",
+        "frank-a",
+        "runtime-frank-a-session",
+    );
+
+    let committed = store
+        .commit(ControlChange::MoveNameWithEffect {
+            target: alice_app_a.clone(),
+            value: value(&alice_app_a, "frank-a", "runtime-frank-a"),
+            source_names: Vec::new(),
+            expected_generation: Some(1),
+            effect: effect.clone(),
+            companion: None,
+        })
+        .unwrap();
+    assert_eq!(committed.durability, Durability::Confirmed);
+
+    let loaded = store.load().unwrap();
+    let alice = loaded.slot(&alice_app_a).unwrap();
+    assert_eq!(
+        alice.active_binding().unwrap().binding.agent_id.as_str(),
+        "frank-a",
+        "the target app publishes the current caller"
+    );
+    assert_eq!(
+        alice
+            .reference_previous()
+            .unwrap()
+            .binding
+            .agent_id
+            .as_str(),
+        "alice-old",
+        "the displaced target holder remains exact history"
+    );
+    let frank = loaded.slot(&frank_app_b).unwrap();
+    assert!(
+        frank.active_binding().is_none(),
+        "the source current is released in the same map candidate"
+    );
+    assert_eq!(
+        frank
+            .reference_previous()
+            .unwrap()
+            .binding
+            .binding_id
+            .as_str(),
+        "binding-runtime-frank-b",
+        "the source exact binding remains available for business reconciliation"
+    );
+    loaded
+        .validate_project_name_uniqueness(&alice_app_a.project_scope, "Alice")
+        .unwrap();
+    assert!(
+        loaded
+            .project_current_for_name(&alice_app_a.project_scope, "Frank")
+            .unwrap()
+            .is_none(),
+        "no other app keeps Frank current after the takeover"
+    );
+    assert!(
+        loaded
+            .pending_effect(&effect.effect_id)
+            .is_some_and(|saved| saved.cross_scope_sources() == effect.cross_scope_sources()),
+        "the exact source reference remains in the bounded pending effect"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn cross_scope_takeover_converges_historical_duplicate_and_preserves_history() {
+    let root = temp_root("cross-scope-history-convergence");
+    let store = BindingControlStore::new(&root);
+    let project = ProjectScopeId::new("/tmp/collab-binding-store-cross-scope-history").unwrap();
+    let alice_app_a =
+        IdentityBindingKey::new(project.clone(), AppServerId::new("app-a").unwrap(), "Alice");
+    let alice_app_c =
+        IdentityBindingKey::new(project.clone(), AppServerId::new("app-c").unwrap(), "Alice");
+    let frank_app_b = IdentityBindingKey::new(project, AppServerId::new("app-b").unwrap(), "Frank");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(
+            &alice_app_a,
+            value(&alice_app_a, "alice-a", "runtime-alice-a"),
+            None,
+        )
+        .unwrap();
+    control
+        .commit(
+            &alice_app_c,
+            value(&alice_app_c, "alice-c", "runtime-alice-c"),
+            None,
+        )
+        .unwrap();
+    control
+        .commit(
+            &frank_app_b,
+            value(&frank_app_b, "frank-b", "runtime-frank-b"),
+            None,
+        )
+        .unwrap();
+    store.save(&control).unwrap();
+
+    let loaded = store.load().unwrap();
+    let sources = vec![
+        BindingControlSet::cross_scope_source_ref(loaded.slot(&alice_app_c).unwrap()).unwrap(),
+        BindingControlSet::cross_scope_source_ref(loaded.slot(&frank_app_b).unwrap()).unwrap(),
+    ];
+    let effect = cross_scope_pending_effect_with_sources(
+        &alice_app_a,
+        sources,
+        "cross-scope-history:operation",
+        "frank-a",
+        "runtime-frank-a-session",
+    );
+    store
+        .commit(ControlChange::MoveNameWithEffect {
+            target: alice_app_a.clone(),
+            value: value(&alice_app_a, "frank-a", "runtime-frank-a"),
+            source_names: Vec::new(),
+            expected_generation: Some(1),
+            effect,
+            companion: None,
+        })
+        .unwrap();
+
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        loaded
+            .project_currents_for_name(&alice_app_a.project_scope, "Alice")
+            .len(),
+        1,
+        "the explicit target app leaves exactly one current Alice"
+    );
+    assert_eq!(
+        loaded
+            .slot(&alice_app_a)
+            .and_then(IdentityBindingSlot::active_binding)
+            .map(|binding| binding.binding.agent_id.as_str()),
+        Some("frank-a")
+    );
+    assert!(loaded
+        .slot(&alice_app_c)
+        .unwrap()
+        .active_binding()
+        .is_none());
+    assert!(loaded
+        .slot(&frank_app_b)
+        .unwrap()
+        .active_binding()
+        .is_none());
+    assert_eq!(
+        loaded
+            .slot(&alice_app_c)
+            .unwrap()
+            .reference_previous()
+            .unwrap()
+            .binding
+            .binding_id
+            .as_str(),
+        "binding-runtime-alice-c",
+        "the conflicting app keeps its exact business-reference binding"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cross_scope_takeover_rejects_stale_source_generation() {
+    let (root, store, alice_app_a, frank_app_b) = cross_scope_store_fixture("cross-scope-stale");
+    let source_slot = store.load().unwrap().slot(&frank_app_b).cloned().unwrap();
+    let stale_source = BindingControlSet::cross_scope_source_ref(&source_slot).unwrap();
+    store
+        .commit(ControlChange::Commit {
+            key: frank_app_b.clone(),
+            value: value(&frank_app_b, "frank-b-new", "runtime-frank-b-new"),
+            expected_generation: Some(1),
+        })
+        .unwrap();
+    let before = store.load().unwrap();
+    let effect = cross_scope_pending_effect(
+        &alice_app_a,
+        stale_source,
+        "cross-scope-stale:operation",
+        "frank-a",
+        "runtime-frank-a-session",
+    );
+
+    let error = store
+        .commit(ControlChange::MoveNameWithEffect {
+            target: alice_app_a.clone(),
+            value: value(&alice_app_a, "frank-a", "runtime-frank-a"),
+            source_names: Vec::new(),
+            expected_generation: Some(1),
+            effect,
+            companion: None,
+        })
+        .expect_err("a stale cross-scope source cannot be released by a later takeover");
+    assert!(error.contains("CROSS_SCOPE_SOURCE_CHANGED"), "{error}");
+    let after = store.load().unwrap();
+    assert_eq!(after, before, "the rejected candidate publishes nothing");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn cross_scope_source_effect_is_rejected_outside_atomic_move() {
+    let (root, store, alice_app_a, frank_app_b) =
+        cross_scope_store_fixture("cross-scope-write-entry");
+    let source_slot = store.load().unwrap().slot(&frank_app_b).cloned().unwrap();
+    let source = BindingControlSet::cross_scope_source_ref(&source_slot).unwrap();
+    let effect = cross_scope_pending_effect(
+        &alice_app_a,
+        source,
+        "cross-scope-write-entry:operation",
+        "frank-a",
+        "runtime-frank-a-session",
+    );
+    for change in [
+        ControlChange::CommitWithEffect {
+            key: alice_app_a.clone(),
+            value: value(&alice_app_a, "frank-a", "runtime-frank-a"),
+            expected_generation: Some(1),
+            effect: effect.clone(),
+        },
+        ControlChange::UnregisterWithEffect {
+            key: alice_app_a.clone(),
+            effect: effect.clone(),
+        },
+        ControlChange::SetEffect {
+            effect: effect.clone(),
+        },
+    ] {
+        let error = store
+            .commit(change)
+            .expect_err("only MoveNameWithEffect may release a cross-scope source");
+        assert!(
+            error.contains("cross-scope source requires MoveNameWithEffect"),
+            "{error}"
+        );
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A retry of an explicit cross-scope takeover continues the remaining effects
+/// instead of failing on the source it already released. The exact source ref
+/// stays recognizable after release, a successor current is never released by
+/// the old intent, and the bounded pending effect stays open for the retry.
+#[test]
+fn cross_scope_source_release_retry_is_idempotent_and_never_releases_a_successor() {
+    let (root, store, alice_app_a, frank_app_b) = cross_scope_store_fixture("cross-scope-retry");
+    let source_slot = store.load().unwrap().slot(&frank_app_b).cloned().unwrap();
+    let source = BindingControlSet::cross_scope_source_ref(&source_slot).unwrap();
+    let effect = cross_scope_pending_effect(
+        &alice_app_a,
+        source.clone(),
+        "cross-scope-retry:operation",
+        "frank-a",
+        "runtime-frank-a-session",
+    );
+    store
+        .commit(ControlChange::MoveNameWithEffect {
+            target: alice_app_a.clone(),
+            value: value(&alice_app_a, "frank-a", "runtime-frank-a"),
+            source_names: Vec::new(),
+            expected_generation: Some(1),
+            effect: effect.clone(),
+            companion: None,
+        })
+        .unwrap();
+
+    let mut retry = store.load().unwrap();
+    assert!(
+        !retry.validate_cross_scope_source(&source).unwrap(),
+        "an already released source is a recognized retry, not a changed source"
+    );
+    assert_eq!(
+        retry
+            .release_cross_scope_sources(std::slice::from_ref(&source))
+            .unwrap(),
+        0,
+        "retrying the release must not release the source a second time"
+    );
+    assert!(
+        retry.slot(&frank_app_b).unwrap().active_binding().is_none(),
+        "the retry keeps the source current released"
+    );
+    assert!(
+        retry
+            .pending_effect(&effect.effect_id)
+            .is_some_and(|saved| saved.cross_scope_sources() == effect.cross_scope_sources()),
+        "the bounded pending effect stays available for the remaining effects"
+    );
+
+    store
+        .commit(ControlChange::Commit {
+            key: frank_app_b.clone(),
+            value: value(&frank_app_b, "frank-b-new", "runtime-frank-b-new"),
+            expected_generation: Some(2),
+        })
+        .unwrap();
+    let after_successor = store.load().unwrap();
+    let error = after_successor
+        .validate_cross_scope_source(&source)
+        .expect_err("a replacement current is not the same source");
+    assert!(error.contains("CROSS_SCOPE_SOURCE_CHANGED"), "{error}");
+    assert_eq!(
+        after_successor
+            .slot(&frank_app_b)
+            .and_then(IdentityBindingSlot::active_binding)
+            .map(|binding| binding.binding.agent_id.as_str()),
+        Some("frank-b-new"),
+        "the old retry must not release the successor current"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }

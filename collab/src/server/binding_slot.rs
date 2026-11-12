@@ -6,15 +6,28 @@ use crate::server::name_state::NamePaneAnchor;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PendingEffectKind {
     Register,
     Name,
+    /// Explicit takeover where one or more source currents live in other app
+    /// scopes. Every exact source current is released in the same control
+    /// candidate as the target name publication.
+    NameAcrossScopes {
+        sources: Vec<CrossScopeSourceRef>,
+    },
     Retire,
+    /// Explicit human `retire_name`. Distinct from the legacy `Retire`
+    /// self-unregister path so recovery releases the exact target binding
+    /// without reading the target token or calling `unregister_self`.
+    HumanRetire {
+        binding_id: crate::identity::BindingId,
+        generation: u64,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RoleAction {
     SetMaster,
@@ -84,6 +97,39 @@ pub(crate) struct BindingValue {
     pub(crate) physical_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) layout_binding_id: Option<String>,
+    /// Daemon-verified owner process of the current Rex execution. The
+    /// project, app, agent session and endpoint come from this same value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rex_execution: Option<VerifiedRexExecutionAssociation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rex_execution_fence: Option<RexExecutionFence>,
+}
+
+/// Current admission boundary in the local process-start clock domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RexExecutionFence {
+    pub(crate) seconds: u64,
+    pub(crate) microseconds: u32,
+}
+
+impl RexExecutionFence {
+    pub(crate) fn from_start_id(start: &str) -> Option<Self> {
+        let (seconds, microseconds) = start.split_once(':')?;
+        let value = Self {
+            seconds: seconds.parse().ok()?,
+            microseconds: microseconds.parse().ok()?,
+        };
+        (value.microseconds < 1_000_000).then_some(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VerifiedRexExecutionAssociation {
+    pub(crate) owner_pid: u32,
+    pub(crate) owner_name: String,
+    pub(crate) process_start_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,16 +173,77 @@ impl BindingValue {
             },
             physical_name: None,
             layout_binding_id: None,
+            rex_execution: None,
+            rex_execution_fence: None,
         }
     }
 
+    pub(crate) fn preserve_rex_fence(&mut self, current: &Self) {
+        self.rex_execution_fence = self.rex_execution_fence.max(current.rex_execution_fence);
+        if self.rex_execution.is_none()
+            && self.transport.kind == crate::proto::TransportKind::Rex
+            && self.binding == current.binding
+            && self.transport.rex_endpoint == current.transport.rex_endpoint
+        {
+            self.rex_execution = current.rex_execution.clone();
+        }
+    }
+
+    /// Only explicit human replacement calls this producer. Current refresh
+    /// and effect retries preserve the boundary without advancing it.
+    pub(crate) fn replace_rex_holder(&mut self, target: &Self) -> Result<(), String> {
+        self.preserve_rex_fence(target);
+        if self.binding.agent_id == target.binding.agent_id
+            && self.binding.session_id == target.binding.session_id
+        {
+            return Ok(());
+        }
+        let displaced = target
+            .rex_execution
+            .as_ref()
+            .and_then(|execution| RexExecutionFence::from_start_id(&execution.process_start_id));
+        let boundary = match displaced {
+            Some(boundary) => boundary,
+            None => crate::host_runtime::current_rex_execution_boundary()?,
+        };
+        self.rex_execution_fence = self.rex_execution_fence.max(Some(boundary));
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), SlotError> {
+        if self
+            .rex_execution_fence
+            .is_some_and(|fence| fence.microseconds >= 1_000_000)
+        {
+            return Err(SlotError::Invariant(
+                "Rex execution fence has invalid microseconds".into(),
+            ));
+        }
         if self.tab_id.project_scope != self.binding.project_scope
             || self.tab_id.app_scope_id != self.binding.app_scope_id
         {
             return Err(SlotError::Invariant(
                 "logical tab differs from binding scope".into(),
             ));
+        }
+        if let Some(execution) = self.rex_execution.as_ref() {
+            if self.transport.kind != crate::proto::TransportKind::Rex
+                || self.transport.rex_endpoint.is_none()
+            {
+                return Err(SlotError::Invariant(
+                    "Rex execution association requires the Rex transport".into(),
+                ));
+            }
+            if execution.owner_pid == 0
+                || execution.owner_name.trim().is_empty()
+                || execution.owner_name.chars().any(char::is_control)
+                || execution.process_start_id.trim().is_empty()
+                || execution.process_start_id.chars().any(char::is_control)
+            {
+                return Err(SlotError::Invariant(
+                    "Rex execution association fields are incomplete".into(),
+                ));
+            }
         }
         self.binding
             .validate()
@@ -173,6 +280,8 @@ impl BindingValue {
             && self.invocation_cwd == other.invocation_cwd
             && self.physical_name == other.physical_name
             && self.layout_binding_id == other.layout_binding_id
+            && self.rex_execution == other.rex_execution
+            && self.rex_execution_fence == other.rex_execution_fence
     }
 }
 
@@ -187,7 +296,7 @@ pub(crate) enum IdentityStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IdentityBindingSlot {
     pub(crate) identity_key: IdentityBindingKey,
-    pub(crate) display_slot: u32,
+    pub(crate) display_slot: Option<u32>,
     pub(crate) identity_status: IdentityStatus,
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
@@ -230,7 +339,30 @@ pub(crate) struct PendingEffect {
     pub(crate) created_ms: i64,
 }
 
+/// Exact source current selected for a cross-scope explicit takeover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CrossScopeSourceRef {
+    pub(crate) key: IdentityBindingKey,
+    pub(crate) binding_id: crate::identity::BindingId,
+    pub(crate) generation: u64,
+}
+
 impl PendingEffect {
+    pub(crate) fn is_name_like(&self) -> bool {
+        matches!(
+            self.kind,
+            PendingEffectKind::Name | PendingEffectKind::NameAcrossScopes { .. }
+        )
+    }
+
+    pub(crate) fn cross_scope_sources(&self) -> &[CrossScopeSourceRef] {
+        match &self.kind {
+            PendingEffectKind::NameAcrossScopes { sources } => sources,
+            _ => &[],
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), SlotError> {
         if self.effect_id.trim().is_empty()
             || self.operation_id.trim().is_empty()
@@ -243,6 +375,26 @@ impl PendingEffect {
                 "pending effect requires effect, operation, name, target carrier and revision"
                     .into(),
             ));
+        }
+        let cross_scope_sources = self.cross_scope_sources();
+        if !cross_scope_sources.is_empty() {
+            let mut keys = std::collections::BTreeSet::new();
+            for source in cross_scope_sources {
+                if source.key.project_scope != self.project_scope
+                    || source.key.app_scope_id == self.app_scope_id
+                    || source.generation == 0
+                    || source.binding_id.as_str().trim().is_empty()
+                    || !keys.insert((
+                        source.key.app_scope_id.as_str().to_owned(),
+                        source.key.name.clone(),
+                    ))
+                {
+                    return Err(SlotError::Invalid(
+                        "cross-scope sources require exact, distinct other-app currents in the same project"
+                            .into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -416,10 +568,9 @@ impl IdentityBindingSlot {
 
     pub(crate) fn validate(&self) -> Result<(), SlotError> {
         self.validate_shape()?;
-        if super::name_resolution::display_slot(&self.identity_key.name)
-            .map_err(SlotError::Invalid)?
-            != self.display_slot
-        {
+        let expected_display_slot = super::name_resolution::display_slot(&self.identity_key.name)
+            .map_err(SlotError::Invalid)?;
+        if expected_display_slot.is_some() && expected_display_slot != self.display_slot {
             return Err(SlotError::Invariant(
                 "display slot differs from the registered name".into(),
             ));
@@ -484,6 +635,24 @@ pub(crate) struct BindingControlSet {
     pub(crate) pending_resets: Vec<String>,
 }
 
+/// Exact match of a caller's current Rex target against a saved binding. The
+/// Rex `server`/`session`/`block` triple is the placement identity; `host_id`
+/// and `instance_id` are transport routing details that the caller does not
+/// claim, and the agent session is a mutable carrier that may change inside the
+/// same block.
+fn rex_target_matches(value: &BindingValue, candidate: &crate::proto::RexCandidate) -> bool {
+    value.transport.kind == crate::proto::TransportKind::Rex
+        && value
+            .transport
+            .rex_endpoint
+            .as_ref()
+            .is_some_and(|endpoint| {
+                endpoint.server == candidate.server
+                    && endpoint.session_id == candidate.session_id
+                    && endpoint.block_id == candidate.block_id
+            })
+}
+
 impl BindingControlSet {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -502,13 +671,38 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
+        self.lookup_with_rex_conflict_policy(project, app, facts, cwd, false)
+    }
+
+    /// Select the caller's current actor after the daemon has validated an
+    /// explicit human name replacement. A Rex block remains a placement
+    /// candidate. When it points at another name, the session holder is the
+    /// actor and the requested target stays a separate handoff decision.
+    pub(crate) fn lookup_explicit_rex_rebind(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        facts: &crate::proto::IdentityFacts,
+        cwd: Option<&str>,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        self.lookup_with_rex_conflict_policy(project, app, facts, cwd, true)
+    }
+
+    fn lookup_with_rex_conflict_policy(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        facts: &crate::proto::IdentityFacts,
+        cwd: Option<&str>,
+        allow_explicit_rex_rebind: bool,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
         let dsh = facts.dsh_session_id.as_deref().or_else(|| {
             facts
                 .dsh
                 .as_ref()
                 .map(|candidate| candidate.session_id.as_str())
         });
-        let candidates = self
+        let scoped_currents = self
             .slots
             .iter()
             .filter(|slot| {
@@ -516,6 +710,10 @@ impl BindingControlSet {
                     && &slot.identity_key.app_scope_id == app
             })
             .filter_map(|slot| slot.active_binding().map(|value| (slot, value)))
+            .collect::<Vec<_>>();
+        let candidates = scoped_currents
+            .iter()
+            .copied()
             .filter(|(_, value)| {
                 (dsh.is_none() || value.transport.kind == crate::proto::TransportKind::Dsh)
                     && (facts.rex.is_none()
@@ -542,6 +740,59 @@ impl BindingControlSet {
                         .into(),
                 ),
             }
+        }
+        // A block can retain another name's recovery entry after a displaced
+        // carrier registers again. Its exact current agent session resolves
+        // that shared placement. A new session still needs a unique candidate.
+        if let Some(rex) = facts.rex.as_ref() {
+            let session_holder = match facts.session_id.as_deref() {
+                Some(session) => unique(
+                    scoped_currents
+                        .iter()
+                        .filter(|(_, value)| {
+                            value
+                                .binding
+                                .session_id
+                                .as_ref()
+                                .is_some_and(|saved| saved.as_str() == session)
+                        })
+                        .map(|(slot, _)| *slot)
+                        .collect(),
+                )?,
+                None => None,
+            };
+            let targets = candidates
+                .iter()
+                .filter(|(_, value)| rex_target_matches(value, rex))
+                .map(|(slot, _)| *slot)
+                .collect::<Vec<_>>();
+            let target = match session_holder {
+                Some(holder)
+                    if targets
+                        .iter()
+                        .any(|target| target.identity_key == holder.identity_key) =>
+                {
+                    Some(holder)
+                }
+                _ => unique(targets)?,
+            };
+            if let (Some(target), Some(session_holder)) = (target, session_holder) {
+                if target.identity_key != session_holder.identity_key {
+                    if allow_explicit_rex_rebind {
+                        return Ok(Some(session_holder));
+                    }
+                    return Err(
+                        "IDENTITY_MAP_REX_TARGET_MISMATCH: the current agent session belongs to a \
+                         different Rex target"
+                            .into(),
+                    );
+                }
+                return Ok(Some(target));
+            }
+            // A mapped agent session may legally move to a new Rex block or
+            // cross adaptors. The daemon still validates that execution fact;
+            // the block alone is only a placement candidate.
+            return Ok(target.or(session_holder));
         }
         if facts.tmux.is_some() {
             if let Some(name) = facts.tmux_session_name.as_ref() {
@@ -647,36 +898,271 @@ impl BindingControlSet {
         Ok(first)
     }
 
+    pub(crate) fn project_currents_for_name<'a>(
+        &'a self,
+        project: &ProjectScopeId,
+        name: &str,
+    ) -> Vec<&'a IdentityBindingSlot> {
+        self.slots
+            .iter()
+            .filter(|slot| {
+                &slot.identity_key.project_scope == project
+                    && slot.identity_key.name.eq_ignore_ascii_case(name)
+                    && slot.active_binding().is_some()
+            })
+            .collect()
+    }
+
+    /// Select one current name across all app scopes in the same project. A
+    /// unique match returns the full existing slot. Multiple active currents
+    /// remain visible as typed ambiguity rather than being guessed.
+    pub(crate) fn project_current_for_name(
+        &self,
+        project: &ProjectScopeId,
+        name: &str,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        let matches = self.project_currents_for_name(project, name);
+        let Some(first) = matches.first().copied() else {
+            return Ok(None);
+        };
+        if let Some(conflict) = matches.get(1) {
+            return Err(format!(
+                "IDENTITY_MAP_AMBIGUOUS: project {} name {} has active current in app {} and app {}",
+                project.as_str(),
+                name,
+                first.identity_key.app_scope_id.as_str(),
+                conflict.identity_key.app_scope_id.as_str()
+            ));
+        }
+        Ok(Some(first))
+    }
+
+    /// Locate the unique current caller in a project without widening the
+    /// exact-app `lookup` contract. Each app scope is still matched by the
+    /// existing typed lookup; more than one matching app stays ambiguous.
+    pub(crate) fn project_current_for_facts(
+        &self,
+        project: &ProjectScopeId,
+        facts: &crate::proto::IdentityFacts,
+        cwd: Option<&str>,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        self.project_current_for_facts_excluding_app(project, None, facts, cwd)
+    }
+
+    /// Locate the caller's source current outside the selected target app.
+    /// Exact-app lookup remains unchanged; this selector only compares the
+    /// same typed host facts against the other app partitions in the project.
+    pub(crate) fn project_current_for_facts_excluding_app(
+        &self,
+        project: &ProjectScopeId,
+        excluded_app: Option<&AppServerId>,
+        facts: &crate::proto::IdentityFacts,
+        cwd: Option<&str>,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        let apps: std::collections::BTreeSet<&str> = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                &slot.identity_key.project_scope == project
+                    && excluded_app
+                        .is_none_or(|excluded| &slot.identity_key.app_scope_id != excluded)
+            })
+            .map(|slot| slot.identity_key.app_scope_id.as_str())
+            .collect();
+        let mut matches = Vec::new();
+        for app in apps {
+            let app = AppServerId::new(app.to_owned()).map_err(|error| error.to_string())?;
+            if let Some(slot) = self.lookup(project, &app, facts, cwd)? {
+                matches.push(slot);
+            }
+        }
+        match matches.as_slice() {
+            [] => Ok(None),
+            [slot] => Ok(Some(*slot)),
+            _ => {
+                let apps: Vec<_> = matches
+                    .iter()
+                    .map(|slot| slot.identity_key.app_scope_id.as_str())
+                    .collect();
+                Err(format!(
+                    "IDENTITY_MAP_AMBIGUOUS: current caller matches active names in apps {}",
+                    apps.join(", ")
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn cross_scope_source_ref(
+        slot: &IdentityBindingSlot,
+    ) -> Option<CrossScopeSourceRef> {
+        let current = slot.active_binding()?;
+        Some(CrossScopeSourceRef {
+            key: slot.identity_key.clone(),
+            binding_id: current.binding.binding_id.clone(),
+            generation: slot.generation(),
+        })
+    }
+
+    /// One active current is valid; more than one is a publication error. The
+    /// error names the exact project/name and conflicting apps so a historical
+    /// ambiguity remains diagnosable without making the whole map unloadable.
+    pub(crate) fn validate_project_name_uniqueness(
+        &self,
+        project: &ProjectScopeId,
+        name: &str,
+    ) -> Result<(), String> {
+        let matches: Vec<_> = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                &slot.identity_key.project_scope == project
+                    && slot.identity_key.name.eq_ignore_ascii_case(name)
+                    && slot.active_binding().is_some()
+            })
+            .collect();
+        if matches.len() > 1 {
+            let apps: Vec<_> = matches
+                .iter()
+                .map(|slot| slot.identity_key.app_scope_id.as_str())
+                .collect();
+            return Err(format!(
+                "IDENTITY_PROJECT_NAME_DUPLICATE: project {} name {} has active current in apps {}",
+                project.as_str(),
+                name,
+                apps.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate the exact source generation an explicit cross-scope takeover
+    /// may release. `true` means release is still needed; `false` recognizes an
+    /// already released retry without making the publication non-idempotent.
+    pub(crate) fn validate_cross_scope_source(
+        &self,
+        source: &CrossScopeSourceRef,
+    ) -> Result<bool, String> {
+        let slot = self.slot(&source.key).ok_or_else(|| {
+            format!(
+                "CROSS_SCOPE_SOURCE_MISSING: {}",
+                identity_key_label(&source.key)
+            )
+        })?;
+        if let Some(current) = slot.active_binding() {
+            if slot.generation() != source.generation
+                || current.binding.binding_id != source.binding_id
+            {
+                return Err(format!(
+                    "CROSS_SCOPE_SOURCE_CHANGED: {}",
+                    identity_key_label(&source.key)
+                ));
+            }
+            return Ok(true);
+        }
+        let previous = slot.reference_previous().ok_or_else(|| {
+            format!(
+                "CROSS_SCOPE_SOURCE_BINDING_MISSING: {}",
+                identity_key_label(&source.key)
+            )
+        })?;
+        if slot.generation() != source.generation.saturating_add(1)
+            || previous.binding.binding_id != source.binding_id
+        {
+            return Err(format!(
+                "CROSS_SCOPE_SOURCE_CHANGED: {}",
+                identity_key_label(&source.key)
+            ));
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn validate_cross_scope_sources(
+        &self,
+        sources: &[CrossScopeSourceRef],
+    ) -> Result<(), String> {
+        for source in sources {
+            self.validate_cross_scope_source(source)?;
+        }
+        Ok(())
+    }
+
+    /// Release the validated cross-scope source in the same in-memory candidate
+    /// as its target publication. An already released retry is a no-op.
+    pub(crate) fn release_cross_scope_source(
+        &mut self,
+        source: &CrossScopeSourceRef,
+    ) -> Result<CommitOutcome, SlotError> {
+        if !self
+            .validate_cross_scope_source(source)
+            .map_err(SlotError::Invariant)?
+        {
+            return Ok(CommitOutcome::Unchanged {
+                generation: source.generation.saturating_add(1),
+            });
+        }
+        self.unregister(&source.key, Some(source.generation))
+    }
+
+    pub(crate) fn release_cross_scope_sources(
+        &mut self,
+        sources: &[CrossScopeSourceRef],
+    ) -> Result<usize, SlotError> {
+        let mut released = 0;
+        for source in sources {
+            if matches!(
+                self.release_cross_scope_source(source)?,
+                CommitOutcome::Committed { .. }
+            ) {
+                released += 1;
+            }
+        }
+        Ok(released)
+    }
+
     pub(crate) fn ordinary_name(
         &self,
         project: &ProjectScopeId,
         app: &AppServerId,
         worker: &str,
     ) -> Result<String, String> {
-        for name in super::name_resolution::ORDINARY_NAME_POOL {
-            if self.slots.iter().any(|slot| {
-                &slot.identity_key.project_scope == project
-                    && &slot.identity_key.app_scope_id == app
-                    && slot.identity_key.name == name
-                    && slot
-                        .active_binding()
-                        .is_some_and(|value| value.binding.agent_id.as_str() == worker)
-            }) {
-                return Ok(name.into());
-            }
+        if let Some(name) = self.slots.iter().find_map(|slot| {
+            let name = slot.identity_key.name.as_str();
+            let ordinary = super::name_resolution::ORDINARY_NAME_POOL.contains(&name)
+                || super::name_resolution::peer_registration_number(name).is_some();
+            (&slot.identity_key.project_scope == project
+                && &slot.identity_key.app_scope_id == app
+                && ordinary
+                && slot
+                    .active_binding()
+                    .is_some_and(|value| value.binding.agent_id.as_str() == worker))
+            .then_some(name)
+        }) {
+            return Ok(name.into());
         }
-        super::name_resolution::ORDINARY_NAME_POOL
+        if let Some(name) = super::name_resolution::ORDINARY_NAME_POOL
             .into_iter()
             .find(|name| {
                 !self.slots.iter().any(|slot| {
                     &slot.identity_key.project_scope == project
-                        && &slot.identity_key.app_scope_id == app
                         && slot.identity_key.name == *name
                         && slot.active_binding().is_some()
                 })
             })
-            .map(str::to_owned)
-            .ok_or_else(|| "NAME_POOL_FULL: all ordinary names have active mappings".into())
+        {
+            return Ok(name.into());
+        }
+        let mut number = 1u64;
+        loop {
+            let name = format!("peer-{number}");
+            if !self.slots.iter().any(|slot| {
+                &slot.identity_key.project_scope == project && slot.identity_key.name == name
+            }) {
+                return Ok(name);
+            }
+            number = number.checked_add(1).ok_or_else(|| {
+                "PEER_NAME_EXHAUSTED: peer-<number> space is exhausted".to_string()
+            })?;
+        }
     }
 
     pub(crate) fn from_slots(slots: Vec<IdentityBindingSlot>) -> Self {

@@ -224,7 +224,8 @@ async fn dispatch_wire_routed(
             let response = match admission {
                 Some(response) => response,
                 None => {
-                    let poll = handle_poll_async_with_context(
+                    let poll = handle_poll_async_with_manager_context(
+                        manager.clone(),
                         server.clone(),
                         worker_id,
                         Some(token),
@@ -741,6 +742,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         rex_monitor: Default::default(),
         mailbox_notify: Notify::new(),
     });
+    server.invalidate_restored_agent_observations().map_err(anyhow::Error::msg)?;
     restore_registered_peer_default_leases(&server);
     reconcile_master_goal_due(&server);
     server
@@ -832,7 +834,10 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             let cycle_manager = cycle_manager.clone();
             tokio::task::spawn_blocking(move || {
                 for runtime in runtimes {
-                    crate::server::timers::tick(&runtime);
+                    crate::server::timers::tick_managed(&cycle_manager, &runtime);
+                    if let Err(error) = cycle_manager.tick_name_stewardship(&runtime, now_ms()) {
+                        append_log(&runtime.log_path(), &format!("NAME_STEWARDSHIP_FAILED: {error}"));
+                    }
                 }
                 if let Err(error) = cycle_manager.tick_ceo_report_patrol(now_ms()) {
                     append_log(

@@ -34,6 +34,37 @@ struct ObservedPane {
     pane_pid: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForegroundPaneFacts {
+    pane_pid: u32,
+    pane_tty: String,
+    command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessFact {
+    pid: u32,
+    ppid: u32,
+    tty: String,
+    state: String,
+    executable: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ObservedTmuxExecution {
+    pub(crate) pid: u32,
+    pub(crate) start_id: String,
+}
+
+pub(crate) struct ExecutionObservation {
+    pub(crate) observation: AgentObservation,
+    pub(crate) execution: Option<ObservedTmuxExecution>,
+}
+
+static LAST_TMUX_EXECUTIONS: OnceLock<Mutex<HashMap<String, ObservedTmuxExecution>>> =
+    OnceLock::new();
+const MAX_TMUX_EXECUTIONS: usize = 256;
+
 pub fn configured_endpoints(state_root: &Path) -> Result<Vec<String>, String> {
     let path = state_root.join(ENDPOINT_CAPABILITY_FILE);
     let bytes = match std::fs::read(&path) {
@@ -306,6 +337,144 @@ fn process_parents() -> Result<HashMap<u32, u32>, String> {
         parents.insert(pid, parent);
     }
     Ok(parents)
+}
+
+fn process_snapshot() -> Result<Vec<ProcessFact>, String> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,tty=,state=,comm="])
+        .output()
+        .map_err(|error| format!("TMUX_OBSERVATION_UNAVAILABLE: start ps: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "TMUX_OBSERVATION_UNAVAILABLE: ps failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "TMUX_OBSERVATION_UNAVAILABLE: ps returned non-UTF-8".to_owned())?;
+    parse_process_snapshot(&text)
+}
+
+fn parse_process_snapshot(text: &str) -> Result<Vec<ProcessFact>, String> {
+    let mut processes = Vec::new();
+    let mut seen = BTreeSet::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(ppid), Some(tty), Some(state)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err("TMUX_OBSERVATION_UNAVAILABLE: malformed ps process table".into());
+        };
+        let executable = fields.collect::<Vec<_>>().join(" ");
+        if executable.is_empty() {
+            return Err("TMUX_OBSERVATION_UNAVAILABLE: missing process executable".into());
+        }
+        let pid = pid
+            .parse::<u32>()
+            .map_err(|_| "TMUX_OBSERVATION_UNAVAILABLE: malformed ps pid".to_owned())?;
+        let ppid = ppid
+            .parse::<u32>()
+            .map_err(|_| "TMUX_OBSERVATION_UNAVAILABLE: malformed ps parent pid".to_owned())?;
+        if !seen.insert(pid) {
+            return Err("TMUX_OBSERVATION_UNAVAILABLE: duplicate ps pid".into());
+        }
+        processes.push(ProcessFact {
+            pid,
+            ppid,
+            tty: tty.to_owned(),
+            state: state.to_owned(),
+            executable,
+        });
+    }
+    if processes.is_empty() {
+        return Err("TMUX_OBSERVATION_UNAVAILABLE: empty ps process table".into());
+    }
+    Ok(processes)
+}
+
+fn process_start_id(pid: u32) -> Result<Option<String>, String> {
+    crate::host_runtime::exact_process_start_id(pid)
+        .map_err(|_| "TMUX_OBSERVATION_UNAVAILABLE: exact process identity query failed".into())
+}
+
+fn execution_key(endpoint: &TmuxEndpoint) -> String {
+    format!(
+        "{}\0{}\0{}\0{}",
+        endpoint.socket_path, endpoint.server_pid, endpoint.tmux_session_id, endpoint.pane_id
+    )
+}
+
+fn remembered_execution(key: &str) -> Result<Option<ObservedTmuxExecution>, String> {
+    let executions = LAST_TMUX_EXECUTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let executions = executions.lock().map_err(|_| {
+        "TMUX_OBSERVATION_UNAVAILABLE: execution observation lock poisoned".to_owned()
+    })?;
+    Ok(executions.get(key).cloned())
+}
+
+fn remember_execution(key: String, execution: ObservedTmuxExecution) -> Result<(), String> {
+    let executions = LAST_TMUX_EXECUTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut executions = executions.lock().map_err(|_| {
+        "TMUX_OBSERVATION_UNAVAILABLE: execution observation lock poisoned".to_owned()
+    })?;
+    executions.insert(key.clone(), execution);
+    if executions.len() > MAX_TMUX_EXECUTIONS {
+        if let Some(evicted) = executions
+            .keys()
+            .find(|candidate| *candidate != &key)
+            .cloned()
+        {
+            executions.remove(&evicted);
+        }
+    }
+    Ok(())
+}
+
+fn current_codex_candidates<'a>(
+    processes: &'a [ProcessFact],
+    pane_pid: u32,
+    pane_tty: &str,
+) -> Vec<&'a ProcessFact> {
+    let descendants = process_descendants(processes, pane_pid);
+    let pane_tty = normalize_tty(pane_tty);
+    processes
+        .iter()
+        .filter(|process| !process_is_zombie(process))
+        .filter(|process| codex_presence::is_codex_executable(&process.executable))
+        .filter(|process| {
+            descendants.contains(&process.pid)
+                || pane_tty
+                    .as_deref()
+                    .is_some_and(|tty| normalize_tty(&process.tty).as_deref() == Some(tty))
+        })
+        .collect()
+}
+
+fn process_descendants(processes: &[ProcessFact], root: u32) -> BTreeSet<u32> {
+    let mut descendants = BTreeSet::from([root]);
+    loop {
+        let mut changed = false;
+        for process in processes {
+            if descendants.contains(&process.ppid) && descendants.insert(process.pid) {
+                changed = true;
+            }
+        }
+        if !changed {
+            return descendants;
+        }
+    }
+}
+
+fn normalize_tty(tty: &str) -> Option<String> {
+    let tty = Path::new(tty).file_name()?.to_str()?;
+    if tty.is_empty() || tty == "??" || tty == "-" {
+        return None;
+    }
+    Some(tty.to_owned())
+}
+
+fn process_is_zombie(process: &ProcessFact) -> bool {
+    process.state.starts_with('Z')
 }
 
 fn caller_ancestors(caller_pid: u32, parents: &HashMap<u32, u32>) -> BTreeSet<u32> {
@@ -669,6 +838,33 @@ pub fn notify(
 /// activity remain separate, and every result carries a stable reason. The
 /// pane address is not treated as proof that an agent is present.
 pub fn observe_agent(endpoint: &TmuxEndpoint) -> Result<AgentObservation, String> {
+    let previous = remembered_execution(&execution_key(endpoint))?;
+    let result = observe_agent_with_execution(endpoint, previous.as_ref())?;
+    if let Some(execution) = result.execution {
+        remember_execution(execution_key(endpoint), execution)?;
+    }
+    Ok(result.observation)
+}
+
+/// The daemon supplies its current durable reference explicitly. This path
+/// never reads or writes the standalone view cache.
+pub(crate) fn observe_agent_with_execution(
+    endpoint: &TmuxEndpoint,
+    previous: Option<&ObservedTmuxExecution>,
+) -> Result<ExecutionObservation, String> {
+    let mut execution = None;
+    let observation = observe_with_execution(endpoint, previous, &mut execution)?;
+    Ok(ExecutionObservation {
+        observation,
+        execution,
+    })
+}
+
+fn observe_with_execution(
+    endpoint: &TmuxEndpoint,
+    previous: Option<&ObservedTmuxExecution>,
+    execution: &mut Option<ObservedTmuxExecution>,
+) -> Result<AgentObservation, String> {
     validate_endpoint(endpoint)?;
     match probe(endpoint) {
         Ok(PanePresence::Missing) => {
@@ -687,12 +883,22 @@ pub fn observe_agent(endpoint: &TmuxEndpoint) -> Result<AgentObservation, String
         Err(_) => return Ok(AgentObservation::unknown("pane_probe_unavailable")),
     }
 
-    let foreground_command = match foreground_command(endpoint) {
-        Ok(command) => command,
+    let foreground = match foreground_pane_facts(endpoint) {
+        Ok(foreground) => foreground,
         Err(_) => return Ok(AgentObservation::unknown("foreground_query_failed")),
     };
-    if let Some(observation) = codex_presence::classify_without_screen(&foreground_command) {
-        return Ok(observation);
+    if codex_presence::is_codex_command(&foreground.command) {
+        match unique_current_execution(&foreground) {
+            Ok(current) => *execution = current,
+            Err(reason) => return Ok(AgentObservation::unknown(reason)),
+        }
+    } else {
+        return Ok(observe_non_codex_with_process_facts(
+            &foreground,
+            codex_presence::is_shell_command(&foreground.command),
+            previous,
+            execution,
+        ));
     }
 
     let visible_screen = match capture_visible(endpoint) {
@@ -702,19 +908,136 @@ pub fn observe_agent(endpoint: &TmuxEndpoint) -> Result<AgentObservation, String
                 agent_presence: AgentPresence::Online,
                 activity: AgentActivity::Unknown,
                 background: false,
-                foreground_command: Some(foreground_command),
+                foreground_command: Some(foreground.command),
                 reason: "visible_screen_unavailable".into(),
             });
         }
     };
     Ok(codex_presence::classify_codex(
-        &foreground_command,
+        &foreground.command,
         &visible_screen,
     ))
 }
 
+fn unique_current_execution(
+    foreground: &ForegroundPaneFacts,
+) -> Result<Option<ObservedTmuxExecution>, &'static str> {
+    let Ok(processes) = process_snapshot() else {
+        return Err("process_query_failed");
+    };
+    let candidates = current_codex_candidates(
+        processes.as_slice(),
+        foreground.pane_pid,
+        &foreground.pane_tty,
+    );
+    if candidates.len() > 1 {
+        return Err("codex_process_candidates_ambiguous");
+    }
+    let Some(candidate) = candidates.first() else {
+        return Err("process_changed_during_observation");
+    };
+    let start_id = process_start_id(candidate.pid)
+        .map_err(|_| "process_identity_query_failed")?
+        .ok_or("process_changed_during_observation")?;
+    Ok(Some(ObservedTmuxExecution {
+        pid: candidate.pid,
+        start_id,
+    }))
+}
+
+fn observe_non_codex_with_process_facts(
+    foreground: &ForegroundPaneFacts,
+    shell_foreground: bool,
+    previous: Option<&ObservedTmuxExecution>,
+    execution: &mut Option<ObservedTmuxExecution>,
+) -> AgentObservation {
+    let processes = match process_snapshot() {
+        Ok(processes) => processes,
+        Err(_) => return AgentObservation::unknown("process_query_failed"),
+    };
+    let candidates = current_codex_candidates(
+        processes.as_slice(),
+        foreground.pane_pid,
+        &foreground.pane_tty,
+    );
+    if candidates.len() > 1 {
+        return AgentObservation::unknown("codex_process_candidates_ambiguous");
+    }
+    if let Some(candidate) = candidates.first() {
+        let start_id = match process_start_id(candidate.pid) {
+            Ok(Some(start_id)) => start_id,
+            Ok(None) => return AgentObservation::unknown("process_changed_during_observation"),
+            Err(_) => return AgentObservation::unknown("process_identity_query_failed"),
+        };
+        *execution = Some(ObservedTmuxExecution {
+            pid: candidate.pid,
+            start_id,
+        });
+        return AgentObservation {
+            agent_presence: AgentPresence::Online,
+            activity: AgentActivity::Unknown,
+            background: false,
+            foreground_command: Some(foreground.command.clone()),
+            reason: "current_codex_process_still_running".into(),
+        };
+    }
+
+    let Some(previous) = previous else {
+        return AgentObservation::unknown(if shell_foreground {
+            "foreground_shell_without_agent_exit_evidence"
+        } else {
+            "unsupported_foreground_process"
+        });
+    };
+    // Persisted exit evidence requires the precise native identity query,
+    // including when the process table no longer contains this PID.
+    observe_exact_execution(previous, &processes, foreground, &process_start_id)
+}
+
+fn observe_exact_execution(
+    previous: &ObservedTmuxExecution,
+    processes: &[ProcessFact],
+    foreground: &ForegroundPaneFacts,
+    query: &dyn Fn(u32) -> Result<Option<String>, String>,
+) -> AgentObservation {
+    let current_start_id = match query(previous.pid) {
+        Ok(Some(start_id)) => start_id,
+        Ok(None) => return exited_codex_observation(),
+        Err(_) => return AgentObservation::unknown("process_identity_query_failed"),
+    };
+    if current_start_id == previous.start_id {
+        if processes
+            .iter()
+            .any(|process| process.pid == previous.pid && process_is_zombie(process))
+        {
+            return exited_codex_observation();
+        }
+        return AgentObservation {
+            agent_presence: AgentPresence::Online,
+            activity: AgentActivity::Unknown,
+            background: false,
+            foreground_command: Some(foreground.command.clone()),
+            reason: "observed_codex_process_still_running".into(),
+        };
+    }
+    exited_codex_observation()
+}
+
+fn exited_codex_observation() -> AgentObservation {
+    AgentObservation {
+        agent_presence: AgentPresence::Offline,
+        activity: AgentActivity::Unknown,
+        background: false,
+        foreground_command: None,
+        reason: "observed_codex_process_exited".into(),
+    }
+}
+
 pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
     let observation = observe_agent(endpoint)?;
+    if observation.reason == "bound_pane_missing" {
+        return Ok(view_projection(observation, false, "missing"));
+    }
     let output = capture(endpoint)?;
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -725,16 +1048,25 @@ pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
         endpoint.socket_path, endpoint.tmux_session_id, endpoint.pane_id
     );
     let (changed, pane_observation) = record_observation(key, digest)?;
+    Ok(view_projection(observation, changed, pane_observation))
+}
+
+fn view_projection(
+    observation: AgentObservation,
+    changed: bool,
+    pane_observation: &str,
+) -> serde_json::Value {
     let (thread_state, thread_status, can_accept_direct_input) = match observation.agent_presence {
         AgentPresence::Online => match observation.activity {
             AgentActivity::Busy => ("working", "working", Some(false)),
             AgentActivity::Idle => ("idle", "idle", Some(true)),
             AgentActivity::WaitingUser => ("waiting_user", "waiting_user", Some(false)),
+            AgentActivity::Error => ("error", "error", Some(false)),
             AgentActivity::Unknown => ("unknown", "unknown", None),
         },
         AgentPresence::Offline | AgentPresence::Unknown => ("unknown", "unknown", None),
     };
-    Ok(serde_json::json!({
+    serde_json::json!({
         "thread": {
             "status": {"type": thread_status},
             "canAcceptDirectInput": can_accept_direct_input,
@@ -749,7 +1081,7 @@ pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
         "pane_output_changed": changed,
         "pane_output_observation": pane_observation,
         "transport": "tmux"
-    }))
+    })
 }
 
 pub fn snapshot(endpoint: &TmuxEndpoint, lines: usize) -> Result<serde_json::Value, String> {
@@ -811,7 +1143,7 @@ fn capture_visible(endpoint: &TmuxEndpoint) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn foreground_command(endpoint: &TmuxEndpoint) -> Result<String, String> {
+fn foreground_pane_facts(endpoint: &TmuxEndpoint) -> Result<ForegroundPaneFacts, String> {
     let output = tmux_command(
         &endpoint.socket_path,
         &[
@@ -819,13 +1151,56 @@ fn foreground_command(endpoint: &TmuxEndpoint) -> Result<String, String> {
             "-t",
             &endpoint.pane_id,
             "-F",
-            "#{session_id}\t#{pane_id}\t#{pane_current_command}",
+            "#{session_id}|#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_command}",
         ],
     )
     .map_err(|error| format!("TMUX_FOREGROUND_QUERY_FAILED: {error}"))?;
     let text = String::from_utf8(output.stdout)
         .map_err(|_| "TMUX_FOREGROUND_QUERY_FAILED: non-UTF-8 tmux metadata".to_owned())?;
-    codex_presence::parse_foreground_command(&endpoint.pane_id, &text)
+    parse_foreground_pane_facts(&endpoint.pane_id, &text)
+}
+
+fn parse_foreground_pane_facts(pane_id: &str, text: &str) -> Result<ForegroundPaneFacts, String> {
+    for line in text.lines() {
+        let mut fields = line.splitn(5, '|');
+        let (Some(session), Some(pane), Some(pane_pid), Some(pane_tty), Some(command)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            return Err("TMUX_FOREGROUND_QUERY_FAILED: malformed pane metadata".into());
+        };
+        let session_digits = session.strip_prefix('$').unwrap_or_default();
+        if session_digits.is_empty()
+            || !session_digits.bytes().all(|byte| byte.is_ascii_digit())
+            || validate_pane_id(pane).is_err()
+        {
+            return Err("TMUX_FOREGROUND_QUERY_FAILED: malformed pane metadata".into());
+        }
+        if pane != pane_id {
+            continue;
+        }
+        let pane_pid = pane_pid
+            .parse::<u32>()
+            .map_err(|_| "TMUX_FOREGROUND_QUERY_FAILED: malformed pane pid".to_owned())?;
+        let command = command.trim();
+        if pane_pid == 0
+            || pane_tty.trim().is_empty()
+            || command.is_empty()
+            || pane_tty.chars().any(char::is_control)
+            || command.chars().any(char::is_control)
+        {
+            return Err("TMUX_FOREGROUND_QUERY_FAILED: malformed pane facts".into());
+        }
+        return Ok(ForegroundPaneFacts {
+            pane_pid,
+            pane_tty: pane_tty.to_owned(),
+            command: command.to_owned(),
+        });
+    }
+    Err("TMUX_FOREGROUND_QUERY_FAILED: bound pane not returned".into())
 }
 
 fn capture_lines(endpoint: &TmuxEndpoint, lines: usize) -> Result<String, String> {
@@ -933,6 +1308,32 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    #[test]
+    fn exact_execution_requires_current_native_identity_and_keeps_query_failure_unknown() {
+        let previous = ObservedTmuxExecution {
+            pid: 700,
+            start_id: "100:1".into(),
+        };
+        let foreground = ForegroundPaneFacts {
+            pane_pid: 1,
+            pane_tty: "/dev/ttys001".into(),
+            command: "sh".into(),
+        };
+        for (identity, expected) in [
+            (Ok(Some("100:1".into())), AgentPresence::Online),
+            (Ok(Some("100:2".into())), AgentPresence::Offline),
+            (Ok(None), AgentPresence::Offline),
+            (Err("permission denied".into()), AgentPresence::Unknown),
+        ] {
+            let observed = observe_exact_execution(&previous, &[], &foreground, &|pid| {
+                assert_eq!(pid, previous.pid);
+                identity.clone()
+            });
+            assert_eq!(observed.agent_presence, expected, "{observed:?}");
+            assert_eq!(observed.activity, AgentActivity::Unknown);
+        }
+    }
+
     struct IsolatedTmux {
         socket: PathBuf,
         root: PathBuf,
@@ -1039,6 +1440,72 @@ pub(crate) mod tests {
                 codex_session_id: None,
                 codex_thread_id: None,
             }
+        }
+
+        fn fake_codex(&self) -> PathBuf {
+            let path = self.root.join("codex");
+            std::os::unix::fs::symlink("/bin/sleep", &path).unwrap();
+            path
+        }
+
+        fn send_command(&self, command: &str) {
+            let endpoint = self.endpoint();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let shell_ready = foreground_pane_facts(&endpoint)
+                    .is_ok_and(|facts| codex_presence::is_shell_command(&facts.command));
+                let prompt_visible = capture(&endpoint).is_ok_and(|screen| {
+                    screen.lines().any(|line| {
+                        let line = line.trim_end();
+                        line.ends_with('$') || line.ends_with('%') || line.ends_with('#')
+                    })
+                });
+                if shell_ready && prompt_visible {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "isolated shell prompt did not become ready"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            let typed = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.socket)
+                .args(["send-keys", "-l", "-t", "collab-test:0.0", command])
+                .output()
+                .expect("type into isolated tmux");
+            assert!(
+                typed.status.success(),
+                "type into isolated tmux: {}",
+                String::from_utf8_lossy(&typed.stderr)
+            );
+            let entered = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.socket)
+                .args(["send-keys", "-t", "collab-test:0.0", "Enter"])
+                .output()
+                .expect("submit isolated tmux command");
+            assert!(
+                entered.status.success(),
+                "submit isolated tmux command: {}",
+                String::from_utf8_lossy(&entered.stderr)
+            );
+        }
+
+        fn send_key(&self, key: &str) {
+            let output = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.socket)
+                .args(["send-keys", "-t", "collab-test:0.0", key])
+                .output()
+                .expect("send key into isolated tmux");
+            assert!(
+                output.status.success(),
+                "send key into isolated tmux: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
@@ -1470,8 +1937,12 @@ pub(crate) mod tests {
         let stable = view(&endpoint).unwrap();
         assert_eq!(stable["thread_state"], "unknown");
         assert_eq!(stable["thread"]["status"]["type"], "unknown");
-        assert_eq!(stable["agent_presence"], "offline");
+        assert_eq!(stable["agent_presence"], "unknown");
         assert_eq!(stable["activity"], "unknown");
+        assert_eq!(
+            stable["reason"],
+            "foreground_shell_without_agent_exit_evidence"
+        );
         assert!(stable["pane_output_changed"].is_boolean());
         assert!(matches!(
             stable["pane_output_observation"].as_str(),
@@ -1480,7 +1951,39 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn view_reports_shell_offline_despite_historical_codex_busy_text() {
+    fn view_reports_offline_when_bound_pane_is_explicitly_missing() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let keepalive = Command::new("tmux")
+            .arg("-S")
+            .arg(&tmux.socket)
+            .args(["new-session", "-d", "-s", "collab-keepalive", "sleep 60"])
+            .output()
+            .unwrap();
+        assert!(
+            keepalive.status.success(),
+            "start keepalive pane: {}",
+            String::from_utf8_lossy(&keepalive.stderr)
+        );
+        let killed = Command::new("tmux")
+            .arg("-S")
+            .arg(&tmux.socket)
+            .args(["kill-pane", "-t", &endpoint.pane_id])
+            .output()
+            .unwrap();
+        assert!(killed.status.success());
+
+        let observed = view(&endpoint).unwrap();
+        assert_eq!(observed["agent_presence"], "offline", "{observed}");
+        assert_eq!(observed["activity"], "unknown", "{observed}");
+        assert_eq!(observed["reason"], "bound_pane_missing", "{observed}");
+        assert_eq!(observed["pane_output_changed"], false, "{observed}");
+        assert_eq!(observed["pane_output_observation"], "missing", "{observed}");
+    }
+
+    #[test]
+    fn view_keeps_shell_unknown_despite_historical_codex_busy_text() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let tmux = IsolatedTmux::start_with_command(Some(
             "printf 'Codex history: esc to interrupt\\n'; exec sh -i",
@@ -1499,9 +2002,450 @@ pub(crate) mod tests {
         }
 
         let observed = view(&endpoint).unwrap();
-        assert_eq!(observed["agent_presence"], "offline", "{observed}");
+        assert_eq!(observed["agent_presence"], "unknown", "{observed}");
         assert_eq!(observed["activity"], "unknown", "{observed}");
         assert_eq!(observed["background"], false, "{observed}");
+        assert_eq!(
+            observed["reason"], "foreground_shell_without_agent_exit_evidence",
+            "{observed}"
+        );
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    fn wait_for_view<F>(
+        endpoint: &TmuxEndpoint,
+        deadline: Duration,
+        predicate: F,
+    ) -> serde_json::Value
+    where
+        F: Fn(&serde_json::Value) -> bool,
+    {
+        let deadline = std::time::Instant::now() + deadline;
+        loop {
+            let observed = view(endpoint).unwrap();
+            if predicate(&observed) {
+                return observed;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "observation did not reach the expected state: {observed}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_remembered_execution(
+        endpoint: &TmuxEndpoint,
+        deadline: Duration,
+        different_from: Option<u32>,
+    ) -> ObservedTmuxExecution {
+        let deadline = std::time::Instant::now() + deadline;
+        loop {
+            let observed = view(endpoint).unwrap();
+            if let Ok(Some(execution)) = remembered_execution(&execution_key(endpoint)) {
+                if different_from != Some(execution.pid) {
+                    return execution;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "execution was not remembered: {observed}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn codex_candidates(endpoint: &TmuxEndpoint) -> Vec<ProcessFact> {
+        let foreground = foreground_pane_facts(endpoint).unwrap();
+        let processes = process_snapshot().unwrap();
+        current_codex_candidates(&processes, foreground.pane_pid, &foreground.pane_tty)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    fn terminate_test_process(pid: u32, suspended: bool) {
+        unsafe {
+            if suspended {
+                libc::kill(pid as libc::pid_t, libc::SIGCONT);
+            }
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let alive = process_snapshot()
+                .unwrap_or_default()
+                .iter()
+                .any(|process| process.pid == pid);
+            if !alive {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn view_reports_offline_after_observed_codex_process_exits() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        tmux.send_command(&format!(
+            "{} 5; exec sh -i",
+            shell_quote(&codex.to_string_lossy())
+        ));
+
+        let running = wait_for_view(&endpoint, Duration::from_secs(3), |observed| {
+            observed["agent_presence"] == "online"
+                && observed["reason"] == "current_codex_process_still_running"
+        });
+        assert_eq!(running["activity"], "unknown", "{running}");
+
+        let exited = wait_for_view(&endpoint, Duration::from_secs(7), |observed| {
+            observed["agent_presence"] == "offline"
+        });
+        assert_eq!(exited["activity"], "unknown", "{exited}");
+        assert_eq!(
+            exited["reason"], "observed_codex_process_exited",
+            "{exited}"
+        );
+    }
+
+    #[test]
+    fn view_does_not_report_background_codex_as_offline() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        tmux.send_command(&format!(
+            "{} 5 & exec sh -i",
+            shell_quote(&codex.to_string_lossy())
+        ));
+
+        let observed = wait_for_view(&endpoint, Duration::from_secs(2), |observed| {
+            observed["agent_presence"] == "online"
+        });
+        assert_eq!(
+            observed["reason"], "current_codex_process_still_running",
+            "{observed}"
+        );
+        for process in codex_candidates(&endpoint) {
+            terminate_test_process(process.pid, false);
+        }
+    }
+
+    #[test]
+    fn view_does_not_report_suspended_codex_as_offline() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        tmux.send_command(&format!(
+            "{} 5 & exec sh -i",
+            shell_quote(&codex.to_string_lossy())
+        ));
+
+        let candidates = loop {
+            let candidates = codex_candidates(&endpoint);
+            if candidates.len() == 1 {
+                break candidates;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        unsafe {
+            assert_eq!(
+                libc::kill(candidates[0].pid as libc::pid_t, libc::SIGSTOP),
+                0
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let candidates = codex_candidates(&endpoint);
+            if candidates
+                .first()
+                .is_some_and(|process| process.state.starts_with('T'))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the Codex fixture did not enter a stopped state"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let observed = view(&endpoint).unwrap();
+        assert_eq!(observed["agent_presence"], "online", "{observed}");
+        assert_eq!(
+            observed["reason"], "current_codex_process_still_running",
+            "{observed}"
+        );
+        for process in codex_candidates(&endpoint) {
+            assert!(process.state.starts_with('T'), "{process:?}");
+            terminate_test_process(process.pid, true);
+        }
+    }
+
+    #[test]
+    fn view_keeps_remembered_detached_codex_online() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(codex);
+        command
+            .arg("5")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let start_id = process_start_id(child.id()).unwrap().unwrap();
+        remember_execution(
+            execution_key(&endpoint),
+            ObservedTmuxExecution {
+                pid: child.id(),
+                start_id,
+            },
+        )
+        .unwrap();
+
+        let observed = view(&endpoint).unwrap();
+        assert_eq!(observed["agent_presence"], "online", "{observed}");
+        assert_eq!(
+            observed["reason"], "observed_codex_process_still_running",
+            "{observed}"
+        );
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        }
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn view_uses_new_codex_execution_instead_of_previous_exit() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        tmux.send_command(&format!(
+            "{} 60; exec sh -i",
+            shell_quote(&codex.to_string_lossy()),
+        ));
+
+        let previous = wait_for_remembered_execution(&endpoint, Duration::from_secs(3), None);
+        terminate_test_process(previous.pid, false);
+        let exited = wait_for_view(&endpoint, Duration::from_secs(7), |observed| {
+            observed["agent_presence"] == "offline"
+        });
+        assert_eq!(
+            exited["reason"], "observed_codex_process_exited",
+            "{exited}"
+        );
+
+        tmux.send_command(&format!("{} 60 &", shell_quote(&codex.to_string_lossy())));
+
+        let observed = wait_for_view(&endpoint, Duration::from_secs(3), |observed| {
+            observed["agent_presence"] == "online"
+                && observed["reason"] == "current_codex_process_still_running"
+        });
+        assert_eq!(observed["agent_presence"], "online", "{observed}");
+        assert_eq!(
+            observed["reason"], "current_codex_process_still_running",
+            "{observed}"
+        );
+        let current =
+            wait_for_remembered_execution(&endpoint, Duration::from_secs(3), Some(previous.pid));
+        assert_ne!(current.pid, previous.pid);
+        terminate_test_process(current.pid, false);
+    }
+
+    struct ProcessFailureWrapper {
+        root: PathBuf,
+        original_path: Option<std::ffi::OsString>,
+    }
+
+    impl ProcessFailureWrapper {
+        fn fail_ps() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "collab-ps-wrapper-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let wrapper = root.join("ps");
+            std::fs::write(&wrapper, "#!/bin/sh\nexit 71\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let original_path = std::env::var_os("PATH");
+            let mut paths = vec![root.clone()];
+            if let Some(original) = &original_path {
+                paths.extend(std::env::split_paths(original));
+            }
+            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+            Self {
+                root,
+                original_path,
+            }
+        }
+    }
+
+    impl Drop for ProcessFailureWrapper {
+        fn drop(&mut self) {
+            match self.original_path.take() {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn view_keeps_shell_unknown_when_process_query_fails() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let _wrapper = ProcessFailureWrapper::fail_ps();
+
+        let observed = view(&endpoint).unwrap();
+        assert_eq!(observed["agent_presence"], "unknown", "{observed}");
+        assert_eq!(observed["activity"], "unknown", "{observed}");
+        assert_eq!(observed["reason"], "process_query_failed", "{observed}");
+    }
+
+    #[test]
+    #[ignore = "requires an installed Codex TUI; run only in the private tmux fixture"]
+    fn real_codex_frontend_keeps_suspended_and_background_executions_online() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = std::env::var_os("COLLAB_REAL_CODEX")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let output = Command::new("which")
+                    .arg("codex")
+                    .output()
+                    .expect("locate installed Codex");
+                assert!(output.status.success(), "installed Codex is required");
+                PathBuf::from(
+                    String::from_utf8(output.stdout)
+                        .expect("Codex path is UTF-8")
+                        .trim(),
+                )
+            });
+        let home = tmux.root.join("home");
+        let codex_home = tmux.root.join("codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&codex_home).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        let launch = format!(
+            "env HOME={} CODEX_HOME={} PATH={} {} --no-alt-screen --no-daemon -C {}",
+            shell_quote(&home.to_string_lossy()),
+            shell_quote(&codex_home.to_string_lossy()),
+            shell_quote(&path),
+            shell_quote(&codex.to_string_lossy()),
+            shell_quote(&tmux.root.to_string_lossy()),
+        );
+
+        tmux.send_command(&format!("{launch}; exec sh -i"));
+        eprintln!("real Codex frontend: waiting for initial foreground process");
+        let _running = wait_for_view(&endpoint, Duration::from_secs(15), |observed| {
+            observed["agent_presence"] == "online"
+        });
+        let initial = wait_for_remembered_execution(&endpoint, Duration::from_secs(5), None);
+
+        tmux.send_key("C-z");
+        eprintln!("real Codex frontend: waiting for suspended process observation");
+        let suspended = wait_for_view(&endpoint, Duration::from_secs(5), |observed| {
+            observed["agent_presence"] == "online"
+                && observed["reason"] == "current_codex_process_still_running"
+        });
+        assert_ne!(suspended["activity"], "offline");
+        let stopped = codex_candidates(&endpoint);
+        assert_eq!(stopped.len(), 1, "{stopped:?}");
+        assert!(stopped[0].state.starts_with('T'), "{:?}", stopped[0]);
+
+        terminate_test_process(stopped[0].pid, true);
+        eprintln!("real Codex frontend: waiting for suspended process exit");
+        let suspended_exited = wait_for_view(&endpoint, Duration::from_secs(10), |observed| {
+            observed["agent_presence"] == "offline"
+        });
+        assert_eq!(
+            suspended_exited["reason"], "observed_codex_process_exited",
+            "{suspended_exited}"
+        );
+
+        tmux.send_command(&format!("{launch}; exec sh -i"));
+        eprintln!("real Codex frontend: waiting for fresh foreground process");
+        let normal = wait_for_view(&endpoint, Duration::from_secs(15), |observed| {
+            observed["agent_presence"] == "online"
+        });
+        let normal_execution =
+            wait_for_remembered_execution(&endpoint, Duration::from_secs(5), Some(initial.pid));
+        assert_ne!(normal_execution.pid, initial.pid);
+        assert_eq!(normal["agent_presence"], "online", "{normal}");
+
+        tmux.send_key("C-c");
+        eprintln!("real Codex frontend: waiting for normal foreground exit");
+        let normal_exited = wait_for_view(&endpoint, Duration::from_secs(10), |observed| {
+            observed["agent_presence"] == "offline"
+        });
+        assert_eq!(normal_exited["activity"], "unknown", "{normal_exited}");
+        assert_eq!(
+            normal_exited["reason"], "observed_codex_process_exited",
+            "{normal_exited}"
+        );
+
+        tmux.send_command(&format!("{launch} &"));
+        eprintln!("real Codex frontend: waiting for background process");
+        let background = wait_for_view(&endpoint, Duration::from_secs(15), |observed| {
+            observed["agent_presence"] == "online"
+                && observed["reason"] == "current_codex_process_still_running"
+        });
+        assert_eq!(background["activity"], "unknown", "{background}");
+        let background_processes = codex_candidates(&endpoint);
+        assert_eq!(background_processes.len(), 1, "{background_processes:?}");
+        let background_pid = background_processes[0].pid;
+        assert_ne!(background_pid, initial.pid);
+        terminate_test_process(background_pid, false);
+        let first_background_exited =
+            wait_for_view(&endpoint, Duration::from_secs(10), |observed| {
+                observed["agent_presence"] == "offline"
+            });
+        assert_eq!(
+            first_background_exited["reason"], "observed_codex_process_exited",
+            "{first_background_exited}"
+        );
+
+        tmux.send_command(&format!("{launch} &"));
+        eprintln!("real Codex frontend: waiting for replacement process");
+        let replacement = wait_for_view(&endpoint, Duration::from_secs(15), |observed| {
+            observed["agent_presence"] == "online"
+                && observed["reason"] == "current_codex_process_still_running"
+        });
+        assert_eq!(replacement["activity"], "unknown", "{replacement}");
+        let replacement_processes = codex_candidates(&endpoint);
+        assert_eq!(replacement_processes.len(), 1, "{replacement_processes:?}");
+        let replacement_pid = replacement_processes[0].pid;
+        assert_ne!(replacement_pid, background_pid);
+
+        for process in codex_candidates(&endpoint) {
+            terminate_test_process(process.pid, false);
+        }
     }
 
     #[test]

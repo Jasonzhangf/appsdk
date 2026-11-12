@@ -44,9 +44,13 @@ collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"
 `collab context --query` 只读当前映射和当前快照，不查旧操作，也不需要操作能力码。
 `--op` 仅关联本次调用，不建立操作历史或恢复 selector。
 
+daemon 确认身份丢失后的十五分钟只约束自动重派。等待期内 manager 可以按现有合法
+邀请入口提前邀请。邀请不转任务归属。目标接受且 daemon 提交后，任务归属才转移。
+
 ## 当前授权与角色
 
-只有用户授权才恢复 master。普通 peer 恢复不推导 master 权限。
+已有合法角色随名字及唯一当前绑定自动恢复。新的 master 授权需要本次人类明确指令。
+普通 peer 恢复保持其当前合法角色。项目 master 统一使用 Jenny 名字。
 
 ```sh
 collab context --approve-grant '{"action":"restore_master","authorization":"<本次用户授权>"}'
@@ -62,6 +66,10 @@ replacement 阶段链已删除。当前 scope 不符或授权缺失会明确失�
 名字、角色和当前绑定继续工作。pending、queued、missing_facts 和错误都不是恢复
 完成。只补返回结果要求的真实事实，不让 agent 选择历史身份。
 
+人类明确退役 Jenny 时，释放 Jenny 当前绑定并撤销该精确 holder 的 master grant。
+未完成任务立即具备重派资格。消息、资源、工作记录和恢复入口保留。Jenny 继续作为
+master 专用名字。普通注册不得自动取得 Jenny。E3 执行验收尚未交回。
+
 ## 固定布局与物理名字
 
 Collab 和 tm-iterm 共用 `~/.local/state/tm-iterm/manifest.json`。manifest 管理固定
@@ -76,6 +84,9 @@ Collab 和 tm-iterm 共用 `~/.local/state/tm-iterm/manifest.json`。manifest �
 
 tm-iterm 只读 Collab identity map。禁止把转换出的 `entries`、布局数据或迁移预览
 写入 `~/.collab/identity-map.json`。布局 manifest 与身份表有各自的唯一 owner。
+
+该固定位置 gate 作用于 tmux。Rex 使用当前 server/session/block，按唯一当前 block 续接。
+项目 Rex session 按 cwd 末级目录命名，身份、角色和任务变化保留该名称。
 
 Desktop 和 DSH 使用同一身份表，只是绑定方式不同。Desktop 使用宿主 bridge 的
 当前 sessionID 和真实 caller 能力；DSH 使用 gateway 的当前 sessionID、endpoint

@@ -423,6 +423,54 @@ impl GlobalState {
         })
     }
 
+    /// Release one exact execution binding after its current-map relation is no
+    /// longer protected. A missing project or binding is an idempotent no-op.
+    /// A different generation under the same binding id is never removed.
+    pub fn release_runtime_execution(
+        &mut self,
+        binding: &RuntimeBinding,
+    ) -> Result<StateVersion, StateError> {
+        binding.validate()?;
+        let scope_key = binding.project_scope.as_str().to_owned();
+        let binding_key = binding.binding_id.as_str().to_owned();
+        let Some(project) = self.lookup_project(&binding.project_scope) else {
+            return Ok(self.version());
+        };
+        let Some(current) = project.lookup_binding(&binding.binding_id) else {
+            return Ok(self.version());
+        };
+        if current != binding {
+            return Err(StateError::BindingConflict(format!(
+                "binding {} is not the exact execution generation being released",
+                binding.binding_id
+            )));
+        }
+        if project.lookup_master_grant(&binding.binding_id).is_some() {
+            return Err(StateError::BindingConflict(format!(
+                "binding {} still has an exact master grant",
+                binding.binding_id
+            )));
+        }
+
+        self.mutate(|next| {
+            let project = next
+                .projects
+                .get_mut(&scope_key)
+                .ok_or_else(|| StateError::ProjectNotRegistered(scope_key.clone()))?;
+            match project.runtime_bindings.get(&binding_key) {
+                None => Ok(()),
+                Some(current) if current == binding => {
+                    project.runtime_bindings.remove(&binding_key);
+                    Ok(())
+                }
+                Some(current) => Err(StateError::BindingConflict(format!(
+                    "binding {} changed from {} to {} during release",
+                    binding.binding_id, binding.binding_id, current.binding_id
+                ))),
+            }
+        })
+    }
+
     /// Restore one exact runtime binding after a registration transaction
     /// fails to publish its host route. This is not a general rollback: the
     /// failed binding must still be current and the previous binding must be

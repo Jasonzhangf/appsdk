@@ -349,6 +349,7 @@ fn current_state_preserves_invitation_and_its_capacity_reservation() {
                     created_ms: now_ms(),
                     original_status: None,
                     original_owner: None,
+                    automatic_source: None,
                 }),
                 ..crate::board::BoardTaskDetails::default()
             },

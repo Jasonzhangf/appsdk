@@ -275,6 +275,28 @@ pub(crate) fn board_peer_has_execution_reservation(state: &State, peer: &str, ex
     })
 }
 
+fn board_named_execution_reserved(
+    state: &State,
+    peer: &str,
+    slot_name: &str,
+    except_task: &str,
+) -> bool {
+    let invitation_reserved = state.tasks.values().any(|task| {
+        task.id != except_task
+            && !matches!(task.status.as_str(), "closed" | "cancelled")
+            && state.board_details.get(&task.id)
+                .and_then(|details| details.invitation.as_ref())
+                .is_some_and(|invite| invite.peer_id == peer)
+    });
+    let executing = state.ticket_phases.iter().any(|phase| {
+        phase.task_id != except_task
+            && phase.slot_name.as_deref() == Some(slot_name)
+            && matches!(phase.status,
+                ticket_state::TicketPhaseStatus::Claimed | ticket_state::TicketPhaseStatus::Running)
+    });
+    invitation_reserved || executing
+}
+
 fn board_check_revision(state: &State, task_id: &str, expected: u64) -> Result<BoardTaskDetails, Resp> {
     let details = state.board_details.get(task_id)
         .ok_or_else(|| Resp::err("BOARD_TASK_NOT_FOUND: no described task with this id"))?;
@@ -682,12 +704,412 @@ fn board_check_actor(state: &State, actor: &str, token: &str) -> Result<(), Resp
     Ok(())
 }
 
+fn board_current_map_actor_gate(
+    state: &State,
+    actor: &str,
+    token: &str,
+    task_id: &str,
+) -> Result<(), Resp> {
+    board_check_actor(state, actor, token)?;
+    if let Some(task) = state.tasks.get(task_id) {
+        if !board_task_visible(state, task, Some(actor)) {
+            return Err(Resp::err(
+                "BOARD_PRIVATE_TASK: task is outside the caller's board view",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn board_task_owner_admission(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    task_owner_gate_maybe_with_control(server, state, control, task_id, actor)
+}
+
 fn board_check_master_locked(server: &Server, state: &State, actor: &str) -> Result<(), Resp> {
     let route = server_route_scope(server, state).map_err(Resp::err)?;
     if current_master_worker_id(state, route.as_ref()).as_deref() != Some(actor) {
         return Err(Resp::err("BOARD_MASTER_REQUIRED: only the current project master may invite or withdraw"));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn board_describe_locked(
+    server: &Server,
+    state: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+    title: String,
+    description: String,
+    delivery_condition: String,
+    test_condition: String,
+    long_horizon: crate::board::LongHorizonArgs,
+) -> Resp {
+    if let Err(error) = board_check_actor(state, &actor, &token) {
+        return error;
+    }
+    let Some(mut task) = state.tasks.get(&id).cloned() else {
+        return Resp::err("task not found");
+    };
+    if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err()
+        && board_check_master_locked(server, state, &actor).is_err()
+    {
+        return Resp::err("only the current task owner or current master may describe it");
+    }
+    let Some(mut details) = state.board_details.get(&id).cloned() else {
+        return Resp::err("task description record missing");
+    };
+    if details.revision != expected_revision {
+        return Resp::err("BOARD_STALE_REVISION: reread the board");
+    }
+    let long_horizon = match long_horizon.merge(details.long_horizon.as_ref()) {
+        Ok(spec) => spec,
+        Err(error) => return Resp::err(error),
+    };
+    if [&title, &description, &delivery_condition, &test_condition]
+        .iter()
+        .any(|text| text.trim().is_empty())
+    {
+        return Resp::err("description and conditions must not be empty");
+    }
+    if task.status == "invited"
+        && (details.title != title
+            || details.description != description
+            || details.delivery_condition != delivery_condition
+            || details.test_condition != test_condition)
+    {
+        return Resp::err("withdraw the invitation before changing its contract");
+    }
+    if matches!(task.status.as_str(), "merged" | "closed" | "cancelled") {
+        return Resp::err("WORK_CONTRACT_TERMINAL: create a follow-up task");
+    }
+    let changed = details.title != title
+        || details.description != description
+        || details.delivery_condition != delivery_condition
+        || details.test_condition != test_condition
+        || details.long_horizon != long_horizon;
+    let mut events = Vec::new();
+    if changed {
+        if let Some(mut record) = state.task_lifecycle.get(&id).cloned() {
+            events.extend(invalidate_work_review(
+                state,
+                &task,
+                &mut record,
+                details.work_policy.reviewer_name.clone(),
+            ));
+            events.push(Event::TaskLifecycleUpdated {
+                task_id: id.clone(),
+                record,
+            });
+            if matches!(task.status.as_str(), "accepted" | "delivered") {
+                task.status = "rework".into();
+            }
+        }
+    }
+    details.title = title;
+    details.description = description;
+    details.delivery_condition = delivery_condition;
+    details.test_condition = test_condition;
+    details.long_horizon = long_horizon;
+    details.public_visibility |= !is_managed_subagent(state, &actor);
+    details.revision += 1;
+    task.updated_ms = now_ms();
+    events.extend([
+        Event::TaskUpdated { task },
+        Event::BoardDetailsChanged {
+            task_id: id.clone(),
+            details,
+        },
+    ]);
+    if let Some(event) = ticket_rework_phase_event(server, state, &id) {
+        events.push(event);
+    }
+    let commit = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(state, &events, control)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server
+            .commit_locked_checked(state, &events)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+    };
+    if let Err(error) = commit {
+        return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
+    }
+    board_task_response(server, state, &id, &actor)
+}
+
+fn dispatch_board_command_current_map(
+    manager: &ProjectRuntimeManager,
+    server: &Server,
+    project_context: Option<&crate::proto::ProjectContext>,
+    actor: String,
+    token: String,
+    command: &BoardCommand,
+) -> Resp {
+    match command {
+        BoardCommand::Invite {
+            id,
+            to,
+            expected_revision,
+        } => board_invite_current_map(
+            manager,
+            server,
+            actor,
+            token,
+            id.clone(),
+            to.clone(),
+            *expected_revision,
+        ),
+        BoardCommand::Respond {
+            id,
+            accept,
+            decline: _,
+            expected_revision,
+            reason,
+        } => board_respond_current_map(
+            manager,
+            server,
+            actor,
+            token,
+            id.clone(),
+            *expected_revision,
+            *accept,
+            reason.clone(),
+        ),
+        BoardCommand::Dispatch {
+            id,
+            expected_revision,
+            long_horizon,
+        } => board_dispatch_current_map(
+            manager,
+            server,
+            actor,
+            token,
+            id.clone(),
+            *expected_revision,
+            long_horizon.clone(),
+        ),
+        BoardCommand::Start {
+            id,
+            expected_revision,
+            attempt,
+        } => {
+            let Some(context) = project_context else {
+                return Resp::err(
+                    "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                );
+            };
+            manager
+                .with_current_task_state_response(
+                    server,
+                    context,
+                    &actor,
+                    &token,
+                    |control, state, _| {
+                        board_current_map_actor_gate(state, &actor, &token, id)?;
+                        Ok(board_start_locked(
+                            server,
+                            state,
+                            Some(control),
+                            actor.clone(),
+                            token.clone(),
+                            id.clone(),
+                            *expected_revision,
+                            *attempt,
+                        ))
+                    },
+                )
+                .unwrap_or_else(|error| error)
+        }
+        BoardCommand::Update {
+            id,
+            expected_revision,
+            status,
+            next,
+        } => {
+            let Some(context) = project_context else {
+                return Resp::err(
+                    "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                );
+            };
+            manager
+                .with_current_task_state_response(
+                    server,
+                    context,
+                    &actor,
+                    &token,
+                    |control, state, _| {
+                        board_current_map_actor_gate(state, &actor, &token, id)?;
+                        board_check_revision(state, id, *expected_revision)?;
+                        if status.is_none() && next.is_none() {
+                            return Err(Resp::err("provide --status or --next"));
+                        }
+                        let result = task_update_locked(
+                            server,
+                            state,
+                            Some(control),
+                            actor.clone(),
+                            token.clone(),
+                            id.clone(),
+                            status.clone(),
+                            next.clone(),
+                            None,
+                            None,
+                        );
+                        if !result.ok {
+                            return Ok(result);
+                        }
+                        let block_request = result.data.get("block_request").cloned();
+                        let mut response = board_task_response(server, state, id, &actor);
+                        if let (Some(request), Some(object)) =
+                            (block_request, response.data.as_object_mut())
+                        {
+                            object.insert("block_request".into(), request);
+                        }
+                        Ok(response)
+                    },
+                )
+                .unwrap_or_else(|error| error)
+        }
+        BoardCommand::Describe {
+            id,
+            expected_revision,
+            title,
+            description,
+            delivery_condition,
+            test_condition,
+            long_horizon,
+        } => {
+            let Some(context) = project_context else {
+                return Resp::err(
+                    "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                );
+            };
+            manager
+                .with_current_task_state_response(
+                    server,
+                    context,
+                    &actor,
+                    &token,
+                    |control, state, _| {
+                        board_current_map_actor_gate(state, &actor, &token, id)?;
+                        Ok(board_describe_locked(
+                            server,
+                            state,
+                            Some(control),
+                            actor.clone(),
+                            token.clone(),
+                            id.clone(),
+                            *expected_revision,
+                            title.clone(),
+                            description.clone(),
+                            delivery_condition.clone(),
+                            test_condition.clone(),
+                            long_horizon.clone(),
+                        ))
+                    },
+                )
+                .unwrap_or_else(|error| error)
+        }
+        BoardCommand::DeclineAssigned {
+            id,
+            expected_revision,
+            reason,
+        } => {
+            let Some(context) = project_context else {
+                return Resp::err(
+                    "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                );
+            };
+            manager
+                .with_current_task_state_response(
+                    server,
+                    context,
+                    &actor,
+                    &token,
+                    |control, state, _| {
+                        board_current_map_actor_gate(state, &actor, &token, id)?;
+                        Ok(board_decline_assigned_locked(
+                            server,
+                            state,
+                            Some(control),
+                            actor.clone(),
+                            token.clone(),
+                            id.clone(),
+                            *expected_revision,
+                            reason.clone(),
+                        ))
+                    },
+                )
+                .unwrap_or_else(|error| error)
+        }
+        BoardCommand::Policy {
+            scope,
+            id,
+            work_kind,
+            prefer_role,
+            executor,
+            reviewer,
+            clear_prefer_role,
+            clear_executor,
+            clear_reviewer,
+            expected_revision,
+        } => {
+            let patch = match parse_work_policy(
+                work_kind.clone(),
+                prefer_role.clone(),
+                executor.clone(),
+                reviewer.clone(),
+                *clear_prefer_role,
+                *clear_executor,
+                *clear_reviewer,
+            ) {
+                Ok(patch) => patch,
+                Err(error) => return error,
+            };
+            let Some(context) = project_context else {
+                return Resp::err(
+                    "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                );
+            };
+            manager
+                .with_current_task_state_response(
+                    server,
+                    context,
+                    &actor,
+                    &token,
+                    |control, state, _| {
+                        if let Some(id) = id {
+                            board_current_map_actor_gate(state, &actor, &token, id)?;
+                        }
+                        Ok(board_work_policy_locked(
+                            server,
+                            state,
+                            Some(control),
+                            actor.clone(),
+                            token.clone(),
+                            scope.clone(),
+                            id.clone(),
+                            patch.clone(),
+                            *expected_revision,
+                        ))
+                    },
+                )
+                .unwrap_or_else(|error| error)
+        }
+        _ => Resp::err("BOARD_CURRENT_MAP_DISPATCH_INVALID"),
+    }
 }
 
 fn handle_board_command(server: &Server, actor: String, token: String, command: BoardCommand) -> Resp {
@@ -785,7 +1207,7 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
             if let Err(error) = board_check_revision(&state, &id, expected_revision) { return error; }
             if status.is_none() && next.is_none() { return Resp::err("provide --status or --next"); }
-            let result = task_update_locked(server, &mut state, actor.clone(), token, id.clone(), status, next, None, None);
+            let result = task_update_locked(server, &mut state, None, actor.clone(), token, id.clone(), status, next, None, None);
             if !result.ok { return result; }
             let block_request = result.data.get("block_request").cloned();
             let mut response = board_task_response(server, &state, &id, &actor);
@@ -797,44 +1219,20 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         BoardCommand::Describe { id, expected_revision, title, description, delivery_condition, test_condition, long_horizon } => {
             let mut state = server.state.lock().unwrap();
             if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-            let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
-            if task.owner != actor && board_check_master_locked(server, &state, &actor).is_err() { return Resp::err("only the task owner or current master may describe it"); }
-            let Some(mut details) = state.board_details.get(&id).cloned() else { return Resp::err("task description record missing"); };
-            if details.revision != expected_revision { return Resp::err("BOARD_STALE_REVISION: reread the board"); }
-            let long_horizon = match long_horizon.merge(details.long_horizon.as_ref()) {
-                Ok(spec) => spec, Err(error) => return Resp::err(error),
-            };
-            if [&title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) { return Resp::err("description and conditions must not be empty"); }
-            if task.status == "invited" && (details.title != title || details.description != description
-                || details.delivery_condition != delivery_condition || details.test_condition != test_condition) {
-                return Resp::err("withdraw the invitation before changing its contract");
-            }
-            if matches!(task.status.as_str(),"merged"|"closed"|"cancelled") {return Resp::err("WORK_CONTRACT_TERMINAL: create a follow-up task");}
-            let changed=details.title!=title || details.description!=description
-                || details.delivery_condition!=delivery_condition || details.test_condition!=test_condition
-                || details.long_horizon!=long_horizon;
-            let mut events=Vec::new();
-            if changed {
-                if let Some(mut record)=state.task_lifecycle.get(&id).cloned() {
-                    events.extend(invalidate_work_review(&state,&task,&mut record,details.work_policy.reviewer_name.clone()));
-                    events.push(Event::TaskLifecycleUpdated {task_id:id.clone(),record});
-                    if matches!(task.status.as_str(),"accepted"|"delivered") {task.status="rework".into();}
-                }
-            }
-            details.title = title; details.description = description;
-            details.delivery_condition = delivery_condition; details.test_condition = test_condition;
-            details.long_horizon = long_horizon;
-            // Editing a claimed public task does not make it a private child assignment.
-            details.public_visibility |= !is_managed_subagent(&state, &actor); details.revision += 1;
-            task.updated_ms=now_ms();
-            events.extend([Event::TaskUpdated {task},Event::BoardDetailsChanged { task_id: id.clone(), details }]);
-            if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
-                events.push(event);
-            }
-            if let Err(error) = server.commit_locked_checked(&mut state, &events) {
-                return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
-            }
-            board_task_response(server, &state, &id, &actor)
+            board_describe_locked(
+                server,
+                &mut state,
+                None,
+                actor,
+                token,
+                id,
+                expected_revision,
+                title,
+                description,
+                delivery_condition,
+                test_condition,
+                long_horizon,
+            )
         },
         BoardCommand::Invite { id, to, expected_revision } => board_invite(server, actor, token, id, to, expected_revision),
         BoardCommand::Respond { id, accept, decline, expected_revision, reason } => {

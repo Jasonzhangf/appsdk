@@ -601,7 +601,15 @@ fn subscription_status_is_active(status: &str) -> bool {
 fn subscription_status_retires(status: &str) -> bool {
     matches!(
         status,
-        "cancelled" | "consumed" | "expired" | "transport-lost" | "suppressed"
+        "cancelled"
+            | "consumed"
+            | "expired"
+            | "transport-lost"
+            | "suppressed"
+            // A task-linked schedule that lost its holder keeps waiting for the
+            // next committed owner. That removes the old holder's wake
+            // obligation, so it retires responsibility like a cancellation.
+            | "waiting-owner"
     )
 }
 
@@ -845,6 +853,9 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
                 ResponsibilityEffect::Mutates(binding.agent_id.as_str())
             }
         }
+        // This removes only the retired execution generation. It does not add
+        // or change a task, message, subscription or resource responsibility.
+        Event::GlobalRuntimeExecutionReleased { .. } => ResponsibilityEffect::Safe,
         Event::GlobalMasterGranted { grant } => {
             ResponsibilityEffect::Mutates(grant.agent_id.as_str())
         }
@@ -1629,6 +1640,20 @@ pub enum Event {
         name: String,
         revision: u64,
     },
+    /// Durable current reassignment scheduling relation. Identity remains owned
+    /// by the identity map; this event neither grants identity nor carries
+    /// credentials.
+    NameReassignmentScheduled {
+        project_scope: String,
+        name: String,
+        schedule: super::name_state::NameReassignmentSchedule,
+    },
+    /// Remove the current reassignment schedule for one name. Used when a valid
+    /// current holder returns, or when the name has no applicable unclosed work.
+    NameReassignmentCleared {
+        project_scope: String,
+        name: String,
+    },
     TaskAssignmentUpdated {
         assignment: super::name_state::TaskAssignment,
     },
@@ -1655,6 +1680,14 @@ pub enum Event {
     },
     AgentActivityObserved {
         activity: super::name_state::AgentActivityRecord,
+    },
+    RexExecutionObserved {
+        worker_id: String,
+        record: super::rex_monitor::ObservedRexExecution,
+    },
+    TmuxExecutionObserved {
+        worker_id: String,
+        record: super::name_monitor::ObservedTmuxExecutionRecord,
     },
     SchedulerAdmission {
         admission: SchedulerAdmissionRecord,
@@ -1751,6 +1784,12 @@ pub enum Event {
         registration: super::global_state::ProjectRegistration,
     },
     GlobalRuntimeBound {
+        binding: super::global_state::RuntimeBinding,
+    },
+    /// Release one exact execution binding after the current identity map no
+    /// longer protects it. This is control-plane state only; it retains the
+    /// worker, credential, tasks, messages, subscriptions and resources.
+    GlobalRuntimeExecutionReleased {
         binding: super::global_state::RuntimeBinding,
     },
     GlobalMasterGranted {

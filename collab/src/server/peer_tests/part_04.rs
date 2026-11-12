@@ -98,6 +98,7 @@ fn typed_waiting_user_projects_to_worker_status_without_becoming_idle() {
     let session = worker.transport.as_ref().unwrap().session_id.clone().unwrap();
     for (presence, activity, expected) in [
         (AgentPresence::Online, AgentActivity::WaitingUser, "waiting_user"),
+        (AgentPresence::Online, AgentActivity::Error, "error"),
         (AgentPresence::Online, AgentActivity::Unknown, "unknown"),
         (AgentPresence::Offline, AgentActivity::WaitingUser, "absent"),
     ] {
@@ -1325,11 +1326,6 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
     for (target, token, expected) in [
         ("snapshot-peer", "wrong-token", "token mismatch"),
         ("missing-peer", "token-snapshot-master", "not registered"),
-        (
-            "snapshot-appserver",
-            "token-snapshot-master",
-            "WORKER_SNAPSHOT_UNSUPPORTED",
-        ),
     ] {
         let response = super::handle_worker_snapshot(
             &server,
@@ -1345,6 +1341,19 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
             response.error
         );
     }
+    assert_eq!(server.state.lock().unwrap().revision, revision_before);
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), state_before);
+    let resolved = super::handle_worker_snapshot(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "snapshot-appserver".into(),
+        40,
+    );
+    assert!(resolved.ok, "{resolved:?}");
+    assert_eq!(resolved.data["snapshot"], "not_collected");
+    assert_eq!(resolved.data["snapshot_collected"], false);
+    assert_eq!(resolved.data["judgment_status"], "satisfied");
     server
         .state
         .lock()
@@ -1363,11 +1372,8 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "snapshot-appserver".into(),
         40,
     );
-    assert!(!incidental_tmux.ok);
-    assert!(incidental_tmux
-        .error
-        .unwrap()
-        .starts_with("WORKER_SNAPSHOT_UNSUPPORTED:"));
+    assert!(!incidental_tmux.ok, "{incidental_tmux:?}");
+    assert_eq!(incidental_tmux.error.as_deref(), Some("WORKER_STATUS_CAPTURE_BINDING_CHANGED"));
     server
         .state
         .lock()
@@ -1388,9 +1394,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
 
     let state = server.state.lock().unwrap();
     assert!(!state.worker_snapshots.contains_key("snapshot-peer"));
-    assert_eq!(state.revision, revision_before);
     drop(state);
-    assert_eq!(std::fs::read(&server.state_path).unwrap(), state_before);
 
     let killed = Command::new("tmux")
         .args([

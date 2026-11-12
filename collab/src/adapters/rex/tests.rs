@@ -901,8 +901,11 @@ async fn event_cleanup_after_setup_expiry_does_not_wait_for_inherited_stderr() {
 async fn cancelling_an_operation_terminates_its_owned_cli_child() {
     let _fixture = fixture_guard().await;
     let env = TestEnv::new("hang");
+    // CI can briefly delay fixture startup; allow the full Rex budget while
+    // still requiring the exact owned PID to be logged before cancellation.
+    set_test_timeout(Some(Duration::from_secs(10)));
     let operation = tokio::spawn(async { write_text(&endpoint(), "hello").await });
-    let pid = tokio::time::timeout(Duration::from_secs(2), async {
+    let pid = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(pid) = env
                 .calls()

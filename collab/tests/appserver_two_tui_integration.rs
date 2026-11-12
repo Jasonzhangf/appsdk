@@ -797,7 +797,7 @@ fn context_recovery_missing_peer_map_row_does_not_block_current_context() {
         task.insert("status".into(), json!("working"));
         task.insert("worktree_path".into(), json!("/tmp/unmapped-peer-resource"));
         task.insert("branch".into(), json!("codex/unmapped-peer-resource"));
-        state["board_details"][task_id]["public_visibility"] = json!(true);
+        state["board_details"][task_id]["public_visibility"] = json!(false);
         state["worktree_bindings"]["binding-unmapped-peer-resource"] = json!({
             "worktree_root": "/tmp/unmapped-peer-resource",
             "owning_project_scope": first["project_root"],
@@ -851,14 +851,17 @@ fn context_recovery_missing_peer_map_row_does_not_block_current_context() {
     assert_eq!(unmapped["identity_status"], "unmapped");
     assert!(unmapped["display_name"].is_null(), "{unmapped}");
     assert!(unmapped["role"].is_null(), "{unmapped}");
-    assert_eq!(unmapped["task_ids"], json!([task_id]));
-    assert_eq!(unmapped["resource_task_ids"], json!([task_id]));
     assert!(
-        unmapped["subscription_ids"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(active_subscription_id)),
-        "the unmapped worker keeps its active subscription visible: {unmapped}"
+        unmapped["task_ids"].as_array().unwrap().is_empty(),
+        "an ordinary peer must not see another worker's private tasks: {unmapped}"
+    );
+    assert!(
+        unmapped["resource_task_ids"].as_array().unwrap().is_empty(),
+        "an ordinary peer must not see another worker's private resources: {unmapped}"
+    );
+    assert!(
+        unmapped["subscription_ids"].as_array().unwrap().is_empty(),
+        "an ordinary peer must not see another worker's private subscriptions: {unmapped}"
     );
     assert!(
         !unmapped["subscription_ids"]
@@ -888,14 +891,23 @@ fn context_recovery_missing_peer_map_row_does_not_block_current_context() {
     assert_eq!(context_peer["identity_status"], "unmapped");
     assert!(context_peer["display_name"].is_null(), "{context_peer}");
     assert!(context_peer["role"].is_null(), "{context_peer}");
-    assert_eq!(context_peer["open_task_ids"], json!([task_id]));
-    assert_eq!(context_peer["resource_task_ids"], json!([task_id]));
+    assert!(
+        context_peer["open_task_ids"].as_array().unwrap().is_empty(),
+        "an ordinary peer must not see another worker's private tasks: {context_peer}"
+    );
+    assert!(
+        context_peer["resource_task_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "an ordinary peer must not see another worker's private resources: {context_peer}"
+    );
     assert!(
         context_peer["subscription_ids"]
             .as_array()
             .unwrap()
-            .contains(&json!(active_subscription_id)),
-        "the unmapped peer keeps its active subscription visible: {context_peer}"
+            .is_empty(),
+        "an ordinary peer must not see another worker's private subscriptions: {context_peer}"
     );
     assert!(
         !context_peer["subscription_ids"]
@@ -921,6 +933,75 @@ fn context_recovery_missing_peer_map_row_does_not_block_current_context() {
             .iter()
             .any(|worker| worker["id"] == second["identity"]["worker_id"]),
         "the current peer remains on the board: {board}"
+    );
+
+    // The same responsibility fields remain available to the project master.
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "review unmapped worker responsibilities",
+        ],
+        THREAD_B,
+    );
+    let master_context = fixture.run_public(&["context"], THREAD_B);
+    let master_peer = master_context["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["worker_id"] == json!(first_worker))
+        .expect("master context keeps the unmapped peer visible");
+    assert_eq!(master_peer["open_task_ids"], json!([task_id]));
+    assert_eq!(master_peer["resource_task_ids"], json!([task_id]));
+    assert!(
+        master_peer["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(active_subscription_id)),
+        "the master keeps the unmapped worker's active responsibility visible: {master_peer}"
+    );
+    assert!(
+        !master_peer["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(consumed_subscription_id)),
+        "terminal subscription history stays hidden from the master: {master_peer}"
+    );
+    let master_board_output = fixture.command_public(&["board", "show"], THREAD_B);
+    assert!(
+        master_board_output.status.success(),
+        "master board read failed: {}",
+        String::from_utf8_lossy(&master_board_output.stderr)
+    );
+    let master_board: Value = serde_json::from_slice(&master_board_output.stdout).unwrap();
+    let master_unmapped = master_board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["id"] == json!(first_worker))
+        .expect("master board keeps the unmapped peer visible");
+    assert_eq!(master_unmapped["identity_status"], "unmapped");
+    assert!(
+        master_unmapped["display_name"].is_null(),
+        "{master_unmapped}"
+    );
+    assert!(master_unmapped["role"].is_null(), "{master_unmapped}");
+    assert_eq!(master_unmapped["task_ids"], json!([task_id]));
+    assert_eq!(master_unmapped["resource_task_ids"], json!([task_id]));
+    assert!(
+        master_unmapped["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(active_subscription_id)),
+        "the master board keeps active unmapped responsibility visible: {master_unmapped}"
+    );
+    assert!(
+        !master_unmapped["subscription_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(consumed_subscription_id)),
+        "terminal subscription history stays hidden on the master board: {master_unmapped}"
     );
 }
 

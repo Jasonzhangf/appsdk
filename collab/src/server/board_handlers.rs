@@ -64,9 +64,10 @@ fn assignment_unavailability(state: &State, control: &binding_slot::BindingContr
     Ok(None)
 }
 
-fn board_task_view_with_master(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, viewer: Option<&str>, _master: Option<&str>, route: Option<&RouteScope>) -> Result<Option<BoardTaskView>, String> {
-    if !board_task_visible(state, task, viewer) { return Ok(None); }
-    let details = state.board_details.get(&task.id).expect("visible board details");
+fn board_task_view_with_master(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, viewer: Option<&str>, master: Option<&str>, route: Option<&RouteScope>) -> Result<Option<BoardTaskView>, String> {
+    let Some(details) = state.board_details.get(&task.id) else { return Ok(None); };
+    let master_view = viewer.is_some_and(|viewer| Some(viewer) == master);
+    if !board_task_visible(state, task, viewer) && !master_view { return Ok(None); }
     let lifecycle = state.task_lifecycle.get(&task.id);
     let cleanup = state.cleanup_receipts.get(&task.id);
     let policy=state.effective_work_policy(&task.id);
@@ -237,8 +238,9 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             None => None,
         };
         // A durable worker without a current map row remains visible as an
-        // explicitly unmapped member. Its tasks and resources stay attached;
-        // neither display name nor role is invented from the raw worker ID.
+        // explicitly unmapped member. Its responsibility IDs stay attached only
+        // when the caller can see them; neither display name nor role is
+        // invented from the raw worker ID.
         let (identity_status, display_name, role, work_roles) = match slot {
             Some(slot) => {
                 let work_roles = match worker_work_roles(&state, &control, route.as_ref(), &worker.id) {
@@ -253,26 +255,37 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             }
             None => ("unmapped".to_string(), None, None, Vec::new()),
         };
-        let mut resource_task_ids: Vec<String> = state
-            .tasks
-            .values()
-            .filter(|task| {
-                task.owner == worker.id
-                    && task.worktree_path.is_some()
-                    && crate::server::state::task_resource_active(&task.status)
-            })
-            .map(|task| task.id.clone())
-            .collect();
+        let visible_responsibility = viewer == Some(worker.id.as_str())
+            || viewer.is_some_and(|viewer| Some(viewer) == master.as_deref());
+        let mut resource_task_ids: Vec<String> = if visible_responsibility {
+            state
+                .tasks
+                .values()
+                .filter(|task| {
+                    task.owner == worker.id
+                        && task.worktree_path.is_some()
+                        && crate::server::state::task_resource_active(&task.status)
+                        && (visible_responsibility || board_public_task(&state, &task.id))
+                })
+                .map(|task| task.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         resource_task_ids.sort();
-        let mut subscription_ids: Vec<String> = state
-            .notification_subscriptions
-            .values()
-            .filter(|subscription| {
-                subscription.worker_id == worker.id
-                    && crate::server::state::subscription_status_is_active(&subscription.status)
-            })
-            .map(|subscription| subscription.id.clone())
-            .collect();
+        let mut subscription_ids: Vec<String> = if visible_responsibility {
+            state
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| {
+                    subscription.worker_id == worker.id
+                        && crate::server::state::subscription_status_is_active(&subscription.status)
+                })
+                .map(|subscription| subscription.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         subscription_ids.sort();
         workers.push(BoardMemberView {
             id: worker.id.clone(),

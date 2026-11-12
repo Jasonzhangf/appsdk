@@ -1499,9 +1499,9 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             .collect()
     };
     // The caller's own mapping above stays strict. A stale business worker
-    // without a current name remains visible as an explicitly unmapped member;
-    // its tasks and resources stay attached, while the display name and role
-    // remain absent. Other map errors stay explicit.
+    // without a current name remains visible as an explicitly unmapped member.
+    // Responsibility IDs are visible to the owner and project master; ordinary
+    // peers only inherit public task visibility. Other map errors stay explicit.
     let mut peer_snapshots: Vec<_> = Vec::new();
     for peer in st.workers.values() {
         let peer_role = match role_brief(server, &st, &control, &peer.id) {
@@ -1522,11 +1522,14 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             },
             None => None,
         };
+        let can_view_responsibility = role == "master" || peer.id == worker_id;
         let mut open_task_ids: Vec<String> = st
             .tasks
             .values()
             .filter(|task| {
-                task.owner == peer.id && !matches!(task.status.as_str(), "closed" | "cancelled")
+                task.owner == peer.id
+                    && !matches!(task.status.as_str(), "closed" | "cancelled")
+                    && can_view_responsibility
             })
             .map(|task| task.id.clone())
             .collect();
@@ -1538,6 +1541,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                 task.owner == peer.id
                     && task.worktree_path.is_some()
                     && crate::server::state::task_resource_active(&task.status)
+                    && can_view_responsibility
             })
             .map(|task| task.id.clone())
             .collect();
@@ -1548,6 +1552,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             .filter(|subscription| {
                 subscription.worker_id == peer.id
                     && crate::server::state::subscription_status_is_active(&subscription.status)
+                    && can_view_responsibility
             })
             .map(|subscription| subscription.id.clone())
             .collect();

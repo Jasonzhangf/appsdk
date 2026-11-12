@@ -12,6 +12,8 @@
 #   HEAD_SHA    github.sha
 #   PUSH_BEFORE github.event.before
 #   PR_BASE     github.event.pull_request.base.sha
+#   REF_NAME    github.ref_name
+#   DEFAULT_BRANCH github.event.repository.default_branch
 #
 # Behavior is fail-closed: an unknown, missing, or empty diff selects the full
 # repository, and a workflow/selector-only diff selects only the workflow
@@ -34,6 +36,8 @@ ref_type="${REF_TYPE:-}"
 head_sha="${HEAD_SHA:-}"
 push_before="${PUSH_BEFORE:-}"
 pr_base="${PR_BASE:-}"
+ref_name="${REF_NAME:-}"
+default_branch="${DEFAULT_BRANCH:-}"
 
 release=false
 if [[ "$event_name" == "workflow_dispatch" || "$ref_type" == "tag" ]]; then
@@ -84,7 +88,16 @@ fi
 
 changed=""
 if [[ "$baseline_ok" == true ]]; then
-  changed="$(git diff --name-only "$base" "$head_sha")"
+  default_ref="refs/remotes/origin/${default_branch}"
+  if [[ "$release" != true && "$event_name" == "push" && "$ref_type" == "branch" &&
+        -n "$ref_name" && -n "$default_branch" && "$ref_name" != "$default_branch" ]] &&
+     git show-ref --verify --quiet "$default_ref"; then
+    # Select the feature's contribution, excluding changes inherited by a
+    # normal merge from the default branch. A diff error remains an error.
+    changed="$(git diff --name-only "$default_ref...$head_sha")"
+  else
+    changed="$(git diff --name-only "$base" "$head_sha")"
+  fi
 elif [[ "$release" == true ]]; then
   base=""
 else
@@ -117,7 +130,7 @@ fi
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
   case "$path" in
-    .github/workflows/verify.yml|scripts/ci/*|scripts/tests/test-verify-selector.sh)
+    .github/workflows/verify.yml|scripts/ci/*|scripts/tests/test-verify-selector.sh|scripts/tests/test-governance-reference-distribution.sh)
       # The workflow file and its selector are validated by the dedicated
       # workflow-contract gate instead of fanning out the whole repository.
       workflow_contract=true
@@ -232,6 +245,12 @@ while IFS= read -r path; do
       ;;
     .agents/skills/appsdk-dev/*)
       docs=true
+      ;;
+    sdk-skill-sources/appsdk-project-governance/references/*.md)
+      # Prose references need installed navigation and text checks. Machine
+      # guidance, other assets, and mixed product paths keep their own jobs.
+      docs=true
+      workflow_contract=true
       ;;
     sdk-skill-sources/project-memory/*)
       resources=true

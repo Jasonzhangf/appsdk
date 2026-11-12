@@ -27,6 +27,7 @@ assert_workflow_contains() {
 }
 
 assert_workflow_contains 'bash scripts/ci/select-verify-scope.sh'
+assert_workflow_contains 'bash scripts/tests/test-governance-reference-distribution.sh'
 assert_workflow_contains 'workflow_contract: ${{ steps.scope.outputs.workflow_contract }}'
 assert_workflow_contains 'npm: ${{ steps.scope.outputs.npm }}'
 if ! awk '
@@ -81,7 +82,7 @@ run_scenario() {
   if ! OUT="$(GITHUB_OUTPUT="" SELECTOR_TEST_BASELINE="$baseline" SELECTOR_TEST_CHANGED="$changed_file" \
     PATH="$stub_dir:$PATH" \
     EVENT_NAME="$event" REF_TYPE="$ref_type" HEAD_SHA="deadbeef" \
-    PUSH_BEFORE="cafebabe" PR_BASE="cafebabe" \
+    PUSH_BEFORE="cafebabe" PR_BASE="cafebabe" REF_NAME="" DEFAULT_BRANCH="" \
     bash "$selector" 2>"$work_dir/err")"; then
     fail "$name: selector exited non-zero: $(cat "$work_dir/err")"
     OUT=""
@@ -233,6 +234,40 @@ run_scenario "appsdk-dev-skill-only" "push" "branch" "1" ".agents/skills/appsdk-
 expect_only "docs"
 
 # 14. Workflow-only change on a pull_request event also selects the contract gate.
+# Governance reference prose needs text and distribution checks. Machine
+# resources and mixed product changes retain their existing consumers.
+run_scenario "governance-reference" "pull_request" "branch" "1" \
+  "sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md"
+expect_only "docs workflow_contract"
+
+run_scenario "reference-distribution-test" "push" "branch" "1" \
+  "scripts/tests/test-governance-reference-distribution.sh"
+expect_only "workflow_contract"
+
+run_scenario "reference-and-guidance" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\nsdk-skill-sources/appsdk-project-governance/appsdk-guidance.json'
+expect_only "docs workflow_contract rust_guidance resources installer windows_appsdk"
+
+run_scenario "reference-non-markdown" "push" "branch" "1" \
+  "sdk-skill-sources/appsdk-project-governance/references/runtime.json"
+expect_only "rust_guidance resources installer windows_appsdk"
+
+run_scenario "reference-and-schema" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\ncontracts/records/example.schema.json'
+expect_only "docs workflow_contract app_sdk_full resources windows_appsdk"
+
+run_scenario "reference-and-template" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\ntemplates/minimal/AGENTS.md'
+expect_only "docs workflow_contract rust_guidance resources windows_appsdk"
+
+run_scenario "reference-and-rust" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\nrust/src/main.rs'
+expect_only "docs workflow_contract app_sdk_full windows_appsdk"
+
+run_scenario "reference-and-unknown" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\nunknown/file.txt'
+expect_only "docs workflow_contract app_sdk_full windows_appsdk windows_dagpipe"
+
 run_scenario "pr-workflow" "pull_request" "branch" "1" ".github/workflows/verify.yml"
 expect_only "workflow_contract"
 
@@ -244,6 +279,111 @@ expect_only "rust_guidance windows_appsdk"
 run_scenario "guidance-selector-milestone" "pull_request" "branch" "1" \
   $'rust/tests/guidance_ablation_cli.rs\nrust/src/guidance/compiler.rs\nsdk-skill-sources/appsdk-project-governance/appsdk-guidance.json\nscripts/ci/select-verify-scope.sh\nscripts/tests/test-verify-selector.sh\n.github/workflows/verify.yml'
 expect_only "rust_guidance windows_appsdk resources installer workflow_contract"
+
+# Real Git history proves that a feature push excludes changes inherited from
+# main while preserving its own changes. Branch names provide the fixture refs.
+history_repo="$work_dir/history"
+git init -q "$history_repo"
+git -C "$history_repo" config user.name 'Selector Fixture'
+git -C "$history_repo" config user.email 'selector@appsdk.invalid'
+git -C "$history_repo" config commit.gpgsign false
+git -C "$history_repo" checkout -q -b main
+printf 'seed\n' > "$history_repo/seed.txt"
+git -C "$history_repo" add seed.txt
+git -C "$history_repo" commit -q -m seed
+git -C "$history_repo" branch main-before
+git -C "$history_repo" checkout -q -b consumer-docs
+mkdir -p "$history_repo/sdk-skill-sources/appsdk-project-governance/references"
+printf 'guide\n' > "$history_repo/sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md"
+git -C "$history_repo" add sdk-skill-sources
+git -C "$history_repo" commit -q -m 'consumer guide'
+git -C "$history_repo" branch feature-before
+git -C "$history_repo" checkout -q main
+mkdir -p "$history_repo/rust/src"
+printf 'upstream\n' > "$history_repo/rust/src/main.rs"
+git -C "$history_repo" add rust/src/main.rs
+git -C "$history_repo" commit -q -m 'upstream source'
+git -C "$history_repo" update-ref refs/remotes/origin/main main
+git -C "$history_repo" checkout -q consumer-docs
+git -C "$history_repo" merge -q --no-edit main
+
+run_history_scenario() {
+  SCENARIO="$1"
+  OUT="$(cd "$history_repo" && GITHUB_OUTPUT="" \
+    REF_NAME="$2" DEFAULT_BRANCH="$3" PUSH_BEFORE="$4" HEAD_SHA="$5" \
+    PR_BASE="$4" EVENT_NAME="${6:-push}" REF_TYPE="${7:-branch}" \
+    bash "$selector")"
+}
+
+git -C "$history_repo" diff --name-only feature-before HEAD | grep -Fxq rust/src/main.rs
+run_history_scenario "feature-push-after-main-merge" consumer-docs main feature-before HEAD
+expect_only "docs workflow_contract"
+
+run_history_scenario "default-branch-push" main main main-before main
+expect_only "app_sdk_full windows_appsdk"
+
+run_history_scenario "feature-push-default-ref-missing" consumer-docs missing feature-before HEAD
+expect_only "app_sdk_full windows_appsdk"
+
+run_history_scenario "feature-push-name-missing" "" main feature-before HEAD
+expect_only "app_sdk_full windows_appsdk"
+run_history_scenario "feature-push-default-name-missing" consumer-docs "" feature-before HEAD
+expect_only "app_sdk_full windows_appsdk"
+run_history_scenario "feature-push-ref-type-missing" consumer-docs main feature-before HEAD push unknown
+expect_only "app_sdk_full windows_appsdk"
+run_history_scenario "pr-with-branch-metadata" consumer-docs main feature-before HEAD pull_request
+expect_only "app_sdk_full windows_appsdk"
+
+run_history_scenario "tag-with-branch-metadata" consumer-docs main feature-before HEAD push tag
+expect_true "release"
+expect_true "resources"
+expect_true "windows_appsdk"
+run_history_scenario "dispatch-with-branch-metadata" consumer-docs main feature-before HEAD workflow_dispatch
+expect_true "release"
+expect_true "resources"
+expect_true "windows_appsdk"
+
+run_history_scenario "feature-push-before-missing" consumer-docs main missing-before HEAD
+expect_true "app_sdk_full"
+expect_true "resources"
+expect_true "windows_appsdk"
+expect_true "windows_dagpipe"
+run_history_scenario "feature-push-before-zero" consumer-docs main 00000000 HEAD
+expect_true "app_sdk_full"
+expect_true "collab"
+
+# A newer default branch must not appear as deletions in an older feature.
+git -C "$history_repo" checkout -q main
+mkdir -p "$history_repo/contracts"
+printf '{}\n' > "$history_repo/contracts/new.schema.json"
+git -C "$history_repo" add contracts
+git -C "$history_repo" commit -q -m 'later upstream schema'
+git -C "$history_repo" update-ref refs/remotes/origin/main main
+git -C "$history_repo" checkout -q consumer-docs
+run_history_scenario "feature-push-behind-default" consumer-docs main feature-before HEAD
+expect_only "docs workflow_contract"
+
+printf '{}\n' > "$history_repo/sdk-skill-sources/appsdk-project-governance/appsdk-guidance.json"
+git -C "$history_repo" add sdk-skill-sources
+git -C "$history_repo" commit -q -m 'feature guidance'
+run_history_scenario "feature-owned-machine-change" consumer-docs main feature-before HEAD
+expect_only "docs workflow_contract rust_guidance resources installer windows_appsdk"
+
+git -C "$history_repo" branch no-contribution main
+run_history_scenario "feature-empty-contribution" no-contribution main feature-before no-contribution
+expect_true "app_sdk_full"
+expect_true "collab"
+
+git -C "$history_repo" checkout -q --orphan unrelated
+git -C "$history_repo" commit -q -m 'unrelated history'
+git -C "$history_repo" update-ref refs/remotes/origin/unrelated unrelated
+git -C "$history_repo" checkout -q consumer-docs
+SCENARIO="feature-diff-no-common-ancestor"
+if (cd "$history_repo" && EVENT_NAME=push REF_TYPE=branch REF_NAME=consumer-docs \
+  DEFAULT_BRANCH=unrelated PUSH_BEFORE=feature-before HEAD_SHA=HEAD GITHUB_OUTPUT="" \
+  bash "$selector" > "$work_dir/unrelated.out" 2> "$work_dir/unrelated.err"); then
+  fail 'uncomputable feature diff was accepted'
+fi
 
 if ((failures > 0)); then
   printf 'selector contract: %d failure(s)\n' "$failures" >&2

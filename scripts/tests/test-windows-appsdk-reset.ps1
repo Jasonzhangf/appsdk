@@ -83,17 +83,16 @@ try {
 
   New-Item -ItemType Directory -Path $outside -Force | Out-Null
   $outsideMarker = Join-Path $outside 'keep.txt'
-  $outsideMarkerContent = 'external data survives'
-  Set-Content -LiteralPath $outsideMarker -Value $outsideMarkerContent -NoNewline
+  Set-Content -LiteralPath $outsideMarker -Value 'external data survives' -NoNewline
   $junction = Join-Path $project 'generated/escape'
   New-Item -ItemType Directory -Path (Split-Path $junction -Parent) -Force | Out-Null
   New-Item -ItemType Junction -Path $junction -Target $outside -ErrorAction Stop | Out-Null
+  $markerHash = (Get-FileHash -LiteralPath $outsideMarker -Algorithm SHA256).Hash
 
   $reset = Invoke-AppSDK @('reset-governance', $project, '--discard-legacy')
   Assert-True ($reset.ExitCode -ne 0) 'reset followed a junction under the generated root'
   Assert-True ($reset.Output -match 'GOVERNANCE_PATH_SYMLINK|REPARSE') "junction refusal was not explicit: $($reset.Output)"
-  Assert-True (Test-Path -LiteralPath $outsideMarker -PathType Leaf) 'reset removed external junction target data'
-  Assert-True ((Get-Content -LiteralPath $outsideMarker -Raw) -eq $outsideMarkerContent) 'reset modified external junction target data'
+  Assert-True ((Get-FileHash -LiteralPath $outsideMarker -Algorithm SHA256).Hash -eq $markerHash) 'reset modified external junction target data'
   Assert-True (Test-Path -LiteralPath $projectContractPath -PathType Leaf) 'junction refusal damaged the project contract'
   [System.IO.Directory]::Delete($junction, $false)
   $junction = $null

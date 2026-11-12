@@ -443,6 +443,13 @@ implementations, configuration, and acceptance. DAGPipe owns graph compilation
 and execution. AppSDK's own Operations can serve as pilots; migrating one SDK
 command does not by itself establish or verify governance for other projects.
 
+Use this procedure to design the consumer's adoption. When a consumer turns
+an instruction into a mandatory governance rule, use the
+[ontology rule template](ontology-governance.md) to model its Object, Behavior,
+and Relation, record exact clause approval, and bind its executable edge or
+gate with legal and illegal cases and a real observation path. Keep proposed
+clauses marked as candidates until those conditions are met.
+
 ### Shape the skeleton
 
 1. Bind the user goal, accepted behavior, acceptance criteria, non-goals,

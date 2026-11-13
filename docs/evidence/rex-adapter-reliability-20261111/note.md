@@ -251,3 +251,9 @@
 - 已在 `e4430cf2` 修复：恢复条件现在还要求 `native_code=none`；新增原生错误伪造 marker 的拒绝用例和本地 typed generation-mismatch 的放行用例。
 - 修复后 Rex 聚焦组单线程通过 `119 passed, 0 failed`，格式和 diff 检查通过。
 - 当前必须基于最终提交 `d390a7ae` 重新执行独立 milestone review；无 P0/P1 后再 push、等 CI、合并和正式构建。
+
+## 最终独立审查（2026-11-13 PT）
+
+- reviewer 已基于 `d390a7ae` 相对 `origin/main=56548a85` 完成整体 milestone 审查，结果无 P0、P1 或 P2。
+- 审查确认 block 是 Rex anchor；布局变化不改变 block；current owner 替换只改变该 block 的当前归属；精确 block 缺失才退役名字；通知写入、单次 Enter、同目标代际刷新、活动投影和主线通信语义均保持一致。
+- 审查输出：`docs/evidence/rex-adapter-reliability-20261111/milestone-review-20261113-final3-stdout.jsonl`。

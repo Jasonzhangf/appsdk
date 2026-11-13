@@ -141,7 +141,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_close",
-            "Close the owner's task after its Collab responsibilities are complete. Collab does not delete worktrees or branches.",
+            "Close the owner's task after its Collab responsibilities and owned cleanup are complete. A clean declared worktree and branch may be removed after the existing ancestry or recorded integration net-content proof succeeds.",
             json!({"id":{"type":"string"}}),
             &["id"]
         ),

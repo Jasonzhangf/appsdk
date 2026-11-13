@@ -976,10 +976,11 @@ fn handle_task_finalize_cleanup(
         );
     }
     if let Some(commit) = provided_integration.as_deref() {
-        // An explicit commit is operator-supplied proof for a task that was
-        // force-closed without recorded integration. Validate it exactly like
-        // `collab task integrated` so a stale or unrelated commit cannot
-        // authorize deletion.
+        // An explicit commit is the operator's integration declaration for a
+        // task that was force-closed without recorded integration. Validate
+        // its reachability and the branch net-content relation through the
+        // same cleanup owner as normal close so a stale or unrelated commit
+        // cannot authorize deletion.
         let main_head = match resolve_authoritative_main_head(&server.root) {
             Ok(head) => head,
             Err(error) => return error,
@@ -1065,9 +1066,10 @@ fn handle_task_finalize_cleanup(
         );
     }
     // The same checks a normal close applies: a clean worktree inside
-    // ./playground and a branch already merged into main. Dirty, unmerged, or
-    // path-escaping resources are never removed to finish the lifecycle, so a
-    // refused finalize leaves the obligation visible and retryable.
+    // ./playground and a branch proven by ancestry or the recorded
+    // integration net-content relation. Dirty, unmerged, or path-escaping
+    // resources are never removed to finish the lifecycle, so a refused
+    // finalize leaves the obligation visible and retryable.
     if let Err(error) = close_task_resources(
         &server.root,
         &server.config,

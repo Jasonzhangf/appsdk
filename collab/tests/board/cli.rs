@@ -47,6 +47,77 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
     )
 }
 
+fn public_command(fixture: &AppFixture, args: &[&str], thread: &str) -> Command {
+    let mut command = Command::new(binary());
+    command
+        .args(args)
+        .current_dir(&fixture.project)
+        .env("PATH", fixture.fixture_path())
+        .env("COLLAB_STATE_DIR", &fixture.host_state)
+        .env("HOME", fixture.root.join("home"))
+        .env("COLLAB_APPSERVER_SOCKET", &fixture.app_socket)
+        .env_remove("CODEX_APP_SERVER_SOCKET")
+        .env_remove("COLLAB_APPSERVER_NAMESPACE")
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+        .env("CODEX_SESSION_ID", thread)
+        .env("CODEX_THREAD_ID", thread)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("COLLAB_WORKER")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
+        .env("CODEX_HOME", fixture.root.join("home"));
+    command
+}
+
+fn spawn_public(fixture: &AppFixture, args: &[&str], thread: &str) -> Child {
+    public_command(fixture, args, thread)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn public collab CLI")
+}
+
+fn wait_for_public(
+    fixture: &mut AppFixture,
+    mut child: Child,
+    timeout: Duration,
+) -> (Output, bool, Duration) {
+    let started = Instant::now();
+    loop {
+        if child.try_wait().expect("poll public CLI").is_some() {
+            let elapsed = started.elapsed();
+            return (
+                child.wait_with_output().expect("read public CLI output"),
+                false,
+                elapsed,
+            );
+        }
+        if started.elapsed() >= timeout {
+            child.kill().expect("stop exact public CLI child");
+            let output = child
+                .wait_with_output()
+                .expect("reap exact public CLI child");
+            let elapsed = started.elapsed();
+            // A killed client does not cancel its daemon poll. Close this
+            // exact fixture daemon before any later mailbox assertion.
+            fixture.stop_daemon();
+            return (output, true, elapsed);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn run_public_bounded(
+    fixture: &mut AppFixture,
+    args: &[&str],
+    thread: &str,
+    timeout: Duration,
+) -> (Output, bool, Duration) {
+    wait_for_public(fixture, spawn_public(fixture, args, thread), timeout)
+}
+
 fn delivery_without_candidate_probe(mode: &str) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -450,6 +521,24 @@ fn fixture_branch_exists(root: &Path, branch: &str) -> bool {
     )
     .status
     .success()
+}
+
+fn configure_fixture_worktree_base(fixture: &mut AppFixture) -> PathBuf {
+    let config_path = fixture.root.join("home/.appsdk/config.toml");
+    let base = fixture.root.join("fixture-worktrees");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&base).unwrap();
+    let base = base.canonicalize().unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            "[worktree]\nbase = {:?}\nlayout = \"{{project-key}}/{{task-slug}}\"\n",
+            base.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    fixture.restart_daemon();
+    base
 }
 
 fn run_held_git_integration(
@@ -3223,10 +3312,7 @@ fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
         THREAD_A,
     );
     let id = sent["msg_id"].as_str().unwrap();
-    let first = fixture.run_public(
-        &["recv", "--receive-id", "minimal-receipt", "--timeout", "0"],
-        THREAD_B,
-    );
+    let first = fixture.run_public(&["recv", "--receive-id", "minimal-receipt"], THREAD_B);
     let message = first["messages"]
         .as_array()
         .unwrap()
@@ -3256,10 +3342,7 @@ fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
         ],
         THREAD_A,
     );
-    let replay = fixture.run_public(
-        &["recv", "--receive-id", "minimal-receipt", "--timeout", "0"],
-        THREAD_B,
-    );
+    let replay = fixture.run_public(&["recv", "--receive-id", "minimal-receipt"], THREAD_B);
     assert_eq!(replay["replayed"], true);
     assert_eq!(first["messages"], replay["messages"]);
     let later = fixture.run_public(&["msg", next["msg_id"].as_str().unwrap()], THREAD_B);
@@ -3267,15 +3350,139 @@ fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
         later["state"], "read",
         "replay consumed another batch: {later}"
     );
-    let second = fixture.run_public(
-        &["recv", "--receive-id", "minimal-next", "--timeout", "0"],
-        THREAD_B,
-    );
+    let second = fixture.run_public(&["recv", "--receive-id", "minimal-next"], THREAD_B);
     assert!(second["messages"]
         .as_array()
         .unwrap()
         .iter()
         .any(|message| message["id"] == next["msg_id"]));
+    let consumed = fixture.run_public(&["msg", next["msg_id"].as_str().unwrap()], THREAD_B);
+    assert_eq!(consumed["consumed_by_recv"], true);
+    let empty = fixture.run_public(&["recv"], THREAD_B);
+    assert_eq!(empty["count"], 0);
+    assert_eq!(empty["messages"], json!([]));
+}
+
+#[test]
+fn recv_default_empty_returns_promptly() {
+    let (mut fixture, _, _) = setup();
+    fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+
+    let help = fixture.command_public(&["recv", "--help"], THREAD_A);
+    assert!(
+        help.status.success(),
+        "recv help failed: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("current available message batch"), "{help}");
+    assert!(help.contains("opt in to waiting"), "{help}");
+    assert!(help.contains("0 checks once"), "{help}");
+    assert!(help.contains("[default: 0]"), "{help}");
+
+    let (output, timed_out, elapsed) =
+        run_public_bounded(&mut fixture, &["recv"], THREAD_B, Duration::from_secs(2));
+    assert!(
+        !timed_out && elapsed < Duration::from_secs(2),
+        "bare recv did not return promptly: timed_out={timed_out} elapsed={elapsed:?}"
+    );
+    assert!(
+        output.status.success(),
+        "bare recv failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let empty: Value = serde_json::from_slice(&output.stdout).expect("recv emits JSON");
+    assert_eq!(empty["count"], 0);
+    assert_eq!(empty["messages"], json!([]));
+    assert_eq!(empty["timeout"], true);
+
+    let invalid = fixture.command_public(
+        &[
+            "recv",
+            "--receive-id",
+            "invalid\u{7}receive-id",
+            "--timeout",
+            "0",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        !invalid.status.success(),
+        "invalid receive id returned success: {invalid:?}"
+    );
+    let error = format!(
+        "{}{}",
+        String::from_utf8_lossy(&invalid.stdout),
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+    assert!(error.contains("RECEIVE_IDENTITY_INVALID"), "{error}");
+}
+
+#[test]
+fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
+    let (mut fixture, _, peer) = setup();
+    fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+
+    let (wait_output, wait_timed_out, waited) = run_public_bounded(
+        &mut fixture,
+        &["recv", "--timeout", "1"],
+        THREAD_B,
+        Duration::from_secs(3),
+    );
+    assert!(
+        !wait_timed_out,
+        "explicit recv wait did not complete: {wait_output:?}"
+    );
+    assert!(
+        wait_output.status.success(),
+        "explicit recv wait failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&wait_output.stdout),
+        String::from_utf8_lossy(&wait_output.stderr)
+    );
+    assert!(
+        waited >= Duration::from_millis(900) && waited < Duration::from_secs(2),
+        "explicit recv wait duration was {waited:?}"
+    );
+    let waited: Value = serde_json::from_slice(&wait_output.stdout).expect("timed recv emits JSON");
+    assert_eq!(waited["count"], 0);
+    assert_eq!(waited["timeout"], true);
+
+    let started = Instant::now();
+    let child = spawn_public(&fixture, &["recv", "--timeout", "5"], THREAD_B);
+    thread::sleep(Duration::from_millis(250));
+    let sent = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            &peer,
+            "--subject",
+            "early-arrival",
+            "wake the explicit wait",
+        ],
+        THREAD_A,
+    );
+    let (arrived_output, arrived_timed_out, _) =
+        wait_for_public(&mut fixture, child, Duration::from_secs(4));
+    let arrived_elapsed = started.elapsed();
+    assert!(
+        !arrived_timed_out && arrived_elapsed < Duration::from_secs(5),
+        "explicit recv did not return early: timed_out={arrived_timed_out} elapsed={arrived_elapsed:?}"
+    );
+    assert!(
+        arrived_output.status.success(),
+        "waiting recv failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&arrived_output.stdout),
+        String::from_utf8_lossy(&arrived_output.stderr)
+    );
+    let arrived: Value =
+        serde_json::from_slice(&arrived_output.stdout).expect("waiting recv emits JSON");
+    assert_eq!(arrived["count"], 1, "{arrived}");
+    assert_eq!(arrived["messages"][0]["id"], sent["msg_id"]);
+
+    let read = fixture.run_public(&["msg", sent["msg_id"].as_str().unwrap()], THREAD_B);
+    assert_eq!(read["state"], "read");
+    assert_eq!(read["consumed_by_recv"], true);
 }
 
 /// Public CLI black box for the accepted pending-close lifecycle: a live master
@@ -3488,5 +3695,166 @@ fn public_f9_branch_only_task_cleanup_must_survive_cancel() {
         status_after,
         String::from_utf8_lossy(&cancel.stdout),
         String::from_utf8_lossy(&cancel.stderr)
+    );
+}
+
+#[test]
+fn public_f8_unrelated_integration_commit_must_not_delete_unmerged_task_resources() {
+    let mut fixture = AppFixture::new();
+    let base = configure_fixture_worktree_base(&mut fixture);
+    let project = fixture.project.canonicalize().unwrap();
+    let base_commit = init_fixture_git_main(&project);
+    fixture.run_public(&["context"], THREAD_A);
+
+    let task_id = "public-entry-f8";
+    let branch = "codex/f8-resource";
+    let worktree = base.join("project").join(task_id);
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    fixture_git_ok(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            worktree.to_str().unwrap(),
+            "main",
+        ],
+    );
+    std::fs::write(worktree.join("f8-task-work.txt"), "unique task work\n").unwrap();
+    fixture_git_ok(&worktree, &["add", "f8-task-work.txt"]);
+    fixture_git_ok(
+        &worktree,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "unique task work",
+        ],
+    );
+    let task_tip = fixture_git_trim(&fixture_git_ok(
+        &worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    ));
+
+    std::fs::write(
+        project.join("fixture-unrelated.txt"),
+        "unrelated main work\n",
+    )
+    .unwrap();
+    fixture_git_ok(&project, &["add", "fixture-unrelated.txt"]);
+    fixture_git_ok(
+        &project,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "unrelated main work",
+        ],
+    );
+    let unrelated_main_commit = fixture_git_trim(&fixture_git_ok(
+        &project,
+        &["rev-parse", "--verify", "refs/heads/main^{commit}"],
+    ));
+    assert_ne!(task_tip, unrelated_main_commit);
+    assert!(
+        !fixture_git(
+            &project,
+            &["merge-base", "--is-ancestor", branch, "refs/heads/main"],
+        )
+        .status
+        .success(),
+        "the task branch must remain unmerged before close"
+    );
+    assert!(
+        fixture_git(&worktree, &["status", "--porcelain"])
+            .stdout
+            .is_empty(),
+        "the task worktree must start clean"
+    );
+
+    let registered = fixture.run_public(
+        &[
+            "task",
+            "register",
+            task_id,
+            "--worktree",
+            worktree.to_str().unwrap(),
+            "--branch",
+            branch,
+            "--base-commit",
+            &base_commit,
+            "--priority",
+            "p1",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(registered["cleanup"], "pending");
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            task_id,
+            "--worktree",
+            worktree.to_str().unwrap(),
+            "--evidence",
+            "public F8 candidate delivered",
+        ],
+        THREAD_A,
+    );
+    let reviewed = fixture.run_public(
+        &[
+            "task",
+            "review",
+            task_id,
+            "--accept",
+            "--evidence",
+            "public F8 candidate reviewed",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(reviewed["status"], "accepted");
+    let integrated = fixture.run_public(
+        &[
+            "task",
+            "integrated",
+            task_id,
+            "--commit",
+            &unrelated_main_commit,
+            "--evidence",
+            "unrelated main-reachable integration receipt",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(integrated["status"], "merged");
+    assert_eq!(
+        fixture.run_public(&["task", "status", task_id], THREAD_A)["cleanup"]["status"],
+        "pending"
+    );
+
+    let close = fixture.command_public(&["task", "close", task_id], THREAD_A);
+    let close_succeeded = close.status.success();
+    let status_after = fixture.run_public(&["task", "status", task_id], THREAD_A);
+    let branch_survived = fixture_branch_exists(&project, branch);
+    let worktree_survived = worktree.exists();
+    let cleanup_not_verified = status_after["cleanup"]["status"] != "verified";
+    assert!(
+        !close_succeeded
+            && status_after["status"] != "closed"
+            && cleanup_not_verified
+            && branch_survived
+            && worktree_survived,
+        "F8 RED/GREEN: an unrelated main-reachable commit must not authorize deletion of the unmerged task branch or clean worktree. close_succeeded={close_succeeded} status_after={status_after} cleanup_not_verified={cleanup_not_verified} branch_survived={branch_survived} worktree_survived={worktree_survived} stdout={} stderr={}",
+        String::from_utf8_lossy(&close.stdout),
+        String::from_utf8_lossy(&close.stderr)
     );
 }

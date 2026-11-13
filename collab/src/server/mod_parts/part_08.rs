@@ -2382,16 +2382,8 @@ fn task_update_locked(
             decision_reason,
         );
     }
-    if task.owner != worker_id {
-        // A task whose owner name/binding is unavailable projects an empty
-        // owner and `needs_reassignment` on the board. The current project
-        // master owns that repair path so the task cannot stay stuck without a
-        // legal owner or wait state.
-        let master_repair = task_owner_unavailable(server, st, &task)
-            && board_check_master_locked(server, st, &worker_id).is_ok();
-        if !master_repair {
-            return Resp::err("only the task owner may update its lifecycle");
-        }
+    if task.owner != worker_id && board_check_master_locked(server, st, &worker_id).is_err() {
+        return Resp::err("only the task owner may update its lifecycle");
     }
     let original_status = task.status.clone();
     if status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed")) {

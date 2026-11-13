@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-board-assignment-lifecycle",
   "version": "0.2.0",
-  "description": "一次 board assignment mutation 的 SESE。同名自动 session 换绑保留状态。显式 invite/respond 让 pending 任务经 invited 接受后进入 working，不以 owner 等于 publisher 为条件；pending/invited 均先检查没有执行资源和生命周期证据。已经开始的任务交接保留状态、证据、资源及 merge/cleanup 义务。拒绝或撤回首次邀请保持原 owner 并回到 pending；closed/cancelled、过期 revision、错误回应者和旧 binding 明确拒绝，不部分转移。名字无可用工作者时保留工作归属并投影空执行者，由原 owner 回流原因，不自动选择 Jenny。",
+  "description": "一次 board assignment 或 task update mutation 的 SESE。同名自动 session 换绑保留状态。显式 invite/respond 让 pending 任务经 invited 接受后进入 working，不以 owner 等于 publisher 为条件；pending/invited 均先检查没有执行资源和生命周期证据。仅更新 task 字段时，当前同项目 master 可在有效 revision 下更新其他在线 owner 的任务，不转移 owner、publisher 或执行状态；普通 peer 与其他项目的 master 不获得该权限。Rex/tmux transport 不决定 authority。已经开始的任务交接保留状态、证据、资源及 merge/cleanup 义务。拒绝或撤回首次邀请保持原 owner 并回到 pending；closed/cancelled、过期 revision、错误回应者和旧 binding 明确拒绝，不部分转移。名字无可用工作者时保留工作归属并投影空执行者，由原 owner 回流原因，不自动选择 Jenny。",
   "inputs": [{"id": "assignment_mutation_request", "schema": "Object"}],
   "nodes": [
     {
@@ -19,7 +19,7 @@
       "id": "分类同名自动换绑或邀请回应改派",
       "operator": "appsdk.collab_assignment.classify_source",
       "operator_version": "1",
-      "description": "同名当前工作者 S1→S2 进入自动换绑，不要求 Jenny assign 或 target invitation。显式目标名字变更复用现有 invite/respond 接受语义，可作用于 pending、working、rework、delivered 和 accepted；不是新的平行 task 命令或第二状态机。",
+      "description": "先区分显式 assignment mutation 与 task update。assignment 中，同名当前工作者 S1→S2 进入自动换绑，不要求 Jenny assign 或 target invitation；显式目标名字变更复用现有 invite/respond 接受语义，可作用于 pending、working、rework、delivered 和 accepted。task update 只携带经 revision 校验的字段变更，不隐式改变归属；不是新的平行 task 命令或第二状态机。",
       "inputs": ["task_assignment_scope"],
       "output": {"id": "assignment_source", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -30,7 +30,7 @@
       "id": "校验目标名字权限与占用",
       "operator": "appsdk.collab_assignment.authorize_target",
       "operator_version": "1",
-      "description": "自动路径核对名字仍归属于同一当前工作者；显式路径核对 actor 权限、invite/respond 接受和 target 名字占用。在线其他工作者仍遵守占用与二次确认规则。目标无可用工作者时保留归属并记录回流原因，不自动选择 Jenny。",
+      "description": "task update 路径允许任务 owner，或当前同项目 master grant holder 在项目范围内修改任务字段；普通 peer 与其他项目 master 拒绝。身份与 master authority 由当前 Collab 身份和作用域解析，Rex/tmux transport 不授予或撤销权限。assignment 自动路径核对名字仍归属于同一当前工作者；显式路径核对 actor 权限、invite/respond 接受和 target 名字占用。在线其他工作者仍遵守占用与二次确认规则。目标无可用工作者时保留归属并记录回流原因，不自动选择 Jenny。",
       "inputs": ["assignment_source"],
       "output": {"id": "authorized_assignment", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -41,7 +41,7 @@
       "id": "原子提交归属并保留任务义务",
       "operator": "appsdk.collab_assignment.commit",
       "operator_version": "1",
-      "description": "在 TaskRec/board mutation owner 内按 revision 原子提交。pending 邀请变 invited，pending/invited 的合法接受变 working；首次拒绝/撤回回 pending 且不转移 owner。已开始任务的显式交接及同名自动换绑保留状态、证据、资源、pending merge 和 cleanup obligation。保留 task ID 与 publisher；不替代 review/merge/close。closed/cancelled 明确拒绝。",
+      "description": "在 TaskRec/board mutation owner 内按 revision 原子提交。task update 仅应用请求字段，保留 owner、publisher、status、历史和既有 obligation；revision 冲突或校验失败不产生部分修改。assignment 路径中，pending 邀请变 invited，pending/invited 的合法接受变 working；首次拒绝/撤回回 pending 且不转移 owner。已开始任务的显式交接及同名自动换绑保留状态、证据、资源、pending merge 和 cleanup obligation。保留 task ID 与 publisher；不替代 review/merge/close。closed/cancelled 明确拒绝。",
       "inputs": ["authorized_assignment"],
       "output": {"id": "assignment_commit", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

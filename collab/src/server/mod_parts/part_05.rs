@@ -1586,6 +1586,30 @@ impl ProjectRuntimeManager {
             return None;
         }
 
+        // Refreshing the binding drops the state lock. Re-read the durable
+        // message before retrying so a concurrent Send that already recorded
+        // its own accepted or non-retryable outcome is never overwritten by
+        // this recovery path.
+        {
+            let state = runtime.state.lock().unwrap();
+            let Some(message) = state.msgs.get(&message_id) else {
+                return None;
+            };
+            let original_failure_is_still_current = state
+                .notification_delivery_failures
+                .get(&message_id)
+                .is_some_and(|failure| failure.retryable && failure.error == error);
+            if message.to != recipient
+                || message.retry_attempted
+                || state
+                    .notification_delivery_accepted
+                    .contains_key(&message_id)
+                || !original_failure_is_still_current
+            {
+                return None;
+            }
+        }
+
         let retry = attempt_notification_detailed_with_mode_at_inner(
             runtime,
             &message_id,

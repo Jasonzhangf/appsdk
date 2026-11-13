@@ -2269,7 +2269,7 @@ fn claimed_and_queued_tasks_survive_daemon_replay() {
 
 #[test]
 fn board_owner_update_is_versioned_and_peer_tasks_remain_independent() {
-    let (fixture, _, _) = setup();
+    let (fixture, _, peer) = setup();
     fixture.run_public(
         &["task", "register", "peer-own", "--next", "实现接口"],
         THREAD_B,
@@ -2311,7 +2311,7 @@ fn board_owner_update_is_versioned_and_peer_tasks_remain_independent() {
         THREAD_B,
     );
     assert!(!stale.status.success());
-    let master_write = fixture.command_public(
+    let master_write = fixture.run_public(
         &[
             "board",
             "update",
@@ -2319,13 +2319,249 @@ fn board_owner_update_is_versioned_and_peer_tasks_remain_independent() {
             "--expected-revision",
             &updated["task"]["revision"].as_u64().unwrap().to_string(),
             "--next",
-            "代写进度",
+            "current master updates coordination progress",
         ],
         THREAD_A,
     );
-    assert!(!master_write.status.success());
+    assert_eq!(
+        master_write["task"]["next_step"],
+        "current master updates coordination progress"
+    );
+    assert_eq!(master_write["task"]["owner"], peer);
+    assert_eq!(master_write["task"]["status"], "verifying");
     let task_after = fixture.run_public(&["task", "status", "peer-own"], THREAD_A);
-    assert_eq!(task_after["next_step"], "执行黑盒回归");
+    assert_eq!(
+        task_after["next_step"],
+        "current master updates coordination progress"
+    );
+    assert_eq!(task_after["owner"], peer);
+    assert_eq!(task_after["created_by"], peer);
+}
+
+#[test]
+fn current_master_updates_live_peer_task_next_step_without_taking_ownership() {
+    let (fixture, master, peer) = setup();
+    let current_master = fixture.run_public(&["context"], THREAD_A);
+    let live_peer = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(current_master["identity"]["worker_id"], master);
+    assert_eq!(live_peer["identity"]["worker_id"], peer);
+    let members = fixture.run_public(&["board", "show"], THREAD_A);
+    assert_eq!(members["master"]["worker_id"], master);
+    assert_eq!(members["master"]["display_name"], "Jenny");
+    assert_eq!(
+        members["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worker| worker["id"] == peer)
+            .unwrap()["display_name"],
+        "Bob"
+    );
+
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "manager-update-live-peer",
+            "--next",
+            "Bob verifies the public behavior",
+        ],
+        THREAD_B,
+    );
+    let before = fixture.run_public(&["task", "status", "manager-update-live-peer"], THREAD_B);
+    assert_eq!(before["owner"], peer);
+    assert_eq!(before["status"], "working");
+    let before_board = fixture.run_public(&["board", "show"], THREAD_A);
+    let before_task = before_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "manager-update-live-peer")
+        .unwrap();
+    assert_eq!(before_task["publisher"], peer);
+    assert_eq!(before_task["needs_reassignment"], false);
+
+    let updated = fixture.run_public(
+        &[
+            "board",
+            "update",
+            "manager-update-live-peer",
+            "--expected-revision",
+            &before_task["revision"].as_u64().unwrap().to_string(),
+            "--next",
+            "current master adds the next coordination step",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(
+        updated["task"]["next_step"],
+        "current master adds the next coordination step"
+    );
+    assert_eq!(updated["task"]["owner"], peer);
+    assert_eq!(updated["task"]["publisher"], peer);
+    assert_eq!(updated["task"]["status"], "working");
+    assert_eq!(
+        updated["task"]["revision"].as_u64().unwrap(),
+        before_task["revision"].as_u64().unwrap() + 1
+    );
+    let after = fixture.run_public(&["task", "status", "manager-update-live-peer"], THREAD_B);
+    for field in [
+        "created_by",
+        "owner_session_id",
+        "work_policy",
+        "delivery_evidence",
+        "review_evidence",
+    ] {
+        assert_eq!(after[field], before[field], "{field} changed");
+    }
+}
+
+#[test]
+fn ordinary_peer_cannot_update_another_live_peers_task() {
+    let (fixture, master, peer) = setup();
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "ordinary-peer-must-not-update",
+            "--next",
+            "Bob retains this task",
+        ],
+        THREAD_B,
+    );
+    let ordinary_peer = fixture.run_public(&["context"], THREAD_C);
+    let ordinary_peer_worker = ordinary_peer["identity"]["worker_id"].as_str().unwrap();
+    assert_ne!(ordinary_peer_worker, master);
+    assert_ne!(ordinary_peer_worker, peer);
+    let before_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let before = before_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "ordinary-peer-must-not-update")
+        .unwrap()
+        .clone();
+    assert_eq!(before["owner"], peer);
+    assert_eq!(before["status"], "working");
+
+    let output = fixture.command_public(
+        &[
+            "board",
+            "update",
+            "ordinary-peer-must-not-update",
+            "--expected-revision",
+            &before["revision"].as_u64().unwrap().to_string(),
+            "--next",
+            "ordinary peer attempts coordination",
+        ],
+        THREAD_C,
+    );
+    let (success, result) = parse_public_response(output);
+    assert!(
+        !success,
+        "ordinary peer update unexpectedly succeeded: {result}"
+    );
+    assert_eq!(
+        result["error"],
+        "only the task owner may update its lifecycle"
+    );
+
+    let after_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let after = after_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "ordinary-peer-must-not-update")
+        .unwrap();
+    assert_eq!(after["next_step"], "Bob retains this task");
+    assert_eq!(after["revision"], before["revision"]);
+    assert_eq!(after["owner"], peer);
+    assert_eq!(after["publisher"], before["publisher"]);
+    assert_eq!(after["status"], "working");
+}
+
+#[test]
+fn live_bob_successor_updates_unfinished_work_after_public_name_handoff() {
+    let (fixture, _, original_bob) = setup();
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "bob-successor-update",
+            "--next",
+            "original Bob keeps unfinished work",
+        ],
+        THREAD_B,
+    );
+    let before_board = fixture.run_public(&["board", "show"], THREAD_A);
+    let before = before_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "bob-successor-update")
+        .unwrap()
+        .clone();
+    assert_eq!(before["owner"], original_bob);
+
+    let fresh = fixture.run_public(&["context"], THREAD_C);
+    let successor = fresh["identity"]["worker_id"].as_str().unwrap().to_owned();
+    let handed = fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture confirms public live-name handoff","replace_confirmed":true}"#,
+        ],
+        THREAD_C,
+    );
+    assert_eq!(handed["identity"]["worker_id"], successor);
+
+    let handed_board = fixture.run_public(&["board", "show"], THREAD_A);
+    let handed_task = handed_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "bob-successor-update")
+        .unwrap();
+    assert_eq!(handed_task["owner"], successor);
+    assert_eq!(handed_task["owner_name"], "Bob");
+
+    let updated = fixture.run_public(
+        &[
+            "board",
+            "update",
+            "bob-successor-update",
+            "--expected-revision",
+            &handed_task["revision"].as_u64().unwrap().to_string(),
+            "--next",
+            "live Bob successor continues the unfinished task",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(
+        updated["task"]["next_step"],
+        "live Bob successor continues the unfinished task"
+    );
+    assert_eq!(updated["task"]["owner"], successor);
+
+    let old_holder = fixture.command_public(
+        &[
+            "board",
+            "update",
+            "bob-successor-update",
+            "--expected-revision",
+            &updated["task"]["revision"].as_u64().unwrap().to_string(),
+            "--next",
+            "former Bob must not retain the name authority",
+        ],
+        THREAD_B,
+    );
+    assert!(!old_holder.status.success());
+    let after = fixture.run_public(&["task", "status", "bob-successor-update"], THREAD_C);
+    assert_eq!(after["created_by"], original_bob);
+    assert_eq!(
+        after["next_step"],
+        "live Bob successor continues the unfinished task"
+    );
 }
 
 #[test]

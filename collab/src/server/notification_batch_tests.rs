@@ -2,6 +2,7 @@ use super::*;
 use crate::proto::RexEndpoint;
 use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
 use serde_json::Value;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 
 fn rex_transport(
@@ -215,16 +216,399 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
     )
 }
 
+fn public_collab_binary() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("COLLAB_TEST_BINARY") {
+        return std::path::PathBuf::from(path);
+    }
+    let executable = std::env::current_exe().expect("current test executable");
+    let debug_dir = executable
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("test executable is below target/debug");
+    let binary = debug_dir.join("collab");
+    assert!(
+        binary.is_file(),
+        "public Collab binary is missing at {}; build it before this test",
+        binary.display()
+    );
+    binary
+}
+
+struct PublicDaemon {
+    socket: std::path::PathBuf,
+    root: Option<std::path::PathBuf>,
+    running: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+}
+
+impl PublicDaemon {
+    async fn start(root: std::path::PathBuf, host_paths: HostPaths) -> Self {
+        let socket = host_paths.socket_path();
+        let mut daemon = Self {
+            socket,
+            root: Some(root.clone()),
+            running: Some(tokio::spawn(run_with_host_paths(
+                Scope { root },
+                host_paths,
+            ))),
+        };
+        daemon.wait_ready().await;
+        daemon
+    }
+
+    async fn wait_ready(&mut self) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if std::os::unix::net::UnixStream::connect(&self.socket).is_ok() {
+                return;
+            }
+            if self
+                .running
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                let result = self.running.take().expect("running daemon task").await;
+                panic!(
+                    "isolated public daemon exited before publishing {}: {result:?}",
+                    self.socket.display()
+                );
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "isolated public daemon did not publish {}",
+                self.socket.display()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(running) = self.running.take() {
+            running.abort();
+            let _ = running.await;
+        }
+        if let Some(root) = self.root.take() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
+impl Drop for PublicDaemon {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.take() {
+            running.abort();
+        }
+        if let Some(root) = self.root.take() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
+const PUBLIC_REX_SERVER: &str = "unix:///tmp/rex-fixture.sock";
+const PUBLIC_REX_SESSION: &str = "session:11111111-1111-1111-1111-111111111111";
+const PUBLIC_SENDER_BLOCK: &str = "block:55555555-5555-5555-5555-555555555555";
+const PUBLIC_RECIPIENT_BLOCK: &str = "block:22222222-2222-2222-2222-222222222222";
+const PUBLIC_MOVED_BLOCK: &str = "block:66666666-6666-6666-6666-666666666666";
+
+#[derive(Debug)]
+struct PublicCliResult {
+    success: bool,
+    value: Value,
+    stdout: String,
+    stderr: String,
+}
+
+fn public_cli_command(
+    root: &std::path::Path,
+    host_paths: &HostPaths,
+    agent_session: &str,
+) -> Command {
+    let mut command = Command::new(public_collab_binary());
+    command
+        .current_dir(root)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("LC_ALL", "en_US.UTF-8")
+        .env("HOME", root.join("home"))
+        .env("CODEX_HOME", root.join("home"))
+        .env("COLLAB_STATE_DIR", host_paths.state_root())
+        .env("CODEX_SESSION_ID", agent_session)
+        .env("CODEX_THREAD_ID", format!("thread-{agent_session}"));
+    command
+}
+
+fn decode_public_cli_output(output: Output) -> PublicCliResult {
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let value = serde_json::from_str(stdout.trim())
+        .or_else(|stdout_error| {
+            stderr
+                .lines()
+                .find_map(|line| line.strip_prefix("collab response: "))
+                .ok_or(stdout_error)
+                .and_then(serde_json::from_str)
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "public Collab CLI did not return JSON: {error}; stdout={stdout} stderr={stderr}"
+            )
+        });
+    PublicCliResult {
+        success: output.status.success(),
+        value,
+        stdout,
+        stderr,
+    }
+}
+
+fn run_public_cli(
+    root: &std::path::Path,
+    host_paths: &HostPaths,
+    agent_session: &str,
+    args: &[&str],
+) -> PublicCliResult {
+    let output = public_cli_command(root, host_paths, agent_session)
+        .args(args)
+        .output()
+        .expect("run public Collab CLI");
+    decode_public_cli_output(output)
+}
+
+fn spawn_public_cli(
+    root: &std::path::Path,
+    host_paths: &HostPaths,
+    agent_session: &str,
+    args: &[&str],
+) -> Child {
+    public_cli_command(root, host_paths, agent_session)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn public Collab CLI")
+}
+
+async fn wait_public_cli(child: Child) -> PublicCliResult {
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output())
+        .await
+        .expect("join public Collab CLI")
+        .expect("wait for public Collab CLI");
+    decode_public_cli_output(output)
+}
+
+fn public_context_args(operation: &str, session_id: &str, block_id: &str) -> Vec<String> {
+    let facts = serde_json::json!({
+        "session_id": session_id,
+        "rex": {
+            "server": PUBLIC_REX_SERVER,
+            "session_id": PUBLIC_REX_SESSION,
+            "block_id": block_id,
+            "cwd": "/tmp",
+        }
+    });
+    vec![
+        "context".into(),
+        "--op".into(),
+        operation.into(),
+        "--provide".into(),
+        facts.to_string(),
+    ]
+}
+
+fn public_snapshot(value: &Value) -> &Value {
+    value
+        .get("result")
+        .and_then(|result| result.get("snapshot"))
+        .unwrap_or(value)
+}
+
+fn public_name(snapshot: &Value) -> String {
+    snapshot["name"]
+        .as_str()
+        .or_else(|| snapshot["identity"]["name"].as_str())
+        .unwrap_or_else(|| panic!("public Context did not return a stable name: {snapshot}"))
+        .to_owned()
+}
+
+fn public_worker_id(snapshot: &Value) -> String {
+    snapshot["identity"]["worker_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("public Context did not return a worker id: {snapshot}"))
+        .to_owned()
+}
+
+fn register_public_rex(
+    root: &std::path::Path,
+    host_paths: &HostPaths,
+    agent_session: &str,
+    block_id: &str,
+    label: &str,
+) -> Value {
+    let args = public_context_args(
+        &format!("{label}-{}-{}", std::process::id(), now_ms()),
+        agent_session,
+        block_id,
+    );
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let result = run_public_cli(root, host_paths, agent_session, &args);
+    assert!(
+        result.success && result.value["result"]["outcome"] == "completed",
+        "public Context registration failed: success={} value={} stdout={} stderr={}",
+        result.success,
+        result.value,
+        result.stdout,
+        result.stderr
+    );
+    result.value
+}
+
+fn public_send_args<'a>(name: &'a str, subject: &'a str, body: &'a str) -> Vec<String> {
+    vec![
+        "send".into(),
+        "--to".into(),
+        name.into(),
+        "--subject".into(),
+        subject.into(),
+        "--content".into(),
+        body.into(),
+    ]
+}
+
+fn public_method_count(calls: &[Value], method: &str) -> usize {
+    calls
+        .iter()
+        .filter(|call| rex_method(call) == method)
+        .count()
+}
+
+fn public_write_targets(calls: &[Value]) -> Vec<String> {
+    calls
+        .iter()
+        .filter(|call| rex_method(call) == "com.superlogical.terminal.write")
+        .filter_map(|call| {
+            let stdin = call["stdin"].as_str()?;
+            let request: Value = serde_json::from_str(stdin).ok()?;
+            Some(format!(
+                "{}#{}",
+                request["session_id"].as_str()?,
+                request["block_id"].as_str()?
+            ))
+        })
+        .collect()
+}
+
+fn public_message_id(result: &PublicCliResult) -> String {
+    result.value["msg_id"]
+        .as_str()
+        .or_else(|| result.value["data"]["msg_id"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn public_message_id_for_subject(state: &State, recipient: &str, subject: &str) -> String {
+    state
+        .msgs
+        .values()
+        .find(|message| message.to == recipient && message.subject.as_deref() == Some(subject))
+        .map(|message| message.id.clone())
+        .unwrap_or_default()
+}
+
+fn public_state_summary(state: &State, message_id: &str, recipient_worker: &str) -> Value {
+    let message = state.msgs.get(message_id);
+    let current_endpoint = state
+        .workers
+        .get(recipient_worker)
+        .and_then(selected_transport_for_worker)
+        .and_then(|transport| transport.rex_endpoint.clone());
+    serde_json::json!({
+        "message_id": message_id,
+        "message": message,
+        "current_worker_endpoint": current_endpoint,
+        "selected_binding": state.notification_delivery_bindings.get(message_id),
+        "failure": state.notification_delivery_failures.get(message_id),
+        "accepted": state.notification_delivery_accepted.contains_key(message_id),
+        "accepted_ms": state.notification_delivery_accepted.get(message_id),
+        "wake_attempt_count": message.map(|message| message.wake_attempt_count),
+        "retry_attempted": message.map(|message| message.retry_attempted),
+        "subscription_id": state.wake_bindings.get(message_id),
+    })
+}
+
+fn public_terminal_calls(calls: &[Value], method: &str) -> Vec<Value> {
+    calls
+        .iter()
+        .filter(|call| rex_method(call) == method)
+        .map(|call| {
+            let request = call["stdin"]
+                .as_str()
+                .and_then(|stdin| serde_json::from_str::<Value>(stdin).ok());
+            serde_json::json!({
+                "serial": call["serial"],
+                "argv": call["argv"],
+                "request": request,
+            })
+        })
+        .collect()
+}
+
+fn public_cli_summary(result: &PublicCliResult) -> Value {
+    serde_json::json!({
+        "success": result.success,
+        "response": result.value,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    })
+}
+
+fn emit_public_observation(label: &str, observation: Value) {
+    eprintln!(
+        "PUBLIC_REX_OBSERVATION {}",
+        serde_json::json!({
+            "label": label,
+            "observation": observation,
+        })
+    );
+}
+
+fn public_state(root: &std::path::Path, host_paths: &HostPaths) -> State {
+    let canonical = std::fs::canonicalize(root).unwrap();
+    let storage = host_paths.app_storage_root(
+        canonical.to_str().expect("temporary root is UTF-8"),
+        crate::identity::CLI_APP_SERVER_ID,
+    );
+    current_state::load(&storage.join(".agent-collab/server/state.json"), false).unwrap()
+}
+
 struct RexCliFixture {
     dir: std::path::PathBuf,
+    barriers: std::path::PathBuf,
+    scenario_file: std::path::PathBuf,
+    blocks_file: std::path::PathBuf,
     old_log_dir: Option<std::ffi::OsString>,
     old_scenario: Option<std::ffi::OsString>,
+    old_scenario_file: Option<std::ffi::OsString>,
+    old_barrier_dir: Option<std::ffi::OsString>,
+    old_blocks_file: Option<std::ffi::OsString>,
 }
 
 impl RexCliFixture {
     fn new(root: &std::path::Path, scenario: &str) -> Self {
         let dir = root.join("rex-cli-fixture");
         std::fs::create_dir_all(&dir).unwrap();
+        let barriers = dir.join("barriers");
+        std::fs::create_dir_all(&barriers).unwrap();
+        let scenario_file = dir.join("scenario");
+        let blocks_file = dir.join("blocks.json");
+        std::fs::write(&scenario_file, scenario).unwrap();
+        std::fs::write(
+            &blocks_file,
+            serde_json::to_vec(&serde_json::json!([
+                "block:22222222-2222-2222-2222-222222222222"
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
         let fixture = dir.join("rex-cli");
         std::fs::write(
             fixture.as_path(),
@@ -238,12 +622,24 @@ impl RexCliFixture {
         crate::client::adapters::rex::set_test_timeout(Some(std::time::Duration::from_secs(5)));
         let old_log_dir = std::env::var_os("REXPRIMITIVE_LOG_DIR");
         let old_scenario = std::env::var_os("REXPRIMITIVE_SCENARIO");
+        let old_scenario_file = std::env::var_os("REXPRIMITIVE_SCENARIO_FILE");
+        let old_barrier_dir = std::env::var_os("REXPRIMITIVE_BARRIER_DIR");
+        let old_blocks_file = std::env::var_os("REXPRIMITIVE_BLOCKS_FILE");
         std::env::set_var("REXPRIMITIVE_LOG_DIR", &dir);
         std::env::set_var("REXPRIMITIVE_SCENARIO", scenario);
+        std::env::set_var("REXPRIMITIVE_SCENARIO_FILE", &scenario_file);
+        std::env::set_var("REXPRIMITIVE_BARRIER_DIR", &barriers);
+        std::env::set_var("REXPRIMITIVE_BLOCKS_FILE", &blocks_file);
         Self {
             dir,
+            barriers,
+            scenario_file,
+            blocks_file,
             old_log_dir,
             old_scenario,
+            old_scenario_file,
+            old_barrier_dir,
+            old_blocks_file,
         }
     }
 
@@ -255,6 +651,37 @@ impl RexCliFixture {
         text.lines()
             .map(|line| serde_json::from_str(line).expect("fixture invocation JSON"))
             .collect()
+    }
+
+    fn set_scenario(&self, scenario: &str) {
+        std::fs::write(&self.scenario_file, scenario).unwrap();
+    }
+
+    fn set_blocks(&self, blocks: &[&str]) {
+        std::fs::write(&self.blocks_file, serde_json::to_vec(&blocks).unwrap()).unwrap();
+    }
+
+    fn arm_method_pause(&self, method: &str) {
+        for name in ["pause-method", "method-entered", "method-release"] {
+            let _ = std::fs::remove_file(self.barriers.join(name));
+        }
+        std::fs::write(self.barriers.join("pause-method"), method).unwrap();
+    }
+
+    fn wait_method_pause(&self) {
+        let marker = self.barriers.join("method-entered");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !marker.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Rex fixture did not enter the armed method barrier"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn release_method_pause(&self) {
+        std::fs::write(self.barriers.join("method-release"), "release").unwrap();
     }
 }
 
@@ -269,6 +696,18 @@ impl Drop for RexCliFixture {
         match self.old_scenario.take() {
             Some(value) => std::env::set_var("REXPRIMITIVE_SCENARIO", value),
             None => std::env::remove_var("REXPRIMITIVE_SCENARIO"),
+        }
+        match self.old_scenario_file.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_SCENARIO_FILE", value),
+            None => std::env::remove_var("REXPRIMITIVE_SCENARIO_FILE"),
+        }
+        match self.old_barrier_dir.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_BARRIER_DIR", value),
+            None => std::env::remove_var("REXPRIMITIVE_BARRIER_DIR"),
+        }
+        match self.old_blocks_file.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_BLOCKS_FILE", value),
+            None => std::env::remove_var("REXPRIMITIVE_BLOCKS_FILE"),
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -1252,6 +1691,627 @@ async fn rex_service_generation_change_refreshes_same_block_and_retries_once() {
             >= 3
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_public_cli_can_operate_an_isolated_test_daemon() {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let root = std::env::temp_dir().join(format!(
+        "collab-rex-public-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+    let fixture = RexCliFixture::new(&root, "normal");
+    let daemon = PublicDaemon::start(root.clone(), host_paths.clone()).await;
+
+    let operation = format!("public-rex-context-{}-0", std::process::id());
+    let rex = serde_json::json!({
+        "session_id": "agent-a",
+        "rex": {
+            "server": "unix:///tmp/rex-fixture.sock",
+            "session_id": "session:11111111-1111-1111-1111-111111111111",
+            "block_id": "block:22222222-2222-2222-2222-222222222222",
+            "cwd": root.to_string_lossy(),
+        }
+    });
+    let output = Command::new(public_collab_binary())
+        .arg("context")
+        .arg("--op")
+        .arg(&operation)
+        .arg("--provide")
+        .arg(rex.to_string())
+        .current_dir(&root)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", root.join("home"))
+        .env("CODEX_HOME", root.join("home"))
+        .env("COLLAB_STATE_DIR", &host_paths.state_root())
+        .env("CODEX_SESSION_ID", "agent-a")
+        .output()
+        .expect("run public Collab context");
+    assert!(
+        output.status.success(),
+        "public context failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("public context returns JSON");
+    assert_eq!(response["result"]["outcome"], "completed", "{response}");
+    assert_eq!(
+        response["result"]["snapshot"]["identity"]["transport"]["rex_endpoint"]["session_id"],
+        "session:11111111-1111-1111-1111-111111111111"
+    );
+    let calls = fixture.calls();
+    assert!(
+        calls.iter().any(|call| rex_method(call) == "server.status"),
+        "the isolated daemon must use the injected Rex CLI: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| rex_method(call) == "session.list_blocks"),
+        "public context must verify the selected block: {calls:?}"
+    );
+
+    drop(fixture);
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_public_recovery_refuses_after_context_moves_the_block() {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let root = std::env::temp_dir().join(format!(
+        "collab-rex-h1-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+    let fixture = RexCliFixture::new(&root, "normal");
+    fixture.set_blocks(&[
+        PUBLIC_SENDER_BLOCK,
+        PUBLIC_RECIPIENT_BLOCK,
+        PUBLIC_MOVED_BLOCK,
+    ]);
+    let daemon = PublicDaemon::start(root.clone(), host_paths.clone()).await;
+
+    let _sender = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-sender",
+        PUBLIC_SENDER_BLOCK,
+        "public-h1-sender",
+    );
+    let recipient = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-a",
+        PUBLIC_RECIPIENT_BLOCK,
+        "public-h1-recipient",
+    );
+    let recipient_snapshot = public_snapshot(&recipient);
+    let recipient_name = public_name(recipient_snapshot);
+    let recipient_worker = public_worker_id(recipient_snapshot);
+
+    fixture.set_scenario("service_changed");
+    fixture.arm_method_pause("session.list");
+    let subject = "public-original-binding-move";
+    let body = "DETAIL-public-original-binding-move";
+    let send_args = public_send_args(&recipient_name, subject, body);
+    let send_request = serde_json::json!(send_args);
+    let send_args = send_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let send_child = spawn_public_cli(&root, &host_paths, "agent-sender", &send_args);
+    fixture.wait_method_pause();
+    let refresh_state = public_state(&root, &host_paths);
+    let refresh_message_id =
+        public_message_id_for_subject(&refresh_state, &recipient_worker, subject);
+    let refresh_observation =
+        public_state_summary(&refresh_state, &refresh_message_id, &recipient_worker);
+
+    let context_args = public_context_args(
+        &format!("public-h1-move-{}-{}", std::process::id(), now_ms()),
+        "agent-a",
+        PUBLIC_MOVED_BLOCK,
+    );
+    let context_request = serde_json::json!(context_args);
+    let context_args = context_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let moved = run_public_cli(&root, &host_paths, "agent-a", &context_args);
+    let after_move_state = public_state(&root, &host_paths);
+    let after_move_observation =
+        public_state_summary(&after_move_state, &refresh_message_id, &recipient_worker);
+    fixture.release_method_pause();
+    let send = wait_public_cli(send_child).await;
+    let calls = fixture.calls();
+    let write_targets = public_write_targets(&calls);
+    let enter_count = public_method_count(&calls, "send-key");
+    let state = public_state(&root, &host_paths);
+    let response_message_id = public_message_id(&send);
+    let message_id = if response_message_id.is_empty() {
+        refresh_message_id.clone()
+    } else {
+        response_message_id
+    };
+    let accepted = state
+        .notification_delivery_accepted
+        .contains_key(&message_id);
+    let selected_block = state
+        .notification_delivery_bindings
+        .get(&message_id)
+        .and_then(|binding| binding.transport.rex_endpoint.as_ref())
+        .map(|endpoint| endpoint.block_id.clone());
+    let final_snapshot = public_snapshot(&moved.value).clone();
+    let failures = state
+        .notification_delivery_failures
+        .get(&message_id)
+        .cloned();
+    let message = state.msgs.get(&message_id).cloned();
+    let final_observation = public_state_summary(&state, &message_id, &recipient_worker);
+
+    emit_public_observation(
+        "h1_original_binding_move",
+        serde_json::json!({
+            "request_order": [
+                {"actor": "agent-sender", "public_request": send_request},
+                {"actor": "agent-a", "public_request": context_request},
+            ],
+            "barrier": "paused at the recovery server.status call while the public Context moved the binding",
+            "recipient_worker": recipient_worker,
+            "binding_at_refresh": refresh_observation,
+            "binding_after_move": after_move_observation,
+            "binding_at_final": final_observation,
+            "write_calls": public_terminal_calls(&calls, "com.superlogical.terminal.write"),
+            "enter_calls": public_terminal_calls(&calls, "send-key"),
+            "send_response": public_cli_summary(&send),
+            "context_response": public_cli_summary(&moved),
+            "selected_block": selected_block,
+            "accepted": accepted,
+            "failure": failures.clone(),
+            "final_message": message.clone(),
+        }),
+    );
+
+    drop(fixture);
+    daemon.shutdown().await;
+
+    assert!(
+        moved.success
+            && final_snapshot["identity"]["transport"]["rex_endpoint"]["block_id"]
+                == PUBLIC_MOVED_BLOCK,
+        "the public Context move must complete before recovery resumes: {moved:?}"
+    );
+    assert!(
+        !write_targets
+            .iter()
+            .any(|target| target.ends_with(PUBLIC_MOVED_BLOCK)),
+        "the moved binding must receive no body input; moved={moved:?} send={send:?} recipient={recipient_worker} message={message_id} selected={selected_block:?} message={message:?} failure={failures:?}"
+    );
+    assert!(
+        message.is_some(),
+        "the original durable message must remain"
+    );
+    assert!(
+        !send.success,
+        "recovery must refuse the replaced original binding: {send:?}"
+    );
+    assert_eq!(
+        write_targets,
+        Vec::<String>::new(),
+        "a replaced original binding must write nowhere: {write_targets:?}"
+    );
+    assert_eq!(enter_count, 0, "a refused recovery must send no Enter");
+    assert!(!accepted, "a refused recovery must not record acceptance");
+    assert!(
+        failures.as_ref().is_some_and(|failure| {
+            send.value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(&failure.error))
+        }),
+        "the original delivery failure must remain: failure={failures:?} response={send:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_public_recovery_revalidates_acceptance_before_retry() {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let root = std::env::temp_dir().join(format!(
+        "collab-rex-h2-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+    let fixture = RexCliFixture::new(&root, "normal");
+    fixture.set_blocks(&[PUBLIC_SENDER_BLOCK, PUBLIC_RECIPIENT_BLOCK]);
+    let daemon = PublicDaemon::start(root.clone(), host_paths.clone()).await;
+
+    let _sender = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-sender",
+        PUBLIC_SENDER_BLOCK,
+        "public-h2-sender",
+    );
+    let recipient = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-a",
+        PUBLIC_RECIPIENT_BLOCK,
+        "public-h2-recipient",
+    );
+    let recipient_snapshot = public_snapshot(&recipient);
+    let recipient_name = public_name(recipient_snapshot);
+    let recipient_worker = public_worker_id(recipient_snapshot);
+
+    fixture.set_scenario("service_changed");
+    fixture.arm_method_pause("session.list");
+    let subject = "public-final-admission-race";
+    let body = "DETAIL-public-final-admission-race";
+    let send_args = public_send_args(&recipient_name, subject, body);
+    let send_request = serde_json::json!(send_args);
+    let send_args = send_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let first_child = spawn_public_cli(&root, &host_paths, "agent-sender", &send_args);
+    fixture.wait_method_pause();
+    let refresh_state = public_state(&root, &host_paths);
+    let refresh_message_id =
+        public_message_id_for_subject(&refresh_state, &recipient_worker, subject);
+    let refresh_observation =
+        public_state_summary(&refresh_state, &refresh_message_id, &recipient_worker);
+
+    fixture.set_scenario("normal");
+    let duplicate = run_public_cli(&root, &host_paths, "agent-sender", &send_args);
+    let pre_admission_state = public_state(&root, &host_paths);
+    let pre_admission_observation =
+        public_state_summary(&pre_admission_state, &refresh_message_id, &recipient_worker);
+    fixture.set_scenario("service_changed");
+    fixture.release_method_pause();
+    let first = wait_public_cli(first_child).await;
+
+    let calls = fixture.calls();
+    let write_targets = public_write_targets(&calls);
+    let enter_count = public_method_count(&calls, "send-key");
+    let state = public_state(&root, &host_paths);
+    let duplicate_message_id = public_message_id(&duplicate);
+    let first_message_id = {
+        let response_id = public_message_id(&first);
+        if response_id.is_empty() {
+            refresh_message_id.clone()
+        } else {
+            response_id
+        }
+    };
+    let accepted = state
+        .notification_delivery_accepted
+        .contains_key(&duplicate_message_id);
+    let message = state.msgs.get(&duplicate_message_id).cloned();
+    let failures = state
+        .notification_delivery_failures
+        .get(&duplicate_message_id)
+        .cloned();
+    let final_observation = public_state_summary(&state, &duplicate_message_id, &recipient_worker);
+
+    emit_public_observation(
+        "h2_concurrent_accepted",
+        serde_json::json!({
+            "public_request": send_request,
+            "barrier": "paused at the recovery server.status call while a duplicate public Send accepted",
+            "recipient_worker": recipient_worker,
+            "binding_at_refresh": refresh_observation,
+            "binding_at_final_admission": pre_admission_observation,
+            "binding_after_recovery": final_observation,
+            "write_calls": public_terminal_calls(&calls, "com.superlogical.terminal.write"),
+            "enter_calls": public_terminal_calls(&calls, "send-key"),
+            "first_response": public_cli_summary(&first),
+            "duplicate_response": public_cli_summary(&duplicate),
+            "accepted": accepted,
+            "failure": failures.clone(),
+            "final_message": message.clone(),
+        }),
+    );
+
+    drop(fixture);
+    daemon.shutdown().await;
+
+    assert!(
+        duplicate.success,
+        "the duplicate public send must complete during the paused refresh: {duplicate:?}"
+    );
+    assert_eq!(
+        duplicate_message_id, first_message_id,
+        "the duplicate must retain the original durable message"
+    );
+    assert!(
+        accepted,
+        "the duplicate accepted attempt was not durably recorded: message={message:?} failure={failures:?}"
+    );
+    assert_eq!(
+        write_targets.len(),
+        1,
+        "a message already accepted during refresh must not be written again: {write_targets:?} first={first:?} duplicate={duplicate:?} message={message:?}"
+    );
+    assert_eq!(enter_count, 1, "the accepted message must have one Enter");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_public_recovery_revalidates_unknown_before_retry() {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let root = std::env::temp_dir().join(format!(
+        "collab-rex-h2u-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+    let fixture = RexCliFixture::new(&root, "normal");
+    fixture.set_blocks(&[PUBLIC_SENDER_BLOCK, PUBLIC_RECIPIENT_BLOCK]);
+    let daemon = PublicDaemon::start(root.clone(), host_paths.clone()).await;
+
+    let _sender = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-sender",
+        PUBLIC_SENDER_BLOCK,
+        "public-h2u-sender",
+    );
+    let recipient = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-a",
+        PUBLIC_RECIPIENT_BLOCK,
+        "public-h2u-recipient",
+    );
+    let recipient_snapshot = public_snapshot(&recipient);
+    let recipient_name = public_name(recipient_snapshot);
+    let recipient_worker = public_worker_id(recipient_snapshot);
+
+    fixture.set_scenario("service_changed");
+    fixture.arm_method_pause("session.list");
+    let subject = "public-final-admission-unknown";
+    let body = "DETAIL-public-final-admission-unknown";
+    let send_args = public_send_args(&recipient_name, subject, body);
+    let send_request = serde_json::json!(send_args);
+    let send_args = send_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let first_child = spawn_public_cli(&root, &host_paths, "agent-sender", &send_args);
+    fixture.wait_method_pause();
+    let refresh_state = public_state(&root, &host_paths);
+    let refresh_message_id =
+        public_message_id_for_subject(&refresh_state, &recipient_worker, subject);
+    let refresh_observation =
+        public_state_summary(&refresh_state, &refresh_message_id, &recipient_worker);
+
+    fixture.set_scenario("enter_unknown");
+    let duplicate = run_public_cli(&root, &host_paths, "agent-sender", &send_args);
+    let pre_admission_state = public_state(&root, &host_paths);
+    let pre_admission_observation =
+        public_state_summary(&pre_admission_state, &refresh_message_id, &recipient_worker);
+    let pre_admission_failure = pre_admission_state
+        .notification_delivery_failures
+        .get(&refresh_message_id)
+        .cloned();
+    fixture.set_scenario("service_changed");
+    fixture.release_method_pause();
+    let first = wait_public_cli(first_child).await;
+
+    let calls = fixture.calls();
+    let write_targets = public_write_targets(&calls);
+    let enter_count = public_method_count(&calls, "send-key");
+    let state = public_state(&root, &host_paths);
+    let duplicate_message_id = public_message_id(&duplicate);
+    let first_message_id = {
+        let response_id = public_message_id(&first);
+        if response_id.is_empty() {
+            refresh_message_id.clone()
+        } else {
+            response_id
+        }
+    };
+    let accepted = state
+        .notification_delivery_accepted
+        .contains_key(&duplicate_message_id);
+    let message = state.msgs.get(&duplicate_message_id).cloned();
+    let failure = state
+        .notification_delivery_failures
+        .get(&duplicate_message_id)
+        .cloned();
+    let final_observation = public_state_summary(&state, &duplicate_message_id, &recipient_worker);
+
+    emit_public_observation(
+        "h2_concurrent_unknown",
+        serde_json::json!({
+            "public_request": send_request,
+            "barrier": "paused at the recovery server.status call while a duplicate public Send became unknown",
+            "recipient_worker": recipient_worker,
+            "binding_at_refresh": refresh_observation,
+            "binding_at_final_admission": pre_admission_observation,
+            "binding_after_recovery": final_observation,
+            "write_calls": public_terminal_calls(&calls, "com.superlogical.terminal.write"),
+            "enter_calls": public_terminal_calls(&calls, "send-key"),
+            "first_response": public_cli_summary(&first),
+            "duplicate_response": public_cli_summary(&duplicate),
+            "accepted": accepted,
+            "failure": failure.clone(),
+            "final_message": message.clone(),
+        }),
+    );
+
+    drop(fixture);
+    daemon.shutdown().await;
+
+    assert!(
+        !duplicate.success,
+        "the concurrent unknown public Send must remain failed: {duplicate:?}"
+    );
+    assert_eq!(
+        duplicate_message_id, first_message_id,
+        "the concurrent unknown attempt must retain the original durable message"
+    );
+    assert!(
+        !first.success,
+        "recovery must not replace the concurrent unknown outcome: {first:?}"
+    );
+    assert!(
+        !accepted,
+        "a concurrent unknown outcome must not become accepted: message={message:?} failure={failure:?}"
+    );
+    assert_eq!(
+        failure, pre_admission_failure,
+        "recovery must preserve the concurrent unknown failure record"
+    );
+    assert!(
+        failure.as_ref().is_some_and(|failure| !failure.retryable),
+        "the concurrent unknown outcome must remain non-retryable: {failure:?}"
+    );
+    assert_eq!(
+        write_targets.len(),
+        1,
+        "a concurrent unknown outcome must not be written again: {write_targets:?} first={first:?} duplicate={duplicate:?}"
+    );
+    assert_eq!(
+        enter_count, 1,
+        "a concurrent unknown outcome must not receive another Enter"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_public_queued_body_enter_rejection_is_unknown_and_not_resent() {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let root = std::env::temp_dir().join(format!(
+        "crq-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    host_paths.ensure_root().unwrap();
+    let fixture = RexCliFixture::new(&root, "normal");
+    fixture.set_blocks(&[PUBLIC_SENDER_BLOCK, PUBLIC_RECIPIENT_BLOCK]);
+    let daemon = PublicDaemon::start(root.clone(), host_paths.clone()).await;
+
+    let _sender = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-sender",
+        PUBLIC_SENDER_BLOCK,
+        "public-queued-sender",
+    );
+    let recipient = register_public_rex(
+        &root,
+        &host_paths,
+        "agent-a",
+        PUBLIC_RECIPIENT_BLOCK,
+        "public-queued-recipient",
+    );
+    let recipient_snapshot = public_snapshot(&recipient);
+    let recipient_name = public_name(recipient_snapshot);
+    let recipient_worker = public_worker_id(recipient_snapshot);
+
+    fixture.set_scenario("enter_typed_reject");
+    let subject = "public-queued-body-reject";
+    let body = "DETAIL-public-queued-body-reject";
+    let send_args = public_send_args(&recipient_name, subject, body);
+    let send_request = serde_json::json!(send_args);
+    let send_args = send_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let first = run_public_cli(&root, &host_paths, "agent-sender", &send_args);
+    let duplicate = run_public_cli(&root, &host_paths, "agent-sender", &send_args);
+
+    let calls = fixture.calls();
+    let write_targets = public_write_targets(&calls);
+    let enter_count = public_method_count(&calls, "send-key");
+    let state = public_state(&root, &host_paths);
+    let first_message_id = public_message_id(&first);
+    let duplicate_message_id = public_message_id(&duplicate);
+    let failure = state
+        .notification_delivery_failures
+        .get(&first_message_id)
+        .cloned();
+    let accepted = state
+        .notification_delivery_accepted
+        .contains_key(&first_message_id);
+    let final_observation = public_state_summary(&state, &first_message_id, &recipient_worker);
+
+    emit_public_observation(
+        "queued_body_enter_rejection",
+        serde_json::json!({
+            "public_request": send_request,
+            "request_order": "first public Send then the identical public Send",
+            "recipient_worker": recipient_worker,
+            "binding_after_rejection": final_observation,
+            "write_calls": public_terminal_calls(&calls, "com.superlogical.terminal.write"),
+            "enter_calls": public_terminal_calls(&calls, "send-key"),
+            "first_response": public_cli_summary(&first),
+            "duplicate_response": public_cli_summary(&duplicate),
+            "accepted": accepted,
+            "failure": failure.clone(),
+        }),
+    );
+
+    drop(fixture);
+    daemon.shutdown().await;
+
+    assert!(
+        !first.success,
+        "the typed Enter rejection must fail: {first:?}"
+    );
+    assert!(
+        !duplicate.success,
+        "the duplicate must retain the original rejection: {duplicate:?}"
+    );
+    assert_eq!(
+        duplicate_message_id, first_message_id,
+        "the duplicate must retain the original durable message"
+    );
+    assert_eq!(
+        write_targets,
+        vec![format!("{PUBLIC_REX_SESSION}#{PUBLIC_RECIPIENT_BLOCK}")],
+        "one body write only: {write_targets:?}"
+    );
+    assert_eq!(enter_count, 1, "one Enter only");
+    assert!(
+        failure.as_ref().is_some_and(|failure| {
+            failure.error.contains("REX_UNKNOWN: operation=notify")
+                && failure.error.contains("stage=WriteQueued")
+        }),
+        "the current public path must retain its actual Unknown plus queued-body classification: {failure:?}"
+    );
+    assert!(
+        failure.as_ref().is_some_and(|failure| !failure.retryable),
+        "the queued Enter rejection must remain non-retryable: {failure:?}"
+    );
+    assert!(
+        !accepted,
+        "a rejected Enter must not be recorded as accepted"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

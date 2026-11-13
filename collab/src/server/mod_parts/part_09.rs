@@ -1140,7 +1140,7 @@ fn handle_task_finalize_cleanup(
 }
 
 fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
-    let cleanup_required = task.worktree_path.is_some();
+    let cleanup_required = task.has_owned_resources();
     let cleanup_receipt = state.cleanup_receipts.get(&task.id);
     let lifecycle = state.task_lifecycle.get(&task.id);
     // A read projects only the sections that carry a fact. A task that has not

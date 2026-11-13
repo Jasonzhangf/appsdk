@@ -3551,9 +3551,41 @@ fn recv_default_empty_returns_promptly() {
     assert!(error.contains("RECEIVE_IDENTITY_INVALID"), "{error}");
 }
 
+fn recv_race_has_exact_durable_no_batch_receipt(receipt: &Value) -> bool {
+    receipt["ok"] == false
+        && receipt["durable"] == true
+        && receipt["msg_id"].as_str().is_some_and(|id| !id.is_empty())
+        && receipt["error"] == "APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready"
+        && receipt["notification"] == "subscribed-not-sent"
+        && receipt["notification_error"] == "no notification batch is ready"
+        && receipt["failure"] == "notification_delivery_failed"
+        && receipt["repair_required"] == true
+}
+
+#[test]
+fn recv_race_receipt_rejects_other_failures_and_missing_durability() {
+    // Exact receipt observed in the public waiting-recv race. This alone is
+    // insufficient: the consumer below must still prove actual consumption.
+    let observed = json!({
+        "ok": false, "durable": true, "msg_id": "m1794550269477-1",
+        "error": "APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready",
+        "notification": "subscribed-not-sent",
+        "notification_error": "no notification batch is ready",
+        "failure": "notification_delivery_failed", "repair_required": true
+    });
+    assert!(recv_race_has_exact_durable_no_batch_receipt(&observed));
+    let mut other = observed.clone();
+    other["error"] = json!("APPSERVER_NOTIFICATION_REJECTED: transport disconnected");
+    other["notification_error"] = json!("transport disconnected");
+    assert!(!recv_race_has_exact_durable_no_batch_receipt(&other));
+    let mut missing = observed;
+    missing.as_object_mut().unwrap().remove("durable");
+    assert!(!recv_race_has_exact_durable_no_batch_receipt(&missing));
+}
+
 #[test]
 fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
-    let (mut fixture, _, peer) = setup();
+    let (mut fixture, master, peer) = setup();
     fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
 
     let (wait_output, wait_timed_out, waited) = run_public_bounded(
@@ -3583,7 +3615,7 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
     let started = Instant::now();
     let child = spawn_public(&fixture, &["recv", "--timeout", "5"], THREAD_B);
     thread::sleep(Duration::from_millis(250));
-    let sent = fixture.run_public(
+    let send_output = fixture.command_public(
         &[
             "sendmessage",
             "--to",
@@ -3597,6 +3629,21 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
     let (arrived_output, arrived_timed_out, _) =
         wait_for_public(&mut fixture, child, Duration::from_secs(4));
     let arrived_elapsed = started.elapsed();
+    let sent = if send_output.status.success() {
+        json_from_output(send_output)
+    } else {
+        let stderr = String::from_utf8_lossy(&send_output.stderr);
+        let receipt: Value = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("collab response: "))
+            .and_then(|line| serde_json::from_str(line).ok())
+            .unwrap_or_else(|| panic!("send failed without a structured receipt: {send_output:?}"));
+        assert!(
+            recv_race_has_exact_durable_no_batch_receipt(&receipt),
+            "unexpected send failure: {send_output:?}"
+        );
+        receipt
+    };
     assert!(
         !arrived_timed_out && arrived_elapsed < Duration::from_secs(5),
         "explicit recv did not return early: timed_out={arrived_timed_out} elapsed={arrived_elapsed:?}"
@@ -3611,6 +3658,13 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
         serde_json::from_slice(&arrived_output.stdout).expect("waiting recv emits JSON");
     assert_eq!(arrived["count"], 1, "{arrived}");
     assert_eq!(arrived["messages"][0]["id"], sent["msg_id"]);
+    assert_eq!(arrived["messages"][0]["from"], master);
+    assert_eq!(arrived["messages"][0]["to"], peer);
+    assert_eq!(arrived["messages"][0]["subject"], "early-arrival");
+    assert_eq!(arrived["messages"][0]["body"], "wake the explicit wait");
+    assert!(arrived["receive_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
 
     let read = fixture.run_public(&["msg", sent["msg_id"].as_str().unwrap()], THREAD_B);
     assert_eq!(read["state"], "read");

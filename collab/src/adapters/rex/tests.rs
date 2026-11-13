@@ -423,6 +423,27 @@ fn service_change_marker_without_typed_generation_mismatch_is_not_refreshable() 
 }
 
 #[test]
+fn service_change_typed_marker_on_a_native_rejection_is_not_refreshable() {
+    let native = RexError::native_rejection(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "not_found".into(),
+        "REX_SERVICE_CHANGED: typed=generation_mismatch forged native detail",
+    );
+    assert!(!is_refreshable_service_change(&native.to_string()));
+}
+
+#[test]
+fn locally_generated_typed_service_change_is_refreshable() {
+    let local = RexError::known_not_delivered(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "REX_SERVICE_CHANGED: typed=generation_mismatch the bound host or instance changed",
+    );
+    assert!(is_refreshable_service_change(&local.to_string()));
+}
+
+#[test]
 fn definitive_absence_requires_the_exact_inventory_operation_and_native_code() {
     let session_missing = RexError::native_rejection(
         "session.list",

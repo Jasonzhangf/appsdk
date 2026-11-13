@@ -45,6 +45,7 @@ pub fn is_refreshable_service_change(error: &str) -> bool {
     error.contains(NOT_DELIVERED_PREFIX)
         && error.contains("operation=server.status")
         && error.contains("stage=BeforeWrite")
+        && error.contains("native_code=none")
         && error
             .split_once("detail=")
             .map(|(_, detail)| detail)

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-notification-consumption",
-  "version": "0.2.0",
-  "description": "SESE consumption graph. A recipient consume request verifies the exact mailbox owner, reads durable payloads, then commits ReceiveCommitted with Delivered/Acked in the same transaction. First receive and receive-id replay use one projection of the durable body, message identity, correlation and reply obligation; delivery-attempt diagnostics remain in their owner and are not part of the default receipt. Native acceptance and received receipt are not consumption. Late or old-generation receipts must not consume a newer binding. The existing subscription owner may idempotently advance its occurrence. Consumption does not change route, transport or binding truth. A fixture or graph validation does not prove live LLM consumption; that requires a real agent recv and receipt.",
+  "version": "0.3.0",
+  "description": "SESE consumption graph. A recipient consume request verifies the exact mailbox owner and the exact current recipient context, reads durable payloads, then commits ReceiveCommitted with Delivered/Acked in the same transaction. Any two registered objects may exchange ordinary messages across role and project; consumption still requires the exact recipient context, so a replaced Rex block owner or a stale generation cannot consume a message addressed to the newer current binding. First receive and receive-id replay use one projection of the durable body, message identity, correlation and reply obligation; delivery-attempt diagnostics remain in their owner and are not part of the default receipt. Upstream Rex notification admission, defined in collab-rex-adaptor.graph.json, requires a matching unique current owner and holds the shared host register gate across map validation, selection, synchronous sink and its original result. That gate serializes submission with binding replacement; it does not consume mail and this consumption path does not reacquire it. Native acceptance and received receipt are not consumption. Multiple peers in one Rex session consume only through their own block-bound current binding. The existing subscription owner may idempotently advance its occurrence. Consumption does not change route, transport or binding truth. A fixture or graph validation does not prove live LLM consumption; that requires a real agent recv and receipt.",
   "inputs": [
     {
       "id": "recipient_consume_request",
@@ -13,7 +13,7 @@
       "id": "verify_message_owner",
       "operator": "appsdk.collab_notification_consume.verify_owner",
       "operator_version": "1",
-      "description": "Owner is the mailbox/name owner. Resolve the recipient from the exact current project/name binding or receive-id replay, then accept only messages owned by that mailbox. Missing, mismatched, ambiguous or unreadable message identity keeps the existing explicit MESSAGE_ID_INVALID/MESSAGE_NOT_FOUND/MESSAGE_LOOKUP_FAILED result and does not consume. Native acceptance is not owner verification.",
+      "description": "Owner is the mailbox/name owner. Resolve the recipient from the exact current project/name binding or receive-id replay, and when the request names a target execution binding, require that binding to still be the current one. Then accept only messages owned by that mailbox. A replaced Rex block owner, an old generation or a different peer in the same session is not the current recipient and must not consume through this path. Missing, mismatched, ambiguous or unreadable message identity keeps the existing explicit MESSAGE_ID_INVALID/MESSAGE_NOT_FOUND/MESSAGE_LOOKUP_FAILED result and does not consume. Native acceptance is not owner verification.",
       "inputs": ["recipient_consume_request"],
       "output": {"id": "owned_mailbox_batch", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -35,7 +35,7 @@
       "id": "commit_consume_receipt",
       "operator": "appsdk.collab_notification_consume.commit_receipt",
       "operator_version": "1",
-      "description": "Owner is the mailbox consumption transaction. Commit ReceiveCommitted together with Delivered/Acked after the exact payload read; same receive-id replay reuses the receipt and does not double-consume. Only this commit represents consumption. Reply is a separate correlated send and sending it is not proof that the consumer received it. A real agent recv receipt is required for live LLM consumption; fixture and graph evidence are insufficient.",
+      "description": "Owner is the mailbox consumption transaction. Commit ReceiveCommitted together with Delivered/Acked after the exact payload read; same receive-id replay reuses the receipt and does not double-consume. Only this commit represents consumption. A late or old-generation receipt must not mark a newer binding consumed, and one peer's receipt must not consume another peer's same-session message. Reply is a separate correlated send and sending it is not proof that the consumer received it. A real agent recv receipt is required for live LLM consumption; fixture and graph evidence are insufficient.",
       "inputs": ["read_payloads"],
       "output": {"id": "consumption_receipt", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

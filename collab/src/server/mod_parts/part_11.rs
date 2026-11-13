@@ -206,7 +206,7 @@ fn dispatch_with_route_context_bound(
             subject,
             body,
             envelope,
-        } => handle_channel_inbound(server, from, to, subject, body, envelope),
+        } => handle_channel_inbound_with_rex_recovery(server, from, to, subject, body, envelope),
         Req::LiveClosureDaemonSend {
             worker_id,
             token,
@@ -634,12 +634,10 @@ fn dispatch_with_route_context_bound(
             record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
-                let role_briefs = st
-                    .workers
-                    .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
-                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
-                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                let role_briefs = match current_role_briefs_by_worker(server, &st, &control) {
+                    Ok(briefs) => briefs,
+                    Err(error) => return Resp::err(error),
+                };
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -657,7 +655,11 @@ fn dispatch_with_route_context_bound(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
-                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
+                        role_briefs
+                            .get(&w.id)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or(serde_json::Value::Null),
                         w,
                     )
                 })
@@ -682,12 +684,10 @@ fn dispatch_with_route_context_bound(
             record_ordinary_peer_presence_edges(server, worker_id.as_deref());
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
-                let role_briefs = st
-                    .workers
-                    .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
-                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
-                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                let role_briefs = match current_role_briefs_by_worker(server, &st, &control) {
+                    Ok(briefs) => briefs,
+                    Err(error) => return Resp::err(error),
+                };
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -706,7 +706,11 @@ fn dispatch_with_route_context_bound(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
-                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
+                        role_briefs
+                            .get(&w.id)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or(serde_json::Value::Null),
                         w,
                     )
                 })
@@ -791,12 +795,10 @@ fn dispatch_with_route_context_bound(
             ) = {
                 let st = server.state.lock().unwrap();
                 let workers_rec: Vec<WorkerRec> = st.workers.values().cloned().collect();
-                let role_briefs = st
-                    .workers
-                    .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
-                    .collect::<Result<std::collections::HashMap<_, _>, String>>();
-                let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                let role_briefs = match current_role_briefs_by_worker(server, &st, &control) {
+                    Ok(briefs) => briefs,
+                    Err(error) => return Resp::err(error),
+                };
                 let mut tasks: Vec<serde_json::Value> =
                     st.tasks.values().map(|task| task_view(&st, task)).collect();
                 tasks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -829,7 +831,11 @@ fn dispatch_with_route_context_bound(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
-                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
+                        role_briefs
+                            .get(&w.id)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or(serde_json::Value::Null),
                         w,
                     )
                 })
@@ -1158,8 +1164,9 @@ fn validate_wire_route_principals(
     }
 
     // Worker status is a read-only identity query. A registered worker whose
-    // active mapping belongs to another project route remains inspectable,
-    // while the response marks route_match=false and never admits mutation.
+    // active mapping belongs to another project route, or whose persistent row
+    // remains after displacement, stays inspectable. The response owns the
+    // unknown projection and never admits mutation from the old caller.
     if let Req::WorkerStatus {
         worker_id: Some(worker_id),
     } = req
@@ -1170,19 +1177,31 @@ fn validate_wire_route_principals(
             let current = slot.active_binding()?;
             (current.binding.agent_id.as_str() == worker_id).then_some(&current.binding)
         });
-        let Some(binding) = matches.next() else {
-            return Err(format!(
-                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no registered runtime binding",
-                worker_id
-            ));
-        };
+        let binding = matches.next();
         if matches.next().is_some() {
             return Err("IDENTITY_MAP_AMBIGUOUS: worker carries multiple active mappings".into());
         }
-        if binding.project_scope != route_scope.project_scope_id
-            || binding.app_scope_id != route_scope.app_scope_id
-        {
-            return Ok(());
+        match binding {
+            Some(binding)
+                if binding.project_scope != route_scope.project_scope_id
+                    || binding.app_scope_id != route_scope.app_scope_id =>
+            {
+                return Ok(())
+            }
+            Some(_) => {}
+            None => {
+                let retained_worker = {
+                    let state = server.state.lock().unwrap();
+                    state.workers.contains_key(worker_id)
+                };
+                if !retained_worker {
+                    return Err(format!(
+                        "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no registered runtime binding",
+                        worker_id
+                    ));
+                }
+                return Ok(());
+            }
         }
     }
 

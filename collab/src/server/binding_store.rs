@@ -242,6 +242,7 @@ impl BindingControlStore {
     /// file that is already visible.
     pub(crate) fn commit(&self, change: ControlChange) -> Result<StoreCommit, String> {
         let mut control = self.load()?;
+        let control_before = control.clone();
         let mut effect_changed = false;
         let outcome = match change {
             ControlChange::Commit {
@@ -376,7 +377,8 @@ impl BindingControlStore {
                 removed: control.remove_scope(project_scope.as_str()),
             },
         };
-        let durability = if effect_changed {
+        let collection_changed = control_before != control;
+        let durability = if effect_changed || collection_changed {
             self.save(&control)?
         } else {
             match outcome {

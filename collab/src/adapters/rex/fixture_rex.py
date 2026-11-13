@@ -25,6 +25,7 @@ Scenarios (override behavior keyed by the extracted method):
   write_typed_reject     write exits 1 with a structured native error code
   enter_fail             send-key exits 3 with stderr text
   enter_typed_reject     send-key exits 1 with a structured native error code
+  enter_unknown          send-key exits 124 without a success result
   events_stream          events emits matching terminal events then stays open
   events_malformed       events emits one valid event then a broken JSON line
 """
@@ -142,19 +143,24 @@ def server_status() -> None:
     if scenario() == "missing_instance":
         emit({"host_id": "host-fixture"})
         return
+    instance = (
+        "instance-fixture-refreshed"
+        if scenario().startswith("service_changed")
+        else "instance-fixture"
+    )
     emit(
         {
             "rex_version": "0.1.0",
             "platform": "darwin",
             "dirty": False,
             "host_id": "host-fixture",
-            "instance_id": "instance-fixture",
+            "instance_id": instance,
         }
     )
 
 
 def session_list() -> None:
-    if scenario() == "session_missing":
+    if scenario() in {"session_missing", "service_changed_session_missing"}:
         emit({"sessions": []})
         return
     emit({"sessions": [{"session_id": SESSION, "label": "fixture"}, {"session_id": OTHER_SESSION, "label": "other"}]})
@@ -162,11 +168,16 @@ def session_list() -> None:
 
 def list_blocks() -> None:
     creator = "com.other.creator" if scenario() == "non_terminal_block" else TERMINAL
+    block = (
+        "block:44444444-4444-4444-4444-444444444444"
+        if scenario() == "service_changed_wrong_block"
+        else BLOCK
+    )
     emit(
         {
             "blocks": [
                 {
-                    "block_id": BLOCK,
+                    "block_id": block,
                     "creator_name": creator,
                     "flavor": "com.superlogical.terminal.shell",
                     "placement": "window",
@@ -206,6 +217,8 @@ def send_key() -> None:
     if mode == "enter_typed_reject":
         emit({"error": {"code": "conflict", "message": "session not attached"}})
         raise SystemExit(1)
+    if mode == "enter_unknown":
+        raise SystemExit(124)
     emit({})
 
 

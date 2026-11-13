@@ -344,20 +344,33 @@ fn worker_status_summary_with_maps(
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
-    let (presence, transport_view) = worker_presence_with_view(server, w);
-    let (identity_valid, endpoint_live) = worker_identity_and_endpoint(server, w);
-    let thread_state = transport_view
-        .get("thread_state")
-        .and_then(serde_json::Value::as_str);
-    let agent_state = match (endpoint_live, thread_state) {
-        (Some(false), _) => "absent",
-        (None, _) => "unknown",
-        (Some(true), Some("notLoaded")) => "cold",
-        (Some(true), Some("idle")) => "idle",
-        (Some(true), Some("waiting_user")) => "waiting_user",
-        (Some(true), Some("working")) => "working",
-        (Some(true), Some("active")) => "working",
-        _ => "unknown",
+    let has_current = !role_brief.is_null();
+    let (presence, transport_view) = if has_current {
+        worker_presence_with_view(server, w)
+    } else {
+        (IdentityPresence::Unknown, serde_json::Value::Null)
+    };
+    let (identity_valid, endpoint_live) = if has_current {
+        worker_identity_and_endpoint(server, w)
+    } else {
+        (false, None)
+    };
+    let agent_state = if has_current {
+        let thread_state = transport_view
+            .get("thread_state")
+            .and_then(serde_json::Value::as_str);
+        match (endpoint_live, thread_state) {
+            (Some(false), _) => "absent",
+            (None, _) => "unknown",
+            (Some(true), Some("notLoaded")) => "cold",
+            (Some(true), Some("idle")) => "idle",
+            (Some(true), Some("waiting_user")) => "waiting_user",
+            (Some(true), Some("working")) => "working",
+            (Some(true), Some("active")) => "working",
+            _ => "unknown",
+        }
+    } else {
+        "unknown"
     };
     let unacked_notifications = msgs
         .values()
@@ -371,7 +384,9 @@ fn worker_status_summary_with_maps(
     let keepalive = keepalives.get(&w.id);
     let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
     let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
-    let status = if !identity_valid {
+    let status = if !has_current {
+        "unknown"
+    } else if !identity_valid {
         "identity-mismatch"
     } else if endpoint_live == Some(false) {
         "lost"
@@ -401,16 +416,23 @@ fn worker_status_summary_with_maps(
         "id": w.id,
         "display_name": display_name,
         "work_roles": work_roles,
-        "role": role_brief["role"].clone(),
+        "role": role_brief
+            .get("role")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
         "role_brief": role_brief,
-        "transport": w.transport.as_ref().map(|transport| json!({
-            "kind": transport.kind.as_str(),
-            "endpoint": transport.endpoint,
-            "namespace": transport.namespace,
-            "session_id": transport.session_id,
-            "thread_id": transport.thread_id,
-            "self_check": transport.self_check,
-        })),
+        "transport": if has_current {
+            w.transport.as_ref().map(|transport| json!({
+                "kind": transport.kind.as_str(),
+                "endpoint": transport.endpoint,
+                "namespace": transport.namespace,
+                "session_id": transport.session_id,
+                "thread_id": transport.thread_id,
+                "self_check": transport.self_check,
+            }))
+        } else {
+            None
+        },
         "status": status,
         "presence": match presence {
             IdentityPresence::Present => "present",
@@ -421,7 +443,7 @@ fn worker_status_summary_with_maps(
         "endpoint_live": endpoint_live,
         "identity_valid": identity_valid,
         "agent_state": agent_state,
-        "route_match": true,
+        "route_match": has_current,
         "transport_view": transport_view,
         "unacked_notifications": unacked_notifications,
         "pending_notifications": pending_notifications,

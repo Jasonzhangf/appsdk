@@ -731,6 +731,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         storage_root: runtime_storage_root,
         state_path,
         host_paths: host_paths.clone(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(state),
         appserver_candidate_check: default_appserver_candidate_check(),
         appserver_notification_sink: default_appserver_notification_sink(),

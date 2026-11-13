@@ -79,3 +79,45 @@
 - 结果：1 passed，0 failed。夹具自建真实 Rex receiver/sender 会话与隔离 daemon，公开 `context/notify/recv/reply/restart` 全链路执行。
 - 状态链证据：`state=working` 投影 busy；`state=blocked:kind=question` 投影 waiting_user；`state=done` 投影 idle；receiver 的 program_status owner 与 Python foreground pid/name 匹配。
 - 该用例第 140 行旧断言把 done 期望建模为 `unknown`；按用户要求的 idle 正确显示语义，已更新为 `idle`。
+
+## Rex parity P0 当前修订（2026-11-12）
+
+长期目标仍是完成 Rex parity 的真实投递修复、ontology 校验、独立 review、
+合并、重建与重启。当前 P0 是先恢复同一 server/session/block 服务实例变化后的
+自动投递，尤其覆盖 QQBot 默认 CEO 入站。
+
+当前通知语义：
+
+- Rex block 本身是 anchor。window/layer/layout 只描述布局；split 创建新 block，
+  resize/move/swap 保留原 block。server/session 用于定位和核实 block。
+- 通知提交先原样写入正文并验证完整 UTF-8 字节，再对同一
+  server/session/block 执行一次独立 `send-key enter`。
+- `REX_SERVICE_CHANGED` 只有在 `stage=BeforeWrite` 且
+  `operation=server.status` 时可恢复。恢复只刷新现有服务的 instance/host
+  代际，并拒绝 server、session 或 block 的任何变化。
+- 刷新成功后原 durable message 只重试一次；accepted 或 unknown 结果不进入恢复
+  路径，也不重写正文或重复 Enter。
+
+已实际执行的聚焦证据：
+
+- `server::notification_batch_tests::rex_service_generation_change_is_recovered_for_qqbot_ceo_inbound`
+  1 passed，覆盖 QQBot CEO 入站、服务代际变化、同一目标刷新、一次 write、
+  一次 Enter 和最终 accepted。
+- `server::notification_batch_tests` 36 passed，覆盖 timer 恢复、同 block、
+  wrong block 拒绝、unknown 不重试、旧 binding 替换隔离和重复 owner 拒绝。
+- 公开 `channel_inbound_cli::` 用例 6 passed，覆盖原路回复、重复平台事件、
+  错误 envelope、CEO 授权/替换、receiver 只投当前 CEO 和名字交接。
+- `cargo fmt --manifest-path collab/Cargo.toml -- --check`、`git diff --check`
+  通过。
+- 9 个受影响 DAG 文件全部通过 `dagpipe graph validate`。
+- `project-memory verify` 通过；Rex anchor/current-binding L3 记忆与当前设计一致。
+
+仍待完成：
+
+- 完整 Collab package 回归与适用 live/公开入口复验。
+- 完整 milestone 的独立 review。
+- commit、更新最新 `origin/main`、merge、push 和远端核对。
+- 通过正式构建/安装路径重建，并由用户管理 daemon 生命周期完成后做 live
+  QQBot 默认 CEO 投递、正式 recv、消费和关联回复验收。
+- 本轮 `collab recv --timeout 30` 只返回 receive ID 和 timeout，没有可消费正文；
+  不猜测或伪造通知内容。

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-name-ownership",
-  "version": "0.2.2",
-  "description": "统一身份映射的名字分配与交接 SESE。identity-map.json 是四宿主唯一选择和提交源。有效授权优先；普通恢复只查 active current，previous 不参与。真实新注册先通过既有typed业务预检并确认精确候选凭据，再发布active；未发布失败恢复原凭据和物理名，可见Unknown保留候选及待办。普通同主体续接不旋转token。布局关联后物理名取共享manifest项目tab_id_固定pane_order_名字，overview仅作展示；明确用户授权晋升保留successor的现有project fixed position，例如position 5成为project_alpha_5_Jenny，只有无该明确授权的Jenny路径保持项目固定位置1限制；名字池不决定布局位置。未关联布局的原有命名行为保持。旧archive、route、reducer占名和operation历史不选择身份。已精确核实消失的outgoing session跳过物理改名，但不取消logical名字、任务、消息与grant交接。保留精确凭据/grant及业务交接owner；缺少投递地址不否决当前身份；不操作tmux生命周期。",
+  "version": "0.3.0",
+  "description": "统一身份映射的名字分配与交接 SESE。identity-map.json 是四宿主唯一选择和提交源。有效授权优先；普通恢复只查 active current，previous 不参与。真实新注册先通过既有typed业务预检并确认精确候选凭据，再发布active；未发布失败恢复原凭据和物理名，可见Unknown保留候选及待办。普通同主体续接不旋转token。纯block替换只改变Rex当前binding所有权，不是名字交接：不移动名字、任务、邮件或grant，也不得借用source_names或handoff表达。布局关联后物理名取共享manifest项目tab_id_固定pane_order_名字，overview仅作展示；明确用户授权晋升保留successor的现有project fixed position，例如position 5成为project_alpha_5_Jenny，只有无该明确授权的Jenny路径保持项目固定位置1限制；名字池不决定布局位置。未关联布局的原有命名行为保持。旧archive、route、reducer占名和operation历史不选择身份。已精确核实消失的outgoing session跳过物理改名，但不取消logical名字、任务、消息与grant交接。保留精确凭据/grant及业务交接owner；缺少投递地址不否决当前身份；不操作tmux生命周期。",
   "inputs": [{"id": "name_context_request", "schema": "Object"}],
   "nodes": [
     {
@@ -19,7 +19,7 @@
       "id": "分类当前工作者与名字候选",
       "operator": "appsdk.collab_name.classify_resolution",
       "operator_version": "1",
-      "description": "有效授权先固定目标。无明确意图时，统一查询按本scope的完整物理名、同宿主agent sessionID、typed当前anchor与canonical invocation cwd联合匹配顺序选active current；cwd只选择项目或提供候选线索，单独不证明身份连续。同级多命中保留IDENTITY_MAP_AMBIGUOUS。精确选择后才读credential/grant owner。缺业务worker不否决active主体；仅该补齐边界验证精确凭据的project/app/agent与可用token，不要求待办期间carrier相等。名字冲突未仲裁时保留原peer并给申请者其他可用名字；明确顶替时原peer先获得其他名字，候选名字必须回到同一注册提交链。无映射的真实新会话才注册并从表内空闲普通池分配；默认池满后的registration_number与自由名是required/unverified设计，当前红测终点仍是NAME_POOL_FULL。旧名字、旧注册和历史歧义不否决本次授权。",
+      "description": "有效授权先固定目标。无明确意图时，统一查询按本scope的完整物理名、同宿主agent sessionID、typed当前anchor与canonical invocation cwd联合匹配顺序选active current；cwd只选择项目或提供候选线索，单独不证明身份连续。Rex先回答本次申请主体是谁，再回答commit后谁占有实际block；主体唯一时进入替换，occupied block本身不是名字冲突或拒绝终点。主体无法唯一确定时保留IDENTITY_MAP_AMBIGUOUS，不按顺序、generation或时间猜任务归属。同级多命中保留IDENTITY_MAP_AMBIGUOUS。精确选择后才读credential/grant owner。缺业务worker不否决active主体；仅该补齐边界验证精确凭据的project/app/agent与可用token，不要求待办期间carrier相等。名字冲突未仲裁时保留原peer并给申请者其他可用名字；明确顶替时原peer先获得其他名字，候选名字必须回到同一注册提交链。纯block替换不触发名字冲突仲裁。无映射的真实新会话才注册并从表内空闲普通池分配；默认池满后的registration_number与自由名是required/unverified设计，当前红测终点仍是NAME_POOL_FULL。旧名字、旧注册和历史歧义不否决本次授权。",
       "inputs": ["name_scope"],
       "output": {"id": "name_decision", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -30,7 +30,7 @@
       "id": "提交名字绑定或保存待决",
       "operator": "appsdk.collab_name.commit_resolution",
       "operator_version": "1",
-      "description": "原子发布当前map集合及必要有界effect。名字key移动、current/previous和当前agent sessionID按同一控制owner提交；同事实不旋转代际；不新增endpoint generation，只使用现有execution/name generation与精确current binding。tmux固定名恢复不把pane当名字key。共享manifest的项目记录独占位置语义；overview仅展示，不决定项目master位置。新升Jenny只用唯一项目记录pane_order，已保存项目binding跨显示名变化保持。真实新普通peer的加入通知属于下一阶段的业务Register事务，不能宣称邮件与map在同一文件事务。重复Context、同名恢复、master自身及无master时无加入通知。通知仅提示查看当前Board，不派单或授予权限；唤醒在释放状态锁后执行，失败不撤销名字或邮件。角色动作和用户授权由有界effect交给唯一grant owner。顶替者不继承credential或master grant；原peer保留身份并取得新名字。提交前改名失败保留原绑定；已发布durability_unknown保留新文件与effect。业务/credential/route完成前不清effect，不使用旧session拦截、旧操作历史或旧执行者管控。",
+      "description": "原子发布当前map集合及必要有界effect。名字key移动、current/previous和当前agent sessionID按同一控制owner提交；同事实不旋转代际；不新增endpoint generation，只使用现有execution/name generation与精确current binding。Rex纯block替换在同一候选集合撤销同实际server block的旧current，发布新current，只收敛明确失效的旧Register/Name待办；不调用Retire、不清credential、不把被替换主体加入source_names或handoff previous。名字key、任务、邮件、grant和资源责任保持原owner。tmux固定名恢复不把pane当名字key。共享manifest的项目记录独占位置语义；overview仅展示，不决定项目master位置。新升Jenny只用唯一项目记录pane_order，已保存项目binding跨显示名变化保持。真实新普通peer的加入通知属于下一阶段的业务Register事务，不能宣称邮件与map在同一文件事务。重复Context、同名恢复、master自身及无master时无加入通知。通知仅提示查看当前Board，不派单或授予权限；唤醒在释放状态锁后执行，失败不撤销名字或邮件。角色动作和用户授权由有界effect交给唯一grant owner。名字顶替者不继承credential或master grant；原peer保留身份并取得新名字。提交前改名失败保留原绑定；已发布durability_unknown保留新文件与effect。业务/credential/route完成前不清effect，不使用旧session拦截、旧操作历史或旧执行者管控。",
       "inputs": ["name_decision"],
       "output": {"id": "name_commit_outcome", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -41,7 +41,7 @@
       "id": "同步全部未关闭任务代理会话",
       "operator": "appsdk.collab_name.sync_open_assignments",
       "operator_version": "1",
-      "description": "仅消费当前map的精确有界effect。同一active主体缺业务worker时由原typed Register事务补齐，不新增map待办、新peer通知或bootstrap消费；既有Name/Register待办保留其操作、授权及角色效果。真实新注册将worker、默认信箱及符合当前master条件的一次加入通知在同一业务事务保存。名字交接按当前消息的project/name地址选择未消费邮件，即使名字曾空缺且无前任；不从旧身份或正文推导归属。无变化载体不重复唤醒，已消费邮件及receive回执保持。名字代际更新后，在已有业务候选状态上撤销旧代际的claimed或running执行阶段并创建queued新batch，与任务会话及阶段变化同批提交。已接单任务的working状态和资源责任保持；当前载体可重新领取，旧代际start/result拒绝并保留原错，不宣称终止旧外部执行。退休执行关系只失效当前anchor，保留peer身份和名字；accepted/unknown attempt保留原事实，不因stale自动判成可安全重投。任务ID、证据、资源、merge及cleanup责任保持；消息ID、正文、发送者保持。精确grant/credential owner保存当前绑定，当前可缺投递地址；只按真实地址发布或撤销route。必要写盘失败保留effect与原错，成功后清除；不依赖历史阶段链。缺地址只影响相应通信，不否决当前身份或无关收件。",
+      "description": "仅消费当前map的精确有界effect。同一active主体缺业务worker时由原typed Register事务补齐，不新增map待办、新peer通知或bootstrap消费；既有Name/Register待办保留其操作、授权及角色效果。真实新注册将worker、默认信箱及符合当前master条件的一次加入通知在同一业务事务保存。名字交接按当前消息的project/name地址选择未消费邮件，即使名字曾空缺且无前任；不从旧身份或正文推导归属。纯block替换不转移另一主体的任务、邮件、grant或未关闭任务carrier，只发布或清理该block的route投影。无变化载体不重复唤醒，已消费邮件及receive回执保持。真实名字代际更新后，在已有业务候选状态上撤销旧代际的claimed或running执行阶段并创建queued新batch，与任务会话及阶段变化同批提交；纯block替换不因block文本相同而伪造名字代际变化。已接单任务的working状态和资源责任保持；当前载体可重新领取，旧代际start/result拒绝并保留原错，不宣称终止旧外部执行。退休执行关系只失效当前anchor，保留peer身份和名字；accepted/unknown attempt保留原事实，不因stale自动判成可安全重投。任务ID、证据、资源、merge及cleanup责任保持；消息ID、正文、发送者保持。精确grant/credential owner保存当前绑定，当前可缺投递地址；只按真实地址发布或撤销route。必要写盘失败保留effect与原错，成功后清除；不依赖历史阶段链。缺地址只影响相应通信，不否决当前身份或无关收件。",
       "inputs": ["name_commit_outcome"],
       "output": {"id": "assignment_sync_outcome", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

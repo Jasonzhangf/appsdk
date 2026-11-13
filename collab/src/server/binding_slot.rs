@@ -146,6 +146,29 @@ impl BindingValue {
             .map_err(|error| SlotError::Invalid(error.to_string()))
     }
 
+    fn validate_for_publication(&self) -> Result<(), SlotError> {
+        self.validate()?;
+        if self.transport.kind == crate::proto::TransportKind::Rex
+            && self.transport.rex_endpoint.as_ref().is_none_or(|endpoint| {
+                endpoint.server.trim().is_empty()
+                    || endpoint.session_id.trim().is_empty()
+                    || endpoint.block_id.trim().is_empty()
+            })
+        {
+            return Err(SlotError::Invalid(
+                "Rex binding requires a complete server, session and block".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn rex_block_key(&self) -> Option<(&str, &str)> {
+        (self.transport.kind == crate::proto::TransportKind::Rex)
+            .then(|| self.transport.rex_endpoint.as_ref())
+            .flatten()
+            .map(|endpoint| (endpoint.server.as_str(), endpoint.block_id.as_str()))
+    }
+
     /// Confirm the value belongs to the given slot partition. The agent_id
     /// (session-derived carrier) is deliberately not part of this check.
     fn scope_matches(&self, key: &IdentityBindingKey) -> bool {
@@ -354,7 +377,7 @@ impl IdentityBindingSlot {
     ) -> Result<CommitOutcome, SlotError> {
         self.check_expected(expected_generation)?;
         self.validate_shape()?;
-        value.validate()?;
+        value.validate_for_publication()?;
         if !value.scope_matches(key) {
             return Err(SlotError::KeyMismatch {
                 expected: key.clone(),
@@ -563,7 +586,8 @@ impl BindingControlSet {
                 .filter(|(_, value)| {
                     value.transport.kind == crate::proto::TransportKind::Tmux
                         && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
-                            saved.tmux_session_id == candidate.endpoint.tmux_session_id
+                            saved.socket_path == candidate.endpoint.socket_path
+                                && saved.tmux_session_id == candidate.endpoint.tmux_session_id
                         })
                 })
                 .map(|(slot, _)| *slot)
@@ -573,11 +597,9 @@ impl BindingControlSet {
                 .iter()
                 .filter(|(_, value)| {
                     value.transport.kind == crate::proto::TransportKind::Rex
-                        && value
-                            .transport
-                            .rex_endpoint
-                            .as_ref()
-                            .is_some_and(|saved| saved.block_id == candidate.block_id)
+                        && value.transport.rex_endpoint.as_ref().is_some_and(|saved| {
+                            saved.server == candidate.server && saved.block_id == candidate.block_id
+                        })
                 })
                 .map(|(slot, _)| *slot)
                 .collect::<Vec<_>>()
@@ -603,13 +625,52 @@ impl BindingControlSet {
         } else {
             Vec::new()
         };
-        let anchor_match = unique(anchor_matches.clone())?;
         let session_match = match session_matches.as_slice() {
             [] => None,
             [slot] => Some(*slot),
             _ => None,
         };
+        if facts.rex.is_some() {
+            match (
+                session_match,
+                session_matches.len(),
+                anchor_matches.as_slice(),
+            ) {
+                (Some(session), _, _) => return Ok(Some(session)),
+                (None, count, [anchor]) if count > 1 => {
+                    if session_matches
+                        .iter()
+                        .any(|slot| slot.identity_key == anchor.identity_key)
+                    {
+                        return Ok(Some(*anchor));
+                    }
+                    return Err(format!(
+                        "IDENTITY_ANCHOR_CONFLICT: current Rex block selects {}, outside the agent session matches",
+                        anchor.identity_key.name
+                    ));
+                }
+                (None, count, []) if count > 1 => {
+                    return Err(
+                        "IDENTITY_MAP_AMBIGUOUS: multiple active mappings match the current caller"
+                            .into(),
+                    );
+                }
+                (None, _, [anchor]) => return Ok(Some(*anchor)),
+                (None, _, []) => return Ok(None),
+                (None, _, _) => {
+                    return Err(
+                        "IDENTITY_MAP_AMBIGUOUS: multiple active mappings match the current Rex block"
+                            .into(),
+                    );
+                }
+            }
+        }
+        let anchor_match = unique(anchor_matches.clone())?;
         let selected = match (session_match, anchor_match) {
+            // A unique current agent session identifies the caller. A Rex
+            // block owner is a publication conflict to resolve at commit, not
+            // a reason to select or impersonate that other identity.
+            (Some(session), _) if facts.rex.is_some() => Some(session),
             (Some(session), Some(anchor)) if session.identity_key != anchor.identity_key => {
                 return Err(format!(
                     "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current runtime anchor selects {}",
@@ -879,6 +940,73 @@ impl BindingControlSet {
         value: BindingValue,
         expected_generation: Option<u64>,
     ) -> Result<CommitOutcome, SlotError> {
+        value.validate_for_publication()?;
+        if !value.scope_matches(key) {
+            return Err(SlotError::KeyMismatch {
+                expected: key.clone(),
+                observed: IdentityBindingKey::new(
+                    value.binding.project_scope.clone(),
+                    value.binding.app_scope_id.clone(),
+                    key.name.clone(),
+                ),
+            });
+        }
+        let mut candidate = self.clone();
+        let outcome = candidate.commit_candidate(key, value, expected_generation)?;
+        *self = candidate;
+        Ok(outcome)
+    }
+
+    fn commit_candidate(
+        &mut self,
+        key: &IdentityBindingKey,
+        value: BindingValue,
+        expected_generation: Option<u64>,
+    ) -> Result<CommitOutcome, SlotError> {
+        struct SupersededEffectOwner {
+            key: IdentityBindingKey,
+            target_worker_id: String,
+            target_session_id: Option<String>,
+        }
+
+        fn superseded_effect_owner(slot: &IdentityBindingSlot) -> Option<SupersededEffectOwner> {
+            let current = slot.active_binding()?;
+            Some(SupersededEffectOwner {
+                key: slot.identity_key.clone(),
+                target_worker_id: current.binding.agent_id.as_str().to_owned(),
+                target_session_id: current
+                    .binding
+                    .session_id
+                    .as_ref()
+                    .map(|session| session.as_str().to_owned()),
+            })
+        }
+
+        let rex_target = value.rex_block_key();
+        let mut replaced = Vec::new();
+        let mut superseded_effects = Vec::new();
+        if let Some(existing_index) = self.slots.iter().position(|slot| &slot.identity_key == key) {
+            if let Some(existing) = self.slots[existing_index].active_binding() {
+                if existing.rex_block_key() != rex_target {
+                    superseded_effects
+                        .push(superseded_effect_owner(&self.slots[existing_index]).unwrap());
+                }
+            }
+        }
+        if let Some(target) = rex_target {
+            for (index, slot) in self.slots.iter().enumerate() {
+                if slot.identity_key == *key {
+                    continue;
+                }
+                if slot.active_binding().and_then(BindingValue::rex_block_key) == Some(target) {
+                    if let Some(owner) = superseded_effect_owner(slot) {
+                        superseded_effects.push(owner);
+                    }
+                    replaced.push((index, slot.generation));
+                }
+            }
+        }
+
         let index = self.slots.iter().position(|slot| &slot.identity_key == key);
         let index = match index {
             Some(index) => index,
@@ -887,7 +1015,34 @@ impl BindingControlSet {
                 self.slots.len() - 1
             }
         };
-        self.slots[index].commit(key, value, expected_generation)
+        let outcome = self.slots[index].commit(key, value, expected_generation)?;
+        for (index, generation) in replaced {
+            self.slots[index].unregister(Some(generation))?;
+        }
+        // A block replacement invalidates only the effects that targeted the
+        // replaced current. An unrelated name handoff for the same stable name
+        // can target a different worker/session and must survive.
+        if !superseded_effects.is_empty() {
+            self.effects.retain(|effect| {
+                if !matches!(
+                    effect.kind,
+                    PendingEffectKind::Register | PendingEffectKind::Name
+                ) {
+                    return true;
+                }
+                !superseded_effects.iter().any(|owner| {
+                    owner.key
+                        == IdentityBindingKey::new(
+                            effect.project_scope.clone(),
+                            effect.app_scope_id.clone(),
+                            &effect.name,
+                        )
+                        && owner.target_worker_id == effect.target_worker_id
+                        && owner.target_session_id.as_deref() == Some(&effect.target_session_id)
+                })
+            });
+        }
+        Ok(outcome)
     }
 
     pub(crate) fn unregister(

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-peer-lifecycle",
-  "version": "0.1.0",
-  "description": "一次Collab peer Create/Read/Update/Close/Snapshot或兼容显示名请求到一次结果。请求分类、分支准入、互斥分支调度、阶段读回和唯一结果出口构成SESE。当前工作名字由context名字owner管理，Jenny对应项目master，普通名来自固定池；tmux pane/session/socket只定位观测和投递，不派生名字或身份。自身显示名分支仅兼容没有当前工作名字的旧记录，不覆盖工作归属。Create复用已有创建和注册owner。Close在同一入口区分两种终态：他人宿主关闭通过所选adapter归档，并继续检查责任准入以保护未结工作；当前pane自注销由当前观察事实和项目内权威daemon binding定位自身，不依赖旧本地token、目标快照、历史generation或未结任务/消息放行，只退役该身份的binding、route、自身master grant与订阅，保留名字下的任务、消息和宿主pane。endpointless Desktop binding无当前thread route且endpoint_live为null/cold/notLoaded时，仅在Desktop发布者typed runtime descriptor或native read_thread精确证明该session/thread不存在后才可退役；缺席无法证明时保持PEER_LIFECYCLE_TARGET_UNPROVEN，并保留peer身份、名字、任务、消息和凭据。自注销后的普通恢复走peer池，不被历史Jenny占用要求授权。Snapshot只读当前缓存区，不消费消息或提交输入。唯一结果保留成功、拒绝、缺事实、partial、unknown、cancelled、cleanup-open或PEER_LIFECYCLE_TARGET_UNPROVEN；不新增自动重试、fallback或第二状态owner。",
+  "version": "0.2.0",
+  "description": "一次Collab peer Create/Read/Update/Close/Snapshot或兼容显示名请求到一次结果。请求分类、分支准入、互斥分支调度、阶段读回和唯一结果出口构成SESE。当前工作名字由context名字owner管理，Jenny对应项目master，普通名来自固定池；tmux pane/session/socket只定位观测和投递，不派生名字或身份。自身显示名分支仅兼容没有当前工作名字的旧记录，不覆盖工作归属。Create复用已有创建和注册owner。Close在同一入口区分两种终态：他人宿主关闭通过所选adapter归档；权威证据确认当前执行载体终结或不存在时，退役其当前执行关系与anchor，未结任务、消息、claim、merge、订阅和资源责任保留并由原owner接续，责任不是退役准入障碍；当前pane自注销由当前观察事实和项目内权威daemon binding定位自身，不依赖旧本地token、目标快照、历史generation或未结任务/消息放行，只退役该身份的binding、route、自身master grant与订阅，保留名字下的任务、消息和宿主pane。endpointless Desktop binding无当前thread route且endpoint_live为null/cold/notLoaded时，仅在Desktop发布者typed runtime descriptor或native read_thread精确证明该session/thread不存在后才可退役；缺席无法证明时保持PEER_LIFECYCLE_TARGET_UNPROVEN，并保留peer身份、名字、任务、消息和凭据。Rex current退役同样只移除当前执行关系与block投递资格，不删除持久身份、任务、邮件、grant或资源责任。自注销后的普通恢复走peer池，不被历史Jenny占用要求授权。Snapshot只读当前缓存区，不消费消息或提交输入。唯一结果保留成功、拒绝、缺事实、partial、unknown、cancelled、cleanup-open或PEER_LIFECYCLE_TARGET_UNPROVEN；cleanup-open只表示跨owner效果未收口，不是退役准入前置。不新增自动重试、fallback或第二状态owner。",
   "inputs": [
     {
       "id": "peer_lifecycle_request",
@@ -85,7 +85,7 @@
       "id": "执行生命周期互斥分支",
       "operator": "appsdk.collab_peer_lifecycle.execute_lifecycle_branch",
       "operator_version": "1",
-      "description": "Owner是peer lifecycle close/branch dispatcher。Read/Update/Query只执行各自当前owner动作；Close先核对当前binding与责任准入。可证明缺席的Desktop only retires current binding/route and anchor，保留peer身份、名字、任务、消息、credential和master grant事实；present或unknown保持现状。旧generation迟到start/result拒绝，不改写历史。",
+      "description": "Owner是peer lifecycle close/branch dispatcher。Read/Update/Query只执行各自当前owner动作；Close先核对当前binding、generation与权威缺席证据，再读取责任用于保留和交接投影；未结责任不阻止退役。可证明缺席的Desktop或Rex只退役current binding/route与anchor，保留peer身份、名字、任务、消息、credential和master grant事实；present或unknown保持现状。旧generation迟到start/result拒绝，不改写历史。",
       "inputs": [
         "已准入生命周期意图"
       ],
@@ -109,7 +109,7 @@
       "id": "读回并分类生命周期结果",
       "operator": "appsdk.collab_peer_lifecycle.readback",
       "operator_version": "1",
-      "description": "Owner是peer lifecycle readback/classification。Close按operation/target幂等读回；成功退役只证明当前执行关系/anchor退役，不证明任务关闭、消息消费或work未执行。无法证明缺席保留PEER_LIFECYCLE_TARGET_UNPROVEN；责任fence保留时返回cleanup-open，partial/unknown/cancelled保留原事实。",
+      "description": "Owner是peer lifecycle readback/classification。Close按operation/target幂等读回；成功退役只证明当前执行关系/anchor退役，不证明任务关闭、消息消费或work未执行。无法证明缺席保留PEER_LIFECYCLE_TARGET_UNPROVEN；责任效果尚未完成时返回cleanup-open并保留原任务、消息、claim、merge、订阅和资源，partial/unknown/cancelled保留原事实。",
       "inputs": [
         "生命周期分支阶段结果"
       ],

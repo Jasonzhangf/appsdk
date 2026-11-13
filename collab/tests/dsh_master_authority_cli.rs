@@ -367,7 +367,10 @@ impl Fixture {
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("COLLAB_WORKER")
-            .env_remove("DSH_SESSION_ID");
+            .env_remove("DSH_SESSION_ID")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK");
         command
     }
 

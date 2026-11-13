@@ -265,7 +265,11 @@ impl ProjectRuntimeManager {
 
     pub(super) fn binding_publication_matches(&self, binding: &RuntimeBinding) -> bool {
         let state = self.host.state.lock().unwrap();
-        state.global.current_thread_routes.values().any(|current| current == binding)
+        state
+            .global
+            .current_thread_routes
+            .values()
+            .any(|current| current == binding)
     }
 
     fn refresh_session_endpoint(
@@ -284,6 +288,7 @@ impl ProjectRuntimeManager {
             .get(&ident.worker_id)
             .and_then(|worker| worker.transport.clone())
             .ok_or_else(|| anyhow::anyhow!("IDENTITY_TRANSPORT_MISSING"))?;
+        let saved_transport = transport.clone();
         transport.tmux_endpoint = Some(candidate.endpoint.clone());
         if transport.kind == TransportKind::Tmux {
             transport.endpoint = Some(candidate.endpoint.socket_path.clone());
@@ -292,13 +297,32 @@ impl ProjectRuntimeManager {
             transport.thread_id = candidate.endpoint.codex_thread_id.clone();
         }
 
-        self.refresh_session_transport(runtime, saved, transport, ident, scope)
+        self.refresh_session_transport_from_snapshot(
+            runtime,
+            saved,
+            Some(saved_transport),
+            transport,
+            ident,
+            scope,
+        )
     }
 
     fn refresh_session_transport(
         &self,
         runtime: &Server,
         saved: &RuntimeBinding,
+        transport: SelectedTransport,
+        ident: &mut identity::Identity,
+        scope: &Scope,
+    ) -> anyhow::Result<RuntimeBinding> {
+        self.refresh_session_transport_from_snapshot(runtime, saved, None, transport, ident, scope)
+    }
+
+    fn refresh_session_transport_from_snapshot(
+        &self,
+        runtime: &Server,
+        saved: &RuntimeBinding,
+        saved_transport: Option<SelectedTransport>,
         transport: SelectedTransport,
         ident: &mut identity::Identity,
         scope: &Scope,
@@ -319,6 +343,30 @@ impl ProjectRuntimeManager {
             != Some(saved)
         {
             anyhow::bail!("IDENTITY_MAP_BINDING_CHANGED: exact binding changed before refresh");
+        }
+        let saved_transport = saved_transport
+            .or_else(|| worker.transport.clone())
+            .ok_or_else(|| anyhow::anyhow!("IDENTITY_TRANSPORT_MISSING"))?;
+        let control_context =
+            ProjectContext::for_registered_root_with_app(&scope.root, saved.app_scope_id.clone())?;
+        let key = self
+            .mapped_key_for_worker(&control_context, &ident.worker_id, saved)
+            .map_err(anyhow::Error::msg)?;
+        let control = self
+            .binding_control_store()
+            .load()
+            .map_err(anyhow::Error::msg)?;
+        let slot = control.slot(&key).ok_or_else(|| {
+            anyhow::anyhow!("IDENTITY_MAP_BINDING_CHANGED: mapping disappeared before refresh")
+        })?;
+        let expected_generation = slot.generation();
+        let control_current = slot.active_binding().ok_or_else(|| {
+            anyhow::anyhow!("IDENTITY_MAP_BINDING_CHANGED: mapping retired before refresh")
+        })?;
+        if control_current.binding != *saved || control_current.transport != saved_transport {
+            anyhow::bail!(
+                "IDENTITY_MAP_BINDING_CHANGED: full binding or selected transport changed before refresh"
+            );
         }
         let same_placement = saved.tmux_endpoint == transport.tmux_endpoint
             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -351,11 +399,6 @@ impl ProjectRuntimeManager {
             .clone()
             .map(NativeThreadId::new)
             .transpose()?;
-        let control_context =
-            ProjectContext::for_registered_root_with_app(&scope.root, saved.app_scope_id.clone())?;
-        let key = self
-            .mapped_key_for_worker(&control_context, &ident.worker_id, saved)
-            .map_err(anyhow::Error::msg)?;
         let session = next
             .session_id
             .as_ref()
@@ -384,26 +427,34 @@ impl ProjectRuntimeManager {
             pane_anchor: holder.and_then(|holder| holder.pane_anchor.clone()),
             created_ms: now_ms(),
         };
-        let control = self.binding_control_store().load().map_err(anyhow::Error::msg)?;
-        let mut value = crate::server::binding_slot::BindingValue::new(next.clone(), transport.clone());
+        let mut value =
+            crate::server::binding_slot::BindingValue::new(next.clone(), transport.clone());
         Self::prepare_control_value(&control, &key, &mut value).map_err(anyhow::Error::msg)?;
         let rename = crate::server::identity_context::rename_prepared_anchor(
             &value,
-            &value.invocation_cwd, &key.name,
-            current_master_worker_id(&state, Some(&saved.route_scope())).as_deref() == Some(ident.worker_id.as_str()),
+            &value.invocation_cwd,
+            &key.name,
+            current_master_worker_id(&state, Some(&saved.route_scope())).as_deref()
+                == Some(ident.worker_id.as_str()),
             false,
             None,
-        ).map_err(anyhow::Error::msg)?;
+        )
+        .map_err(anyhow::Error::msg)?;
         let committed = match self.commit_control_change_locked(
             crate::server::binding_store::ControlChange::CommitWithEffect {
-                key, value, expected_generation: None, effect: effect.clone(),
+                key,
+                value,
+                expected_generation: Some(expected_generation),
+                effect: effect.clone(),
             },
         ) {
             Ok(committed) => committed,
             Err(error) => {
                 let error = match rename.map(|rename| rename.rollback()).transpose() {
                     Ok(_) => error,
-                    Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
+                    Err(rollback) => {
+                        format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}")
+                    }
                 };
                 return Err(anyhow::Error::msg(error));
             }
@@ -424,6 +475,96 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| anyhow::anyhow!("PENDING_EFFECT_CREDENTIAL_MISSING"))?;
         Ok(next)
     }
+
+    /// Refresh only the service generation of one exact Rex notification
+    /// binding. The block anchor and agent session stay unchanged; a changed
+    /// server, session, or block is rejected before any write can be retried.
+    pub(crate) fn refresh_rex_notification_binding(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        recipient: &str,
+    ) -> Result<SelectedTransport, String> {
+        let control = self.binding_control_store().load()?;
+        let key = control
+            .key_for_worker(
+                &context.project_scope,
+                &context.app_scope_id,
+                recipient,
+            )?
+            .cloned()
+            .ok_or_else(|| {
+                format!("REX_CURRENT_BINDING_MISSING: {recipient} has no current binding")
+            })?;
+        let slot = control
+            .slot(&key)
+            .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: binding slot disappeared".to_string())?;
+        let value = slot.active_binding().ok_or_else(|| {
+            format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding")
+        })?;
+        let saved = value.binding.clone();
+        let saved_transport = value.transport.clone();
+        let endpoint = saved_transport.rex_endpoint.as_ref().ok_or_else(|| {
+            format!("REX_CURRENT_BINDING_CHANGED: {recipient} is not currently bound to Rex")
+        })?;
+        let agent_session_id = saved_transport.session_id.as_deref().ok_or_else(|| {
+            format!("REX_AGENT_SESSION_MISSING: {recipient} has no agent session")
+        })?;
+        let candidate = crate::proto::RexCandidate {
+            server: endpoint.server.clone(),
+            session_id: endpoint.session_id.clone(),
+            block_id: endpoint.block_id.clone(),
+            cwd: endpoint.cwd.clone(),
+        };
+        let refreshed = tokio::runtime::Handle::try_current()
+            .map_err(|_| "REX_ENDPOINT_REJECTED: daemon runtime is unavailable".to_string())?
+            .block_on(crate::client::adapters::rex::verify_candidate(
+                &candidate,
+                agent_session_id,
+            ))
+            .map_err(|error| error.to_string())?;
+        let refreshed_endpoint = refreshed
+            .rex_endpoint
+            .as_ref()
+            .ok_or_else(|| "REX_CURRENT_BINDING_CHANGED: refreshed binding has no Rex endpoint".to_string())?;
+        if refreshed.kind != TransportKind::Rex
+            || refreshed_endpoint.server != endpoint.server
+            || refreshed_endpoint.session_id != endpoint.session_id
+            || refreshed_endpoint.block_id != endpoint.block_id
+        {
+            return Err(format!(
+                "REX_CURRENT_BINDING_CHANGED: refreshed target is not the same server/session/block for {recipient}"
+            ));
+        }
+        let mut ident = identity::read_persisted(&self.host.host_paths, recipient)
+            .map_err(|error| format!("{error:#}"))?
+            .ok_or_else(|| {
+                format!("IDENTITY_CREDENTIAL_MISSING: mapped worker {recipient} is not registered")
+            })?;
+        let scope = Scope {
+            root: runtime.root.clone(),
+        };
+        self.refresh_session_transport_from_snapshot(
+            runtime,
+            &saved,
+            Some(saved_transport),
+            refreshed,
+            &mut ident,
+            &scope,
+        )
+        .map_err(|error| format!("{error:#}"))?;
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get(recipient)
+            .and_then(|worker| worker.transport.clone())
+            .ok_or_else(|| {
+                format!("IDENTITY_TRANSPORT_MISSING: refreshed worker {recipient} has no transport")
+            })
+    }
+
     fn reconcile_identity_context(
         &self,
         context: ProjectContext,
@@ -532,6 +673,7 @@ impl ProjectRuntimeManager {
                             .as_ref()
                             .filter(|_| saved.native_thread_id.is_none())
                         {
+                            let saved_transport = transport.clone();
                             let candidates = TransportCandidates {
                                 dsh: Some(candidate.clone()),
                                 ..Default::default()
@@ -542,33 +684,58 @@ impl ProjectRuntimeManager {
                                 &context.canonical_root,
                             )
                             .map_err(anyhow::Error::msg)?;
-                            current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
+                            current = Some(self.refresh_session_transport_from_snapshot(
+                                &runtime,
+                                saved,
+                                Some(saved_transport),
+                                transport,
+                                &mut ident,
+                                &scope,
                             )?);
                         } else if let Some(candidate) = facts.rex.as_ref() {
-                            let candidates = TransportCandidates { rex: Some(candidate.clone()), ..Default::default() };
+                            let saved_transport = transport.clone();
+                            let candidates = TransportCandidates {
+                                rex: Some(candidate.clone()),
+                                ..Default::default()
+                            };
                             transport = validate_transport_candidates_for_session(
-                                &runtime, &candidates, &context.canonical_root, facts.session_id.as_deref(),
-                            ).map_err(anyhow::Error::msg)?;
-                            current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
+                                &runtime,
+                                &candidates,
+                                &context.canonical_root,
+                                facts.session_id.as_deref(),
+                            )
+                            .map_err(anyhow::Error::msg)?;
+                            current = Some(self.refresh_session_transport_from_snapshot(
+                                &runtime,
+                                saved,
+                                Some(saved_transport),
+                                transport,
+                                &mut ident,
+                                &scope,
                             )?);
                         } else if facts.desktop_bridge.is_some()
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
                                 == facts.session_id.as_deref()
                         {
                             let candidate = facts.desktop_bridge.as_ref().unwrap();
+                            let saved_transport = transport.clone();
                             transport = crate::client::adapters::desktop_bridge::verify_candidate(
                                 candidate,
                             )
                             .map_err(|e| anyhow::anyhow!(e))?;
-                            current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
+                            current = Some(self.refresh_session_transport_from_snapshot(
+                                &runtime,
+                                saved,
+                                Some(saved_transport),
+                                transport,
+                                &mut ident,
+                                &scope,
                             )?);
                         } else if transport.kind == TransportKind::AppServer
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
                                 == facts.session_id.as_deref()
                         {
+                            let saved_transport = transport.clone();
                             transport.session_id = facts.session_id.clone();
                             if facts.thread_id.is_some() {
                                 transport.thread_id = facts.thread_id.clone();
@@ -578,8 +745,13 @@ impl ProjectRuntimeManager {
                                 transport.namespace = facts.namespace.clone();
                             }
                             transport.tmux_endpoint = None;
-                            current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
+                            current = Some(self.refresh_session_transport_from_snapshot(
+                                &runtime,
+                                saved,
+                                Some(saved_transport),
+                                transport,
+                                &mut ident,
+                                &scope,
                             )?);
                         } else if transport.kind == TransportKind::Tmux
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -589,8 +761,13 @@ impl ProjectRuntimeManager {
                             // Session recovery may lack a live pane. Its exact
                             // published binding still owns the saved transport
                             // projection, but does not authorize a new claim.
-                            current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
+                            current = Some(self.refresh_session_transport_from_snapshot(
+                                &runtime,
+                                saved,
+                                Some(transport.clone()),
+                                transport,
+                                &mut ident,
+                                &scope,
                             )?);
                         }
                     }

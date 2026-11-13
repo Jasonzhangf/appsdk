@@ -101,6 +101,263 @@ fn rex_public_context_automatically_discovers_current_block() {
 
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
+fn rex_public_block_binding_replaces_current_owner_and_keeps_blocks_independent() {
+    let mut fixture = RexLiveFixture::new("block-binding");
+    let alice = fixture.create_receiver_session("binding-alice");
+    let bob = fixture.create_receiver_session("binding-bob");
+    fixture.wait_receiver_ready(&alice, Duration::from_secs(20));
+    fixture.wait_receiver_ready(&bob, Duration::from_secs(20));
+    fixture.start_daemon();
+
+    let alice_context = fixture.context_provide(&alice);
+    assert_eq!(
+        alice_context["result"]["outcome"], "completed",
+        "{alice_context}"
+    );
+    let bob_context = fixture.context_provide(&bob);
+    assert_eq!(
+        bob_context["result"]["outcome"], "completed",
+        "{bob_context}"
+    );
+    let alice_snapshot = snapshot(&alice_context);
+    let bob_snapshot = snapshot(&bob_context);
+    let alice_name = alice_snapshot["name"]
+        .as_str()
+        .unwrap_or_else(|| panic!("Alice snapshot has no name: {alice_snapshot}"))
+        .to_owned();
+    let bob_name = bob_snapshot["name"]
+        .as_str()
+        .unwrap_or_else(|| panic!("Bob snapshot has no name: {bob_snapshot}"))
+        .to_owned();
+    assert_ne!(alice_name, bob_name);
+    assert_ne!(alice.block_id, bob.block_id);
+
+    let initial_owners = fixture.rex_block_current_owners();
+    assert_eq!(
+        initial_owners.get(&alice.block_id),
+        Some(&vec![alice_name.clone()]),
+        "Alice must initially own her distinct block alone: {initial_owners:?}"
+    );
+    assert_eq!(
+        initial_owners.get(&bob.block_id),
+        Some(&vec![bob_name.clone()]),
+        "Bob must initially own his distinct block alone: {initial_owners:?}"
+    );
+
+    let replacement = fixture.context_provide_on_block(&alice, &bob);
+    assert_eq!(
+        replacement["result"]["outcome"],
+        "completed",
+        "the known agent session must replace the occupied block owner without a manual takeover: {replacement}"
+    );
+    let replacement_snapshot = snapshot(&replacement);
+    assert_eq!(
+        selected_transport(replacement_snapshot)["rex_endpoint"]["block_id"],
+        bob.block_id,
+        "{replacement}"
+    );
+    assert_eq!(
+        selected_transport(replacement_snapshot)["session_id"],
+        alice.agent_session_id,
+        "the agent session must stay distinct from its Rex address: {replacement}"
+    );
+
+    let owners = fixture.rex_block_current_owners();
+    assert_eq!(
+        owners.get(&bob.block_id),
+        Some(&vec![alice_name.clone()]),
+        "the later successful binding must be the only current owner of Bob's block: {owners:?}"
+    );
+    assert!(
+        owners
+            .get(&alice.block_id)
+            .is_none_or(|owners| owners.is_empty()),
+        "Alice's old block must not remain a current delivery target: {owners:?}"
+    );
+    assert!(
+        !owners.values().flatten().any(|owner| owner == &bob_name),
+        "Bob must lose current ownership of the replaced block without being deleted: {owners:?}"
+    );
+    fixture.evidence(
+        "block_binding_replacement",
+        json!({
+            "alice": {"agent_session_id": alice.agent_session_id, "block_id": alice.block_id},
+            "bob": {"agent_session_id": bob.agent_session_id, "block_id": bob.block_id},
+            "current_owners": owners,
+        }),
+    );
+
+    let errors = fixture.finish();
+    assert!(
+        errors.is_empty(),
+        "owned Rex session cleanup failed: {errors:?}"
+    );
+    eprintln!("Rex live evidence: {}", fixture.evidence_path.display());
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
+fn rex_public_block_binding_directs_delivery_to_the_current_owner_only() {
+    let mut fixture = RexLiveFixture::new("block-delivery");
+    let sender = fixture.create_receiver_session("binding-sender");
+    let old_owner = fixture.create_receiver_session("binding-old-owner");
+    let new_owner = fixture.create_receiver_session("binding-new-owner");
+    for owned in [&sender, &old_owner, &new_owner] {
+        fixture.wait_receiver_ready(owned, Duration::from_secs(20));
+    }
+    fixture.start_daemon();
+
+    for owned in [&sender, &old_owner, &new_owner] {
+        let context = fixture.context_provide(owned);
+        assert_eq!(context["result"]["outcome"], "completed", "{context}");
+    }
+    let sender_id = worker_id(snapshot(&fixture.context_provide(&sender)));
+    let old_id = worker_id(snapshot(&fixture.context_provide(&old_owner)));
+    let new_id = worker_id(snapshot(&fixture.context_provide(&new_owner)));
+
+    let replacement = fixture.context_provide_on_block(&new_owner, &old_owner);
+    assert_eq!(
+        replacement["result"]["outcome"], "completed",
+        "the later successful binding must replace the old owner: {replacement}"
+    );
+    assert_eq!(
+        snapshot(&replacement)["identity"]["transport"]["rex_endpoint"]["block_id"],
+        old_owner.block_id,
+        "{replacement}"
+    );
+
+    let old_body = "old owner body must not reach the replaced block";
+    let old_output = fixture
+        .command(
+            &[
+                "sendmessage",
+                "--to",
+                old_id.as_str(),
+                "--subject",
+                "rex block binding old owner",
+                old_body,
+            ],
+            Some(&sender.agent_session_id),
+        )
+        .output()
+        .expect("send a durable message to the displaced identity");
+    assert_eq!(
+        old_output.status.code(),
+        Some(1),
+        "the displaced identity has no current Rex delivery target: stdout={} stderr={}",
+        String::from_utf8_lossy(&old_output.stdout),
+        String::from_utf8_lossy(&old_output.stderr)
+    );
+    let old_stderr = String::from_utf8_lossy(&old_output.stderr);
+    assert!(
+        old_stderr.contains("REX_CURRENT_BINDING_MISSING"),
+        "the notification failure must identify the absent current binding: {old_stderr}"
+    );
+    let old_response = old_stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("collab response: "))
+        .unwrap_or_else(|| panic!("CLI omitted the durable response: {old_stderr}"));
+    let old_sent: Value =
+        serde_json::from_str(old_response).expect("decode durable notification failure");
+    assert_eq!(old_sent["durable"], true, "{old_sent}");
+    assert_eq!(
+        old_sent["notification"], "subscribed-not-sent",
+        "{old_sent}"
+    );
+    assert_eq!(
+        old_sent["failure"], "notification_delivery_failed",
+        "{old_sent}"
+    );
+    let old_message_id = old_sent["msg_id"]
+        .as_str()
+        .or_else(|| old_sent["message_id"].as_str())
+        .unwrap_or_else(|| panic!("old-owner send has no durable message id: {old_sent}"))
+        .to_owned();
+
+    let new_body = "new owner body must reach the current block";
+    let new_sent = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            new_id.as_str(),
+            "--subject",
+            "rex block binding new owner",
+            new_body,
+        ],
+        Some(&sender.agent_session_id),
+    );
+    let new_message_id = new_sent["msg_id"]
+        .as_str()
+        .or_else(|| new_sent["message_id"].as_str())
+        .unwrap_or_else(|| panic!("new-owner send has no durable message id: {new_sent}"))
+        .to_owned();
+
+    // The old identity keeps its mailbox but no longer owns a current Rex
+    // target. Prove its rejected wake did not write the shared block.
+    fixture.wait_capture_contains(&old_owner, &new_message_id, Duration::from_secs(20));
+    let block_capture = fixture
+        .capture(&old_owner)
+        .expect("capture the shared test-owned block");
+    assert!(
+        !block_capture.contains(&old_message_id),
+        "the displaced owner's send must not write the shared block: {block_capture}"
+    );
+
+    let receive_id = format!("rex-block-binding-recv-{}", fixture.unique_token());
+    let received = fixture.run_ok(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            receive_id.as_str(),
+        ],
+        Some(&new_owner.agent_session_id),
+    );
+    assert_eq!(received["count"], 1, "{received}");
+    assert_eq!(received["messages"][0]["id"], new_message_id);
+    assert_eq!(received["messages"][0]["to"], new_id);
+    assert_eq!(received["messages"][0]["from"], sender_id);
+    assert_eq!(received["messages"][0]["body"], new_body);
+
+    let new_message = fixture.run_ok(
+        &["msg", new_message_id.as_str()],
+        Some(&sender.agent_session_id),
+    );
+    assert_eq!(new_message["state"], "read");
+    assert_eq!(new_message["consumed_by_recv"], true);
+    assert_eq!(new_message["to"], new_id);
+
+    let old_message = fixture.run_ok(
+        &["msg", old_message_id.as_str()],
+        Some(&sender.agent_session_id),
+    );
+    assert_eq!(old_message["state"], "pending");
+    assert_eq!(old_message["consumed_by_recv"], false);
+    assert_eq!(
+        old_message["to"], old_id,
+        "mailbox ownership must not transfer"
+    );
+    fixture.evidence(
+        "block_binding_delivery",
+        json!({
+            "sender": sender_id,
+            "old_owner": {"worker_id": old_id, "block_id": old_owner.block_id, "message_id": old_message_id},
+            "new_owner": {"worker_id": new_id, "block_id": old_owner.block_id, "message_id": new_message_id},
+            "received": received,
+        }),
+    );
+
+    let errors = fixture.finish();
+    assert!(
+        errors.is_empty(),
+        "owned Rex session cleanup failed: {errors:?}"
+    );
+    eprintln!("Rex live evidence: {}", fixture.evidence_path.display());
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
     let mut fixture = RexLiveFixture::new("contract");
     let receiver = fixture.create_receiver_session("receiver");

@@ -138,6 +138,7 @@ impl ProjectRuntimeManager {
             storage_root,
             state_path,
             host_paths: self.host.host_paths.clone(),
+            register_gate: Arc::clone(&self.host.register_gate),
             state: Mutex::new(state),
             appserver_candidate_check: self.host.appserver_candidate_check.clone(),
             #[cfg(not(test))]
@@ -660,7 +661,7 @@ impl ProjectRuntimeManager {
                 &intent,
             )
         };
-        channel_inbound_finish(&target, &mut response);
+        channel_inbound_finish(&target, Some(&target), &mut response);
         (target, response)
     }
 
@@ -686,6 +687,11 @@ impl ProjectRuntimeManager {
         let workspace_reset=matches!(&req,Req::ProjectReset{..});
         let context=project_context.clone();
         let (runtime,mut response)=self.dispatch_sync_with_register_binding_inner(project_context,req,outer_binding);
+        self.recover_rex_notification_after_service_change(
+            &runtime,
+            context.as_ref(),
+            &mut response,
+        );
         if workspace_reset && response.ok {
             if let Err(error)=self.reconcile_ceo_workspace_reset(context.as_ref()) {
                 response.ok=false;

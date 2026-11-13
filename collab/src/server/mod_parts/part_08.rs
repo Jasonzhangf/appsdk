@@ -162,16 +162,7 @@ pub(crate) fn project_master_wake_idle_capacity(
     accumulator
 }
 
-fn prune_master_wake_idle_capacity(server: &Server) {
-    let mut state = server.state.lock().unwrap();
-    let accumulator = project_master_wake_idle_capacity(server, &state);
-    if accumulator != state.master_wake {
-        server.commit_locked_reporting(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
-    }
-}
-
 fn handle_master_status(server: &Server) -> Resp {
-    prune_master_wake_idle_capacity(server);
     // The typed grant is the only authority source. A route, reducer or scope
     // failure is an explicit error; a transport observation is reported
     // separately and never removes the holder. The endpoint probe must run
@@ -370,6 +361,45 @@ pub(crate) fn handle_channel_inbound(
     body: String,
     envelope: crate::server::channel_envelope::ChannelEnvelope,
 ) -> Resp {
+    handle_channel_inbound_impl(
+        server,
+        None,
+        from,
+        to,
+        subject,
+        body,
+        envelope,
+    )
+}
+
+pub(crate) fn handle_channel_inbound_with_rex_recovery(
+    server: &Arc<Server>,
+    from: String,
+    to: String,
+    subject: String,
+    body: String,
+    envelope: crate::server::channel_envelope::ChannelEnvelope,
+) -> Resp {
+    handle_channel_inbound_impl(
+        server,
+        Some(server),
+        from,
+        to,
+        subject,
+        body,
+        envelope,
+    )
+}
+
+fn handle_channel_inbound_impl(
+    server: &Server,
+    recovery_server: Option<&Arc<Server>>,
+    from: String,
+    to: String,
+    subject: String,
+    body: String,
+    envelope: crate::server::channel_envelope::ChannelEnvelope,
+) -> Resp {
     let mut st = server.state.lock().unwrap();
     let intent = match channel_inbound_address_intent(
         &st,
@@ -402,7 +432,7 @@ pub(crate) fn handle_channel_inbound(
         &intent,
     );
     drop(st);
-    channel_inbound_finish(server, &mut response);
+    channel_inbound_finish(server, recovery_server, &mut response);
     response
 }
 
@@ -563,7 +593,11 @@ fn channel_inbound_commit_locked(
 }
 
 /// Notification runs only after the inbound commit released the state guard.
-fn channel_inbound_finish(server: &Server, response: &mut Resp) {
+fn channel_inbound_finish(
+    server: &Server,
+    recovery_server: Option<&Arc<Server>>,
+    response: &mut Resp,
+) {
     if response.data.get("deduplicated").and_then(|value| value.as_bool()) == Some(true) {
         return;
     }
@@ -600,7 +634,20 @@ fn channel_inbound_finish(server: &Server, response: &mut Resp) {
         }
         return;
     };
-    let notification = attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms());
+    let notification = match recovery_server {
+        Some(server) => attempt_notification_detailed_with_rex_recovery(
+            server,
+            &msg_id,
+            &subscription.id,
+            now_ms(),
+        ),
+        None => attempt_notification_detailed_with_at(
+            server,
+            &msg_id,
+            &subscription.id,
+            now_ms(),
+        ),
+    };
     let method = {
         let st = server.state.lock().unwrap();
         notification_method_for_worker(&st, &to.unwrap_or_default())

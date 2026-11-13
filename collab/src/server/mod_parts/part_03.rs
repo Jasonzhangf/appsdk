@@ -248,7 +248,7 @@ struct ProjectRuntimeManager {
     route_file: PathBuf,
     routes: Mutex<std::collections::BTreeMap<RouteKey, RuntimeRoute>>,
     project_locks: Mutex<std::collections::BTreeMap<PathBuf, std::fs::File>>,
-    register_gate: Mutex<()>,
+    register_gate: Arc<Mutex<()>>,
     identity_gate: Mutex<()>,
     runtime_init_gates: Mutex<std::collections::BTreeMap<RouteKey, Arc<Mutex<()>>>>,
     /// Manager-wide admission lock. The per-route gates deduplicate one key;

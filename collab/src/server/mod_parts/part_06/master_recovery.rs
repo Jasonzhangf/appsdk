@@ -443,20 +443,20 @@ fn base_role_brief(
 /// `base_role_brief` remains the owner of identity, authority and mandatory
 /// runtime constraints. The selected identity template adds its workflow text,
 /// then configured specialty cards are appended in the current work-role order.
-fn role_brief(
+fn current_role_brief(
     server: &Server,
     state: &State,
     control: &binding_slot::BindingControlSet,
     worker_id: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<Option<serde_json::Value>, String> {
     let project_scope =
         GlobalState::canonical_project_scope(&server.root).map_err(|error| error.to_string())?;
     let mut current = control.active_values().filter(|value| {
         value.binding.project_scope == project_scope && value.binding.agent_id.as_str() == worker_id
     });
-    let binding = current
-        .next()
-        .ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping")?;
+    let Some(binding) = current.next() else {
+        return Ok(None);
+    };
     if current.next().is_some() {
         return Err("IDENTITY_MAP_AMBIGUOUS: worker has several current app mappings".into());
     }
@@ -472,11 +472,36 @@ fn role_brief(
     let base_role = match brief.get("role").and_then(serde_json::Value::as_str) {
         Some("master") => "master",
         Some("worker") => "peer",
-        _ => return Ok(brief),
+        _ => return Ok(Some(brief)),
     };
     let workflow = effective_workflow_templates(state, project_scope.as_str(), base_role, &roles);
     apply_workflow_template(&mut brief, &workflow, base_role == "peer" && peer_specialty);
-    Ok(brief)
+    Ok(Some(brief))
+}
+
+fn role_brief(
+    server: &Server,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    worker_id: &str,
+) -> Result<serde_json::Value, String> {
+    current_role_brief(server, state, control, worker_id)?
+        .ok_or_else(|| "IDENTITY_MAP_NOT_FOUND: worker has no current mapping".into())
+}
+
+fn current_role_briefs_by_worker(
+    server: &Server,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+) -> Result<std::collections::HashMap<String, Option<serde_json::Value>>, String> {
+    state
+        .workers
+        .keys()
+        .map(|worker_id| {
+            current_role_brief(server, state, control, worker_id)
+                .map(|brief| (worker_id.clone(), brief))
+        })
+        .collect()
 }
 
 fn apply_workflow_template(

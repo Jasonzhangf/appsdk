@@ -257,6 +257,7 @@ fn test_server(root: &Path) -> Arc<Server> {
         storage_root: root.to_path_buf(),
         state_path,
         host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(State::default()),
         // dsh validation must never consult the App Server candidate check.
         appserver_candidate_check: Arc::new(|_| {

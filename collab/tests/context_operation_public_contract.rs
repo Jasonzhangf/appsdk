@@ -1125,3 +1125,4 @@ include!("context_operation_public_contract/part_a.rs");
 include!("context_operation_public_contract/part_b.rs");
 include!("context_operation_public_contract/part_c.rs");
 include!("context_operation_public_contract/part_d.rs");
+include!("context_operation_public_contract/preserved_peer_projection.rs");

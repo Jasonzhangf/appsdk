@@ -1,0 +1,6 @@
+<!-- project-memory:v1 {"category":"knowledge","created_at":"2026-11-12T13:09:09.615315+00:00","id":"appsdk-collab-rex-block-current-binding","importance":0,"memory_level":3,"review_evidence":[],"review_status":"unreviewed","source_refs":[],"tags":["appsdk","collab","identity","ontology","rex"],"updated_at":"2026-11-12T13:09:09.615315+00:00"} -->
+
+# Rex block has one current identity binding
+
+User-approved Rex binding semantics: the actual Rex block itself is the anchor. The Rex server/session/endpoint provide locator and verification context; window/layer/layout describe placement. A newly admitted successful binding for the same actual block replaces its prior current owner; the block has at most one current identity owner within the verified-server scope. Preserve the displaced stable name, persistent identity and business state; do not infer its deletion. A separate approved stable-name rule requires each assigned project name to have one current holder/anchor, and approved timed detach releases execution/anchor while retaining identity/work. Their interaction with replacement and detach has not yet been reconciled. This entry records approved binding semantics and unresolved relation composition, not runtime repair or acceptance.
+<!-- project-memory:end -->

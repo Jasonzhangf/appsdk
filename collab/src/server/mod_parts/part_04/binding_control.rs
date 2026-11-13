@@ -6,27 +6,47 @@ impl ProjectRuntimeManager {
         invocation_cwd: Option<&str>,
     ) -> Result<(), String> {
         let control = self.binding_control_store().load()?;
-        if control.lookup(&context.project_scope, &context.app_scope_id, facts, invocation_cwd)?.is_none() {
+        if control
+            .lookup(
+                &context.project_scope,
+                &context.app_scope_id,
+                facts,
+                invocation_cwd,
+            )?
+            .is_none()
+        {
             return Ok(());
         }
         let root = Path::new(&context.canonical_root);
-        context.validate_registered_root(root).map_err(|error| format!("{error:#}"))?;
+        context
+            .validate_registered_root(root)
+            .map_err(|error| format!("{error:#}"))?;
         validate_project_registration_cwd(&context.canonical_root, root)?;
         let runtime = self.select_runtime(context)?;
         let _register = self.register_gate.lock().unwrap();
         let control = self.binding_control_store().load()?;
-        let Some(slot) = control.lookup(&context.project_scope, &context.app_scope_id, facts, invocation_cwd)? else {
+        let Some(slot) = control.lookup(
+            &context.project_scope,
+            &context.app_scope_id,
+            facts,
+            invocation_cwd,
+        )?
+        else {
             return Ok(());
         };
-        let value = slot.active_binding().expect("lookup selects active current");
-        let pending = control.pending_effects().find(|effect|
+        let value = slot
+            .active_binding()
+            .expect("lookup selects active current");
+        let pending = control.pending_effects().find(|effect| {
             effect.kind == crate::server::binding_slot::PendingEffectKind::Register
                 && effect.project_scope == context.project_scope
                 && effect.app_scope_id == context.app_scope_id
                 && effect.name == slot.identity_key.name
                 && effect.target_worker_id == value.binding.agent_id.as_str()
-                && value.binding.session_id.as_ref().map(|id| id.as_str()) == Some(effect.target_session_id.as_str())
-                && !Self::pending_effect_superseded(&control, effect));
+                && value.binding.session_id.as_ref().map(|id| id.as_str())
+                    == Some(effect.target_session_id.as_str())
+                && !Self::pending_effect_superseded(&control, effect)
+        });
         self.materialize_current_worker_locked(&runtime, value, pending)
     }
 
@@ -45,7 +65,9 @@ impl ProjectRuntimeManager {
         let credential = crate::identity::read_persisted(&self.host.host_paths, worker)
             .map_err(|error| format!("{error:#}"))?
             .ok_or("IDENTITY_CREDENTIAL_MISSING: mapped worker has no credential")?;
-        let principal = credential.runtime.as_ref()
+        let principal = credential
+            .runtime
+            .as_ref()
             .ok_or("IDENTITY_CREDENTIAL_INVALID: mapped credential has no registered principal")?;
         if credential.worker_id != worker
             || credential.project_scope.as_ref() != Some(&value.binding.project_scope)
@@ -53,24 +75,41 @@ impl ProjectRuntimeManager {
             || principal.appserver_id != value.binding.app_scope_id
             || credential.token.trim().is_empty()
         {
-            return Err("IDENTITY_CREDENTIAL_INVALID: exact mapped principal or token differs".into());
+            return Err(
+                "IDENTITY_CREDENTIAL_INVALID: exact mapped principal or token differs".into(),
+            );
         }
         let prepared = runtime.prepare_register_envelope_for_current(
-            worker, &credential.token, &value.transport, value.binding.project_scope.clone(),
-            &runtime.root.to_string_lossy(), value.binding.app_scope_id.clone(),
-            false, Some(&value.binding), pending.filter(|effect|
-                effect.kind == crate::server::binding_slot::PendingEffectKind::Register)
+            worker,
+            &credential.token,
+            &value.transport,
+            value.binding.project_scope.clone(),
+            &runtime.root.to_string_lossy(),
+            value.binding.app_scope_id.clone(),
+            false,
+            Some(&value.binding),
+            pending
+                .filter(|effect| {
+                    effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+                })
                 .map(|effect| effect.operation_id.as_str()),
         )?;
-        let origin = pending.filter(|effect|
-            effect.kind == crate::server::binding_slot::PendingEffectKind::Register
-                && effect.operation_id == prepared.nested_operation_id)
-            .map(|effect| RegisterOrigin::InitialCurrentContinuation { explicit_peer: effect.name != "Jenny" })
+        let origin = pending
+            .filter(|effect| {
+                effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+                    && effect.operation_id == prepared.nested_operation_id
+            })
+            .map(|effect| RegisterOrigin::InitialCurrentContinuation {
+                explicit_peer: effect.name != "Jenny",
+            })
             .unwrap_or(RegisterOrigin::CurrentPrincipal);
-        runtime.typed_dispatch_register_with_origin(prepared.typed, None, origin)
+        runtime
+            .typed_dispatch_register_with_origin(prepared.typed, None, origin)
             .map_err(|error| format!("CURRENT_WORKER_MATERIALIZATION_FAILED: {error}"))?;
         if !runtime.state.lock().unwrap().workers.contains_key(worker) {
-            return Err("CURRENT_WORKER_MATERIALIZATION_INCOMPLETE: Register receipt has no worker".into());
+            return Err(
+                "CURRENT_WORKER_MATERIALIZATION_INCOMPLETE: Register receipt has no worker".into(),
+            );
         }
         Ok(())
     }
@@ -198,9 +237,7 @@ impl ProjectRuntimeManager {
     }
 
     fn binding_control_store(&self) -> crate::server::binding_store::BindingControlStore {
-        crate::server::binding_store::BindingControlStore::new(
-            self.host.host_paths.state_root(),
-        )
+        crate::server::binding_store::BindingControlStore::new(self.host.host_paths.state_root())
     }
 
     pub(crate) fn commit_control_change(
@@ -234,7 +271,9 @@ impl ProjectRuntimeManager {
             }
         }
         if let Some(endpoint) = value.binding.tmux_endpoint.as_ref() {
-            value.physical_name = Some(crate::client::adapters::tmux::observe_session_name(endpoint)?);
+            value.physical_name = Some(crate::client::adapters::tmux::observe_session_name(
+                endpoint,
+            )?);
             if let Ok(Some(layout)) = crate::server::tm_layout::observe(value) {
                 value.layout_binding_id = Some(layout.binding_id);
             }
@@ -242,7 +281,8 @@ impl ProjectRuntimeManager {
                 Some("codex") => "codex_tui",
                 Some("antigravity") => "agy_tui",
                 _ => "tui",
-            }.into();
+            }
+            .into();
         }
         Ok(())
     }
@@ -460,10 +500,14 @@ impl ProjectRuntimeManager {
         };
         let _register = self.register_gate.lock().unwrap();
         let state = runtime.state.lock().unwrap();
-        prepared.typed.envelope.validate()
-            .map_err(|error| format!("typed registrar rejected registration: {}",
-                notification_contract::MutationError::InvalidCommand(error.to_string())))?;
-        runtime.validate_typed_register(&state, &prepared.typed)
+        prepared.typed.envelope.validate().map_err(|error| {
+            format!(
+                "typed registrar rejected registration: {}",
+                notification_contract::MutationError::InvalidCommand(error.to_string())
+            )
+        })?;
+        runtime
+            .validate_typed_register(&state, &prepared.typed)
             .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
         let control = self.binding_control_store().load()?;
         let registration = name_resolution::name_for_registration(&state, &control, binding)?;
@@ -508,53 +552,79 @@ impl ProjectRuntimeManager {
         let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref()
             == Some(binding.agent_id.as_str());
         let new_principal = !state.workers.contains_key(&worker.id)
-            && !control.active_values().any(|current| current.binding.same_principal(binding));
+            && !control
+                .active_values()
+                .any(|current| current.binding.same_principal(binding));
         drop(state);
         let staged = if new_principal {
-            Some(crate::identity::stage_registration_credential(
-                &self.host.host_paths, &Scope { root: runtime.root.clone() },
-                crate::identity::Identity { worker_id:worker.id.clone(), token:worker.token.clone(),
-                    project_scope:None, runtime:None, transport:None },
-                crate::identity::RuntimeIdentity { agent_id:binding.agent_id.clone(),
-                    runtime_id:binding.runtime_id.clone(), appserver_id:binding.app_scope_id.clone(),
-                    binding_id:binding.binding_id.clone(), session_id:binding.session_id.clone(),
-                    native_thread_id:binding.native_thread_id.clone() },
-                value.transport.clone(),
-            ).map_err(|error| format!("{error:#}"))?)
-        } else { None };
+            Some(
+                crate::identity::stage_registration_credential(
+                    &self.host.host_paths,
+                    &Scope {
+                        root: runtime.root.clone(),
+                    },
+                    crate::identity::Identity {
+                        worker_id: worker.id.clone(),
+                        token: worker.token.clone(),
+                        project_scope: None,
+                        runtime: None,
+                        transport: None,
+                    },
+                    crate::identity::RuntimeIdentity {
+                        agent_id: binding.agent_id.clone(),
+                        runtime_id: binding.runtime_id.clone(),
+                        appserver_id: binding.app_scope_id.clone(),
+                        binding_id: binding.binding_id.clone(),
+                        session_id: binding.session_id.clone(),
+                        native_thread_id: binding.native_thread_id.clone(),
+                    },
+                    value.transport.clone(),
+                )
+                .map_err(|error| format!("{error:#}"))?,
+            )
+        } else {
+            None
+        };
         let rename = match crate::server::identity_context::rename_prepared_anchor(
             &value,
-            &value.invocation_cwd, &name,
+            &value.invocation_cwd,
+            &name,
             is_current_master,
             false,
             None,
         ) {
             Ok(rename) => rename,
-            Err(error) => return Err(match staged.map(|staged| staged.rollback()).transpose() {
-                Ok(_) => error,
-                Err(rollback) => format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"),
-            }),
+            Err(error) => {
+                return Err(match staged.map(|staged| staged.rollback()).transpose() {
+                    Ok(_) => error,
+                    Err(rollback) => format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"),
+                })
+            }
         };
         let change = match effect {
             Some(effect) => crate::server::binding_store::ControlChange::CommitWithEffect {
-                    key,
-                    value,
-                    expected_generation: None,
-                    effect,
-                },
+                key,
+                value,
+                expected_generation: None,
+                effect,
+            },
             None => crate::server::binding_store::ControlChange::Commit {
-                    key,
-                    value,
-                    expected_generation: None,
-                },
+                key,
+                value,
+                expected_generation: None,
+            },
         };
         let committed = match self.commit_control_change_locked(change) {
             Ok(committed) => committed,
             Err(mut error) => {
                 let rename = rename.map(|rename| rename.rollback()).transpose();
                 let credential = staged.map(|staged| staged.rollback()).transpose();
-                if let Err(rollback) = rename { error = format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"); }
-                if let Err(rollback) = credential { error = format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"); }
+                if let Err(rollback) = rename {
+                    error = format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}");
+                }
+                if let Err(rollback) = credential {
+                    error = format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}");
+                }
                 return Err(error);
             }
         };
@@ -671,8 +741,18 @@ impl ProjectRuntimeManager {
         control: &crate::server::binding_slot::BindingControlSet,
         effect: &crate::server::binding_slot::PendingEffect,
     ) -> Result<(), String> {
+        let current = self.binding_control_store().load()?;
+        if current.pending_effect(&effect.effect_id) != Some(effect) {
+            return Ok(());
+        }
+        let control = &current;
         if let Some(primary) = effect.effect_id.strip_suffix(":outgoing") {
-            if self.binding_control_store().load()?.pending_effect(primary).is_some() {
+            if self
+                .binding_control_store()
+                .load()?
+                .pending_effect(primary)
+                .is_some()
+            {
                 return Err(format!("PENDING_EFFECT_PRIMARY_INCOMPLETE: {primary}"));
             }
         }
@@ -739,8 +819,7 @@ impl ProjectRuntimeManager {
                 &effect.target_worker_id,
             )
             .map_err(|error| format!("PENDING_EFFECT_RETIREMENT_CREDENTIAL_FAILED: {error}"))?;
-            if crate::server::global_state::installed_route_address_key(&value.binding).is_some()
-            {
+            if crate::server::global_state::installed_route_address_key(&value.binding).is_some() {
                 self.host
                     .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
                         binding: value.binding.clone(),
@@ -805,10 +884,11 @@ impl ProjectRuntimeManager {
         let value = slot
             .active_binding()
             .ok_or("PENDING_EFFECT_MAPPING_INACTIVE")?;
-        if matches!(effect.kind,
+        if matches!(
+            effect.kind,
             crate::server::binding_slot::PendingEffectKind::Name
-                | crate::server::binding_slot::PendingEffectKind::Register)
-        {
+                | crate::server::binding_slot::PendingEffectKind::Register
+        ) {
             self.materialize_current_worker_locked(&runtime, value, Some(effect))?;
         }
         let mut state = runtime.state.lock().unwrap();
@@ -910,8 +990,7 @@ impl ProjectRuntimeManager {
                     },
                     Event::Registered { worker },
                 ];
-                if crate::server::global_state::installed_route_address_key(&current).is_some()
-                {
+                if crate::server::global_state::installed_route_address_key(&current).is_some() {
                     events.insert(
                         0,
                         Event::GlobalCurrentThreadRouteRetired {
@@ -957,20 +1036,19 @@ impl ProjectRuntimeManager {
             } else {
                 &[]
             };
-            events =
-                crate::server::name_resolution::build_name_resolution_events_with_rename_from(
-                    &state,
-                    effect.project_scope.as_str(),
-                    &occupancy,
-                    rename_sources,
-                    state
-                        .name_occupancy(effect.project_scope.as_str(), &effect.name)
-                        .filter(|holder| {
-                            Some(holder.worker_id.as_str()) == effect.previous_worker_id.as_deref()
-                                && Some(holder.session_id.as_str())
-                                    == effect.previous_session_id.as_deref()
-                        }),
-                );
+            events = crate::server::name_resolution::build_name_resolution_events_with_rename_from(
+                &state,
+                effect.project_scope.as_str(),
+                &occupancy,
+                rename_sources,
+                state
+                    .name_occupancy(effect.project_scope.as_str(), &effect.name)
+                    .filter(|holder| {
+                        Some(holder.worker_id.as_str()) == effect.previous_worker_id.as_deref()
+                            && Some(holder.session_id.as_str())
+                                == effect.previous_session_id.as_deref()
+                    }),
+            );
             // The mailbox/subscription/task constructors can legitimately
             // emit no name-resolution record when the target occupancy is
             // already current but an old source name still exists. The
@@ -1003,18 +1081,15 @@ impl ProjectRuntimeManager {
         // Occupancy can already be current when only the native thread changed.
         // Ticket recovery therefore has its own admission condition here.
         events.extend(
-            ticket_binding_recovery_events(
-                &candidate,
-                control,
-                &route_scope,
-                &effect.name,
-            )
-            .map_err(|error| {
-                format!(
-                    "TICKET_BINDING_RECOVERY_FAILED: {}",
-                    error.error.unwrap_or_else(|| "unknown recovery error".into())
-                )
-            })?,
+            ticket_binding_recovery_events(&candidate, control, &route_scope, &effect.name)
+                .map_err(|error| {
+                    format!(
+                        "TICKET_BINDING_RECOVERY_FAILED: {}",
+                        error
+                            .error
+                            .unwrap_or_else(|| "unknown recovery error".into())
+                    )
+                })?,
         );
         if !events.is_empty() {
             runtime
@@ -1064,7 +1139,8 @@ impl ProjectRuntimeManager {
                         == effect.previous_worker_id.as_deref()
                     && previous.binding.session_id.as_ref().map(|id| id.as_str())
                         == effect.previous_session_id.as_deref()
-                    && crate::server::global_state::installed_route_address_key(&previous.binding).is_some()
+                    && crate::server::global_state::installed_route_address_key(&previous.binding)
+                        .is_some()
             }) {
                 publications.push(Event::GlobalCurrentThreadRouteRetired {
                     binding: previous.binding.clone(),
@@ -1084,7 +1160,8 @@ impl ProjectRuntimeManager {
                 }
             }
             if !self.binding_publication_matches(&value.binding)
-                && crate::server::global_state::installed_route_address_key(&value.binding).is_some()
+                && crate::server::global_state::installed_route_address_key(&value.binding)
+                    .is_some()
             {
                 publications.push(Event::GlobalCurrentThreadRouteSet {
                     binding: value.binding.clone(),
@@ -1209,7 +1286,18 @@ impl ProjectRuntimeManager {
     ) -> Result<(), String> {
         let mut bindings = Vec::new();
         for value in controlled.active_values() {
-            if value.binding.tmux_endpoint.is_none() && value.binding.native_thread_id.is_none() {
+            let has_route_address =
+                crate::server::global_state::installed_route_address_key(&value.binding).is_some();
+            let complete_rex = value
+                .transport
+                .rex_endpoint
+                .as_ref()
+                .is_some_and(|endpoint| {
+                    !endpoint.server.trim().is_empty()
+                        && !endpoint.session_id.trim().is_empty()
+                        && !endpoint.block_id.trim().is_empty()
+                });
+            if !has_route_address && !complete_rex {
                 append_log(
                     &self.host.log_path(),
                     &format!(

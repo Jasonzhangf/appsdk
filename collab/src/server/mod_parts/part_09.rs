@@ -1399,16 +1399,16 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         .map(|task| task_view(&st, task))
         .collect();
     tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    let current_role_brief = match role_brief(server, &st, &control, &worker_id) {
+    let caller_role_brief = match role_brief(server, &st, &control, &worker_id) {
         Ok(brief) => brief,
         Err(error) => return Resp::err(error),
     };
-    let role = current_role_brief
+    let role = caller_role_brief
         .get("role")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("worker")
         .to_owned();
-    let authority = current_role_brief["authority"].clone();
+    let authority = caller_role_brief["authority"].clone();
     // The caller's own runtime binding is the receipt that addresses this
     // route. `collab context` is the single bootstrap read, so it owns the
     // read-back path for a peer whose local copy of that receipt was lost.
@@ -1502,11 +1502,13 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         .workers
         .values()
         .map(|peer| {
-            let peer_role = role_brief(server, &st, &control, &peer.id)?
-                .get("role")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("worker")
-                .to_owned();
+            let peer_role =
+                current_role_brief(server, &st, &control, &peer.id)?.and_then(|brief| {
+                    brief
+                        .get("role")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
             let display_name = worker_display_name(&control, route_scope.as_ref(), &peer.id)?;
             Ok((peer.clone(), peer_role, display_name))
         })
@@ -1528,7 +1530,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         let mut digest = Vec::new();
         let mut activities = std::collections::HashMap::new();
         for (peer, peer_role, peer_display_name) in &peer_snapshots {
-            if peer.id == worker_id || peer_role != "worker" {
+            if peer.id == worker_id || peer_role.as_deref() != Some("worker") {
                 continue;
             }
             let (_, activity_fact) = worker_agent_facts(server, &st, peer);
@@ -1793,13 +1795,22 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     let peers: Vec<_> = peer_snapshots
         .into_iter()
         .map(|(peer, peer_role, display_name)| {
-            let peer_presence = worker_presence(server, &peer);
-            let (_, peer_endpoint_live) = worker_identity_and_endpoint(server, &peer);
+            let has_current = peer_role.is_some();
+            let (peer_presence, peer_endpoint_live) = if has_current {
+                let (_, peer_endpoint_live) = worker_identity_and_endpoint(server, &peer);
+                (worker_presence(server, &peer), peer_endpoint_live)
+            } else {
+                (IdentityPresence::Unknown, None)
+            };
             endpoint_live_by_worker.insert(peer.id.clone(), peer_endpoint_live);
-            let activity_str = peer_activities
-                .get(&peer.id)
-                .cloned()
-                .unwrap_or_else(|| "unknown".into());
+            let activity_str = if has_current {
+                peer_activities
+                    .get(&peer.id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".into())
+            } else {
+                "unknown".into()
+            };
             let availability = if matches!(activity_str.as_str(), "busy" | "waiting_user") {
                 "busy"
             } else if activity_str == "idle" {
@@ -1959,7 +1970,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             "role": role,
             "transport": mapped_current.transport,
         },
-        "role_brief": current_role_brief,
+        "role_brief": caller_role_brief,
         "work_roles": work_roles_by_worker.get(&worker.id).cloned().unwrap_or_default(),
         "work_policies": work_policies,
         "pending_reply_obligations": pending_reply_obligations,

@@ -157,6 +157,7 @@ fn reload_owned_test_server(server: &Arc<Server>) -> Arc<Server> {
         config: server.config.clone(),
         root: server.root.clone(), storage_root: server.storage_root.clone(),
         state_path: server.state_path.clone(), host_paths: server.host_paths.clone(),
+        register_gate: Arc::clone(&server.register_gate),
         state: Mutex::new(current_state::load(&server.state_path, false).unwrap()),
         appserver_candidate_check: server.appserver_candidate_check.clone(),
         appserver_notification_sink: server.appserver_notification_sink.clone(),

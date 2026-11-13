@@ -35,6 +35,18 @@ pub const NATIVE_REJECTION_CODES: [&str; 7] = [
 
 const DEFAULT_TIMEOUT_SECS: f64 = 10.0;
 
+/// True only for the proven-before-write service generation failure.
+///
+/// This is narrow on purpose. It lets the notification owner refresh the same
+/// server/session/block binding before retrying once. A write or Enter result
+/// that is unknown must never match this predicate.
+pub fn is_refreshable_service_change(error: &str) -> bool {
+    error.contains(NOT_DELIVERED_PREFIX)
+        && error.contains("operation=server.status")
+        && error.contains("stage=BeforeWrite")
+        && error.contains("REX_SERVICE_CHANGED")
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn installed_macos_cli(system_applications: &Path, user_home: Option<&Path>) -> PathBuf {
     let relative = "Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
@@ -1236,10 +1248,7 @@ fn extract_status_records(value: &Value) -> Vec<RexProgramStatusRecord> {
                 .and_then(|owner| {
                     let pid = owner.get("pid").and_then(Value::as_u64)?;
                     let name = owner.get("name").and_then(Value::as_str)?.to_owned();
-                    let owner = RexProgramStatusOwner {
-                        pid,
-                        name,
-                    };
+                    let owner = RexProgramStatusOwner { pid, name };
                     owner.is_complete().then_some(owner)
                 }),
         })
@@ -1276,10 +1285,34 @@ pub async fn notify(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
-    // One write queues the complete body plus its submission key. A separate
-    // send-key call can fail after the body is queued and strand the text.
-    let submission = format!("{text}\r");
-    let receipt = write_text_until(endpoint, &submission, deadline).await?;
+    let receipt = write_text_until(endpoint, text, deadline).await?;
+    let stage = RexInputStage::WriteQueued {
+        bytes_written: receipt.bytes_written,
+    };
+    let enter_argv = vec![
+        "send-key".to_string(),
+        "enter".to_string(),
+        "-s".to_string(),
+        endpoint.session_id.clone(),
+        "-b".to_string(),
+        endpoint.block_id.clone(),
+    ];
+    let call = run_cli(
+        "send_key",
+        Path::new(&official_cli_path()),
+        &endpoint.server,
+        deadline,
+        &enter_argv,
+        None,
+    )
+    .await
+    .map_err(|mut error| {
+        error.stage = stage;
+        error
+    })?;
+    if !call.status.success() {
+        return Err(native_failure("send_key", stage, &call));
+    }
     let value = json!({
         "transport": "rex",
         "bytes_written": receipt.bytes_written,

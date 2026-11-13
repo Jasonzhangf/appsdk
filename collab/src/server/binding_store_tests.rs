@@ -144,6 +144,58 @@ fn rex_human_fence_survives_restart_rebuild_and_effect_clear() {
 }
 
 #[test]
+fn rex_linux_fence_survives_restart_and_rebuild() {
+    use super::binding_slot::RexExecutionFence;
+    let root = temp_root("linux-fence");
+    let store = BindingControlStore::new(&root);
+    let key = key();
+    let mut current = value(&key, "actor", "runtime");
+    current.rex_execution_fence =
+        RexExecutionFence::from_start_id("linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:34771");
+    store
+        .commit(ControlChange::Commit {
+            key: key.clone(),
+            value: current.clone(),
+            expected_generation: Some(0),
+        })
+        .unwrap();
+
+    let restarted = BindingControlStore::new(&root);
+    assert_eq!(
+        restarted
+            .load()
+            .unwrap()
+            .slot(&key)
+            .unwrap()
+            .active_binding()
+            .unwrap()
+            .rex_execution_fence,
+        current.rex_execution_fence
+    );
+    let mut rebuilt = current.clone();
+    rebuilt.rex_execution_fence = None;
+    restarted
+        .commit(ControlChange::Commit {
+            key: key.clone(),
+            value: rebuilt,
+            expected_generation: Some(1),
+        })
+        .unwrap();
+    assert_eq!(
+        restarted
+            .load()
+            .unwrap()
+            .slot(&key)
+            .unwrap()
+            .active_binding()
+            .unwrap()
+            .rex_execution_fence,
+        current.rex_execution_fence
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn save_then_load_round_trips_current_map() {
     let root = temp_root("roundtrip");
     let store = BindingControlStore::new(&root);

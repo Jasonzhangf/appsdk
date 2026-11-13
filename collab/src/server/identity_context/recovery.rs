@@ -17,9 +17,10 @@ fn verify_local_rex_socket(server: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn rex_execution_start_time(start_id: &str) -> Option<(u64, u32)> {
+fn rex_execution_start_clock(
+    start_id: &str,
+) -> Option<crate::server::binding_slot::RexExecutionFence> {
     crate::server::binding_slot::RexExecutionFence::from_start_id(start_id)
-        .map(|start| (start.seconds, start.microseconds))
 }
 
 fn classify_rex_execution(
@@ -38,10 +39,23 @@ fn classify_rex_execution(
         .map(identity::SessionId::as_str)
         == current_session;
     let Some(previous) = baseline.current.rex_execution.as_ref() else {
-        if !session_same && baseline.current.rex_execution_fence.is_some_and(|fence|
-            crate::server::binding_slot::RexExecutionFence::from_start_id(&execution.process_start_id)
-                .is_some_and(|start| start <= fence)) {
-            return RexRecoveryAdmission::DisplacedExecution(execution);
+        if !session_same {
+            if let Some(fence) = baseline.current.rex_execution_fence.as_ref() {
+                let candidate = rex_execution_start_clock(&execution.process_start_id);
+                return match candidate.as_ref().and_then(|candidate| candidate.compare(fence)) {
+                    Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Less) => {
+                        RexRecoveryAdmission::DisplacedExecution(execution)
+                    }
+                    None => RexRecoveryAdmission::Missing(
+                        "REX_EXECUTION_ASSOCIATION_REQUIRED: precise execution start order is unavailable"
+                            .into(),
+                    ),
+                    Some(std::cmp::Ordering::Greater) => RexRecoveryAdmission::Missing(
+                        "REX_EXECUTION_ASSOCIATION_REQUIRED: current binding has no verified Rex execution association"
+                            .into(),
+                    ),
+                };
+            }
         }
         return if session_same {
             RexRecoveryAdmission::Verified(execution)
@@ -70,17 +84,49 @@ fn classify_rex_execution(
                 .into(),
         );
     }
-    let previous_start = rex_execution_start_time(&previous.process_start_id);
-    let next_start = rex_execution_start_time(&execution.process_start_id);
-    if baseline.current.rex_execution_fence.is_some_and(|fence|
-        next_start.is_some_and(|start| start <= (fence.seconds, fence.microseconds))) {
-        return RexRecoveryAdmission::DisplacedExecution(execution);
+    let previous_start = rex_execution_start_clock(&previous.process_start_id);
+    let next_start = rex_execution_start_clock(&execution.process_start_id);
+    if let Some(fence) = baseline.current.rex_execution_fence.as_ref() {
+        return match next_start.as_ref().and_then(|start| start.compare(fence)) {
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Less) => {
+                RexRecoveryAdmission::DisplacedExecution(execution)
+            }
+            None => RexRecoveryAdmission::Missing(
+                "REX_EXECUTION_ASSOCIATION_REQUIRED: precise execution start order is unavailable"
+                    .into(),
+            ),
+            Some(std::cmp::Ordering::Greater) => {
+                return match previous_start.as_ref().and_then(|previous| {
+                    next_start.as_ref().and_then(|next| next.compare(previous))
+                }) {
+                    Some(std::cmp::Ordering::Greater) => {
+                        RexRecoveryAdmission::Verified(execution)
+                    }
+                    Some(std::cmp::Ordering::Less) => RexRecoveryAdmission::Missing(
+                        "REX_EXECUTION_ASSOCIATION_REQUIRED: caller is older than the current Rex execution"
+                            .into(),
+                    ),
+                    Some(std::cmp::Ordering::Equal) => RexRecoveryAdmission::Missing(
+                        "REX_EXECUTION_ASSOCIATION_REQUIRED: equal execution start ticks cannot establish a new execution"
+                            .into(),
+                    ),
+                    _ => RexRecoveryAdmission::Missing(
+                        "REX_EXECUTION_ASSOCIATION_REQUIRED: precise execution start order is unavailable"
+                            .into(),
+                    ),
+                };
+            }
+        };
     }
-    match previous_start.zip(next_start) {
-        Some((previous_start, next_start)) if next_start > previous_start => {
+    match next_start.as_ref().and_then(|next| {
+        previous_start
+            .as_ref()
+            .and_then(|previous| next.compare(previous))
+    }) {
+        Some(std::cmp::Ordering::Greater) => {
             RexRecoveryAdmission::Verified(execution)
         }
-        Some((previous_start, next_start)) if next_start < previous_start => {
+        Some(std::cmp::Ordering::Less) => {
             RexRecoveryAdmission::Missing(
                 "REX_EXECUTION_ASSOCIATION_REQUIRED: caller is older than the current Rex execution"
                     .into(),
@@ -1214,11 +1260,96 @@ mod anchor_provenance_tests {
     use std::sync::Arc;
 
     #[test]
-    fn rex_execution_start_times_use_numeric_order() {
-        assert!(rex_execution_start_time("10:3") > rex_execution_start_time("9:900000"));
-        assert!(rex_execution_start_time("10:11") > rex_execution_start_time("10:9"));
-        assert_eq!(rex_execution_start_time("unavailable"), None);
-        assert_eq!(rex_execution_start_time("10:invalid"), None);
+    fn rex_execution_classifier_uses_only_comparable_clock_domains() {
+        use crate::server::binding_slot::{
+            BindingValue, IdentityBindingKey, RexExecutionFence, VerifiedRexExecutionAssociation,
+        };
+        use std::cmp::Ordering;
+
+        let unix_earlier = rex_execution_start_clock("9:900000").unwrap();
+        let unix_later = rex_execution_start_clock("10:3").unwrap();
+        assert_eq!(
+            unix_earlier.partial_cmp(&unix_later),
+            Some(Ordering::Less)
+        );
+        assert_eq!(rex_execution_start_clock("unavailable"), None);
+        assert_eq!(rex_execution_start_clock("10:invalid"), None);
+
+        let (_, root) = test_server();
+        let context = recovery_context(&root);
+        let key = IdentityBindingKey::new(
+            context.project_scope.clone(),
+            context.app_scope_id.clone(),
+            "Alice",
+        );
+        let binding = RuntimeBinding::new_with_session(
+            context.project_scope.clone(),
+            context.app_scope_id.clone(),
+            identity::AgentId::new("actor").unwrap(),
+            identity::RuntimeId::new("runtime").unwrap(),
+            identity::BindingId::new("binding").unwrap(),
+            Some(identity::SessionId::new("s0").unwrap()),
+            None,
+        )
+        .unwrap();
+        let execution = |pid, start: &str| VerifiedRexExecutionAssociation {
+            owner_pid: pid,
+            owner_name: "codex".into(),
+            process_start_id: start.into(),
+        };
+        let boot = "b879bb0a-cf9a-47d1-b889-f63aa872d851";
+        let other_boot = "11111111-1111-1111-1111-111111111111";
+        let mut current = BindingValue::new(binding, rex_transport(&root, "s0"));
+        current.rex_execution = Some(execution(10, &format!("linux:{boot}:100:1000")));
+        current.rex_execution_fence = None;
+        let baseline = RexRecoveryBaseline {
+            key,
+            generation: 1,
+            current,
+        };
+
+        assert!(matches!(
+            classify_rex_execution(
+                Some(&baseline),
+                Some("s1"),
+                execution(20, &format!("linux:{boot}:100:1001"))
+            ),
+            RexRecoveryAdmission::Verified(_)
+        ));
+        assert!(matches!(
+            classify_rex_execution(
+                Some(&baseline),
+                Some("s1"),
+                execution(20, &format!("linux:{boot}:100:1000"))
+            ),
+            RexRecoveryAdmission::Missing(_)
+        ));
+        assert!(matches!(
+            classify_rex_execution(
+                Some(&baseline),
+                Some("s1"),
+                execution(20, &format!("linux:{other_boot}:100:9999"))
+            ),
+            RexRecoveryAdmission::Missing(_)
+        ));
+        assert!(matches!(
+            classify_rex_execution(Some(&baseline), Some("s1"), execution(20, "12:7")),
+            RexRecoveryAdmission::Missing(_)
+        ));
+
+        let mut fenced = baseline.clone();
+        fenced.current.rex_execution_fence = Some(
+            RexExecutionFence::from_start_id(&format!("linux:{boot}:100:900")).unwrap(),
+        );
+        assert!(matches!(
+            classify_rex_execution(
+                Some(&fenced),
+                Some("s1"),
+                execution(20, &format!("linux:{boot}:100:800"))
+            ),
+            RexRecoveryAdmission::DisplacedExecution(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1676,7 +1807,7 @@ mod anchor_provenance_tests {
         assert!(associated.ok, "the restored current can establish its execution: {associated:?}");
         let initial_fence = manager.binding_control_store().load().unwrap()
             .current_for_name(&context.project_scope, &context.app_scope_id, &target_name).unwrap().unwrap()
-            .active_binding().unwrap().rex_execution_fence;
+            .active_binding().unwrap().rex_execution_fence.clone();
         let (_, refreshed) = tokio::task::spawn_blocking({
             let manager = manager.clone(); let context = context.clone(); let mut request = request0.clone();
             request.operation_id = "rex-current-refresh-preserves-fence".into();

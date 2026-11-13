@@ -6,6 +6,51 @@ fn fixture_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn native_codex_fixture(root: &Path) -> PathBuf {
+    let source = root.join("codex-fixture.c");
+    let executable = root.join("codex");
+    std::fs::write(
+        &source,
+        r#"#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    sigset_t signals;
+    int signal_number;
+
+    if (argc != 2 || argv[1][0] == '\0') {
+        return 64;
+    }
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &signals, NULL) != 0) {
+        return 70;
+    }
+    for (;;) {
+        if (sigwait(&signals, &signal_number) == 0) {
+            return 0;
+        }
+    }
+}
+"#,
+    )
+    .expect("write public Codex process fixture");
+    let output = Command::new("cc")
+        .args(["-std=c11", "-O0", "-o"])
+        .arg(&executable)
+        .arg(&source)
+        .output()
+        .expect("compile public Codex process fixture");
+    assert!(
+        output.status.success(),
+        "compile public Codex process fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
 fn quiet_judgment_fixture(label: &str) -> (Fixture, Pane) {
     let (mut fixture, master) = Fixture::isolated(label);
     let config_dir = fixture.root.join("home/.appsdk");
@@ -138,7 +183,6 @@ fn peer_status(fixture: &Fixture, caller: &Pane, target_id: &str) -> Value {
         .unwrap_or_else(|| panic!("worker status does not include {target_id}: {status}"))
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn tmux_exact_exit_survives_daemon_process_restart() {
     let _fixture_lock = fixture_lock();
@@ -146,8 +190,7 @@ fn tmux_exact_exit_survives_daemon_process_restart() {
     register_peer(&fixture, "tmux-exact-caller", &caller);
     let peer = new_peer_pane(&fixture, &caller, "tmux-exact-peer", "sleep 600");
     let (_, peer_id) = register_peer(&fixture, "tmux-exact-register", &peer);
-    let codex = fixture.root.join("codex");
-    std::os::unix::fs::symlink("/bin/sleep", &codex).unwrap();
+    let codex = native_codex_fixture(&fixture.root);
     let pid_file = fixture.root.join("exact.pid");
     let script = format!(
         "{} 600 &\necho $! > {}\nwait\n",
@@ -197,7 +240,6 @@ fn tmux_exact_exit_survives_daemon_process_restart() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn tmux_restart_preserves_suspended_execution_and_prefers_same_pane_new_execution() {
     let _fixture_lock = fixture_lock();
@@ -205,8 +247,7 @@ fn tmux_restart_preserves_suspended_execution_and_prefers_same_pane_new_executio
     register_peer(&fixture, "tmux-live-caller", &caller);
     let peer = new_peer_pane(&fixture, &caller, "tmux-live-peer", "sleep 600");
     let (_, peer_id) = register_peer(&fixture, "tmux-live-register", &peer);
-    let codex = fixture.root.join("codex");
-    std::os::unix::fs::symlink("/bin/sleep", &codex).unwrap();
+    let codex = native_codex_fixture(&fixture.root);
     let pid_file = fixture.root.join("live.pid");
     let script = format!(
         "{} 600 &\necho $! > {}\nwait\n",
@@ -217,8 +258,8 @@ fn tmux_restart_preserves_suspended_execution_and_prefers_same_pane_new_executio
     assert!(wait_until(Duration::from_secs(15), || pid_file.exists()));
     assert!(wait_until(Duration::from_secs(20), || peer_status(
         &fixture, &caller, &peer_id
-    )["presence"]
-        == "present"));
+    )["transport_view"]["agent_presence"]
+        == "online"));
     let old_reference = fixture.current_state()["tmux_executions"][&peer_id].clone();
     let pid: i32 = std::fs::read_to_string(&pid_file)
         .unwrap()
@@ -231,8 +272,8 @@ fn tmux_restart_preserves_suspended_execution_and_prefers_same_pane_new_executio
     fixture.restart_daemon();
     assert!(wait_until(Duration::from_secs(20), || peer_status(
         &fixture, &caller, &peer_id
-    )["presence"]
-        == "present"));
+    )["transport_view"]["agent_presence"]
+        == "online"));
     assert_eq!(
         fixture.current_state()["tmux_executions"][&peer_id],
         old_reference
@@ -260,8 +301,8 @@ fn tmux_restart_preserves_suspended_execution_and_prefers_same_pane_new_executio
     fixture.restart_daemon();
     assert!(wait_until(Duration::from_secs(20), || peer_status(
         &fixture, &caller, &peer_id
-    )["presence"]
-        == "present"));
+    )["transport_view"]["agent_presence"]
+        == "online"));
     assert_eq!(
         fixture.current_state()["tmux_executions"][&peer_id]["execution"]["pid"],
         new_pid

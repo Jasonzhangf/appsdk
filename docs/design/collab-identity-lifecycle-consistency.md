@@ -46,8 +46,17 @@ self-close 与人类退役后的 worker-ID 消息名字关系保全、后续收�
 匹配时保全，异 session 仍排除。`self-close-session-frontend-qa/report.md` 已用正式
 候选 0.2.0491 通过自退役和人类退役的真实 TUI 增量：旧宿主存活且拒收，新 holder
 收到原 ID/正文，session/wake/消费回执更新，旧消费历史和任务名字归属保持。
-整体独立 Review 已通过，见 `milestone-review-result.json` 与
-`milestone-review-verdict.md`；远端集成另以交付回执记录。生产 runtime 未安装。
+原候选整体独立 Review 已通过，见 `milestone-review-result.json` 与
+`milestone-review-verdict.md`。后续 Linux CI 增量的实现、原生后端与公开消费者证据
+见 `linux-ci-author-report.md`；该增量的真实前端和复核单独记录，不扩大原 PASS。
+增量独立复核通过，见 `linux-ci-review-verdict.md`。原时钟 finding 与内核输出
+字段不符，经源码证据和独立复核撤销；原始 finding 与裁定依据均保留。
+正式候选 0.2.0492 的受影响真实前端通过：
+`records/linux-shared-tmux-qa/report.md` 覆盖挂起、正常退出、同 pane 新执行与重启；
+`records/linux-shared-rex-qa/report.md` 覆盖旧会话存活时接替、人类恢复、被顶替者
+普通注册、真正后续执行接替和旧 macOS fence 格式持久化。两个报告均保留各自
+环境准备问题及适用边界。Linux 公开 status/context 与同一进程身份原生验证通过。
+远端集成另以交付回执记录。生产 runtime 未安装。
 
 ## 当前身份生命周期合同
 
@@ -97,6 +106,15 @@ self-close 与人类退役后的 worker-ID 消息名字关系保全、后续收�
 master 鉴别。事实充分即停，各级只补仍缺的事实。presence 与 activity 分开保留。
 snapshot 判断须经过当前 holder、端点、master 权限和新观测核对。被替换的绑定为
 stale，迟到观测和判断不能写到继任 holder。
+
+精确执行身份使用宿主原生时钟。macOS 保留 Unix 秒/微秒字符串和原有持久化
+对象；Linux 使用 boot ID、CLK_TCK 和 `/proc` starttime ticks，人工接替的发布
+边界使用 CLOCK_BOOTTIME。同一时钟域、boot 和 rate 才能比较先后。不同执行
+的相同 tick 不提供自动接替顺序；跨域或缺失事实返回明确 unknown/unverified。
+同一 PID 和精确启动标识继续存活，包含挂起、后台和已记录的脱离 TTY 执行。
+人类明确接替遇到不兼容历史边界时建立本机有效边界；旧边界不能否决授权，也不能
+在后续重建中覆盖新边界。该机制由 `host_runtime`、`binding_slot` 和现有恢复
+adaptor 负责，不创建第二份身份或任务归属真源。
 
 ## 已批准条款与执行绑定
 

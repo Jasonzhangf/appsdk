@@ -284,6 +284,17 @@ fn first_binding_becomes_current_without_previous() {
     slot.validate().unwrap();
 }
 
+fn native_fixture_start(order: u64) -> String {
+    match crate::host_runtime::current_rex_execution_boundary().unwrap() {
+        super::binding_slot::RexExecutionFence::UnixWall { .. } => format!("{order}:1"),
+        super::binding_slot::RexExecutionFence::LinuxBoot {
+            boot_id,
+            ticks_per_second,
+            ..
+        } => format!("linux:{boot_id}:{ticks_per_second}:{order}"),
+    }
+}
+
 #[test]
 fn rex_human_fence_merge_is_monotonic_and_part_of_current_fact() {
     use super::binding_slot::{RexExecutionFence, VerifiedRexExecutionAssociation};
@@ -292,26 +303,26 @@ fn rex_human_fence_merge_is_monotonic_and_part_of_current_fact() {
     target.rex_execution = Some(VerifiedRexExecutionAssociation {
         owner_pid: 42,
         owner_name: "codex".into(),
-        process_start_id: "10:999999".into(),
+        process_start_id: native_fixture_start(10),
     });
-    target.rex_execution_fence = RexExecutionFence::from_start_id("12:7");
+    target.rex_execution_fence = RexExecutionFence::from_start_id(&native_fixture_start(12));
     let mut actor = rex_value(&key, "actor", "actor");
-    actor.rex_execution_fence = RexExecutionFence::from_start_id("11:9");
+    actor.rex_execution_fence = RexExecutionFence::from_start_id(&native_fixture_start(11));
     actor.replace_rex_holder(&target).unwrap();
     assert_eq!(
         actor.rex_execution_fence,
-        RexExecutionFence::from_start_id("12:7")
+        RexExecutionFence::from_start_id(&native_fixture_start(12))
     );
-    target.rex_execution.as_mut().unwrap().process_start_id = "13:1".into();
+    target.rex_execution.as_mut().unwrap().process_start_id = native_fixture_start(13);
     actor.replace_rex_holder(&target).unwrap();
     assert_eq!(
         actor.rex_execution_fence,
-        RexExecutionFence::from_start_id("13:1")
+        RexExecutionFence::from_start_id(&native_fixture_start(13))
     );
     let mut slot = IdentityBindingSlot::new(key.clone());
     slot.commit(&key, actor.clone(), Some(0)).unwrap();
     let mut advanced = actor.clone();
-    advanced.rex_execution_fence = RexExecutionFence::from_start_id("14:1");
+    advanced.rex_execution_fence = RexExecutionFence::from_start_id(&native_fixture_start(14));
     assert_eq!(
         slot.commit(&key, advanced.clone(), Some(1)).unwrap(),
         CommitOutcome::Committed { generation: 2 }
@@ -324,7 +335,7 @@ fn rex_human_fence_merge_is_monotonic_and_part_of_current_fact() {
         slot.commit(&key, advanced.clone(), Some(2)).unwrap(),
         CommitOutcome::Unchanged { generation: 2 }
     );
-    advanced.rex_execution_fence = Some(RexExecutionFence {
+    advanced.rex_execution_fence = Some(RexExecutionFence::UnixWall {
         seconds: 14,
         microseconds: 1_000_000,
     });
@@ -340,7 +351,7 @@ fn rex_human_fence_missing_association_uses_exact_publication_clock() {
     let before = crate::host_runtime::current_rex_execution_boundary().unwrap();
     actor.replace_rex_holder(&target).unwrap();
     let after = crate::host_runtime::current_rex_execution_boundary().unwrap();
-    let fence = actor.rex_execution_fence.unwrap();
+    let fence = actor.rex_execution_fence.clone().unwrap();
     assert!(before <= fence && fence <= after);
     let same_holder = actor.clone();
     actor.replace_rex_holder(&same_holder).unwrap();
@@ -353,15 +364,162 @@ fn rex_human_fence_missing_association_uses_exact_publication_clock() {
 }
 
 #[test]
+fn rex_human_replacement_uses_the_current_clock_when_history_is_incomparable() {
+    use super::binding_slot::{RexExecutionFence, VerifiedRexExecutionAssociation};
+    let key = key("Alice");
+    let before = crate::host_runtime::current_rex_execution_boundary().unwrap();
+    let foreign = match before {
+        RexExecutionFence::UnixWall { .. } => {
+            RexExecutionFence::from_start_id("linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:700")
+        }
+        RexExecutionFence::LinuxBoot { .. } => RexExecutionFence::from_start_id("12:7"),
+    }
+    .unwrap();
+    let foreign_start_id = match &foreign {
+        RexExecutionFence::UnixWall {
+            seconds,
+            microseconds,
+        } => format!("{seconds}:{microseconds}"),
+        RexExecutionFence::LinuxBoot {
+            boot_id,
+            ticks_per_second,
+            ticks,
+        } => format!("linux:{boot_id}:{ticks_per_second}:{ticks}"),
+    };
+    let mut target = rex_value(&key, "target", "target");
+    target.rex_execution_fence = Some(foreign.clone());
+    target.rex_execution = Some(VerifiedRexExecutionAssociation {
+        owner_pid: 42,
+        owner_name: "codex".into(),
+        process_start_id: foreign_start_id,
+    });
+    let mut actor = rex_value(&key, "actor", "actor");
+    actor.rex_execution_fence = Some(foreign.clone());
+
+    actor.replace_rex_holder(&target).unwrap();
+    let after = crate::host_runtime::current_rex_execution_boundary().unwrap();
+    let fence = actor.rex_execution_fence.clone().unwrap();
+    assert!(
+        fence.compare(&before).is_some() && fence.compare(&after).is_some(),
+        "human replacement must establish a boundary in the current clock domain: before={before:?} fence={fence:?} after={after:?}"
+    );
+
+    let mut later = actor.clone();
+    later.rex_execution_fence = Some(foreign);
+    actor.preserve_rex_fence(&later);
+    assert_eq!(
+        actor.rex_execution_fence,
+        Some(fence),
+        "ordinary preservation must not replace the new local boundary with an incomparable historical value"
+    );
+}
+
+#[test]
+fn rex_fence_round_trips_legacy_and_linux_clock_domains() {
+    use super::binding_slot::RexExecutionFence;
+
+    let legacy = json!({"seconds": 123, "microseconds": 456});
+    let legacy_fence: RexExecutionFence = serde_json::from_value(legacy.clone())
+        .expect("legacy Unix wall-time fence must remain readable");
+    assert_eq!(
+        serde_json::to_value(&legacy_fence).unwrap(),
+        legacy,
+        "macOS must keep its existing wall-time object shape"
+    );
+
+    let linux = json!({
+        "clock": "linux_boottime",
+        "boot_id": "b879bb0a-cf9a-47d1-b889-f63aa872d851",
+        "ticks_per_second": 100,
+        "ticks": 34771
+    });
+    let linux_fence: RexExecutionFence = serde_json::from_value(linux.clone())
+        .expect("Linux boot-clock fence must have an explicit typed shape");
+    assert_eq!(
+        serde_json::to_value(&linux_fence).unwrap(),
+        linux,
+        "Linux fence round-trip must preserve boot ID, rate, and native ticks"
+    );
+    for invalid in [
+        json!({
+            "clock": "linux_boottime",
+            "boot_id": "boot with spaces",
+            "ticks_per_second": 100,
+            "ticks": 1
+        }),
+        json!({
+            "clock": "linux_boottime",
+            "boot_id": "b879bb0a-cf9a-47d1-b889-f63aa872d851",
+            "ticks_per_second": 0,
+            "ticks": 1
+        }),
+        json!({
+            "clock": "linux_boottime",
+            "boot_id": "b879bb0a-cf9a-47d1-b889-f63aa872d851",
+            "ticks_per_second": 100,
+            "ticks": 1,
+            "extra": true
+        }),
+    ] {
+        assert!(
+            serde_json::from_value::<RexExecutionFence>(invalid).is_err(),
+            "strict Linux fence fields must reject malformed persisted facts"
+        );
+    }
+    assert_eq!(
+        RexExecutionFence::from_start_id("linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:1:extra"),
+        None
+    );
+    assert_eq!(RexExecutionFence::from_start_id("linux: boot:100:1"), None);
+}
+
+#[test]
+fn rex_fence_comparison_does_not_rank_incomparable_executions() {
+    use super::binding_slot::RexExecutionFence;
+    use std::cmp::Ordering;
+
+    let legacy = RexExecutionFence::from_start_id("12:7").unwrap();
+    let linux_low =
+        RexExecutionFence::from_start_id("linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:700")
+            .unwrap();
+    let linux_high =
+        RexExecutionFence::from_start_id("linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:701")
+            .unwrap();
+    let other_boot =
+        RexExecutionFence::from_start_id("linux:11111111-1111-1111-1111-111111111111:100:999")
+            .unwrap();
+    let other_rate =
+        RexExecutionFence::from_start_id("linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:1000:7000")
+            .unwrap();
+
+    assert_eq!(
+        linux_low.partial_cmp(&linux_high),
+        Some(Ordering::Less),
+        "same boot and same rate must preserve native tick order"
+    );
+    assert_eq!(legacy.partial_cmp(&linux_high), None);
+    assert_eq!(linux_high.partial_cmp(&other_boot), None);
+    assert_eq!(linux_high.partial_cmp(&other_rate), None);
+    assert_eq!(
+        linux_high.partial_cmp(&RexExecutionFence::from_start_id(
+            "linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:701"
+        )
+        .unwrap()),
+        Some(Ordering::Equal),
+        "equal ticks on one boot are equal as a fence; caller code must still reject equal different executions"
+    );
+}
+
+#[test]
 fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
     use super::binding_slot::{RexExecutionFence, VerifiedRexExecutionAssociation};
     let key = key("Alice");
     let mut current = rex_value(&key, "actor", "runtime");
-    current.rex_execution_fence = RexExecutionFence::from_start_id("20:123456");
+    current.rex_execution_fence = RexExecutionFence::from_start_id(&native_fixture_start(20));
     current.rex_execution = Some(VerifiedRexExecutionAssociation {
         owner_pid: 42,
         owner_name: "codex".into(),
-        process_start_id: "10:1".into(),
+        process_start_id: native_fixture_start(10),
     });
     let mut same = current.clone();
     same.rex_execution = None;
@@ -403,11 +561,11 @@ fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
     assert_eq!(returned.rex_execution_fence, current.rex_execution_fence);
     let mut target = current.clone();
     target.binding.app_scope_id = AppServerId::new("different-target-app").unwrap();
-    target.rex_execution.as_mut().unwrap().process_start_id = "30:654321".into();
+    target.rex_execution.as_mut().unwrap().process_start_id = native_fixture_start(30);
     returned.replace_rex_holder(&target).unwrap();
     assert_eq!(
         returned.rex_execution_fence,
-        RexExecutionFence::from_start_id("30:654321")
+        RexExecutionFence::from_start_id(&native_fixture_start(30))
     );
 }
 

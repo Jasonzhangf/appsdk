@@ -3,7 +3,8 @@ use crate::proto::SelectedTransport;
 use crate::scope::ProjectScopeId;
 use crate::server::global_state::RuntimeBinding;
 use crate::server::name_state::NamePaneAnchor;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cmp::Ordering;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,21 +110,190 @@ pub(crate) struct BindingValue {
 }
 
 /// Current admission boundary in the local process-start clock domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RexExecutionFence {
-    pub(crate) seconds: u64,
-    pub(crate) microseconds: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RexExecutionFence {
+    UnixWall {
+        seconds: u64,
+        microseconds: u32,
+    },
+    LinuxBoot {
+        boot_id: String,
+        ticks_per_second: u64,
+        ticks: u64,
+    },
 }
 
 impl RexExecutionFence {
     pub(crate) fn from_start_id(start: &str) -> Option<Self> {
+        if let Some(rest) = start.strip_prefix("linux:") {
+            let mut fields = rest.split(':');
+            let boot_id = fields.next()?.to_owned();
+            let ticks_per_second = fields.next()?.parse().ok()?;
+            let ticks = fields.next()?.parse().ok()?;
+            if fields.next().is_some() {
+                return None;
+            }
+            return Self::linux_boot(boot_id, ticks_per_second, ticks);
+        }
         let (seconds, microseconds) = start.split_once(':')?;
-        let value = Self {
-            seconds: seconds.parse().ok()?,
-            microseconds: microseconds.parse().ok()?,
-        };
-        (value.microseconds < 1_000_000).then_some(value)
+        let seconds = seconds.parse().ok()?;
+        let microseconds = microseconds.parse().ok()?;
+        Self::unix_wall(seconds, microseconds)
+    }
+
+    pub(crate) fn unix_wall(seconds: u64, microseconds: u32) -> Option<Self> {
+        (microseconds < 1_000_000).then_some(Self::UnixWall {
+            seconds,
+            microseconds,
+        })
+    }
+
+    pub(crate) fn linux_boot(boot_id: String, ticks_per_second: u64, ticks: u64) -> Option<Self> {
+        if boot_id.trim() != boot_id
+            || boot_id.is_empty()
+            || boot_id.chars().any(|character| {
+                character.is_whitespace() || character.is_control() || character == ':'
+            })
+            || ticks_per_second == 0
+        {
+            return None;
+        }
+        Some(Self::LinuxBoot {
+            boot_id,
+            ticks_per_second,
+            ticks,
+        })
+    }
+
+    fn validate(&self) -> bool {
+        match self {
+            Self::UnixWall { microseconds, .. } => *microseconds < 1_000_000,
+            Self::LinuxBoot {
+                boot_id,
+                ticks_per_second,
+                ..
+            } => Self::linux_boot(boot_id.clone(), *ticks_per_second, 0).is_some(),
+        }
+    }
+
+    pub(crate) fn compare(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (
+                Self::UnixWall {
+                    seconds: left_seconds,
+                    microseconds: left_microseconds,
+                },
+                Self::UnixWall {
+                    seconds: right_seconds,
+                    microseconds: right_microseconds,
+                },
+            ) => Some(
+                (*left_seconds, *left_microseconds).cmp(&(*right_seconds, *right_microseconds)),
+            ),
+            (
+                Self::LinuxBoot {
+                    boot_id: left_boot,
+                    ticks_per_second: left_rate,
+                    ticks: left_ticks,
+                },
+                Self::LinuxBoot {
+                    boot_id: right_boot,
+                    ticks_per_second: right_rate,
+                    ticks: right_ticks,
+                },
+            ) if left_boot == right_boot && left_rate == right_rate => {
+                Some(left_ticks.cmp(right_ticks))
+            }
+            _ => None,
+        }
+    }
+
+    fn merge_comparable(destination: Option<Self>, incoming: Option<&Self>) -> Option<Self> {
+        match (destination, incoming) {
+            (None, Some(incoming)) => Some(incoming.clone()),
+            (Some(destination), Some(incoming)) => match destination.compare(incoming) {
+                Some(Ordering::Less) => Some(incoming.clone()),
+                Some(Ordering::Equal | Ordering::Greater) | None => Some(destination),
+            },
+            (destination, None) => destination,
+        }
+    }
+}
+
+impl PartialOrd for RexExecutionFence {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.compare(other)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnixWallFenceJson {
+    seconds: u64,
+    microseconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LinuxFenceClock {
+    LinuxBoottime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinuxBootFenceJson {
+    clock: LinuxFenceClock,
+    boot_id: String,
+    ticks_per_second: u64,
+    ticks: u64,
+}
+
+impl Serialize for RexExecutionFence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::UnixWall {
+                seconds,
+                microseconds,
+            } => UnixWallFenceJson {
+                seconds: *seconds,
+                microseconds: *microseconds,
+            }
+            .serialize(serializer),
+            Self::LinuxBoot {
+                boot_id,
+                ticks_per_second,
+                ticks,
+            } => LinuxBootFenceJson {
+                clock: LinuxFenceClock::LinuxBoottime,
+                boot_id: boot_id.clone(),
+                ticks_per_second: *ticks_per_second,
+                ticks: *ticks,
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RexExecutionFence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("clock").is_some() {
+            let linux: LinuxBootFenceJson =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Self::linux_boot(linux.boot_id, linux.ticks_per_second, linux.ticks)
+                .ok_or_else(|| serde::de::Error::custom("invalid Linux Rex execution fence"))
+        } else {
+            let unix: UnixWallFenceJson =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Self::unix_wall(unix.seconds, unix.microseconds)
+                .ok_or_else(|| serde::de::Error::custom("invalid Unix Rex execution fence"))
+        }
     }
 }
 
@@ -182,7 +352,10 @@ impl BindingValue {
     }
 
     pub(crate) fn preserve_rex_fence(&mut self, current: &Self) {
-        self.rex_execution_fence = self.rex_execution_fence.max(current.rex_execution_fence);
+        self.rex_execution_fence = RexExecutionFence::merge_comparable(
+            self.rex_execution_fence.take(),
+            current.rex_execution_fence.as_ref(),
+        );
         if self.rex_execution.is_none()
             && self.transport.kind == crate::proto::TransportKind::Rex
             && self.binding == current.binding
@@ -205,21 +378,29 @@ impl BindingValue {
             .rex_execution
             .as_ref()
             .and_then(|execution| RexExecutionFence::from_start_id(&execution.process_start_id));
-        let boundary = match displaced {
-            Some(boundary) => boundary,
-            None => crate::host_runtime::current_rex_execution_boundary()?,
+        let publication = crate::host_runtime::current_rex_execution_boundary()?;
+        let boundary = displaced
+            .filter(|boundary| boundary.compare(&publication).is_some())
+            .unwrap_or(publication);
+        self.rex_execution_fence = match self.rex_execution_fence.take() {
+            None => Some(boundary),
+            Some(existing) => match existing.compare(&boundary) {
+                Some(Ordering::Less) => Some(boundary),
+                Some(Ordering::Equal | Ordering::Greater) => Some(existing),
+                None => Some(boundary),
+            },
         };
-        self.rex_execution_fence = self.rex_execution_fence.max(Some(boundary));
         Ok(())
     }
 
     fn validate(&self) -> Result<(), SlotError> {
         if self
             .rex_execution_fence
-            .is_some_and(|fence| fence.microseconds >= 1_000_000)
+            .as_ref()
+            .is_some_and(|fence| !fence.validate())
         {
             return Err(SlotError::Invariant(
-                "Rex execution fence has invalid microseconds".into(),
+                "Rex execution fence contains invalid clock facts".into(),
             ));
         }
         if self.tab_id.project_scope != self.binding.project_scope

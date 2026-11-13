@@ -1005,22 +1005,38 @@ fn observe_exact_execution(
         Ok(None) => return exited_codex_observation(),
         Err(_) => return AgentObservation::unknown("process_identity_query_failed"),
     };
-    if current_start_id == previous.start_id {
-        if processes
-            .iter()
-            .any(|process| process.pid == previous.pid && process_is_zombie(process))
+    let same_execution = if current_start_id == previous.start_id {
+        true
+    } else {
+        let previous =
+            crate::server::binding_slot::RexExecutionFence::from_start_id(&previous.start_id);
+        let current =
+            crate::server::binding_slot::RexExecutionFence::from_start_id(&current_start_id);
+        match previous
+            .as_ref()
+            .zip(current.as_ref())
+            .and_then(|(previous, current)| previous.compare(current))
         {
-            return exited_codex_observation();
+            Some(_) => false,
+            None => return AgentObservation::unknown("process_identity_query_failed"),
         }
-        return AgentObservation {
-            agent_presence: AgentPresence::Online,
-            activity: AgentActivity::Unknown,
-            background: false,
-            foreground_command: Some(foreground.command.clone()),
-            reason: "observed_codex_process_still_running".into(),
-        };
+    };
+    if !same_execution {
+        return exited_codex_observation();
     }
-    exited_codex_observation()
+    if processes
+        .iter()
+        .any(|process| process.pid == previous.pid && process_is_zombie(process))
+    {
+        return exited_codex_observation();
+    }
+    AgentObservation {
+        agent_presence: AgentPresence::Online,
+        activity: AgentActivity::Unknown,
+        background: false,
+        foreground_command: Some(foreground.command.clone()),
+        reason: "observed_codex_process_still_running".into(),
+    }
 }
 
 fn exited_codex_observation() -> AgentObservation {
@@ -1305,7 +1321,8 @@ fn tmux_command(socket: &str, args: &[&str]) -> Result<std::process::Output, Str
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     #[test]
@@ -1332,6 +1349,47 @@ pub(crate) mod tests {
             assert_eq!(observed.agent_presence, expected, "{observed:?}");
             assert_eq!(observed.activity, AgentActivity::Unknown);
         }
+    }
+
+    #[test]
+    fn exact_execution_keeps_incomparable_start_reference_unknown() {
+        let foreground = ForegroundPaneFacts {
+            pane_pid: 1,
+            pane_tty: "/dev/ttys001".into(),
+            command: "sh".into(),
+        };
+        for (remembered, current) in [
+            ("12:7", "linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:700"),
+            (
+                "linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:700",
+                "linux:11111111-1111-1111-1111-111111111111:100:701",
+            ),
+            (
+                "linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:700",
+                "linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:1000:7000",
+            ),
+        ] {
+            let previous = ObservedTmuxExecution {
+                pid: 700,
+                start_id: remembered.into(),
+            };
+            let observed =
+                observe_exact_execution(&previous, &[], &foreground, &|_| Ok(Some(current.into())));
+            assert_eq!(observed.agent_presence, AgentPresence::Unknown);
+            assert_eq!(observed.reason, "process_identity_query_failed");
+        }
+
+        let previous = ObservedTmuxExecution {
+            pid: 700,
+            start_id: "linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:700".into(),
+        };
+        let observed = observe_exact_execution(&previous, &[], &foreground, &|_| {
+            Ok(Some(
+                "linux:b879bb0a-cf9a-47d1-b889-f63aa872d851:100:701".into(),
+            ))
+        });
+        assert_eq!(observed.agent_presence, AgentPresence::Offline);
+        assert_eq!(observed.reason, "observed_codex_process_exited");
     }
 
     struct IsolatedTmux {
@@ -1433,7 +1491,9 @@ pub(crate) mod tests {
             let mut fields = line.trim_end().split('\t');
             TmuxEndpoint {
                 socket_path: self.socket.to_string_lossy().into_owned(),
-                server_pid: fields.next().unwrap().parse().unwrap(),
+                server_pid: fields.next().unwrap().parse().unwrap_or_else(|error| {
+                    panic!("invalid isolated tmux server PID in {line:?}: {error}")
+                }),
                 tmux_session_id: fields.next().unwrap().into(),
                 pane_id: fields.next().unwrap().into(),
                 pane_pid: fields.next().unwrap().parse().unwrap(),
@@ -1442,10 +1502,8 @@ pub(crate) mod tests {
             }
         }
 
-        fn fake_codex(&self) -> PathBuf {
-            let path = self.root.join("codex");
-            std::os::unix::fs::symlink("/bin/sleep", &path).unwrap();
-            path
+        fn fake_codex(&self) -> CodexFixture {
+            CodexFixture::compile(&self.root)
         }
 
         fn send_command(&self, command: &str) {
@@ -1517,6 +1575,152 @@ pub(crate) mod tests {
                 .args(["kill-session", "-t", &self.session_id])
                 .output();
             let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct CodexFixture {
+        executable: PathBuf,
+        pid_file: PathBuf,
+        start_id: RefCell<Option<String>>,
+    }
+
+    impl CodexFixture {
+        fn compile(root: &Path) -> Self {
+            let source = root.join("codex-fixture.c");
+            let executable = root.join("codex");
+            let pid_file = root.join("codex.pid");
+            std::fs::write(
+                &source,
+                r#"#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    char pid_text[32];
+    int pid_length;
+    int pid_file;
+    int signal_number;
+    sigset_t signals;
+
+    if (argc != 2) {
+        return 64;
+    }
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &signals, NULL) != 0) {
+        return 70;
+    }
+    pid_length = snprintf(pid_text, sizeof(pid_text), "%ld\n", (long)getpid());
+    if (pid_length <= 0 || (size_t)pid_length >= sizeof(pid_text)) {
+        return 71;
+    }
+    pid_file = open(argv[1], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (pid_file < 0) {
+        return 72;
+    }
+    if (write(pid_file, pid_text, (size_t)pid_length) != pid_length) {
+        close(pid_file);
+        return 73;
+    }
+    if (close(pid_file) != 0) {
+        return 74;
+    }
+    if (sigwait(&signals, &signal_number) != 0) {
+        return 75;
+    }
+    return 0;
+}
+"#,
+            )
+            .expect("write native Codex fixture source");
+            let output = Command::new("cc")
+                .args(["-std=c11", "-O0", "-o"])
+                .arg(&executable)
+                .arg(&source)
+                .output()
+                .expect("compile native Codex fixture with cc");
+            assert!(
+                output.status.success(),
+                "compile native Codex fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Self {
+                executable,
+                pid_file,
+                start_id: RefCell::new(None),
+            }
+        }
+
+        fn background_command(&self) -> String {
+            format!(
+                "{} {} & exec sh -i",
+                shell_quote(&self.executable.to_string_lossy()),
+                shell_quote(&self.pid_file.to_string_lossy())
+            )
+        }
+
+        fn pid(&self) -> Option<u32> {
+            std::fs::read_to_string(&self.pid_file)
+                .ok()
+                .and_then(|pid| pid.trim().parse().ok())
+        }
+
+        fn spawn_detached(&self) -> std::process::Child {
+            use std::os::unix::process::CommandExt;
+            let mut command = Command::new(&self.executable);
+            command
+                .arg(&self.pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            command
+                .spawn()
+                .expect("spawn detached native Codex fixture")
+        }
+
+        fn terminate(&self) {
+            let Some(pid) = self.pid() else {
+                return;
+            };
+            let expected_start_id = self.start_id.borrow().clone();
+            let current_start_id = process_start_id(pid).ok().flatten();
+            if expected_start_id.is_some() && current_start_id != expected_start_id {
+                self.clear_pid();
+                return;
+            }
+            if expected_start_id.is_none() || current_start_id.is_none() {
+                self.clear_pid();
+                return;
+            }
+            terminate_test_process(pid, true);
+            self.clear_pid();
+        }
+
+        fn clear_pid(&self) {
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
+
+        fn record_start_id(&self, pid: u32) {
+            *self.start_id.borrow_mut() = process_start_id(pid)
+                .expect("read native Codex fixture start identity through product process helper")
+                .or_else(|| panic!("native Codex fixture disappeared before identity read"));
+        }
+    }
+
+    impl Drop for CodexFixture {
+        fn drop(&mut self) {
+            self.terminate();
         }
     }
 
@@ -2058,6 +2262,88 @@ pub(crate) mod tests {
         }
     }
 
+    fn wait_for_fixture_ready(
+        endpoint: &TmuxEndpoint,
+        fixture: &CodexFixture,
+        deadline: Duration,
+    ) -> u32 {
+        let deadline = std::time::Instant::now() + deadline;
+        loop {
+            let pid = fixture.pid();
+            let processes = process_snapshot().ok();
+            let process = pid.and_then(|pid| {
+                processes
+                    .as_ref()?
+                    .iter()
+                    .find(|process| process.pid == pid)
+                    .cloned()
+            });
+            let pane = foreground_pane_facts(endpoint).ok();
+            let process_matches_pane =
+                match (pid, processes.as_ref(), process.as_ref(), pane.as_ref()) {
+                    (Some(pid), Some(processes), Some(process), Some(pane)) => {
+                        let descendants = process_descendants(processes, pane.pane_pid);
+                        let tty_matches = normalize_tty(&pane.pane_tty).is_some_and(|tty| {
+                            normalize_tty(&process.tty).as_deref() == Some(tty.as_str())
+                        });
+                        descendants.contains(&pid) && tty_matches
+                    }
+                    _ => false,
+                };
+            if process_matches_pane
+                && process.as_ref().is_some_and(|process| {
+                    !process_is_zombie(process) && fixture_executable_is_codex(&process.executable)
+                })
+                && pane
+                    .as_ref()
+                    .is_some_and(|pane| codex_presence::is_shell_command(&pane.command))
+            {
+                fixture.record_start_id(pid.unwrap());
+                return pid.unwrap();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native Codex fixture did not become ready: pid={pid:?}, process={process:?}, pane={pane:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_detached_fixture_ready(
+        fixture: &CodexFixture,
+        expected_pid: u32,
+        deadline: Duration,
+    ) -> ProcessFact {
+        let deadline = std::time::Instant::now() + deadline;
+        loop {
+            let process = process_snapshot()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|process| process.pid == expected_pid);
+            if fixture.pid() == Some(expected_pid)
+                && process.as_ref().is_some_and(|process| {
+                    !process_is_zombie(process) && fixture_executable_is_codex(&process.executable)
+                })
+            {
+                fixture.record_start_id(expected_pid);
+                return process.unwrap();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detached native Codex fixture did not become ready: pid_file={:?}, process={process:?}",
+                fixture.pid()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn fixture_executable_is_codex(executable: &str) -> bool {
+        Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("codex")
+    }
+
     fn codex_candidates(endpoint: &TmuxEndpoint) -> Vec<ProcessFact> {
         let foreground = foreground_pane_facts(endpoint).unwrap();
         let processes = process_snapshot().unwrap();
@@ -2079,7 +2365,7 @@ pub(crate) mod tests {
             let alive = process_snapshot()
                 .unwrap_or_default()
                 .iter()
-                .any(|process| process.pid == pid);
+                .any(|process| process.pid == pid && !process_is_zombie(process));
             if !alive {
                 return;
             }
@@ -2093,17 +2379,16 @@ pub(crate) mod tests {
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         let codex = tmux.fake_codex();
-        tmux.send_command(&format!(
-            "{} 5; exec sh -i",
-            shell_quote(&codex.to_string_lossy())
-        ));
+        tmux.send_command(&codex.background_command());
 
+        let _pid = wait_for_fixture_ready(&endpoint, &codex, Duration::from_secs(3));
         let running = wait_for_view(&endpoint, Duration::from_secs(3), |observed| {
             observed["agent_presence"] == "online"
                 && observed["reason"] == "current_codex_process_still_running"
         });
         assert_eq!(running["activity"], "unknown", "{running}");
 
+        codex.terminate();
         let exited = wait_for_view(&endpoint, Duration::from_secs(7), |observed| {
             observed["agent_presence"] == "offline"
         });
@@ -2120,11 +2405,9 @@ pub(crate) mod tests {
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         let codex = tmux.fake_codex();
-        tmux.send_command(&format!(
-            "{} 5 & exec sh -i",
-            shell_quote(&codex.to_string_lossy())
-        ));
+        tmux.send_command(&codex.background_command());
 
+        let _pid = wait_for_fixture_ready(&endpoint, &codex, Duration::from_secs(3));
         let observed = wait_for_view(&endpoint, Duration::from_secs(2), |observed| {
             observed["agent_presence"] == "online"
         });
@@ -2132,9 +2415,7 @@ pub(crate) mod tests {
             observed["reason"], "current_codex_process_still_running",
             "{observed}"
         );
-        for process in codex_candidates(&endpoint) {
-            terminate_test_process(process.pid, false);
-        }
+        codex.terminate();
     }
 
     #[test]
@@ -2143,23 +2424,11 @@ pub(crate) mod tests {
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         let codex = tmux.fake_codex();
-        tmux.send_command(&format!(
-            "{} 5 & exec sh -i",
-            shell_quote(&codex.to_string_lossy())
-        ));
+        tmux.send_command(&codex.background_command());
 
-        let candidates = loop {
-            let candidates = codex_candidates(&endpoint);
-            if candidates.len() == 1 {
-                break candidates;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
+        let pid = wait_for_fixture_ready(&endpoint, &codex, Duration::from_secs(3));
         unsafe {
-            assert_eq!(
-                libc::kill(candidates[0].pid as libc::pid_t, libc::SIGSTOP),
-                0
-            );
+            assert_eq!(libc::kill(pid as libc::pid_t, libc::SIGSTOP), 0);
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
@@ -2183,10 +2452,11 @@ pub(crate) mod tests {
             observed["reason"], "current_codex_process_still_running",
             "{observed}"
         );
-        for process in codex_candidates(&endpoint) {
-            assert!(process.state.starts_with('T'), "{process:?}");
-            terminate_test_process(process.pid, true);
-        }
+        let candidates = codex_candidates(&endpoint);
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].pid, pid, "{candidates:?}");
+        assert!(candidates[0].state.starts_with('T'), "{candidates:?}");
+        codex.terminate();
     }
 
     #[test]
@@ -2195,22 +2465,8 @@ pub(crate) mod tests {
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         let codex = tmux.fake_codex();
-        use std::os::unix::process::CommandExt;
-        let mut command = Command::new(codex);
-        command
-            .arg("5")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let mut child = command.spawn().unwrap();
+        let mut child = codex.spawn_detached();
+        wait_for_detached_fixture_ready(&codex, child.id(), Duration::from_secs(3));
         let start_id = process_start_id(child.id()).unwrap().unwrap();
         remember_execution(
             execution_key(&endpoint),
@@ -2231,6 +2487,7 @@ pub(crate) mod tests {
             libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
         }
         let _ = child.wait();
+        codex.clear_pid();
     }
 
     #[test]
@@ -2239,13 +2496,12 @@ pub(crate) mod tests {
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         let codex = tmux.fake_codex();
-        tmux.send_command(&format!(
-            "{} 60; exec sh -i",
-            shell_quote(&codex.to_string_lossy()),
-        ));
+        tmux.send_command(&codex.background_command());
 
+        let _pid = wait_for_fixture_ready(&endpoint, &codex, Duration::from_secs(3));
         let previous = wait_for_remembered_execution(&endpoint, Duration::from_secs(3), None);
-        terminate_test_process(previous.pid, false);
+        assert_eq!(codex.pid(), Some(previous.pid));
+        codex.terminate();
         let exited = wait_for_view(&endpoint, Duration::from_secs(7), |observed| {
             observed["agent_presence"] == "offline"
         });
@@ -2254,8 +2510,9 @@ pub(crate) mod tests {
             "{exited}"
         );
 
-        tmux.send_command(&format!("{} 60 &", shell_quote(&codex.to_string_lossy())));
+        tmux.send_command(&codex.background_command());
 
+        let _pid = wait_for_fixture_ready(&endpoint, &codex, Duration::from_secs(3));
         let observed = wait_for_view(&endpoint, Duration::from_secs(3), |observed| {
             observed["agent_presence"] == "online"
                 && observed["reason"] == "current_codex_process_still_running"
@@ -2268,7 +2525,8 @@ pub(crate) mod tests {
         let current =
             wait_for_remembered_execution(&endpoint, Duration::from_secs(3), Some(previous.pid));
         assert_ne!(current.pid, previous.pid);
-        terminate_test_process(current.pid, false);
+        assert_eq!(codex.pid(), Some(current.pid));
+        codex.terminate();
     }
 
     struct ProcessFailureWrapper {

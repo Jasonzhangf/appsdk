@@ -46,7 +46,8 @@ self-close 与人类退役后的 worker-ID 消息名字关系保全、后续收�
 匹配时保全，异 session 仍排除。`self-close-session-frontend-qa/report.md` 已用正式
 候选 0.2.0491 通过自退役和人类退役的真实 TUI 增量：旧宿主存活且拒收，新 holder
 收到原 ID/正文，session/wake/消费回执更新，旧消费历史和任务名字归属保持。
-尚无整体 Review、main 或安装声明。
+整体独立 Review 已通过，见 `milestone-review-result.json` 与
+`milestone-review-verdict.md`；远端集成另以交付回执记录。生产 runtime 未安装。
 
 ## 当前身份生命周期合同
 

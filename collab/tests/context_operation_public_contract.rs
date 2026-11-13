@@ -954,7 +954,9 @@ fn peer_lifecycle_r4_managed_visibility_is_authorized_and_pure() {
     file["state"]["subagents"]["managed-private"] = json!({
             "id": "managed-private", "parent": parent["worker_id"], "peer": child["worker_id"],
             "status": "ready", "thread_id": child["transport"]["thread_id"], "profile": null,
-            "created_ms": 1, "ready_deadline_ms": 0, "last_message": "private-assignment", "error": null
+            "created_ms": 1, "ready_deadline_ms": 0, "last_message": "private-assignment", "error": null,
+            // Match Record serialization before independent State saves.
+            "probe_failures": [], "runtime": null
     });
     fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
     fixture.restart_daemon();

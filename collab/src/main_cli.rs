@@ -767,9 +767,10 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: GoalCmd,
     },
-    /// Block until messages arrive (long-poll)
+    /// Read and consume the current available message batch
     Recv {
-        #[arg(long, default_value_t = 600)]
+        /// Seconds to opt in to waiting for new mail; 0 checks once
+        #[arg(long, default_value_t = 0)]
         timeout: u64,
         /// Replay one committed receive identity instead of consuming new mail
         #[arg(long = "receive-id")]

@@ -636,11 +636,16 @@ fn f7_execution_admission_explicit_disjoint_executor_continues() {
 #[test]
 fn f7_execution_admission_dispatch_uses_disjoint_executor() {
     let fixture = f7_fixture();
-    publish(
+    let published = publish(
         &fixture,
         "f7-dispatch-disjoint",
         &f7_publish_flags(&["--reviewer", "Alice"]),
     );
+    assert_eq!(
+        published["task"]["owner_display_name"], "Jenny",
+        "{published}"
+    );
+    let published_owner = published["task"]["owner"].clone();
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let bob_worker = slot_worker_id(&board, "Bob");
 
@@ -663,11 +668,75 @@ fn f7_execution_admission_dispatch_uses_disjoint_executor() {
         dispatched["task"]["dispatch_selection"], "Bob",
         "{dispatched}"
     );
-    assert_eq!(dispatched["task"]["reviewer_name"], "Alice", "{dispatched}");
-    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
+    assert_eq!(dispatched["task"]["owner"], published_owner, "{dispatched}");
     assert_eq!(
-        dispatched["goal_schedule"]["subscription"]["worker_id"], bob_worker,
+        dispatched["task"]["owner_display_name"], "Jenny",
         "{dispatched}"
+    );
+    assert_eq!(dispatched["task"]["reviewer_name"], "Alice", "{dispatched}");
+    assert_eq!(dispatched["task"]["status"], "invited", "{dispatched}");
+    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
+    assert!(
+        dispatched["goal_schedule"]["subscription"].is_null(),
+        "{dispatched}"
+    );
+
+    let invitation_revision = dispatched["task"]["revision"]
+        .as_u64()
+        .expect("dispatched task has a revision")
+        .to_string();
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "f7-dispatch-disjoint",
+            "--accept",
+            "--expected-revision",
+            &invitation_revision,
+        ],
+        THREAD_C,
+    );
+    assert_eq!(accepted["task"]["owner"], bob_worker, "{accepted}");
+    assert_eq!(accepted["task"]["owner_display_name"], "Bob", "{accepted}");
+    assert_eq!(accepted["task"]["status"], "working", "{accepted}");
+    assert!(accepted["task"]["invited_peer"].is_null(), "{accepted}");
+    assert_eq!(accepted["task"]["reviewer_name"], "Alice", "{accepted}");
+    assert_eq!(accepted["goal_schedule"]["armed"], true, "{accepted}");
+    assert_eq!(
+        accepted["goal_schedule"]["subscription"]["worker_id"], bob_worker,
+        "{accepted}"
+    );
+    assert_eq!(
+        accepted["goal_schedule"]["subscription"]["subject"], "goal:task:f7-dispatch-disjoint",
+        "{accepted}"
+    );
+    assert_eq!(
+        accepted["goal_schedule"]["subscription"]["interval_ms"], 3_600_000,
+        "{accepted}"
+    );
+    assert_eq!(
+        accepted["goal_schedule"]["subscription"]["goal_content"]["source"]["kind"], "board-task",
+        "{accepted}"
+    );
+    assert_eq!(
+        accepted["goal_schedule"]["subscription"]["goal_content"]["source"]["task_id"],
+        "f7-dispatch-disjoint",
+        "{accepted}"
+    );
+
+    let after_accept = fixture.current_state();
+    assert!(
+        after_accept["board_details"]["f7-dispatch-disjoint"]["invitation"].is_null(),
+        "{after_accept}"
+    );
+    assert_eq!(
+        after_accept["tasks"]["f7-dispatch-disjoint"]["owner"], bob_worker,
+        "{after_accept}"
+    );
+    assert_eq!(
+        f7_goal_subscriptions(&after_accept, "f7-dispatch-disjoint").len(),
+        1,
+        "{after_accept}"
     );
 }
 

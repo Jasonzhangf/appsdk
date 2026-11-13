@@ -384,7 +384,7 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
         Ok(prepared) => prepared,
         Err(error) => return error,
     };
-    if let Err(error) = server.commit_locked_checked(&mut state, &prepared.events) {
+    if let Err(error) = server.commit_locked_checked_with_control(&mut state, &prepared.events, &control) {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
     let master = current_master_worker_id(&state, Some(&route));

@@ -105,14 +105,31 @@ pub(crate) fn current_ticket_stale_binding_error(
     task_id: &str,
     attempt: u64,
 ) -> Result<Option<Resp>, Resp> {
+    current_ticket_stale_binding_error_with_control(server, state, None, actor, task_id, attempt)
+}
+
+fn current_ticket_stale_binding_error_with_control(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    actor: &str,
+    task_id: &str,
+    attempt: u64,
+) -> Result<Option<Resp>, Resp> {
     let route = match server_route_scope(server, state) {
         Ok(Some(route)) => route,
         Ok(None) => return Ok(None),
         Err(error) => return Err(Resp::err(error)),
     };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control,
-        Err(error) => return Err(Resp::err(error)),
+    let loaded;
+    let control = match control {
+        Some(control) => control,
+        None => {
+            loaded = binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .map_err(Resp::err)?;
+            &loaded
+        }
     };
     let slot = match control.current_for_worker(
         &route.project_scope_id,
@@ -145,28 +162,37 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         "BOARD_TASK_NOT_PENDING: only pending publisher-owned work may be claimed",
         json!({"task_id": id, "status": task.status}),
     );
+    let control;
     let claimable;
     let name_session;
     if ordinary_pending {
         if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
-        let binding = match board_execution_gate(server, &state, &actor, &id) {
-            Ok(binding) => binding, Err(error) => return error,
+        let route = match server_route_scope(server, &state) {
+            Ok(Some(route)) => route,
+            Ok(None) => return Resp::err("BOARD_ROUTE_REQUIRED: public execution requires a unique project route"),
+            Err(error) => return Resp::err(error),
         };
-        if let Err(error) = execution_admission_gate_for_actor(server, &state, &id, &actor) {
-            return error;
-        }
-        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
             Ok(control) => control, Err(error) => return Resp::err(error),
         };
-        name_session = match control.current_for_worker(&binding.project_scope, &binding.app_scope_id, &actor) {
-            Ok(slot) => slot.and_then(|slot| slot.active_binding().and_then(|current|
+        if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id) {
+            return error;
+        }
+        let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
+            Ok(slot) => slot,
+            Err(error) => return Resp::err(error),
+        };
+        if let Some(slot) = &slot {
+            if let Err(error) = execution_candidate_gate(&state, &id, &slot.identity_key.name) {
+                return error;
+            }
+        }
+        name_session = slot.and_then(|slot| slot.active_binding().and_then(|current|
                 current.binding.session_id.as_ref().map(|session| (
                     slot.identity_key.name.clone(),
                     session.to_string(),
                     slot.generation,
-                )))),
-            Err(error) => return Resp::err(error),
-        };
+                ))));
         // An admitted ticket's pending phase is its queue position. A peer may
         // only advance the phase queued on its own slot; a WaitingAssignment
         // phase has no slot and stays open to any claimer. The current manager
@@ -225,7 +251,7 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             Ok(None) => return not_pending_error,
             Err(error) => return Resp::err(error),
         };
-        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
             Ok(control) => control, Err(error) => return Resp::err(error),
         };
         let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
@@ -261,10 +287,10 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         }) else {
             return not_pending_error;
         };
-        if let Err(error) = board_execution_gate(server, &state, &actor, &id) {
+        if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id) {
             return error;
         }
-        if let Err(error) = execution_admission_gate_for_actor(server, &state, &id, &actor) {
+        if let Err(error) = execution_candidate_gate(&state, &id, &slot_name) {
             return error;
         }
         claimable = Some(recovered);
@@ -328,7 +354,7 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             reflow: None, updated_ms: now_ms(),
         } });
     }
-    if let Err(error) = server.commit_locked_checked(&mut state, &events) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
+    if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, &control) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
     board_task_response(server, &state, &id, &actor)
 }
 
@@ -357,7 +383,26 @@ fn board_start_locked(
     if let Err(error) = board_check_actor(&state, &actor, &token) {
         return error;
     }
-    match current_ticket_stale_binding_error(server, &state, &actor, &id, attempt) {
+    let loaded_control;
+    let control = match control {
+        Some(control) => control,
+        None => {
+            loaded_control =
+                match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                    Ok(control) => control,
+                    Err(error) => return Resp::err(error),
+                };
+            &loaded_control
+        }
+    };
+    match current_ticket_stale_binding_error_with_control(
+        server,
+        &state,
+        Some(control),
+        &actor,
+        &id,
+        attempt,
+    ) {
         Ok(Some(error)) => return error,
         Ok(None) => {}
         Err(error) => return error,
@@ -369,33 +414,13 @@ fn board_start_locked(
         return Resp::err("task not found");
     };
     if let Err(error) =
-        task_owner_gate_maybe_with_control(server, state, control, &id, &actor)
+        task_owner_gate_maybe_with_control(server, state, Some(control), &id, &actor)
     {
         return error;
     }
-    let binding_result = match control {
-        Some(control) => board_execution_gate_with_control(server, state, control, &actor, &id),
-        None => board_execution_gate(server, state, &actor, &id),
-    };
-    let binding = match binding_result {
+    let binding = match board_execution_gate_with_control(server, state, control, &actor, &id) {
         Ok(binding) => binding,
         Err(error) => return error,
-    };
-    if let Err(error) = execution_admission_gate_for_actor(server, &state, &id, &actor) {
-        return error;
-    }
-    let loaded;
-    let control = match control {
-        Some(control) => control,
-        None => {
-            loaded = match binding_store::BindingControlStore::new(server.host_paths.state_root())
-                .load()
-            {
-                Ok(control) => control,
-                Err(error) => return Resp::err(error),
-            };
-            &loaded
-        }
     };
     let slot = match control.current_for_worker(
         &binding.project_scope,
@@ -415,6 +440,9 @@ fn board_start_locked(
         return Resp::err("TICKET_SESSION_MISSING: current identity binding has no session");
     }
     let slot_name = slot.identity_key.name.clone();
+    if let Err(error) = execution_candidate_gate(state, &id, &slot_name) {
+        return error;
+    }
     let Some(phase) = state.ticket_phases.iter().find(|phase| {
         phase.task_id == id
             && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
@@ -486,7 +514,9 @@ fn board_ticket_result_event(
 
     if admitted_public {
         if let Some(attempt) = attempt {
-            match current_ticket_stale_binding_error(server, state, actor, task_id, attempt) {
+            match current_ticket_stale_binding_error_with_control(
+                server, state, None, actor, task_id, attempt,
+            ) {
                 Ok(Some(error)) => return Err(error),
                 Ok(None) => {}
                 Err(error) => return Err(error),

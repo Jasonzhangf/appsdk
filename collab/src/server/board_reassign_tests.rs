@@ -369,6 +369,129 @@ fn identity_return_observation(
 }
 
 #[test]
+fn prepared_claim_commit_retains_admitted_control_across_rebind() {
+    let (server, root, route) = identity_return_fixture();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let admitted = store.load().unwrap();
+    let idle = admitted
+        .current_for_worker(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            "idle",
+        )
+        .unwrap()
+        .unwrap();
+    let idle_key = idle.identity_key.clone();
+    let idle_name = idle.identity_key.name.clone();
+    let idle_generation = idle.generation;
+    let idle_session = idle
+        .active_binding()
+        .unwrap()
+        .binding
+        .session_id
+        .as_ref()
+        .unwrap()
+        .to_string();
+
+    let events = {
+        let mut state = server.state.lock().unwrap();
+        state
+            .apply_checked(&Event::TicketPhaseRecorded {
+                phase: ticket_state::TicketPhaseRecord {
+                    task_id: "named-work".into(),
+                    phase: ticket_state::TicketPhaseKind::Execute,
+                    batch: 1,
+                    priority: "P2".into(),
+                    status: ticket_state::TicketPhaseStatus::Queued,
+                    slot_name: Some(idle_name.clone()),
+                    binding_generation: idle_generation,
+                    enqueue_seq: 1,
+                    attempt_generation: 0,
+                    depends_on: Vec::new(),
+                    route_group: None,
+                    wait_reason: None,
+                    result: None,
+                },
+            })
+            .unwrap();
+        let mut task = state.tasks["named-work"].clone();
+        task.owner = "idle".into();
+        task.status = "working".into();
+        task.updated_ms = now_ms();
+        let mut details = state.board_details["named-work"].clone();
+        details.revision += 1;
+        vec![
+            Event::TaskUpdated { task },
+            Event::BoardDetailsChanged {
+                task_id: "named-work".into(),
+                details,
+            },
+            Event::TicketPhaseRecorded {
+                phase: ticket_state::TicketPhaseRecord {
+                    task_id: "named-work".into(),
+                    phase: ticket_state::TicketPhaseKind::Execute,
+                    batch: 1,
+                    priority: "P2".into(),
+                    status: ticket_state::TicketPhaseStatus::Claimed,
+                    slot_name: Some(idle_name.clone()),
+                    binding_generation: idle_generation,
+                    enqueue_seq: 1,
+                    attempt_generation: 1,
+                    depends_on: Vec::new(),
+                    route_group: None,
+                    wait_reason: None,
+                    result: None,
+                },
+            },
+            Event::TaskAssignmentUpdated {
+                assignment: name_state::TaskAssignment {
+                    task_id: "named-work".into(),
+                    name: idle_name.clone(),
+                    session_id: idle_session.clone(),
+                    assignment_revision: state
+                        .task_assignment("named-work")
+                        .map_or(1, |assignment| assignment.assignment_revision + 1),
+                    reflow: None,
+                    updated_ms: now_ms(),
+                },
+            },
+        ]
+    };
+
+    let mut rebound = admitted.clone();
+    rebound.unregister(&idle_key, None).unwrap();
+    store.save(&rebound).unwrap();
+
+    let mut state = server.state.lock().unwrap();
+    server
+        .commit_locked_checked_with_control(&mut state, &events, &admitted)
+        .expect("the prepared claim commit must retain its admitted control");
+    assert_eq!(state.tasks["named-work"].owner, "idle");
+    let claimed = state
+        .ticket_phases
+        .iter()
+        .find(|phase| phase.task_id == "named-work")
+        .expect("claim phase");
+    assert_eq!(claimed.status, ticket_state::TicketPhaseStatus::Claimed);
+    assert_eq!(claimed.slot_name.as_deref(), Some(idle_name.as_str()));
+    let assignment = state
+        .task_assignment("named-work")
+        .expect("claim assignment");
+    assert_eq!(assignment.name, idle_name);
+    assert_eq!(assignment.session_id, idle_session);
+    let subscription = state
+        .notification_subscriptions
+        .values()
+        .find(|subscription| {
+            subscription.subject.as_deref() == Some("goal:task:named-work")
+        })
+        .expect("claim wake subscription");
+    assert_eq!(subscription.worker_id, "idle");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn identity_return_deadline_holds_until_fifteen_minutes_then_prepares_idle_redispatch() {
     let (server, root, route) = identity_return_fixture();
     {

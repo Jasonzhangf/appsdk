@@ -175,17 +175,6 @@ fn execution_candidate_gate(
     }
 }
 
-fn execution_admission_gate(
-    server: &Server,
-    state: &State,
-    task_id: &str,
-    actor: &str,
-    candidate_name: &str,
-) -> Result<(), Resp> {
-    work_executor_gate(server, state, task_id, actor)?;
-    execution_candidate_gate(state, task_id, candidate_name)
-}
-
 fn execution_admission_gate_with_control(
     state: &State,
     control: &binding_slot::BindingControlSet,
@@ -196,34 +185,6 @@ fn execution_admission_gate_with_control(
 ) -> Result<(), Resp> {
     work_executor_gate_with_control(state, control, route, task_id, actor)?;
     execution_candidate_gate(state, task_id, candidate_name)
-}
-
-fn execution_admission_gate_for_actor(
-    server: &Server,
-    state: &State,
-    task_id: &str,
-    actor: &str,
-) -> Result<(), Resp> {
-    let route = server_route_scope(server, state)
-        .map_err(Resp::err)?
-        .ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))?;
-    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
-        .load()
-        .map_err(Resp::err)?;
-    let Some(slot) = control
-        .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
-        .map_err(Resp::err)?
-    else {
-        return Ok(());
-    };
-    execution_admission_gate_with_control(
-        state,
-        &control,
-        &route,
-        task_id,
-        actor,
-        slot.identity_key.name.as_str(),
-    )
 }
 
 fn parse_work_policy(

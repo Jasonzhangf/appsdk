@@ -1,0 +1,36 @@
+{
+  "id": "project-memory-rule-promotion",
+  "version": "1",
+  "description": "一次 Project Memory 规则晋升或已批准规则替换。prepare 只解析结构化请求；SDK 保留的 governance.commit 节点是唯一 raw 提交位置，M1-M4 clauses 绑定 prepare 到 commit 的真实边。",
+  "inputs": [
+    {"id": "request", "schema": "Object"}
+  ],
+  "nodes": [
+    {
+      "id": "prepare",
+      "operator": "memory.prepare_rule",
+      "operator_version": "1",
+      "description": "解析并整理结构化请求；不读 raw、不计算 revision、不验证批准、不写文件。",
+      "inputs": ["request"],
+      "output": {"id": "prepared", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit",
+      "operator": "governance.commit",
+      "operator_version": "1",
+      "description": "SDK 保留的受保护提交节点。在 Memory scope 锁内重读 current、构造 candidate、执行 M1-M4 验证闭包，验证成功后替换本 scope 分类 raw 文件一次。",
+      "inputs": ["prepared"],
+      "output": {"id": "committed", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "prepare", "to": "commit", "arc_id": "prepared"}
+  ],
+  "outputs": ["committed"]
+}

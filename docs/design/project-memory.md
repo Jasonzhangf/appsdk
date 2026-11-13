@@ -28,10 +28,14 @@ Markdown details use a small JSON metadata marker so they can be imported back
 after an intentional edit. JSONL remains the canonical event history; Markdown
 is a human-readable interchange view, not a second mutable truth store.
 Normal writes are one-shot: a single `entry` invocation appends the raw event
-and atomically regenerates the detail, title index, and rebuildable projection.
-SQLite may be deleted and rebuilt from raw events. `vec_entries` records the
-pinned WeMM adapter contract; until a local WeMM server is configured, RAG/
-semantic results are candidate-only and never change explicit relations.
+under the scope lock, then regenerates the detail, title index, and rebuildable
+projection. The atomic commit boundary is one classification JSONL file
+replacement. The Markdown and SQLite projections are separate outputs. A
+projection failure after the raw commit is reported as committed, and the
+projection can be rebuilt without submitting the entry again. SQLite may be
+deleted and rebuilt from raw events. `vec_entries` records the pinned WeMM
+adapter contract; until a local WeMM server is configured, RAG/semantic results
+are candidate-only and never change explicit relations.
 The SQLite `index_profile.schema_version` is written from the single
 `MEMORY_SCHEMA_VERSION` constant. `project-memory verify` reports the stored
 value and treats a missing or mismatched value as an unhealthy stale index.
@@ -43,6 +47,10 @@ separate from its review level. New CLI entries default to level 3 and may be
 searched before review. Level 2 is reviewed/reusable; level 1 is reviewed and
 critical. Only evidence-backed review can promote level. Tags are retrieval
 features and may be searched with `query --tag`.
+
+Review level and status describe retrieval and review state. They do not approve
+a rule. A review pass, task acceptance, or non-empty `review_evidence` cannot
+replace the explicit user approval required for rule promotion.
 
 The agent-visible resident index is the project Skill frontmatter description,
 not the entire Markdown index. Curation uses a fixed base line budget: keep
@@ -62,11 +70,81 @@ Results return `detail_path`; an agent may open that Markdown file directly.
 explicit `memory`/`memory_update` candidate is classified and appended; absent
 candidates return `no_update`. Without a real evidence-backed
 `memory_review`, the candidate stays at level 3. `project-memory promote` is
-the explicit user/audit promotion path and requires level 1/2 plus evidence.
-`compact` updates only the rebuildable index: the latest event owns content
-while tags, source references, and relations are unioned; raw JSONL events
-remain unchanged and recoverable. Review never promotes project data to global
-memory. Global writes require an explicit `entry --global` action.
+the explicit promotion path and requires level 1/2 plus evidence. For a rule,
+promotion also requires a complete clause and a matching user approval
+declaration. `compact` updates only the rebuildable index: the latest event owns
+content while tags, source references, and relations are unioned; raw JSONL
+events remain unchanged and recoverable. `rule_control` is not unioned or
+inherited from an older event. Review never promotes project data to global
+memory. Global writes require an explicit `--global` action.
+
+## Rule promotion
+
+`entry_kind` separates `fact` and `rule`. A missing value means an old or
+unclassified record; it does not become a fact automatically. Facts and rule
+candidates can be saved and queried without approval. A rule candidate may have
+an incomplete clause, but it is not an approved or executable rule.
+
+The latest raw event owns the complete effective `rule_control`. Its clause
+contains the rule's scope, scenario, trigger, allowed and forbidden actions,
+state change, effects, owner, evidence, and target governance binding. A rule
+revision covers the title, content, and complete clause. Tags, source
+references, importance, review fields, timestamps, projections, and approval
+metadata do not change the revision.
+
+Approval is separate from review. The approval declaration names the user role,
+the target Memory scope, entry ID, and exact rule revision, plus its source and
+original approval text. The target scope identifies the project or global
+Memory store. It does not replace `rule_control.clause.scope`, which states the
+business scope of the stored rule. A mismatched scope, ID, or revision is
+rejected before raw commit. The machine validates the declaration; it does not
+authenticate a person.
+
+The structured submission and promotion paths are:
+
+```text
+project-memory entry <project> --input <entry.json> [--global]
+project-memory promote <project> --id <id> --level <1|2> \
+  --evidence <review-ref> --approval <approval.json> [--global]
+project-memory import [project] [--global]
+```
+
+`--input` is the structured entry channel. A new rule is always saved as a
+candidate, even when its input claims approval. The result must state that the
+approval was not applied because a new entry needs a later promotion. For an
+existing candidate, `promote --approval` submits the matching approval and the
+requested review level in one interaction. Explicit import can carry the same
+structured data for an existing candidate. Run-note review, automatic L3
+intake, and migration can save facts, candidates, or review evidence; they
+cannot submit approval or promote a rule to level 1/2.
+
+`--global` selects the global Memory scope. It does not change a project rule
+into a globally approved rule, and the approval declaration must match that
+global scope. Without `--global`, the command uses the project scope.
+
+Promotion runs through the Memory operation bound to the existing SDK
+`bind_operation` commit boundary. The lock-protected commit rereads current raw
+state, validates the complete clause and approval target, replaces one
+classification JSONL file, and returns a typed raw receipt. Markdown and SQLite
+projection updates happen after that raw commit and are not part of its atomic
+boundary.
+
+If projection fails after commit, the JSON result reports
+`accepted=true`, `committed=true`, and `projection_updated=false`, with the real
+error and a recovery command. The recovery command is:
+
+```text
+project-memory index <project> --rebuild-only
+project-memory export <project> --rebuild-only
+project-memory index <project> --global --rebuild-only
+project-memory export <project> --global --rebuild-only
+```
+
+`--rebuild-only` reads raw state and rebuilds the selected projection. It does
+not scan Markdown input, accept new L3 entries, append raw events, or repeat
+promotion. A successful Memory promotion proves only that Memory accepted and
+stored the rule revision. It does not prove that another consumer or downstream
+gate has executed the stored rule.
 
 ## Migration and re-entry
 

@@ -2,6 +2,124 @@ use super::*;
 
 const THREAD_C: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fdd";
 
+#[test]
+fn board_name_projection_keeps_unoccupied_source_private_work_off_current_bob() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"fixture user selects Jenny"}"#,
+        ],
+        THREAD_C,
+    );
+    assert_eq!(alice["name"], "Alice");
+    for (id, session) in [
+        ("source-alice-private", THREAD_A),
+        ("target-bob-private", THREAD_B),
+        ("source-alice-public", THREAD_A),
+    ] {
+        fixture.run_public(
+            &["task", "register", id, "--next", "retain name duty"],
+            session,
+        );
+    }
+    // Privacy is an existing stored input, as in the unmapped-worker consumer.
+    // All registration, takeover and board reads still use the public CLI.
+    fixture.update_current_state(|state| {
+        for id in ["source-alice-private", "target-bob-private"] {
+            state["board_details"][id]["public_visibility"] = json!(false);
+        }
+    });
+    let member = |board: &Value, id: &Value| {
+        board["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| &row["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let owner_board = fixture.run_public(&["board", "show"], THREAD_A);
+    assert_eq!(
+        member(&owner_board, &alice["identity"]["worker_id"])["task_ids"],
+        json!(["source-alice-private", "source-alice-public"])
+    );
+    let other_board = fixture.run_public(&["board", "show"], THREAD_B);
+    assert_eq!(
+        member(&other_board, &alice["identity"]["worker_id"])["task_ids"],
+        json!(["source-alice-public"])
+    );
+
+    let takeover = fixture.run_public(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture user replaces Bob","replace_confirmed":true}"#], THREAD_A);
+    assert_eq!(takeover["name"], "Bob");
+    assert_eq!(
+        takeover["identity"]["worker_id"],
+        alice["identity"]["worker_id"]
+    );
+    let before = fixture.current_state();
+    for session in [THREAD_A, THREAD_C] {
+        let board = fixture.run_public(&["board", "show"], session);
+        let bob = member(&board, &takeover["identity"]["worker_id"]);
+        assert_eq!(bob["display_name"], "Bob");
+        assert_eq!(
+            bob["task_ids"],
+            json!(["target-bob-private"]),
+            "current Bob must not inherit Alice duties: {bob}"
+        );
+        if session == THREAD_C {
+            for id in ["source-alice-private", "source-alice-public"] {
+                let task = board["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["id"] == id)
+                    .expect("Jenny retains unoccupied Alice duty");
+                assert_eq!(task["owner_name"], "Alice");
+                assert_eq!(task["owner"], "");
+                assert!(task["owner_session_id"].is_null());
+                assert_eq!(task["needs_reassignment"], true);
+                assert_eq!(task["reassignment_reason"], "name_unoccupied");
+            }
+        } else {
+            assert!(
+                !board.to_string().contains("source-alice-private"),
+                "Bob cannot see Alice private work: {board}"
+            );
+            assert!(board["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == "source-alice-public"));
+        }
+    }
+    let after = fixture.current_state();
+    for field in ["tasks", "task_assignments"] {
+        assert_eq!(
+            after[field], before[field],
+            "board reads must not mutate {field}"
+        );
+    }
+    // The displaced Bob carrier can register as Alice and resume Alice work.
+    // This also checks that filtering did not simply hide source duties forever.
+    let resumed = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(resumed["name"], "Alice");
+    let resumed_board = fixture.run_public(&["board", "show"], THREAD_B);
+    assert_eq!(
+        member(&resumed_board, &resumed["identity"]["worker_id"])["task_ids"],
+        json!(["source-alice-private", "source-alice-public"])
+    );
+    let bob_board = fixture.run_public(&["board", "show"], THREAD_A);
+    assert_eq!(
+        member(&bob_board, &takeover["identity"]["worker_id"])["task_ids"],
+        json!(["target-bob-private"])
+    );
+    assert!(!bob_board.to_string().contains("source-alice-private"));
+}
+
 fn setup() -> (AppFixture, String, String) {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
@@ -1330,7 +1448,8 @@ fn display_name_defaults_follow_current_master_without_renaming_identity() {
     // Handoff does not operate the former executor. Its own later context
     // call obtains an ordinary pool name without taking Jenny back.
     let resumed_peer = fixture.run_public(&["context"], THREAD_A);
-    assert_eq!(resumed_peer["identity"]["worker_id"], master);
+    let resumed_worker = resumed_peer["identity"]["worker_id"].as_str().unwrap();
+    assert_ne!(resumed_worker, master);
     assert_eq!(resumed_peer["identity"]["display_name"], "Alice");
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     assert_eq!(board["master"]["worker_id"], peer);
@@ -1340,7 +1459,7 @@ fn display_name_defaults_follow_current_master_without_renaming_identity() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|w| w["id"] == master)
+            .find(|w| w["id"] == resumed_worker)
             .unwrap()["display_name"],
         "Alice"
     );
@@ -2712,6 +2831,19 @@ fn resource_reassignment_consumer(status: &str) {
         });
     });
 
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(THREAD_B)
+        .unwrap()
+        .reject_as_missing = true;
+    let source_status = fixture.run_public(&["worker", "snapshot", &peer], THREAD_A);
+    assert_eq!(
+        source_status["judgment_status"], "satisfied",
+        "{source_status}"
+    );
+    fixture.run_public(&["worker", "snapshot", &carol], THREAD_A);
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let task = board["tasks"]
         .as_array()
@@ -3419,9 +3551,41 @@ fn recv_default_empty_returns_promptly() {
     assert!(error.contains("RECEIVE_IDENTITY_INVALID"), "{error}");
 }
 
+fn recv_race_has_exact_durable_no_batch_receipt(receipt: &Value) -> bool {
+    receipt["ok"] == false
+        && receipt["durable"] == true
+        && receipt["msg_id"].as_str().is_some_and(|id| !id.is_empty())
+        && receipt["error"] == "APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready"
+        && receipt["notification"] == "subscribed-not-sent"
+        && receipt["notification_error"] == "no notification batch is ready"
+        && receipt["failure"] == "notification_delivery_failed"
+        && receipt["repair_required"] == true
+}
+
+#[test]
+fn recv_race_receipt_rejects_other_failures_and_missing_durability() {
+    // Exact receipt observed in the public waiting-recv race. This alone is
+    // insufficient: the consumer below must still prove actual consumption.
+    let observed = json!({
+        "ok": false, "durable": true, "msg_id": "m1794550269477-1",
+        "error": "APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready",
+        "notification": "subscribed-not-sent",
+        "notification_error": "no notification batch is ready",
+        "failure": "notification_delivery_failed", "repair_required": true
+    });
+    assert!(recv_race_has_exact_durable_no_batch_receipt(&observed));
+    let mut other = observed.clone();
+    other["error"] = json!("APPSERVER_NOTIFICATION_REJECTED: transport disconnected");
+    other["notification_error"] = json!("transport disconnected");
+    assert!(!recv_race_has_exact_durable_no_batch_receipt(&other));
+    let mut missing = observed;
+    missing.as_object_mut().unwrap().remove("durable");
+    assert!(!recv_race_has_exact_durable_no_batch_receipt(&missing));
+}
+
 #[test]
 fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
-    let (mut fixture, _, peer) = setup();
+    let (mut fixture, master, peer) = setup();
     fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
 
     let (wait_output, wait_timed_out, waited) = run_public_bounded(
@@ -3451,7 +3615,7 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
     let started = Instant::now();
     let child = spawn_public(&fixture, &["recv", "--timeout", "5"], THREAD_B);
     thread::sleep(Duration::from_millis(250));
-    let sent = fixture.run_public(
+    let send_output = fixture.command_public(
         &[
             "sendmessage",
             "--to",
@@ -3465,6 +3629,21 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
     let (arrived_output, arrived_timed_out, _) =
         wait_for_public(&mut fixture, child, Duration::from_secs(4));
     let arrived_elapsed = started.elapsed();
+    let sent = if send_output.status.success() {
+        json_from_output(send_output)
+    } else {
+        let stderr = String::from_utf8_lossy(&send_output.stderr);
+        let receipt: Value = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("collab response: "))
+            .and_then(|line| serde_json::from_str(line).ok())
+            .unwrap_or_else(|| panic!("send failed without a structured receipt: {send_output:?}"));
+        assert!(
+            recv_race_has_exact_durable_no_batch_receipt(&receipt),
+            "unexpected send failure: {send_output:?}"
+        );
+        receipt
+    };
     assert!(
         !arrived_timed_out && arrived_elapsed < Duration::from_secs(5),
         "explicit recv did not return early: timed_out={arrived_timed_out} elapsed={arrived_elapsed:?}"
@@ -3479,6 +3658,13 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
         serde_json::from_slice(&arrived_output.stdout).expect("waiting recv emits JSON");
     assert_eq!(arrived["count"], 1, "{arrived}");
     assert_eq!(arrived["messages"][0]["id"], sent["msg_id"]);
+    assert_eq!(arrived["messages"][0]["from"], master);
+    assert_eq!(arrived["messages"][0]["to"], peer);
+    assert_eq!(arrived["messages"][0]["subject"], "early-arrival");
+    assert_eq!(arrived["messages"][0]["body"], "wake the explicit wait");
+    assert!(arrived["receive_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
 
     let read = fixture.run_public(&["msg", sent["msg_id"].as_str().unwrap()], THREAD_B);
     assert_eq!(read["state"], "read");

@@ -1,4 +1,35 @@
 impl Server {
+    /// Activation preserves the loaded control and work records while current
+    /// presence and activity wait for a sample from this runtime.
+    fn invalidate_restored_agent_observations(&self) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        let now = now_ms();
+        let reason = "runtime activated; awaiting current agent observation";
+        let mut events = Vec::new();
+        for workers in state.agent_presence.values() {
+            for record in workers.values() {
+                let mut presence = record.clone();
+                presence.presence = name_state::AgentPresence::Unknown;
+                presence.reason = reason.into();
+                presence.observed_ms = now;
+                events.push(Event::AgentPresenceObserved { presence });
+            }
+        }
+        for workers in state.agent_activity.values() {
+            for record in workers.values() {
+                let mut activity = record.clone();
+                activity.activity = name_state::AgentActivity::Unknown;
+                activity.background = false;
+                activity.idle_since_ms = None;
+                activity.reason = reason.into();
+                activity.observed_ms = now;
+                events.push(Event::AgentActivityObserved { activity });
+            }
+        }
+        self.try_commit_locked(&mut state, &events)
+            .map_err(|error| format!("RUNTIME_OBSERVATION_INVALIDATION_FAILED: {error}"))
+    }
+
     pub(crate) fn commit(&self, changes: &[Event]) {
         let mut state = self.state.lock().unwrap();
         self.commit_locked_reporting(&mut state, changes);
@@ -42,21 +73,53 @@ impl Server {
         state: &mut State,
         changes: &[Event],
     ) -> Result<notification_contract::CommitReceipt, notification_contract::MutationError> {
-        use notification_contract::MutationError;
-        state::responsibility_preflight(state, changes).map_err(MutationError::InvalidCommand)?;
+        self.commit_locked_checked_with_current(state, changes, None)
+    }
+
+    pub(crate) fn commit_locked_checked_with_control(
+        &self,
+        state: &mut State,
+        changes: &[Event],
+        control: &binding_slot::BindingControlSet,
+    ) -> Result<notification_contract::CommitReceipt, notification_contract::MutationError> {
+        self.commit_locked_checked_with_current(state, changes, Some(control))
+    }
+
+    fn commit_locked_checked_with_current(
+        &self,
+        state: &mut State,
+        changes: &[Event],
+        control: Option<&binding_slot::BindingControlSet>,
+    ) -> Result<notification_contract::CommitReceipt, notification_contract::MutationError> {
         if changes.is_empty() {
             return Ok(notification_contract::CommitReceipt {
                 sequence: state.sequence,
                 revision: state.revision,
             });
         }
+        let candidate = self.checked_candidate_with_goal(state, changes, control)?;
+        self.publish_current_state(state, candidate)
+    }
+
+    /// Build the durable State candidate for one checked commit: apply the
+    /// explicit events, then the goal-derived transitions, then advance the
+    /// version. The same current control set feeds selection, goal derivation
+    /// and publication so a command-receipt commit cannot fork the derivation.
+    fn checked_candidate_with_goal(
+        &self,
+        state: &State,
+        changes: &[Event],
+        control: Option<&binding_slot::BindingControlSet>,
+    ) -> Result<State, notification_contract::MutationError> {
+        use notification_contract::MutationError;
+        state::responsibility_preflight(state, changes).map_err(MutationError::InvalidCommand)?;
         let mut candidate = state.clone();
         for change in changes {
             candidate
                 .apply_checked(change)
                 .map_err(MutationError::InvalidState)?;
         }
-        for change in task_goal_transition_events(self, state, &candidate, changes)
+        for change in task_goal_transition_events(self, state, &candidate, changes, control)
             .map_err(|error| MutationError::InvalidCommand(error.error.unwrap_or_default()))?
         {
             candidate.apply_checked(&change).map_err(MutationError::InvalidState)?;
@@ -64,7 +127,71 @@ impl Server {
         candidate
             .advance_version()
             .map_err(MutationError::InvalidState)?;
-        self.publish_current_state(state, candidate)
+        Ok(candidate)
+    }
+
+    /// Commit one command with its receipt and the same goal derivation as a
+    /// checked commit. `retire_name` reuses this so a retry of the same
+    /// operation replays its exact result instead of retiring a successor.
+    pub(crate) fn commit_command_locked_with_control(
+        &self,
+        state: &mut State,
+        command: &str,
+        operation: &str,
+        changes: &[Event],
+        outcome: serde_json::Value,
+        control: &binding_slot::BindingControlSet,
+    ) -> Result<notification_contract::CommandOutcome, notification_contract::MutationError> {
+        use notification_contract::MutationError;
+        let command_id = CommandId::new(command.to_owned())
+            .map_err(|error| MutationError::InvalidCommand(error.to_string()))?;
+        let operation_id = OperationId::new(operation.to_owned())
+            .map_err(|error| MutationError::InvalidCommand(error.to_string()))?;
+        if let Some(receipt) = state.global.lookup_command_receipt(&command_id) {
+            if receipt.operation_id != operation_id {
+                return Err(MutationError::InvalidCommand(format!(
+                    "command {command} already belongs to another operation"
+                )));
+            }
+            return Ok(notification_contract::CommandOutcome {
+                receipt: notification_contract::CommitReceipt {
+                    sequence: receipt.sequence,
+                    revision: receipt.revision,
+                },
+                operation_id: operation.into(),
+                outcome: receipt.outcome.clone(),
+                replayed: true,
+            });
+        }
+        if state
+            .global
+            .command_receipts
+            .values()
+            .any(|receipt| receipt.operation_id == operation_id)
+        {
+            return Err(MutationError::InvalidCommand(format!(
+                "operation {operation} already belongs to another command"
+            )));
+        }
+        let mut candidate = self.checked_candidate_with_goal(state, changes, Some(control))?;
+        candidate.global.command_receipts.insert(
+            command.into(),
+            global_state::CommandReceipt {
+                command_id,
+                operation_id,
+                epoch: candidate.global.epoch,
+                sequence: candidate.sequence,
+                revision: candidate.revision,
+                outcome: outcome.clone(),
+            },
+        );
+        let receipt = self.publish_current_state(state, candidate)?;
+        Ok(notification_contract::CommandOutcome {
+            receipt,
+            operation_id: operation.into(),
+            outcome,
+            replayed: false,
+        })
     }
 
     pub fn commit_command(

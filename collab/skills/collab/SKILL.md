@@ -17,12 +17,16 @@ master 权限。只有用户要求注册时才初始化；未注册或初始化�
 可做任务，不寻找或等待 master。
 
 已注册身份、角色、任务、消息和订阅以当前 `collab context` 为真源。项目由本次真实
-cwd 确定，名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递与任务锚点；
-sessionID 只承载当前执行。第一次绑定分配固定名字，后续绑定与恢复可显式继承名字，
-新注册为新会话新增名字，旧名字在旧持有者离线或获得用户授权时可顶替。选择 tmux
+cwd 确定，名字承载 TUI、Codex Desktop、DSH 和 Rex 的工作归属、身份、投递与任务。
+sessionID 承载当前执行。普通名字池用完后分配未占用的 `peer-数字`，新注册继续。
+唯一当前宿主事实可自动续接已有名字。人类明确授权可顶替指定名字和角色。
+已有合法角色随名字恢复。新 master 授权需要本次人类明确指令，名字统一为 Jenny。
+接替时任务和消息跟目标名字走，源名字工作保留。被替换的旧会话再次真实 context 时再普通注册。
+选择 tmux
 适配器的 TUI 使用固定 session 名字 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
 `appsdk_1_Jenny`；只有固定位置 1 可升 Jenny。布局读取共享 manifest，正常改名由
-Collab 负责。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
+Collab 负责。Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录名。
+身份、角色和任务变化保留该 Rex session 名。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
 恢复链已删除。tmux `$N`、pane、thread 和 socket 仅定位通信。不得猜身份、
 复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。

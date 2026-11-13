@@ -41,19 +41,39 @@ fn poll_messages_with_context(
     project_context: Option<&ProjectContext>,
     receive_id: Option<&str>,
 ) -> Option<Resp> {
-    let ids: Vec<String>;
     let mut st = server.state.lock().unwrap();
-    match (token, project_context) {
+    poll_messages_with_state(
+        server,
+        &mut st,
+        None,
+        worker_id,
+        token,
+        project_context,
+        receive_id,
+    )
+}
+
+fn poll_messages_with_state(
+    server: &Server,
+    st: &mut State,
+    current_control: Option<&crate::server::binding_slot::BindingControlSet>,
+    worker_id: &str,
+    token: Option<&str>,
+    project_context: Option<&ProjectContext>,
+    receive_id: Option<&str>,
+) -> Option<Resp> {
+    let authorized_binding = match (token, project_context) {
         (Some(token), Some(project_context)) => {
-            if let Err(response) = project_route_actor(&st, project_context, worker_id, token) {
-                return Some(response);
+            match project_route_actor_with_binding(st, project_context, worker_id, token) {
+                Ok((_, binding)) => Some(binding),
+                Err(response) => return Some(response),
             }
         }
-        (None, None) => {}
+        (None, None) => None,
         _ => return Some(Resp::err(
             "PROJECT_CONTEXT_REQUIRED: poll runtime admission requires token and project context",
         )),
-    }
+    };
     let route_scope = project_context.map(|context| RouteScope {
         app_scope_id: context.app_scope_id.clone(),
         project_scope_id: context.project_scope.clone(),
@@ -104,11 +124,31 @@ fn poll_messages_with_context(
             })));
         }
     }
-    let unread = st.inbox_of(worker_id);
-    if unread.is_empty() {
+    let mut ids = Vec::new();
+    for message in st.inbox_of(worker_id) {
+        if let (Some(control), Some(authorized_binding), Some(route_scope)) = (
+            current_control,
+            authorized_binding.as_ref(),
+            route_scope.as_ref(),
+        ) {
+            match name_mailbox::current_name_allows_message(
+                st,
+                control,
+                route_scope,
+                worker_id,
+                authorized_binding,
+                message,
+            ) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => return Some(Resp::err(error)),
+            }
+        }
+        ids.push(message.id.clone());
+    }
+    if ids.is_empty() {
         return None;
     }
-    ids = unread.iter().map(|m| m.id.clone()).collect();
     // recv is an explicit read operation: deliver and consume the same batch
     // atomically so a successful read cannot leave a new ACK obligation. The
     // receive receipt commits in the same transaction, so a lost socket
@@ -143,8 +183,7 @@ fn poll_messages_with_context(
             });
         }
     }
-    if let Err(error) = server.commit_locked(&mut st, &events) {
-        drop(st);
+    if let Err(error) = server.commit_locked(&mut *st, &events) {
         return Some(Resp::err(format!("RECV_DURABILITY_FAILED: {error}")));
     }
     // Project from the committed reducer state so the first response and a
@@ -198,6 +237,52 @@ async fn poll_messages_async_with_context(
     .unwrap_or_else(|error| Some(Resp::err(format!("poll handler join error: {}", error))))
 }
 
+fn poll_messages_with_manager_context(
+    manager: &ProjectRuntimeManager,
+    server: &Server,
+    worker_id: &str,
+    token: Option<&str>,
+    project_context: Option<&ProjectContext>,
+    receive_id: Option<&str>,
+) -> Option<Resp> {
+    manager
+        .with_current_state(server, |control, state| {
+            Ok(poll_messages_with_state(
+                server,
+                state,
+                Some(control),
+                worker_id,
+                token,
+                project_context,
+                receive_id,
+            ))
+        })
+        .unwrap_or_else(|error| Some(Resp::err(error)))
+}
+
+async fn poll_messages_async_with_manager_context(
+    manager: Arc<ProjectRuntimeManager>,
+    server: Arc<Server>,
+    worker_id: &str,
+    token: Option<String>,
+    project_context: Option<ProjectContext>,
+    receive_id: Option<String>,
+) -> Option<Resp> {
+    let worker_id = worker_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        poll_messages_with_manager_context(
+            &manager,
+            &server,
+            &worker_id,
+            token.as_deref(),
+            project_context.as_ref(),
+            receive_id.as_deref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|error| Some(Resp::err(format!("poll handler join error: {}", error))))
+}
+
 async fn handle_poll_async(server: Arc<Server>, worker_id: String, timeout_ms: u64) -> Resp {
     handle_poll_async_with_context(server, worker_id, None, timeout_ms, None, None).await
 }
@@ -210,21 +295,78 @@ async fn handle_poll_async_with_context(
     project_context: Option<ProjectContext>,
     receive_id: Option<String>,
 ) -> Resp {
+    handle_poll_async_with_context_authority(
+        server,
+        None,
+        worker_id,
+        token,
+        timeout_ms,
+        project_context,
+        receive_id,
+    )
+    .await
+}
+
+async fn handle_poll_async_with_manager_context(
+    manager: Arc<ProjectRuntimeManager>,
+    server: Arc<Server>,
+    worker_id: String,
+    token: Option<String>,
+    timeout_ms: u64,
+    project_context: Option<ProjectContext>,
+    receive_id: Option<String>,
+) -> Resp {
+    handle_poll_async_with_context_authority(
+        server,
+        Some(manager),
+        worker_id,
+        token,
+        timeout_ms,
+        project_context,
+        receive_id,
+    )
+    .await
+}
+
+async fn handle_poll_async_with_context_authority(
+    server: Arc<Server>,
+    manager: Option<Arc<ProjectRuntimeManager>>,
+    worker_id: String,
+    token: Option<String>,
+    timeout_ms: u64,
+    project_context: Option<ProjectContext>,
+    receive_id: Option<String>,
+) -> Resp {
     let timeout_ms = timeout_ms.min(MAX_POLL_MS);
     let mut notified = Box::pin(server.mailbox_notify.notified());
     let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout);
     loop {
         notified.as_mut().enable();
-        if let Some(response) = poll_messages_async_with_context(
-            server.clone(),
-            &worker_id,
-            token.clone(),
-            project_context.clone(),
-            receive_id.clone(),
-        )
-        .await
-        {
+        let response = match manager.as_ref() {
+            Some(manager) => {
+                poll_messages_async_with_manager_context(
+                    manager.clone(),
+                    server.clone(),
+                    &worker_id,
+                    token.clone(),
+                    project_context.clone(),
+                    receive_id.clone(),
+                )
+                .await
+            }
+            None => {
+                poll_messages_async_with_context(
+                    server.clone(),
+                    &worker_id,
+                    token.clone(),
+                    project_context.clone(),
+                    receive_id.clone(),
+                )
+                .await
+            }
+        };
+        if let Some(response) = response {
             return response;
         }
         tokio::select! {
@@ -243,8 +385,18 @@ fn task_conflicts(
     feature_id: Option<String>,
     worktree_path: Option<String>,
 ) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+    {
+        Ok(control) => control,
+        Err(error) => return Resp::err(error),
+    };
     let st = server.state.lock().unwrap();
-    let conflicts: Vec<serde_json::Value> = st
+    let route_scope = match server_route_scope(server, &st) {
+        Ok(route_scope) => route_scope,
+        Err(error) => return Resp::err(error),
+    };
+    let mut conflicts = Vec::new();
+    for task in st
         .tasks
         .values()
         .filter(|task| {
@@ -252,8 +404,12 @@ fn task_conflicts(
                 && ((feature_id.is_some() && task.feature_id == feature_id)
                     || (worktree_path.is_some() && task.worktree_path == worktree_path))
         })
-        .map(|task| task_view(&st, task))
-        .collect();
+    {
+        match task_view_with_identity(&st, &control, route_scope.as_ref(), task) {
+            Ok(view) => conflicts.push(view),
+            Err(error) => return Resp::err(error),
+        }
+    }
     Resp::data(json!({"conflicts": conflicts}))
 }
 
@@ -265,6 +421,26 @@ fn handle_task_wait(
     blocking_task_id: String,
 ) -> Resp {
     let mut st = server.state.lock().unwrap();
+    handle_task_wait_locked(
+        server,
+        &mut st,
+        None,
+        worker_id,
+        token,
+        task_id,
+        blocking_task_id,
+    )
+}
+
+fn handle_task_wait_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    blocking_task_id: String,
+) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
@@ -277,7 +453,14 @@ fn handle_task_wait(
     let master_repair = task.owner != worker_id
         && task_owner_unavailable(server, &st, &task)
         && board_check_master_locked(server, &st, &worker_id).is_ok();
-    if (!master_repair && task.owner != worker_id) || !task_claim_held(&task.status) {
+    if !master_repair {
+        if let Err(error) =
+            task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+        {
+            return error;
+        }
+    }
+    if !task_claim_held(&task.status) {
         return Resp::err("only an owned active task may enter waiting");
     }
     if matches!(
@@ -318,8 +501,15 @@ fn handle_task_wait(
         escalation: "resource_owner_and_waiter_recheck".into(),
     });
     task.updated_ms = now_ms();
-    if let Err(error) = server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]) {
-        drop(st);
+    let events = [Event::TaskUpdated { task: task.clone() }];
+    let commit = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(st, &events, control)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server.commit_locked(st, &events),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("TASK_WAIT_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -338,9 +528,56 @@ fn worker_status_summary_with_maps(
     tasks: &std::collections::HashMap<String, TaskRec>,
     msgs: &std::collections::HashMap<String, Message>,
     keepalives: &std::collections::HashMap<String, crate::server::keepalive::Record>,
-    role_brief: serde_json::Value,
+    role_brief: Option<serde_json::Value>,
     w: &WorkerRec,
 ) -> Result<serde_json::Value, String> {
+    let unacked_notifications = msgs
+        .values()
+        .filter(|m| m.to == w.id && m.state == "delivered")
+        .count();
+    let pending_notifications = msgs
+        .values()
+        .filter(|m| m.to == w.id && m.state == "pending")
+        .count();
+    let notifications_paused = false;
+    let keepalive = keepalives.get(&w.id);
+    let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
+    let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
+    let (display_name, work_roles) = {
+        let state = server.state.lock().unwrap();
+        let route = server_route_scope(server, &state)?;
+        (
+            worker_display_name(control, route.as_ref(), &w.id)?,
+            worker_work_roles(&state, control, route.as_ref(), &w.id)?,
+        )
+    };
+
+    let Some(role_brief) = role_brief else {
+        return Ok(json!({
+            "id": w.id,
+            "display_name": display_name,
+            "work_roles": work_roles,
+            "role": null,
+            "role_brief": null,
+            "transport": null,
+            "status": "identity-mismatch",
+            "presence": "unknown",
+            "endpoint_live": null,
+            "identity_valid": false,
+            "agent_state": "unknown",
+            "route_match": null,
+            "transport_view": null,
+            "unacked_notifications": unacked_notifications,
+            "pending_notifications": pending_notifications,
+            "notifications_paused": false,
+            "unacked_keepalives": unacked_keepalives,
+            "suspected_offline": suspected_offline,
+            "diagnostic": "worker record is retained without a current identity mapping; run `collab context` for ordinary registration",
+            "active_task": null,
+            "active_status": null,
+        }));
+    };
+
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
@@ -357,20 +594,9 @@ fn worker_status_summary_with_maps(
         (Some(true), Some("waiting_user")) => "waiting_user",
         (Some(true), Some("working")) => "working",
         (Some(true), Some("active")) => "working",
+        (Some(true), Some("error")) => "error",
         _ => "unknown",
     };
-    let unacked_notifications = msgs
-        .values()
-        .filter(|m| m.to == w.id && m.state == "delivered")
-        .count();
-    let pending_notifications = msgs
-        .values()
-        .filter(|m| m.to == w.id && m.state == "pending")
-        .count();
-    let notifications_paused = false;
-    let keepalive = keepalives.get(&w.id);
-    let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
-    let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
     let status = if !identity_valid {
         "identity-mismatch"
     } else if endpoint_live == Some(false) {
@@ -390,12 +616,6 @@ fn worker_status_summary_with_maps(
         Some("SESSION_THREAD_BINDING_MISMATCH: selected transport does not prove the registered identity; preserve the registered binding and use `collab context` as the only repair entry; do not edit or infer the binding")
     } else {
         None
-    };
-    let (display_name, work_roles) = {
-        let state = server.state.lock().unwrap();
-        let route=server_route_scope(server,&state)?;
-        (worker_display_name(control, route.as_ref(), &w.id)?,
-         worker_work_roles(&state, control, route.as_ref(), &w.id)?)
     };
     Ok(json!({
         "id": w.id,
@@ -855,6 +1075,7 @@ fn mutation_blocked_during_project_reset(req: &Req) -> bool {
         | Req::MasterWakeRelease { .. }
         | Req::TransferMaster { .. }
         | Req::WorkerSnapshot { .. }
+        | Req::WorkerStatusJudgment { .. }
         | Req::WorkerClose { .. }
         | Req::WorkRolesSet { .. }
         | Req::WorkflowTemplateSet { .. }
@@ -1001,6 +1222,9 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id, token, ..
         }
         | Req::WorkerSnapshot {
+            worker_id, token, ..
+        }
+        | Req::WorkerStatusJudgment {
             worker_id, token, ..
         } => Some((worker_id, token)),
         _ => None,
@@ -1269,6 +1493,16 @@ pub(crate) fn project_route_actor(
     worker_id: &str,
     token: &str,
 ) -> Result<WorkerRec, Resp> {
+    project_route_actor_with_binding(state, context, worker_id, token)
+        .map(|(worker, _)| worker)
+}
+
+pub(crate) fn project_route_actor_with_binding(
+    state: &State,
+    context: &ProjectContext,
+    worker_id: &str,
+    token: &str,
+) -> Result<(WorkerRec, crate::server::RuntimeBinding), Resp> {
     project_route_actor_for(state, context, worker_id, token, false)
 }
 
@@ -1281,6 +1515,7 @@ pub(crate) fn project_route_actor_for_poll(
     token: &str,
 ) -> Result<WorkerRec, Resp> {
     project_route_actor_for(state, context, worker_id, token, true)
+        .map(|(worker, _)| worker)
 }
 
 fn project_route_actor_for(
@@ -1289,7 +1524,7 @@ fn project_route_actor_for(
     worker_id: &str,
     token: &str,
     poll_admission: bool,
-) -> Result<WorkerRec, Resp> {
+) -> Result<(WorkerRec, crate::server::RuntimeBinding), Resp> {
     context
         .validate()
         .map_err(|error| Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")))?;
@@ -1352,5 +1587,5 @@ fn project_route_actor_for(
             ))
         })?;
     }
-    Ok(worker)
+    Ok((worker, binding.clone()))
 }

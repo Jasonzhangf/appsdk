@@ -980,6 +980,8 @@ pub enum Req {
         worker_id: String,
         token: String,
         target_id: String,
+        #[serde(default)]
+        approval: Option<String>,
     },
     #[serde(alias = "RootStatus")]
     MasterStatus,
@@ -1084,6 +1086,16 @@ pub enum Req {
         token: String,
         target_id: String,
         lines: usize,
+    },
+    WorkerStatusJudgment {
+        worker_id: String,
+        token: String,
+        capture: WorkerStatusCapture,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presence: Option<crate::server::name_state::AgentPresence>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activity: Option<crate::server::name_state::AgentActivity>,
+        basis: String,
     },
     /// Live master retires a worker registration.
     WorkerClose {
@@ -1221,6 +1233,71 @@ fn default_delivery_mode() -> String {
 
 fn default_poll_timeout() -> u64 {
     600_000
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatusField {
+    Presence,
+    Activity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatusJudgmentOutcome {
+    Applied,
+    Partial,
+    Unknown,
+    Satisfied,
+    Rejected,
+    StaleTarget,
+    StaleFacts,
+    Unauthorized,
+    AwaitingMaster,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatusSessionProbe {
+    NotRequired,
+    Applied,
+    Unsupported,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerStatusCapture {
+    pub project_scope: String,
+    pub app_scope_id: String,
+    pub name: String,
+    pub binding_generation: u64,
+    pub worker_id: String,
+    pub agent_session_id: String,
+    pub binding: crate::server::global_state::RuntimeBinding,
+    pub selected_transport: SelectedTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<crate::server::name_state::AgentPresenceRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::server::name_state::AgentActivityRecord>,
+    pub missing_fields: Vec<WorkerStatusField>,
+    pub session_probe: WorkerStatusSessionProbe,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_worker_id: Option<String>,
+    pub captured_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerStatusJudgmentReceipt {
+    pub outcome: WorkerStatusJudgmentOutcome,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied_fields: Vec<WorkerStatusField>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_fields: Vec<WorkerStatusField>,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<crate::server::name_state::AgentPresenceRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::server::name_state::AgentActivityRecord>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

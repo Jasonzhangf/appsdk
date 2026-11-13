@@ -1,9 +1,11 @@
 use crate::server::binding_slot::{
-    IdentityBindingKey, PendingEffect, PendingEffectKind, RoleAction, RoleAuthorization, RoleEffect,
+    BindingControlSet, IdentityBindingKey, PendingEffect, PendingEffectKind, RoleAction,
+    RoleAuthorization, RoleEffect,
 };
 
 include!("anchor_rename.rs");
 include!("communication.rs");
+include!("retirement.rs");
 
 impl ProjectRuntimeManager {
     pub(super) fn identity_context(
@@ -31,6 +33,11 @@ impl ProjectRuntimeManager {
             Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
         };
         request.facts = facts.clone();
+        match self.requested_name_scope_requirement(&context, &request) {
+            Ok(Some(requirement)) => return (self.host.clone(), requirement),
+            Ok(None) => {}
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        }
         if facts.dsh_session_id.is_some() && facts.dsh.is_none() {
             let mapped = self.binding_control_store().load().and_then(|map| {
                 map.lookup(
@@ -56,6 +63,9 @@ impl ProjectRuntimeManager {
             }
         }
         if request.query {
+            if let Some(retirement) = self.query_human_retirement(&context, &request) {
+                return retirement;
+            }
             return self.current_mapped_context(&context, &request);
         }
         if let Some(approval) = request
@@ -79,7 +89,7 @@ impl ProjectRuntimeManager {
             }
             if !matches!(
                 approval["action"].as_str(),
-                Some("restore_master" | "restore_peer" | "restore_name")
+                Some("restore_master" | "restore_peer" | "restore_name" | "retire_name")
             ) {
                 return (
                     self.host.clone(),
@@ -88,6 +98,7 @@ impl ProjectRuntimeManager {
                     ),
                 );
             }
+            let retire_name = approval["action"].as_str() == Some("retire_name");
             if !approval
                 .get("authorization")
                 .or(approval.get("approval"))
@@ -99,27 +110,51 @@ impl ProjectRuntimeManager {
                     Resp::err("IDENTITY_AUTHORIZATION_REQUIRED"),
                 );
             }
+            // Explicit human retirement is a release action with its own
+            // dedicated dispatch. It must not fall through to the ordinary
+            // register/allocate path.
+            if retire_name {
+                return self.human_retire_name(&context, &request, approval);
+            }
         }
-        // Resolve the explicit name intent before any registration step. The
-        // Register publish boundary consumes it, so an authorized target is
-        // the first published mapping and never an intermediate pool name.
-        let raw_authorization = request
-            .grant_approval
-            .as_ref()
-            .or(request.approval.as_ref());
+        // Parse authorized target before any registration can publish a name.
+        let raw_authorization = request.grant_approval.as_ref().or(request.approval.as_ref());
         let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
             Ok(intent) => intent,
             Err(error) => return (self.host.clone(), Resp::err(error)),
         };
-        // Materialization may recreate an existing mapped worker. It still runs
-        // only after an authorized target is parsed, so invalid Jenny/name
-        // intent cannot cause a pre-publication business registration.
-        {
+        let allow_explicit_rex_rebind = matches!(request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref())
+            .and_then(|approval| approval["action"].as_str()),
+            Some("restore_name" | "restore_master"));
+        let rex_recovery = if facts.rex.is_some() && !allow_explicit_rex_rebind {
+            match self.observe_rex_recovery(
+                &context,
+                &facts,
+                request.invocation_cwd.as_deref(),
+            ) {
+                Ok(observation) => Some(observation),
+                Err(error) => {
+                    return (self.host.clone(), Resp::err(format!("{error:#}")));
+                }
+            }
+        } else {
+            None
+        };
+        let mut facts = facts;
+        facts.caller_pid = None;
+        facts.pane_hint = None;
+        request.facts = facts.clone();
+        if !rex_recovery.as_ref().is_some_and(|recovery|
+            matches!(recovery.admission, RexRecoveryAdmission::DisplacedExecution(_))) {
             let _identity = self.identity_gate.lock().unwrap();
             if let Err(error) = self.ensure_current_worker_for_context(
                 &context,
                 &facts,
                 request.invocation_cwd.as_deref(),
+                allow_explicit_rex_rebind,
             ) {
                 return (self.host.clone(), Resp::err(error));
             }
@@ -142,6 +177,7 @@ impl ProjectRuntimeManager {
                     .zip(request.invocation_cwd.clone())
                     .map(|(pane, cwd)| name_state::NamePaneAnchor { pane, cwd }),
             )
+            .with_rex_recovery(rex_recovery)
             .with_name_intent(intent.clone())
             .with_role_intent(&request);
         let reconciled = self.reconcile_identity_context(
@@ -149,6 +185,7 @@ impl ProjectRuntimeManager {
             facts.clone(),
             Some(outer),
             true,
+            allow_explicit_rex_rebind,
             request.invocation_cwd.as_deref(),
         );
         let (runtime, mut response) = match reconciled {
@@ -214,9 +251,12 @@ impl ProjectRuntimeManager {
                 .map(|(pane, cwd)| name_state::NamePaneAnchor { pane, cwd }),
             Some(&facts),
         );
-        if let Err(error) = name_result {
-            return (runtime, Resp::err(error));
-        }
+        let name_result = match name_result {
+            Ok(result) => result,
+            Err(error) => return (runtime, Resp::err(error)),
+        };
+        let physical = name_result["physical_anchor"].clone();
+        let physical_incomplete = physical["status"] == "incomplete";
         drop(_identity);
         let communication = match self.mapped_communication(&runtime, &context,
             &identity.worker_id, &identity.token,
@@ -230,22 +270,101 @@ impl ProjectRuntimeManager {
             return (runtime, snapshot);
         }
         response.data["snapshot"] = snapshot.data;
-        if request.operation_id.is_empty() && communication.is_none() {
+        if request.operation_id.is_empty() && communication.is_none() && !physical_incomplete {
             return (runtime, response);
         }
-        let outcome = communication.as_ref().map(communication_operation_outcome).unwrap_or("completed");
+        let outcome = if physical_incomplete { "incomplete" } else {
+            communication.as_ref().map(communication_operation_outcome).unwrap_or("completed")
+        };
         let mut result =
             json!({"result":{
                 "operation_id":request.operation_id,"action":"context","invocation":request.invocation,
                 "outcome":outcome,"phase":"context_complete","committed_phases":[],"failed_phase":null,
                 "requires":{"kind":null,"fields":[],"sources":{},"approval":null,"repair_invocation":null},
-                "snapshot":response.data["snapshot"],"owner_readback":{}
+                "snapshot":response.data["snapshot"],"owner_readback":{"physical_anchor":physical}
             }});
+        if physical_incomplete {
+            result["result"]["phase"] = json!("physical_anchor");
+            result["result"]["failed_phase"] = json!("physical_anchor");
+            result["result"]["committed_phases"] = json!(["current", "business_effects"]);
+            result["result"]["requires"]["kind"] = json!("physical_anchor");
+            result["result"]["requires"]["repair_invocation"] = json!("collab context");
+        }
+        let error = physical_incomplete.then(|| physical["error"].as_str()
+            .unwrap_or("PHYSICAL_ANCHOR_INCOMPLETE").to_owned());
         if let Some(communication) = communication { result["result"]["owner_readback"]["communication"] = communication; }
         (
             runtime,
-            Resp { ok: outcome == "completed", error: None, data: result },
+            Resp { ok: outcome == "completed", error, data: result },
         )
+    }
+
+    /// A uniquely held target name keeps its existing app partition. Resolve
+    /// that partition before registration so a wrong `--app-scope` cannot
+    /// allocate an ordinary name or mutate the map first.
+    fn requested_name_scope_requirement(
+        &self,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+    ) -> Result<Option<Resp>, String> {
+        let Some(raw) = request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref())
+        else {
+            return Ok(None);
+        };
+        let Some(intent) = name_resolution::parse_name_intent(Some(raw))? else {
+            return Ok(None);
+        };
+        let requested_name = &intent.requested_name;
+        let control = self.binding_control_store().load()?;
+        let targets = control.project_currents_for_name(&context.project_scope, requested_name);
+        if targets.is_empty()
+            || targets.iter().any(|slot| slot.identity_key.app_scope_id == context.app_scope_id)
+        {
+            return Ok(None);
+        }
+        let target_apps = targets
+            .iter()
+            .map(|slot| slot.identity_key.app_scope_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let unique_target = (targets.len() == 1).then(|| targets[0]);
+        let target_app = unique_target.map(|slot| slot.identity_key.app_scope_id.as_str());
+        let repair_invocation = match target_app {
+            Some(target_app) => format!(
+                "collab context --project <project> --app-scope {target_app} --approve-grant <existing-approval-json>"
+            ),
+            None => format!(
+                "collab context --project <project> --app-scope <one of: {}> --approve-grant <existing-approval-json>",
+                target_apps.join(", ")
+            ),
+        };
+        let sources = json!({
+            "requested_name": requested_name,
+            "target_app_scope_id": target_app,
+            "target_app_scope_ids": target_apps,
+            "target_key": unique_target.map(|slot| &slot.identity_key),
+            "target_keys": targets.iter().map(|slot| &slot.identity_key).collect::<Vec<_>>(),
+        }).as_object().unwrap().clone();
+        Ok(Some(typed_operation_resp(crate::proto::ContextOperationResult {
+            operation_id: request.operation_id.clone(),
+            invocation: request.invocation.clone(),
+            action: request.action.clone(),
+            phase: Some("target_scope_resolution".into()),
+            outcome: "scope_required".into(),
+            committed_phases: Vec::new(),
+            failed_phase: None,
+            requires: crate::proto::ContextOperationRequires {
+                kind: Some("app_scope".into()),
+                fields: vec!["app_scope_id".into()],
+                sources,
+                repair_invocation: Some(repair_invocation),
+                ..Default::default()
+            },
+            snapshot: Some(json!({"registered": false, "identity": null})),
+            owner_readback: Default::default(),
+        })))
     }
 
     fn current_mapped_context(
@@ -253,10 +372,16 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         request: &IdentityContextRequest,
     ) -> (Arc<Server>, Resp) {
+        match self.pending_registration_context(context, request) {
+            Ok(Some(result)) => return result,
+            Ok(None) => {}
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        }
         let identity = match self.current_session_identity_at_cwd(
             context,
             &request.facts,
             request.invocation_cwd.as_deref(),
+            false,
         ) {
             Ok(Some(identity)) => identity,
             Ok(None) => {
@@ -288,15 +413,142 @@ impl ProjectRuntimeManager {
         if !snapshot.ok {
             return (runtime, snapshot);
         }
-        let outcome = communication.as_ref().map(communication_operation_outcome).unwrap_or("completed");
+        let communication_outcome = communication.as_ref().map(communication_operation_outcome).unwrap_or("completed");
+        let physical = snapshot.data["physical_anchor"].clone();
+        let outcome = if physical["status"] == "incomplete" { "incomplete" } else { communication_outcome };
         let mut result = json!({"result":{"operation_id":request.operation_id,"action":"context","invocation":"query",
             "outcome":outcome,"phase":null,"committed_phases":[],"failed_phase":null,
-            "requires":{"kind":null,"fields":[],"sources":{},"approval":null,"repair_invocation":null},"snapshot":snapshot.data,"owner_readback":{}}});
+            "requires":{"kind":null,"fields":[],"sources":{},"approval":null,"repair_invocation":null},"snapshot":snapshot.data,
+            "owner_readback":{"physical_anchor":physical}}});
         if let Some(communication) = communication { result["result"]["owner_readback"]["communication"] = communication; }
         (
             runtime,
-            Resp { ok: outcome == "completed", error: None, data: result },
+            Resp { ok: communication_outcome == "completed", error: None, data: result },
         )
+    }
+
+    /// A published current map can precede its Register business commit. Project
+    /// only the map-owned facts and the exact pending effect; never read a
+    /// credential, reconstruct a worker from State history, or consume work.
+    fn pending_registration_context(
+        &self,
+        context: &ProjectContext,
+        request: &IdentityContextRequest,
+    ) -> Result<Option<(Arc<Server>, Resp)>, String> {
+        let control = self.binding_control_store().load()?;
+        let Some(slot) = control.lookup(
+            &context.project_scope,
+            &context.app_scope_id,
+            &request.facts,
+            request.invocation_cwd.as_deref(),
+        )? else {
+            return Ok(None);
+        };
+        let value = slot
+            .active_binding()
+            .expect("lookup returns active current");
+        if request
+            .facts
+            .dsh
+            .as_ref()
+            .is_some_and(|candidate| {
+                !identity::dsh_transport_matches(candidate, &value.transport)
+            })
+        {
+            return Err(
+                "IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the current mapped binding"
+                    .into(),
+            );
+        }
+        let Some(session_id) = value.binding.session_id.as_ref() else {
+            return Ok(None);
+        };
+        let worker_id = value.binding.agent_id.as_str();
+        let runtime = self.select_runtime(context)?;
+        if runtime.state.lock().unwrap().workers.contains_key(worker_id) {
+            return Ok(None);
+        }
+        let pending: Vec<_> = control
+            .pending_effects()
+            .filter(|effect| {
+                effect.is_register()
+                    && effect.project_scope == context.project_scope
+                    && effect.app_scope_id == context.app_scope_id
+                    && effect.name == slot.identity_key.name
+                    && effect.target_worker_id == worker_id
+                    && effect.target_session_id == session_id.as_str()
+            })
+            .collect();
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let pending_views: Vec<_> = pending
+            .iter()
+            .map(|effect| {
+                json!({
+                    "effect_id": effect.effect_id,
+                    "operation_id": effect.operation_id,
+                    "kind": serde_json::to_value(&effect.kind)
+                        .unwrap_or(serde_json::Value::Null),
+                    "name": effect.name,
+                    "target_worker_id": effect.target_worker_id,
+                    "target_session_id": effect.target_session_id,
+                    "created_ms": effect.created_ms,
+                })
+            })
+            .collect();
+        let name = slot.identity_key.name.clone();
+        let snapshot = json!({
+            "schema_version": 1,
+            "registration": {
+                "status": "pending",
+                "project_root": runtime.root,
+                "worker_id": worker_id,
+                "cwd": value.invocation_cwd,
+            },
+            "name": name,
+            "session_id": value.binding.session_id,
+            "layout": tm_layout::projection(value),
+            "physical_anchor": physical_anchor_projection(value, &name),
+            "binding": value.binding,
+            "registered": false,
+            "project_root": runtime.root,
+            "identity": {
+                "worker_id": worker_id,
+                "display_name": name,
+                "kind": "peer",
+                "role": "unknown",
+                "transport": value.transport,
+            },
+            "work_visibility": "pending registration: role and work projections are unavailable until Register commits",
+            "truth": "identity-map.json owns the published current; the Register effect is still pending in business State"
+        });
+        let result = json!({"result":{
+            "operation_id":request.operation_id,
+            "action":request.action,
+            "invocation":"query",
+            "outcome":"partial",
+            "phase":"business_effects_pending",
+            "committed_phases":["current"],
+            "failed_phase":null,
+            "requires":{
+                "kind":"register_effect",
+                "fields":[],
+                "sources":{"effect_ids":pending.iter().map(|effect| effect.effect_id.clone()).collect::<Vec<_>>()},
+                "approval":null,
+                "repair_invocation":"collab context"
+            },
+            "snapshot":snapshot,
+            "owner_readback":{"pending_effects":pending_views}
+        }});
+        Ok(Some((
+            runtime,
+            Resp {
+                ok: true,
+                error: None,
+                data: result,
+            },
+        )))
     }
 
     pub(super) fn change_mapped_role(
@@ -325,10 +577,11 @@ impl ProjectRuntimeManager {
                 worker_id,
                 token,
                 target_id,
+                approval,
             } => (
                 worker_id.as_str(),
                 token.as_str(),
-                None,
+                approval.as_deref(),
                 Some(target_id.as_str()),
             ),
             _ => return Resp::err("MASTER_CHANGE_INVALID"),
@@ -350,21 +603,24 @@ impl ProjectRuntimeManager {
         };
         let previous = current_master_worker_id(&state, Some(&route));
         let (subject, target, authorization) = if let Some(target) = delegate {
-            let Some(grant) = current_master_grant(&state, Some(&route))
+            let Some(_grant) = current_master_grant(&state, Some(&route))
                 .filter(|grant| grant.agent_id.as_str() == worker)
             else {
                 return Resp::err(
                     "MASTER_DELEGATE_DENIED: caller must hold the current master grant",
                 );
             };
+            let Some(approval) = approval
+                .filter(|text| !text.trim().is_empty() && !text.chars().any(char::is_control))
+            else {
+                return Resp::err("MASTER_AUTHORIZATION_REQUIRED: a new master requires explicit user approval");
+            };
             (
                 target.to_owned(),
                 "Jenny".to_owned(),
-                RoleAuthorization::Delegate {
-                    actor: worker.into(),
-                    target: target.into(),
-                    grant_id: grant.resource_id().into(),
-                    grant_generation: grant.resource_generation(),
+                RoleAuthorization::User {
+                    authorization: approval.into(),
+                    granted_by: "user".into(),
                 },
             )
         } else {
@@ -419,7 +675,7 @@ impl ProjectRuntimeManager {
                     Ok(control) => control, Err(error) => return Resp::err(error),
                 };
                 let state = runtime.state.lock().unwrap();
-                let brief = match role_brief(runtime, &state, &control, worker) {
+                let brief = match role_brief(runtime, &state, &control, &subject) {
                     Ok(brief) => brief, Err(error) => return Resp::err(error),
                 };
                 let mut response = json!({"master":current_master_worker_id(&state, Some(&route)),"scope":scope_view(Some(&route)),
@@ -428,6 +684,14 @@ impl ProjectRuntimeManager {
                     response["cleared"] = json!(true);
                     response["was_empty"] = json!(previous.is_none());
                     response["previous_worker_id"] = json!(previous);
+                }
+                if outcome["physical_anchor"]["status"] == "incomplete" {
+                    response["outcome"] = json!("incomplete");
+                    return Resp::err_data(
+                        outcome["physical_anchor"]["error"].as_str()
+                            .unwrap_or("PHYSICAL_ANCHOR_INCOMPLETE"),
+                        response,
+                    );
                 }
                 Resp::data(response)
             }
@@ -460,13 +724,53 @@ impl ProjectRuntimeManager {
             .as_ref()
             .map(|intent| intent.requested_name.clone())
             .unwrap_or_else(|| source.name.clone());
-        name_resolution::display_slot(&target)?;
+        let _display_slot = name_resolution::display_slot(&target)?;
         if intent
             .as_ref()
             .is_some_and(|intent| !intent.user_authorized)
         {
             return Err("NAME_AUTHORIZATION_REQUIRED".into());
         }
+        let mut cross_scope_sources = if intent
+            .as_ref()
+            .is_some_and(|intent| intent.user_authorized)
+        {
+            let mut sources: Vec<_> = map
+                .project_currents_for_name(&context.project_scope, &target)
+                .into_iter()
+                .filter(|slot| slot.identity_key.app_scope_id != context.app_scope_id)
+                .filter_map(BindingControlSet::cross_scope_source_ref)
+                .collect();
+            if let Some(facts) = facts {
+                let cwd = pane
+                    .as_ref()
+                    .map(|pane| pane.cwd.as_str())
+                    .or(Some(value.invocation_cwd.as_str()));
+                if let Some(source_slot) = map.project_current_for_facts_excluding_app(
+                    &context.project_scope,
+                    Some(&context.app_scope_id),
+                    facts,
+                    cwd,
+                )? {
+                    if source_slot.identity_key.app_scope_id != context.app_scope_id {
+                        if let Some(source) = BindingControlSet::cross_scope_source_ref(source_slot)
+                        {
+                            sources.push(source);
+                        }
+                    }
+                }
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            sources.retain(|source| {
+                seen.insert((
+                    source.key.app_scope_id.as_str().to_owned(),
+                    source.key.name.clone(),
+                ))
+            });
+            sources
+        } else {
+            Vec::new()
+        };
         if let Some(facts) = facts {
             value.host.agent_kind = facts.agent_kind.clone().or(value.host.agent_kind);
             value.host.profile = facts.profile.clone().or(value.host.profile);
@@ -519,8 +823,13 @@ impl ProjectRuntimeManager {
                 .name_occupancy(context.project_scope.as_str(), &target)
                 .is_some_and(|holder| holder.worker_id == worker && holder.session_id == session)
         {
+            let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker);
+            drop(state);
+            let physical = rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master)?;
             return Ok(
-                json!({"outcome":"committed","name":target,"session_id":session,"effects":{"grant_committed":role.is_some()}}),
+                json!({"outcome":"committed","name":target,"session_id":session,
+                    "physical_anchor":physical.readback(value.physical_name.clone()),
+                    "effects":{"grant_committed":role.is_some()}}),
             );
         }
         let key = IdentityBindingKey::new(
@@ -529,8 +838,51 @@ impl ProjectRuntimeManager {
             &target,
         );
         let previous = map.slot(&key).and_then(|slot| slot.active_binding());
+        if intent.as_ref().is_some_and(|intent| intent.user_authorized) {
+            if let Some(previous) = previous {
+                value.replace_rex_holder(previous)?;
+            }
+            for source in &cross_scope_sources {
+                if let Some(current) = map.slot(&source.key).and_then(|slot| slot.active_binding()) {
+                    value.preserve_rex_fence(current);
+                    if source.key.name.eq_ignore_ascii_case(&target) {
+                        value.replace_rex_holder(current)?;
+                    }
+                }
+            }
+        }
+        let mut local_source_names: Vec<_> = map
+            .slots()
+            .filter(|slot| {
+                slot.identity_key.project_scope == context.project_scope
+                    && slot.identity_key.app_scope_id == context.app_scope_id
+                    && slot.identity_key.name != target
+                    && slot.active_binding().is_some_and(|current| {
+                        current.binding.agent_id.as_str() == worker
+                    })
+            })
+            .map(|slot| slot.identity_key.name.clone())
+            .collect();
+        local_source_names.sort();
+        local_source_names.dedup();
+        cross_scope_sources.sort_by(|left, right| {
+            (
+                left.key.app_scope_id.as_str(),
+                left.key.name.as_str(),
+            )
+                .cmp(&(
+                    right.key.app_scope_id.as_str(),
+                    right.key.name.as_str(),
+                ))
+        });
         let effect = PendingEffect {
-            kind: PendingEffectKind::Name,
+            kind: if cross_scope_sources.is_empty() {
+                PendingEffectKind::Name
+            } else {
+                PendingEffectKind::NameAcrossScopes {
+                    sources: cross_scope_sources,
+                }
+            },
             role: role.clone(),
             effect_id: format!("name:{}:{operation}", context.project_scope.as_str()),
             operation_id: operation.into(),
@@ -547,68 +899,17 @@ impl ProjectRuntimeManager {
                 .name_occupancy_revision(context.project_scope.as_str(), &target)
                 .checked_add(1)
                 .ok_or("NAME_REVISION_EXHAUSTED")?,
-            source_names: vec![source.name.clone()],
+            source_names: local_source_names,
             moves_existing_names: intent
                 .as_ref()
                 .is_some_and(|intent| intent.moves_existing_names),
             pane_anchor: pane,
             created_ms: now_ms(),
         };
-        let companion = {
-            previous
-                .filter(|previous| previous.binding.agent_id.as_str() != worker)
-                .map(|previous| {
-                    let mut candidate = map.clone();
-                    if effect.moves_existing_names {
-                        candidate.move_name(&key, value.clone(), &effect.source_names, None)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    let ordinary = candidate.ordinary_name(
-                        &context.project_scope,
-                        &context.app_scope_id,
-                        previous.binding.agent_id.as_str(),
-                    )?;
-                    let key = IdentityBindingKey::new(
-                        context.project_scope.clone(),
-                        context.app_scope_id.clone(),
-                        &ordinary,
-                    );
-                    let mut outgoing = previous.clone();
-                    if let Some(endpoint) = &outgoing.binding.tmux_endpoint {
-                        outgoing.physical_name = crate::client::adapters::tmux::session_name_if_live(endpoint)?
-                            .map(|_| super::tm_layout::physical_name(&outgoing, &outgoing.invocation_cwd, &ordinary))
-                            .transpose()?.flatten();
-                    }
-                    let outgoing_effect = PendingEffect {
-                        role: None,
-                        effect_id: format!("{}:outgoing", effect.effect_id),
-                        name: ordinary.clone(),
-                        previous_worker_id: None,
-                        previous_session_id: None,
-                        target_worker_id: outgoing.binding.agent_id.to_string(),
-                        target_session_id: outgoing
-                            .binding
-                            .session_id
-                            .as_ref()
-                            .ok_or("IDENTITY_SESSION_MISSING")?
-                            .to_string(),
-                        occupancy_revision: state
-                            .name_occupancy_revision(context.project_scope.as_str(), &ordinary)
-                            .checked_add(1)
-                            .ok_or("NAME_REVISION_EXHAUSTED")?,
-                        source_names: Vec::new(),
-                        moves_existing_names: false,
-                        pane_anchor: None,
-                        ..effect.clone()
-                    };
-                    Ok::<_, String>((key, outgoing, outgoing_effect))
-                })
-                .transpose()?
-        };
         let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker);
         drop(state);
-        let rename = rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master,
-            companion.as_ref().map(|(key, value, _)| (value, key.name.as_str())))?;
+        let rename = rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master)?;
+        let physical = rename.readback(value.physical_name.clone());
         let committed = match self.commit_control_change_locked(
             super::binding_store::ControlChange::MoveNameWithEffect {
                 target: key,
@@ -616,11 +917,11 @@ impl ProjectRuntimeManager {
                 source_names: effect.source_names.clone(),
                 expected_generation: None,
                 effect: effect.clone(),
-                companion: companion.clone(),
+                companion: None,
             },
         ) {
             Ok(committed) => committed,
-            Err(error) => return Err(match rename.map(|rename| rename.rollback()).transpose() {
+            Err(error) => return Err(match rename.rollback() {
                 Ok(_) => error,
                 Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
             }),
@@ -633,12 +934,9 @@ impl ProjectRuntimeManager {
         let published = self.binding_control_store().load()?;
         self.recover_pending_effect_locked(&published, &effect)
             .map_err(|error| format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"))?;
-        if let Some((_, _, outgoing)) = companion {
-            self.recover_pending_effect_locked(&published, &outgoing)
-                .map_err(|error| format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"))?;
-        }
         Ok(
-            json!({"outcome":"committed","name":target,"session_id":session,"effects":{"grant_committed":role.is_some()}}),
+            json!({"outcome":"committed","name":target,"session_id":session,
+                "physical_anchor":physical,"effects":{"grant_committed":role.is_some()}}),
         )
     }
 }

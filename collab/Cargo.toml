@@ -17,6 +17,7 @@ gix = { version = "0.81", default-features = false, features = ["revision", "sha
 toml = "0.8"
 toml_edit = "0.22"
 libc = "0.2"
+percent-encoding = "2"
 axum = { version = "0.8.8", default-features = false, features = ["http1", "json", "tokio"] }
 
 [features]

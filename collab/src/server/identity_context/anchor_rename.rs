@@ -2,32 +2,70 @@ pub(crate) struct TmuxAnchorRename {
     caller: crate::proto::TmuxEndpoint,
     caller_previous: String,
     target: String,
-    outgoing: Option<(crate::proto::TmuxEndpoint, String)>,
 }
 
 impl TmuxAnchorRename {
     pub(crate) fn rollback(&self) -> Result<(), String> {
-        use crate::client::adapters::tmux;
-        let Some((outgoing, previous)) = &self.outgoing else {
-            return tmux::rename_session(&self.caller, &self.caller_previous);
-        };
-        let observed = tmux::require_live_session_name(outgoing)?;
-        tmux::rename_session(&self.caller, &anchor_swap_name())?;
-        if let Err(error) = tmux::rename_session(outgoing, previous) {
-            let _ = tmux::rename_session(&self.caller, &self.target);
-            return Err(error);
-        }
-        if let Err(error) = tmux::rename_session(&self.caller, &self.caller_previous) {
-            let _ = tmux::rename_session(outgoing, &observed);
-            let _ = tmux::rename_session(&self.caller, &self.target);
-            return Err(error);
-        }
-        Ok(())
+        crate::client::adapters::tmux::rename_session(&self.caller, &self.caller_previous)
     }
 }
 
-fn anchor_swap_name() -> String {
-    format!("collab-anchor-{}-{}", std::process::id(), now_ms())
+/// Optional physical effect result for one prepared anchor.
+///
+/// A reliable manifest target makes the physical rename part of this
+/// operation, but it is not the identity commit. A real rename/readback error
+/// stays an explicit incomplete result so the committed identity and basic
+/// communication survive and the caller can retry the remaining effect.
+pub(crate) enum PhysicalAnchorOutcome {
+    /// The current label already matched the reliable target; no command ran.
+    Consistent { target: String },
+    /// No reliable target exists, so no physical effect was required.
+    NotRequested,
+    /// The anchor was renamed; the guard can roll the effect back.
+    Applied(TmuxAnchorRename),
+    /// A reliable target exists but the actual rename/readback failed.
+    Incomplete {
+        target: String,
+        observed: Option<String>,
+        error: String,
+    },
+}
+
+impl PhysicalAnchorOutcome {
+    pub(crate) fn rollback(&self) -> Result<(), String> {
+        match self {
+            Self::Applied(rename) => rename.rollback(),
+            Self::Consistent { .. } | Self::NotRequested | Self::Incomplete { .. } => Ok(()),
+        }
+    }
+
+    /// Observed physical readback for the operation outcome. `observed` is the
+    /// caller's current physical label when known; it is never invented.
+    pub(crate) fn readback(&self, observed: Option<String>) -> serde_json::Value {
+        match self {
+            Self::Consistent { target } => json!({
+                "status": "complete", "target": target, "observed": target,
+                "error": null, "renamed": false
+            }),
+            Self::NotRequested => json!({
+                "status": "not_requested", "target": null, "observed": observed,
+                "error": null, "renamed": false
+            }),
+            Self::Applied(rename) => json!({
+                "status": "complete", "target": rename.target, "observed": rename.target,
+                "error": null, "renamed": true
+            }),
+            Self::Incomplete {
+                target,
+                observed: recorded,
+                error,
+            } => json!({
+                "status": "incomplete", "target": target,
+                "observed": recorded,
+                "error": error, "renamed": false
+            }),
+        }
+    }
 }
 
 pub(crate) fn rename_prepared_anchor(
@@ -35,49 +73,60 @@ pub(crate) fn rename_prepared_anchor(
     cwd: &str,
     target: &str,
     is_current_master: bool,
-    outgoing: Option<(&super::binding_slot::BindingValue, &str)>,
-) -> Result<Option<TmuxAnchorRename>, String> {
+) -> Result<PhysicalAnchorOutcome, String> {
     use crate::client::adapters::tmux;
     if target == "Jenny" && !is_current_master {
         super::tm_layout::require_master_position(value)?;
     }
-    let mut changes = Vec::new();
-    if let Some(endpoint) = &value.binding.tmux_endpoint {
-        let desired = super::tm_layout::physical_name(value, cwd, target)?
-            .ok_or("TM_LAYOUT_UNAVAILABLE: current fixed position cannot be named")?;
-        let previous = tmux::require_live_session_name(endpoint)?;
-        if previous != desired { changes.push((endpoint.clone(), previous, desired)); }
-    }
-    if let Some((outgoing, name)) = outgoing {
-        if let Some(endpoint) = &outgoing.binding.tmux_endpoint {
-            if let Some(previous) = tmux::session_name_if_live(endpoint)? {
-                let desired = super::tm_layout::physical_name(outgoing, &outgoing.invocation_cwd, name)?
-                    .ok_or("TM_LAYOUT_UNAVAILABLE: outgoing fixed position cannot be named")?;
-                if previous != desired { changes.push((endpoint.clone(), previous, desired)); }
-            }
-        }
-    }
-    let mut changes = changes.into_iter();
-    let Some((caller, previous, target_name)) = changes.next() else { return Ok(None); };
-    if let Some((endpoint, old_name, outgoing_name)) = changes.next() {
-        tmux::rename_session(&caller, &anchor_swap_name())?;
-        if let Err(error) = tmux::rename_session(&endpoint, &outgoing_name) {
-            return Err(match tmux::rename_session(&caller, &previous) {
-                Ok(()) => error,
-                Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
+    let Some(caller) = value.binding.tmux_endpoint.as_ref() else {
+        return Ok(PhysicalAnchorOutcome::NotRequested);
+    };
+    let Some(target_name) = super::tm_layout::physical_name(value, cwd, target)? else {
+        return Ok(PhysicalAnchorOutcome::NotRequested);
+    };
+    let previous = match tmux::require_live_session_name(caller) {
+        Ok(previous) => previous,
+        Err(error) => {
+            return Ok(PhysicalAnchorOutcome::Incomplete {
+                target: target_name,
+                observed: None,
+                error,
             });
         }
-        if let Err(error) = tmux::rename_session(&caller, &target_name) {
-            let rollback = tmux::rename_session(&endpoint, &old_name)
-                .and_then(|()| tmux::rename_session(&caller, &previous));
-            return Err(match rollback {
-                Ok(()) => error,
-                Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
-            });
-        }
-        return Ok(Some(TmuxAnchorRename { caller, caller_previous: previous, target: target_name,
-            outgoing: Some((endpoint, old_name)) }));
+    };
+    if previous == target_name {
+        return Ok(PhysicalAnchorOutcome::Consistent { target: target_name });
     }
-    tmux::rename_session(&caller, &target_name)?;
-    Ok(Some(TmuxAnchorRename { caller, caller_previous: previous, target: target_name, outgoing: None }))
+    if let Err(error) = tmux::rename_session(caller, &target_name) {
+        return Ok(PhysicalAnchorOutcome::Incomplete {
+            target: target_name,
+            observed: tmux::session_name_if_live(caller).ok().flatten(),
+            error,
+        });
+    }
+    Ok(PhysicalAnchorOutcome::Applied(TmuxAnchorRename {
+        caller: caller.clone(),
+        caller_previous: previous,
+        target: target_name,
+    }))
+}
+
+pub(crate) fn physical_anchor_projection(
+    value: &super::binding_slot::BindingValue,
+    name: &str,
+) -> serde_json::Value {
+    let target = match super::tm_layout::physical_name(value, &value.invocation_cwd, name) {
+        Ok(Some(target)) => target,
+        Ok(None) => return json!({"status":"not_requested","target":null,"observed":value.physical_name,"error":null}),
+        Err(error) => return json!({"status":"incomplete","target":null,"observed":null,"error":error}),
+    };
+    let Some(endpoint) = value.binding.tmux_endpoint.as_ref() else {
+        return json!({"status":"not_requested","target":null,"observed":null,"error":null});
+    };
+    match crate::client::adapters::tmux::require_live_session_name(endpoint) {
+        Ok(observed) if observed == target => json!({"status":"complete","target":target,"observed":observed,"error":null}),
+        Ok(observed) => json!({"status":"incomplete","target":target,"observed":observed,
+            "error":format!("TMUX_SESSION_NAME_MISMATCH: expected {target}, observed {observed}")}),
+        Err(error) => json!({"status":"incomplete","target":target,"observed":null,"error":error}),
+    }
 }

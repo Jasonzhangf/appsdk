@@ -1,7 +1,10 @@
 use super::*;
 use crate::proto::RexEndpoint;
 use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
+use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 fn test_server() -> (Arc<Server>, std::path::PathBuf) {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -104,6 +107,138 @@ fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
         },
     ]);
     subscription_id
+}
+
+fn run_late_old_acceptance_interleaving(new_wake_fails: bool) {
+    let (mut server, root) = test_server();
+    let old_subscription = register_and_subscribe(&server, "old");
+    let new_subscription = register_and_subscribe(&server, "new");
+    let now = now_ms();
+    queue_message(&server, "old", &old_subscription, "notice", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "notice".into(),
+        mode: "immediate".into(),
+        source_thread_id: None,
+    }]);
+
+    let (started_tx, started_rx) = sync_channel(1);
+    let (release_tx, release_rx) = sync_channel(1);
+    let release_rx = Mutex::new(release_rx);
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_sink = calls.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
+        let call = {
+            let mut calls = calls_for_sink.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if call == 1 {
+            started_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("old delivery must be released by the test");
+            return Ok(json!({"accepted": "old"}));
+        }
+        if new_wake_fails {
+            Err("new holder wake failed".into())
+        } else {
+            Ok(json!({"accepted": "new"}))
+        }
+    });
+
+    let server = Arc::new(server);
+    let old_server = server.clone();
+    let old_subscription_for_thread = old_subscription.clone();
+    let old_delivery = thread::spawn(move || {
+        attempt_notification_detailed_with_at(
+            &old_server,
+            "notice",
+            &old_subscription_for_thread,
+            now,
+        )
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("old delivery callback must start");
+
+    let handoff = {
+        let state = server.state.lock().unwrap();
+        let message = &state.msgs["notice"];
+        super::name_mailbox::MailboxHandoff {
+            project_scope: "/project".into(),
+            name: "Alice".into(),
+            occupancy_revision: 2,
+            session_id: "session-new".into(),
+            message_id: message.id.clone(),
+            previous_recipient: message.to.clone(),
+            recipient: "new".into(),
+            wake_attempt_count: message.wake_attempt_count,
+            previous_subscription: Some(old_subscription.clone()),
+            accepted_ms: state.notification_delivery_accepted.get("notice").copied(),
+            evidence: state.notification_delivery_evidence.get("notice").cloned(),
+            failure: state.notification_delivery_failures.get("notice").cloned(),
+        }
+    };
+    server.commit(&[Event::MailboxReassigned { handoff }]);
+
+    let new_delivery =
+        attempt_notification_detailed_with_at(&server, "notice", &new_subscription, now + 1);
+    if new_wake_fails {
+        assert!(matches!(new_delivery, NotificationAttempt::Rejected(_)));
+    } else {
+        assert!(new_delivery.accepted(), "{new_delivery:?}");
+    }
+
+    release_tx.send(()).unwrap();
+    let old_delivery = old_delivery.join().unwrap();
+    assert!(old_delivery.accepted(), "{old_delivery:?}");
+
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["notice"].to, "new");
+    assert_eq!(
+        state.wake_bindings["notice"],
+        super::mailbox::default_direct_message_id("new")
+    );
+    assert!(
+        !state
+            .receive_receipts
+            .values()
+            .any(|receipt| receipt.message_ids.iter().any(|id| id == "notice")),
+        "late acceptance must not create a receive receipt"
+    );
+    if new_wake_fails {
+        let failure = state
+            .notification_delivery_failures
+            .get("notice")
+            .expect("new holder failure must remain visible");
+        assert!(
+            state
+                .notification_delivery_accepted
+                .get("notice")
+                .is_none_or(|accepted| *accepted < failure.failed_ms),
+            "late old acceptance must not hide the new holder failure"
+        );
+    } else {
+        assert_eq!(
+            state.notification_delivery_evidence.get("notice"),
+            Some(&json!({"accepted": "new"})),
+            "late old acceptance must not overwrite the new delivery evidence"
+        );
+    }
+}
+
+#[test]
+fn name_handoff_late_old_acceptance_does_not_overwrite_new_delivery() {
+    run_late_old_acceptance_interleaving(false);
+}
+
+#[test]
+fn name_handoff_late_old_acceptance_does_not_hide_new_failure() {
+    run_late_old_acceptance_interleaving(true);
 }
 
 fn queue_message(

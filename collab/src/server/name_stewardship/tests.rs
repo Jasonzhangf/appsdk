@@ -2,6 +2,90 @@ use super::*;
 use crate::server::peer_tests::{register_synthetic_peer, test_server};
 
 #[test]
+fn confirmed_loss_starts_one_fixed_deadline_and_repeats_keep_it() {
+    let (server, root, route) = fixture();
+    let scope = route.project_scope_id.as_str().to_owned();
+    let first = name_state::start_return_wait(None, "Alice:old:gen-1", 1_000);
+    assert_eq!(
+        first,
+        name_state::NameReassignmentSchedule::WaitingReturn {
+            lost_relation_ref: "Alice:old:gen-1".into(),
+            started_ms: 1_000,
+            deadline_ms: 1_000 + name_state::IDENTITY_RETURN_WAIT_MS,
+        }
+    );
+    let deadline = 1_000 + name_state::IDENTITY_RETURN_WAIT_MS;
+    assert!(!first.is_due(deadline - 1));
+    assert!(first.is_due(deadline));
+
+    let mut state = server.state.lock().unwrap();
+    state
+        .apply_checked(&Event::NameReassignmentScheduled {
+            project_scope: scope.clone(),
+            name: "Alice".into(),
+            schedule: first.clone(),
+        })
+        .unwrap();
+    let repeated = name_state::start_return_wait(
+        state.name_reassignment(&scope, "Alice"),
+        "Alice:old:gen-2",
+        deadline + 5_000,
+    );
+    assert_eq!(
+        repeated, first,
+        "a repeated loss observation must keep the first deadline"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_retirement_is_immediately_eligible_and_replaces_a_wait() {
+    let (server, root, route) = fixture();
+    let scope = route.project_scope_id.as_str().to_owned();
+    let retired = name_state::eligible_after_retirement("Alice:retired:gen-1", 2_000);
+    assert!(retired.is_due(2_000), "retirement must not wait 900000ms");
+
+    let mut state = server.state.lock().unwrap();
+    state
+        .apply_checked(&Event::NameReassignmentScheduled {
+            project_scope: scope.clone(),
+            name: "Alice".into(),
+            schedule: name_state::start_return_wait(None, "Alice:old:gen-1", 1_000),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::NameReassignmentScheduled {
+            project_scope: scope.clone(),
+            name: "Alice".into(),
+            schedule: retired.clone(),
+        })
+        .unwrap();
+    assert_eq!(state.name_reassignment(&scope, "Alice"), Some(&retired));
+    assert!(state
+        .name_reassignment(&scope, "Alice")
+        .unwrap()
+        .is_due(2_000));
+
+    state
+        .apply_checked(&Event::NameReassignmentCleared {
+            project_scope: scope.clone(),
+            name: "Alice".into(),
+        })
+        .unwrap();
+    assert!(state.name_reassignment(&scope, "Alice").is_none());
+    assert!(state.name_reassignments.is_empty());
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_state_without_reassignment_field_decodes_as_empty() {
+    let state: State = serde_json::from_str("{}").expect("legacy state decodes");
+    assert!(state.name_reassignments.is_empty());
+}
+
+#[test]
 fn absence_of_a_probe_fact_does_not_fabricate_periodic_unknown() {
     let (server, root, _) = fixture();
     let before = server.state.lock().unwrap().task_assignments.clone();
@@ -167,6 +251,69 @@ fn subscribe(server: &Server, worker: &str) {
             },
         })
         .unwrap();
+}
+
+#[test]
+fn reflow_delivery_progress_keeps_the_persisted_assignment_generation() {
+    let (server, root, route) = fixture();
+    master(&server, &route, "jenny");
+    subscribe(&server, "jenny");
+    {
+        let mut state = server.state.lock().unwrap();
+        for id in ["one", "two"] {
+            let mut assignment = state.task_assignment(id).unwrap().clone();
+            assignment.assignment_revision = 7;
+            state
+                .apply_checked(&Event::TaskAssignmentUpdated { assignment })
+                .unwrap();
+        }
+    }
+    presence(&server, &route, AgentPresence::Offline, 2);
+    tick_checked(&server, 3).unwrap();
+    let message_ids = {
+        let mut state = server.state.lock().unwrap();
+        let ids: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|id| {
+                let assignment = state.task_assignment(id).unwrap();
+                assert_eq!(assignment.assignment_revision, 7);
+                assignment
+                    .reflow
+                    .as_ref()
+                    .unwrap()
+                    .message_id
+                    .clone()
+                    .unwrap()
+            })
+            .collect();
+        for id in &ids {
+            state
+                .apply_checked(&Event::NotificationDeliveryAccepted {
+                    message_id: id.clone(),
+                    accepted_ms: 4,
+                    evidence: None,
+                })
+                .unwrap();
+        }
+        ids
+    };
+    tick_checked(&server, 5).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&server.state_path).unwrap()).unwrap();
+    let restored: State = serde_json::from_value(saved["state"].clone()).unwrap();
+    for (id, message_id) in ["one", "two"].into_iter().zip(message_ids) {
+        let assignment = restored.task_assignment(id).unwrap();
+        assert_eq!(assignment.assignment_revision, 7);
+        let reflow = assignment.reflow.as_ref().unwrap();
+        assert_eq!(reflow.delivery, SchedulingReflowDelivery::Delivered);
+        assert_eq!(reflow.message_id.as_deref(), Some(message_id.as_str()));
+    }
+    assert_eq!(
+        restored.msgs.len(),
+        2,
+        "delivery progress must reuse the original messages"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

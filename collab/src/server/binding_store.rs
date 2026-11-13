@@ -97,6 +97,44 @@ pub(crate) enum ControlChange {
     },
 }
 
+impl ControlChange {
+    fn touched_project_names(&self) -> Vec<(crate::scope::ProjectScopeId, String)> {
+        let mut names = Vec::new();
+        let mut add = |project: crate::scope::ProjectScopeId, name: &str| {
+            names.push((project, name.to_owned()));
+        };
+        match self {
+            Self::Commit { key, .. }
+            | Self::CommitWithEffect { key, .. }
+            | Self::Unregister { key, .. }
+            | Self::UnregisterWithEffect { key, .. } => add(key.project_scope.clone(), &key.name),
+            Self::MoveName {
+                target,
+                source_names,
+                ..
+            }
+            | Self::MoveNameWithEffect {
+                target,
+                source_names,
+                ..
+            } => {
+                add(target.project_scope.clone(), &target.name);
+                for source in source_names {
+                    add(target.project_scope.clone(), source);
+                }
+            }
+            Self::SetEffect { effect } => add(effect.project_scope.clone(), &effect.name),
+            Self::ClearEffect { .. } | Self::RemoveScope { .. } => {}
+        }
+        if let Self::MoveNameWithEffect { effect, .. } = self {
+            for source in effect.cross_scope_sources() {
+                add(source.key.project_scope.clone(), &source.key.name);
+            }
+        }
+        names
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreChangeOutcome {
     Slot(CommitOutcome),
@@ -240,9 +278,24 @@ impl BindingControlStore {
     /// resource. Unchanged facts never rewrite the file. A post-rename parent
     /// sync failure returns Durability::Unknown without rolling back the new
     /// file that is already visible.
-    pub(crate) fn commit(&self, change: ControlChange) -> Result<StoreCommit, String> {
+    pub(crate) fn commit(&self, mut change: ControlChange) -> Result<StoreCommit, String> {
         let mut control = self.load()?;
+        // Every publication retains the touched current's admission boundary,
+        // including rematerialization and pending-effect retries.
+        let target_value = match &mut change {
+            ControlChange::Commit { key, value, .. }
+            | ControlChange::CommitWithEffect { key, value, .. } => Some((key, value)),
+            ControlChange::MoveName { target, value, .. }
+            | ControlChange::MoveNameWithEffect { target, value, .. } => Some((target, value)),
+            _ => None,
+        };
+        if let Some((key, value)) = target_value {
+            if let Some(current) = control.slot(key).and_then(|slot| slot.active_binding()) {
+                value.preserve_rex_fence(current);
+            }
+        }
         let mut effect_changed = false;
+        let touched_project_names = change.touched_project_names();
         let outcome = match change {
             ControlChange::Commit {
                 key,
@@ -264,6 +317,12 @@ impl BindingControlStore {
                 expected_generation,
                 effect,
             } => {
+                if !effect.cross_scope_sources().is_empty() {
+                    return Err(
+                        "BINDING_CONTROL_COMMIT_REJECTED: cross-scope source requires MoveNameWithEffect"
+                            .into(),
+                    );
+                }
                 let slot = control
                     .commit(&key, value, expected_generation)
                     .map_err(|error| {
@@ -281,6 +340,12 @@ impl BindingControlStore {
                 StoreChangeOutcome::Slot(slot)
             }
             ControlChange::UnregisterWithEffect { key, effect } => {
+                if !effect.cross_scope_sources().is_empty() {
+                    return Err(
+                        "BINDING_CONTROL_COMMIT_REJECTED: cross-scope source requires MoveNameWithEffect"
+                            .into(),
+                    );
+                }
                 let outcome = control
                     .unregister(&key, None)
                     .map_err(|error| error.to_string())?;
@@ -334,6 +399,15 @@ impl BindingControlStore {
                 effect,
                 companion,
             } => {
+                let cross_scope_sources = effect.cross_scope_sources().to_vec();
+                control
+                    .validate_cross_scope_sources(&cross_scope_sources)
+                    .map_err(|error| {
+                        format!(
+                            "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
+                            self.path.display()
+                        )
+                    })?;
                 let moved = control
                     .move_name(&target, value, &source_names, expected_generation)
                     .map_err(|error| {
@@ -348,6 +422,15 @@ impl BindingControlStore {
                         self.path.display()
                     )
                 })?;
+                effect_changed |= control
+                    .release_cross_scope_sources(&cross_scope_sources)
+                    .map_err(|error| {
+                        format!(
+                            "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
+                            self.path.display()
+                        )
+                    })?
+                    > 0;
                 if let Some((key, value, effect)) = companion {
                     let changed = control
                         .commit(&key, value, None)
@@ -360,6 +443,12 @@ impl BindingControlStore {
                 StoreChangeOutcome::Moved(moved)
             }
             ControlChange::SetEffect { effect } => {
+                if !effect.cross_scope_sources().is_empty() {
+                    return Err(
+                        "BINDING_CONTROL_COMMIT_REJECTED: cross-scope source requires MoveNameWithEffect"
+                            .into(),
+                    );
+                }
                 let changed = control.set_effect(effect).map_err(|error| {
                     format!(
                         "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
@@ -376,6 +465,16 @@ impl BindingControlStore {
                 removed: control.remove_scope(project_scope.as_str()),
             },
         };
+        for (project, name) in touched_project_names {
+            control
+                .validate_project_name_uniqueness(&project, &name)
+                .map_err(|error| {
+                    format!(
+                        "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
+                        self.path.display()
+                    )
+                })?;
+        }
         let durability = if effect_changed {
             self.save(&control)?
         } else {

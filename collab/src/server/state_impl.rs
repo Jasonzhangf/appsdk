@@ -1141,6 +1141,27 @@ impl State {
             } => {
                 self.retain_name_occupancy_revision(project_scope, name, *revision);
             }
+            Event::NameReassignmentScheduled {
+                project_scope,
+                name,
+                schedule,
+            } => {
+                self.name_reassignments
+                    .entry(project_scope.clone())
+                    .or_default()
+                    .insert(name.clone(), schedule.clone());
+            }
+            Event::NameReassignmentCleared {
+                project_scope,
+                name,
+            } => {
+                if let Some(names) = self.name_reassignments.get_mut(project_scope) {
+                    names.remove(name);
+                    if names.is_empty() {
+                        self.name_reassignments.remove(project_scope);
+                    }
+                }
+            }
             Event::TaskAssignmentUpdated { assignment } => {
                 self.apply_task_assignment(assignment)?;
                 if self
@@ -1193,6 +1214,22 @@ impl State {
             }
             Event::AgentActivityObserved { activity } => {
                 self.apply_agent_activity(activity)?;
+            }
+            Event::RexExecutionObserved { worker_id, record } => {
+                let matches = self.workers.get(worker_id)
+                    .and_then(|worker| worker.transport.as_ref())
+                    .is_some_and(|transport| transport.rex_endpoint.as_ref() == Some(&record.endpoint)
+                        && transport.session_id.as_deref() == Some(record.agent_session_id.as_str()));
+                if !matches || record.owner.pid == 0 || record.owner.name.trim().is_empty() {
+                    return Err("REX_EXECUTION_TARGET_MISMATCH".into());
+                }
+                self.rex_executions.insert(worker_id.clone(), record.clone());
+            }
+            Event::TmuxExecutionObserved { worker_id, record } => {
+                if !record.matches_state(self, worker_id) {
+                    return Err("TMUX_EXECUTION_TARGET_MISMATCH".into());
+                }
+                self.tmux_executions.insert(worker_id.clone(), record.clone());
             }
             Event::SchedulerAdmission { admission } => {
                 self.scheduler_admissions
@@ -1317,6 +1354,13 @@ impl State {
                 self.apply_global_event(&GlobalEvent::RuntimeBound {
                     binding: binding.clone(),
                 })?;
+            }
+            Event::GlobalRuntimeExecutionReleased { binding } => {
+                let mut next = self.global.clone();
+                next.release_runtime_execution(binding)
+                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                next.set_counters(self.sequence, self.revision);
+                self.global = next;
             }
             Event::GlobalMasterGranted { grant } => {
                 self.apply_global_event(&GlobalEvent::MasterGranted {
@@ -1607,7 +1651,7 @@ impl State {
             .msgs
             .values()
             .filter(|m| {
-                m.to == worker_id
+                self.message_receivable_by(worker_id, m)
                     && m.state != "read"
                     && m.state != "superseded"
                     && self.scheduler_message_deliverable(&m.id)

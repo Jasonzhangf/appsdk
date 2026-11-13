@@ -4,19 +4,121 @@ fn work_executor_gate(
     task_id: &str,
     actor: &str,
 ) -> Result<(), Resp> {
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))?;
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .map_err(Resp::err)?;
+    work_executor_gate_with_control(state, &control, &route, task_id, actor)
+}
+
+fn work_executor_gate_with_control(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
     if let Some(name) = state.effective_work_policy(task_id).executor_name {
-        let route = server_route_scope(server, state)
+        let matches = control
+            .current_for_name(&route.project_scope_id, &route.app_scope_id, &name)
             .map_err(Resp::err)?
-            .ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))?;
-        let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().map_err(Resp::err)?;
-        let matches = control.current_for_name(&route.project_scope_id, &route.app_scope_id, &name).map_err(Resp::err)?
-            .and_then(|slot| slot.active_binding()).is_some_and(|current| current.binding.agent_id.as_str() == actor);
+            .and_then(|slot| slot.active_binding())
+            .is_some_and(|current| current.binding.agent_id.as_str() == actor);
         if !matches {
             return Err(Resp::err_data(
                 "WORK_EXECUTOR_REQUIRED: task is pinned to another stable name",
                 json!({"task_id":task_id,"executor_name":name,"delivery_complete":false}),
             ));
         }
+    }
+    Ok(())
+}
+
+fn task_owner_gate(
+    server: &Server,
+    state: &State,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    task_owner_gate_maybe_with_control(server, state, None, task_id, actor)
+}
+
+fn task_owner_gate_maybe_with_control(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    if state.task_assignment(task_id).is_none() {
+        return legacy_task_owner_gate(state, task_id, actor);
+    }
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("TASK_OWNER_PROJECT_REQUIRED"))?;
+    let loaded;
+    let control = match control {
+        Some(control) => control,
+        None => {
+            loaded = binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .map_err(Resp::err)?;
+            &loaded
+        }
+    };
+    task_owner_gate_with_control(state, control, &route, task_id, actor)
+}
+
+fn task_owner_gate_with_control(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    if !state.tasks.contains_key(task_id) {
+        return Err(Resp::err(format!("task {task_id} not found")));
+    }
+    if let Some(assignment) = state.task_assignment(task_id) {
+        let matches = control
+            .current_for_name(
+                &route.project_scope_id,
+                &route.app_scope_id,
+                &assignment.name,
+            )
+            .map_err(Resp::err)?
+            .and_then(|slot| slot.active_binding())
+            .is_some_and(|current| current.binding.agent_id.as_str() == actor);
+        if !matches {
+            return Err(Resp::err_data(
+                "TASK_OWNER_REQUIRED: the task's current stable-name holder may execute it",
+                json!({
+                    "task_id": task_id,
+                    "assignment_name": assignment.name,
+                    "delivery_complete": false,
+                }),
+            ));
+        }
+        return Ok(());
+    }
+    legacy_task_owner_gate(state, task_id, actor)
+}
+
+fn legacy_task_owner_gate(state: &State, task_id: &str, actor: &str) -> Result<(), Resp> {
+    let Some(task) = state.tasks.get(task_id) else {
+        return Err(Resp::err(format!("task {task_id} not found")));
+    };
+    if task.owner != actor {
+        return Err(Resp::err_data(
+            "TASK_OWNER_REQUIRED: only the legacy task owner may execute it",
+            json!({
+                "task_id": task_id,
+                "legacy_owner": task.owner,
+                "delivery_complete": false,
+            }),
+        ));
     }
     Ok(())
 }
@@ -44,14 +146,11 @@ fn execution_candidate_eligibility(
     Ok(())
 }
 
-fn execution_admission_gate(
-    server: &Server,
+fn execution_candidate_gate(
     state: &State,
     task_id: &str,
-    actor: &str,
     candidate_name: &str,
 ) -> Result<(), Resp> {
-    work_executor_gate(server, state, task_id, actor)?;
     let policy = state.effective_work_policy(task_id);
     match execution_candidate_eligibility(&policy, candidate_name) {
         Ok(()) => Ok(()),
@@ -76,31 +175,16 @@ fn execution_admission_gate(
     }
 }
 
-fn execution_admission_gate_for_actor(
-    server: &Server,
+fn execution_admission_gate_with_control(
     state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
     task_id: &str,
     actor: &str,
+    candidate_name: &str,
 ) -> Result<(), Resp> {
-    let route = server_route_scope(server, state)
-        .map_err(Resp::err)?
-        .ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))?;
-    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
-        .load()
-        .map_err(Resp::err)?;
-    let Some(slot) = control
-        .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
-        .map_err(Resp::err)?
-    else {
-        return Ok(());
-    };
-    execution_admission_gate(
-        server,
-        state,
-        task_id,
-        actor,
-        slot.identity_key.name.as_str(),
-    )
+    work_executor_gate_with_control(state, control, route, task_id, actor)?;
+    execution_candidate_gate(state, task_id, candidate_name)
 }
 
 fn parse_work_policy(
@@ -610,6 +694,31 @@ fn board_work_policy(
     expected_revision: Option<u64>,
 ) -> Resp {
     let mut state = server.state.lock().unwrap();
+    board_work_policy_locked(
+        server,
+        &mut state,
+        None,
+        actor,
+        token,
+        scope,
+        id,
+        patch,
+        expected_revision,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn board_work_policy_locked(
+    server: &Server,
+    state: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    actor: String,
+    token: String,
+    scope: String,
+    id: Option<String>,
+    patch: crate::board::WorkPolicy,
+    expected_revision: Option<u64>,
+) -> Resp {
     if let Err(error) = board_check_actor(&state, &actor, &token) {
         return error;
     }
@@ -629,13 +738,21 @@ fn board_work_policy(
             .cloned()
             .unwrap_or_default();
         overlay_work_policy(&mut policy, &patch);
-        if let Err(error) = server.commit_locked_checked(
-            &mut state,
-            &[Event::ProjectWorkPolicyUpdated {
-                work_kind: kind.clone(),
-                policy: policy.clone(),
-            }],
-        ) {
+        let events = [Event::ProjectWorkPolicyUpdated {
+            work_kind: kind.clone(),
+            policy: policy.clone(),
+        }];
+        let commit = match control {
+            Some(control) => server
+                .commit_locked_checked_with_control(state, &events, control)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            None => server
+                .commit_locked_checked(state, &events)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        };
+        if let Err(error) = commit {
             return Resp::err(format!("WORK_POLICY_DURABILITY_FAILED: {error}"));
         }
         return Resp::data(
@@ -683,7 +800,7 @@ fn board_work_policy(
         let policy = details.child_work_policies.entry(kind).or_default();
         overlay_work_policy(policy, &patch);
     } else {
-        if task.owner != actor {
+        if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err() {
             if let Err(error) = board_check_master_locked(server, &state, &actor) {
                 return error;
             }
@@ -742,74 +859,75 @@ fn board_work_policy(
             events.push(event);
         }
     }
-    if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+    let commit = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(state, &events, control)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server
+            .commit_locked_checked(state, &events)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("WORK_POLICY_DURABILITY_FAILED: {error}"));
     }
     board_task_response(server, &state, &id, &actor)
 }
 
-fn board_dispatch_work(
+enum PreparedBoardDispatch {
+    Invite(PreparedBoardInvitation),
+    Waiting {
+        events: Vec<Event>,
+        response: serde_json::Value,
+    },
+}
+
+fn prepare_board_dispatch_locked(
     server: &Server,
-    actor: String,
-    token: String,
-    id: String,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    actor: &str,
+    id: &str,
     expected_revision: u64,
     long_horizon: crate::board::LongHorizonArgs,
-) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    if let Err(error) = board_check_actor(&state, &actor, &token)
-        .and_then(|()| board_check_master_locked(server, &state, &actor))
-    {
-        return error;
-    }
-    let mut details = match board_check_revision(&state, &id, expected_revision) {
-        Ok(details) => details,
-        Err(error) => return error,
-    };
+    now: i64,
+) -> Result<PreparedBoardDispatch, Resp> {
+    let mut details = board_check_revision(state, id, expected_revision)?;
     details.long_horizon = match long_horizon.merge(details.long_horizon.as_ref()) {
         Ok(Some(spec)) => Some(spec),
-        Ok(None) => return Resp::err("BOARD_LONG_HORIZON_CONTENT_REQUIRED: supply long-horizon task content and cadence"),
-        Err(error) => return Resp::err(error),
+        Ok(None) => {
+            return Err(Resp::err(
+                "BOARD_LONG_HORIZON_CONTENT_REQUIRED: supply long-horizon task content and cadence",
+            ))
+        }
+        Err(error) => return Err(Resp::err(error)),
     };
-    let Some(task) = state.tasks.get(&id) else {
-        return Resp::err("task not found");
+    let Some(task) = state.tasks.get(id) else {
+        return Err(Resp::err("task not found"));
     };
     if !details.public_visibility
         || matches!(task.status.as_str(), "closed" | "cancelled" | "merged")
     {
-        return Resp::err("WORK_DISPATCH_UNAVAILABLE: task must be public and open");
+        return Err(Resp::err(
+            "WORK_DISPATCH_UNAVAILABLE: task must be public and open",
+        ));
     }
     if details.invitation.is_some() {
-        return Resp::err("task already has a pending invitation");
+        return Err(Resp::err("task already has a pending invitation"));
     }
-    let route = match server_route_scope(server, &state) {
-        Ok(Some(route)) => route,
-        _ => return Resp::err("project route is not ready"),
-    };
     let policy = details.work_policy.clone();
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
-    let eligible_ids = match dispatch_eligible_worker_ids(
-        &state,
-        &route,
-        &control,
-        actor.as_str(),
-        &policy,
-    ) {
-        Ok(ids) => ids,
-        Err(error) => return error,
-    };
+    let eligible_ids =
+        dispatch_eligible_worker_ids(state, route, control, actor, &policy)?;
     let selected = if let Some(name) = policy.executor_name.as_deref() {
-        eligible_ids
-            .first()
-            .map(|worker_id| {
-                (
-                    name.to_owned(),
-                    worker_id.clone(),
-                    "explicit executor".to_owned(),
-                )
-            })
+        eligible_ids.first().map(|worker_id| {
+            (
+                name.to_owned(),
+                worker_id.clone(),
+                "explicit executor".to_owned(),
+            )
+        })
     } else {
         let mut candidates = Vec::new();
         for worker_id in &eligible_ids {
@@ -820,7 +938,7 @@ fn board_dispatch_work(
             ) {
                 Ok(Some(slot)) => slot,
                 Ok(None) => continue,
-                Err(error) => return Resp::err(error),
+                Err(error) => return Err(Resp::err(error)),
             };
             let name = slot.identity_key.name.clone();
             let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
@@ -870,30 +988,212 @@ fn board_dispatch_work(
         details.dispatch_selection = None;
         details.dispatch_reason = Some(reason.clone());
         details.revision += 1;
-        if let Err(error) = server.commit_locked_checked(
-            &mut state,
-            &[Event::BoardDetailsChanged {
-                task_id: id.clone(),
+        return Ok(PreparedBoardDispatch::Waiting {
+            events: vec![Event::BoardDetailsChanged {
+                task_id: id.to_owned(),
                 details,
             }],
-        ) {
-            return Resp::err(format!("WORK_DISPATCH_DURABILITY_FAILED: {error}"));
-        }
-        return Resp::data(
-            json!({"outcome":"waiting","task_id":id,"reason":reason,"delivery_complete":false}),
-        );
+            response: json!({
+                "outcome": "waiting",
+                "task_id": id,
+                "reason": reason,
+                "delivery_complete": false,
+            }),
+        });
     };
-    drop(state);
-    board_invite_with_selection(
+    let prepared = prepare_board_invitation_locked(
         server,
-        actor,
-        token,
+        state,
+        control,
+        route,
+        Some(actor),
         id,
-        peer,
+        &name,
         expected_revision,
-        Some((name, reason)),
+        Some((name.clone(), reason)),
         details.long_horizon,
-    )
+        None,
+        now,
+    )?;
+    let _ = peer;
+    Ok(PreparedBoardDispatch::Invite(prepared))
+}
+
+fn board_dispatch_work(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+    long_horizon: crate::board::LongHorizonArgs,
+) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+        Ok(control) => control,
+        Err(error) => return Resp::err(error),
+    };
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = board_check_actor(&state, &actor, &token)
+        .and_then(|()| board_check_master_locked(server, &state, &actor))
+    {
+        return error;
+    }
+    let route = match server_route_scope(server, &state) {
+        Ok(Some(route)) => route,
+        _ => return Resp::err("project route is not ready"),
+    };
+    let prepared = match prepare_board_dispatch_locked(
+        server,
+        &state,
+        &control,
+        &route,
+        &actor,
+        &id,
+        expected_revision,
+        long_horizon,
+        now_ms(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return error,
+    };
+    match prepared {
+        PreparedBoardDispatch::Waiting { events, response } => {
+            if let Err(error) =
+                server.commit_locked_checked_with_control(&mut state, &events, &control)
+            {
+                return Resp::err(format!("WORK_DISPATCH_DURABILITY_FAILED: {error}"));
+            }
+            Resp::data(response)
+        }
+        PreparedBoardDispatch::Invite(prepared) => {
+            if let Err(error) = server
+                .commit_locked_checked_with_control(&mut state, &prepared.events, &control)
+            {
+                return Resp::err(format!("WORK_DISPATCH_DURABILITY_FAILED: {error}"));
+            }
+            let master = current_master_worker_id(&state, Some(&route));
+            let task = match state
+                .tasks
+                .get(&id)
+                .map(|task| {
+                    board_task_view_with_master(
+                        &state,
+                        &control,
+                        task,
+                        Some(&actor),
+                        master.as_deref(),
+                        Some(&route),
+                    )
+                })
+                .transpose()
+            {
+                Ok(task) => task.flatten(),
+                Err(error) => return Resp::err(error),
+            };
+            let data = json!({
+                "task": task,
+                "msg_id": prepared.message_id,
+                "consumed": false,
+                "goal_schedule": task_goal_receipt(&state, &id),
+            });
+            drop(state);
+            let attempt = match &prepared.subscription {
+                Some(subscription) => attempt_notification_detailed_with_at(
+                    server,
+                    &prepared.message_id,
+                    &subscription.id,
+                    now_ms(),
+                ),
+                None => NotificationAttempt::NotAttempted(
+                    NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into(),
+                ),
+            };
+            notification_send_response(
+                data,
+                prepared.subscription.is_some(),
+                prepared.method,
+                &attempt,
+            )
+        }
+    }
+}
+
+fn board_dispatch_current_map(
+    manager: &ProjectRuntimeManager,
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+    long_horizon: crate::board::LongHorizonArgs,
+) -> Resp {
+    let outcome = manager.with_current_state_response(server, |control, state| {
+        board_current_map_actor_gate(state, &actor, &token, &id)?;
+        board_check_master_locked(server, state, &actor)?;
+        let route = server_route_scope(server, state)
+            .map_err(Resp::err)?
+            .ok_or_else(|| Resp::err("project route is not ready"))?;
+        let prepared = prepare_board_dispatch_locked(
+            server,
+            state,
+            control,
+            &route,
+            &actor,
+            &id,
+            expected_revision,
+            long_horizon,
+            now_ms(),
+        )?;
+        match prepared {
+            PreparedBoardDispatch::Waiting { events, response } => {
+                server
+                    .commit_locked_checked_with_control(state, &events, control)
+                    .map_err(|error| {
+                        Resp::err(format!("WORK_DISPATCH_DURABILITY_FAILED: {error}"))
+                    })?;
+                Ok(BoardManagerOutcome::Reply(Resp::data(response)))
+            }
+            PreparedBoardDispatch::Invite(prepared) => {
+                server
+                    .commit_locked_checked_with_control(state, &prepared.events, control)
+                    .map_err(|error| {
+                        Resp::err(format!("WORK_DISPATCH_DURABILITY_FAILED: {error}"))
+                    })?;
+                let master = current_master_worker_id(state, Some(&route));
+                let task = state
+                    .tasks
+                    .get(&id)
+                    .map(|task| {
+                        board_task_view_with_master(
+                            state,
+                            control,
+                            task,
+                            Some(&actor),
+                            master.as_deref(),
+                            Some(&route),
+                        )
+                    })
+                    .transpose()
+                    .map_err(Resp::err)?
+                    .flatten();
+                let data = json!({
+                    "task": task,
+                    "msg_id": prepared.message_id,
+                    "consumed": false,
+                    "goal_schedule": task_goal_receipt(state, &id),
+                });
+                Ok(BoardManagerOutcome::Notify(BoardManagerNotification {
+                    data,
+                    message_id: prepared.message_id,
+                    subscription: prepared.subscription,
+                    method: prepared.method,
+                }))
+            }
+        }
+    });
+    match outcome {
+        Ok(outcome) => outcome.finish(server),
+        Err(response) => response,
+    }
 }
 
 /// The board dispatch/invite eligibility owner. Reminder observers must call

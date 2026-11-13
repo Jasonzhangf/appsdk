@@ -206,6 +206,7 @@ fn unavailable_holder_reflows_once_to_jenny_and_board_reads_do_not_write() {
             "reason":"fixture current agent exited","observed_ms":1
         })
     });
+    fixture.observe_native_agent(&peer, "offline", "unknown");
     let received = fixture.run_public(&["recv", "--timeout", "5"], THREAD_A);
     let messages: Vec<_> = received["messages"]
         .as_array()

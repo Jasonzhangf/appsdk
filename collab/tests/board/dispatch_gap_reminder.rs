@@ -110,6 +110,7 @@ fn seed_peer_activity(
             "idle_since_ms": 2
         });
     });
+    fixture.observe_native_agent(peer, presence, activity);
 }
 
 fn publish_waiting_assignment_ticket(
@@ -233,6 +234,7 @@ fn dispatch_gap_reminder_is_delivered_once_and_idempotent_for_600000ms() {
     fixture.update_current_state(|state| {
         state["master_wake"]["last_dispatch_gap_notice_ms"] = json!(now - 600_000);
     });
+    fixture.observe_native_agent(&facts.peer, "online", "idle");
     let notices = wait_for_gap_notices(&fixture, &facts.master, 2);
     assert_eq!(
         notices.len(),

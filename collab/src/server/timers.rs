@@ -45,10 +45,22 @@ pub fn tick(server: &Arc<Server>) {
     tick_at(server, now_ms());
 }
 
+pub(super) fn tick_managed(manager: &super::ProjectRuntimeManager, server: &Arc<Server>) {
+    let now = now_ms();
+    super::keepalive::tick_at(server, now);
+    super::name_monitor::tick_managed(manager, server, now);
+    tick_after_tmux(server, now);
+}
+
 fn tick_at(server: &Arc<Server>, now: i64) {
     super::keepalive::tick_at(server, now);
     super::name_monitor::tick(server, now);
+    tick_after_tmux(server, now);
+}
+
+fn tick_after_tmux(server: &Arc<Server>, now: i64) {
     super::rex_monitor::reconcile(server, now);
+    #[cfg(test)]
     super::name_stewardship::tick(server, now);
     super::purge_expired_storage(server, now);
     tick_default_lease_maintenance_at(server, now);

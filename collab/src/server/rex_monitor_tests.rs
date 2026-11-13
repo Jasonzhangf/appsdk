@@ -272,12 +272,13 @@ fn status_mapping_covers_working_blocked_idle_and_unknown() {
     }
     assert_eq!(
         project_observation(&observation(vec![record("error", None)])).activity,
-        AgentActivity::Error
+        AgentActivity::Idle,
+        "a current error state must not be offered as busy"
     );
     assert_eq!(
         project_observation(&observation(vec![record("clear", None)])).activity,
-        AgentActivity::Unknown,
-        "clear is not an established idle state"
+        AgentActivity::Idle,
+        "an unrecognized current state must project idle"
     );
     let mut failed = observation(vec![record("working", None)]);
     failed.sources = vec!["com.superlogical.terminal.program_status".into()];
@@ -289,33 +290,28 @@ fn status_mapping_covers_working_blocked_idle_and_unknown() {
 }
 
 #[test]
-fn r1_current_codex_error_is_not_projected_as_idle() {
+fn r1_current_codex_error_projects_idle() {
     let projection = project_observation(&observation(vec![record("error", None)]));
 
     assert!(
-        projection.reason.contains("projection=error"),
-        "expected an observable error classification, got {}",
+        projection.reason.contains("projection=idle"),
+        "expected a current error state to project idle, got {}",
         projection.reason
     );
-    assert_ne!(
-        projection.activity,
-        AgentActivity::Idle,
-        "a current Codex error must not be offered as idle capacity"
-    );
-    assert_eq!(projection.activity, AgentActivity::Error);
+    assert_eq!(projection.activity, AgentActivity::Idle);
     assert_eq!(projection.presence, AgentPresence::Online);
 }
 
 #[test]
-fn r1_unrecognized_current_codex_state_stays_unknown() {
+fn r1_unrecognized_current_codex_state_projects_idle() {
     let projection = project_observation(&observation(vec![record("future_state", None)]));
 
     assert!(
-        projection.reason.contains("projection=unknown"),
-        "unknown Rex state must remain observable as unknown, got {}",
+        projection.reason.contains("projection=idle"),
+        "an unrecognized Rex state must not become busy, got {}",
         projection.reason
     );
-    assert_eq!(projection.activity, AgentActivity::Unknown);
+    assert_eq!(projection.activity, AgentActivity::Idle);
     assert_eq!(projection.presence, AgentPresence::Online);
 }
 
@@ -398,7 +394,7 @@ fn r1_current_codex_working_submission_is_online_and_busy() {
 }
 
 #[test]
-fn r1_unrecognized_current_codex_state_submits_online_unknown() {
+fn r1_unrecognized_current_codex_state_submits_online_idle() {
     let (server, root) = rex_server(&target());
     let projection = project_observation(&observation(vec![record("future_state", None)]));
 
@@ -421,7 +417,7 @@ fn r1_unrecognized_current_codex_state_submits_online_unknown() {
         state
             .agent_activity(&scope, "worker")
             .map(|record| record.activity),
-        Some(AgentActivity::Unknown)
+        Some(AgentActivity::Idle)
     );
     drop(state);
     std::fs::remove_dir_all(root).unwrap();

@@ -1,0 +1,59 @@
+{
+  "contract_version": "1",
+  "scope": {
+    "mode": "milestone",
+    "commit": "d390a7ae",
+    "base": "56548a85"
+  },
+  "module_boundary_evidence": [
+    {
+      "module": "Rex adapter transport, target resolution, and notification submission",
+      "owner": "collab/src/adapters/rex.rs",
+      "paths": "collab/src/adapters/rex.rs; collab/src/adapters/rex/tests.rs; collab/src/adapters/rex/fixture_rex.py",
+      "edges": "server.status generation verification -> exact session inventory -> exact block inventory -> complete UTF-8 body write -> one independent send-key enter; snapshot -> official capture; observation -> foreground owner matching -> activity projection",
+      "resources": "Rex server endpoint, service host_id and instance_id generation, Rex session, Rex block, terminal.write, send-key enter, official capture, terminal.process, terminal.program_status",
+      "gates": "Rex publication requires a complete server/session/block endpoint; write completion is checked by UTF-8 byte count; write rejection, short write, or unknown write does not execute Enter; Enter is issued once to the same target and failure preserves WriteQueued without rewriting; service-change recovery requires KnownNotDelivered, stage BeforeWrite, operation server.status, native_code none, and the typed generation-mismatch marker; definitive absence is limited to exact session.list or session.list_blocks absence"
+    },
+    {
+      "module": "Rex block current ownership and identity preservation",
+      "owner": "collab/src/server/binding_slot.rs and collab/src/server/identity_context/recovery.rs",
+      "paths": "collab/src/server/binding_slot.rs; collab/src/server/binding_slot_tests.rs; collab/src/server/identity_context/recovery.rs; collab/src/server/mod_parts/part_07.rs; collab/src/server/peer_lifecycle/maintenance_tests.rs",
+      "edges": "candidate identity and Rex endpoint -> scoped current lookup -> binding publication validation -> current slot commit -> same Rex block current-owner replacement -> displaced current retained as previous -> active delivery projection; exact block absence -> maintenance Missing -> name retirement path",
+      "resources": "BindingControlSet, IdentityBindingSlot, current and previous BindingValue, stable name, worker identity, agent session ID, Rex server/session/block endpoint, durable task and message ownership, pending effects",
+      "gates": "Rex bindings require server/session/block; a Rex block has at most one active current owner; later successful publication unregisters only the displaced block owner; displaced identity and previous binding remain retained; no alternate block or transport is selected; block absence is not inferred from timeout, malformed response, service drift, or query failure; service refresh verifies the unchanged server/session/block target"
+    },
+    {
+      "module": "Durable notification routing and narrow Rex recovery",
+      "owner": "collab/src/server/mod_parts/part_05.rs",
+      "paths": "collab/src/server/mod_parts/part_05.rs; collab/src/server/mod_parts/part_08.rs; collab/src/server/mod_parts/part_11.rs; collab/src/server/keepalive.rs; collab/src/server/notification_batch_tests.rs",
+      "edges": "durable message -> selected current Rex binding -> exact block-owner validation -> notification attempt -> accepted or typed failure -> optional same-generation refresh -> one retry of the original durable message -> durable delivery receipt; channel inbound and timer/keepalive paths use the same narrow recovery hook",
+      "resources": "durable message, wake binding, notification subscription, current binding control store, registration gate, delivery failure and acceptance records, channel-inbound envelope, timer and keepalive notification owners",
+      "gates": "Rex delivery rechecks the current binding and unique block owner under the registration gate; stale cached transport is rejected; no fallback block or transport is selected; only a typed BeforeWrite server.status generation change enters refresh; refresh preserves server/session/block and retries the original durable message once; accepted or unknown post-write outcomes do not retry; notification acceptance remains distinct from receive and consumption"
+    },
+    {
+      "module": "Rex activity monitoring and worker projection",
+      "owner": "collab/src/server/rex_monitor.rs",
+      "paths": "collab/src/server/rex_monitor.rs; collab/src/server/rex_monitor_tests.rs; collab/src/adapters/rex.rs; collab/tests/rex_public_contract.rs",
+      "edges": "Rex observation -> complete foreground process identity -> program-status owner match -> valid state projection -> worker and master status views",
+      "resources": "foreground PID, foreground process name, Rex program-status records, record owner PID/name, current Rex binding, AgentPresence, AgentActivity, worker status and master-wake projections",
+      "gates": "foreground PID and name must both match; incomplete foreground identity remains unknown; records for another app do not prove Codex activity; blocked maps to waiting_user; working maps to busy; idle, done, error, and unknown states map to idle when the record is otherwise valid; no valid matching record remains unknown; conflicting current records remain unknown"
+    },
+    {
+      "module": "Mainline communication, reviewer admission, cleanup, and worker identity preservation",
+      "owner": "collab/src/server/mod_parts/part_08.rs; collab/src/server/mod_parts/part_09.rs; collab/src/server/mod_parts/part_10.rs; collab/src/server/mod_parts/part_11.rs",
+      "paths": "collab/src/server/mod_parts/part_08.rs; collab/src/server/mod_parts/part_09.rs; collab/src/server/mod_parts/part_10.rs; collab/src/server/mod_parts/part_11.rs; collab/tests/board/workflow_templates.rs; collab/tests/board/work_roles.rs; collab/tests/context_operation_public_contract/preserved_peer_projection.rs",
+      "edges": "ordinary inbound communication -> durable mailbox commit -> notification attempt outside the state lock -> optional Rex recovery -> explicit recv -> consumption commit; task completion -> reviewer admission -> integration and cleanup evidence -> close; worker identity -> normalized worker ID and route projection",
+      "resources": "nonblocking receive behavior, receive IDs, durable messages, task owner and executor IDs, required reviewer, cleanup receipt, worktree and branch responsibility, role and master projections",
+      "gates": "Rex recovery is additive and does not replace ordinary inbound routing; nonblocking recv remains separate from consumption; reviewer execution admission remains enforced; cleanup evidence remains required before close; worker ID normalization remains in the existing board/task owner path; master status uses a read-only projection and does not erase authority or task state"
+    },
+    {
+      "module": "Requirements, ontology, DAG, and verification boundary",
+      "owner": "project design and evidence owners",
+      "paths": ".appsdk/requirements.json; docs/evidence/rex-adapter-reliability-20261111/note.md; docs/evidence/rex-adapter-reliability-20261111/plan.md; docs/design/rex-project-agent-lifecycle-architect-20261110.md; docs/design/rex-collab-ontology-20261111.md; docs/dagpipe/collab-rex-adaptor.graph.json; docs/dagpipe/collab-notification-consumption.graph.json",
+      "edges": "approved requirements -> lifecycle and adapter ontology -> Rex adapter and binding owners -> focused red/green tests -> public Rex contract tests -> DAG and project-memory validation",
+      "resources": "active AppSDK requirements, approved block-anchor semantics, current binding relation, notification stage semantics, service-generation recovery marker, activity projection, task notes, plan, DAG files and recorded candidate verification",
+      "gates": "candidate is reviewed against origin/main 56548a85 and commit d390a7ae; the supplied evidence covers focused collab tests, real Rex public-contract tests, inbound channel tests, DAG validation, project-memory verification and formatting; no finding is inferred from a passing unit test alone, and notification submission remains distinct from agent consumption"
+    }
+  ],
+  "findings": []
+}

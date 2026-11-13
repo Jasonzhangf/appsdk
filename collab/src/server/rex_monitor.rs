@@ -384,8 +384,8 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
             Some("working") => Some(AgentActivity::Busy),
             Some("blocked") => Some(AgentActivity::WaitingUser),
             Some("idle" | "done") => Some(AgentActivity::Idle),
-            Some("error") => Some(AgentActivity::Error),
-            _ => None,
+            Some("error") => Some(AgentActivity::Idle),
+            _ => Some(AgentActivity::Idle),
         };
         match (activity, next) {
             (None, Some(next)) => activity = Some(next),

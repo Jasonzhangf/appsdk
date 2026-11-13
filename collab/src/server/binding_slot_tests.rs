@@ -181,7 +181,7 @@ fn retired_ordinary_name_is_reusable_across_app_scopes() {
 
 /// A Rex binding whose current typed endpoint is `session`/`block` and whose
 /// current agent session carrier is derived from `runtime`.
-fn rex_value(key: &IdentityBindingKey, agent: &str, runtime: &str) -> BindingValue {
+fn rex_value_default(key: &IdentityBindingKey, agent: &str, runtime: &str) -> BindingValue {
     let agent_session_id = SessionId::new(format!("{runtime}-agent-session")).unwrap();
     let binding = RuntimeBinding::new_with_session(
         key.project_scope.clone(),
@@ -263,7 +263,7 @@ fn value(key: &IdentityBindingKey, agent: &str, runtime: &str, endpoint: &str) -
     )
 }
 
-fn rex_value_for_session(
+fn rex_value(
     key: &IdentityBindingKey,
     agent: &str,
     runtime: &str,
@@ -431,14 +431,14 @@ fn native_fixture_start(order: u64) -> String {
 fn rex_human_fence_merge_is_monotonic_and_part_of_current_fact() {
     use super::binding_slot::{RexExecutionFence, VerifiedRexExecutionAssociation};
     let key = key("Alice");
-    let mut target = rex_value(&key, "target", "target");
+    let mut target = rex_value_default(&key, "target", "target");
     target.rex_execution = Some(VerifiedRexExecutionAssociation {
         owner_pid: 42,
         owner_name: "codex".into(),
         process_start_id: native_fixture_start(10),
     });
     target.rex_execution_fence = RexExecutionFence::from_start_id(&native_fixture_start(12));
-    let mut actor = rex_value(&key, "actor", "actor");
+    let mut actor = rex_value_default(&key, "actor", "actor");
     actor.rex_execution_fence = RexExecutionFence::from_start_id(&native_fixture_start(11));
     actor.replace_rex_holder(&target).unwrap();
     assert_eq!(
@@ -478,8 +478,8 @@ fn rex_human_fence_merge_is_monotonic_and_part_of_current_fact() {
 fn rex_human_fence_missing_association_uses_exact_publication_clock() {
     use super::binding_slot::RexExecutionFence;
     let key = key("Alice");
-    let target = rex_value(&key, "target", "target");
-    let mut actor = rex_value(&key, "actor", "actor");
+    let target = rex_value_default(&key, "target", "target");
+    let mut actor = rex_value_default(&key, "actor", "actor");
     let before = crate::host_runtime::current_rex_execution_boundary().unwrap();
     actor.replace_rex_holder(&target).unwrap();
     let after = crate::host_runtime::current_rex_execution_boundary().unwrap();
@@ -518,14 +518,14 @@ fn rex_human_replacement_uses_the_current_clock_when_history_is_incomparable() {
             ticks,
         } => format!("linux:{boot_id}:{ticks_per_second}:{ticks}"),
     };
-    let mut target = rex_value(&key, "target", "target");
+    let mut target = rex_value_default(&key, "target", "target");
     target.rex_execution_fence = Some(foreign.clone());
     target.rex_execution = Some(VerifiedRexExecutionAssociation {
         owner_pid: 42,
         owner_name: "codex".into(),
         process_start_id: foreign_start_id,
     });
-    let mut actor = rex_value(&key, "actor", "actor");
+    let mut actor = rex_value_default(&key, "actor", "actor");
     actor.rex_execution_fence = Some(foreign.clone());
 
     actor.replace_rex_holder(&target).unwrap();
@@ -646,7 +646,7 @@ fn rex_fence_comparison_does_not_rank_incomparable_executions() {
 fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
     use super::binding_slot::{RexExecutionFence, VerifiedRexExecutionAssociation};
     let key = key("Alice");
-    let mut current = rex_value(&key, "actor", "runtime");
+    let mut current = rex_value_default(&key, "actor", "runtime");
     current.rex_execution_fence = RexExecutionFence::from_start_id(&native_fixture_start(20));
     current.rex_execution = Some(VerifiedRexExecutionAssociation {
         owner_pid: 42,
@@ -688,7 +688,7 @@ fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
     native.preserve_rex_fence(&current);
     assert_eq!(native.rex_execution_fence, current.rex_execution_fence);
     assert!(native.rex_execution.is_none());
-    let mut returned = rex_value(&key, "actor", "returned-runtime");
+    let mut returned = rex_value_default(&key, "actor", "returned-runtime");
     returned.preserve_rex_fence(&native);
     assert_eq!(returned.rex_execution_fence, current.rex_execution_fence);
     let mut target = current.clone();
@@ -702,7 +702,7 @@ fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
 }
 
 #[test]
-fn current_lookup_selects_unique_session_before_an_occupied_rex_block() {
+fn ordinary_rex_lookup_selects_non_rex_session_holder_against_rex_target() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
@@ -716,7 +716,7 @@ fn current_lookup_selects_unique_session_before_an_occupied_rex_block() {
     control
         .commit(
             &bob,
-            rex_value_for_session(&bob, "bob", "runtime-bob", "bob-session", "block-bob"),
+            rex_value(&bob, "bob", "runtime-bob", "bob-session", "block-bob"),
             None,
         )
         .unwrap();
@@ -734,7 +734,7 @@ fn current_lookup_selects_unique_session_before_an_occupied_rex_block() {
     let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
         .unwrap()
-        .expect("the unique agent session selects the caller for a later block replacement");
+        .expect("ordinary recovery selects the actor session for a later block replacement");
     assert_eq!(selected.identity_key, alice);
 }
 
@@ -746,7 +746,7 @@ fn current_rex_anchor_disambiguates_a_reused_agent_session() {
     control
         .commit(
             &alice,
-            rex_value_for_session(
+            rex_value(
                 &alice,
                 "alice",
                 "runtime-alice",
@@ -759,7 +759,7 @@ fn current_rex_anchor_disambiguates_a_reused_agent_session() {
     control
         .commit(
             &bob,
-            rex_value_for_session(
+            rex_value(
                 &bob,
                 "bob",
                 "runtime-bob",
@@ -796,7 +796,7 @@ fn current_lookup_rejects_reused_agent_session_without_matching_anchor() {
     control
         .commit(
             &alice,
-            rex_value_for_session(
+            rex_value(
                 &alice,
                 "alice",
                 "runtime-alice",
@@ -809,7 +809,7 @@ fn current_lookup_rejects_reused_agent_session_without_matching_anchor() {
     control
         .commit(
             &bob,
-            rex_value_for_session(
+            rex_value(
                 &bob,
                 "bob",
                 "runtime-bob",
@@ -833,7 +833,7 @@ fn current_lookup_rejects_reused_agent_session_without_matching_anchor() {
 }
 
 #[test]
-fn current_lookup_rejects_anchor_outside_reused_session_matches() {
+fn current_lookup_keeps_anchor_outside_reused_session_matches_ambiguous() {
     let alice = key("alice");
     let bob = key("bob");
     let carol = key("Carol");
@@ -845,7 +845,7 @@ fn current_lookup_rejects_anchor_outside_reused_session_matches() {
         control
             .commit(
                 key,
-                rex_value_for_session(key, agent, runtime, "reused-agent-session", block),
+                rex_value(key, agent, runtime, "reused-agent-session", block),
                 None,
             )
             .unwrap();
@@ -853,7 +853,7 @@ fn current_lookup_rejects_anchor_outside_reused_session_matches() {
     control
         .commit(
             &carol,
-            rex_value_for_session(
+            rex_value(
                 &carol,
                 "carol",
                 "runtime-carol",
@@ -878,7 +878,7 @@ fn current_lookup_rejects_anchor_outside_reused_session_matches() {
     let error = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
         .unwrap_err();
-    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
+    assert!(error.starts_with("IDENTITY_MAP_AMBIGUOUS:"), "{error}");
     assert_eq!(serde_json::to_value(&control).unwrap(), before);
 }
 
@@ -886,15 +886,14 @@ fn current_lookup_rejects_anchor_outside_reused_session_matches() {
 fn current_lookup_uses_unique_session_when_a_rex_block_has_seeded_duplicate_currents() {
     let alice = key("alice");
     let bob = key("bob");
-    let alice_value = rex_value_for_session(
+    let alice_value = rex_value(
         &alice,
         "alice",
         "runtime-alice",
         "alice-session",
         "shared-block",
     );
-    let bob_value =
-        rex_value_for_session(&bob, "bob", "runtime-bob", "bob-session", "shared-block");
+    let bob_value = rex_value(&bob, "bob", "runtime-bob", "bob-session", "shared-block");
     let control = BindingControlSet::from_parts(
         vec![
             committed_slot(alice.clone(), alice_value),
@@ -1064,7 +1063,7 @@ fn current_lookup_allows_same_subject_to_move_to_a_new_rex_block() {
     control
         .commit(
             &alice,
-            rex_value_for_session(
+            rex_value(
                 &alice,
                 "alice",
                 "runtime-alice",
@@ -1149,7 +1148,7 @@ fn rex_lookup_continues_a_unique_current_block_with_a_new_agent_session() {
     let key = key("alice");
     let mut control = BindingControlSet::new();
     control
-        .commit(&key, rex_value(&key, "alice-agent", "old"), None)
+        .commit(&key, rex_value_default(&key, "alice-agent", "old"), None)
         .unwrap();
 
     let facts = rex_facts(
@@ -1170,7 +1169,7 @@ fn rex_lookup_continues_the_same_agent_session_on_a_new_target() {
     let key = key("alice");
     let mut control = BindingControlSet::new();
     control
-        .commit(&key, rex_value(&key, "alice-agent", "old"), None)
+        .commit(&key, rex_value_default(&key, "alice-agent", "old"), None)
         .unwrap();
     let saved_agent_session = "old-agent-session";
 
@@ -1238,9 +1237,9 @@ fn rex_lookup_reports_ambiguity_for_multiple_current_slots_on_one_block() {
         vec![
             committed_slot(
                 alice.clone(),
-                rex_value(&key("alice"), "alice-agent", "alice"),
+                rex_value_default(&alice, "alice-agent", "alice"),
             ),
-            committed_slot(bob, rex_value(&key("bob"), "bob-agent", "bob")),
+            committed_slot(bob.clone(), rex_value_default(&bob, "bob-agent", "bob")),
         ],
         Vec::new(),
     );
@@ -1263,9 +1262,13 @@ fn rex_lookup_uses_the_exact_current_session_when_names_share_one_block() {
     let bob = key("bob");
     let mut control = BindingControlSet::new();
     control
-        .commit(&alice, rex_value(&alice, "alice-agent", "alice"), None)
+        .commit(
+            &alice,
+            rex_value_default(&alice, "alice-agent", "alice"),
+            None,
+        )
         .unwrap();
-    let bob_value = rex_value(&bob, "bob-agent", "bob");
+    let bob_value = rex_value_default(&bob, "bob-agent", "bob");
     let bob_session = bob_value.binding.session_id.as_ref().unwrap().to_string();
     control.commit(&bob, bob_value, None).unwrap();
     let before = serde_json::to_value(&control).unwrap();
@@ -1279,12 +1282,16 @@ fn rex_lookup_uses_the_exact_current_session_when_names_share_one_block() {
 }
 
 #[test]
-fn rex_lookup_rejects_endpoint_holder_and_session_holder_conflict() {
+fn rex_lookup_selects_session_holder_and_leaves_block_replacement_to_publication() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
     control
-        .commit(&alice, rex_value(&alice, "alice-agent", "alice"), None)
+        .commit(
+            &alice,
+            rex_value_default(&alice, "alice-agent", "alice"),
+            None,
+        )
         .unwrap();
     control
         .commit(
@@ -1294,31 +1301,33 @@ fn rex_lookup_rejects_endpoint_holder_and_session_holder_conflict() {
         )
         .unwrap();
 
-    // The caller's Rex block selects Alice, but its agent session is still a
-    // current binding for Bob through another adaptor. A block is a placement
-    // address, not authority to absorb the session's current identity.
+    // The caller's Rex block still selects Alice, but its agent session is Bob.
+    // The block is the placement anchor, so Bob is selected now and his later
+    // successful publication replaces Alice only as that block's current owner.
     let facts = rex_facts(
         Some("bob-runtime-session"),
         REX_SERVER,
         REX_SESSION,
         REX_BLOCK,
     );
-    let error = control
+    let found = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
-        .unwrap_err();
-    assert!(
-        error.starts_with("IDENTITY_MAP_REX_TARGET_MISMATCH:"),
-        "{error}"
-    );
+        .unwrap()
+        .expect("the session holder is selected for the occupied block");
+    assert_eq!(found.identity_key, bob);
 }
 
 #[test]
-fn explicit_rex_rebind_keeps_the_actor_session_when_the_target_block_differs() {
+fn rex_lookup_keeps_the_actor_session_when_the_target_block_differs() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
     control
-        .commit(&alice, rex_value(&alice, "alice-agent", "alice"), None)
+        .commit(
+            &alice,
+            rex_value_default(&alice, "alice-agent", "alice"),
+            None,
+        )
         .unwrap();
     control
         .commit(
@@ -1335,7 +1344,7 @@ fn explicit_rex_rebind_keeps_the_actor_session_when_the_target_block_differs() {
         REX_BLOCK,
     );
     let found = control
-        .lookup_explicit_rex_rebind(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
         .unwrap()
         .expect("the actor session remains selected");
     assert_eq!(found.identity_key, bob);
@@ -1859,18 +1868,18 @@ fn rex_block_commit_retires_the_previous_current_and_persists_cleanup() {
     let mut set = BindingControlSet::new();
     set.commit(
         &alice,
-        rex_value_for_session(&alice, "alice", "runtime-a", "alice-session", "block-a"),
+        rex_value(&alice, "alice", "runtime-a", "alice-session", "block-a"),
         None,
     )
     .unwrap();
     set.commit(
         &bob,
-        rex_value_for_session(&bob, "bob", "runtime-b", "bob-session", "block-b"),
+        rex_value(&bob, "bob", "runtime-b", "bob-session", "block-b"),
         None,
     )
     .unwrap();
 
-    let winner = rex_value_for_session(&alice, "alice", "runtime-c", "alice-session", "block-b");
+    let winner = rex_value(&alice, "alice", "runtime-c", "alice-session", "block-b");
     set.commit(&alice, winner.clone(), Some(1)).unwrap();
 
     assert_eq!(set.slot(&alice).unwrap().active_binding(), Some(&winner));
@@ -1905,14 +1914,14 @@ fn rex_block_commit_retires_the_previous_current_and_persists_cleanup() {
 fn unchanged_rex_winner_still_retires_a_seeded_duplicate_current() {
     let alice = key("alice");
     let bob = key("bob");
-    let winner = rex_value_for_session(
+    let winner = rex_value(
         &alice,
         "alice",
         "runtime-a",
         "alice-session",
         "shared-block",
     );
-    let duplicate = rex_value_for_session(&bob, "bob", "runtime-b", "bob-session", "shared-block");
+    let duplicate = rex_value(&bob, "bob", "runtime-b", "bob-session", "shared-block");
     let mut set = BindingControlSet::from_parts(
         vec![
             committed_slot(alice.clone(), winner.clone()),
@@ -1962,8 +1971,8 @@ fn unchanged_rex_winner_still_retires_a_seeded_duplicate_current() {
 fn stale_rex_generation_cannot_restore_an_old_block() {
     let alice = key("alice");
     let mut set = BindingControlSet::new();
-    let old = rex_value_for_session(&alice, "alice", "runtime-a", "alice-session", "old-block");
-    let new = rex_value_for_session(&alice, "alice", "runtime-b", "alice-session", "new-block");
+    let old = rex_value(&alice, "alice", "runtime-a", "alice-session", "old-block");
+    let new = rex_value(&alice, "alice", "runtime-b", "alice-session", "new-block");
     set.commit(&alice, old.clone(), Some(0)).unwrap();
     set.commit(&alice, new.clone(), Some(1)).unwrap();
 
@@ -1985,8 +1994,7 @@ fn stale_rex_generation_cannot_restore_an_old_block() {
 fn rex_publication_rejects_an_incomplete_current_without_mutation() {
     let alice = key("alice");
     let mut set = BindingControlSet::new();
-    let mut incomplete =
-        rex_value_for_session(&alice, "alice", "runtime-a", "alice-session", "block-a");
+    let mut incomplete = rex_value(&alice, "alice", "runtime-a", "alice-session", "block-a");
     incomplete
         .transport
         .rex_endpoint

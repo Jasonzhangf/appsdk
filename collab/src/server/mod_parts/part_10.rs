@@ -586,16 +586,17 @@ fn worker_status_summary_with_maps(
     let thread_state = transport_view
         .get("thread_state")
         .and_then(serde_json::Value::as_str);
-    let agent_state = match (endpoint_live, thread_state) {
-        (Some(false), _) => "absent",
-        (None, _) => "unknown",
-        (Some(true), Some("notLoaded")) => "cold",
-        (Some(true), Some("idle")) => "idle",
-        (Some(true), Some("waiting_user")) => "waiting_user",
-        (Some(true), Some("working")) => "working",
-        (Some(true), Some("active")) => "working",
-        (Some(true), Some("error")) => "error",
-        _ => "unknown",
+    let agent_state = match endpoint_live {
+        Some(false) => "absent",
+        None => "unknown",
+        Some(true) => match thread_state {
+            Some("notLoaded") => "cold",
+            Some("idle") => "idle",
+            Some("waiting_user") => "waiting_user",
+            Some("working" | "active") => "working",
+            Some("error") => "error",
+            _ => "unknown",
+        },
     };
     let status = if !identity_valid {
         "identity-mismatch"

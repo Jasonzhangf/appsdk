@@ -1693,7 +1693,7 @@ impl ProjectRuntimeManager {
         };
 
         if let Err(refresh_error) =
-            self.refresh_rex_notification_binding(runtime, project_context, &recipient)
+            refresh_rex_notification_binding(self, runtime, project_context, &recipient)
         {
             response.data["rex_binding_refresh"] = json!("failed");
             response.data["rex_binding_refresh_error"] = json!(refresh_error);
@@ -1834,6 +1834,82 @@ fn notification_rejected_label(notification_method: &str, error: &str) -> String
         "rex" => format!("REX_NOTIFICATION_REJECTED: {error}"),
         _ => format!("TMUX_NOTIFICATION_REJECTED: {error}"),
     }
+}
+
+/// Refresh only the service generation of one exact Rex notification binding.
+/// The server, session and block anchor must remain unchanged.
+fn refresh_rex_notification_binding(
+    manager: &ProjectRuntimeManager,
+    runtime: &Server,
+    context: &ProjectContext,
+    recipient: &str,
+) -> Result<SelectedTransport, String> {
+    let control = manager
+        .binding_control_store()
+        .load()
+        .map_err(|error| error.to_string())?;
+    let key = control
+        .key_for_worker(&context.project_scope, &context.app_scope_id, recipient)?
+        .cloned()
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no current binding"))?;
+    let slot = control
+        .slot(&key)
+        .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: binding slot disappeared".to_string())?;
+    let value = slot
+        .active_binding()
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding"))?;
+    let saved_transport = value.transport.clone();
+    let endpoint = saved_transport
+        .rex_endpoint
+        .as_ref()
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_CHANGED: {recipient} is not currently bound to Rex"))?;
+    let agent_session_id = saved_transport
+        .session_id
+        .as_deref()
+        .ok_or_else(|| format!("REX_AGENT_SESSION_MISSING: {recipient} has no agent session"))?;
+    let candidate = crate::proto::RexCandidate {
+        server: endpoint.server.clone(),
+        session_id: endpoint.session_id.clone(),
+        block_id: endpoint.block_id.clone(),
+        cwd: endpoint.cwd.clone(),
+    };
+    let refreshed = tokio::runtime::Handle::try_current()
+        .map_err(|_| "REX_ENDPOINT_REJECTED: daemon runtime is unavailable".to_string())?
+        .block_on(crate::client::adapters::rex::verify_candidate(
+            &candidate,
+            agent_session_id,
+        ))
+        .map_err(|error| error.to_string())?;
+    let refreshed_endpoint = refreshed
+        .rex_endpoint
+        .as_ref()
+        .ok_or_else(|| "REX_CURRENT_BINDING_CHANGED: refreshed binding has no Rex endpoint".to_string())?;
+    if refreshed.kind != TransportKind::Rex
+        || refreshed_endpoint.server != endpoint.server
+        || refreshed_endpoint.session_id != endpoint.session_id
+        || refreshed_endpoint.block_id != endpoint.block_id
+    {
+        return Err(format!(
+            "REX_CURRENT_BINDING_CHANGED: refreshed target is not the same server/session/block for {recipient}"
+        ));
+    }
+    let ident = crate::identity::read_persisted(&manager.host.host_paths, recipient)
+        .map_err(|error| format!("{error:#}"))?
+        .ok_or_else(|| format!("IDENTITY_CREDENTIAL_MISSING: mapped worker {recipient} is not registered"))?;
+    let mut identity = ident;
+    let scope = crate::scope::Scope {
+        root: runtime.root.clone(),
+    };
+    manager
+        .refresh_session_transport_for_notification(
+            runtime,
+            &value.binding,
+            refreshed.clone(),
+            &mut identity,
+            &scope,
+        )
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(refreshed)
 }
 
 /// The repair belongs to the selected transport. A rejected dsh wake means the

@@ -620,21 +620,6 @@ impl ProjectRuntimeManager {
                     "IDENTITY_MAP_BINDING_CHANGED: Rex recovery baseline no longer matches the published current"
                 );
             }
-            let target_matches = baseline
-                .current
-                .transport
-                .rex_endpoint
-                .as_ref()
-                .is_some_and(|endpoint| {
-                    endpoint.server == candidate.server
-                        && endpoint.session_id == candidate.session_id
-                        && endpoint.block_id == candidate.block_id
-                });
-            if !target_matches {
-                anyhow::bail!(
-                    "IDENTITY_MAP_REX_TARGET_MISMATCH: Rex recovery baseline changed before commit"
-                );
-            }
         }
         match &recovery.admission {
             RexRecoveryAdmission::Verified(execution) => {
@@ -656,86 +641,6 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-    }
-
-    /// Refresh the same Rex server/session/block binding after its service
-    /// generation changed. This keeps the business identity and execution
-    /// association on the existing current binding and only re-observes the
-    /// current Rex server status before retrying the original durable message.
-    pub(crate) fn refresh_rex_notification_binding(
-        &self,
-        runtime: &Server,
-        project_context: &ProjectContext,
-        recipient: &str,
-    ) -> Result<(), String> {
-        let control = self.binding_control_store().load()?;
-        let value = control
-            .current_for_worker(
-                &project_context.project_scope,
-                &project_context.app_scope_id,
-                recipient,
-            )?
-            .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: recipient has no current binding".to_string())?
-            .active_binding()
-            .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: recipient has no active binding".to_string())?
-            .clone();
-        if value.transport.kind != crate::proto::TransportKind::Rex {
-            return Err("REX_BINDING_REFRESH_REJECTED: recipient transport is not Rex".into());
-        }
-        let endpoint = value
-            .transport
-            .rex_endpoint
-            .as_ref()
-            .ok_or_else(|| "REX_BINDING_REFRESH_REJECTED: recipient has no Rex endpoint".to_string())?;
-        if endpoint.server.trim().is_empty()
-            || endpoint.session_id.trim().is_empty()
-            || endpoint.block_id.trim().is_empty()
-        {
-            return Err("REX_BINDING_REFRESH_REJECTED: recipient Rex endpoint is incomplete".into());
-        }
-        let candidate = crate::proto::RexCandidate {
-            server: endpoint.server.clone(),
-            session_id: endpoint.session_id.clone(),
-            block_id: endpoint.block_id.clone(),
-            cwd: endpoint.cwd.clone(),
-        };
-        let agent_session = value
-            .binding
-            .session_id
-            .as_ref()
-            .ok_or_else(|| "REX_BINDING_REFRESH_REJECTED: recipient has no agent session".to_string())?
-            .as_str();
-        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-            "REX_BINDING_REFRESH_REJECTED: daemon runtime is unavailable".to_string()
-        })?;
-        let transport = handle
-            .block_on(crate::client::adapters::rex::verify_candidate(
-                &candidate,
-                agent_session,
-            ))
-            .map_err(|error| format!("REX_BINDING_REFRESH_REJECTED: {error}"))?;
-
-        let mut ident = {
-            let state = runtime.state.lock().unwrap();
-            self.recovered_binding_identity(project_context, &value.binding, &state)
-                .ok_or_else(|| {
-                    "REX_BINDING_REFRESH_REJECTED: mapped worker is not registered".to_string()
-                })?
-        };
-        let scope = crate::scope::Scope {
-            root: std::path::PathBuf::from(&project_context.canonical_root),
-        };
-        self.refresh_session_transport(
-            runtime,
-            &value.binding,
-            transport,
-            &mut ident,
-            &scope,
-            None,
-            None,
-        )
-        .map_err(|error| format!("REX_BINDING_REFRESH_REJECTED: {error:#}"))?;
-        Ok(())
     }
 
     fn refresh_session_transport(
@@ -922,6 +827,21 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| anyhow::anyhow!("PENDING_EFFECT_CREDENTIAL_MISSING"))?;
         Ok(next)
     }
+
+    pub(crate) fn refresh_session_transport_for_notification(
+        &self,
+        runtime: &Server,
+        saved: &RuntimeBinding,
+        transport: SelectedTransport,
+        ident: &mut identity::Identity,
+        scope: &Scope,
+    ) -> anyhow::Result<RuntimeBinding> {
+        if transport.kind != TransportKind::Rex {
+            anyhow::bail!("REX_CURRENT_BINDING_CHANGED: notification refresh requires Rex transport");
+        }
+        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None)
+    }
+
     fn reconcile_identity_context(
         &self,
         context: ProjectContext,
@@ -1862,10 +1782,12 @@ mod anchor_provenance_tests {
         );
 
         let current_control = manager.binding_control_store().load().unwrap();
-        let target_name = current_control.active_values()
+        let target_key = current_control.active_values()
             .find(|value| value.binding.session_id.as_ref().is_some_and(|session| session.as_str() == "session-s1"))
             .and_then(|value| current_control.key_for_worker(&context.project_scope, &context.app_scope_id, value.binding.agent_id.as_str()).unwrap())
-            .unwrap().name.clone();
+            .cloned()
+            .unwrap();
+        let target_name = target_key.name.clone();
         std::env::set_var("COLLAB_TEST_REX_OWNER_PID", owner0.owner_pid.to_string());
         let (_, human_restored) = tokio::task::spawn_blocking({
             let manager = manager.clone();
@@ -1939,16 +1861,49 @@ mod anchor_provenance_tests {
         let returned_name = displaced_return.data["result"]["snapshot"]["name"].as_str().unwrap();
         assert_ne!(returned_name, target_name, "ordinary registration must not reclaim the human-selected target");
         let control = manager.binding_control_store().load().unwrap();
-        let target = control.current_for_name(&context.project_scope, &context.app_scope_id, &target_name).unwrap().unwrap().active_binding().unwrap();
-        assert_eq!(target.binding.session_id.as_ref().unwrap().as_str(), "session-s0");
-        assert_eq!(target.rex_execution.as_ref().unwrap().owner_pid, owner0.owner_pid);
-        assert_eq!(target.rex_execution_fence, Some(crate::server::binding_slot::RexExecutionFence::from_start_id(
-            &crate::host_runtime::exact_process_start_id(owner2.owner_pid).unwrap().unwrap()).unwrap()));
-        let returned = control.current_for_name(&context.project_scope, &context.app_scope_id, returned_name).unwrap().unwrap().active_binding().unwrap();
+        let target_slot = control.slot(&target_key).unwrap();
+        assert_eq!(
+            target_slot.identity_status(),
+            crate::server::binding_slot::IdentityStatus::Unregistered
+        );
+        let target_previous = target_slot
+            .reference_previous()
+            .expect("the displaced target binding is preserved");
+        assert_eq!(
+            target_previous.binding.session_id.as_ref().unwrap().as_str(),
+            "session-s0"
+        );
+        assert_eq!(
+            target_previous.rex_execution.as_ref().unwrap().owner_pid,
+            owner0.owner_pid
+        );
+        let returned = control
+            .current_for_name(
+                &context.project_scope,
+                &context.app_scope_id,
+                returned_name,
+            )
+            .unwrap()
+            .unwrap()
+            .active_binding()
+            .unwrap();
         assert_eq!(returned.binding.session_id.as_ref().unwrap().as_str(), "session-s1");
-        assert_ne!(returned.binding.agent_id, target.binding.agent_id);
         assert_eq!(returned.transport.kind, TransportKind::Rex);
-        assert_eq!(returned.transport.rex_endpoint, target.transport.rex_endpoint);
+        assert_eq!(
+            returned.transport.rex_endpoint,
+            target_previous.transport.rex_endpoint
+        );
+        assert_eq!(
+            control
+                .active_values()
+                .filter(|value| {
+                    value.transport.kind == TransportKind::Rex
+                        && value.transport.rex_endpoint == returned.transport.rex_endpoint
+                })
+                .count(),
+            1,
+            "the later successful publication is the block's only current owner"
+        );
         assert_eq!(control.lookup(&context.project_scope, &context.app_scope_id, &request1.facts, None)
             .unwrap().unwrap().identity_key.name, returned_name);
         let (_, returned_again) = tokio::task::spawn_blocking({
@@ -1959,8 +1914,27 @@ mod anchor_provenance_tests {
         assert!(returned_again.ok, "ordinary name must remain usable: {returned_again:?}");
         assert_eq!(returned_again.data["result"]["snapshot"]["name"], returned_name);
         let final_control = manager.binding_control_store().load().unwrap();
-        let final_target = final_control.current_for_name(&context.project_scope, &context.app_scope_id, &target_name).unwrap().unwrap().active_binding().unwrap();
-        assert_eq!(final_target, target, "ordinary context must leave the human-selected current unchanged");
+        assert!(
+            final_control
+                .current_for_name(&context.project_scope, &context.app_scope_id, &target_name)
+                .unwrap()
+                .is_none(),
+            "the target name stays retired after the block's newer owner publishes"
+        );
+        assert_eq!(
+            final_control
+                .current_for_name(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    returned_name,
+                )
+                .unwrap()
+                .unwrap()
+                .active_binding()
+                .unwrap(),
+            returned,
+            "ordinary context continues the block's current owner"
+        );
         owner2.stop();
         owner0.stop();
         owner1.stop();

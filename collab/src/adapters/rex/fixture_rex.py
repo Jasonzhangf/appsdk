@@ -26,6 +26,12 @@ Scenarios (override behavior keyed by the extracted method):
   normal                 all calls succeed
   non_terminal_block     session.list_blocks returns a non-terminal creator
   session_missing        session.list omits the requested session
+  session_malformed      session.list returns an incomplete response
+  block_missing          session.list_blocks omits the requested block
+  blocks_malformed       session.list_blocks returns an incomplete response
+  status_marker_only     server.status fails with the service marker but no
+                         typed service-generation mismatch
+  status_unknown         server.status fails without proving absence
   write_short            write returns bytes_written = 1
   write_unknown          write exits 124 with no JSON (timeout-like)
   write_typed_reject     write exits 1 with a structured native error code
@@ -182,6 +188,12 @@ def server_version() -> None:
 
 
 def server_status() -> None:
+    if scenario() == "status_marker_only":
+        sys.stderr.write("REX_SERVICE_CHANGED: fixture native detail only\n")
+        raise SystemExit(3)
+    if scenario() == "status_unknown":
+        sys.stderr.write("fixture: status unavailable\n")
+        raise SystemExit(3)
     if scenario() == "missing_instance":
         emit({"host_id": "host-fixture"})
         return
@@ -202,6 +214,9 @@ def server_status() -> None:
 
 
 def session_list() -> None:
+    if scenario() == "session_malformed":
+        emit({})
+        return
     if scenario() in {"session_missing", "service_changed_session_missing"}:
         emit({"sessions": []})
         return
@@ -209,6 +224,12 @@ def session_list() -> None:
 
 
 def list_blocks() -> None:
+    if scenario() == "blocks_malformed":
+        emit({})
+        return
+    if scenario() == "block_missing":
+        emit({"blocks": []})
+        return
     creator = "com.other.creator" if scenario() == "non_terminal_block" else TERMINAL
     blocks = [BLOCK]
     path = os.environ.get("REXPRIMITIVE_BLOCKS_FILE")

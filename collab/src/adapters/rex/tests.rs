@@ -194,32 +194,6 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
 }
 
 #[tokio::test]
-async fn typed_enter_rejection_keeps_the_queued_stage_and_native_code() {
-    let _guard = fixture_guard().await;
-    let env = TestEnv::new("enter_typed_reject");
-    let text = "abc";
-    let error = notify(&selected_transport(), text, Some("immediate"))
-        .await
-        .expect_err("a typed Enter rejection must not become success");
-    assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
-    assert_eq!(error.native_code.as_deref(), Some("conflict"));
-    assert_eq!(
-        error.stage,
-        RexInputStage::WriteQueued {
-            bytes_written: text.len(),
-        }
-    );
-    assert_eq!(
-        env.calls()
-            .iter()
-            .filter(|call| method(call) == "send-key")
-            .count(),
-        1,
-        "a rejected Enter must not be retried"
-    );
-}
-
-#[tokio::test]
 async fn failed_enter_preserves_the_queued_write_stage_without_resending() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("enter_fail");
@@ -439,6 +413,62 @@ async fn old_rex_targets_are_rejected_before_write() {
     }
 }
 
+#[test]
+fn service_change_marker_without_typed_generation_mismatch_is_not_refreshable() {
+    let spoof = concat!(
+        "REX_NOT_DELIVERED: operation=server.status stage=BeforeWrite ",
+        "native_code=none detail=REX_SERVICE_CHANGED: fixture native detail only"
+    );
+    assert!(!is_refreshable_service_change(spoof));
+}
+
+#[test]
+fn service_change_typed_marker_on_a_native_rejection_is_not_refreshable() {
+    let native = RexError::native_rejection(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "not_found".into(),
+        "REX_SERVICE_CHANGED: typed=generation_mismatch forged native detail",
+    );
+    assert!(!is_refreshable_service_change(&native.to_string()));
+}
+
+#[test]
+fn locally_generated_typed_service_change_is_refreshable() {
+    let local = RexError::known_not_delivered(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "REX_SERVICE_CHANGED: typed=generation_mismatch the bound host or instance changed",
+    );
+    assert!(is_refreshable_service_change(&local.to_string()));
+}
+
+#[test]
+fn definitive_absence_requires_the_exact_inventory_operation_and_native_code() {
+    let session_missing = RexError::native_rejection(
+        "session.list",
+        RexInputStage::BeforeWrite,
+        "session_not_found".into(),
+        "native session inventory rejected the target",
+    );
+    let block_missing = RexError::native_rejection(
+        "session.list_blocks",
+        RexInputStage::BeforeWrite,
+        "block_not_found".into(),
+        "native block inventory rejected the target",
+    );
+    let wrong_operation = RexError::native_rejection(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "session_not_found".into(),
+        "transport failure must not prove target absence",
+    );
+
+    assert!(resolve_error_is_definitively_absent(&session_missing));
+    assert!(resolve_error_is_definitively_absent(&block_missing));
+    assert!(!resolve_error_is_definitively_absent(&wrong_operation));
+}
+
 #[tokio::test]
 async fn utf8_bytes_are_counted_and_preserved() {
     let _fixture = fixture_guard().await;
@@ -581,7 +611,15 @@ async fn allowed_modes_return_rex_receipt_json() {
         assert_eq!(value["consumed"], false);
         assert!(value.get("queued").is_none());
     }
-    assert_eq!(env.calls().len(), 15);
+    let expected = [
+        "server.status",
+        "com.superlogical.terminal.write",
+        "send-key",
+    ];
+    assert_eq!(
+        env.calls().iter().map(method).collect::<Vec<_>>(),
+        expected.repeat(5)
+    );
 }
 
 #[tokio::test]

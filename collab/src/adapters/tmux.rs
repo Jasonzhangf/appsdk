@@ -1459,6 +1459,8 @@ pub(crate) mod tests {
                 .args(["new-session", "-d", "-s", &session_name]);
             if let Some(pane_command) = pane_command {
                 command.arg(pane_command);
+            } else {
+                command.arg("/bin/sh");
             }
             let output = command.output().expect("start isolated tmux server");
             assert!(
@@ -1549,18 +1551,58 @@ pub(crate) mod tests {
             loop {
                 let shell_ready = foreground_pane_facts(&endpoint)
                     .is_ok_and(|facts| codex_presence::is_shell_command(&facts.command));
-                let prompt_visible = capture(&endpoint).is_ok_and(|screen| {
-                    screen.lines().any(|line| {
-                        let line = line.trim_end();
-                        line.ends_with('$') || line.ends_with('%') || line.ends_with('#')
-                    })
-                });
-                if shell_ready && prompt_visible {
+                if shell_ready {
                     break;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "isolated shell prompt did not become ready"
+                    "isolated shell did not become the foreground process"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            let marker = format!(
+                "COLLAB_TMUX_FIXTURE_READY_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let readiness_probe = format!("printf '{}\\n'", marker);
+            let typed_probe = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.socket)
+                .args(["send-keys", "-l", "-t", "collab-test:0.0", &readiness_probe])
+                .output()
+                .expect("type isolated tmux readiness probe");
+            assert!(
+                typed_probe.status.success(),
+                "type isolated tmux readiness probe: {}",
+                String::from_utf8_lossy(&typed_probe.stderr)
+            );
+            let entered_probe = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.socket)
+                .args(["send-keys", "-t", "collab-test:0.0", "Enter"])
+                .output()
+                .expect("submit isolated tmux readiness probe");
+            assert!(
+                entered_probe.status.success(),
+                "submit isolated tmux readiness probe: {}",
+                String::from_utf8_lossy(&entered_probe.stderr)
+            );
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let probe_ready = capture(&endpoint)
+                    .is_ok_and(|screen| screen.lines().any(|line| line.trim() == marker));
+                if probe_ready {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "isolated shell did not process the readiness probe"
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }

@@ -904,7 +904,7 @@ fn register_desktop_binding(
 }
 
 #[test]
-fn public_context_rex_target_conflict_is_typed_and_explicit_approval_reaches_admission() {
+fn public_context_rex_target_conflict_reaches_admission_without_old_history_rejection() {
     let mut fixture = Fixture::without_tmux("rex-target-session-conflict");
     let alice_host = TestAppServer::start_with_effect_at(
         &fixture.root,
@@ -953,8 +953,8 @@ fn public_context_rex_target_conflict_is_typed_and_explicit_approval_reaches_adm
                     "session_id": "conflict-agent-session",
                     "rex_endpoint": {
                         "server": "unix:///tmp/conflict-rex.sock",
-                        "session_id": "session:conflict-rex",
-                        "block_id": "block:conflict-rex",
+                        "session_id": "session:11111111-1111-4111-8111-111111111111",
+                        "block_id": "block:22222222-2222-4222-8222-222222222222",
                         "instance_id": "conflict-rex-instance",
                         "cwd": fixture.root
                     },
@@ -977,8 +977,8 @@ fn public_context_rex_target_conflict_is_typed_and_explicit_approval_reaches_adm
         "session_id": "conflict-agent-session",
         "rex": {
             "server": "unix:///tmp/conflict-rex.sock",
-            "session_id": "session:conflict-rex",
-            "block_id": "block:conflict-rex",
+            "session_id": "session:11111111-1111-4111-8111-111111111111",
+            "block_id": "block:22222222-2222-4222-8222-222222222222",
             "cwd": fixture.root
         }
     })
@@ -990,17 +990,32 @@ fn public_context_rex_target_conflict_is_typed_and_explicit_approval_reaches_adm
             args.push("--query");
         }
         let output = fixture.configured_command(&args, None).output().unwrap();
-        assert!(!output.status.success(), "{output:?}");
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(
-            error.contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
-            "plain query={query} must expose the endpoint/session conflict: {error}"
+            !error.contains("IDENTITY_MAP_REX_TARGET_MISMATCH")
+                && !String::from_utf8_lossy(&output.stdout)
+                    .contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
+            "old Rex identity history must not reject the new recovery: {error}"
         );
+        if query {
+            assert!(output.status.success(), "{output:?}");
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                response["result"]["snapshot"]["name"], "Bob",
+                "the exact agent session selects its current holder: {response}"
+            );
+        } else {
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                error.contains("REX_"),
+                "plain recovery must reach the Rex admission boundary: {error}"
+            );
+        }
     }
     assert_eq!(
         fixture.current_resources(),
         before,
-        "a conflicted ordinary context must not mutate identity or business state"
+        "a failed ordinary context must not mutate identity or business state"
     );
 
     let approval = json!({
@@ -1028,7 +1043,7 @@ fn public_context_rex_target_conflict_is_typed_and_explicit_approval_reaches_adm
     let approved_error = String::from_utf8_lossy(&approved.stderr);
     assert!(
         !approved_error.contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
-        "explicit human replacement must pass the ordinary lookup conflict: {approved_error}"
+        "explicit human replacement must also reach Rex admission: {approved_error}"
     );
     assert!(
         approved_error.contains("REX_"),

@@ -1122,6 +1122,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             std::fs::create_dir_all(&host_server_dir)?;
             std::fs::remove_file(host_server_dir.join("DOWN")).ok();
             let sock = host_paths.socket_path();
+            // A daemon whose process is alive but whose socket does not answer
+            // would otherwise block both the supervised and the detached start
+            // with DAEMON_UNKNOWN. `up` is the user restart entry, so it stops
+            // that verified recorded daemon first and then starts normally.
+            let replaced = client::replace_unresponsive_daemon(&sock, &host_paths.pid_path())?;
             let was_running = client::alive(&sock);
             // Bind the supervised daemon to this project, then let launchd own
             // the start. Loading the agent before spawning anything is what
@@ -1165,6 +1170,10 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "server": sock,
                 "started": started,
                 "supervised": supervised,
+                "replaced": replaced.map(|daemon| json!({
+                    "pid": daemon.pid,
+                    "signal": daemon.signal,
+                })),
                 "service_record": {"bound": true, "path": service_record},
                 "autostart": match &autostart {
                     Ok(path) => json!({

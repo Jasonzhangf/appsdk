@@ -1340,3 +1340,157 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         "{restored}"
     );
 }
+
+/// Run the user maintenance entry `collab up` through a pseudo terminal, with
+/// the fixture's isolated state root. The isolated root has no login
+/// supervisor, so `up` uses its unsupervised start path and never calls
+/// launchctl or tmux.
+fn up_in_terminal(fixture: &IsolatedDaemon) -> Output {
+    let mut terminal = Command::new("script");
+    terminal.arg("-q");
+    if cfg!(target_os = "linux") {
+        let executable = fixture.binary.to_string_lossy().replace('\'', "'\\''");
+        terminal.args(["-e", "-c", &format!("exec '{executable}' up"), "/dev/null"]);
+    } else {
+        terminal.arg("/dev/null").arg(&fixture.binary).arg("up");
+    }
+    terminal
+        .current_dir(&fixture.root)
+        .env("HOME", &fixture.home)
+        .env("CODEX_HOME", &fixture.home)
+        .env("COLLAB_STATE_DIR", &fixture.host)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run collab up in a terminal")
+}
+
+fn recorded_pid(fixture: &IsolatedDaemon) -> u32 {
+    std::fs::read_to_string(fixture.host.join("server.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Freeze the fixture-owned daemon: the kernel still accepts connections on
+/// its listening socket, but no request is ever answered. This is the
+/// "process alive, socket unresponsive" state.
+fn freeze_fixture_daemon(fixture: &IsolatedDaemon) -> u32 {
+    let pid = fixture.child.as_ref().unwrap().id();
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ping(&fixture.socket()).is_ok() {
+        assert!(Instant::now() < deadline, "frozen daemon still answers");
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        UnixStream::connect(fixture.socket()).is_ok(),
+        "frozen daemon socket must still accept connections"
+    );
+    pid
+}
+
+/// Stop a daemon that `up` launched detached in the isolated state root.
+fn shutdown_isolated_daemon(socket: &Path) {
+    if let Ok(mut stream) = UnixStream::connect(socket) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.write_all(b"{\"op\":\"Shutdown\",\"password\":null}\n");
+        let mut line = String::new();
+        let _ = BufReader::new(stream).read_line(&mut line);
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while UnixStream::connect(socket).is_ok() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn up_replaces_a_live_daemon_whose_socket_does_not_answer() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let frozen = freeze_fixture_daemon(&fixture);
+    assert_eq!(recorded_pid(&fixture), frozen);
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    let exited = fixture.child.as_mut().unwrap().try_wait().unwrap();
+    let replacement_pid = std::fs::read_to_string(fixture.host.join("server.pid"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    let reachable = ping(&fixture.socket()).is_ok();
+    if reachable {
+        shutdown_isolated_daemon(&fixture.socket());
+    }
+    assert!(output.status.success(), "up must recover service: {text}");
+    assert!(!text.contains("DAEMON_UNKNOWN"), "{text}");
+    assert!(
+        text.contains(&format!("\"pid\": {frozen}")) && text.contains("\"signal\": \"SIG"),
+        "up must report the replaced recorded daemon: {text}"
+    );
+    assert!(
+        exited.is_some(),
+        "the unresponsive daemon must be replaced: {text}"
+    );
+    assert!(reachable, "replacement daemon must answer Ping: {text}");
+    assert!(
+        replacement_pid.is_some_and(|pid| pid != frozen),
+        "a new daemon must own the recorded PID: {text}"
+    );
+}
+
+#[test]
+fn up_keeps_a_healthy_daemon() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let before = recorded_pid(&fixture);
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("\"replaced\": null"), "{text}");
+    assert!(fixture
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none());
+    assert_eq!(recorded_pid(&fixture), before);
+    assert!(ping(&fixture.socket()).is_ok());
+}
+
+#[test]
+fn up_never_signals_a_pid_that_is_not_the_recorded_collab_daemon() {
+    let mut fixture = IsolatedDaemon::start(None);
+    freeze_fixture_daemon(&fixture);
+    let mut bystander = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn owned bystander process");
+    std::fs::write(fixture.host.join("server.pid"), bystander.id().to_string()).unwrap();
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    let bystander_alive = bystander.try_wait().unwrap().is_none();
+    let daemon_alive = fixture
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("DAEMON_REPLACE_REFUSED"), "{text}");
+    assert!(bystander_alive, "a non-collab PID must never be signalled");
+    assert!(
+        daemon_alive,
+        "an unverified PID must not cause any replacement"
+    );
+}

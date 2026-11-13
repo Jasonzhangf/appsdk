@@ -527,6 +527,143 @@ where
     }
 }
 
+/// Bounded wait for the recorded daemon to release the host writer lock after
+/// each signal.
+const REPLACE_SIGNAL_WAIT: Duration = Duration::from_secs(5);
+
+/// The recorded daemon that `replace_unresponsive_daemon` stopped.
+pub struct ReplacedDaemon {
+    pub pid: u32,
+    pub signal: &'static str,
+}
+
+/// User maintenance only (`collab up`): stop a daemon whose process is alive
+/// and holds the host writer lock, but whose socket does not answer Ping
+/// within the required-server window. A reachable daemon, a missing daemon,
+/// and a daemon that is still starting (lock held, no socket yet) are left
+/// alone, so the caller keeps its normal start path for them.
+///
+/// Only the PID recorded in `pid_path` is signalled, and only after it is
+/// verified to be a live `collab` process while the writer lock is held.
+/// SIGTERM comes first; SIGKILL follows only when the lock is still held after
+/// a bounded wait and the PID still verifies.
+pub fn replace_unresponsive_daemon(
+    sock: &Path,
+    pid_path: &Path,
+) -> anyhow::Result<Option<ReplacedDaemon>> {
+    let error = match readiness_probe_with_timeout(sock, REQUIRED_SERVER_PING_TIMEOUT) {
+        Ok(()) => return Ok(None),
+        Err(error) => error,
+    };
+    if failed_connection_status(sock, &error) != DaemonAvailability::Unknown {
+        return Ok(None);
+    }
+    let server_dir = sock
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid collab server socket path"))?;
+    match lock_availability(server_dir) {
+        LockAvailability::Held => {}
+        LockAvailability::Unheld => return Ok(None),
+        LockAvailability::Unknown => anyhow::bail!(
+            "DAEMON_REPLACE_REFUSED: cannot read the host writer lock in {}; no process was signalled",
+            server_dir.display()
+        ),
+    }
+    let pid = verified_daemon_pid(pid_path)?;
+    for (signal, name) in [(libc::SIGTERM, "SIGTERM"), (libc::SIGKILL, "SIGKILL")] {
+        if signal == libc::SIGKILL {
+            // Re-verify before escalating: the PID must still be the same
+            // live collab process that holds the lock.
+            verified_daemon_pid(pid_path).and_then(|current| {
+                if current == pid {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "DAEMON_REPLACE_REFUSED: recorded daemon PID changed from {pid} to {current} during replacement"
+                    ))
+                }
+            })?;
+        }
+        if unsafe { libc::kill(pid, signal) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "DAEMON_REPLACE_REFUSED: cannot send {name} to recorded daemon PID {pid}"
+                )));
+            }
+        }
+        let deadline = Instant::now() + REPLACE_SIGNAL_WAIT;
+        while Instant::now() < deadline {
+            if lock_availability(server_dir) == LockAvailability::Unheld {
+                return Ok(Some(ReplacedDaemon {
+                    pid: pid as u32,
+                    signal: name,
+                }));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    anyhow::bail!(
+        "DAEMON_REPLACE_FAILED: recorded daemon PID {pid} still holds the host writer lock in {} after SIGKILL",
+        server_dir.display()
+    )
+}
+
+/// Read the recorded daemon PID and verify that it names a live `collab`
+/// process other than this one.
+fn verified_daemon_pid(pid_path: &Path) -> anyhow::Result<libc::pid_t> {
+    let refused = |detail: String| {
+        anyhow::anyhow!(
+            "DAEMON_REPLACE_REFUSED: {detail}; the unresponsive daemon was not signalled"
+        )
+    };
+    let text = std::fs::read_to_string(pid_path)
+        .map_err(|error| refused(format!("cannot read {}: {error}", pid_path.display())))?;
+    let pid = text
+        .trim()
+        .parse::<libc::pid_t>()
+        .ok()
+        .filter(|pid| *pid > 1 && *pid != unsafe { libc::getpid() })
+        .ok_or_else(|| {
+            refused(format!(
+                "invalid daemon PID {:?} in {}",
+                text.trim(),
+                pid_path.display()
+            ))
+        })?;
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return Err(refused(format!("recorded daemon PID {pid} is not running")));
+    }
+    match process_name(pid) {
+        Some(name) if name == "collab" => Ok(pid),
+        Some(name) => Err(refused(format!(
+            "recorded PID {pid} is {name:?}, not the collab daemon"
+        ))),
+        None => Err(refused(format!(
+            "cannot read the process name of recorded PID {pid}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_name(pid: libc::pid_t) -> Option<String> {
+    let mut buffer = [0u8; 256];
+    let length = unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    (length > 0).then(|| String::from_utf8_lossy(&buffer[..length as usize]).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn process_name(pid: libc::pid_t) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|name| name.trim_end().to_owned())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_name(_pid: libc::pid_t) -> Option<String> {
+    None
+}
+
 fn spawn_server(sock: &Path) -> anyhow::Result<()> {
     let server_dir = sock
         .parent()

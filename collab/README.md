@@ -413,8 +413,10 @@ deadline event matching remains owner-scoped and finite.
 App Server receives `COLLAB_NOTIFY <message-id> [<subject>]
 <original-body-preview>` through the registered native thread. The Agent first
 weighs the id and subject against current work. When it selects the notice, it runs
-`collab recv` once, which consumes the durable batch and prints its full
-detail, then executes actionable in-scope work; it must not stop at ACK or waiting. The first pending notice opens
+`collab recv` once, which consumes the current durable batch and prints its full
+detail, then executes actionable in-scope work; it must not stop at ACK or waiting.
+Use `collab recv --timeout 5` only when an explicit wait is needed; a new message
+returns that wait early. The first pending notice opens
 a fixed 120-second window. At its end all eligible unsent notices for that peer
 are combined into one bounded batch, including notices arriving later
 in the window. Working Agents receive the batch without waiting for idle.

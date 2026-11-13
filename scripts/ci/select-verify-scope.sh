@@ -247,9 +247,11 @@ while IFS= read -r path; do
       rust_platform_lock_cli=true
       windows_appsdk=true
       ;;
+    rust/src/memory_governance.rs|rust/tests/memory_governance_cli.rs|contracts/memory/*|docs/dagpipe/graphs/project-memory-rule-promotion.graph.json)
+      rust_memory=true
+      ;;
     rust/src/memory.rs|rust/src/memory_cli.rs|rust/src/bin/project-memory.rs)
       rust_memory=true
-      windows_appsdk=true
       ;;
     rust/src/global_registry.rs|rust/src/global_registry_communication.rs|rust/src/global_registry_tests.rs)
       rust_registry=true
@@ -275,7 +277,7 @@ while IFS= read -r path; do
     contracts/guidance/guidance-manifest.schema.json)
       rust_ontology_governance=true
       ;;
-    contracts/maps/module-registry.json|contracts/maps/function-map.json)
+    contracts/maps/module-registry.json|contracts/maps/function-map.json|contracts/maps/mainline-call-map.json|contracts/maps/resource-map.json|contracts/maps/verification-map.json)
       source_registry=true
       ;;
     rust/tests/reset_platform_cli.rs)
@@ -329,6 +331,10 @@ while IFS= read -r path; do
     sdk-skill-sources/appsdk-project-governance/references/*.md)
       # Prose references need installed navigation and text checks. Machine
       # guidance, other assets, and mixed product paths keep their own jobs.
+      docs=true
+      workflow_contract=true
+      ;;
+    sdk-skill-sources/project-memory/SKILL.md)
       docs=true
       workflow_contract=true
       ;;

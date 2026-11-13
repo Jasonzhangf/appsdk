@@ -40,7 +40,7 @@
       "id": "按范围选择最短队列并推进执行",
       "operator": "collab.ticket_design.advance_execution",
       "operator_version": "1",
-      "description": "名字代际更新时，已有业务候选状态撤销旧claimed或running阶段并创建queued新batch，与任务会话和阶段变化同批提交；原任务的working状态及资源责任保持。当前授权载体可重新领取并使用当前代际的新attempt；旧代际start/result拒绝并保留原错。带长程声明的任务在执行slot实际claim或start时，复用唯一goal计划owner准备目标peer订阅，与执行归属同批提交。纯排队只保存声明；master显式邀请或派发立即原子开启目标订阅。任务单提供完整内容和明确周期，周期次数默认100。无执行目标保持等待，不对Planner或Reviewer创建执行订阅。旧通用工单不因加载而自动加订阅。失败沿既有结果出口传递，不宣称终止旧外部执行。",
+      "description": "public publish 首次 Execute admission、manual claim/start 与 automatic continuation 读取当前物化任务策略，并用同一 required reviewer disjointness 决策；reviewer 候选不产生 Execute claim、assignment、ticket-claimed 消息或执行订阅。pinned executor 与 required reviewer 同名时保留两个字段并进入既有 waiting_assignment。Plan/Review 候选、ordinary specialty 偏好和已接任务的交付/迁移归属不变。名字代际更新时，已有业务候选状态撤销旧claimed或running阶段并创建queued新batch，与任务会话和阶段变化同批提交；原任务的working状态及资源责任保持。当前授权载体可重新领取并使用当前代际的新attempt；旧代际start/result拒绝并保留原错。带长程声明的任务在执行slot实际claim或start时，复用唯一goal计划owner准备目标peer订阅，与执行归属同批提交。纯排队只保存声明；master显式邀请或派发立即原子开启目标订阅。任务单提供完整内容和明确周期，周期次数默认100。无执行目标保持等待，不对Planner或Reviewer创建执行订阅。旧通用工单不因加载而自动加订阅。失败沿既有结果出口传递，不宣称终止旧外部执行。",
       "inputs": ["规划阶段结果"],
       "output": {"id": "执行验证结果", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

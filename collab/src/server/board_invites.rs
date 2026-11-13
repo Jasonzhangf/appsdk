@@ -39,13 +39,17 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
     let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
         Ok(control) => control, Err(error) => return Resp::err(error),
     };
-    let to = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, &to) {
-        Ok(Some(slot)) => slot.active_binding().unwrap().binding.agent_id.as_str().to_owned(),
-        Ok(None) => to, Err(error) => return Resp::err(error),
+    let (to, candidate_name) = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, &to) {
+        Ok(Some(slot)) => (
+            slot.active_binding().unwrap().binding.agent_id.as_str().to_owned(),
+            slot.identity_key.name.clone(),
+        ),
+        Ok(None) => (to.clone(), to),
+        Err(error) => return Resp::err(error),
     };
     if to == actor || is_managed_subagent(&state, &to) { return Resp::err("BOARD_ORDINARY_PEER_REQUIRED: invite a different ordinary peer"); }
     if !state.workers.contains_key(&to) { return Resp::err("peer not registered"); }
-    if let Err(error)=work_executor_gate(server,&state,&id,&to) {return error;}
+    if let Err(error)=execution_admission_gate(server,&state,&id,&to,&candidate_name) {return error;}
     let binding = match authoritative_send_binding(&state, &route, &to) { Ok(binding) => binding, Err(error) => return Resp::err(error) };
     let now = now_ms();
     let message_id = format!("board-invite-{}-{}", id, details.revision + 1);
@@ -108,7 +112,7 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
     }
     let mut events = Vec::new();
     if accept {
-        if let Err(error)=work_executor_gate(server,&state,&id,&actor) {return error;}
+        if let Err(error)=execution_admission_gate_for_actor(server,&state,&id,&actor) {return error;}
         // Validate resources before moving their current owner references.
         if let Err(error) = board_resume_gate(&state, &task.owner, &id) { return error; }
         let route = match server_route_scope(server, &state) { Ok(Some(route)) => route, _ => return Resp::err("project route is not ready") };

@@ -178,6 +178,20 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
 
     let source = register_context(&fixture, &source_root, &pane, "self-close-source", false);
     let (source_id, source_app_scope) = identity(&source);
+    let source_name = source["result"]["snapshot"]["name"]
+        .as_str()
+        .expect("original name")
+        .to_owned();
+    assert!(!source_name.is_empty(), "original name must be non-empty");
+    let source_session = source["result"]["snapshot"]["binding"]["session_id"]
+        .as_str()
+        .expect("source binding session")
+        .to_owned();
+    assert!(
+        !source_session.is_empty(),
+        "source binding session must be non-empty"
+    );
+    assert_eq!(source_session, pane.session_anchor);
 
     let task = run_ok_at(
         &fixture,
@@ -256,14 +270,61 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         false,
     );
     let msg_id = sent["msg_id"].as_str().expect("sent message id").to_owned();
+    let explicit = run_ok_at(
+        &fixture,
+        &source_root,
+        &pane,
+        &[
+            "send",
+            "--unknown-sender",
+            "--to",
+            &source_id,
+            "--target-session",
+            &source_session,
+            "--subject",
+            "preserve exact session",
+            "--content",
+            "current-session payload must survive retirement",
+            "--delivery",
+            "queued",
+        ],
+        false,
+    );
+    let explicit_id = explicit["msg_id"]
+        .as_str()
+        .expect("explicit-session message id")
+        .to_owned();
     let source_before = fixture.current_state_for(&source_root, &source_app_scope);
     let task_before = source_before["tasks"]["self-close-open-task"].clone();
     let message_before = source_before["msgs"][&msg_id].clone();
+    let explicit_before = source_before["msgs"][&explicit_id].clone();
     assert!(!task_before.is_null());
     assert!(!message_before.is_null());
+    assert!(!explicit_before.is_null());
     assert_eq!(
         message_before["body"],
         "business payload must survive self close"
+    );
+    assert_eq!(
+        explicit_before["body"],
+        "current-session payload must survive retirement"
+    );
+    assert!(
+        source_before["mailbox_name_addresses"]
+            .get(&msg_id)
+            .is_none(),
+        "unpinned raw-worker message starts without a name address: {source_before}"
+    );
+    assert!(
+        source_before["mailbox_name_addresses"]
+            .get(&explicit_id)
+            .is_none(),
+        "exact-session raw-worker message starts without a name address: {source_before}"
+    );
+    assert!(source_before["target_sessions"].get(&msg_id).is_none());
+    assert_eq!(
+        source_before["target_sessions"][&explicit_id], source_session,
+        "the public send must keep the actual source session"
     );
     let map: Value = serde_json::from_slice(
         &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
@@ -323,6 +384,12 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
     let source_after = fixture.current_state_for(&source_root, &source_app_scope);
     assert_eq!(source_after["tasks"]["self-close-open-task"], task_before);
     assert_eq!(source_after["msgs"][&msg_id], message_before);
+    assert_eq!(source_after["msgs"][&explicit_id], explicit_before);
+    let old_default = format!("sub-default-direct-message-{source_id}");
+    assert_eq!(
+        source_after["notification_subscriptions"][&old_default]["status"], "cancelled",
+        "retirement must stop the old default wake subscription"
+    );
     assert_eq!(
         source_after["receive_receipts"],
         source_before["receive_receipts"]
@@ -377,6 +444,7 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
     let source_final = fixture.current_state_for(&source_root, &source_app_scope);
     assert_eq!(source_final["tasks"]["self-close-open-task"], task_before);
     assert_eq!(source_final["msgs"][&msg_id], message_before);
+    assert_eq!(source_final["msgs"][&explicit_id], explicit_before);
     assert_eq!(
         source_final["receive_receipts"],
         source_before["receive_receipts"]
@@ -414,13 +482,30 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         "self-close-reacquired-name",
         false,
     );
-    let source_name = source["result"]["snapshot"]["name"]
-        .as_str()
-        .expect("original name");
     let returned_name = returned["result"]["snapshot"]["name"]
         .as_str()
         .expect("returned name");
+    assert!(!returned_name.is_empty(), "returned name must be non-empty");
     assert_eq!(returned_name, source_name);
+    let returned_worker = returned["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("returned worker")
+        .to_owned();
+    let returned_session = returned["result"]["snapshot"]["binding"]["session_id"]
+        .as_str()
+        .expect("returned binding session")
+        .to_owned();
+    assert!(
+        !returned_worker.is_empty(),
+        "returned worker must be non-empty"
+    );
+    assert_ne!(returned_worker, source_id, "the successor is a new worker");
+    assert_eq!(returned_session, returned_pane.session_anchor);
+    assert_ne!(
+        returned_session, source_session,
+        "the successor is a new execution session"
+    );
+    let handoff = fixture.current_state_for(&source_root, &source_app_scope);
     let receive_args = ["recv", "--receive-id", "after-self-close", "--timeout", "0"];
     let received = run_ok_at(&fixture, &source_root, &returned_pane, &receive_args, false);
     let messages = received["messages"].as_array().unwrap();
@@ -431,8 +516,48 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         "{received}"
     );
     assert!(
+        messages.iter().any(|message| {
+            message["id"] == explicit_id && message["body"] == explicit_before["body"]
+        }),
+        "{received}"
+    );
+    assert!(
         !messages.iter().any(|message| message["id"] == consumed_id),
         "{received}"
+    );
+    for id in [&msg_id, &explicit_id] {
+        assert_eq!(
+            handoff["msgs"][id]["to"], returned_worker,
+            "message {id} must transfer to the current name holder"
+        );
+        assert_eq!(
+            handoff["wake_bindings"][id],
+            format!("sub-default-direct-message-{returned_worker}"),
+            "message {id} must wake the successor"
+        );
+    }
+    assert_eq!(
+        handoff["target_sessions"][&explicit_id], returned_session,
+        "the exact-session message must follow the successor session"
+    );
+    assert_eq!(
+        handoff["notification_subscriptions"]
+            [&format!("sub-default-direct-message-{returned_worker}")]["worker_id"],
+        returned_worker,
+        "the successor default wake subscription must belong to the new holder"
+    );
+    assert_eq!(
+        retired["mailbox_name_addresses"][&msg_id]["name"], source_name,
+        "the unpinned message must retain the retired name relation"
+    );
+    assert_eq!(
+        retired["mailbox_name_addresses"][&explicit_id]["name"], source_name,
+        "the matching current-session message must retain the retired name relation"
+    );
+    assert!(retired["target_sessions"].get(&msg_id).is_none());
+    assert_eq!(
+        retired["target_sessions"][&explicit_id], source_session,
+        "retirement must preserve the original target session before handoff"
     );
     let replay = run_ok_at(&fixture, &source_root, &returned_pane, &receive_args, false);
     assert_eq!(replay["messages"], received["messages"]);

@@ -89,6 +89,17 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
             .expect("self binding")
             .clone()
     };
+    let actual_session = binding
+        .session_id
+        .as_ref()
+        .expect("self binding session")
+        .as_str()
+        .to_owned();
+    let different_session = "explicit-original-session";
+    assert_ne!(
+        different_session, actual_session,
+        "the synthetic negative must be a different session"
+    );
     let endpoint = binding.tmux_endpoint.clone().expect("tmux endpoint");
     let now = now_ms();
     server.commit(&[
@@ -164,6 +175,8 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
     };
     let mut pinned = template;
     pinned.id = "self-session-pinned-message".into();
+    let mut matching = server.state.lock().unwrap().msgs["self-pending-message"].clone();
+    matching.id = "self-session-matching-message".into();
     server.commit(&[
         state::Event::Sent { msg: delivered },
         state::Event::Sent { msg: addressed },
@@ -172,9 +185,14 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
             address: other_address.clone(),
         },
         state::Event::Sent { msg: pinned },
+        state::Event::Sent { msg: matching },
+        state::Event::TargetSessionBound {
+            message_id: "self-session-matching-message".into(),
+            target_session: actual_session.clone(),
+        },
         state::Event::TargetSessionBound {
             message_id: "self-session-pinned-message".into(),
-            target_session: "explicit-original-session".into(),
+            target_session: different_session.into(),
         },
     ]);
 
@@ -216,8 +234,16 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
         .mailbox_name_addresses
         .contains_key("self-session-pinned-message"));
     assert_eq!(
+        state.mailbox_name_addresses["self-session-matching-message"].name,
+        "Jenny"
+    );
+    assert_eq!(
+        state.target_sessions["self-session-matching-message"],
+        actual_session
+    );
+    assert_eq!(
         state.target_sessions["self-session-pinned-message"],
-        "explicit-original-session"
+        different_session
     );
     assert_eq!(
         state.notification_subscriptions["self-subscription"].status,

@@ -36,8 +36,17 @@ map candidate 中释放 source 并发布 target，原 source 任务、消息和�
 共享 Register/pending/首次通知消费者也已通过定向回归。跨 app source 的精确旧 master
 grant 撤销、提交失败重试和继任者保护已公开验证。`self-close-mail-fix-report.md` 覆盖
 self-close 与人类退役后的 worker-ID 消息名字关系保全、后续收件和已消费历史不重放。
-真实查询和消息增量已由 `final-query-mail-frontend-qa/report.md` 通过；显式
-`--target-session` 语义仍未确认，且没有整体 PASS、Review、main 或安装声明。
+真实查询和消息增量已由 `final-query-mail-frontend-qa/report.md` 通过。
+项目 memory `appsdk-collab-message-name-handoff` 已批准消息归名字，名字寻址消息即使
+附带 `--target-session`，合法同名交接后仍交新 holder。旧固定 session 测试不构成
+新增审批要求。`name-address-session-consumer-report.md` 与
+`name-address-session-frontend-qa/report.md` 已证明该公开消费者与真实 TUI 行为。
+`self-close-session-worker-report.md` 已记录 raw worker-ID 加当前 session 的精确退役
+消费者修复及公开红绿。原条件会漏掉名字关系；现在无 session 或与本次退役 binding
+匹配时保全，异 session 仍排除。`self-close-session-frontend-qa/report.md` 已用正式
+候选 0.2.0491 通过自退役和人类退役的真实 TUI 增量：旧宿主存活且拒收，新 holder
+收到原 ID/正文，session/wake/消费回执更新，旧消费历史和任务名字归属保持。
+尚无整体 Review、main 或安装声明。
 
 ## 当前身份生命周期合同
 
@@ -117,10 +126,10 @@ AGENTS。审批状态均为 approved。执行绑定状态另列。实际 gate �
 | R4 | 人类指定master，名字统一Jenny | name intent；角色到规范名字 gate | Bob升master成为Jenny；名为Bob的项目master须拦截 | role_name_master公开用例 |
 | R5 | Bob升Jenny后，Bob原任务留Bob，Jenny工作接续 | source释放、target续接；名字到任务关系 gate | Bob任务保留待恢复/重派；源任务随session搬走须拦截 | `final-context-role-timing-r2.log` 的两条公开角色用例通过。原 `final-context-name-consumers.log` 保留异步 reflow 尚未生成时的时序断言失败；独立 `context-reflow-final-plan.md` 以保留现场确认通知随后生成。修正只分开同步归属/拒绝断言与异步通知观察，保留 task、ticket、assignment revision 不变和公开 board 空 holder 断言，未改产品时序 |
 | R6 | 顶替时旧holder退出目标current，后来真实context再普通注册 | mapped context、typed DisplacedExecution准入、真实Register及完整基线CAS | 顶替不生成companion；已核实旧Rex执行不高于current fence时进入普通登记，不取目标名字/权限，不搬走目标工作和收件；明确人类恢复优先。fence仅存current常量边界，普通刷新、角色/名字移动和效果重试保全 | `public_r6_human_fence_preserves_target_work_role_mail_and_survives_restart` 为真实CLI/wire；Rex manager覆盖启动代际；`rex-association-frontend-qa/fence-report.md` 的真实 Rex 增量通过，同 block 多 current 歧义保留，同 exact execution 仅换 session 未真实验证 |
-| R7 | 根据所选transport使用tmux pane或Rex block | tm_layout、Rex端点/current lookup；适用端点 gate | 合法Rex block无tmux位置仍升Jenny；提供错误block须显式拒绝 | 真实Rex正例通过；错误target query反例待修 |
+| R7 | 根据所选transport使用tmux pane或Rex block | tm_layout、Rex端点/current lookup；适用端点 gate | 合法Rex block无tmux位置仍升Jenny；endpoint与session命中不同current须拒绝；query不准入或提交所带端点 | 真实Rex角色/位置正例通过。`r7-evidence-reconcile-report.md` 区分只读查询实际current与端点变更；`public_context_rex_target_conflict_is_typed_and_explicit_approval_reaches_admission` 公开通过。唯一current session允许合法换端点，实际换绑仍核实当前执行事实；不再用“未知block加已知session的query必须失败”替代该契约 |
 | R8 | Frank当前会话顶替Bob，Frank任务留Frank | name intent、source释放、target续接；源工作保留 gate | 当前会话只接Bob工作；同actor导致Frank工作搬迁须拦截 | typed assignment与旧无assignment数据的普通restore_name公开红绿均已通过 |
 | R9 | 创建项目Rex session或身份角色变化 | Rex session owner；cwd目录名到session展示名 | session按项目cwd命名；按身份/角色/任务自动改名须拦截 | 真实Rex角色变化前后session查询已通过 |
-| M1 | 同名接替提交，未消费消息交当前holder | typed名字地址、mailbox、通知；当前收件关系 gate | 已投递未消费仍可交接；源名字消息不能泄漏给目标 | map-first 公开用例和 mailbox/notification tests 覆盖 pending/delivered 交接、wake 与 project 隔离。`source-mail-frontend-qa/report.md` 真实 TUI 证明 Alice actor 接替 Bob 后只收到 Bob 原消息，后来普通注册的 Alice 收到 Alice 原消息，ID/正文/真实消费回执保持且不重放。显式 `--target-session` 与名字交接关系仍待用户单独决定，不纳入该 PASS |
+| M1 | 同名接替提交，未消费消息交当前holder | typed名字地址、mailbox、通知；当前收件关系 gate | 已投递未消费仍可交接；名字寻址的显式session随合法交接更新；源名字消息不能泄漏给目标 | map-first 公开用例和 mailbox/notification tests 覆盖 pending/delivered 交接、wake 与 project 隔离。`source-mail-frontend-qa/report.md` 真实 TUI 证明源名字与目标名字消息隔离、ID/正文/真实消费回执保持且不重放。`name-address-session-consumer-report.md` 和 `name-address-session-frontend-qa/report.md` 证明名字寻址的显式session随合法接替更新。`self-close-session-worker-report.md` 和 `self-close-session-frontend-qa/report.md` 证明 raw worker-ID 加当前session在自退役/人类退役后保全名字关系，公开与真实TUI后继收件、旧holder拒收、session/wake及幂等消费均通过。无名字交接时保留发送session选择边界 |
 | M2 | 交接时保留已消费历史 | receive receipt；历史重放归属与消费 gate | 正文、ID、真实回执保留；接替触发重复投递须拦截 | `name_mailbox_public_repeated_release_reallocation_keeps_current_carrier` 公开通过，含原 receive-id replay；`mailbox-worker/report.md` 记录正文、消息 ID 和真实消费回执未重投。`self-close-mail-continuation-green-r2.log` 通过完整 old-consumed-history 公开交接组合：先消费一条再 self-close，后续 holder 只收到原未消费消息，已消费消息不重放。`final-query-mail-frontend-qa/report.md` 在真实 TUI 复验同一 self-close 收件边界 |
 | M3 | 旧holder收件/消费或迟到delivery结果进入提交边 | inbox/ACK/notification结果；current与捕获投递归属 gate | 真实旧结果归原投递；误标新holder已消费或覆盖其证据须拦截 | `mailbox-worker/report.md` 的迟到回执精确红绿及 `parent-map-first-green.log` 覆盖提交边界；`source-mail-frontend-qa/report.md` 的真实 TUI 源名隔离与独立消费回执通过。该证据不声称真实宿主已制造迟到 callback 竞态 |
 | E1 | 人类明确退役普通名字，释放当前占用 | approval/UnregisterWithEffect；精确目标及退役操作 gate | 新普通注册可取得Bob，保留任务消息宿主资源；退役旧操作不能退继任holder | `human_retirement_` 公开回归覆盖无授权拒绝、明确退役释放并允许重新分配、旧 self-close 不进入明确退役路径，HumanRetire 直接消息消费者也已公开通过。`physical-frontend-qa/report.md` 另证真实 TUI self-close 保留旧 host/label，新 Bob 普通 context 取得名字并完成双向通信。`return-timeout-qa/e2-final-report.md` 的真实 TUI 场景已执行明确 human retire 并使 Alice 接管未完成任务 |

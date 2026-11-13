@@ -1625,7 +1625,8 @@ pub(super) fn exact_binding_retirement_events(
     let mut events = Vec::new();
     if preserve_default_messages {
         // Preserve the business name relation before removing the current
-        // carrier. A later Register has no active predecessor to infer it from.
+        // carrier. A later Register has no active predecessor to infer it from,
+        // and an explicit session mismatch stays excluded.
         let name = state
             .name_occupancies
             .get(target.project_scope.as_str())
@@ -1644,7 +1645,13 @@ pub(super) fn exact_binding_retirement_events(
                     message.to == target.worker_id
                         && matches!(message.state.as_str(), "pending" | "delivered")
                         && !state.mailbox_name_addresses.contains_key(&message.id)
-                        && !state.target_sessions.contains_key(&message.id)
+                        && match state.target_sessions.get(&message.id) {
+                            None => true,
+                            Some(required_session) => {
+                                binding.session_id.as_ref().map(|session| session.as_str())
+                                    == Some(required_session.as_str())
+                            }
+                        }
                 })
                 .collect();
             messages.sort_by(|a, b| a.id.cmp(&b.id));

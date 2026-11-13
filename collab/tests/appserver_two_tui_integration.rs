@@ -2203,6 +2203,11 @@ fn human_retirement_releases_ordinary_name_and_allows_reallocation() {
     assert_eq!(alice["name"], "Alice", "{alice}");
     assert_eq!(bob["name"], "Bob", "{bob}");
     let bob_worker = bob["identity"]["worker_id"].as_str().unwrap();
+    let bob_session = bob["binding"]["session_id"]
+        .as_str()
+        .expect("Bob binding session");
+    assert!(!bob_session.is_empty(), "Bob session must be non-empty");
+    assert_eq!(bob_session, THREAD_B);
 
     // Legal task assignment and a queued message belong to Bob's name.
     fixture.run_public(
@@ -2241,6 +2246,29 @@ fn human_retirement_releases_ordinary_name_and_allows_reallocation() {
         THREAD_A,
     );
     let direct_id = direct["msg_id"].as_str().unwrap().to_owned();
+    let exact = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            bob_worker,
+            "--target-session",
+            bob_session,
+            "--subject",
+            "retire-exact-session",
+            "exact current-session message follows the retired name",
+        ],
+        THREAD_A,
+    );
+    let exact_id = exact["msg_id"].as_str().unwrap().to_owned();
+    let before_retire = fixture.current_state();
+    assert!(
+        before_retire["target_sessions"].get(&direct_id).is_none(),
+        "the retained unpinned message must not acquire a session constraint: {before_retire}"
+    );
+    assert_eq!(
+        before_retire["target_sessions"][&exact_id], bob_session,
+        "the public send must use Bob's actual binding session: {before_retire}"
+    );
     let refused = fixture.command_public(
         &[
             "context",
@@ -2334,32 +2362,121 @@ fn human_retirement_releases_ordinary_name_and_allows_reallocation() {
         message["to"], bob_worker,
         "the queued message is not re-addressed: {message}"
     );
+    let direct_message = fixture.run_public(&["msg", &direct_id], THREAD_A);
+    assert_eq!(direct_message["state"], "pending", "{direct_message}");
+    assert_eq!(direct_message["to"], bob_worker, "{direct_message}");
+    assert_eq!(
+        direct_message["target_session"],
+        Value::Null,
+        "the unpinned message remains unpinned: {direct_message}"
+    );
+    let exact_message = fixture.run_public(&["msg", &exact_id], THREAD_A);
+    assert_eq!(exact_message["state"], "pending", "{exact_message}");
+    assert_eq!(exact_message["to"], bob_worker, "{exact_message}");
+    assert_eq!(
+        exact_message["target_session"], bob_session,
+        "retirement keeps the original exact session before handoff: {exact_message}"
+    );
+    let bob_default = format!("sub-default-direct-message-{bob_worker}");
+    assert_eq!(
+        state["notification_subscriptions"][&bob_default]["status"], "cancelled",
+        "retirement must stop Bob's old default wake subscription: {state}"
+    );
 
     // A later ordinary context acquires the freed ordinary name.
     let reallocated = fixture.run_public(&["context"], THREAD_C);
     assert_eq!(reallocated["name"], "Bob", "{reallocated}");
+    let successor_worker = reallocated["identity"]["worker_id"]
+        .as_str()
+        .expect("successor worker");
+    let successor_session = reallocated["binding"]["session_id"]
+        .as_str()
+        .expect("successor session");
+    assert!(
+        !successor_worker.is_empty(),
+        "successor worker must be non-empty"
+    );
+    assert!(
+        !successor_session.is_empty(),
+        "successor session must be non-empty"
+    );
     assert_ne!(
-        reallocated["identity"]["worker_id"], bob_worker,
+        successor_worker, bob_worker,
         "the free name goes to a new carrier: {reallocated}"
     );
-    let received = fixture.run_public(
-        &[
-            "recv",
-            "--receive-id",
-            "retired-bob-successor",
-            "--timeout",
-            "0",
-        ],
-        THREAD_C,
-    );
+    assert_eq!(successor_session, THREAD_C);
+    let handoff = fixture.current_state();
+    let receive_args = [
+        "recv",
+        "--receive-id",
+        "retired-bob-successor",
+        "--timeout",
+        "0",
+    ];
+    let received = fixture.run_public(&receive_args, THREAD_C);
     let messages = received["messages"].as_array().unwrap();
     assert!(
         messages.iter().any(|message| message["id"] == msg_id),
         "{received}"
     );
     assert!(
-        messages.iter().any(|message| message["id"] == direct_id),
+        messages.iter().any(|message| {
+            message["id"] == direct_id
+                && message["body"] == "unconsumed direct message follows the retired name"
+        }),
         "{received}"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message["id"] == exact_id
+                && message["body"] == "exact current-session message follows the retired name"
+        }),
+        "{received}"
+    );
+    for id in [&direct_id, &exact_id] {
+        assert_eq!(
+            handoff["msgs"][id]["to"], successor_worker,
+            "message {id} must transfer to the successor: {handoff}"
+        );
+        assert_eq!(
+            handoff["wake_bindings"][id],
+            format!("sub-default-direct-message-{successor_worker}"),
+            "message {id} must wake the successor: {handoff}"
+        );
+    }
+    assert!(
+        handoff["target_sessions"].get(&direct_id).is_none(),
+        "the unpinned message remains unpinned after handoff: {handoff}"
+    );
+    assert_eq!(
+        handoff["target_sessions"][&exact_id], successor_session,
+        "the exact-session message follows the successor session: {handoff}"
+    );
+    assert_eq!(
+        handoff["workers"][successor_worker]["transport"]["session_id"], successor_session,
+        "the successor current session must match the handoff session: {handoff}"
+    );
+    for id in [&direct_id, &exact_id] {
+        assert_eq!(
+            state["mailbox_name_addresses"][id]["name"], "Bob",
+            "message {id} must retain Bob's name relation: {state}"
+        );
+    }
+    let receipt = fixture.current_state();
+    for id in [&direct_id, &exact_id] {
+        assert!(
+            receipt["receive_receipts"]["retired-bob-successor"]["message_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message_id| message_id == id),
+            "successor receipt must retain message {id}: {receipt}"
+        );
+    }
+    let replay_receive = fixture.run_public(&receive_args, THREAD_C);
+    assert_eq!(
+        replay_receive["messages"], received["messages"],
+        "the same receive ID must return the same successor receipt"
     );
 
     // Replaying the original operation does not retire the successor.

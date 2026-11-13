@@ -53,7 +53,7 @@ pub(super) fn tick_managed(manager: &super::ProjectRuntimeManager, server: &Arc<
 }
 
 fn tick_at(server: &Arc<Server>, now: i64) {
-    super::keepalive::tick_at(server, now);
+    super::keepalive::tick_with_rex_recovery(server, now);
     super::name_monitor::tick(server, now);
     tick_after_tmux(server, now);
 }
@@ -549,7 +549,12 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             .collect()
     };
     for (message_id, subscription_id) in candidates {
-        super::attempt_notification_with_at(server, &message_id, &subscription_id, now);
+        let _ = super::attempt_notification_detailed_with_rex_recovery(
+            server,
+            &message_id,
+            &subscription_id,
+            now,
+        );
     }
 }
 
@@ -876,7 +881,7 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             committed.then_some(message_id).flatten()
         };
         if let Some(message_id) = message_id {
-            let _ = super::attempt_notification_detailed_with_at(
+            let _ = super::attempt_notification_detailed_with_rex_recovery(
                 server,
                 &message_id,
                 &snapshot.id,

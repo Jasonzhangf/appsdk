@@ -530,16 +530,106 @@ impl RexLiveFixture {
         )
     }
 
+    /// Facts for `owned`'s agent session that target `target`'s actual Rex
+    /// block. A later successful binding with these facts must replace the
+    /// current block owner without transferring its identity or work.
+    pub fn provider_facts_on_block(
+        &self,
+        owned: &OwnedRexSession,
+        target: &OwnedRexSession,
+    ) -> Value {
+        json!({
+            "session_id": owned.agent_session_id,
+            "rex": {
+                "server": self.rex_server,
+                "session_id": target.session_id,
+                "block_id": target.block_id,
+                "cwd": self.root.to_string_lossy(),
+            }
+        })
+    }
+
+    pub fn context_provide_on_block(
+        &self,
+        owned: &OwnedRexSession,
+        target: &OwnedRexSession,
+    ) -> Value {
+        let facts = self.provider_facts_on_block(owned, target).to_string();
+        let operation = format!(
+            "ctx-rex-live-replace-{}-{}",
+            owned.run_id,
+            self.unique_token()
+        );
+        self.run_ok(
+            &[
+                "context",
+                "--op",
+                operation.as_str(),
+                "--provide",
+                facts.as_str(),
+            ],
+            Some(&owned.agent_session_id),
+        )
+    }
+
+    /// Read the test-owned identity map. Assertions must treat this as the
+    /// single control source for current ownership.
+    pub fn identity_map(&self) -> Value {
+        let path = self.host_state.join("identity-map.json");
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!("read test-owned identity map {}: {error}", path.display())
+        });
+        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!("decode test-owned identity map {}: {error}", path.display())
+        })
+    }
+
+    /// Every Rex block mapped to its currently published identity names. Only
+    /// `active current` rows participate; previous relations are history.
+    pub fn rex_block_current_owners(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let map = self.identity_map();
+        let mut owners: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        let Some(slots) = map["slots"].as_array() else {
+            return owners;
+        };
+        for slot in slots {
+            let Some(current) = slot.get("current").filter(|value| !value.is_null()) else {
+                continue;
+            };
+            if current["transport"]["kind"] != "rex" {
+                continue;
+            }
+            let Some(block) = current["transport"]["rex_endpoint"]["block_id"].as_str() else {
+                continue;
+            };
+            let name = slot["identity_key"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            owners.entry(block.to_owned()).or_default().push(name);
+        }
+        owners
+    }
+
     pub fn wait_agent_state(&self, owned: &OwnedRexSession, expected: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let value = self.run_ok(&["context", "--query"], Some(&owned.agent_session_id));
-            let current = value.get("result").and_then(|result| result.get("snapshot")).unwrap_or(&value);
+            let current = value
+                .get("result")
+                .and_then(|result| result.get("snapshot"))
+                .unwrap_or(&value);
             if current["agent"]["thread_state"] == expected {
-                self.evidence("agent_status", json!({"expected": expected, "agent": current["agent"]}));
+                self.evidence(
+                    "agent_status",
+                    json!({"expected": expected, "agent": current["agent"]}),
+                );
                 return current["agent"].clone();
             }
-            assert!(Instant::now() < deadline, "Rex status did not reach {expected}: {value}");
+            assert!(
+                Instant::now() < deadline,
+                "Rex status did not reach {expected}: {value}"
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
     }

@@ -434,6 +434,22 @@ impl BindingValue {
             .map_err(|error| SlotError::Invalid(error.to_string()))
     }
 
+    fn validate_for_publication(&self) -> Result<(), SlotError> {
+        self.validate()?;
+        if self.transport.kind == crate::proto::TransportKind::Rex
+            && self.transport.rex_endpoint.as_ref().is_none_or(|endpoint| {
+                endpoint.server.trim().is_empty()
+                    || endpoint.session_id.trim().is_empty()
+                    || endpoint.block_id.trim().is_empty()
+            })
+        {
+            return Err(SlotError::Invalid(
+                "Rex binding requires a complete server, session and block".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Confirm the value belongs to the given slot partition. The agent_id
     /// (session-derived carrier) is deliberately not part of this check.
     fn scope_matches(&self, key: &IdentityBindingKey) -> bool {
@@ -694,7 +710,7 @@ impl IdentityBindingSlot {
     ) -> Result<CommitOutcome, SlotError> {
         self.check_expected(expected_generation)?;
         self.validate_shape()?;
-        value.validate()?;
+        value.validate_for_publication()?;
         if !value.scope_matches(key) {
             return Err(SlotError::KeyMismatch {
                 expected: key.clone(),
@@ -845,6 +861,17 @@ fn rex_target_matches(value: &BindingValue, candidate: &crate::proto::RexCandida
             })
 }
 
+fn tmux_session_matches(value: &BindingValue, candidate: &crate::proto::TmuxCandidate) -> bool {
+    value
+        .binding
+        .tmux_endpoint
+        .as_ref()
+        .is_some_and(|endpoint| {
+            endpoint.socket_path == candidate.endpoint.socket_path
+                && endpoint.tmux_session_id == candidate.endpoint.tmux_session_id
+        })
+}
+
 impl BindingControlSet {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -937,8 +964,16 @@ impl BindingControlSet {
         // carrier registers again. Its exact current agent session resolves
         // that shared placement. A new session still needs a unique candidate.
         if let Some(rex) = facts.rex.as_ref() {
-            let session_holder = match facts.session_id.as_deref() {
-                Some(session) => unique(
+            let rank = |slot: &IdentityBindingSlot| {
+                self.slots
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate, slot))
+                    .unwrap_or(usize::MAX)
+            };
+            let session_holders = facts
+                .session_id
+                .as_deref()
+                .map(|session| {
                     scoped_currents
                         .iter()
                         .filter(|(_, value)| {
@@ -949,42 +984,81 @@ impl BindingControlSet {
                                 .is_some_and(|saved| saved.as_str() == session)
                         })
                         .map(|(slot, _)| *slot)
-                        .collect(),
-                )?,
-                None => None,
-            };
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let targets = candidates
                 .iter()
                 .filter(|(_, value)| rex_target_matches(value, rex))
                 .map(|(slot, _)| *slot)
                 .collect::<Vec<_>>();
-            let target = match session_holder {
-                Some(holder)
-                    if targets
-                        .iter()
-                        .any(|target| target.identity_key == holder.identity_key) =>
-                {
-                    Some(holder)
-                }
-                _ => unique(targets)?,
+
+            let ambiguous = || {
+                Err::<Option<&IdentityBindingSlot>, _>(
+                    "IDENTITY_MAP_AMBIGUOUS: multiple active mappings match the current caller"
+                        .into(),
+                )
             };
-            if let (Some(target), Some(session_holder)) = (target, session_holder) {
-                if target.identity_key != session_holder.identity_key {
-                    if allow_explicit_rex_rebind {
-                        return Ok(Some(session_holder));
-                    }
+
+            match (session_holders.as_slice(), targets.as_slice()) {
+                ([], []) => return Ok(None),
+                ([], [target]) => return Ok(Some(target)),
+                ([], _) => return ambiguous(),
+                ([holder], []) => return Ok(Some(holder)),
+                ([holder], [target]) if holder.identity_key == target.identity_key => {
+                    return Ok(Some(holder));
+                }
+                ([holder], [target])
+                    if allow_explicit_rex_rebind || rank(holder) < rank(target) =>
+                {
+                    return Ok(Some(holder));
+                }
+                ([_holder], [_target]) => {
                     return Err(
                         "IDENTITY_MAP_REX_TARGET_MISMATCH: the current agent session belongs to a \
                          different Rex target"
                             .into(),
                     );
                 }
-                return Ok(Some(target));
+                ([holder], _)
+                    if targets
+                        .iter()
+                        .any(|target| target.identity_key == holder.identity_key) =>
+                {
+                    return Ok(Some(holder));
+                }
+                ([holder], _) if targets.iter().all(|target| rank(holder) < rank(target)) => {
+                    return Ok(Some(holder));
+                }
+                ([_holder], _) => {
+                    return Err(
+                        "IDENTITY_MAP_REX_TARGET_MISMATCH: the current agent session belongs to a \
+                         different Rex target"
+                            .into(),
+                    );
+                }
+                (holders, []) => {
+                    if holders.len() == 1 {
+                        return Ok(Some(holders[0]));
+                    }
+                    return ambiguous();
+                }
+                (holders, [target])
+                    if holders
+                        .iter()
+                        .any(|holder| holder.identity_key == target.identity_key) =>
+                {
+                    return Ok(Some(target));
+                }
+                (holders, [target]) => {
+                    return Err(format!(
+                        "IDENTITY_ANCHOR_CONFLICT: agent session matches {} names, but Rex target belongs to {}",
+                        holders.len(),
+                        target.identity_key.name.as_str()
+                    ));
+                }
+                (_, _) => return ambiguous(),
             }
-            // A mapped agent session may legally move to a new Rex block or
-            // cross adaptors. The daemon still validates that execution fact;
-            // the block alone is only a placement candidate.
-            return Ok(target.or(session_holder));
         }
         if facts.tmux.is_some() {
             if let Some(name) = facts.tmux_session_name.as_ref() {
@@ -992,6 +1066,18 @@ impl BindingControlSet {
                     candidates
                         .iter()
                         .filter(|(_, value)| value.physical_name.as_ref() == Some(name))
+                        .map(|(slot, _)| *slot)
+                        .collect(),
+                )?;
+                if found.is_some() {
+                    return Ok(found);
+                }
+            }
+            if let Some(candidate) = facts.tmux.as_ref() {
+                let found = unique(
+                    candidates
+                        .iter()
+                        .filter(|(_, value)| tmux_session_matches(value, candidate))
                         .map(|(slot, _)| *slot)
                         .collect(),
                 )?;
@@ -1024,12 +1110,13 @@ impl BindingControlSet {
                     .iter()
                     .filter(|(_, value)| {
                         value.invocation_cwd == cwd
-                            && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
-                                crate::client::adapters::tmux::same_owned_pane(
-                                    saved,
-                                    &candidate.endpoint,
-                                )
-                            })
+                            && (tmux_session_matches(value, candidate)
+                                || value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                                    crate::client::adapters::tmux::same_owned_pane(
+                                        saved,
+                                        &candidate.endpoint,
+                                    )
+                                }))
                     })
                     .map(|(slot, _)| *slot)
                     .collect(),
@@ -1437,6 +1524,7 @@ impl BindingControlSet {
         value: BindingValue,
         expected_generation: Option<u64>,
     ) -> Result<CommitOutcome, SlotError> {
+        value.validate_for_publication()?;
         let index = self.slots.iter().position(|slot| &slot.identity_key == key);
         let index = match index {
             Some(index) => index,
@@ -1445,7 +1533,86 @@ impl BindingControlSet {
                 self.slots.len() - 1
             }
         };
-        self.slots[index].commit(key, value, expected_generation)
+        let published = value.clone();
+        let outcome = self.slots[index].commit(key, value, expected_generation)?;
+        self.retire_conflicting_currents(index, &published)?;
+        Ok(outcome)
+    }
+
+    fn retire_conflicting_currents(
+        &mut self,
+        index: usize,
+        value: &BindingValue,
+    ) -> Result<(), SlotError> {
+        if value.transport.kind != crate::proto::TransportKind::Rex {
+            return Ok(());
+        }
+        let Some(endpoint) = value.transport.rex_endpoint.as_ref() else {
+            return Ok(());
+        };
+
+        let incoming_start = value
+            .rex_execution
+            .as_ref()
+            .and_then(|execution| RexExecutionFence::from_start_id(&execution.process_start_id));
+
+        let conflicts = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(slot_index, slot)| {
+                if slot_index == &index {
+                    return false;
+                }
+                let Some(current) = slot.active_binding() else {
+                    return false;
+                };
+                if current.transport.kind != crate::proto::TransportKind::Rex {
+                    return false;
+                }
+                let Some(saved) = current.transport.rex_endpoint.as_ref() else {
+                    return false;
+                };
+                if saved.server != endpoint.server
+                    || saved.session_id != endpoint.session_id
+                    || saved.block_id != endpoint.block_id
+                {
+                    return false;
+                }
+                match (
+                    incoming_start.as_ref(),
+                    current.rex_execution_fence.as_ref(),
+                ) {
+                    (Some(incoming), Some(fence)) => {
+                        incoming.compare(fence) == Some(std::cmp::Ordering::Greater)
+                    }
+                    _ => true,
+                }
+            })
+            .map(|(slot_index, slot)| {
+                (
+                    slot_index,
+                    slot.active_binding()
+                        .expect("the filter already selected an active binding")
+                        .binding
+                        .agent_id
+                        .as_str()
+                        .to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (slot_index, _) in &conflicts {
+            self.slots[*slot_index].unregister(None)?;
+        }
+        if !conflicts.is_empty() {
+            self.effects.retain(|effect| {
+                !conflicts
+                    .iter()
+                    .any(|(_, worker)| effect.is_register() && effect.target_worker_id == *worker)
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn unregister(

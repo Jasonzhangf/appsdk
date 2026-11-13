@@ -1,6 +1,338 @@
 include!("support/tmux_cli_fixture.rs");
 
 #[test]
+fn approved_master_replaces_absent_session_on_live_server() {
+    assert_approved_master_replaces_absent_session(false);
+}
+
+#[test]
+fn approved_restore_master_replaces_absent_session_on_live_server() {
+    assert_approved_master_replaces_absent_session(true);
+}
+
+#[test]
+fn approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message() {
+    assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message(false);
+}
+
+#[test]
+fn approved_restore_master_nonfirst_successor_replaces_absent_incumbent_and_preserves_message() {
+    assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message(true);
+}
+
+fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message(
+    restore: bool,
+) {
+    let (mut fixture, incumbent) = single_pane_fixture("promote-layout-incumbent");
+    let created = tmux(
+        &fixture.tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}\t#{pane_id}",
+            "-s",
+            "promote-layout-successor",
+            "sleep 600",
+        ],
+    );
+    let created = String::from_utf8(created.stdout).unwrap();
+    let (successor_session, successor_pane) = created.trim().split_once('\t').unwrap();
+    fixture.owned_sessions.push(successor_session.to_owned());
+    let successor = Pane {
+        pane_id: successor_pane.to_owned(),
+        server_pid: incumbent.server_pid,
+        session_anchor: "promote-layout-successor-agent".into(),
+        thread_anchor: "promote-layout-successor-thread".into(),
+    };
+
+    let manifest_path = fixture
+        .root
+        .join("home/.local/state/tm-iterm/manifest.json");
+    std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    let manifest = serde_json::to_vec(&json!([
+        {
+            "binding_id":"tm_fixed_one",
+            "tab_id":"project_alpha",
+            "pane_order":"1",
+            "cwd":fixture.root,
+            "tmux_session":"promote-layout-incumbent",
+            "profile":"incumbent-profile"
+        },
+        {
+            "binding_id":"tm_fixed_five",
+            "tab_id":"project_alpha",
+            "pane_order":"5",
+            "cwd":fixture.root,
+            "tmux_session":"promote-layout-successor",
+            "profile":"successor-profile"
+        },
+        {
+            "binding_id":"overview_one",
+            "tab_id":"overview",
+            "pane_order":"1",
+            "cwd":fixture.root,
+            "tmux_session":"promote-layout-incumbent"
+        }
+    ]))
+    .unwrap();
+    std::fs::write(&manifest_path, &manifest).unwrap();
+
+    let original = fixture.registered_context(&incumbent, true);
+    let old_worker = original["identity"]["worker_id"].as_str().unwrap();
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approves initial layout incumbent",
+        ],
+        Some(&incumbent),
+    );
+    let registered = fixture.registered_context(&successor, true);
+    let successor_worker = registered["identity"]["worker_id"].as_str().unwrap();
+    let map_path = fixture.host_state.join("identity-map.json");
+    let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let successor_slot = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["current"]["binding"]["agent_id"] == successor_worker)
+        .unwrap();
+    assert_eq!(
+        successor_slot["current"]["layout_binding_id"],
+        "tm_fixed_five"
+    );
+    assert_eq!(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &successor.pane_id,
+                "#{session_name}",
+            ],
+        )
+        .stdout
+        .as_slice(),
+        b"project_alpha_5_Alice\n"
+    );
+
+    fixture.run_ok(
+        &[
+            "task",
+            "register",
+            "retained-incumbent-task",
+            "--next",
+            "continue after master replacement",
+        ],
+        Some(&incumbent),
+    );
+    let task_before = fixture.run_ok(
+        &["task", "status", "retained-incumbent-task"],
+        Some(&incumbent),
+    );
+    assert_eq!(task_before["owner"], old_worker);
+    assert_eq!(task_before["status"], "working");
+    let sent = fixture.run_ok(
+        &[
+            "sendmessage",
+            "--to",
+            old_worker,
+            "--subject",
+            "retain incumbent message",
+            "This unread message stays with the old peer.",
+        ],
+        Some(&successor),
+    );
+    let message_id = sent["msg_id"].as_str().unwrap();
+    let before = fixture.current_state_for(&fixture.root, "appserver-cli");
+    assert_eq!(before["msgs"][message_id]["state"], "pending");
+    let incumbent_session = fixture.owned_sessions[0].clone();
+    tmux(
+        &fixture.tmux_socket,
+        &["kill-session", "-t", &incumbent_session],
+    );
+
+    if restore {
+        let restored = fixture.run_context(
+            &[
+                "context",
+                "--approve-grant",
+                r#"{"action":"restore_master","authorization":"user approves position-five successor","replace_confirmed":true}"#,
+            ],
+            Some(&successor),
+        );
+        assert_eq!(restored["master"]["worker_id"], successor_worker);
+    } else {
+        let promoted = fixture.run_ok(
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "user approves position-five successor",
+            ],
+            Some(&successor),
+        );
+        assert_eq!(promoted["master"], successor_worker);
+    }
+    let status = fixture.run_ok(&["master", "status"], Some(&successor));
+    assert_eq!(status["master"]["worker_id"], successor_worker);
+    let board = fixture.run_ok(&["board", "show"], Some(&successor));
+    let masters: Vec<_> = board["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|worker| worker["role"] == "master")
+        .collect();
+    assert_eq!(masters.len(), 1, "{board}");
+    assert_eq!(masters[0]["id"], successor_worker);
+
+    let after_map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let successor_slot = after_map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == successor_worker
+        })
+        .unwrap();
+    assert_eq!(successor_slot["identity_key"]["name"], "Jenny");
+    assert_eq!(
+        successor_slot["current"]["layout_binding_id"],
+        "tm_fixed_five"
+    );
+    assert_eq!(
+        successor_slot["current"]["binding"]["session_id"],
+        registered["binding"]["session_id"]
+    );
+    assert_eq!(
+        successor_slot["current"]["binding"]["tmux_endpoint"]["pane_id"],
+        successor.pane_id
+    );
+    assert_eq!(
+        String::from_utf8(
+            tmux(
+                &fixture.tmux_socket,
+                &[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &successor.pane_id,
+                    "#{session_name}",
+                ],
+            )
+            .stdout,
+        )
+        .unwrap()
+        .trim(),
+        "project_alpha_5_Jenny"
+    );
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest);
+
+    let old_peer = fixture.run_ok(&["list"], Some(&successor));
+    assert!(old_peer.to_string().contains(old_worker), "{old_peer}");
+    let old_task = fixture.run_ok(
+        &["task", "status", "retained-incumbent-task"],
+        Some(&successor),
+    );
+    assert_eq!(old_task["id"], task_before["id"]);
+    assert_eq!(old_task["owner"], successor_worker, "{old_task}");
+    assert_eq!(old_task["status"], "working", "{old_task}");
+    assert_eq!(old_task["next_step"], task_before["next_step"]);
+    let after = fixture.current_state_for(&fixture.root, "appserver-cli");
+    assert_eq!(
+        after["tasks"]["retained-incumbent-task"]["created_by"],
+        before["tasks"]["retained-incumbent-task"]["created_by"]
+    );
+    assert_eq!(
+        after["tasks"]["retained-incumbent-task"]["next_step"],
+        before["tasks"]["retained-incumbent-task"]["next_step"]
+    );
+    assert_eq!(after["msgs"][message_id]["state"], "pending");
+    assert_eq!(
+        after["msgs"][message_id]["body"],
+        before["msgs"][message_id]["body"]
+    );
+    assert_eq!(
+        after["msgs"][message_id]["from"],
+        before["msgs"][message_id]["from"]
+    );
+    assert_eq!(after["msgs"][message_id]["to"], successor_worker);
+}
+
+fn assert_approved_master_replaces_absent_session(restore: bool) {
+    let (mut fixture, incumbent) = single_pane_fixture("promote-absent-incumbent");
+    let original = fixture.registered_context(&incumbent, true);
+    let old_worker = original["identity"]["worker_id"].as_str().unwrap();
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "user approves initial master",
+        ],
+        Some(&incumbent),
+    );
+    let old_session = fixture.owned_sessions[0].clone();
+    let created = tmux(
+        &fixture.tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}\t#{pane_id}",
+            "-s",
+            "promote-live-successor",
+            "sleep 600",
+        ],
+    );
+    let created = String::from_utf8(created.stdout).unwrap();
+    let (session, pane) = created.trim().split_once('\t').unwrap();
+    fixture.owned_sessions.push(session.to_owned());
+    let successor = Pane {
+        pane_id: pane.to_owned(),
+        server_pid: incumbent.server_pid,
+        session_anchor: "promote-successor-agent".into(),
+        thread_anchor: "promote-successor-thread".into(),
+    };
+    let registered = fixture.registered_context(&successor, true);
+    let worker = registered["identity"]["worker_id"].as_str().unwrap();
+    tmux(&fixture.tmux_socket, &["kill-session", "-t", &old_session]);
+    if restore {
+        let restored = fixture.run_context(
+            &["context", "--approve-grant",
+                r#"{"action":"restore_master","authorization":"user approves replacement of absent master","replace_confirmed":true}"#],
+            Some(&successor),
+        );
+        assert_eq!(restored["master"]["worker_id"], worker);
+    } else {
+        let promoted = fixture.run_ok(
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "user approves replacement of absent master",
+            ],
+            Some(&successor),
+        );
+        assert_eq!(promoted["master"], worker);
+    }
+    let current = fixture.run_context(&["context"], Some(&successor));
+    assert_eq!(current["master"]["worker_id"], worker);
+    assert_eq!(current["identity"]["worker_id"], worker);
+    let workers = fixture.run_ok(&["list"], Some(&successor));
+    assert!(
+        workers.to_string().contains(old_worker),
+        "old peer identity retained: {workers}"
+    );
+}
+
+#[test]
 fn context_session_reuse_and_minimal_master_approval() {
     let (mut fixture, first) = single_pane_fixture("identity-session-main");
     let daemon_pid = fixture.daemon.as_ref().unwrap().id();
@@ -610,6 +942,20 @@ fn master_authority_rejects_blank_approval_without_state_change() {
         "blank clear approval must be rejected: stdout={} stderr={}",
         String::from_utf8_lossy(&clear.stdout),
         String::from_utf8_lossy(&clear.stderr)
+    );
+    let restore = fixture.command(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"   ","replace_confirmed":true}"#,
+        ],
+        Some(&pane),
+    );
+    assert!(
+        !restore.status.success(),
+        "blank restore_master authorization must be rejected: stdout={} stderr={}",
+        String::from_utf8_lossy(&restore.stdout),
+        String::from_utf8_lossy(&restore.stderr)
     );
 
     let status = fixture.run_ok(&["master", "status"], Some(&pane));

@@ -589,15 +589,52 @@ pub fn observe_session_name(endpoint: &TmuxEndpoint) -> Result<String, String> {
 /// read-back mismatch is explicit: callers must abort the identity commit and
 /// keep the previous session name instead of persisting a half-anchor.
 /// Observe the current session name only when the endpoint is live. A missing
-/// or unreachable server yields `Ok(None)`: the caller has no live tmux anchor
+/// server yields `Ok(None)`: the caller has no live tmux anchor
 /// to move, so identity handlers skip the rename instead of failing a
 /// non-TUI/one-shot caller. Other observation failures stay explicit.
 pub fn session_name_if_live(endpoint: &TmuxEndpoint) -> Result<Option<String>, String> {
-    match observe_session_name(endpoint) {
-        Ok(name) => Ok(Some(name)),
-        Err(error) if endpoint_is_absent(&error) => Ok(None),
-        Err(error) => Err(error),
+    validate_endpoint(endpoint)?;
+    let output = match tmux_command(
+        &endpoint.socket_path,
+        &[
+            "list-sessions",
+            "-F",
+            "#{pid}|#{session_id}|#{session_name}",
+        ],
+    ) {
+        Ok(output) => output,
+        Err(error)
+            if error == format!("no server running on {}", endpoint.socket_path)
+                || error
+                    == format!(
+                        "error connecting to {} (No such file or directory)",
+                        endpoint.socket_path
+                    ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(format!("TMUX_SESSION_NAME_QUERY_FAILED: {error}")),
+    };
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|error| format!("TMUX_SESSION_NAME_QUERY_FAILED: {error}"))?;
+    for line in text.lines() {
+        let fields: Vec<_> = line.splitn(3, '|').collect();
+        if fields.len() != 3 {
+            return Err("TMUX_SESSION_NAME_QUERY_FAILED: malformed session inventory".into());
+        }
+        let pid: u32 = fields[0]
+            .parse()
+            .map_err(|_| "TMUX_SESSION_NAME_QUERY_FAILED: malformed server pid")?;
+        if pid == endpoint.server_pid && fields[1] == endpoint.tmux_session_id {
+            if fields[2].trim().is_empty() || fields[2].chars().any(char::is_control) {
+                return Err(
+                    "TMUX_SESSION_NAME_QUERY_FAILED: empty or malformed session name".into(),
+                );
+            }
+            return Ok(Some(fields[2].to_owned()));
+        }
     }
+    Ok(None)
 }
 
 /// Find a live tmux pane whose session currently carries `name`. This is used
@@ -2843,6 +2880,70 @@ int main(int argc, char **argv) {
             "tmux server {} leaked after session rename",
             server_pid
         );
+    }
+
+    #[test]
+    fn session_name_if_live_returns_none_for_absent_session_on_live_server() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let mut endpoint = tmux.endpoint();
+        assert!(session_name_if_live(&endpoint).unwrap().is_some());
+        endpoint.tmux_session_id = "$999999".into();
+        assert_eq!(session_name_if_live(&endpoint).unwrap(), None);
+    }
+
+    #[test]
+    fn session_name_if_live_keeps_a_different_server_pid_as_absence() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let mut endpoint = tmux.endpoint();
+        assert!(session_name_if_live(&endpoint).unwrap().is_some());
+        endpoint.server_pid += 1;
+        assert_eq!(session_name_if_live(&endpoint).unwrap(), None);
+    }
+
+    #[test]
+    fn session_name_if_live_keeps_missing_tmux_executable_as_an_error() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let path = std::env::temp_dir().join(format!(
+            "collab-tmux-empty-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &path);
+        let result = session_name_if_live(&endpoint);
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        std::fs::remove_dir_all(path).unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error.starts_with("TMUX_SESSION_NAME_QUERY_FAILED: start tmux:"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn session_name_if_live_keeps_inventory_command_failure_as_an_error() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let _wrapper = TmuxFailureWrapper::fail_command("list-sessions");
+
+        let error = session_name_if_live(&endpoint).unwrap_err();
+        assert!(
+            error.starts_with("TMUX_SESSION_NAME_QUERY_FAILED:"),
+            "{error}"
+        );
+        assert!(error.contains("forced list-sessions failure"), "{error}");
     }
 
     #[test]

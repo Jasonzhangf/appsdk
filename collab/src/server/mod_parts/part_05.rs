@@ -772,6 +772,68 @@ fn notification_method_for_worker(state: &State, worker_id: &str) -> &'static st
         .unwrap_or("tmux")
 }
 
+fn select_current_rex_delivery_binding(
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
+    recipient: &str,
+    proposed: &SelectedTransport,
+) -> Result<notification_contract::SelectedDeliveryBinding, String> {
+    let Some(route) = route else {
+        return Err("REX_CURRENT_BINDING_MISSING: recipient route is unavailable".into());
+    };
+    let slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)?
+        .ok_or_else(|| {
+            format!("REX_CURRENT_BINDING_MISSING: {recipient} has no current Rex binding")
+        })?;
+    let selected = notification_contract::SelectedDeliveryBinding::from_slot(slot)
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding"))?;
+    let endpoint = selected
+        .transport
+        .rex_endpoint
+        .as_ref()
+        .filter(|endpoint| {
+            !endpoint.server.trim().is_empty()
+                && !endpoint.session_id.trim().is_empty()
+                && !endpoint.block_id.trim().is_empty()
+        })
+        .ok_or_else(|| {
+            format!("REX_CURRENT_BINDING_CHANGED: {recipient} has an incomplete Rex endpoint")
+        })?;
+    if selected.transport.kind != TransportKind::Rex
+        || selected.binding.agent_id.as_str() != recipient
+        || selected.binding.project_scope != route.project_scope_id
+        || selected.binding.app_scope_id != route.app_scope_id
+        || selected.transport != *proposed
+    {
+        return Err(format!(
+            "REX_CURRENT_BINDING_CHANGED: cached transport for {recipient} is not its exact current binding"
+        ));
+    }
+    let mut owners = control.active_values().filter(|value| {
+        value.transport.kind == TransportKind::Rex
+            && value
+                .transport
+                .rex_endpoint
+                .as_ref()
+                .is_some_and(|candidate| {
+                    candidate.server == endpoint.server && candidate.block_id == endpoint.block_id
+                })
+    });
+    let unique_owner = owners.next().is_some_and(|owner| {
+        owner.binding.agent_id.as_str() == recipient
+            && owner.binding == selected.binding
+            && owner.transport == selected.transport
+    });
+    if !unique_owner || owners.next().is_some() {
+        return Err(format!(
+            "REX_BLOCK_OWNER_AMBIGUOUS: {} on {} has multiple current identities",
+            endpoint.block_id, endpoint.server
+        ));
+    }
+    Ok(selected)
+}
+
 fn attempt_tmux_notification_with_retry(
     server: &Server,
     message_id: &str,
@@ -793,6 +855,23 @@ fn attempt_tmux_notification_with_retry(
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
+    let _register_guard = if transport.kind == TransportKind::Rex {
+        match server.register_gate.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return NotificationAttempt::NotAttempted(
+                    "REX_BINDING_PUBLICATION_BUSY: retry after current binding publication".into(),
+                );
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                return NotificationAttempt::Rejected(format!(
+                    "REX_BINDING_PUBLICATION_FAILED: registration gate poisoned: {error}"
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let mut state = server.state.lock().unwrap();
     let Some(seed_id) = state.msgs.get(message_id).map(|message| message.id.clone()) else {
         return NotificationAttempt::NotAttempted("durable message not found".into());
@@ -1047,25 +1126,50 @@ fn attempt_tmux_notification_with_retry(
             "notification delivery window has not elapsed".into(),
         );
     }
-    let selected_binding = (|| -> Result<_, String> {
-        let Some(route) = server_route_scope(server, &state)? else { return Ok(None); };
-        let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
-        Ok(control.current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)?
-            .and_then(notification_contract::SelectedDeliveryBinding::from_slot)
-            .filter(|binding| binding.transport == *transport))
-    })();
-    let selected_binding = match selected_binding {
-        Ok(binding) => binding,
-        Err(error) => return NotificationAttempt::Rejected(error),
+    let selected_binding = if transport.kind == TransportKind::Rex {
+        let route = match server_route_scope(server, &state) {
+            Ok(route) => route,
+            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+        };
+        let control =
+            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control,
+                Err(error) => return NotificationAttempt::NotAttempted(error),
+            };
+        match select_current_rex_delivery_binding(&control, route.as_ref(), recipient, transport) {
+            Ok(binding) => Some(binding),
+            Err(error) => return NotificationAttempt::NotAttempted(error),
+        }
+    } else {
+        let selected = (|| -> Result<_, String> {
+            let Some(route) = server_route_scope(server, &state)? else {
+                return Ok(None);
+            };
+            let control =
+                binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
+            Ok(control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)?
+                .and_then(notification_contract::SelectedDeliveryBinding::from_slot)
+                .filter(|binding| binding.transport == *transport))
+        })();
+        match selected {
+            Ok(binding) => binding,
+            Err(error) => return NotificationAttempt::Rejected(error),
+        }
     };
     let mut attempt_events = vec![Event::WakeAttempted {
-            ids: batch.iter().map(|message| message.1.clone()).collect(),
-            attempted_ms: now,
-            retry,
-        }];
-    attempt_events.extend(batch.iter().map(|message| Event::NotificationDeliverySelected {
-        message_id: message.1.clone(), selected_binding: selected_binding.clone(),
-    }));
+        ids: batch.iter().map(|message| message.1.clone()).collect(),
+        attempted_ms: now,
+        retry,
+    }];
+    attempt_events.extend(
+        batch
+            .iter()
+            .map(|message| Event::NotificationDeliverySelected {
+                message_id: message.1.clone(),
+                selected_binding: selected_binding.clone(),
+            }),
+    );
     if let Err(error) = server.commit_locked_checked(&mut state, &attempt_events) {
         return NotificationAttempt::Rejected(error.to_string());
     }
@@ -1223,6 +1327,22 @@ fn attempt_notification_detailed_with_at(
 }
 
 fn attempt_notification_detailed_with_mode_at(
+    server: &Server,
+    message_id: &str,
+    subscription_id: &str,
+    now: i64,
+    explicit_retry: bool,
+) -> NotificationAttempt {
+    attempt_notification_detailed_with_mode_at_inner(
+        server,
+        message_id,
+        subscription_id,
+        now,
+        explicit_retry,
+    )
+}
+
+fn attempt_notification_detailed_with_mode_at_inner(
     server: &Server,
     message_id: &str,
     subscription_id: &str,
@@ -1469,6 +1589,171 @@ fn attempt_notification(server: &Server, message_id: &str, subscription_id: &str
     attempt_notification_with_at(server, message_id, subscription_id, now_ms())
 }
 
+/// Background notification owners use this entry so a proven-before-write Rex
+/// service generation change reaches the same one-time same-block recovery as
+/// synchronous Send.
+pub(crate) fn attempt_notification_detailed_with_rex_recovery(
+    server: &Arc<Server>,
+    message_id: &str,
+    subscription_id: &str,
+    now: i64,
+) -> NotificationAttempt {
+    let attempt = attempt_notification_detailed_with_mode_at_inner(
+        server,
+        message_id,
+        subscription_id,
+        now,
+        false,
+    );
+    let NotificationAttempt::Rejected(error) = &attempt else {
+        return attempt;
+    };
+    if !crate::client::adapters::rex::is_refreshable_service_change(error) {
+        return attempt;
+    }
+    let context = {
+        let state = server.state.lock().unwrap();
+        server_route_scope(server, &state)
+            .ok()
+            .flatten()
+            .and_then(|route| {
+                ProjectContext::for_registered_root_with_app(&server.root, route.app_scope_id).ok()
+            })
+    };
+    let Some(context) = context else {
+        return attempt;
+    };
+    let Ok(manager) = ProjectRuntimeManager::new(server.clone(), &server.host_paths) else {
+        return attempt;
+    };
+    let mut response = Resp::err(error.clone());
+    response.data["notification_error"] = json!(error);
+    response.data["msg_id"] = json!(message_id);
+    manager
+        .recover_rex_notification_after_service_change(
+            server,
+            Some(&context),
+            &mut response,
+        )
+        .unwrap_or(attempt)
+}
+
+impl ProjectRuntimeManager {
+    /// Recover one proven-before-write Rex notification after the bound service
+    /// generation changed. This refreshes only the same server/session/block
+    /// anchor through the existing binding-control owner, then retries the
+    /// original durable message once. Unknown post-write outcomes never enter
+    /// this path.
+    pub(crate) fn recover_rex_notification_after_service_change(
+        &self,
+        runtime: &Server,
+        project_context: Option<&ProjectContext>,
+        response: &mut Resp,
+    ) -> Option<NotificationAttempt> {
+        if response.ok {
+            return None;
+        }
+        let Some(error) = response
+            .data
+            .get("notification_error")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return None;
+        };
+        if !crate::client::adapters::rex::is_refreshable_service_change(error) {
+            return None;
+        }
+        let Some(project_context) = project_context else {
+            return None;
+        };
+        let Some(message_id) = response
+            .data
+            .get("msg_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            return None;
+        };
+        let (recipient, subscription_id) = {
+            let state = runtime.state.lock().unwrap();
+            let Some(message) = state.msgs.get(&message_id) else {
+                return None;
+            };
+            let Some(subscription_id) = state.wake_bindings.get(&message_id).cloned() else {
+                return None;
+            };
+            let failure_is_current = state
+                .notification_delivery_failures
+                .get(&message_id)
+                .is_some_and(|failure| failure.retryable && failure.error == error);
+            if !failure_is_current {
+                return None;
+            }
+            (message.to.clone(), subscription_id)
+        };
+
+        if let Err(refresh_error) =
+            self.refresh_rex_notification_binding(runtime, project_context, &recipient)
+        {
+            response.data["rex_binding_refresh"] = json!("failed");
+            response.data["rex_binding_refresh_error"] = json!(refresh_error);
+            return None;
+        }
+
+        // Refreshing the binding drops the state lock. Re-read the durable
+        // message before retrying so a concurrent Send that already recorded
+        // its own accepted or non-retryable outcome is never overwritten by
+        // this recovery path.
+        {
+            let state = runtime.state.lock().unwrap();
+            let Some(message) = state.msgs.get(&message_id) else {
+                return None;
+            };
+            let original_failure_is_still_current = state
+                .notification_delivery_failures
+                .get(&message_id)
+                .is_some_and(|failure| failure.retryable && failure.error == error);
+            if message.to != recipient
+                || message.retry_attempted
+                || state
+                    .notification_delivery_accepted
+                    .contains_key(&message_id)
+                || !original_failure_is_still_current
+            {
+                return None;
+            }
+        }
+
+        let retry = attempt_notification_detailed_with_mode_at_inner(
+            runtime,
+            &message_id,
+            &subscription_id,
+            now_ms(),
+            true,
+        );
+        let notification_method = {
+            let state = runtime.state.lock().unwrap();
+            notification_method_for_worker(&state, &recipient)
+        };
+        let mut retry_data = response.data.clone();
+        if let Some(retry_data) = retry_data.as_object_mut() {
+            for key in [
+                "notification_error",
+                "failure",
+                "repair_required",
+                "escalation",
+            ] {
+                retry_data.remove(key);
+            }
+        }
+        retry_data["rex_binding_refresh"] =
+            json!("same-server-session-block-service-generation");
+        retry_data["rex_binding_retry"] = json!("original-durable-message-once");
+        *response = notification_send_response(retry_data, true, notification_method, &retry);
+        Some(retry)
+    }
+}
+
 fn notification_send_response(
     mut data: serde_json::Value,
     subscription_present: bool,
@@ -1518,7 +1803,7 @@ fn notification_send_response(
             data["notification_error"] = json!(error);
             data["failure"] = json!("notification_delivery_failed");
             data["repair_required"] = json!(true);
-            data["escalation"] = json!(rejected_wake_escalation(notification_method));
+            data["escalation"] = json!(rejected_wake_escalation(notification_method, error));
             Resp::err_data(
                 notification_rejected_label(notification_method, &format!("{error}")),
                 data,
@@ -1556,9 +1841,18 @@ fn notification_rejected_label(notification_method: &str, error: &str) -> String
 /// CLI reader cannot repair it and a repeated send only reproduces the same
 /// failure. Other transports reach the peer through the durable mailbox, where
 /// an explicit read is the repair.
-fn rejected_wake_escalation(notification_method: &str) -> &'static str {
+fn rejected_wake_escalation(notification_method: &str, error: &str) -> &'static str {
+    let known_not_delivered = matches!(
+        crate::client::adapters::AdapterError::notification_class_from_display(error),
+        crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
+    );
+    if notification_method == "rex" && known_not_delivered {
+        return "the message is durable and this wake was not submitted; refresh the same Rex server/session/block binding, then retry the original durable message once";
+    }
     if notification_method == "dsh" {
         "the message is durable but this wake has an ambiguous submission outcome; do not retry this wake or repeat the send; restore the recipient's bound gateway native receive, then let that loop consume the durable message"
+    } else if known_not_delivered {
+        "the message is durable and this wake was not submitted; repair the selected transport, then retry the original durable message once"
     } else {
         "the message is durable but this wake has an ambiguous submission outcome; do not retry this wake, have the recipient run collab recv, and send a new message if another wake is needed"
     }

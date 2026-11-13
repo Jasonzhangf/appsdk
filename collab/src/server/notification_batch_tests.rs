@@ -1,10 +1,109 @@
 use super::*;
 use crate::proto::RexEndpoint;
 use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
-use std::sync::mpsc::{sync_channel, Receiver};
+use serde_json::Value;
+use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+fn rex_transport(
+    agent_session: &str,
+    server: &str,
+    rex_session: &str,
+    block: &str,
+) -> SelectedTransport {
+    SelectedTransport {
+        kind: TransportKind::Rex,
+        endpoint: None,
+        namespace: None,
+        session_id: Some(agent_session.into()),
+        thread_id: None,
+        tmux_endpoint: None,
+        rex_endpoint: Some(RexEndpoint {
+            server: server.into(),
+            session_id: rex_session.into(),
+            block_id: block.into(),
+            host_id: Some("host".into()),
+            instance_id: "instance".into(),
+            cwd: "/tmp".into(),
+        }),
+        capabilities: vec!["send_message_to_block".into()],
+        self_check: "test rex transport".into(),
+    }
+}
+
+fn seed_rex_route(server: &Server) -> crate::scope::RouteScope {
+    let project_scope_id =
+        crate::server::GlobalState::canonical_project_scope(&server.root).unwrap();
+    let app_scope_id = AppServerId::new("appserver-cli").unwrap();
+    server.commit(&[Event::GlobalProjectRegistered {
+        registration: ProjectRegistration::new(project_scope_id.clone(), app_scope_id.clone())
+            .unwrap(),
+    }]);
+    crate::scope::RouteScope {
+        project_scope_id,
+        app_scope_id,
+    }
+}
+
+fn rex_binding_value(
+    route: &crate::scope::RouteScope,
+    name: &str,
+    worker: &str,
+    transport: SelectedTransport,
+) -> crate::server::binding_slot::BindingValue {
+    let binding = RuntimeBinding::new_with_session(
+        route.project_scope_id.clone(),
+        route.app_scope_id.clone(),
+        crate::identity::AgentId::new(worker).unwrap(),
+        crate::identity::RuntimeId::new(format!("runtime-{name}")).unwrap(),
+        crate::identity::BindingId::new(format!("binding-{name}")).unwrap(),
+        Some(crate::identity::SessionId::new(transport.session_id.clone().unwrap()).unwrap()),
+        None,
+    )
+    .unwrap();
+    crate::server::binding_slot::BindingValue::new(binding, transport)
+}
+
+fn seed_current_rex_bindings(
+    server: &Server,
+    route: &crate::scope::RouteScope,
+    bindings: &[(&str, &str, &SelectedTransport)],
+) {
+    let mut control = crate::server::binding_slot::BindingControlSet::new();
+    for (name, worker, transport) in bindings {
+        control
+            .commit(
+                &crate::server::binding_slot::IdentityBindingKey::new(
+                    route.project_scope_id.clone(),
+                    route.app_scope_id.clone(),
+                    name.to_string(),
+                ),
+                rex_binding_value(route, name, worker, (*transport).clone()),
+                None,
+            )
+            .unwrap();
+    }
+    crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .save(&control)
+        .unwrap();
+}
+
+fn register_rex_worker(server: &Server, worker: &str, transport: &SelectedTransport) -> String {
+    let subscription_id = register_and_subscribe(server, worker);
+    {
+        let mut state = server.state.lock().unwrap();
+        state.workers.get_mut(worker).unwrap().transport = Some(transport.clone());
+        let subscription = state
+            .notification_subscriptions
+            .get_mut(&subscription_id)
+            .unwrap();
+        subscription.method = "rex".into();
+        subscription.target = notification_target(transport).unwrap().into_owned();
+    }
+    subscription_id
+}
 
 fn test_server() -> (Arc<Server>, std::path::PathBuf) {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -24,6 +123,7 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
             storage_root: root.clone(),
             state_path,
             host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
+            register_gate: Arc::new(Mutex::new(())),
             state: Mutex::new(State::default()),
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(SelectedTransport {
@@ -107,6 +207,183 @@ fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
         },
     ]);
     subscription_id
+}
+
+struct RexCliFixture {
+    dir: std::path::PathBuf,
+    old_log_dir: Option<std::ffi::OsString>,
+    old_scenario: Option<std::ffi::OsString>,
+    old_scenario_file: Option<std::ffi::OsString>,
+    old_barrier_dir: Option<std::ffi::OsString>,
+    old_blocks_file: Option<std::ffi::OsString>,
+}
+
+impl RexCliFixture {
+    fn new(root: &std::path::Path, scenario: &str) -> Self {
+        let dir = root.join("rex-cli-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        let barriers = dir.join("barriers");
+        std::fs::create_dir_all(&barriers).unwrap();
+        let scenario_file = dir.join("scenario");
+        let blocks_file = dir.join("blocks.json");
+        std::fs::write(&scenario_file, scenario).unwrap();
+        std::fs::write(
+            &blocks_file,
+            serde_json::to_vec(&serde_json::json!([
+                "block:22222222-2222-2222-2222-222222222222"
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let fixture = dir.join("rex-cli");
+        std::fs::write(
+            fixture.as_path(),
+            include_str!("../adapters/rex/fixture_rex.py"),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(fixture.as_path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        crate::client::adapters::rex::set_test_cli(Some(fixture));
+        crate::client::adapters::rex::set_test_timeout(Some(std::time::Duration::from_secs(5)));
+        let old_log_dir = std::env::var_os("REXPRIMITIVE_LOG_DIR");
+        let old_scenario = std::env::var_os("REXPRIMITIVE_SCENARIO");
+        let old_scenario_file = std::env::var_os("REXPRIMITIVE_SCENARIO_FILE");
+        let old_barrier_dir = std::env::var_os("REXPRIMITIVE_BARRIER_DIR");
+        let old_blocks_file = std::env::var_os("REXPRIMITIVE_BLOCKS_FILE");
+        std::env::set_var("REXPRIMITIVE_LOG_DIR", &dir);
+        std::env::set_var("REXPRIMITIVE_SCENARIO", scenario);
+        std::env::set_var("REXPRIMITIVE_SCENARIO_FILE", &scenario_file);
+        std::env::set_var("REXPRIMITIVE_BARRIER_DIR", &barriers);
+        std::env::set_var("REXPRIMITIVE_BLOCKS_FILE", &blocks_file);
+        Self {
+            dir,
+            old_log_dir,
+            old_scenario,
+            old_scenario_file,
+            old_barrier_dir,
+            old_blocks_file,
+        }
+    }
+
+    fn calls(&self) -> Vec<Value> {
+        let path = self.dir.join("invocations.jsonl");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(|line| serde_json::from_str(line).expect("fixture invocation JSON"))
+            .collect()
+    }
+}
+
+impl Drop for RexCliFixture {
+    fn drop(&mut self) {
+        crate::client::adapters::rex::set_test_cli(None);
+        crate::client::adapters::rex::set_test_timeout(None);
+        match self.old_log_dir.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_LOG_DIR", value),
+            None => std::env::remove_var("REXPRIMITIVE_LOG_DIR"),
+        }
+        match self.old_scenario.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_SCENARIO", value),
+            None => std::env::remove_var("REXPRIMITIVE_SCENARIO"),
+        }
+        match self.old_scenario_file.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_SCENARIO_FILE", value),
+            None => std::env::remove_var("REXPRIMITIVE_SCENARIO_FILE"),
+        }
+        match self.old_barrier_dir.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_BARRIER_DIR", value),
+            None => std::env::remove_var("REXPRIMITIVE_BARRIER_DIR"),
+        }
+        match self.old_blocks_file.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_BLOCKS_FILE", value),
+            None => std::env::remove_var("REXPRIMITIVE_BLOCKS_FILE"),
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn rex_method(call: &Value) -> String {
+    let argv = call["argv"].as_array().expect("fixture argv array");
+    for candidate in [
+        "server.status",
+        "session.list",
+        "session.list_blocks",
+        "com.superlogical.terminal.write",
+        "send-key",
+    ] {
+        if argv.iter().any(|value| value.as_str() == Some(candidate)) {
+            return candidate.into();
+        }
+    }
+    String::new()
+}
+
+fn current_rex_binding(
+    server: &Server,
+    route: &crate::scope::RouteScope,
+    worker: &str,
+) -> RuntimeBinding {
+    let control =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .unwrap();
+    let key = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, worker)
+        .unwrap()
+        .unwrap()
+        .clone();
+    control
+        .slot(&key)
+        .and_then(|slot| slot.active_binding())
+        .expect("current Rex binding")
+        .binding
+        .clone()
+}
+
+fn persist_rex_worker_binding(
+    server: &Server,
+    route: &crate::scope::RouteScope,
+    worker: &str,
+    transport: &SelectedTransport,
+) {
+    let binding = current_rex_binding(server, route, worker);
+    server.commit(&[
+        Event::GlobalRuntimeBound {
+            binding: binding.clone(),
+        },
+        Event::GlobalCurrentThreadRouteSet {
+            binding: binding.clone(),
+        },
+    ]);
+    let token = server.state.lock().unwrap().workers[worker].token.clone();
+    let runtime = crate::identity::RuntimeIdentity {
+        agent_id: binding.agent_id.clone(),
+        runtime_id: binding.runtime_id.clone(),
+        appserver_id: binding.app_scope_id.clone(),
+        binding_id: binding.binding_id.clone(),
+        session_id: binding.session_id.clone(),
+        native_thread_id: binding.native_thread_id.clone(),
+    };
+    let mut ident = crate::identity::Identity {
+        worker_id: worker.into(),
+        token,
+        project_scope: None,
+        runtime: None,
+        transport: None,
+    };
+    crate::identity::persist_current_binding_at(
+        &server.host_paths,
+        &crate::scope::Scope {
+            root: server.root.clone(),
+        },
+        &mut ident,
+        runtime,
+        transport.clone(),
+    )
+    .unwrap();
 }
 
 fn run_late_old_acceptance_interleaving(new_wake_fails: bool) {
@@ -1330,4 +1607,92 @@ fn retarget_same_target_transport_lost_preserves_schedule_and_terminal_states() 
     assert_eq!(subscription.fired_count, 1);
     assert_eq!(subscription.expires_ms, 20_000);
     assert_eq!(subscription.updated_ms, now);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_service_generation_change_is_recovered_for_qqbot_ceo_inbound() {
+    use crate::ceo::CeoGrant;
+    use crate::server::channel_envelope::ChannelEnvelope;
+
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (mut server, root) = test_server();
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink = default_appserver_notification_sink();
+    let fixture = RexCliFixture::new(&root, "service_changed");
+    let route = seed_rex_route(&server);
+    let stale = rex_transport(
+        "agent-a",
+        "unix:///tmp/rex-fixture.sock",
+        "session:11111111-1111-1111-1111-111111111111",
+        "block:22222222-2222-2222-2222-222222222222",
+    );
+    register_rex_worker(&server, "a", &stale);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &stale)]);
+    persist_rex_worker_binding(&server, &route, "a", &stale);
+    server.commit(&[Event::CeoGrantSet {
+        grant: Some(CeoGrant {
+            workspace: route.project_scope_id.as_str().into(),
+            app_scope_id: route.app_scope_id.as_str().into(),
+            name: "Alice".into(),
+            granted_by: "user".into(),
+            approval: "approved".into(),
+            granted_ms: 1,
+        }),
+    }]);
+
+    let channel_server = server.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        handle_channel_inbound_with_rex_recovery(
+            &channel_server,
+            "external:qqbot".into(),
+            "ceo".into(),
+            "QQBot".into(),
+            "qqbot ceo service-change".into(),
+            ChannelEnvelope {
+                source_channel: "qqbot".into(),
+                channel_instance: "qqbot".into(),
+                external_user: "qq-user".into(),
+                external_conversation: "conversation".into(),
+                platform_message_id: "platform-service-change".into(),
+                reply_route: "qqbot://c2c/conversation".into(),
+                recipient_address: "ceo".into(),
+                attachments: vec![],
+            },
+        )
+    })
+    .await
+    .unwrap();
+
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["notification"], "rex-input-submitted");
+    let message_id = response.data["msg_id"].as_str().unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        let message = &state.msgs[message_id];
+        assert_eq!(message.to, "a");
+        assert_eq!(message.wake_attempt_count, 2);
+        assert!(state
+            .notification_delivery_accepted
+            .contains_key(message_id));
+    }
+    let calls = fixture.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| rex_method(call) == "com.superlogical.terminal.write")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| rex_method(call) == "send-key")
+            .count(),
+        1
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }

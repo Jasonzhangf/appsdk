@@ -658,6 +658,86 @@ impl ProjectRuntimeManager {
         }
     }
 
+    /// Refresh the same Rex server/session/block binding after its service
+    /// generation changed. This keeps the business identity and execution
+    /// association on the existing current binding and only re-observes the
+    /// current Rex server status before retrying the original durable message.
+    pub(crate) fn refresh_rex_notification_binding(
+        &self,
+        runtime: &Server,
+        project_context: &ProjectContext,
+        recipient: &str,
+    ) -> Result<(), String> {
+        let control = self.binding_control_store().load()?;
+        let value = control
+            .current_for_worker(
+                &project_context.project_scope,
+                &project_context.app_scope_id,
+                recipient,
+            )?
+            .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: recipient has no current binding".to_string())?
+            .active_binding()
+            .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: recipient has no active binding".to_string())?
+            .clone();
+        if value.transport.kind != crate::proto::TransportKind::Rex {
+            return Err("REX_BINDING_REFRESH_REJECTED: recipient transport is not Rex".into());
+        }
+        let endpoint = value
+            .transport
+            .rex_endpoint
+            .as_ref()
+            .ok_or_else(|| "REX_BINDING_REFRESH_REJECTED: recipient has no Rex endpoint".to_string())?;
+        if endpoint.server.trim().is_empty()
+            || endpoint.session_id.trim().is_empty()
+            || endpoint.block_id.trim().is_empty()
+        {
+            return Err("REX_BINDING_REFRESH_REJECTED: recipient Rex endpoint is incomplete".into());
+        }
+        let candidate = crate::proto::RexCandidate {
+            server: endpoint.server.clone(),
+            session_id: endpoint.session_id.clone(),
+            block_id: endpoint.block_id.clone(),
+            cwd: endpoint.cwd.clone(),
+        };
+        let agent_session = value
+            .binding
+            .session_id
+            .as_ref()
+            .ok_or_else(|| "REX_BINDING_REFRESH_REJECTED: recipient has no agent session".to_string())?
+            .as_str();
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            "REX_BINDING_REFRESH_REJECTED: daemon runtime is unavailable".to_string()
+        })?;
+        let transport = handle
+            .block_on(crate::client::adapters::rex::verify_candidate(
+                &candidate,
+                agent_session,
+            ))
+            .map_err(|error| format!("REX_BINDING_REFRESH_REJECTED: {error}"))?;
+
+        let mut ident = {
+            let state = runtime.state.lock().unwrap();
+            self.recovered_binding_identity(project_context, &value.binding, &state)
+                .ok_or_else(|| {
+                    "REX_BINDING_REFRESH_REJECTED: mapped worker is not registered".to_string()
+                })?
+        };
+        let scope = crate::scope::Scope {
+            root: std::path::PathBuf::from(&project_context.canonical_root),
+        };
+        self.refresh_session_transport(
+            runtime,
+            &value.binding,
+            transport,
+            &mut ident,
+            &scope,
+            None,
+            None,
+        )
+        .map_err(|error| format!("REX_BINDING_REFRESH_REJECTED: {error:#}"))?;
+        Ok(())
+    }
+
     fn refresh_session_transport(
         &self,
         runtime: &Server,

@@ -23,6 +23,9 @@ impl NativeReceiver {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER");

@@ -23,6 +23,7 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
             storage_root: root.clone(),
             state_path,
             host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
+            register_gate: Arc::new(Mutex::new(())),
             state: Mutex::new(State::default()),
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(SelectedTransport {
@@ -612,6 +613,7 @@ fn restart_does_not_reset_exhausted_direct_message_attempts() {
         storage_root: root.clone(),
         state_path,
         host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(current),
         appserver_candidate_check: super::super::default_appserver_candidate_check(),
         appserver_notification_sink: super::super::default_appserver_notification_sink(),
@@ -671,6 +673,7 @@ fn restart_attempts_only_undelivered_pending() {
         storage_root: root.clone(),
         state_path,
         host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(current),
         appserver_candidate_check: super::super::default_appserver_candidate_check(),
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {

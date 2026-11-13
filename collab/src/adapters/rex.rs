@@ -23,6 +23,7 @@ pub const NOT_DELIVERED_PREFIX: &str = "REX_NOT_DELIVERED:";
 pub const UNKNOWN_PREFIX: &str = "REX_UNKNOWN:";
 pub const KNOWN_DELIVERED_PREFIX: &str = "REX_DELIVERED:";
 pub const TERMINAL_CREATOR: &str = "com.superlogical.terminal";
+const SERVICE_CHANGE_TYPED_MARKER: &str = "REX_SERVICE_CHANGED: typed=generation_mismatch";
 pub const NATIVE_REJECTION_CODES: [&str; 7] = [
     "bad_request",
     "block_not_found",
@@ -34,6 +35,19 @@ pub const NATIVE_REJECTION_CODES: [&str; 7] = [
 ];
 
 const DEFAULT_TIMEOUT_SECS: f64 = 10.0;
+
+/// True only for the adapter's own proven-before-write service-generation
+/// failure. A write or Enter result that is unknown must never match this
+/// predicate, so a queued body is never rewritten and never re-entered.
+pub fn is_refreshable_service_change(error: &str) -> bool {
+    error.contains(NOT_DELIVERED_PREFIX)
+        && error.contains("operation=server.status")
+        && error.contains("stage=BeforeWrite")
+        && error
+            .split_once("detail=")
+            .map(|(_, detail)| detail)
+            .is_some_and(|detail| detail.starts_with(SERVICE_CHANGE_TYPED_MARKER))
+}
 
 #[cfg(any(target_os = "macos", test))]
 fn installed_macos_cli(system_applications: &Path, user_home: Option<&Path>) -> PathBuf {
@@ -1074,8 +1088,13 @@ async fn verify_service_until(endpoint: &RexEndpoint, deadline: Instant) -> Resu
         .as_deref()
         .is_none_or(|host| status.get("host_id").and_then(Value::as_str) == Some(host));
     if !instance_matches || !host_matches {
-        return Err(RexError::known_not_delivered("server.status", RexInputStage::BeforeWrite,
-            "REX_SERVICE_CHANGED: the bound host or instance changed; refresh the current Rex binding"));
+        return Err(RexError::known_not_delivered(
+            "server.status",
+            RexInputStage::BeforeWrite,
+            format!(
+                "{SERVICE_CHANGE_TYPED_MARKER} the bound host or instance changed; refresh the current Rex binding"
+            ),
+        ));
     }
     Ok(())
 }
@@ -1138,7 +1157,6 @@ async fn write_text_until(
 }
 
 async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
-    verify_service_until(endpoint, deadline).await?;
     let call = run_cli(
         "send_enter",
         Path::new(&official_cli_path()),
@@ -1362,8 +1380,8 @@ pub async fn notify(
     };
     if let Err(error) = send_enter_until(endpoint, deadline).await {
         return Err(RexError {
-            operation: "notify",
-            class: NotificationDeliveryClass::Unknown,
+            operation: "send_key",
+            class: error.class,
             stage: text_stage,
             native_code: error.native_code,
             detail: error.detail,

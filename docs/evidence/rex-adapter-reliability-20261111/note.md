@@ -257,3 +257,5 @@
 - reviewer 已基于 `d390a7ae` 相对 `origin/main=56548a85` 完成整体 milestone 审查，结果无 P0、P1 或 P2。
 - 审查确认 block 是 Rex anchor；布局变化不改变 block；current owner 替换只改变该 block 的当前归属；精确 block 缺失才退役名字；通知写入、单次 Enter、同目标代际刷新、活动投影和主线通信语义均保持一致。
 - 审查输出：`docs/evidence/rex-adapter-reliability-20261111/milestone-review-20261113-final3-stdout.jsonl`。
+- 最终候选正式构建 `scripts/build-collab.sh` 通过，产物版本 `collab_build_version=0.2.0498`。
+- 真实 Rex 公开契约 `rex_public_contract`（`--ignored`）通过：4 passed，0 failed。

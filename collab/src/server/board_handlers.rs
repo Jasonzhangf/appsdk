@@ -138,7 +138,7 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         delivery_evidence: lifecycle.and_then(|record| record.delivery_evidence.clone()),
         review_evidence: lifecycle.and_then(|record| record.review_evidence.clone()),
         integration_commit: lifecycle.and_then(|record| record.integration_commit.clone()),
-        cleanup_status: if task.worktree_path.is_none() { "not_required" }
+        cleanup_status: if !task.has_owned_resources() { "not_required" }
             else if cleanup.is_some_and(|receipt| receipt.verification == CleanupVerification::Verified) { "verified" }
             else if cleanup.is_some() { "unverified" } else { "pending" }.into(),
         blocking_task: task.wait.as_ref().map(|wait| {

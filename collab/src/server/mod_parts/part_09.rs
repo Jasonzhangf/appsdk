@@ -2021,7 +2021,7 @@ fn task_view_with_identity(
 }
 
 fn task_cleanup_view(state: &State, task: &TaskRec) -> serde_json::Value {
-    let cleanup_required = task.worktree_path.is_some();
+    let cleanup_required = task.has_owned_resources();
     let cleanup_receipt = state.cleanup_receipts.get(&task.id);
     if !cleanup_required && cleanup_receipt.is_none() {
         return serde_json::Value::Null;

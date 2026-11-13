@@ -532,7 +532,7 @@ fn worktree_claim_requires_cleanup_and_cannot_cancel() {
     assert_eq!(
         cancelled.error.as_deref(),
         Some(
-            "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree; close only after merged cleanup"
+            "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree or branch; close only after merged cleanup"
         )
     );
     std::fs::remove_dir_all(root).ok();

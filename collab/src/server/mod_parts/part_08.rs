@@ -2167,7 +2167,7 @@ fn handle_task_register_with_next_locked(
         "task": task.id,
         "owner": task.owner,
         "status": task.status,
-        "cleanup": if task.worktree_path.is_some() { "pending" } else { "not_required" },
+        "cleanup": if task.has_owned_resources() { "pending" } else { "not_required" },
     }))
 }
 
@@ -2592,9 +2592,9 @@ fn task_update_locked(
         if new_status == "waiting" {
             return Resp::err("use collab task wait so responsibility and deadline are durable");
         }
-        if new_status == "cancelled" && task.worktree_path.is_some() {
+        if new_status == "cancelled" && task.has_owned_resources() {
             return Resp::err(
-                "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree; close only after merged cleanup",
+                "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree or branch; close only after merged cleanup",
             );
         }
         if !task_transition_allowed(&task.status, &new_status) {

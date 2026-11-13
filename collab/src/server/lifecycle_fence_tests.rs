@@ -166,6 +166,7 @@ fn public_details() -> crate::board::BoardTaskDetails {
             created_ms: 3,
             original_status: None,
             original_owner: None,
+        automatic_source: None,
         }),
         last_response: Some("public-response".into()),
         ..Default::default()

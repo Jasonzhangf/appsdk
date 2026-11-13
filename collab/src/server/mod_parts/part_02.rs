@@ -27,6 +27,7 @@ pub(crate) struct RegisterOuterBinding {
     /// later context name resolution will use.
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
     identity_facts: Option<crate::proto::IdentityFacts>,
+    rex_recovery: Option<crate::server::identity_context::RexRecoveryObservation>,
     /// The parsed explicit name target for this context invocation. It must
     /// reach the Register publish boundary so `restore_master`/`restore_name`
     /// publish the requested name as the first mapping instead of allocating a
@@ -42,6 +43,7 @@ impl RegisterOuterBinding {
             name_tmux_session_name: None,
             name_pane_anchor: None,
             identity_facts: None,
+            rex_recovery: None,
             name_intent: None,
         }
     }
@@ -65,6 +67,20 @@ impl RegisterOuterBinding {
 
     pub(crate) fn identity_facts(&self) -> Option<&crate::proto::IdentityFacts> {
         self.identity_facts.as_ref()
+    }
+
+    pub(crate) fn with_rex_recovery(
+        mut self,
+        recovery: Option<crate::server::identity_context::RexRecoveryObservation>,
+    ) -> Self {
+        self.rex_recovery = recovery;
+        self
+    }
+
+    pub(crate) fn rex_recovery(
+        &self,
+    ) -> Option<&crate::server::identity_context::RexRecoveryObservation> {
+        self.rex_recovery.as_ref()
     }
 
     pub(crate) fn with_name_tmux_session_name(
@@ -415,17 +431,10 @@ impl Server {
         })
     }
 
-    /// Plan the exact execution releases one incoming Register needs.
-    ///
-    /// Candidates are limited to the same project, app scope and runtime id
-    /// with a different binding id, so a release can never touch an unrelated
-    /// runtime or scope. A release also needs a valid claim: either the old
-    /// execution is the same principal as the incoming one, or the caller
-    /// carries an explicit user-authorized replacement. A retired execution
-    /// has no current worker and cannot veto the exact current claimant.
-    /// An unrelated active current on the runtime, and any active current the
-    /// caller did not authorize, stay protected.
-    /// The caller owns the register gate and the current-map snapshot.
+    /// Plan the exact execution releases needed by one incoming Register.
+    /// The caller owns the register gate and current-map snapshot. Candidates
+    /// stay inside the incoming project/app scope, and any current relation
+    /// that still protects the old principal blocks the release.
     fn register_execution_release_events(
         &self,
         state: &State,
@@ -448,42 +457,43 @@ impl Server {
             .cloned()
             .collect();
 
-        // Select only the executions this Register is allowed to release.
-        let mut releasable = Vec::new();
-        for old in candidates {
-            if old.same_principal(incoming) {
-                releasable.push(old);
-                continue;
+        for old in &candidates {
+            // Only this validated Register request can authorize replacement
+            // of a live, different claimant. Retired rows grant no authority.
+            if !old.same_principal(incoming)
+                && authorized_replace.is_none()
+                && state.workers.contains_key(old.agent_id.as_str())
+            {
+                return Err(
+                    "REGISTER_RUNTIME_RELEASE_REJECTED: releasing another claimant on the same runtime requires an explicit user-authorized replacement".into(),
+                );
             }
-            // A retired ledger row has no current worker. It is not a present
-            // identity gate. An explicit user-authorized request may likewise
-            // replace the exact same-runtime claimant it names. Only a live,
-            // unrelated claimant without that authorization stays protected.
-            if authorized_replace.is_some() || !state.workers.contains_key(old.agent_id.as_str()) {
-                releasable.push(old);
-                continue;
+            if control.active_values().any(|current| {
+                &current.binding != incoming
+                    && current.binding.same_principal(&old)
+                    && (&current.binding != old
+                        || !old.same_principal(incoming) && authorized_replace.is_none())
+            }) {
+                return Err(
+                    "REGISTER_RUNTIME_RELEASE_REJECTED: current map still protects the prior principal"
+                        .into(),
+                );
             }
-            return Err(
-                "REGISTER_RUNTIME_RELEASE_REJECTED: releasing another claimant on the same runtime requires an explicit user-authorized replacement"
-                    .into(),
-            );
         }
-        if !releasable.is_empty()
-            && control.active_values().any(|current| {
+        if !candidates.is_empty() && control.active_values().any(|current| {
                 &current.binding != incoming
                     && current.binding.project_scope == incoming.project_scope
                     && current.binding.app_scope_id == incoming.app_scope_id
                     && current.binding.runtime_id == incoming.runtime_id
-                    && !releasable.iter().any(|old| old == &current.binding)
-            })
-        {
-            return Err(
-                "REGISTER_RUNTIME_RELEASE_REJECTED: another current still owns the runtime".into(),
-            );
+                    && !candidates.iter().any(|old| old == &current.binding)
+            }) {
+                return Err(
+                    "REGISTER_RUNTIME_RELEASE_REJECTED: another current still owns the runtime"
+                        .into(),
+                );
         }
-
         let mut events = Vec::new();
-        for old in releasable {
+        for old in candidates {
             if state
                 .global
                 .lookup_master_grant_for(&old.route_scope(), &old.binding_id)
@@ -904,6 +914,7 @@ include!("part_02/commit.rs");
 #[cfg(test)]
 mod scoped_register_tests {
     use super::*;
+    use crate::identity::SessionId;
 
     fn prepared_tmux_registration() -> (Arc<ProjectRuntimeManager>, Arc<Server>, PathBuf,
         peer_tests::IsolatedTmux, PreparedRegisterEnvelope) {
@@ -1065,6 +1076,7 @@ mod scoped_register_tests {
     fn register_control_unknown_keeps_the_new_name_and_unconsumed_intent() {
         let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
         let endpoint = tmux.endpoints().remove(0);
+        let previous = crate::client::adapters::tmux::require_live_session_name(&endpoint).unwrap();
         test_hooks::fail_next_parent_sync();
         let error = manager
             .publish_register_control_before_consume(&server, &prepared, None, None, None, None)
@@ -1074,7 +1086,7 @@ mod scoped_register_tests {
         let values: Vec<_> = map.active_values().collect();
         assert_eq!(values.len(), 1);
         let name = crate::client::adapters::tmux::require_live_session_name(&endpoint).unwrap();
-        assert!(name.ends_with("_2_Alice"), "{name}");
+        assert_eq!(name, previous, "no manifest target was declared for this pane");
         assert_eq!(values[0].physical_name.as_deref(), Some(name.as_str()));
         assert_eq!(map.pending_effects().count(), 1);
         let credential = crate::identity::read_persisted(
@@ -1328,6 +1340,12 @@ mod scoped_register_tests {
             error.contains("requires an explicit user-authorized replacement"),
             "{error}"
         );
+        let released = server.register_execution_release_events(
+            &state, &control, incoming_binding, Some("Bob"),
+        ).expect("this authorized request may replace the exact live same-runtime holder");
+        assert!(released.iter().any(|event| matches!(event,
+            Event::GlobalRuntimeExecutionReleased { binding } if binding.agent_id.as_str() == "Alice"
+        )));
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1592,6 +1610,287 @@ mod scoped_register_tests {
         assert_eq!(
             first.nested_operation_id,
             changed_intent.nested_operation_id
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Build one registered project State that already holds `old` as the
+    /// exact runtime binding for `runtime_id`.
+    fn state_holding_runtime(old: &RuntimeBinding) -> State {
+        let mut state = State::default();
+        state
+            .global
+            .register_project(ProjectRegistration::new(
+                old.project_scope.clone(),
+                old.app_scope_id.clone(),
+            )
+            .unwrap())
+            .unwrap();
+        state
+            .global
+            .bind_runtime(old.clone())
+            .expect("seed the prior runtime binding");
+        state
+    }
+
+    /// Register one more current principal that still occupies `runtime_id`.
+    fn commit_runtime_current(
+        manager: &ProjectRuntimeManager,
+        transport: &SelectedTransport,
+        binding: &RuntimeBinding,
+        name: &str,
+    ) {
+        let key = crate::server::binding_slot::IdentityBindingKey::new(
+            binding.project_scope.clone(),
+            binding.app_scope_id.clone(),
+            name,
+        );
+        let mut control = manager.binding_control_store().load().unwrap();
+        control
+            .commit(
+                &key,
+                crate::server::binding_slot::BindingValue::new(
+                    binding.clone(),
+                    transport.clone(),
+                ),
+                None,
+            )
+            .unwrap();
+        manager.binding_control_store().save(&control).unwrap();
+    }
+
+    fn prepared_incoming_register(
+        old: &RuntimeBinding,
+        worker_id: &str,
+    ) -> RuntimeBinding {
+        RuntimeBinding {
+            agent_id: AgentId::new(worker_id).unwrap(),
+            binding_id: BindingId::new(format!("binding-{worker_id}")).unwrap(),
+            ..old.clone()
+        }
+    }
+
+    /// The current map still protects the prior principal while its State
+    /// binding is still the exact old generation. The plan must use the full
+    /// principal relation, so an exact-equality-only check would wrongly
+    /// release a principal the map still owns.
+    #[test]
+    fn release_planner_refuses_a_current_that_still_protects_the_prior_principal() {
+        let (server, root) = peer_tests::test_server();
+        let server = Arc::new(server);
+        let prepared = prepared(&server, &root, "rename-owner");
+        let TypedCommand::RegisterWorker { worker, binding, .. } = &prepared.typed.command;
+        let old = binding.clone();
+        let state = state_holding_runtime(&old);
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        let transport = worker.transport.clone().unwrap();
+        commit_runtime_current(&manager, &transport, &old, "Alice");
+
+        let later = RuntimeBinding {
+            agent_id: old.agent_id.clone(),
+            binding_id: BindingId::new("binding-role-current-next").unwrap(),
+            session_id: Some(SessionId::new("role-current-next-session").unwrap()),
+            native_thread_id: old.native_thread_id.clone(),
+            ..old.clone()
+        };
+        commit_runtime_current(&manager, &transport, &later, "Alice");
+        let control = manager.binding_control_store().load().unwrap();
+        assert_eq!(control.active_values().count(), 1);
+        assert!(!control.holds_current_binding(&old));
+        assert!(control.holds_current_binding(&later));
+
+        let incoming = prepared_incoming_register(&old, "role-current-intruder");
+        let error = server
+            .register_execution_release_events(&state, &control, &incoming, None)
+            .expect_err("a current map that still protects the prior principal must block release");
+        assert!(
+            error.contains("current map still protects the prior principal"),
+            "{error}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A current principal that still occupies the same runtime blocks any
+    /// release, even when it is a different principal from the incoming one.
+    #[test]
+    fn release_planner_refuses_another_current_on_the_same_runtime() {
+        let (server, root) = peer_tests::test_server();
+        let server = Arc::new(server);
+        let prepared = prepared(&server, &root, "rename-owner");
+        let TypedCommand::RegisterWorker { worker, binding, .. } = &prepared.typed.command;
+        let old = binding.clone();
+        let state = state_holding_runtime(&old);
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        let transport = worker.transport.clone().unwrap();
+        let other = RuntimeBinding {
+            agent_id: AgentId::new("role-runtime-other").unwrap(),
+            binding_id: BindingId::new("binding-role-runtime-other").unwrap(),
+            ..old.clone()
+        };
+        commit_runtime_current(&manager, &transport, &other, "Alice");
+        let control = manager.binding_control_store().load().unwrap();
+        assert!(control.active_values().all(|current| current.binding != old));
+        assert!(control.holds_current_binding(&other));
+
+        let incoming = prepared_incoming_register(&old, "role-runtime-incoming");
+        let error = server
+            .register_execution_release_events(&state, &control, &incoming, None)
+            .expect_err("another current owner of the same runtime must block release");
+        assert!(
+            error.contains("another current still owns the runtime"),
+            "{error}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn typed_register_keeps_runtime_conflict_without_a_releasable_current() {
+        let (server, root) = peer_tests::test_server();
+        let server = Arc::new(server);
+        let prepared = prepared(&server, &root, "rename-owner");
+        let TypedCommand::RegisterWorker { worker, binding, .. } = &prepared.typed.command;
+        let old = binding.clone();
+        {
+            let mut state = server.state.lock().unwrap();
+            state
+                .global
+                .register_project(ProjectRegistration::new(
+                    old.project_scope.clone(),
+                    old.app_scope_id.clone(),
+                )
+                .unwrap())
+                .unwrap();
+            state.global.bind_runtime(old.clone()).unwrap();
+        }
+
+        let transport = worker.transport.clone().unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        commit_runtime_current(&manager, &transport, &old, "Alice");
+        let control = manager.binding_control_store().load().unwrap();
+        let mut incoming = server
+            .prepare_register_envelope_for_scope(
+                "role-runtime-incoming",
+                "role-runtime-incoming-token",
+                &transport,
+                old.project_scope.clone(),
+                root.to_str().unwrap(),
+                old.app_scope_id.clone(),
+                false,
+            )
+            .unwrap();
+        if let TypedCommand::RegisterWorker { binding, .. } = &mut incoming.typed.command {
+            binding.runtime_id = old.runtime_id.clone();
+        }
+        let before_state = server.state.lock().unwrap().clone();
+        let before_map = manager.binding_control_store().load().unwrap();
+
+        let protected = server.typed_dispatch_register_with_origin(
+            incoming.typed.clone(),
+            None,
+            RegisterOrigin::Registration,
+            Some(&control),
+            None,
+        );
+        assert!(
+            protected
+                .unwrap_err()
+                .to_string()
+                .contains("current map still protects the prior principal"),
+            "a current-map principal cannot be released by another Register"
+        );
+        assert_eq!(
+            serde_json::to_value(&*server.state.lock().unwrap()).unwrap(),
+            serde_json::to_value(&before_state).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(manager.binding_control_store().load().unwrap()).unwrap(),
+            serde_json::to_value(&before_map).unwrap()
+        );
+
+        let unprotected = server.typed_dispatch_register_with_origin(
+            incoming.typed.clone(),
+            None,
+            RegisterOrigin::Registration,
+            None,
+            None,
+        );
+        assert!(
+            unprotected
+                .unwrap_err()
+                .to_string()
+                .contains("already bound as"),
+            "ordinary typed Register still preserves strong runtime uniqueness"
+        );
+        assert_eq!(
+            serde_json::to_value(&*server.state.lock().unwrap()).unwrap(),
+            serde_json::to_value(&before_state).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(manager.binding_control_store().load().unwrap()).unwrap(),
+            serde_json::to_value(&before_map).unwrap()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The release event removes exactly one runtime binding. It must not touch
+    /// the worker, tasks, messages, or subscriptions that still own their work.
+    #[test]
+    fn runtime_execution_release_keeps_worker_and_business_state() {
+        let (server, root) = peer_tests::test_server();
+        let prepared = prepared(&server, &root, "rename-owner");
+        let TypedCommand::RegisterWorker { worker, binding, .. } = &prepared.typed.command;
+        let old = binding.clone();
+        let mut state = state_holding_runtime(&old);
+        state.workers.insert(worker.id.clone(), worker.clone());
+        let scope = old.project_scope.as_str().to_owned();
+        state
+            .msgs
+            .insert(
+                "release-keeps-message".into(),
+                crate::server::Message {
+                    id: "release-keeps-message".into(),
+                    from: worker.id.clone(),
+                    to: worker.id.clone(),
+                    mtype: "notify".into(),
+                    subject: None,
+                    body: "keep".into(),
+                    state: "pending".into(),
+                    created_ms: now_ms(),
+                    in_reply_to: None,
+                    wake_attempt_count: 0,
+                    last_wake_attempt_ms: 0,
+                    retry_attempted: false,
+                },
+            );
+        let before_workers = state.workers.clone();
+        let before_msgs = state.msgs.clone();
+        state
+            .apply_checked(&Event::GlobalRuntimeExecutionReleased {
+                binding: old.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            state.global.lookup_binding(&old.binding_id),
+            None,
+            "the exact released binding is gone"
+        );
+        assert_eq!(
+            serde_json::to_value(&state.workers).unwrap(),
+            serde_json::to_value(&before_workers).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&state.msgs).unwrap(),
+            serde_json::to_value(&before_msgs).unwrap()
+        );
+        assert!(
+            state
+                .global
+                .lookup_project(&old.project_scope)
+                .is_some(),
+            "the project and its registration stay: {scope}"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -18,6 +18,11 @@ pub struct State {
         HashMap<String, HashMap<String, crate::server::name_state::NameOccupancy>>,
     /// Per-project/name durable high watermark, including released names.
     pub name_occupancy_revisions: HashMap<String, HashMap<String, u64>>,
+    /// Current reassignment schedule per project and stable name. Separate from
+    /// `name_occupancies` so releasing or replacing a holder never cancels a
+    /// wait. Missing for legacy state; never backfilled from history.
+    pub name_reassignments:
+        HashMap<String, HashMap<String, crate::server::name_state::NameReassignmentSchedule>>,
     pub task_assignments: HashMap<String, crate::server::name_state::TaskAssignment>,
     pub name_work_roles: HashMap<String, HashMap<String, crate::board::NameWorkRoles>>,
     /// Master-configured workflow templates keyed by project scope, then target
@@ -30,6 +35,8 @@ pub struct State {
         HashMap<String, HashMap<String, crate::server::name_state::AgentPresenceRecord>>,
     pub agent_activity:
         HashMap<String, HashMap<String, crate::server::name_state::AgentActivityRecord>>,
+    pub(crate) rex_executions: HashMap<String, crate::server::rex_monitor::ObservedRexExecution>,
+    pub(crate) tmux_executions: HashMap<String, crate::server::name_monitor::ObservedTmuxExecutionRecord>,
     pub msgs: HashMap<String, Message>,
     pub target_sessions: HashMap<String, String>,
     /// Reply obligations keyed by the original message id. This is the single

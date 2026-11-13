@@ -111,13 +111,21 @@ fn handle_read(
     let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
         Ok(control) => control, Err(error) => return Resp::err(error),
     };
+    let current_role = {
+        let state = server.state.lock().unwrap();
+        match role_brief_if_current(server, &state, &control, target_id) {
+            Ok(brief) => brief.map(|brief| json!({"role": brief["role"]})),
+            Err(error) => return Resp::err(error),
+        }
+    };
+    let has_current = current_role.is_some();
     let projection = worker_status_summary_with_maps(
         server,
         &control,
         &tasks,
         &msgs,
         &keepalives,
-        json!({"role": "peer"}),
+        current_role,
         &worker,
     );
     let mut projection = match projection { Ok(projection) => projection, Err(error) => return Resp::err(error) };
@@ -144,8 +152,10 @@ fn handle_read(
         } else {
             "peer"
         };
-        projection["role"] = json!(role);
-        projection["role_brief"] = json!({"role": role});
+        if has_current {
+            projection["role"] = json!(role);
+            projection["role_brief"] = json!({"role": role});
+        }
         let managed: Vec<_> = state.subagents.values().filter(|record| record.peer == target_id)
             .map(|record| json!({"id": record.id, "parent": record.parent, "peer": record.peer, "status": record.status})).collect();
         if !managed.is_empty() {

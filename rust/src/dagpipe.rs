@@ -581,7 +581,7 @@ fn design_graph_ids() -> [&'static str; 45] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 267] {
+fn design_graph_operator_names() -> [&'static str; 269] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -617,11 +617,13 @@ fn design_graph_operator_names() -> [&'static str; 267] {
         "appsdk.collab_identity.reject_missing_facts",
         "appsdk.collab_name.hold_pending",
         "appsdk.collab_name.check_claimant",
+        "appsdk.collab_name.allocate",
         "appsdk.collab_identity.anchor",
         "appsdk.collab_identity.bind_native_session",
         "appsdk.collab_identity.classify_anchor",
         "appsdk.collab_identity.record_anchor_failure",
         "appsdk.collab_binding.commit",
+        "appsdk.collab_identity.explicit_retire",
         "appsdk.collab_binding.classify_commit",
         "appsdk.collab_identity.rollback_name",
         "appsdk.collab_identity.cancel_partial",

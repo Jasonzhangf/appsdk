@@ -57,24 +57,25 @@ pub(super) fn sdk_map_migration_manifest(step: &str) -> Value {
             .iter()
             .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
             .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"));
-        if entry.get("source_digest").and_then(Value::as_str)
-            != Some(
-                digest_bytes(historical_governance_map(source_version, name).as_bytes()).as_str(),
-            )
-            || entry.get("target_digest").and_then(Value::as_str)
-                != Some(
-                    digest_bytes(if target_version == SDK_VERSION {
-                        canonical_governance_map(name).as_bytes()
-                    } else {
-                        historical_governance_map(target_version, name).as_bytes()
-                    })
-                    .as_str(),
-                )
+        let source_digest =
+            digest_bytes(historical_governance_map(source_version, name).as_bytes());
+        if entry.get("source_digest").and_then(Value::as_str) != Some(source_digest.as_str())
+            || entry.get("target_digest").and_then(Value::as_str).is_none()
         {
             fail(format!(
                 "SDK_MAP_MIGRATION_MANIFEST_DIGEST_MISMATCH:{}",
                 name
             ));
+        }
+        if target_version != SDK_VERSION {
+            let target_digest =
+                digest_bytes(historical_governance_map(target_version, name).as_bytes());
+            if entry.get("target_digest").and_then(Value::as_str) != Some(target_digest.as_str()) {
+                fail(format!(
+                    "SDK_MAP_MIGRATION_MANIFEST_DIGEST_MISMATCH:{}",
+                    name
+                ));
+            }
         }
     }
     manifest

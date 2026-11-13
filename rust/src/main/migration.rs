@@ -504,6 +504,10 @@ pub(super) fn sdk_map_migration_target_content(manifest: &Value, name: &str) -> 
     }
 }
 
+pub(super) fn sdk_map_migration_target_digest(manifest: &Value, name: &str) -> String {
+    digest_bytes(sdk_map_migration_target_content(manifest, name).as_bytes())
+}
+
 pub(super) fn sdk_map_migration_checks_live_target(step: &str) -> bool {
     let manifest = sdk_map_migration_manifest(step);
     let (_, target_version) = sdk_map_migration_manifest_versions(&manifest);
@@ -512,12 +516,17 @@ pub(super) fn sdk_map_migration_checks_live_target(step: &str) -> bool {
 
 fn live_maps_match(root: &Path, manifest: &Value, field: &str) -> bool {
     GOVERNANCE_MAP_NAMES.iter().all(|name| {
-        file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-            == record_str(
+        let expected = match field {
+            "source_digest" => record_str(
                 sdk_map_migration_entry(manifest, name),
-                &format!("/{}", field),
+                "/source_digest",
                 "sdk-map-migration",
             )
+            .to_string(),
+            "target_digest" => sdk_map_migration_target_digest(manifest, name),
+            _ => fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"),
+        };
+        file_sha256(&root.join(".appsdk/maps").join(name), "governance_map") == expected
     })
 }
 
@@ -530,11 +539,7 @@ fn live_map_unreconciled_detail(
         .iter()
         .find(|name| {
             let live = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
-            let current_target = record_str(
-                sdk_map_migration_entry(manifest, name),
-                "/target_digest",
-                "sdk-map-migration",
-            );
+            let current_target = sdk_map_migration_target_digest(manifest, name);
             let recorded_target = record.and_then(|record| {
                 record
                     .get("maps")
@@ -606,12 +611,12 @@ fn final_live_target_accepts(
     live_digest: &str,
     entry: &Value,
     declared: &Value,
+    current_target: &str,
     canonical_source: &Value,
     canonical_target: &Value,
     explicit_custom_source: bool,
     explicit_custom_target: bool,
 ) -> bool {
-    let current_target = record_str(declared, "/target_digest", "sdk-map-migration");
     let current_target_is_authorized = bundle_transition
         && live_digest == current_target
         && explicit_custom_source
@@ -619,6 +624,7 @@ fn final_live_target_accepts(
         && Some(canonical_source) == declared.get("source_digest")
         && Some(canonical_target) == entry.get("target_digest");
     live_digest == record_str(entry, "/target_digest", "sdk-migration-map")
+        || (!explicit_custom_source && !explicit_custom_target && live_digest == current_target)
         || current_target_is_authorized
 }
 
@@ -667,8 +673,9 @@ fn assert_projected_live_targets(
         let explicit_custom_target = entry
             .get("canonical_target_digest")
             .is_some_and(|value| !value.is_null());
+        let current_target = sdk_map_migration_target_digest(manifest, name);
         let projected_digest = if installs_canonical_target {
-            record_str(declared, "/target_digest", "sdk-map-migration").to_string()
+            current_target.clone()
         } else {
             file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
         };
@@ -677,6 +684,7 @@ fn assert_projected_live_targets(
             &projected_digest,
             entry,
             declared,
+            &current_target,
             canonical_source,
             canonical_target,
             explicit_custom_source,
@@ -963,6 +971,7 @@ pub(super) fn assert_sdk_migration_record(
         let explicit_custom_target = entry
             .get("canonical_target_digest")
             .is_some_and(|value| !value.is_null());
+        let current_target = sdk_map_migration_target_digest(&manifest, name);
         let actual_source = entry
             .get("source_digest")
             .and_then(Value::as_str)
@@ -1031,6 +1040,9 @@ pub(super) fn assert_sdk_migration_record(
                     && canonical_target.as_str() == Some(actual_target))
         } else {
             declared.get("target_digest").and_then(Value::as_str) == Some(actual_target)
+                || (!explicit_custom_source
+                    && !explicit_custom_target
+                    && actual_target == current_target)
                 || legacy_historical_target_authorized
         };
         if !actual_target_bound {
@@ -1068,6 +1080,7 @@ pub(super) fn assert_sdk_migration_record(
                 &live_digest,
                 entry,
                 declared,
+                &current_target,
                 canonical_source,
                 canonical_target,
                 explicit_custom_source,
@@ -1137,11 +1150,7 @@ pub(super) fn install_governance_maps(root: &Path, step: &str, force: bool) {
             "SDK_MAP_MIGRATION_WRITE_FAILED",
         );
         if file_sha256(&target, "governance_map")
-            != record_str(
-                sdk_map_migration_entry(&manifest, name),
-                "/target_digest",
-                "sdk-map-migration",
-            )
+            != sdk_map_migration_target_digest(&manifest, name)
         {
             fail(format!("SDK_MAP_MIGRATION_TARGET_MISMATCH:{}", name));
         }
@@ -1285,10 +1294,11 @@ pub(super) fn migrate_governance_maps(root: &Path, project: &Value, step: &str) 
             "SDK_MAP_MIGRATION_WRITE_FAILED",
         );
         let project_map_hash = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+        let effective_target_digest = sdk_map_migration_target_digest(&manifest, name);
         map_records.push(serde_json::json!({
             "name": name,
             "source_digest": if canonical_source_matches { entry["source_digest"].clone() } else { Value::String(project_map_hash.clone()) },
-            "target_digest": if canonical_source_matches { entry["target_digest"].clone() } else { Value::String(project_map_hash) },
+            "target_digest": if canonical_source_matches { Value::String(effective_target_digest) } else { Value::String(project_map_hash) },
             "canonical_source_digest": if canonical_source_matches { Value::Null } else { entry["source_digest"].clone() },
             "canonical_target_digest": if canonical_source_matches { Value::Null } else { entry["target_digest"].clone() },
             "snapshot_path": format!(".appsdk/migrations/{step}/maps/{}", name)

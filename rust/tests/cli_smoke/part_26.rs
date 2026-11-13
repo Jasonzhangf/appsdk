@@ -861,10 +861,26 @@ fn pin_lock_replays_canonical_current_record_from_0014_source() {
     for name in CURRENT_MIGRATION_MAPS {
         assert_eq!(
             file_digest(&root.join(".appsdk/maps").join(name)),
-            current_step_declared(name, "target_digest"),
+            digest(&repo_relative_text(&format!("contracts/maps/{name}"))),
             "live map {name} was not migrated to the canonical target"
         );
     }
+    assert_eq!(fs::read_to_string(&record_path).unwrap(), original_record);
+    // The retained declaration-target record must also replay after its live
+    // maps have reached the current embedded target, without rewriting history.
+    let current_maps = snapshot_paths(&root, &[".appsdk/maps"]);
+    let repeated = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert_paths_unchanged(&root, &[".appsdk/maps"], &current_maps);
     assert_eq!(fs::read_to_string(&record_path).unwrap(), original_record);
     fs::remove_dir_all(root).unwrap();
 }

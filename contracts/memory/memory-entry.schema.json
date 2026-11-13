@@ -18,7 +18,168 @@
     "importance": {"type": "integer", "minimum": 0, "maximum": 100},
     "layer": {"type": "integer", "minimum": 1, "maximum": 3},
     "created_at": {"type": "string"},
-    "updated_at": {"type": "string"}
+    "updated_at": {"type": "string"},
+    "entry_kind": {"enum": ["fact", "rule"]},
+    "rule_control": {"$ref": "#/$defs/rule_control"}
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {"entry_kind": {"const": "fact"}},
+        "required": ["entry_kind"]
+      },
+      "then": {"not": {"required": ["rule_control"]}}
+    }
+  ],
+  "$defs": {
+    "rule_control": {
+      "type": "object",
+      "required": ["revision", "clause"],
+      "additionalProperties": false,
+      "properties": {
+        "revision": {"type": "integer", "minimum": 1},
+        "clause": {"$ref": "#/$defs/rule_clause"},
+        "approval": {"$ref": "#/$defs/rule_approval"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "approval": {
+                "properties": {"state": {"const": "approved"}},
+                "required": ["state"]
+              }
+            },
+            "required": ["approval"]
+          },
+          "then": {
+            "properties": {
+              "clause": {"$ref": "#/$defs/approved_rule_clause"}
+            }
+          }
+        }
+      ]
+    },
+    "rule_clause": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clause_id": {"type": "string", "minLength": 1},
+        "axis": {"enum": ["object", "behavior", "relation"]},
+        "axis_id": {"type": "string", "minLength": 1},
+        "scope": {"type": "string", "minLength": 1},
+        "rule": {"type": "string", "minLength": 1},
+        "scenario": {"type": "string", "minLength": 1},
+        "trigger": {"type": "string", "minLength": 1},
+        "allowed_actions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "forbidden_actions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "state_before": {"type": "string", "minLength": 1},
+        "state_after": {"type": "string", "minLength": 1},
+        "effects": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "owner": {"type": "string", "minLength": 1},
+        "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "governance": {"$ref": "#/$defs/rule_clause_governance"}
+      }
+    },
+    "approved_rule_clause": {
+      "allOf": [
+        {"$ref": "#/$defs/rule_clause"},
+        {
+          "required": [
+            "clause_id",
+            "axis",
+            "axis_id",
+            "scope",
+            "scenario",
+            "trigger",
+            "allowed_actions",
+            "forbidden_actions",
+            "state_before",
+            "state_after",
+            "effects",
+            "owner",
+            "evidence",
+            "governance"
+          ]
+        }
+      ]
+    },
+    "rule_clause_governance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "edge": {"type": "string", "minLength": 1},
+        "gate_kind": {
+          "enum": [
+            "identity",
+            "attribute",
+            "precondition",
+            "transition",
+            "relation",
+            "terminal",
+            "effect"
+          ]
+        },
+        "check": {"type": "string", "minLength": 1},
+        "allow_case": {"type": "string", "minLength": 1},
+        "deny_case": {"type": "string", "minLength": 1},
+        "observation": {"type": "string", "minLength": 1}
+      }
+    },
+    "rule_approval": {
+      "type": "object",
+      "required": ["state"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {"enum": ["candidate", "approved"]},
+        "role": {"const": "user"},
+        "scope": {"$ref": "#/$defs/approval_scope"},
+        "entry_id": {"type": "string", "minLength": 1},
+        "revision": {"type": "integer", "minimum": 1},
+        "source": {"type": "string", "minLength": 1},
+        "text": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"state": {"const": "approved"}},
+            "required": ["state"]
+          },
+          "then": {
+            "required": [
+              "role",
+              "scope",
+              "entry_id",
+              "revision",
+              "source",
+              "text"
+            ]
+          }
+        }
+      ]
+    },
+    "approval_scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "root"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "project"},
+            "root": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "home"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "global"},
+            "home": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    }
+  }
 }

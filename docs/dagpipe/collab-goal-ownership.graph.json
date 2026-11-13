@@ -18,13 +18,13 @@
     },
     {
       "id":"执行本人目标转换","operator":"appsdk.collab_goal.apply_transition","operator_version":"1",
-      "description":"校验目标范围、任务版本、完整长程内容与明确周期。任务派发先比较改派前后的符号化 schedule selection；选择未变时不解析旧绑定。显式 WaitingAssignment 不回退旧 owner，新邀请仍优先。撤回邀请只暴露未变的历史执行归属且历史名字无 active binding 时保留原计划；store、scope 和歧义错误仍传播。新目标的绑定与 transport 严格校验。读取不写记录。重试、内容修改和同名换载体保留订阅ID、已消费次数和有效期。取消和关闭只结束该goal的有限计划，终态不被普通恢复复活。拒绝在提交前返回同一结果出口。",
+      "description":"任务调度先比较符号化执行选择。仅 policy、邀请或撤回元数据变化不移动已有订阅，不要求旧 holder 可解析。WaitingAssignment 选择空执行者并保留待接续记录。接受提交新归属后，只校验新目标，使用同一 control snapshot 迁移原订阅并沿既有路径退役重复项。保留 ID、created、trigger、interval、repeat、expiry 和 fired count。终止、显式 goal 变更、当前已声明的续订条件及错误传播保持；邀请不构成续订条件。",
       "inputs":["owned_goal"],"output":{"id":"goal_transition_request","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
     {
       "id":"收敛本人目标调度","operator":"appsdk.collab_goal.reconcile_schedule","operator_version":"1",
-      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。派发把邀请或执行归属、任务单内容和目标订阅事件在同一事务提交，容量或保存失败不留下部分派发。重复收敛保留进度。任务结束抑制该订阅尚未接受的pending wake，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
+      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。接受提交执行归属、任务单内容和目标订阅事件，容量或保存失败不留下部分派发。邀请不迁移或续订已有任务订阅。重复收敛保留进度。任务结束抑制该订阅尚未接受的pending wake，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
       "inputs":["goal_transition_request"],"output":{"id":"goal_transition_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },

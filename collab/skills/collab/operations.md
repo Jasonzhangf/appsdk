@@ -1062,8 +1062,9 @@ maintain a separate role prompt:
 
 The default identity is peer. Master authority is explicit and
 user-authorized: an approved `master promote` replaces the recorded holder,
-and delegation is accepted only from the current master grant holder and
-records that handoff. Registration, a process, inferred `/goal`, or
+and delegation requires the current master grant holder plus this handoff's
+explicit user approval. Existing legitimate roles recover with their current name.
+Registration, a process, inferred `/goal`, or
 `role_brief` never silently creates master authority.
 
 On trouble, apply Registered patrol duties: investigate and promptly report
@@ -1656,7 +1657,8 @@ Escalation routing is explicit:
   for this exact project, record it with `collab master promote --approval
   "<user text>"`; the approved promote atomically replaces any recorded holder
   and is independent of the incumbent's or the candidate's liveness. Only the
-  current master grant holder may `collab master delegate <peer>`. An
+  current master grant holder may route an explicitly approved handoff with
+  `collab master delegate <peer> --approval "<user text>"`. An
   authenticated peer with explicit approval may `collab master clear
   --approval "<user text>"` to remove the scoped grant; the caller does not
   need to be the master first. An internal init adapter result alone never
@@ -1948,7 +1950,7 @@ is an observation, never task or control truth.
 | Inspect current master (operator diagnostic; also in `collab context`) | `collab master status` |
 | Replace the current master with an explicitly approved promote | `collab master promote --approval "<user text>"` |
 | Clear the current master authority with explicit approval | `collab master clear --approval "<user text>"` |
-| Delegate master authority to another peer (current master only) | `collab master delegate <peer>` |
+| Delegate master authority with explicit user approval (current master only) | `collab master delegate <peer> --approval "<user text>"` |
 | Split work to a registered peer | `collab sendmessage --to <peer> --subject <topic> "<assignment with delivery and test conditions>"` |
 | Request blocker verification from the current master | `collab sendmessage --to <master> --subject blocker "<task_id; failure evidence; attempts/results; alternatives; decision/resume condition; cause/fix if known, otherwise unknown>"` |
 | End your own finite goal schedule | `appsdk goal cancel` (task-owned schedules end with task closure) |
@@ -2286,7 +2288,8 @@ claim an independent goal or infer master authority.
   or assigned states; the current holder controls independent of its transport
   liveness. An explicitly user-approved `collab master promote` replaces the
   recorded holder, and only the current master grant holder may
-  `collab master delegate`. Independent peers may
+  `collab master delegate <peer> --approval "<user text>"` for that explicit
+  human-authorized handoff. Independent peers may
   decline a master collaboration invite. Master splits by dependency then
   unique write scope, offers long-horizon work to a consenting peer through the
   public board with unambiguous delivery and test conditions, and keeps

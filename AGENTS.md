@@ -97,8 +97,11 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   sessionID 并绑定，不使用 tmux session `$N` 代替 agent sessionID。
   名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递和任务锚点：第一次
   绑定分配固定名字，后续绑定与恢复可显式继承已有名字，新注册为新会话新增名字，
-  旧名字在旧持有者离线或获得用户授权时可顶替。TUI 首次绑定把当前 tmux session
-  改名为角色注册名并读回确认；改名失败不提交身份，持久化失败回滚原名。Codex
+  旧名字在旧持有者离线或获得用户授权时可顶替；被顶替旧持有者再次普通 context
+  时另行取可用名字，不自动生成 companion 或夺回。TUI 首次绑定优先将当前 tmux
+  session 改名为角色注册名并读回实际结果；必需位置条件失败不提交身份，可选
+  物理效果未完成时保留已发布身份与通信并返回真实 incomplete，不回滚基础身份。
+  Codex
   Desktop 按 agent sessionID、DSH 按 gateway sessionID 承载传输，两者不执行 tmux
   改名。旧版本按名字一次性迁移后，身份恢复不依赖旧 operation journal。
   名字仍归当前工作者而 sessionID 变化时，daemon 更新该名字的 sessionID，并自动
@@ -117,6 +120,14 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   本次明确用户恢复授权先于历史歧义处理；同项目/app/session 后提交的注册替换旧
   执行载体，不停止旧进程，不影响其他 session。不同 session 在线占名仍沿本次
   用户确认规则；已有授权不重复索取。
+
+  身份丢失、普通名字退役、任务重派和消息交接的完整边界由
+  [Collab 身份生命周期一致性合同](docs/design/collab-identity-lifecycle-consistency.md)
+  承载。B2 事实不足必须列出具体缺失或冲突；daemon 确定丢失后固定等待十五分钟；
+  新 owner 接受且 daemon 提交任务归属才完成派发；项目 master 只使用 Jenny。
+  T2-M 与 E3 已批准。T2-M 只约束 daemon 自动重派等待十五分钟。manager 可按现有
+  合法入口提前邀请。接受并提交后才转任务归属。E3 释放 Jenny 当前绑定和该 holder
+  的 master grant。Jenny 保留 master 专用名和恢复入口。E3 执行验收尚未交回。
 - 工作角色（如 designer、reviewer）按项目和稳定名字持久化，可多选；它们不改变
   master/peer 职责或授权。用户可在注册时声明，也可让当前 master 指派。
   分工按工作类别逐项继承项目默认、目标默认和任务明确字段，并物化到任务。

@@ -349,6 +349,7 @@ fn current_state_preserves_invitation_and_its_capacity_reservation() {
                     created_ms: now_ms(),
                     original_status: None,
                     original_owner: None,
+                    automatic_source: None,
                 }),
                 ..crate::board::BoardTaskDetails::default()
             },
@@ -677,6 +678,331 @@ fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
     );
     drop(state);
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn task_view_with_identity_follows_current_name_and_preserves_closed_history() {
+    let (server, root, route) = board_name_fixture();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        let open =
+            task_view_with_identity(&state, &control, Some(&route), &state.tasks["named-work"])
+                .unwrap();
+        assert_eq!(open["owner_name"], "Alice");
+        assert_eq!(open["owner"], "old");
+        assert_eq!(open["owner_session_id"], "session-old");
+
+        let mut closed = state.tasks["named-work"].clone();
+        closed.status = "closed".into();
+        let closed = task_view_with_identity(&state, &control, Some(&route), &closed).unwrap();
+        assert_eq!(closed["owner_name"], "Alice");
+        assert_eq!(closed["owner"], "old");
+        assert_eq!(closed["owner_session_id"], "session-old");
+    }
+
+    let source = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "current")
+        .unwrap()
+        .unwrap();
+    let value = control
+        .slot(source)
+        .unwrap()
+        .active_binding()
+        .unwrap()
+        .clone();
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: binding_slot::IdentityBindingKey::new(
+                route.project_scope_id.clone(),
+                route.app_scope_id.clone(),
+                "Alice",
+            ),
+            value,
+            source_names: vec![source.name.clone()],
+            expected_generation: None,
+        })
+        .unwrap();
+    let control = store.load().unwrap();
+    let state = server.state.lock().unwrap();
+    let open = task_view_with_identity(&state, &control, Some(&route), &state.tasks["named-work"])
+        .unwrap();
+    assert_eq!(open["owner_name"], "Alice");
+    assert_eq!(open["owner"], "current");
+    assert_eq!(open["owner_session_id"], "session-current");
+
+    let mut closed = state.tasks["named-work"].clone();
+    closed.status = "closed".into();
+    let closed = task_view_with_identity(&state, &control, Some(&route), &closed).unwrap();
+    assert_eq!(closed["owner"], "old");
+    assert_eq!(closed["owner_session_id"], "session-old");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_view_with_identity_preserves_legacy_and_empty_holder_cases() {
+    let (server, root, route) = board_name_fixture();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let mut state = server.state.lock().unwrap();
+    state.task_assignments.remove("named-work");
+    let legacy =
+        task_view_with_identity(&state, &control, Some(&route), &state.tasks["named-work"])
+            .unwrap();
+    assert_eq!(legacy["owner"], "old");
+    assert!(legacy["owner_name"].is_null());
+    assert!(legacy["owner_session_id"].is_null());
+
+    state.task_assignments.insert(
+        "named-work".into(),
+        crate::server::name_state::TaskAssignment {
+            task_id: "named-work".into(),
+            name: "Alice".into(),
+            session_id: "recorded-session".into(),
+            assignment_revision: 1,
+            reflow: None,
+            updated_ms: 1,
+        },
+    );
+    let empty = task_view_with_identity(
+        &state,
+        &binding_slot::BindingControlSet::default(),
+        Some(&route),
+        &state.tasks["named-work"],
+    )
+    .unwrap();
+    assert_eq!(empty["owner_name"], "Alice");
+    assert_eq!(empty["owner"], "");
+    assert!(empty["owner_session_id"].is_null());
+
+    let missing_route = task_view_with_identity(
+        &state,
+        &binding_slot::BindingControlSet::default(),
+        None,
+        &state.tasks["named-work"],
+    )
+    .unwrap_err();
+    assert!(
+        missing_route.contains("TASK_ROUTE_SCOPE_REQUIRED"),
+        "{missing_route}"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_view_with_identity_propagates_ambiguous_current_map() {
+    let (server, root, route) = board_name_fixture();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let key = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "old")
+        .unwrap()
+        .unwrap()
+        .clone();
+    let slot = control.slot(&key).unwrap().clone();
+    let ambiguous = binding_slot::BindingControlSet::from_slots(vec![slot.clone(), slot]);
+    let state = server.state.lock().unwrap();
+    let error =
+        task_view_with_identity(&state, &ambiguous, Some(&route), &state.tasks["named-work"])
+            .unwrap_err();
+    assert!(error.contains("IDENTITY_MAP_AMBIGUOUS"), "{error}");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn dispatch_without_state_mutation(server: &Arc<Server>, req: Req, label: &str) -> Resp {
+    let state_before = serde_json::to_vec(&*server.state.lock().unwrap()).unwrap();
+    let identity_path = server
+        .host_paths
+        .state_root()
+        .join(binding_store::BINDING_CONTROL_FILE);
+    let identity_before = std::fs::read(&identity_path).unwrap();
+
+    let response = dispatch_with_route_context(server, req, None);
+
+    let state_after = serde_json::to_vec(&*server.state.lock().unwrap()).unwrap();
+    let identity_after = std::fs::read(&identity_path).unwrap();
+    assert_eq!(state_after, state_before, "{label} mutated State");
+    assert_eq!(
+        identity_after, identity_before,
+        "{label} mutated identity-map.json"
+    );
+    response
+}
+
+fn assert_named_work_projection(
+    view: &serde_json::Value,
+    owner_name: &str,
+    owner: &str,
+    session_id: Option<&str>,
+) {
+    assert_eq!(view["id"], "named-work", "{view}");
+    assert_eq!(view["owner_name"], owner_name, "{view}");
+    assert_eq!(view["owner"], owner, "{view}");
+    match session_id {
+        Some(session_id) => assert_eq!(view["owner_session_id"], session_id, "{view}"),
+        None => assert!(view["owner_session_id"].is_null(), "{view}"),
+    }
+}
+
+fn named_work_list_row(response: &Resp, label: &str) -> serde_json::Value {
+    response.data["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "named-work")
+        .unwrap_or_else(|| panic!("{label} omitted named-work: {response:?}"))
+        .clone()
+}
+
+#[test]
+fn task_registry_public_queries_do_not_mutate_state() {
+    let (server, root, route) = board_name_fixture();
+    let server = Arc::new(server);
+    for worker in server.state.lock().unwrap().workers.values_mut() {
+        worker.transport = None;
+    }
+    let task_ids = {
+        let state = server.state.lock().unwrap();
+        let mut task_ids: Vec<String> = state.tasks.keys().cloned().collect();
+        task_ids.sort();
+        task_ids
+    };
+    assert_eq!(task_ids, ["named-work"]);
+
+    for task_id in &task_ids {
+        let label = format!("current-holder task status {task_id}");
+        let response = dispatch_without_state_mutation(
+            &server,
+            Req::TaskStatus {
+                task_id: Some(task_id.clone()),
+            },
+            &label,
+        );
+        assert!(response.ok, "{response:?}");
+        assert_named_work_projection(&response.data, "Alice", "old", Some("session-old"));
+    }
+
+    let response = dispatch_without_state_mutation(
+        &server,
+        Req::TaskStatus { task_id: None },
+        "current-holder task status list",
+    );
+    assert!(response.ok, "{response:?}");
+    assert_named_work_projection(
+        &named_work_list_row(&response, "current-holder task status list"),
+        "Alice",
+        "old",
+        Some("session-old"),
+    );
+
+    let response =
+        dispatch_without_state_mutation(&server, Req::StatusAll, "current-holder status --all");
+    assert!(response.ok, "{response:?}");
+    assert_named_work_projection(
+        &named_work_list_row(&response, "current-holder status --all"),
+        "Alice",
+        "old",
+        Some("session-old"),
+    );
+
+    binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .commit(binding_store::ControlChange::Unregister {
+            key: binding_slot::IdentityBindingKey::new(
+                route.project_scope_id.clone(),
+                route.app_scope_id.clone(),
+                "Alice",
+            ),
+            expected_generation: None,
+        })
+        .unwrap();
+
+    for task_id in &task_ids {
+        let label = format!("no-holder task status {task_id}");
+        let response = dispatch_without_state_mutation(
+            &server,
+            Req::TaskStatus {
+                task_id: Some(task_id.clone()),
+            },
+            &label,
+        );
+        assert!(response.ok, "{response:?}");
+        assert_named_work_projection(&response.data, "Alice", "", None);
+    }
+
+    let response = dispatch_without_state_mutation(
+        &server,
+        Req::TaskStatus { task_id: None },
+        "no-holder task status list",
+    );
+    assert!(response.ok, "{response:?}");
+    assert_named_work_projection(
+        &named_work_list_row(&response, "no-holder task status list"),
+        "Alice",
+        "",
+        None,
+    );
+
+    let response =
+        dispatch_without_state_mutation(&server, Req::StatusAll, "no-holder status --all");
+    assert!(response.ok, "{response:?}");
+    assert_named_work_projection(
+        &named_work_list_row(&response, "no-holder status --all"),
+        "Alice",
+        "",
+        None,
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_conflicts_keeps_membership_and_projects_current_holder() {
+    let (server, root, route) = board_name_fixture();
+    {
+        let mut state = server.state.lock().unwrap();
+        state.tasks.get_mut("named-work").unwrap().feature_id = Some("registry-conflict".into());
+    }
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let source = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "current")
+        .unwrap()
+        .unwrap();
+    let value = control
+        .slot(source)
+        .unwrap()
+        .active_binding()
+        .unwrap()
+        .clone();
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: binding_slot::IdentityBindingKey::new(
+                route.project_scope_id.clone(),
+                route.app_scope_id.clone(),
+                "Alice",
+            ),
+            value,
+            source_names: vec![source.name.clone()],
+            expected_generation: None,
+        })
+        .unwrap();
+
+    let response = task_conflicts(&server, Some("registry-conflict".into()), None);
+    assert!(response.ok, "{:?}", response.error);
+    let conflicts = response.data["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1, "{:?}", response.data);
+    assert_eq!(conflicts[0]["id"], "named-work");
+    assert_eq!(conflicts[0]["owner_name"], "Alice");
+    assert_eq!(conflicts[0]["owner"], "current");
+    assert_eq!(conflicts[0]["owner_session_id"], "session-current");
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -77,6 +77,27 @@ fn master_authority_revoke_events(state: &State, route_scope: &RouteScope) -> Ve
         .collect()
 }
 
+/// Release only the grant carried by this exact source binding and holder.
+/// The source-effect owner checks the map generation/current before calling.
+fn master_authority_revoke_binding_events(state: &State, binding: &RuntimeBinding) -> Vec<Event> {
+    state
+        .global
+        .lookup_project_for_route(&binding.route_scope())
+        .into_iter()
+        .flat_map(|project| project.master_grants.values())
+        .filter(|grant| {
+            grant.project_scope == binding.project_scope
+                && grant.app_scope_id == binding.app_scope_id
+                && grant.binding_id == binding.binding_id
+                && grant.agent_id == binding.agent_id
+        })
+        .map(|grant| Event::GlobalMasterRevoked {
+            project_scope: grant.project_scope.clone(),
+            binding_id: grant.binding_id.clone(),
+        })
+        .collect()
+}
+
 /// Finds the bindings that an incoming registration reclaims.
 ///
 /// A tmux pane has one owner, and the pane id is the whole anchor a tmux
@@ -449,14 +470,29 @@ fn role_brief(
     control: &binding_slot::BindingControlSet,
     worker_id: &str,
 ) -> Result<serde_json::Value, String> {
+    role_brief_if_current(server, state, control, worker_id)?
+        .ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping".into())
+}
+
+/// Build a role brief only when the worker owns a current identity mapping.
+///
+/// Public status reads retain historical workers after a replacement. Those
+/// workers have no current role, but strict identity operations still use
+/// `role_brief` above and keep the original missing-mapping error.
+fn role_brief_if_current(
+    server: &Server,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    worker_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
     let project_scope =
         GlobalState::canonical_project_scope(&server.root).map_err(|error| error.to_string())?;
     let mut current = control.active_values().filter(|value| {
         value.binding.project_scope == project_scope && value.binding.agent_id.as_str() == worker_id
     });
-    let binding = current
-        .next()
-        .ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping")?;
+    let Some(binding) = current.next() else {
+        return Ok(None);
+    };
     if current.next().is_some() {
         return Err("IDENTITY_MAP_AMBIGUOUS: worker has several current app mappings".into());
     }
@@ -472,11 +508,11 @@ fn role_brief(
     let base_role = match brief.get("role").and_then(serde_json::Value::as_str) {
         Some("master") => "master",
         Some("worker") => "peer",
-        _ => return Ok(brief),
+        _ => return Ok(Some(brief)),
     };
     let workflow = effective_workflow_templates(state, project_scope.as_str(), base_role, &roles);
     apply_workflow_template(&mut brief, &workflow, base_role == "peer" && peer_specialty);
-    Ok(brief)
+    Ok(Some(brief))
 }
 
 fn apply_workflow_template(

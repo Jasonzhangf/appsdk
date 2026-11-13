@@ -90,6 +90,42 @@ fn workspace_idle_view_reports_typed_idle_and_unknown() {
 }
 
 #[test]
+fn error_activity_clears_trusted_idle_projection() {
+    let (server, root) = crate::server::peer_tests::test_server();
+    let now = 2_000_000;
+    let scope = seed_idle_master(&server, 1_800_000, now);
+    let session = server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get("master")
+        .and_then(|worker| worker.transport.as_ref())
+        .and_then(|transport| transport.session_id.clone())
+        .unwrap();
+    server.commit(&[Event::AgentActivityObserved {
+        activity: AgentActivityRecord {
+            project_scope: scope,
+            worker_id: "master".into(),
+            session_id: session,
+            activity: Activity::Error,
+            background: false,
+            reason: "current Codex error".into(),
+            observed_ms: now + 1,
+            idle_since_ms: Some(1_800_000),
+        },
+    }]);
+
+    let state = server.state.lock().unwrap();
+    let view = workspace_idle_view(&server, &state, Some("master"), now + 2);
+    assert_eq!(view["activity"], "error");
+    assert_eq!(view["idle_since_ms"], serde_json::Value::Null);
+    assert_eq!(view["idle_duration_ms"], 0);
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn master_status_workspace_uses_registered_canonical_project() {
     let (server, root) = crate::server::peer_tests::test_server();
     let now = now_ms();

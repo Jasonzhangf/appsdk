@@ -81,6 +81,7 @@ pub(crate) fn workspace_idle_view(
         (_, Some(crate::server::name_state::AgentActivity::Busy)) => "busy",
         (_, Some(crate::server::name_state::AgentActivity::Idle)) => "idle",
         (_, Some(crate::server::name_state::AgentActivity::WaitingUser)) => "waiting_user",
+        (_, Some(crate::server::name_state::AgentActivity::Error)) => "error",
         _ => "unknown",
     };
     let trusted_idle = presence == Some(crate::server::name_state::AgentPresence::Online)
@@ -1933,7 +1934,7 @@ fn handle_task_register_with_next(
     task_id: String,
     owner: Option<String>,
     feature_id: Option<String>,
-    mut worktree_path: Option<String>,
+    worktree_path: Option<String>,
     branch: Option<String>,
     base_commit: Option<String>,
     priority: String,
@@ -1941,6 +1942,40 @@ fn handle_task_register_with_next(
     goal_prompt: Option<String>,
 ) -> Resp {
     let mut st = server.state.lock().unwrap();
+    handle_task_register_with_next_locked(
+        server,
+        &mut st,
+        None,
+        worker_id,
+        token,
+        task_id,
+        owner,
+        feature_id,
+        worktree_path,
+        branch,
+        base_commit,
+        priority,
+        next_step,
+        goal_prompt,
+    )
+}
+
+fn handle_task_register_with_next_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    owner: Option<String>,
+    feature_id: Option<String>,
+    mut worktree_path: Option<String>,
+    branch: Option<String>,
+    base_commit: Option<String>,
+    priority: String,
+    next_step: Option<String>,
+    goal_prompt: Option<String>,
+) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
@@ -1981,6 +2016,67 @@ fn handle_task_register_with_next(
     let isolation_mode = worktree_path
         .as_deref()
         .map(|path| derive_isolation_mode(Some(path)));
+    let now = now_ms();
+    let assignment_event = match control {
+        Some(control) => {
+            let route = match server_route_scope(server, st) {
+                Ok(Some(route)) => route,
+                Ok(None) => return Resp::err("project route is not ready"),
+                Err(error) => return Resp::err(error),
+            };
+            let slot = match control.current_for_worker(
+                &route.project_scope_id,
+                &route.app_scope_id,
+                &worker_id,
+            ) {
+                Ok(Some(slot)) => slot,
+                Ok(None) => {
+                    return Resp::err(
+                        "TASK_CURRENT_BINDING_REQUIRED: registration requires the current stable name and session",
+                    )
+                }
+                Err(error) => return Resp::err(error),
+            };
+            let current = match slot.active_binding() {
+                Some(current) => current,
+                None => {
+                    return Resp::err(
+                        "TASK_CURRENT_BINDING_REQUIRED: registration requires the current stable name and session",
+                    )
+                }
+            };
+            let Some(session) = current.binding.session_id.as_ref() else {
+                return Resp::err(
+                    "TASK_CURRENT_BINDING_REQUIRED: registration requires the current stable name and session",
+                );
+            };
+            Some(Event::TaskAssignmentUpdated {
+                assignment: name_state::TaskAssignment {
+                    task_id: task_id.clone(),
+                    name: slot.identity_key.name.clone(),
+                    session_id: session.as_str().into(),
+                    assignment_revision: st
+                        .task_assignment(&task_id)
+                        .map_or(1, |assignment| assignment.assignment_revision + 1),
+                    reflow: None,
+                    updated_ms: now,
+                },
+            })
+        }
+        None => None,
+    };
+    let commit_events = |st: &mut State, events: &[Event]| -> Result<(), String> {
+        match control {
+            Some(control) => server
+                .commit_locked_checked_with_control(st, events, control)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            None => server
+                .commit_locked_checked(st, events)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        }
+    };
     if let Some(existing) = st
         .tasks
         .values()
@@ -2007,7 +2103,6 @@ fn handle_task_register_with_next(
         })
         .cloned()
     {
-        let now = now_ms();
         let blocked_task = TaskRec {
             id: task_id.clone(),
             owner: worker_id.clone(),
@@ -2024,9 +2119,11 @@ fn handle_task_register_with_next(
             created_ms: now,
             updated_ms: now,
         };
-        if let Err(error) =
-            server.commit_locked_checked(&mut st, &[Event::TaskCreated { task: blocked_task }])
-        {
+        let mut events = vec![Event::TaskCreated { task: blocked_task }];
+        if let Some(assignment) = assignment_event.clone() {
+            events.push(assignment);
+        }
+        if let Err(error) = commit_events(st, &events) {
             return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
         }
         return Resp::err_data(
@@ -2040,7 +2137,6 @@ fn handle_task_register_with_next(
             }),
         );
     }
-    let now = now_ms();
     let task = TaskRec {
         id: task_id.clone(),
         owner: task_owner,
@@ -2058,17 +2154,20 @@ fn handle_task_register_with_next(
         updated_ms: now,
     };
     let mut events = vec![Event::TaskCreated { task: task.clone() }];
+    if let Some(assignment) = assignment_event {
+        events.push(assignment);
+    }
     if let Some(binding) = worktree_binding_for_task(server, &task) {
         events.push(Event::WorktreeBound { binding });
     }
-    if let Err(error) = server.commit_locked_checked(&mut st, &events) {
+    if let Err(error) = commit_events(st, &events) {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
         "task": task.id,
         "owner": task.owner,
         "status": task.status,
-        "cleanup": if task.worktree_path.is_some() { "pending" } else { "not_required" },
+        "cleanup": if task.has_owned_resources() { "pending" } else { "not_required" },
     }))
 }
 
@@ -2081,25 +2180,74 @@ fn handle_task_relocate(
     branch: Option<String>,
     base_commit: Option<String>,
 ) -> Resp {
+    {
+        let st = server.state.lock().unwrap();
+        let Some(worker) = st.workers.get(&worker_id) else {
+            return Resp::err(format!("worker {} not registered", worker_id));
+        };
+        if worker.token != token {
+            return Resp::err("token mismatch: identity does not own this worker_id");
+        }
+        if st.tasks.get(&task_id).is_none() {
+            return Resp::err(format!("task {} not found", task_id));
+        }
+    }
+    let worktree_path = match declare_task_workspace(&server.root, &server.config, &worktree_path)
+    {
+        Ok(declared) => declared,
+        Err(error) => return Resp::err(error),
+    };
     let mut st = server.state.lock().unwrap();
+    task_relocate_locked(
+        server,
+        &mut st,
+        None,
+        worker_id,
+        token,
+        task_id,
+        worktree_path,
+        branch,
+        base_commit,
+    )
+}
+
+fn task_relocate_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    worktree_path: String,
+    branch: Option<String>,
+    base_commit: Option<String>,
+) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
     if worker.token != token {
         return Resp::err("token mismatch: identity does not own this worker_id");
     }
-    let worktree_path =
-        match declare_task_workspace(&server.root, &server.config, &worktree_path) {
-            Ok(declared) => declared,
-            Err(error) => return Resp::err(error),
-        };
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
     };
-    if task.owner != worker_id {
-        return Resp::err("only the task owner may relocate its worktree");
+    if let Err(error) =
+        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+    {
+        return error;
     }
-    if let Err(error)=work_executor_gate(server,&st,&task_id,&worker_id) {return error;}
+    let executor = match control {
+        Some(control) => server_route_scope(server, st)
+            .map_err(Resp::err)
+            .and_then(|route| route.ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED")))
+            .and_then(|route| {
+                work_executor_gate_with_control(st, control, &route, &task_id, &worker_id)
+            }),
+        None => work_executor_gate(server, st, &task_id, &worker_id),
+    };
+    if let Err(error) = executor {
+        return error;
+    }
     if matches!(task.status.as_str(), "closed" | "cancelled") {
         return Resp::err("terminal tasks cannot be relocated");
     }
@@ -2131,8 +2279,14 @@ fn handle_task_relocate(
     if let Some(binding) = worktree_binding_for_task(server, &task) {
         events.push(Event::WorktreeBound { binding });
     }
-    if let Err(error) = server.commit_locked(&mut st, &events) {
-        drop(st);
+    let commit = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(st, &events, control)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server.commit_locked(st, &events),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("TASK_RELOCATE_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -2168,6 +2322,17 @@ fn handle_task_claim(server: &Server, worker_id: String, token: String, task_id:
 
 fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id: String) -> Resp {
     let mut st = server.state.lock().unwrap();
+    handle_task_accept_locked(server, &mut st, None, worker_id, token, task_id)
+}
+
+fn handle_task_accept_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: String,
+    token: String,
+    task_id: String,
+) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
@@ -2180,10 +2345,23 @@ fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id
     if task.status == "invited" {
         return Resp::err("BOARD_INVITATION_REVISION_REQUIRED: use collab task accept --expected-revision N or collab board respond --accept --expected-revision N");
     }
-    if task.owner != worker_id {
-        return Resp::err("only the task owner may accept its assignment");
+    if let Err(error) =
+        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+    {
+        return error;
     }
-    if let Err(error) = work_executor_gate(server,&st, &task_id, &worker_id) { return error; }
+    let executor = match control {
+        Some(control) => server_route_scope(server, st)
+            .map_err(Resp::err)
+            .and_then(|route| route.ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED")))
+            .and_then(|route| {
+                work_executor_gate_with_control(st, control, &route, &task_id, &worker_id)
+            }),
+        None => work_executor_gate(server, st, &task_id, &worker_id),
+    };
+    if let Err(error) = executor {
+        return error;
+    }
     let Some(admission) = st
         .scheduler_admissions
         .values()
@@ -2213,15 +2391,22 @@ fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id
             task.id, task.status
         ));
     }
-    if let Err(error) = board_execution_gate(server, &st, &worker_id, &task_id) {
+    let execution_gate = match control {
+        Some(control) => board_execution_gate_with_control(server, st, control, &worker_id, &task_id),
+        None => board_execution_gate(server, st, &worker_id, &task_id),
+    };
+    if let Err(error) = execution_gate {
         return error;
     }
     task.status = "working".into();
     task.wait = None;
     task.updated_ms = now_ms();
-    if let Err(error) =
-        server.commit_locked_checked(&mut st, &[Event::TaskUpdated { task: task.clone() }])
-    {
+    let events = [Event::TaskUpdated { task: task.clone() }];
+    let commit = match control {
+        Some(control) => server.commit_locked_checked_with_control(st, &events, control),
+        None => server.commit_locked_checked(st, &events),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -2288,6 +2473,7 @@ fn handle_task_update_full(
     task_update_locked(
         server,
         &mut st,
+        None,
         worker_id,
         token,
         task_id,
@@ -2301,6 +2487,7 @@ fn handle_task_update_full(
 fn task_update_locked(
     server: &Server,
     mut st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
     worker_id: String,
     token: String,
     task_id: String,
@@ -2329,6 +2516,7 @@ fn task_update_locked(
         return task_block_decide_locked(
             server,
             st,
+            control,
             worker_id,
             task_id,
             action,
@@ -2343,12 +2531,33 @@ fn task_update_locked(
         let master_repair = task_owner_unavailable(server, st, &task)
             && board_check_master_locked(server, st, &worker_id).is_ok();
         if !master_repair {
-            return Resp::err("only the task owner may update its lifecycle");
+            if let Err(error) =
+                task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+            {
+                return error;
+            }
         }
+    } else if let Err(error) =
+        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+    {
+        return error;
     }
     let original_status = task.status.clone();
     if status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed")) {
-        if let Err(error)=work_executor_gate(server,st,&task_id,&worker_id) {return error;}
+        let result = match control {
+            Some(control) => server_route_scope(server, st)
+                .map_err(Resp::err)
+                .and_then(|route| {
+                    route.ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))
+                })
+                .and_then(|route| {
+                    work_executor_gate_with_control(st, control, &route, &task_id, &worker_id)
+                }),
+            None => work_executor_gate(server, st, &task_id, &worker_id),
+        };
+        if let Err(error) = result {
+            return error;
+        }
     }
     if let Some(new_status) = status {
         if !TASK_STATUSES.contains(&new_status.as_str()) {
@@ -2383,9 +2592,9 @@ fn task_update_locked(
         if new_status == "waiting" {
             return Resp::err("use collab task wait so responsibility and deadline are durable");
         }
-        if new_status == "cancelled" && task.worktree_path.is_some() {
+        if new_status == "cancelled" && task.has_owned_resources() {
             return Resp::err(
-                "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree; close only after merged cleanup",
+                "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree or branch; close only after merged cleanup",
             );
         }
         if !task_transition_allowed(&task.status, &new_status) {
@@ -2401,7 +2610,14 @@ fn task_update_locked(
             // A member business block is an application, never an approved
             // blocker. Keep the task status and record one typed pending
             // request for the authorized supervisor or CEO to decide.
-            return task_block_apply_locked(server, st, &task, next_step.clone());
+            return task_block_apply_locked(
+                server,
+                st,
+                control,
+                &task,
+                &worker_id,
+                next_step.clone(),
+            );
         }
         task.status = new_status.clone();
         if new_status != "waiting" {
@@ -2446,7 +2662,11 @@ fn task_update_locked(
             events.push(Event::Superseded { ids: stale_notices });
         }
     }
-    if let Err(error) = server.commit_locked_checked(&mut st, &events) {
+    let commit = match control {
+        Some(control) => server.commit_locked_checked_with_control(&mut st, &events, control),
+        None => server.commit_locked_checked(&mut st, &events),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -2464,7 +2684,9 @@ fn task_update_locked(
 fn task_block_apply_locked(
     server: &Server,
     st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
     task: &TaskRec,
+    requester: &str,
     reason: Option<String>,
 ) -> Resp {
     let revision = st
@@ -2476,7 +2698,7 @@ fn task_block_apply_locked(
     let request = match st.task_block_requests.get(&task.id).cloned() {
         Some(existing)
             if existing.state == TaskBlockRequestState::Pending
-                && existing.requester == task.owner =>
+                && existing.requester == requester =>
         {
             let mut existing = existing;
             existing.reason = reason;
@@ -2485,7 +2707,7 @@ fn task_block_apply_locked(
         }
         _ => TaskBlockRequest {
             task_id: task.id.clone(),
-            requester: task.owner.clone(),
+            requester: requester.to_owned(),
             reason,
             requested_at_ms: now,
             task_revision: revision,
@@ -2495,12 +2717,14 @@ fn task_block_apply_locked(
             decision_reason: None,
         },
     };
-    if let Err(error) = server.commit_locked_checked(
-        st,
-        &[Event::TaskBlockRequestUpdated {
-            request: request.clone(),
-        }],
-    ) {
+    let events = [Event::TaskBlockRequestUpdated {
+        request: request.clone(),
+    }];
+    let commit = match control {
+        Some(control) => server.commit_locked_checked_with_control(st, &events, control),
+        None => server.commit_locked_checked(st, &events),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -2520,6 +2744,7 @@ fn task_block_apply_locked(
 fn task_block_decide_locked(
     server: &Server,
     st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
     worker_id: String,
     task_id: String,
     decision: String,
@@ -2619,7 +2844,11 @@ fn task_block_decide_locked(
             task: updated_task.clone(),
         });
     }
-    if let Err(error) = server.commit_locked_checked(st, &events) {
+    let commit = match control {
+        Some(control) => server.commit_locked_checked_with_control(st, &events, control),
+        None => server.commit_locked_checked(st, &events),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -2685,19 +2914,31 @@ fn close_task_resources(
     }
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = run_safe_git(root, &["rev-parse", "--verify", &branch_ref])
-            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-        if branch_exists.status.success() {
+        if branch_exists(root, &branch_ref)? {
             let main_ref = "refs/heads/main";
             let merged = run_safe_git(root, &["merge-base", "--is-ancestor", &branch_ref, main_ref])
                 .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-            if !merged.status.success()
-                && !integration_commit_proves_branch_merged(
+            let merged = match merged.status.code() {
+                Some(0) => true,
+                Some(1) => false,
+                _ => {
+                    return Err(format!(
+                        "cannot verify whether branch {branch} is an ancestor of {main_ref}: {}",
+                        String::from_utf8_lossy(&merged.stderr).trim()
+                    ));
+                }
+            };
+            let proven = if merged {
+                true
+            } else {
+                branch_net_content_present_at_integration_commit(
                     root,
                     main_ref,
+                    &branch_ref,
                     recorded_integration,
                 )?
-            {
+            };
+            if !proven {
                 return Err(format!(
                     "branch {branch} is not merged into {main_ref}; refusing delete"
                 ));
@@ -2737,9 +2978,7 @@ fn close_task_resources(
 
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = run_safe_git(root, &["rev-parse", "--verify", &branch_ref])
-            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-        if branch_exists.status.success() {
+        if branch_exists(root, &branch_ref)? {
             let deleted = run_safe_git(root, &["branch", "-D", branch])
                 .map_err(|e| format!("cannot delete branch {branch}: {e}"))?;
             if !deleted.status.success() {
@@ -2751,6 +2990,36 @@ fn close_task_resources(
         }
     }
     Ok(())
+}
+
+fn branch_exists(root: &Path, branch_ref: &str) -> Result<bool, String> {
+    let format = run_safe_git(root, &["check-ref-format", branch_ref])
+        .map_err(|e| format!("cannot verify branch {branch_ref}: {e}"))?;
+    match format.status.code() {
+        Some(0) => {}
+        Some(1) => {
+            return Err(format!(
+                "branch {branch_ref} is not a valid ref name; refusing delete"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "cannot verify branch {branch_ref}: {}",
+                String::from_utf8_lossy(&format.stderr).trim()
+            ));
+        }
+    }
+
+    let exists = run_safe_git(root, &["show-ref", "--verify", "--quiet", branch_ref])
+        .map_err(|e| format!("cannot verify branch {branch_ref}: {e}"))?;
+    match exists.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "cannot verify branch {branch_ref}: {}",
+            String::from_utf8_lossy(&exists.stderr).trim()
+        )),
+    }
 }
 
 /// Release a LayerFS task workspace obligation. Collab owns only the isolation
@@ -2773,12 +3042,15 @@ fn close_layerfs_task_workspace(worktree_path: &str) -> Result<(), String> {
 
 /// A squash integration replaces the branch tip with a new commit, so the
 /// branch is not an ancestor of main even though its work landed. The recorded
-/// `integration.commit` is the authoritative proof in that case. The check is
-/// the same reachability question `collab task integrated` answers: resolve the
-/// commit, then require it to be reachable from `refs/heads/main`.
-fn integration_commit_proves_branch_merged(
+/// `integration.commit` is the owner's integration declaration. For cleanup,
+/// require that commit to be reachable from `refs/heads/main` and that the
+/// branch's net changes relative to its unique common ancestor are present
+/// with identical Git tree content in that commit. This proves net content,
+/// not integration causality or exact candidate identity.
+fn branch_net_content_present_at_integration_commit(
     root: &Path,
     main_ref: &str,
+    branch_ref: &str,
     recorded_integration: Option<&str>,
 ) -> Result<bool, String> {
     let Some(commit) = recorded_integration
@@ -2795,15 +3067,143 @@ fn integration_commit_proves_branch_merged(
             )
         })?;
     match commit_is_integrated_in_main(root, commit) {
-        Ok(true) => Ok(true),
-        Ok(false) => Err(format!(
+        Ok(true) => {}
+        Ok(false) => return Err(format!(
             "integration commit {commit} is not reachable from {main_ref} (main_head {main_head}); expected a commit reachable from {main_ref}; refusing delete"
         )),
-        Err(error) => Err(format!(
+        Err(error) => return Err(format!(
             "integration commit {commit} cannot be resolved (main_head {main_head}): {}; expected a commit reachable from {main_ref}; refusing delete",
             error.error.unwrap_or_default()
         )),
     }
+
+    let merge_bases = run_safe_git(root, &["merge-base", "--all", branch_ref, commit])
+        .map_err(|e| format!("cannot find the common ancestor for {branch_ref} and {commit}: {e}"))?;
+    if !merge_bases.status.success() {
+        return Err(format!(
+            "cannot find the common ancestor for {branch_ref} and {commit}: {}",
+            String::from_utf8_lossy(&merge_bases.stderr).trim()
+        ));
+    }
+    let merge_bases = String::from_utf8(merge_bases.stdout)
+        .map_err(|error| format!("common ancestor output is not valid UTF-8: {error}"))?;
+    let merge_bases = merge_bases
+        .lines()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if merge_bases.len() != 1 {
+        return Err(format!(
+            "expected one common ancestor for {branch_ref} and {commit}, found {}; refusing delete",
+            merge_bases.len()
+        ));
+    }
+    let base = &merge_bases[0];
+
+    let changed = run_safe_git_os(
+        root,
+        [
+            std::ffi::OsStr::new("diff"),
+            std::ffi::OsStr::new("--no-ext-diff"),
+            std::ffi::OsStr::new("--no-textconv"),
+            std::ffi::OsStr::new("--no-renames"),
+            std::ffi::OsStr::new("--ignore-submodules=none"),
+            std::ffi::OsStr::new("--name-only"),
+            std::ffi::OsStr::new("-z"),
+            std::ffi::OsStr::new(base),
+            std::ffi::OsStr::new(branch_ref),
+            std::ffi::OsStr::new("--"),
+        ],
+    )
+    .map_err(|e| format!("cannot list net changed paths for {branch_ref}: {e}"))?;
+    if !changed.status.success() {
+        return Err(format!(
+            "cannot list net changed paths for {branch_ref}: {}",
+            String::from_utf8_lossy(&changed.stderr).trim()
+        ));
+    }
+    let paths = parse_nul_os_strings(&changed.stdout, "net changed path")?;
+    if paths.is_empty() {
+        return Err(format!(
+            "branch {branch_ref} has no net changed paths to compare; refusing delete"
+        ));
+    }
+
+    for path in paths {
+        let output = run_safe_git_os(
+            root,
+            [
+                std::ffi::OsStr::new("--literal-pathspecs"),
+                std::ffi::OsStr::new("diff"),
+                std::ffi::OsStr::new("--no-ext-diff"),
+                std::ffi::OsStr::new("--no-textconv"),
+                std::ffi::OsStr::new("--no-renames"),
+                std::ffi::OsStr::new("--ignore-submodules=none"),
+                std::ffi::OsStr::new("--quiet"),
+                std::ffi::OsStr::new(branch_ref),
+                std::ffi::OsStr::new(commit),
+                std::ffi::OsStr::new("--"),
+                path.as_os_str(),
+            ],
+        )
+        .map_err(|e| {
+            format!(
+                "cannot compare net changed path {} for {branch_ref}: {e}",
+                path.to_string_lossy()
+            )
+        })?;
+        match output.status.code() {
+            Some(0) => {}
+            Some(1) => {
+                return Err(format!(
+                    "net changed path {} differs between {branch_ref} and integration commit {commit}; refusing delete",
+                    path.to_string_lossy()
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "cannot compare net changed path {} for {branch_ref}: {}",
+                    path.to_string_lossy(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn run_safe_git_os<I, S>(root: &Path, args: I) -> std::io::Result<std::process::Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    safe_git_command(root)?.args(args).output()
+}
+
+fn parse_nul_os_strings(bytes: &[u8], label: &str) -> Result<Vec<std::ffi::OsString>, String> {
+    if !bytes.is_empty() && !bytes.ends_with(&[0]) {
+        return Err(format!("{label} output is not NUL-terminated"));
+    }
+    let mut values = Vec::new();
+    for value in bytes.split(|byte| *byte == 0) {
+        if value.is_empty() {
+            continue;
+        }
+        #[cfg(unix)]
+        let value = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(value).to_os_string()
+        };
+        #[cfg(not(unix))]
+        let value = std::ffi::OsString::from(
+            std::str::from_utf8(value)
+                .map_err(|error| format!("{label} is not valid UTF-8: {error}"))?,
+        );
+        values.push(value);
+    }
+    Ok(values)
 }
 
 fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {
@@ -2868,7 +3268,47 @@ fn handle_task_deliver_with_intent(
     worktree: Option<String>,
     no_candidate: bool,
 ) -> Resp {
-    let mut st = server.state.lock().unwrap();
+    let mut pending_notice = None;
+    let response = {
+        let mut st = server.state.lock().unwrap();
+        handle_task_deliver_with_intent_locked(
+            server,
+            &mut st,
+            None,
+            worker_id,
+            token,
+            task_id,
+            evidence,
+            attempt,
+            worktree,
+            no_candidate,
+            &mut pending_notice,
+        )
+    };
+    finish_task_deliver_notification(server, response, pending_notice)
+}
+
+struct PendingTaskReviewNotice {
+    message_id: String,
+    subscription_id: Option<String>,
+    method: &'static str,
+    now: i64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_task_deliver_with_intent_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    evidence: Option<String>,
+    attempt: Option<u64>,
+    worktree: Option<String>,
+    no_candidate: bool,
+    pending_notice: &mut Option<PendingTaskReviewNotice>,
+) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
@@ -2878,7 +3318,12 @@ fn handle_task_deliver_with_intent(
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
     };
-    if task.owner != worker_id || !task_delivery_allowed(&task.status) {
+    if let Err(error) =
+        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+    {
+        return error;
+    }
+    if !task_delivery_allowed(&task.status) {
         return Resp::err(format!(
             "task {} must be owned and working, verifying, reviewed, or rework before delivery (current: {})",
             task_id, task.status
@@ -2897,7 +3342,18 @@ fn handle_task_deliver_with_intent(
             json!({"task_id": task_id}),
         );
     }
-    if let Err(error)=work_executor_gate(server,&st,&task_id,&worker_id) {return error;}
+    let executor = match control {
+        Some(control) => server_route_scope(server, st)
+            .map_err(Resp::err)
+            .and_then(|route| route.ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED")))
+            .and_then(|route| {
+                work_executor_gate_with_control(st, control, &route, &task_id, &worker_id)
+            }),
+        None => work_executor_gate(server, st, &task_id, &worker_id),
+    };
+    if let Err(error) = executor {
+        return error;
+    }
 
     let ticket_result_event = match board_ticket_result_event(
         server,
@@ -2970,8 +3426,16 @@ fn handle_task_deliver_with_intent(
             Ok(Some(route)) => route,
             _ => return Resp::err("required reviewer project route is not ready"),
         };
-        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-            Ok(control) => control, Err(error) => return Resp::err(error),
+        let loaded;
+        let control = match control {
+            Some(control) => control,
+            None => {
+                loaded = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                    Ok(control) => control,
+                    Err(error) => return Resp::err(error),
+                };
+                &loaded
+            }
         };
         let recipient = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
             Ok(slot) => slot.and_then(|slot| slot.active_binding()).map(|current| current.binding.agent_id.as_str().to_owned()),
@@ -2999,12 +3463,21 @@ fn handle_task_deliver_with_intent(
     // entry so the next queued item for that slot is claimed in this batch.
     if let Some(Event::TicketPhaseRecorded { phase: completed }) = ticket_result_event.as_ref() {
         if let Ok(Some(route)) = server_route_scope(server, &st) {
-            if let Ok(control) =
-                binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
-            {
+            let loaded;
+            let control = match control {
+                Some(control) => Some(control),
+                None => match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                    Ok(control) => {
+                        loaded = control;
+                        Some(&loaded)
+                    }
+                    Err(_) => None,
+                },
+            };
+            if let Some(control) = control {
                 events.extend(ticket_continuation_events(
                     &st,
-                    &control,
+                    control,
                     &route,
                     &worker_id,
                     std::slice::from_ref(completed),
@@ -3012,7 +3485,7 @@ fn handle_task_deliver_with_intent(
                 ));
                 events.extend(ticket_dependency_release_events(
                     &st,
-                    &control,
+                    control,
                     &route,
                     completed,
                     &worker_id,
@@ -3027,12 +3500,17 @@ fn handle_task_deliver_with_intent(
                 record: lifecycle,
             },
         ]);
-    if let Err(error) = server.commit_locked(&mut st, &events) {
-        drop(st);
+    let commit = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(st, &events, control)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server.commit_locked(st, &events),
+    };
+    if let Err(error) = commit {
         return Resp::err(format!("TASK_DELIVER_DURABILITY_FAILED: {error}"));
     }
 
-    drop(st);
     let data = json!({
         "delivered": task.id,
         "status": task.status,
@@ -3046,15 +3524,43 @@ fn handle_task_deliver_with_intent(
         "next_action": task.next_step,
         "identity": {"worker_id": worker.id, "kind": "peer"},
     });
-    if let Some((message_id,subscription,method)) = review_notice {
-        let attempt = match &subscription {
-            Some(subscription) => attempt_notification_detailed_with_at(server,&message_id,&subscription.id,now_ms()),
-            None => NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into()),
-        };
+    if let Some((message_id, subscription, method)) = review_notice {
         let mut data = data;
         data["review_message_id"] = json!(message_id);
-        notification_send_response(data,subscription.is_some(),method,&attempt)
-    } else { Resp::data(data) }
+        *pending_notice = Some(PendingTaskReviewNotice {
+            message_id,
+            subscription_id: subscription.map(|subscription| subscription.id),
+            method,
+            now,
+        });
+        Resp::data(data)
+    } else {
+        Resp::data(data)
+    }
+}
+
+fn finish_task_deliver_notification(
+    server: &Server,
+    response: Resp,
+    pending_notice: Option<PendingTaskReviewNotice>,
+) -> Resp {
+    let Some(notice) = pending_notice else {
+        return response;
+    };
+    let attempt = match notice.subscription_id.as_deref() {
+        Some(subscription_id) => {
+            attempt_notification_detailed_with_at(server, &notice.message_id, subscription_id, notice.now)
+        }
+        None => {
+            NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into())
+        }
+    };
+    notification_send_response(
+        response.data,
+        notice.subscription_id.is_some(),
+        notice.method,
+        &attempt,
+    )
 }
 
 fn task_integration_authorized(
@@ -3063,7 +3569,17 @@ fn task_integration_authorized(
     task: &TaskRec,
     worker_id: &str,
 ) -> bool {
-    task.owner == worker_id
+    task_integration_authorized_with_control(server, state, None, task, worker_id)
+}
+
+fn task_integration_authorized_with_control(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    task: &TaskRec,
+    worker_id: &str,
+) -> bool {
+    task_owner_gate_maybe_with_control(server, state, control, &task.id, worker_id).is_ok()
         || current_master_holder(server, state)
             .ok()
             .flatten()

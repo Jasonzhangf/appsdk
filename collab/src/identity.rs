@@ -789,6 +789,26 @@ pub(crate) fn registered_from_map(
     let value = slot
         .active_binding()
         .expect("lookup returns active current");
+    let caller_session = facts
+        .dsh_session_id
+        .as_deref()
+        .or_else(|| {
+            facts
+                .dsh
+                .as_ref()
+                .map(|candidate| candidate.session_id.as_str())
+        })
+        .or(facts.session_id.as_deref());
+    if value
+        .binding
+        .session_id
+        .as_ref()
+        .is_some_and(|current| caller_session != Some(current.as_str()))
+    {
+        anyhow::bail!(
+            "IDENTITY_SESSION_NOT_CURRENT: ordinary commands require the current agent session; run collab context from the current session"
+        );
+    }
     let mut ident =
         read_persisted(host_paths, value.binding.agent_id.as_str())?.ok_or_else(|| {
             anyhow::anyhow!("IDENTITY_CREDENTIAL_MISSING: mapped worker has no credential")

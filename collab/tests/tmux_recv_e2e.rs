@@ -633,7 +633,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
 }
 
 #[test]
-fn context_recovers_archived_master_in_the_same_live_pane() {
+fn context_requires_current_credential_then_recovers_master_in_the_same_live_pane() {
     let root = unique_root();
     let host_state = root.join("h");
     let tmux_socket = root.join("t.sock");
@@ -742,6 +742,16 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
         thread_anchor: "thread-after-restart".into(),
         ..old
     };
+    let missing = fixture.command(&["context"], Some(&new));
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("IDENTITY_CREDENTIAL_MISSING"));
+    // Archives are not a control source. Restore the current credential and
+    // verify automatic continuation without changing the name or grant.
+    std::fs::rename(
+        &archive,
+        fixture.host_state.join("identities").join(&worker_id),
+    )
+    .unwrap();
     let envelope = fixture.run_ok(&["context"], Some(&new));
     assert_eq!(envelope["result"]["outcome"], "completed", "{envelope}");
     let recovered = context_snapshot(&envelope);
@@ -947,21 +957,8 @@ fn same_live_caller_pane_and_exact_cwd_inherits_name_across_session() {
     let before = fixture.run_context(&["context"], Some(&old));
     assert_eq!(before["name"], "Jenny", "{before}");
 
-    // Force recovery from the archived pane credential so the name anchor is
-    // proven from this invocation's live caller pane, not a local session hit.
-    let archive = fixture
-        .host_state
-        .join("archives/identities-retired-1")
-        .join(&worker_id);
-    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
-    std::fs::rename(
-        fixture.host_state.join("identities").join(&worker_id),
-        &archive,
-    )
-    .unwrap();
-
     // A different agent session runs in the same live pane and same cwd. The
-    // session anchor is not the identity anchor; the exact pane plus cwd is.
+    // current map and credential remain available; no archive is consulted.
     let new = Pane {
         session_anchor: "session-after".into(),
         thread_anchor: "thread-after".into(),
@@ -970,6 +967,7 @@ fn same_live_caller_pane_and_exact_cwd_inherits_name_across_session() {
     let envelope = fixture.run_ok(&["context"], Some(&new));
     assert_eq!(envelope["result"]["outcome"], "completed", "{envelope}");
     let recovered = context_snapshot(&envelope);
+    assert_eq!(recovered["identity"]["worker_id"], worker_id, "{recovered}");
     assert_eq!(
         recovered["name"], "Jenny",
         "the same live pane plus exact cwd must inherit the name across a session change: {recovered}"

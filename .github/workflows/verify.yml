@@ -201,6 +201,13 @@ jobs:
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke -- --list \
             | grep -E 'project_memory' > /dev/null
           cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke project_memory
+      - name: Memory governance CLI tests
+        if: needs.changes.outputs.rust_memory == 'true'
+        run: |
+          jq empty contracts/memory/memory-entry.schema.json contracts/memory/rule-promotion.ontology.json docs/dagpipe/graphs/project-memory-rule-promotion.graph.json
+          cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli -- --list \
+            | grep -E ': test$' > /dev/null
+          cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli
       - name: Registry unit tests
         if: needs.changes.outputs.rust_registry == 'true'
         run: |
@@ -458,6 +465,25 @@ jobs:
             git show --check --oneline --format= "$HEAD_SHA"
           fi
 
+  windows-memory:
+    name: Windows Memory governance (MSVC)
+    needs: changes
+    if: needs.changes.outputs.rust_memory == 'true' && needs.changes.outputs.windows_appsdk != 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Memory governance CLI tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $listed = & cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli -- --list
+          if ($LASTEXITCODE -ne 0) { throw "memory governance test listing failed ($LASTEXITCODE)" }
+          $count = @($listed | Where-Object { $_ -match ': test$' }).Count
+          if ($count -lt 1) { throw "expected at least one memory governance test" }
+          cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli
+          if ($LASTEXITCODE -ne 0) { throw "memory governance tests failed ($LASTEXITCODE)" }
+
   windows-appsdk:
     name: Windows AppSDK (MSVC)
     needs: changes
@@ -522,6 +548,20 @@ jobs:
           Invoke-CargoTest @('--bin', 'appsdk', 'producer::lock_tests')
           Invoke-CargoTest @('--test', 'platform_lock_cli')
           Invoke-CargoTest @('--test', 'registry_home_cli') -ExpectCount 3
+      - name: Memory governance CLI tests
+        if: |
+          needs.changes.outputs.rust_memory == 'true' ||
+          needs.changes.outputs.app_sdk_full == 'true' ||
+          needs.changes.outputs.release == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $listed = & cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli -- --list
+          if ($LASTEXITCODE -ne 0) { throw "memory governance test listing failed ($LASTEXITCODE)" }
+          $count = @($listed | Where-Object { $_ -match ': test$' }).Count
+          if ($count -lt 1) { throw "expected at least one memory governance test" }
+          cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli
+          if ($LASTEXITCODE -ne 0) { throw "memory governance tests failed ($LASTEXITCODE)" }
       - name: Governance reset CLI and interrupted-recovery tests
         shell: pwsh
         run: |

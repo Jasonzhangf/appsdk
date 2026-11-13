@@ -438,6 +438,22 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         ],
         false,
     );
+    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
+    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    let dispatched = run_ok_at(
+        &fixture,
+        &root,
+        &peer_pane,
+        &[
+            "board",
+            "respond",
+            "goal-task",
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        false,
+    );
     assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
     let subscription = dispatched["goal_schedule"]["subscription"].clone();
     assert_eq!(subscription["worker_id"], peer_id);
@@ -721,7 +737,7 @@ fn delegated_goal_ceo_updates_foreign_peer_and_other_peers_are_refused() {
 }
 
 #[test]
-fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_enforced() {
+fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is_enforced() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, master_pane) = Fixture::isolated("goal-capacity");
     let root = fixture.root.canonicalize().unwrap();
@@ -815,7 +831,7 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         false,
     );
     let revision = published["task"]["revision"].as_u64().unwrap().to_string();
-    let failed = command_at(
+    let dispatched = run_ok_at(
         &fixture,
         &root,
         &master_pane,
@@ -829,12 +845,33 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
             "Capacity task full instructions",
             "--long-horizon-every-ms",
             "60000",
+            "--long-horizon-repeat",
+            "4",
+        ],
+        false,
+    );
+    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
+    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    let failed = command_at(
+        &fixture,
+        &root,
+        &peer_pane,
+        &[
+            "board",
+            "respond",
+            "capacity-task",
+            "--accept",
+            "--expected-revision",
+            &revision,
         ],
         false,
     )
     .output()
     .unwrap();
-    assert!(!failed.status.success(), "capacity-full dispatch must fail");
+    assert!(
+        !failed.status.success(),
+        "capacity-full acceptance must fail"
+    );
     assert!(
         String::from_utf8_lossy(&failed.stderr).contains("maximum 3 active subscriptions"),
         "{}",
@@ -847,9 +884,10 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         .iter()
         .find(|task| task["id"] == "capacity-task")
         .unwrap();
-    assert_eq!(task["revision"], published["task"]["revision"]);
-    assert!(task["invited_peer"].is_null());
-    assert!(task["long_horizon"].is_null());
+    assert_eq!(task["revision"], dispatched["task"]["revision"]);
+    assert_eq!(task["owner"], dispatched["task"]["owner"]);
+    assert_eq!(task["invited_peer"], dispatched["task"]["invited_peer"]);
+    assert_eq!(task["long_horizon"], dispatched["task"]["long_horizon"]);
     let status = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
     assert!(status["subscriptions"]
         .as_array()
@@ -875,19 +913,14 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
     let dispatched = run_ok_at(
         &fixture,
         &root,
-        &master_pane,
+        &peer_pane,
         &[
             "board",
-            "dispatch",
+            "respond",
             "capacity-task",
+            "--accept",
             "--expected-revision",
             &revision,
-            "--long-horizon-content",
-            "Capacity task full instructions",
-            "--long-horizon-every-ms",
-            "60000",
-            "--long-horizon-repeat",
-            "4",
         ],
         false,
     );
@@ -895,19 +928,19 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         dispatched["goal_schedule"]["subscription"]["repeat_count"],
         4
     );
-    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
     run_ok_at(
         &fixture,
         &root,
         &master_pane,
         &[
-            "board",
-            "withdraw",
-            "capacity-task",
-            "--expected-revision",
-            &revision,
-            "--reason",
-            "isolated lifecycle verification",
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "task:capacity-task",
+            "--owner",
+            peer_name,
+            "--desired",
+            "ended",
         ],
         false,
     );

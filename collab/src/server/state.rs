@@ -601,7 +601,15 @@ pub(crate) fn subscription_status_is_active(status: &str) -> bool {
 fn subscription_status_retires(status: &str) -> bool {
     matches!(
         status,
-        "cancelled" | "consumed" | "expired" | "transport-lost" | "suppressed"
+        "cancelled"
+            | "consumed"
+            | "expired"
+            | "transport-lost"
+            | "suppressed"
+            // A task-linked schedule that lost its holder keeps waiting for the
+            // next committed owner. That removes the old holder's wake
+            // obligation, so it retires responsibility like a cancellation.
+            | "waiting-owner"
     )
 }
 
@@ -1189,6 +1197,10 @@ pub struct TaskRec {
 }
 
 impl TaskRec {
+    pub(crate) fn has_owned_resources(&self) -> bool {
+        self.worktree_path.is_some() || self.branch.is_some()
+    }
+
     /// 生效的隔离模式。优先返回记录显式持有的值；历史缺字段的记录按工作空间
     /// 路径推导，避免消费者各自重复前缀判断。
     pub(crate) fn isolation_mode_value(&self) -> String {
@@ -1632,6 +1644,20 @@ pub enum Event {
         name: String,
         revision: u64,
     },
+    /// Durable current reassignment scheduling relation. Identity remains owned
+    /// by the identity map; this event neither grants identity nor carries
+    /// credentials.
+    NameReassignmentScheduled {
+        project_scope: String,
+        name: String,
+        schedule: super::name_state::NameReassignmentSchedule,
+    },
+    /// Remove the current reassignment schedule for one name. Used when a valid
+    /// current holder returns, or when the name has no applicable unclosed work.
+    NameReassignmentCleared {
+        project_scope: String,
+        name: String,
+    },
     TaskAssignmentUpdated {
         assignment: super::name_state::TaskAssignment,
     },
@@ -1658,6 +1684,14 @@ pub enum Event {
     },
     AgentActivityObserved {
         activity: super::name_state::AgentActivityRecord,
+    },
+    RexExecutionObserved {
+        worker_id: String,
+        record: super::rex_monitor::ObservedRexExecution,
+    },
+    TmuxExecutionObserved {
+        worker_id: String,
+        record: super::name_monitor::ObservedTmuxExecutionRecord,
     },
     SchedulerAdmission {
         admission: SchedulerAdmissionRecord,

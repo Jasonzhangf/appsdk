@@ -77,6 +77,144 @@ fn scope(server: &Server) -> String {
     server.root.canonicalize().unwrap().to_string_lossy().into()
 }
 
+fn execution_server() -> Arc<Server> {
+    let server = server();
+    let transport = server.state.lock().unwrap().workers["worker"]
+        .transport
+        .clone()
+        .unwrap();
+    let response = crate::server::peer_tests::seed_committed_owner(
+        &server,
+        "worker",
+        "test",
+        &transport,
+        &scope(&server),
+        None,
+    );
+    assert!(response.ok, "{response:?}");
+    server
+}
+
+fn execution_result(pid: u32) -> tmux::ExecutionObservation {
+    tmux::ExecutionObservation {
+        observation: observation(AgentPresence::Online, AgentActivity::Idle),
+        execution: Some(tmux::ObservedTmuxExecution {
+            pid,
+            start_id: format!("100:{pid}"),
+        }),
+    }
+}
+
+#[test]
+fn exact_execution_and_presence_share_durable_candidate_and_activation_preserves_reference() {
+    let server = execution_server();
+    let manager =
+        crate::server::ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    tick_internal(Some(&manager), &server, 100, &|_, previous| {
+        assert!(previous.is_none());
+        assert!(server.state.try_lock().is_ok());
+        assert!(
+            manager.register_gate.try_lock().is_ok(),
+            "host probe must release current-control gate"
+        );
+        Ok(execution_result(700))
+    });
+    let saved = crate::server::current_state::load(&server.state_path, false).unwrap();
+    assert_eq!(saved.tmux_executions["worker"].execution.pid, 700);
+    assert_eq!(
+        saved.agent_presence[&scope(&server)]["worker"].presence,
+        Presence::Online
+    );
+    server.invalidate_restored_agent_observations().unwrap();
+    let activated = crate::server::current_state::load(&server.state_path, false).unwrap();
+    assert_eq!(activated.tmux_executions, saved.tmux_executions);
+    assert_eq!(
+        activated.agent_presence[&scope(&server)]["worker"].presence,
+        Presence::Unknown
+    );
+    assert_eq!(
+        activated.agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        None
+    );
+    let mut legacy = serde_json::to_value(&activated).unwrap();
+    legacy.as_object_mut().unwrap().remove("tmux_executions");
+    let legacy: State = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.tmux_executions.is_empty());
+    assert_eq!(legacy.workers.len(), saved.workers.len());
+    drop(manager);
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
+fn late_exit_cannot_overwrite_new_execution_in_same_pane() {
+    let server = execution_server();
+    tick_internal(None, &server, 100, &|_, _| Ok(execution_result(700)));
+    tick_internal(None, &server, 200, &|_, previous| {
+        assert_eq!(previous.unwrap().pid, 700);
+        tick_internal(None, &server, 201, &|_, _| Ok(execution_result(701)));
+        Ok(tmux::ExecutionObservation {
+            observation: observation(AgentPresence::Offline, AgentActivity::Unknown),
+            execution: None,
+        })
+    });
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tmux_executions["worker"].execution.pid, 701);
+    assert_eq!(
+        state.agent_presence[&scope(&server)]["worker"].presence,
+        Presence::Online
+    );
+    assert!(state.name_reassignments.is_empty());
+    drop(state);
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
+fn map_first_new_generation_rejects_old_exit_before_state_effects() {
+    let server = execution_server();
+    tick_internal(None, &server, 100, &|_, _| Ok(execution_result(700)));
+    tick_internal(None, &server, 200, &|_, _| {
+        let store =
+            crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root());
+        let control = store.load().unwrap();
+        let slot = control.slots().next().unwrap();
+        let mut value = slot.active_binding().unwrap().clone();
+        value.binding.binding_id = crate::identity::BindingId::new("new-binding").unwrap();
+        store
+            .commit(crate::server::binding_store::ControlChange::Commit {
+                key: slot.identity_key.clone(),
+                value,
+                expected_generation: Some(slot.generation()),
+            })
+            .unwrap();
+        Ok(tmux::ExecutionObservation {
+            observation: observation(AgentPresence::Offline, AgentActivity::Unknown),
+            execution: None,
+        })
+    });
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.agent_presence[&scope(&server)]["worker"].presence,
+        Presence::Online
+    );
+    assert_eq!(state.tmux_executions["worker"].execution.pid, 700);
+    drop(state);
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
+fn failed_candidate_does_not_publish_execution_or_presence() {
+    let server = execution_server();
+    let before = server.state.lock().unwrap().clone();
+    std::fs::remove_file(&server.state_path).unwrap();
+    std::fs::create_dir(&server.state_path).unwrap();
+    tick_internal(None, &server, 100, &|_, _| Ok(execution_result(700)));
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tmux_executions, before.tmux_executions);
+    assert_eq!(state.agent_presence, before.agent_presence);
+    drop(state);
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
 #[test]
 fn ordinary_worker_maps_activity_and_deduplicates_facts() {
     let server = server();
@@ -215,6 +353,22 @@ fn shell_offline_and_probe_error_unknown() {
     );
     drop(state);
     std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
+fn offline_presence_does_not_leave_activity_as_a_missing_field() {
+    let presence = AgentPresenceRecord {
+        project_scope: "/tmp/project".into(),
+        worker_id: "worker".into(),
+        session_id: "agent-session".into(),
+        presence: Presence::Offline,
+        reason: "explicit session exit".into(),
+        observed_ms: 1,
+    };
+    assert!(
+        missing_status_fields(Some(&presence), None).is_empty(),
+        "offline makes activity inapplicable; a snapshot must not request it"
+    );
 }
 
 #[test]

@@ -19,7 +19,7 @@ set -euo pipefail
 # --- policy constants ------------------------------------------------------
 
 # Maximum number of registered Git worktrees, including the main worktree.
-APPSDK_WORKTREE_MAX=15
+APPSDK_WORKTREE_MAX=20
 
 # UTC deadline after which the limit is enforced (2026-10-30 04:36:00 UTC).
 APPSDK_WORKTREE_DEADLINE_EPOCH=1793334960

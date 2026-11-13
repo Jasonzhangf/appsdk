@@ -181,6 +181,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
     let before_state = std::fs::read(&server.state_path).unwrap();
     let (_, rejected) = manager.dispatch_sync(Some(context_for("worker")), Req::MasterDelegate {
         worker_id: "worker".into(), token: "token-worker".into(), target_id: "child".into(),
+        approval: None,
     });
     assert!(!rejected.ok, "{rejected:?}");
     assert!(rejected.error.as_deref().unwrap().starts_with("MASTER_DELEGATE_DENIED:"), "{rejected:?}");

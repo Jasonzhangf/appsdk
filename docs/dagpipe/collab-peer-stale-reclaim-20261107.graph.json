@@ -1,76 +1,212 @@
 {
   "id": "collab-peer-stale-reclaim-design",
-  "version": "0.1.0",
-  "description": "设计草案。一次 peer 状态鉴别事件到一次鉴别及未结单回收结果。master 鉴别，TUI 快照后仍未知则直接 stale，DSH/Desktop 真实请求回复后 10 分钟无有效回复则 stale。daemon 撤销旧 attempt 代际并收回全部未结单，按接收范围立即进入新 slot 的最短 queue；未隔离的共享资源保持执行等待。等待和取证错误传递到唯一出口，后续事件使用新批次。算子为拟定接口，未绑定运行实现。",
-  "inputs": [{"id": "失联鉴别事件", "schema": "Object"}],
+  "version": "0.2.0",
+  "description": "设计图：一次 daemon 当前身份状态、明确退役、等待期限、容量或邀请接受事件到一个任务调度结果。确认当前 holder 丢失后开始固定 900000ms 回归等待；重复丢失、重启与容量变化不延后 deadline。source current 已释放、任务仍归 source 且 map 无合法继任者时，从 daemon 确认该缺位事实开始同一等待；target session 在线不等于 source 在线。明确人类退役普通名字或 Jenny 后立即具备重派资格，不套用 900000ms；Jenny 退役释放当前绑定并撤销精确 holder 的 master grant，名字保持 master 专用；普通 close/self-unregister 不升级为明确退役。当前有效 holder 或同名新 holder 在线回归则结束等待并撤回本轮未接受邀请。到期或 E2 资格仅在存在合法 Online+Idle 且无执行或邀请预留冲突时准备自动重派；全部忙或 Error/WaitingUser/Unknown 保留原归属、资格及恢复入口，不改变普通新任务队列策略。Invitation 与消息投递不转移归属；合法接单并由 daemon 同批提交 assignment、goal 与 subscription 才完成重派。回归先提交则撤回本轮未接受邀请并拒绝晚到接受；接受先提交则保留新 owner。退役与真正转交后停止旧 holder 的该名字 wake；无合法 holder 时任务订阅保留内容、进度、剩余次数与节奏，待接续。未知、连接错误、未回复、结果未交均不构成确定丢失。唯一出口的结果区分继续或结束等待、待重派、无容量、过时或拒绝、持久化失败及耐久性未知；失败不得伪造成功。图内算子为设计占位，不代表已绑定或由程序强制。",
+  "inputs": [
+    {
+      "id": "单次身份或任务调度事件",
+      "schema": "Object"
+    }
+  ],
   "nodes": [
     {
-      "id": "核对鉴别范围与宿主类型",
-      "operator": "collab.peer_reclaim_design.admit",
+      "id": "接收一次身份或任务调度事件",
+      "operator": "design.collab_identity_return_wait.receive",
       "operator_version": "1",
-      "inputs": ["失联鉴别事件"],
-      "output": {"id": "鉴别准入结果", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "inputs": [
+        "单次身份或任务调度事件"
+      ],
+      "output": {
+        "id": "本次处理事件",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
       "iterator": "Whole"
     },
     {
-      "id": "收集终端快照或回复证据",
-      "operator": "collab.peer_reclaim_design.collect_evidence",
+      "id": "读取当前名字等待任务与邀请关系",
+      "operator": "design.collab_identity_return_wait.read_current",
       "operator_version": "1",
-      "inputs": ["鉴别准入结果"],
-      "output": {"id": "宿主状态证据", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "description": "读取当前名字、任务assignment代际、调度轮次与邀请。reflow的建立、发送、投递和不可用区间记账由已有episode、message_id、delivery和时间字段承载，保持assignment代际。",
+      "inputs": [
+        "本次处理事件"
+      ],
+      "output": {
+        "id": "当前关系与事件事实",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
       "iterator": "Whole"
     },
     {
-      "id": "负责人按宿主规则鉴别状态",
-      "operator": "collab.peer_reclaim_design.master_adjudicate",
+      "id": "判定当前身份丢失回归或不确定",
+      "operator": "design.collab_identity_return_wait.classify",
       "operator_version": "1",
-      "inputs": ["宿主状态证据"],
-      "output": {"id": "负责人鉴别结果", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "inputs": [
+        "当前关系与事件事实"
+      ],
+      "output": {
+        "id": "有效当前状态判定",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
       "iterator": "Whole"
     },
     {
-      "id": "撤销失效承接并收回未结工单",
-      "operator": "collab.peer_reclaim_design.revoke_and_reclaim",
+      "id": "推进固定身份回归等待",
+      "operator": "design.collab_identity_return_wait.advance",
       "operator_version": "1",
-      "inputs": ["负责人鉴别结果"],
-      "output": {"id": "未结工单回收结果", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "description": "固定十五分钟约束 daemon 自动重派。manager 可在等待期提前邀请，接受并由 daemon 提交后才转归属。明确退役普通名字或 Jenny 均立即具备重派资格。Jenny 退役撤销精确旧 holder 的 master grant，名字保持 master 专用。无 master 或无合法 idle 时保留资格、工作和恢复入口。",
+      "inputs": [
+        "有效当前状态判定"
+      ],
+      "output": {
+        "id": "等待与任务调度决定",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
       "iterator": "Whole"
     },
     {
-      "id": "按接收范围重新进入最短队列",
-      "operator": "collab.peer_reclaim_design.redistribute",
+      "id": "核对容量与任务归属提交条件",
+      "operator": "design.collab_identity_return_wait.admit_assignment",
       "operator_version": "1",
-      "inputs": ["未结工单回收结果"],
-      "output": {"id": "未结工单重新分配结果", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "description": "自动邀请绑定源assignment代际和当前调度轮次，选人使用当前Online/Idle、未关闭任务的有效邀请和当前名字Claimed/Running执行容量。主动接受保留Online、精确current和实际容量检查，忽略本次邀请自身，不因接受时原生活动Busy或Unknown自我否决。关闭任务历史邀请不占容量。纯reflow保持同一邀请有效，真实换主、有效回归、轮次替换或目标换绑拒绝旧邀请。合法接受在register gate、current control和State串行边内重核后提交。",
+      "inputs": [
+        "等待与任务调度决定"
+      ],
+      "output": {
+        "id": "本次有效变化或保留结果",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
       "iterator": "Whole"
     },
     {
-      "id": "返回唯一鉴别与回收结果",
-      "operator": "collab.peer_reclaim_design.emit_result",
+      "id": "提交当前等待邀请与任务归属",
+      "operator": "design.collab_identity_return_wait.commit",
       "operator_version": "1",
-      "inputs": ["未结工单重新分配结果"],
-      "output": {"id": "失联鉴别与回收结果", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "inputs": [
+        "本次有效变化或保留结果"
+      ],
+      "output": {
+        "id": "提交回执或提交不确定",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "返回唯一调度结果",
+      "operator": "design.collab_identity_return_wait.emit_result",
+      "operator_version": "1",
+      "inputs": [
+        "提交回执或提交不确定"
+      ],
+      "output": {
+        "id": "身份回归等待与任务重派结果",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
       "iterator": "Whole"
     }
   ],
   "edges": [
-    {"from": "核对鉴别范围与宿主类型", "to": "收集终端快照或回复证据", "arc_id": "鉴别准入结果"},
-    {"from": "收集终端快照或回复证据", "to": "负责人按宿主规则鉴别状态", "arc_id": "宿主状态证据"},
-    {"from": "负责人按宿主规则鉴别状态", "to": "撤销失效承接并收回未结工单", "arc_id": "负责人鉴别结果"},
-    {"from": "撤销失效承接并收回未结工单", "to": "按接收范围重新进入最短队列", "arc_id": "未结工单回收结果"},
-    {"from": "按接收范围重新进入最短队列", "to": "返回唯一鉴别与回收结果", "arc_id": "未结工单重新分配结果"}
+    {
+      "from": "接收一次身份或任务调度事件",
+      "to": "读取当前名字等待任务与邀请关系",
+      "arc_id": "本次处理事件"
+    },
+    {
+      "from": "读取当前名字等待任务与邀请关系",
+      "to": "判定当前身份丢失回归或不确定",
+      "arc_id": "当前关系与事件事实"
+    },
+    {
+      "from": "判定当前身份丢失回归或不确定",
+      "to": "推进固定身份回归等待",
+      "arc_id": "有效当前状态判定"
+    },
+    {
+      "from": "推进固定身份回归等待",
+      "to": "核对容量与任务归属提交条件",
+      "arc_id": "等待与任务调度决定"
+    },
+    {
+      "from": "核对容量与任务归属提交条件",
+      "to": "提交当前等待邀请与任务归属",
+      "arc_id": "本次有效变化或保留结果"
+    },
+    {
+      "from": "提交当前等待邀请与任务归属",
+      "to": "返回唯一调度结果",
+      "arc_id": "提交回执或提交不确定"
+    }
   ],
-  "outputs": ["失联鉴别与回收结果"]
+  "outputs": [
+    "身份回归等待与任务重派结果"
+  ]
 }

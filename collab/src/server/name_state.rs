@@ -30,10 +30,112 @@ pub struct TaskAssignment {
     pub task_id: String,
     pub name: String,
     pub session_id: String,
+    /// Assignment commit generation. Reflow delivery progress keeps this value.
     pub assignment_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reflow: Option<TaskSchedulingReflow>,
     pub updated_ms: i64,
+}
+
+/// Fixed automatic identity-return wait. One production constant; no
+/// configurable fast-forward and no startup test hook.
+pub(crate) const IDENTITY_RETURN_WAIT_MS: i64 = 900_000;
+
+/// One current reassignment schedule for a stable name. This is the single
+/// durable scheduling relation. It is independent of `NameOccupancy`, so
+/// releasing or replacing the occupancy never cancels the wait. It never
+/// grants identity and never carries credentials; the relation reference only
+/// identifies stale events for the same generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum NameReassignmentSchedule {
+    /// A sufficiently confirmed loss of the current holder waits a fixed
+    /// interval for that holder or a same-name successor to return online.
+    /// The deadline is set once. A repeated loss, a restart and a capacity
+    /// change keep it.
+    WaitingReturn {
+        lost_relation_ref: String,
+        started_ms: i64,
+        deadline_ms: i64,
+    },
+    /// An explicit human retirement already released the name, so the name is
+    /// immediately eligible for reassignment. It must not take the automatic
+    /// return wait.
+    EligibleAfterRetirement {
+        retired_relation_ref: String,
+        retired_ms: i64,
+    },
+}
+
+impl NameReassignmentSchedule {
+    pub(crate) fn round_ms(&self) -> i64 {
+        match self {
+            Self::WaitingReturn { started_ms, .. } => *started_ms,
+            Self::EligibleAfterRetirement { retired_ms, .. } => *retired_ms,
+        }
+    }
+
+    /// Whether reassignment capacity may be admitted for this name at `now`.
+    pub(crate) fn is_due(&self, now: i64) -> bool {
+        match self {
+            Self::WaitingReturn { deadline_ms, .. } => now >= *deadline_ms,
+            Self::EligibleAfterRetirement { .. } => true,
+        }
+    }
+
+    /// Whether this is still the schedule round recorded by an automatic
+    /// invitation. A cleared schedule means the holder returned; a different
+    /// relation means the invitation belongs to a superseded round.
+    pub(crate) fn is_current_for_source(&self, name: &str) -> bool {
+        let reference = reassignment_relation_ref(name);
+        match self {
+            Self::WaitingReturn {
+                lost_relation_ref, ..
+            } => reference == *lost_relation_ref,
+            Self::EligibleAfterRetirement {
+                retired_relation_ref,
+                ..
+            } => reference == *retired_relation_ref,
+        }
+    }
+}
+
+pub(crate) fn reassignment_relation_ref(name: &str) -> String {
+    name.to_owned()
+}
+
+/// Start or keep the fixed return wait for one name. The first confirmed loss
+/// sets the deadline. A repeated loss or restart keeps it. An existing
+/// explicit-retirement eligibility is never downgraded to a wait.
+pub(crate) fn start_return_wait(
+    existing: Option<&NameReassignmentSchedule>,
+    lost_relation_ref: &str,
+    confirmed_ms: i64,
+) -> NameReassignmentSchedule {
+    match existing {
+        Some(schedule @ NameReassignmentSchedule::WaitingReturn { .. })
+        | Some(schedule @ NameReassignmentSchedule::EligibleAfterRetirement { .. }) => {
+            schedule.clone()
+        }
+        None => NameReassignmentSchedule::WaitingReturn {
+            lost_relation_ref: lost_relation_ref.to_owned(),
+            started_ms: confirmed_ms,
+            deadline_ms: confirmed_ms.saturating_add(IDENTITY_RETURN_WAIT_MS),
+        },
+    }
+}
+
+/// Replace any automatic return wait with immediate explicit-retirement
+/// eligibility. The caller must hold a typed explicit human-retirement cause;
+/// an ordinary close or self-unregister is not this cause.
+pub(crate) fn eligible_after_retirement(
+    retired_relation_ref: &str,
+    retired_ms: i64,
+) -> NameReassignmentSchedule {
+    NameReassignmentSchedule::EligibleAfterRetirement {
+        retired_relation_ref: retired_relation_ref.to_owned(),
+        retired_ms,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,10 +198,23 @@ pub enum AgentActivity {
     Busy,
     Idle,
     WaitingUser,
+    Error,
     Unknown,
 }
 
 impl State {
+    /// Current reassignment schedule for one project/stable name, if any. This
+    /// is scheduling state only; it never proves a current identity.
+    pub(crate) fn name_reassignment(
+        &self,
+        project_scope: &str,
+        name: &str,
+    ) -> Option<&NameReassignmentSchedule> {
+        self.name_reassignments
+            .get(project_scope)
+            .and_then(|names| names.get(name))
+    }
+
     pub(crate) fn name_occupancy_revision(&self, project_scope: &str, name: &str) -> u64 {
         self.name_occupancy_revisions
             .get(project_scope)

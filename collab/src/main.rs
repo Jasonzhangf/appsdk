@@ -1378,10 +1378,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     token: ident.token.clone(),
                     approval,
                 },
-                MasterCmd::Delegate { target } => Req::MasterDelegate {
+                MasterCmd::Delegate { target, approval } => Req::MasterDelegate {
                     worker_id: ident.worker_id.clone(),
                     token: ident.token.clone(),
                     target_id: target,
+                    approval,
                 },
                 MasterCmd::Send {
                     project,
@@ -1486,6 +1487,52 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                             token: ident.token.clone(),
                             target_id,
                             lines,
+                        },
+                    )?;
+                    out(&v);
+                    Ok(())
+                }
+                WorkerCmd::Judge {
+                    capture,
+                    presence,
+                    activity,
+                    basis,
+                } => {
+                    let ident = me(&scope)?;
+                    let capture: crate::proto::WorkerStatusCapture = serde_json::from_str(&capture)
+                        .map_err(|error| {
+                            anyhow::anyhow!("WORKER_STATUS_CAPTURE_INVALID: {error}")
+                        })?;
+                    let presence = presence
+                        .map(|value| {
+                            serde_json::from_value::<crate::server::name_state::AgentPresence>(
+                                serde_json::Value::String(value),
+                            )
+                            .map_err(|error| {
+                                anyhow::anyhow!("WORKER_STATUS_PRESENCE_INVALID: {error}")
+                            })
+                        })
+                        .transpose()?;
+                    let activity = activity
+                        .map(|value| {
+                            serde_json::from_value::<crate::server::name_state::AgentActivity>(
+                                serde_json::Value::String(value),
+                            )
+                            .map_err(|error| {
+                                anyhow::anyhow!("WORKER_STATUS_ACTIVITY_INVALID: {error}")
+                            })
+                        })
+                        .transpose()?;
+                    let v: serde_json::Value = call_project(
+                        &scope,
+                        &ident,
+                        &Req::WorkerStatusJudgment {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            capture,
+                            presence,
+                            activity,
+                            basis,
                         },
                     )?;
                     out(&v);

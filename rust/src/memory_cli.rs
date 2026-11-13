@@ -7,130 +7,95 @@ fn generated_id(value: &Value) -> String {
     format!("memory-{}", &digest(&seed)[7..23])
 }
 
+fn ensure_entry_id(mut value: Value) -> Value {
+    if value.get("id").and_then(Value::as_str).is_none() {
+        value["id"] = Value::String(generated_id(&value));
+    }
+    value
+}
+
+fn with_entry_receipt(mut result: Value, value: &Value, global: bool) -> Value {
+    let level = result
+        .get("memory_level")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| memory_level(value));
+    result["write_mode"] = json!("one_shot");
+    result["memory_level"] = json!(level);
+    if result.get("review_status").is_none() {
+        result["review_status"] = json!(review_status(value));
+    }
+    if result.get("detail_path").is_none() {
+        result["detail_path"] = json!(detail_display_path(global, &entry_id(value), level));
+    }
+    result
+}
+
 fn write_entry_with_review(
     root: &Path,
     global: bool,
     value: Value,
     reviewed: Option<(i64, Vec<String>)>,
 ) -> Value {
-    write_entry_event(root, global, value, reviewed, true)
+    let review = reviewed.map(|(level, evidence)| governance::ReviewRequest {
+        status: "reviewed".into(),
+        level,
+        evidence,
+    });
+    match governance::submit_change(root, global, ensure_entry_id(value), review, false, false) {
+        Ok(result) => result,
+        Err(error) => governance::emit_error(error),
+    }
 }
 
-fn write_entry_event(
-    root: &Path,
-    global: bool,
-    mut value: Value,
-    reviewed: Option<(i64, Vec<String>)>,
-    rebuild: bool,
-) -> Value {
-    let cat = category(
-        value
-            .get("category")
-            .and_then(Value::as_str)
-            .unwrap_or("knowledge"),
-    )
-    .to_string();
-    if value.get("id").and_then(Value::as_str).is_none() {
-        value["id"] = Value::String(generated_id(&value));
-    }
-    let id = entry_id(&value);
-    assert_id(&id);
-    let content = entry_text(&value);
-    let timestamp = now();
-    if value.get("title").and_then(Value::as_str).is_none() {
-        value["title"] = Value::String(id.clone());
-    }
-    value["category"] = Value::String(cat.clone());
-    value["content"] = Value::String(content);
-    value["tags"] = Value::Array(tags(&value).into_iter().map(Value::String).collect());
-    value["source_refs"] = Value::Array(refs(&value).into_iter().map(Value::String).collect());
-    let current = effective_entries_for_scope(root, global)
-        .into_iter()
-        .find(|existing| entry_id(existing) == id);
-    let is_review_write = reviewed.is_some();
-    match reviewed {
-        Some((level, evidence)) => {
-            if !matches!(level, 1 | 2) || evidence.is_empty() {
-                fail(
-                    "MEMORY_REVIEW_INVALID",
-                    "promote only to level 1 or 2 with review evidence",
-                );
-            }
-            value["memory_level"] = Value::Number(level.into());
-            value["review_status"] = Value::String("reviewed".into());
-            value["review_evidence"] =
-                Value::Array(evidence.into_iter().map(Value::String).collect());
-        }
-        None => {
-            let level = current.as_ref().map(memory_level).unwrap_or(3);
-            let status = current.as_ref().map(review_status).unwrap_or("unreviewed");
-            value["memory_level"] = Value::Number(level.into());
-            value["review_status"] = Value::String(status.into());
-            if let Some(existing) = &current {
-                if let Some(evidence) = existing.get("review_evidence") {
-                    value["review_evidence"] = evidence.clone();
-                }
-            }
-        }
-    }
-    value["layer"] = Value::Number(memory_level(&value).into());
-    value["detail_path"] = Value::String(detail_display_path(global, &id, memory_level(&value)));
-    value["created_at"] = value
-        .get("created_at")
-        .cloned()
-        .unwrap_or_else(|| Value::String(timestamp.clone()));
-    value["updated_at"] = Value::String(timestamp);
-    let incoming_tags = tags(&value);
-    let incoming_refs = refs(&value);
-    if let Some(existing) = &current {
-        if existing.get("category").and_then(Value::as_str) != Some(cat.as_str()) {
-            fail(
-                "MEMORY_CATEGORY_CHANGE",
-                "keep one category per memory ID or create a new ID",
-            );
-        }
-    }
-    let duplicate = !is_review_write
-        && current.as_ref().is_some_and(|existing| {
-            existing.get("content").and_then(Value::as_str)
-                == value.get("content").and_then(Value::as_str)
-                && incoming_tags.iter().all(|tag| tags(existing).contains(tag))
-                && incoming_refs
-                    .iter()
-                    .all(|source| refs(existing).contains(source))
-        });
-    if duplicate {
-        let index = if rebuild {
-            sync_index(root, global)
-        } else {
-            Value::Null
-        };
-        return json!({"accepted": true, "deduplicated": true, "id": id, "category": cat, "index": index});
-    }
-    let path = if global {
-        home_dir().join("global").join(format!("{}.jsonl", cat))
-    } else {
-        category_file(root, &cat)
-    };
-    if path.exists() {
-        let mut text = fs::read_to_string(&path)
-            .unwrap_or_else(|_| fail("MEMORY_SOURCE_INVALID", "repair the memory JSONL source"));
-        text.push_str(&serde_json::to_string(&value).unwrap());
-        text.push('\n');
-        atomic_write(&path, &text);
-    } else {
-        atomic_write(&path, &(serde_json::to_string(&value).unwrap() + "\n"));
-    }
-    let index = if rebuild {
-        sync_index(root, global)
-    } else {
-        Value::Null
-    };
-    json!({"accepted": true, "write_mode": "one_shot", "id": id, "category": cat, "memory_level": memory_level(&value), "review_status": review_status(&value), "detail_path": detail_display_path(global, &id, memory_level(&value)), "index": index})
+fn review_from_value(value: &Value) -> Option<governance::ReviewRequest> {
+    let review = value.get("memory_review")?;
+    let status = review.get("status").and_then(Value::as_str)?;
+    let level = review.get("level").and_then(Value::as_i64)?;
+    let evidence = review
+        .get("evidence")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(governance::ReviewRequest {
+        status: status.to_string(),
+        level,
+        evidence,
+    })
 }
 
 pub(super) fn write_entry(root: &Path, global: bool, value: Value) -> Value {
-    write_entry_with_review(root, global, value, None)
+    let review = review_from_value(&value);
+    let value = ensure_entry_id(value);
+    match governance::submit_change(root, global, value.clone(), review, true, false) {
+        Ok(result) => with_entry_receipt(result, &value, global),
+        Err(error) => governance::emit_error(error),
+    }
+}
+
+pub(super) fn write_entries(
+    root: &Path,
+    global: bool,
+    entries: Vec<Value>,
+) -> Result<Value, MemoryError> {
+    let changes = entries
+        .into_iter()
+        .map(|value| {
+            let review = review_from_value(&value);
+            governance::MemoryChange {
+                patch: ensure_entry_id(value),
+                review,
+                allow_approval: true,
+                force_rule_operation: false,
+            }
+        })
+        .collect();
+    governance::submit_batch(root, global, changes)
 }
 
 // Ingest additions before any projection can hide them. Existing IDs remain
@@ -165,11 +130,85 @@ pub(super) fn import_new_l3(root: &Path, global: bool) -> bool {
         );
     }
     let changed = !entries.is_empty();
-    for mut entry in entries {
-        entry.as_object_mut().unwrap().remove("review_evidence");
-        write_entry_event(root, global, entry, None, false);
+    let changes = entries
+        .into_iter()
+        .map(|mut entry| {
+            entry = ensure_entry_id(entry);
+            entry["memory_level"] = json!(3);
+            entry["review_status"] = json!("unreviewed");
+            entry["review_evidence"] = json!([]);
+            entry.as_object_mut().unwrap().remove("memory_review");
+            governance::MemoryChange {
+                patch: entry,
+                review: None,
+                allow_approval: false,
+                force_rule_operation: false,
+            }
+        })
+        .collect();
+    if changed {
+        match governance::submit_batch(root, global, changes) {
+            Ok(result) if result.get("committed") == Some(&Value::Bool(true)) => true,
+            Ok(_) => false,
+            Err(error) => governance::emit_error(error),
+        }
+    } else {
+        false
     }
-    changed
+}
+
+fn changed_prefix(result: &Value) -> Vec<Value> {
+    result
+        .get("updates")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![result.clone()])
+}
+
+fn review_changes(updates: Vec<Value>) -> Vec<governance::MemoryChange> {
+    updates
+        .into_iter()
+        .map(|value| {
+            let review = value.get("memory_review").and_then(|review| {
+                let level = review.get("level").and_then(Value::as_i64)?;
+                let evidence = review
+                    .get("evidence")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                Some(governance::ReviewRequest {
+                    status: "reviewed".into(),
+                    level,
+                    evidence,
+                })
+            });
+            governance::MemoryChange {
+                patch: value,
+                review,
+                allow_approval: false,
+                force_rule_operation: false,
+            }
+        })
+        .collect()
+}
+
+fn review_result(root: &Path, updates: Vec<Value>, run_id: &str) -> Value {
+    let result = match governance::submit_batch(root, false, review_changes(updates)) {
+        Ok(result) => result,
+        Err(error) => governance::emit_error(error),
+    };
+    json!({
+        "status":"multiple_updates",
+        "run_id":run_id,
+        "checked":true,
+        "review_recorded":true,
+        "promotion_applied":false,
+        "reason":"user_approval_required",
+        "updates":changed_prefix(&result),
+        "index_updated":true
+    })
 }
 
 fn open_scope(root: &Path, global: bool) -> Connection {
@@ -518,25 +557,34 @@ fn review(root: &Path, run_id: &str) -> Value {
     if updates.is_empty() {
         return json!({"status":"no_update","run_id":run_id,"checked":true,"reason":"no explicit memory candidates in run notes","index_updated":false});
     }
-    let mut result = Vec::new();
-    for value in updates {
-        let policy = value.get("memory_review").and_then(|review| {
-            let level = review.get("level").and_then(Value::as_i64)?;
-            let evidence = review
-                .get("evidence")
-                .and_then(Value::as_array)?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            Some((level, evidence))
-        });
-        result.push(write_entry_with_review(root, false, value, policy));
-    }
-    json!({"status":"multiple_updates","run_id":run_id,"checked":true,"updates":result,"index_updated":true})
+    review_result(root, updates, run_id)
 }
 
-fn promote(root: &Path, id: &str, level: i64, evidence: Vec<String>) -> Value {
+fn read_json_object(path: &str, code: &str, next: &str) -> Value {
+    let text = fs::read_to_string(path).unwrap_or_else(|_| fail(code, next));
+    let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| fail(code, next));
+    if value.is_object() {
+        value
+    } else {
+        fail(code, next)
+    }
+}
+
+fn is_rule_value(value: &Value) -> bool {
+    value.get("entry_kind").and_then(Value::as_str) == Some("rule")
+        || value
+            .get("rule_control")
+            .is_some_and(|control| !control.is_null())
+}
+
+fn promote_with_approval(
+    root: &Path,
+    global: bool,
+    id: &str,
+    level: i64,
+    evidence: Vec<String>,
+    approval: Option<Value>,
+) -> Value {
     assert_id(id);
     if !matches!(level, 1 | 2) || evidence.is_empty() {
         fail(
@@ -544,7 +592,7 @@ fn promote(root: &Path, id: &str, level: i64, evidence: Vec<String>) -> Value {
             "use level 1 or 2 with at least one review evidence reference",
         );
     }
-    let current = effective_entries_for_scope(root, false)
+    let current = effective_entries_for_scope(root, global)
         .into_iter()
         .find(|entry| entry_id(entry) == id)
         .unwrap_or_else(|| {
@@ -553,9 +601,42 @@ fn promote(root: &Path, id: &str, level: i64, evidence: Vec<String>) -> Value {
                 "query or create the memory before promotion",
             )
         });
-    let mut next = current;
-    next["memory_review"] = json!({"status":"reviewed","level":level,"evidence":evidence});
-    let result = write_entry_with_review(root, false, next, Some((level, evidence)));
+    if !is_rule_value(&current) {
+        let review = json!({"status":"reviewed","level":level,"evidence":evidence});
+        let next = json!({
+            "id": id,
+            "category": current.get("category").cloned().unwrap_or_else(|| json!("knowledge")),
+            "memory_review": review,
+        });
+        return json!({
+            "status":"reviewed",
+            "id":id,
+            "level":level,
+            "result":write_entry_with_review(root, global, next, Some((level, evidence)))
+        });
+    }
+    let mut patch = json!({
+        "id": id,
+        "memory_review": {"status":"reviewed","level":level,"evidence":evidence},
+    });
+    if let Some(approval) = approval {
+        patch["rule_control"] = json!({"approval": approval});
+    }
+    let result = match governance::submit_change(
+        root,
+        global,
+        patch,
+        Some(governance::ReviewRequest {
+            status: "reviewed".into(),
+            level,
+            evidence,
+        }),
+        true,
+        true,
+    ) {
+        Ok(result) => result,
+        Err(error) => governance::emit_error(error),
+    };
     json!({"status":"reviewed","id":id,"level":level,"result":result})
 }
 
@@ -763,6 +844,7 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
         "entry" => {
             let mut value = serde_json::Map::new();
             let mut global = false;
+            let mut input = None;
             let mut index = 0;
             while index < values.len() {
                 let option = values[index].as_str();
@@ -770,6 +852,10 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
                     "--global" => {
                         global = true;
                         index += 1;
+                    }
+                    "--input" => {
+                        input = values.get(index + 1).cloned();
+                        index += 2;
                     }
                     "--id" | "--category" | "--title" | "--text" | "--content" | "--importance"
                     | "--tag" => {
@@ -798,11 +884,36 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
                     }
                     _ => fail(
                         "MEMORY_USAGE",
-                        "use --id --category --title --text --tag [--global]",
+                        "use --id --category --title --text --tag [--global] or --input <entry.json>",
                     ),
                 }
             }
-            output(&write_entry(&root, global, Value::Object(value)));
+            if input.is_some() && !value.is_empty() {
+                fail("MEMORY_USAGE", "use either entry flags or --input, not both");
+            }
+            let entry = if let Some(input) = input {
+                read_json_object(
+                    &input,
+                    "MEMORY_ENTRY_INVALID",
+                    "provide a structured JSON entry object",
+                )
+            } else {
+                Value::Object(value)
+            };
+            let entry = ensure_entry_id(entry);
+            let review = review_from_value(&entry);
+            let result = match governance::submit_change(
+                &root,
+                global,
+                entry.clone(),
+                review,
+                true,
+                false,
+            ) {
+                Ok(result) => result,
+                Err(error) => governance::emit_error(error),
+            };
+            output(&with_entry_receipt(result, &entry, global));
         }
         "query" => {
             let mut text_parts = Vec::new();
@@ -875,10 +986,12 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
             let mut id = None;
             let mut level = None;
             let mut evidence = Vec::new();
+            let mut approval = None;
+            let mut global = false;
             let mut index = 0;
             while index < values.len() {
                 match values[index].as_str() {
-                    "--id" | "--level" | "--evidence" => {
+                    "--id" | "--level" | "--evidence" | "--approval" => {
                         let arg = values.get(index + 1).cloned().unwrap_or_else(|| {
                             fail("MEMORY_USAGE", "provide a value after the promote option")
                         });
@@ -886,18 +999,35 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
                             "--id" => id = Some(arg),
                             "--level" => level = Some(arg.parse::<i64>().unwrap_or(0)),
                             "--evidence" => evidence.push(arg),
+                            "--approval" => approval = Some(arg),
                             _ => unreachable!(),
                         }
                         index += 2;
                     }
-                    _ => fail("MEMORY_USAGE", "use promote --id <id> --level <1|2> --evidence <ref>"),
+                    "--global" => {
+                        global = true;
+                        index += 1;
+                    }
+                    _ => fail(
+                        "MEMORY_USAGE",
+                        "use promote --id <id> --level <1|2> --evidence <ref> [--approval <file>] [--global]",
+                    ),
                 }
             }
-            output(&promote(
+            let approval = approval.map(|path| {
+                read_json_object(
+                    &path,
+                    "MEMORY_APPROVAL_INVALID",
+                    "provide a structured approval JSON object",
+                )
+            });
+            output(&promote_with_approval(
                 &root,
+                global,
                 &id.unwrap_or_else(|| fail("MEMORY_USAGE", "provide --id")),
                 level.unwrap_or(0),
                 evidence,
+                approval,
             ));
         }
         "migrate" => {
@@ -938,10 +1068,36 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
             ));
         }
         "index" | "export" => {
-            if !values.is_empty() {
-                fail("MEMORY_USAGE", "use project-memory index|export [project]");
+            let rebuild_only = values.iter().any(|value| value == "--rebuild-only");
+            let global = values.iter().any(|value| value == "--global");
+            if !values.is_empty()
+                && !(rebuild_only
+                    && values
+                        .iter()
+                        .all(|value| value == "--rebuild-only" || value == "--global"))
+            {
+                fail(
+                    "MEMORY_USAGE",
+                    "use project-memory index|export [project] [--global] [--rebuild-only]",
+                );
             }
-            output(&json!({"project":sync_index(&root, false),"global":sync_index(&root, true)}));
+            if rebuild_only {
+                if global {
+                    let value = match sync_index_rebuild_only(&root, true) {
+                        Ok(value) => value,
+                        Err(error) => governance::emit_error(error),
+                    };
+                    output(&json!({"global": value}));
+                } else {
+                    let value = match sync_index_rebuild_only(&root, false) {
+                        Ok(value) => value,
+                        Err(error) => governance::emit_error(error),
+                    };
+                    output(&json!({"project": value}));
+                }
+            } else {
+                output(&json!({"project":sync_index(&root, false),"global":sync_index(&root, true)}));
+            }
         }
         "compact" => {
             if !values.is_empty() {

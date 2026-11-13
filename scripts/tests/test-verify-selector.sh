@@ -50,6 +50,14 @@ assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --
 assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli'
 [[ "$(grep -Fc -- 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli' "$workflow")" == 1 ]] ||
   fail "guidance_ablation_cli must run from one shared condition"
+[[ "$(grep -Ec '^[[:space:]]*cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli$' "$workflow")" == 3 ]] ||
+  fail "memory_governance_cli must cover Ubuntu and the exclusive native Windows routes"
+[[ "$(grep -Fc -- 'cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli -- --list' "$workflow")" == 3 ]] ||
+  fail "all memory governance routes must prove their test target is non-empty"
+[[ "$(grep -Fc -- '  - name: Memory governance CLI tests' "$workflow")" == 3 ]] ||
+  fail "memory governance CLI steps must cover Ubuntu and both Windows routes"
+assert_workflow_contains '  windows-memory:'
+assert_workflow_contains "if: needs.changes.outputs.rust_memory == 'true' && needs.changes.outputs.windows_appsdk != 'true'"
 assert_workflow_contains 'dagpipe::tests::graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs'
 assert_workflow_contains 'dagpipe_validate_notifications_records_invocation_outcomes'
 assert_workflow_contains 'dagpipe_validate_notifications_isolates_invocation_log_failure'
@@ -305,7 +313,7 @@ expect_only "rust_verify_foundation app_sdk_full resources windows_appsdk"
 
 run_scenario "verify-foundation-and-unrelated-source" "push" "branch" "1" \
   $'rust/src/main/verify_foundation.rs\nrust/src/memory.rs'
-expect_only "rust_verify_foundation rust_memory windows_appsdk"
+expect_only "rust_verify_foundation rust_memory"
 
 run_scenario "verify-foundation-and-producer" "push" "branch" "1" \
   $'rust/src/main.rs\nrust/src/main/producer.rs'
@@ -512,7 +520,51 @@ run_scenario "ontology-guidance-schema" "push" "branch" "1" \
   "contracts/guidance/guidance-manifest.schema.json"
 expect_only "rust_ontology_governance"
 
-for map in contracts/maps/function-map.json contracts/maps/module-registry.json; do
+# Memory rule governance paths use the existing Memory verification owner.
+for owner in \
+  rust/src/memory.rs \
+  rust/src/memory_cli.rs \
+  rust/src/bin/project-memory.rs \
+  rust/src/memory_governance.rs \
+  rust/tests/memory_governance_cli.rs \
+  contracts/memory/memory-entry.schema.json \
+  contracts/memory/rule-promotion.ontology.json \
+  docs/dagpipe/graphs/project-memory-rule-promotion.graph.json
+do
+  run_scenario "memory-governance-owner:$owner" "push" "branch" "1" "$owner"
+  expect_only "rust_memory"
+done
+
+run_scenario "memory-governance-and-dependency" "push" "branch" "1" \
+  $'rust/src/memory_governance.rs\nrust/Cargo.toml'
+expect_only "rust_memory app_sdk_full resources windows_appsdk"
+
+run_scenario "memory-governance-and-unknown" "push" "branch" "1" \
+  $'rust/src/memory_governance.rs\nunknown/memory-governance.txt'
+expect_only "rust_memory app_sdk_full windows_appsdk windows_dagpipe dagpipe_installer"
+
+run_scenario "memory-governance-and-dagpipe" "push" "branch" "1" \
+  $'docs/dagpipe/graphs/project-memory-rule-promotion.graph.json\ndagpipe/src/lib.rs'
+expect_only "rust_memory dagpipe windows_dagpipe"
+
+run_scenario "project-memory-skill" "push" "branch" "1" \
+  "sdk-skill-sources/project-memory/SKILL.md"
+expect_only "docs workflow_contract"
+
+run_scenario "memory-source-and-skill" "push" "branch" "1" \
+  $'rust/src/memory_governance.rs\ncontracts/maps/resource-map.json\nsdk-skill-sources/project-memory/SKILL.md'
+expect_only "rust_memory source_registry docs workflow_contract"
+
+run_scenario "project-memory-design-doc" "push" "branch" "1" \
+  "docs/design/project-memory.md"
+expect_only "docs"
+
+for map in \
+  contracts/maps/function-map.json \
+  contracts/maps/module-registry.json \
+  contracts/maps/mainline-call-map.json \
+  contracts/maps/resource-map.json \
+  contracts/maps/verification-map.json; do
   run_scenario "source-map-$map" "push" "branch" "1" "$map"
   expect_only "source_registry"
 done
@@ -521,7 +573,7 @@ run_scenario "source-map-with-dependency" "push" "branch" "1" \
   $'contracts/maps/module-registry.json\nrust/Cargo.toml'
 expect_only "source_registry app_sdk_full resources windows_appsdk"
 
-run_scenario "other-source-map" "push" "branch" "1" "contracts/maps/verification-map.json"
+run_scenario "unknown-source-map" "push" "branch" "1" "contracts/maps/unknown-map.json"
 expect_only "app_sdk_full resources windows_appsdk"
 
 run_scenario "ontology-guidance-and-dependency" "push" "branch" "1" \

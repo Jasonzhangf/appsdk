@@ -472,13 +472,15 @@ fn authenticated_send_records_real_identity_without_regression() {
 }
 
 #[test]
-fn pinned_session_survives_public_continuation_and_current_retention_without_cross_session_delivery(
-) {
+fn name_addressed_target_session_follows_same_name_handoff_across_restart_and_retention() {
     const NEXT_SESSION: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fdd";
+    const ORIGINAL_BODY: &str = "private body for the original session";
+    const FRESH_BODY: &str = "complete body for the current session";
     let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
     let receiver = fixture.run_public(&["context"], THREAD_B);
     let name = receiver["name"].as_str().unwrap();
-    let worker = receiver["identity"]["worker_id"]
+    let old_worker = receiver["identity"]["worker_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -501,7 +503,7 @@ fn pinned_session_survives_public_continuation_and_current_retention_without_cro
         "queued",
         "--subject",
         "old-session-pinned",
-        "private body for the original session",
+        ORIGINAL_BODY,
     ]);
     assert!(
         !pinned.status.success(),
@@ -530,7 +532,7 @@ fn pinned_session_survives_public_continuation_and_current_retention_without_cro
     // daemon must perform its own current-state retention.
     fixture.update_current_state(|state| {
         state["msgs"]["m1-1"] = json!({
-            "id":"m1-1", "from":"unknown", "to":worker,
+            "id":"m1-1", "from":"unknown", "to":old_worker,
             "type":"notify", "subject":"expired retention sibling", "body":"old history",
             "in_reply_to":null, "created_ms":1, "state":"pending",
             "wake_attempt_count":0, "last_wake_attempt_ms":0, "retry_attempted":false
@@ -571,33 +573,55 @@ fn pinned_session_survives_public_continuation_and_current_retention_without_cro
     let continued: Value = serde_json::from_slice(&continued.stdout).unwrap();
     let snapshot = &continued["result"]["snapshot"];
     assert_eq!(snapshot["name"], name);
-    assert_ne!(snapshot["identity"]["worker_id"], worker);
-    let worker = snapshot["identity"]["worker_id"].as_str().unwrap();
+    assert_ne!(snapshot["identity"]["worker_id"], old_worker);
+    let new_worker = snapshot["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(snapshot["binding"]["session_id"], NEXT_SESSION);
 
-    // Replay the actual committed send and continuation, then enable delivery.
+    // The name still owns the pending delivery. The legal continuation moves
+    // only its current carrier; the message identity and body do not change.
+    let followed = fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
+    assert!(
+        followed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&followed.stderr)
+    );
+    let followed: Value = serde_json::from_slice(&followed.stdout).unwrap();
+    assert_eq!(followed["id"], old_id);
+    assert_eq!(followed["body"], ORIGINAL_BODY);
+    assert_eq!(followed["to"], new_worker);
+    assert_eq!(followed["target_session"], NEXT_SESSION);
+    assert_eq!(followed["consumed_by_recv"], false);
+
+    // Restart and enable delivery. The pending message must retain the name
+    // handoff while the expired sibling remains purged.
     fixture.stop_daemon();
     std::fs::write(&config, "[notifications]\nenabled=true\n").unwrap();
     fixture.start_daemon();
-    let replayed = fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
+    let retained = fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
     assert!(
-        replayed.status.success(),
+        retained.status.success(),
         "{}",
-        String::from_utf8_lossy(&replayed.stderr)
+        String::from_utf8_lossy(&retained.stderr)
     );
-    let replayed: Value = serde_json::from_slice(&replayed.stdout).unwrap();
-    assert_eq!(
-        replayed["target_session"], THREAD_B,
-        "current-state restart must retain the original fixed session: {replayed}"
-    );
+    let retained: Value = serde_json::from_slice(&retained.stdout).unwrap();
+    assert_eq!(retained["id"], old_id);
+    assert_eq!(retained["body"], ORIGINAL_BODY);
+    assert_eq!(retained["to"], new_worker);
+    assert_eq!(retained["target_session"], NEXT_SESSION);
+    assert_eq!(retained["consumed_by_recv"], false);
+    assert!(fixture.current_state()["msgs"]["m1-1"].is_null());
+
     let fresh = fixture.command_without_native_facts(&[
         "sendmessage",
         "--unknown-sender",
         "--to",
-        &worker,
+        &new_worker,
         "--subject",
         "current-session-message",
-        "complete body for the current session",
+        FRESH_BODY,
     ]);
     assert!(
         fresh.status.success(),
@@ -606,49 +630,29 @@ fn pinned_session_survives_public_continuation_and_current_retention_without_cro
         String::from_utf8_lossy(&fresh.stderr)
     );
     let fresh: Value = serde_json::from_slice(&fresh.stdout).unwrap();
-    let fresh_id = fresh["msg_id"].as_str().unwrap();
+    let fresh_id = fresh["msg_id"].as_str().unwrap().to_owned();
 
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let old_status = loop {
-        let output = fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if status["notification_delivery_failure"]["operation"]
-            == "notification.target_session_mismatch"
-        {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "pinned failure did not become observable: {status}"
-        );
-        thread::sleep(Duration::from_millis(50));
-    };
-    assert_eq!(old_status["target_session"], THREAD_B);
-    assert_eq!(
-        old_status["notification_delivery_failure"]["retryable"],
-        false
+    // The stable name change does not widen another name's mailbox.
+    let alice_inbox = fixture.run_public(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "other-name-isolation",
+        ],
+        THREAD_A,
     );
-    assert_eq!(old_status["consumed_by_recv"], false);
-    let native = fixture.state.lock().unwrap();
-    let inputs = &native.get(THREAD_B).unwrap().inputs;
+    let alice_messages = alice_inbox["messages"].as_array().unwrap();
     assert!(
-        inputs
-            .iter()
-            .any(|input| native_input_has_message(input, fresh_id)),
-        "the current session's native consumer did not receive its wake: {inputs:?}"
+        alice_messages.iter().all(|message| {
+            message["id"] != old_id
+                && message["id"] != fresh_id
+                && message["body"] != ORIGINAL_BODY
+                && message["body"] != FRESH_BODY
+        }),
+        "another name's mailbox received the handed-off delivery: {alice_inbox}"
     );
-    assert!(
-        !inputs
-            .iter()
-            .any(|input| native_input_has_message(input, &old_id)),
-        "a replayed pinned message leaked into native input for the new session: {inputs:?}"
-    );
-    drop(native);
 
     let received = fixture.command_public_with_session(
         &[
@@ -669,22 +673,97 @@ fn pinned_session_survives_public_continuation_and_current_retention_without_cro
     );
     let received: Value = serde_json::from_slice(&received.stdout).unwrap();
     let messages = received["messages"].as_array().unwrap();
-    assert!(
-        !messages.iter().any(|message| message["id"] == old_id),
-        "{received}"
-    );
-    assert!(
-        !messages
-            .iter()
-            .any(|message| message["body"] == "private body for the original session"),
-        "{received}"
-    );
+    let original = messages
+        .iter()
+        .find(|message| message["id"] == old_id)
+        .expect("the new holder consumes the original pending message through recv");
+    assert_eq!(original["from"], "unknown");
+    assert_eq!(original["to"], new_worker);
+    assert_eq!(original["body"], ORIGINAL_BODY);
     let current = messages
         .iter()
         .find(|message| message["id"] == fresh_id)
         .expect("the current session consumes its ordinary message through recv");
     assert_eq!(current["from"], "unknown");
-    assert_eq!(current["body"], "complete body for the current session");
+    assert_eq!(current["body"], FRESH_BODY);
+    let consumed_messages = messages.clone();
+
+    // The durable receipt binds to the current actual carrier. It survives a
+    // daemon restart and replays the same batch without moving or duplicating
+    // either original delivery.
+    let consumed = fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
+    assert!(
+        consumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&consumed.stderr)
+    );
+    let consumed: Value = serde_json::from_slice(&consumed.stdout).unwrap();
+    assert_eq!(consumed["id"], old_id);
+    assert_eq!(consumed["body"], ORIGINAL_BODY);
+    assert_eq!(consumed["to"], new_worker);
+    assert_eq!(consumed["target_session"], NEXT_SESSION);
+    assert_eq!(consumed["consumed_by_recv"], true);
+
+    fixture.restart_daemon();
+    let receipt_after_restart =
+        fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
+    assert!(
+        receipt_after_restart.status.success(),
+        "{}",
+        String::from_utf8_lossy(&receipt_after_restart.stderr)
+    );
+    let receipt_after_restart: Value =
+        serde_json::from_slice(&receipt_after_restart.stdout).unwrap();
+    assert_eq!(receipt_after_restart["id"], old_id);
+    assert_eq!(receipt_after_restart["body"], ORIGINAL_BODY);
+    assert_eq!(receipt_after_restart["to"], new_worker);
+    assert_eq!(receipt_after_restart["target_session"], NEXT_SESSION);
+    assert_eq!(receipt_after_restart["consumed_by_recv"], true);
+
+    let replay = fixture.command_public_with_session(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "session-continuation-consume",
+        ],
+        NEXT_SESSION,
+        THREAD_B,
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["messages"], json!(consumed_messages));
+
+    let repeated = fixture.command_public_with_session(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "session-continuation-repeat",
+        ],
+        NEXT_SESSION,
+        THREAD_B,
+    );
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    let repeated_messages = repeated["messages"].as_array().unwrap();
+    assert!(
+        repeated_messages
+            .iter()
+            .all(|message| message["id"] != old_id && message["id"] != fresh_id),
+        "a repeat recv duplicated an already consumed delivery: {repeated}"
+    );
 }
 
 #[test]

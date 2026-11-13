@@ -4,6 +4,21 @@ use super::binding_slot::BindingValue;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+#[derive(Debug)]
+enum LayoutError {
+    Ambiguous,
+    Other(String),
+}
+
+impl LayoutError {
+    fn message(self) -> String {
+        match self {
+            Self::Ambiguous => "TM_LAYOUT_AMBIGUOUS: layout binding is not unique".into(),
+            Self::Other(message) => message,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct LayoutBinding {
     pub(crate) binding_id: String,
@@ -31,6 +46,10 @@ fn manifest_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn observe(value: &BindingValue) -> Result<Option<LayoutBinding>, String> {
+    observe_typed(value).map_err(LayoutError::message)
+}
+
+fn observe_typed(value: &BindingValue) -> Result<Option<LayoutBinding>, LayoutError> {
     if value.binding.tmux_endpoint.is_none() {
         return Ok(None);
     }
@@ -41,34 +60,41 @@ pub(crate) fn observe(value: &BindingValue) -> Result<Option<LayoutBinding>, Str
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(format!(
+            return Err(LayoutError::Other(format!(
                 "TM_LAYOUT_READ_FAILED: {}: {error}",
                 path.display()
-            ))
+            )))
         }
     };
-    let entries: Vec<LayoutBinding> = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("TM_LAYOUT_DECODE_FAILED: {}: {error}", path.display()))?;
+    let entries: Vec<LayoutBinding> = serde_json::from_slice(&bytes).map_err(|error| {
+        LayoutError::Other(format!(
+            "TM_LAYOUT_DECODE_FAILED: {}: {error}",
+            path.display()
+        ))
+    })?;
     let project_entries: Vec<_> = entries
         .iter()
         .filter(|entry| entry.tab_id != "overview" && entry.belongs_to_project(value))
         .collect();
     let saved = if let Some(id) = value.layout_binding_id.as_deref() {
         let mut exact = entries.iter().filter(|entry| entry.binding_id == id);
-        let Some(saved) = exact.next() else {
-            return Ok(None);
-        };
-        if exact.next().is_some() {
-            return Err("TM_LAYOUT_AMBIGUOUS: layout binding is not unique".into());
-        }
-        if saved.tab_id == "overview" {
-            None
-        } else if saved.belongs_to_project(value) {
-            Some(saved)
-        } else {
-            return Err(
-                "TM_LAYOUT_PROJECT_MISMATCH: layout binding belongs to another project".into(),
-            );
+        match exact.next() {
+            Some(saved) => {
+                if exact.next().is_some() {
+                    return Err(LayoutError::Ambiguous);
+                }
+                if saved.tab_id == "overview" {
+                    None
+                } else if saved.belongs_to_project(value) {
+                    Some(saved)
+                } else {
+                    return Err(LayoutError::Other(
+                        "TM_LAYOUT_PROJECT_MISMATCH: layout binding belongs to another project"
+                            .into(),
+                    ));
+                }
+            }
+            None => None,
         }
     } else {
         None
@@ -86,12 +112,14 @@ pub(crate) fn observe(value: &BindingValue) -> Result<Option<LayoutBinding>, Str
         return Ok(None);
     };
     if matches.next().is_some() {
-        return Err("TM_LAYOUT_AMBIGUOUS: layout binding is not unique".into());
+        return Err(LayoutError::Ambiguous);
     }
     if entry.binding_id.trim().is_empty() || entry.tab_id.trim().is_empty() {
-        return Err("TM_LAYOUT_INVALID: binding_id and tab_id are required".into());
+        return Err(LayoutError::Other(
+            "TM_LAYOUT_INVALID: binding_id and tab_id are required".into(),
+        ));
     }
-    entry.slot()?;
+    entry.slot().map_err(LayoutError::Other)?;
     Ok(Some(entry.clone()))
 }
 
@@ -126,16 +154,16 @@ impl LayoutBinding {
 
 pub(crate) fn physical_name(
     value: &BindingValue,
-    cwd: &str,
+    _cwd: &str,
     name: &str,
 ) -> Result<Option<String>, String> {
-    match observe(value)? {
-        Some(layout) => layout.physical_name(name).map(Some),
-        None if value.layout_binding_id.is_none() => {
-            super::name_resolution::physical_tmux_name(cwd, name).map(Some)
-        }
-        // A stale fixed ID cannot invent a new position.
-        None => Ok(None),
+    match observe_typed(value) {
+        Err(LayoutError::Ambiguous) => Ok(None),
+        Err(error) => Err(error.message()),
+        Ok(Some(layout)) => layout.physical_name(name).map(Some),
+        // No unique manifest position means no physical target.
+        // Ordinary-pool and peer-number labels do not invent a position.
+        Ok(None) => Ok(None),
     }
 }
 

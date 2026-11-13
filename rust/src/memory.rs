@@ -24,6 +24,117 @@ const SKILL_DESCRIPTION_BASE_SLOTS: usize = 8;
 #[allow(dead_code)]
 const INDEX_TEMPLATE: &str = include_str!("../../memory/index.md");
 
+#[derive(Clone, Debug)]
+pub(super) struct RawCommitReceipt {
+    pub(super) scope: String,
+    pub(super) id: String,
+    pub(super) category: String,
+    pub(super) revision: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(super) struct MemoryError {
+    pub(super) code: String,
+    pub(super) message: String,
+    pub(super) next: String,
+    pub(super) committed: Vec<RawCommitReceipt>,
+    pub(super) uncommitted_ids: Vec<String>,
+    pub(super) recovery: Option<Vec<String>>,
+}
+
+impl MemoryError {
+    pub(super) fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        next: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            next: next.into(),
+            committed: Vec::new(),
+            uncommitted_ids: Vec::new(),
+            recovery: None,
+        }
+    }
+
+    pub(super) fn committed_prefix(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        next: impl Into<String>,
+        receipts: Vec<RawCommitReceipt>,
+        uncommitted_ids: Vec<String>,
+        recovery: Vec<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            next: next.into(),
+            committed: receipts,
+            uncommitted_ids,
+            recovery: Some(recovery),
+        }
+    }
+
+    pub(super) fn to_json(&self) -> Value {
+        let committed = !self.committed.is_empty();
+        let mut value = json!({
+            "accepted": committed,
+            "committed": committed,
+            "projection_updated": false,
+            "error": {
+                "code": self.code,
+                "message": self.message,
+            },
+            "next": self.next,
+            "retry_allowed": !committed,
+        });
+        if let Some(receipt) = self.committed.first() {
+            value["scope"] = Value::String(receipt.scope.clone());
+            value["id"] = Value::String(receipt.id.clone());
+            value["category"] = Value::String(receipt.category.clone());
+            value["revision"] = receipt
+                .revision
+                .map(|revision| Value::Number(revision.into()))
+                .unwrap_or(Value::Null);
+        }
+        if !self.committed.is_empty() {
+            value["receipts"] = Value::Array(
+                self.committed
+                    .iter()
+                    .map(|receipt| {
+                        json!({
+                            "scope": receipt.scope,
+                            "id": receipt.id,
+                            "category": receipt.category,
+                            "revision": receipt.revision,
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        if !self.uncommitted_ids.is_empty() {
+            value["uncommitted_ids"] = Value::Array(
+                self.uncommitted_ids
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            );
+        }
+        if let Some(recovery) = &self.recovery {
+            value["recovery"] = Value::Array(
+                recovery
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        value
+    }
+}
+
 #[allow(dead_code)]
 pub fn initialize_project(root: &Path) -> Result<(), &'static str> {
     let directory = root.join("memory");
@@ -184,7 +295,7 @@ fn markdown_heading(value: &str) -> String {
         .replace('#', "\\#")
 }
 
-pub(super) fn write_detail(root: &Path, global: bool, value: &Value) {
+pub(super) fn write_detail(root: &Path, global: bool, value: &Value) -> Result<(), MemoryError> {
     let id = entry_id(value);
     let level = memory_level(value);
     let metadata = json!({
@@ -195,6 +306,8 @@ pub(super) fn write_detail(root: &Path, global: bool, value: &Value) {
         "memory_level": memory_level(value),
         "review_status": review_status(value),
         "review_evidence": value.get("review_evidence").cloned().unwrap_or_else(|| json!([])),
+        "entry_kind": value.get("entry_kind").cloned().unwrap_or(Value::Null),
+        "rule_control": value.get("rule_control").cloned().unwrap_or(Value::Null),
         "importance": value.get("importance").and_then(Value::as_i64).unwrap_or(0),
         "created_at": value.get("created_at").and_then(Value::as_str).unwrap_or(""),
         "updated_at": value.get("updated_at").and_then(Value::as_str).unwrap_or(""),
@@ -213,7 +326,8 @@ pub(super) fn write_detail(root: &Path, global: bool, value: &Value) {
     }
     text.push_str(DETAIL_END_MARKER);
     text.push('\n');
-    atomic_write(&detail_path(root, global, &id, level), &text);
+    atomic_write_result(&detail_path(root, global, &id, level), &text)
+        .map_err(|error| MemoryError::new("MEMORY_INDEX_WRITE_FAILED", error.message, error.next))
 }
 
 fn detail_directories(root: &Path, global: bool) -> Vec<(Option<i64>, PathBuf)> {
@@ -415,6 +529,9 @@ pub(super) fn read_selected_details(root: &Path, global: bool, l3_only: bool) ->
             }
             let value = parse_detail(&path);
             let id = entry_id(&value);
+            if l3_only && expected_levels.contains_key(&id) {
+                continue;
+            }
             let filename_matches = path.file_stem().and_then(|name| name.to_str())
                 == Some(detail_filename(&id).as_str());
             if l3_only && !expected_levels.contains_key(&id) && !filename_matches {
@@ -503,9 +620,19 @@ pub(super) fn import_details(root: &Path, global: bool) -> Value {
     }
     let mut imported = 0usize;
     let mut skipped = 0usize;
-    for entry in entries {
-        let result = cli::write_entry(root, global, entry);
-        if result.get("deduplicated") == Some(&Value::Bool(true)) {
+    let result = match cli::write_entries(root, global, entries) {
+        Ok(result) => result,
+        Err(error) => governance::emit_error(error),
+    };
+    let updates = result
+        .get("updates")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![result]);
+    for update in updates {
+        if update.get("deduplicated") == Some(&Value::Bool(true))
+            || update.get("status") == Some(&Value::String("deduplicated".into()))
+        {
             skipped += 1;
         } else {
             imported += 1;
@@ -522,7 +649,11 @@ pub(super) fn import_details(root: &Path, global: bool) -> Value {
     })
 }
 
-fn write_memory_index(root: &Path, global: bool, entries: &[Value]) -> PathBuf {
+fn write_memory_index(
+    root: &Path,
+    global: bool,
+    entries: &[Value],
+) -> Result<PathBuf, MemoryError> {
     let path = if global {
         home_dir().join("global/index.md")
     } else {
@@ -613,8 +744,8 @@ fn write_memory_index(root: &Path, global: bool, entries: &[Value]) -> PathBuf {
         text.push_str("- _No reviewed or searchable entries yet._\n");
     }
     text.push('\n');
-    atomic_write(&path, &text);
-    path
+    atomic_write_result(&path, &text)?;
+    Ok(path)
 }
 
 pub(super) fn home_dir() -> PathBuf {
@@ -979,37 +1110,64 @@ pub(super) fn migration(root: &Path) -> Value {
 }
 
 pub(super) fn atomic_write(path: &Path, text: &str) {
+    if let Err(error) = atomic_write_result(path, text) {
+        fail(&error.code, &error.next);
+    }
+}
+
+pub(super) fn atomic_write_result(path: &Path, text: &str) -> Result<(), MemoryError> {
     if let Some(parent) = path.parent() {
         if fs::symlink_metadata(parent)
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)
         {
-            fail(
+            return Err(MemoryError::new(
                 "MEMORY_SOURCE_SYMLINK",
                 "replace the memory source directory with a project-owned directory",
-            );
+                "replace the memory source directory with a project-owned directory",
+            ));
         }
-        fs::create_dir_all(parent)
-            .unwrap_or_else(|_| fail("MEMORY_WRITE_FAILED", "repair memory permissions"));
+        fs::create_dir_all(parent).map_err(|error| {
+            MemoryError::new(
+                "MEMORY_WRITE_FAILED",
+                error.to_string(),
+                "repair memory permissions",
+            )
+        })?;
     }
     if fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        fail(
+        return Err(MemoryError::new(
             "MEMORY_SOURCE_SYMLINK",
             "replace the memory source with a project-owned regular file",
-        );
+            "replace the memory source with a project-owned regular file",
+        ));
     }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let staging = path.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
-    fs::write(&staging, text)
-        .unwrap_or_else(|_| fail("MEMORY_WRITE_FAILED", "repair memory permissions"));
-    fs::rename(staging, path)
-        .unwrap_or_else(|_| fail("MEMORY_WRITE_FAILED", "repair memory permissions"));
+    let result = fs::write(&staging, text).and_then(|()| fs::rename(&staging, path));
+    if let Err(error) = result {
+        let mut message = format!("writing {} failed ({error})", path.display());
+        if let Err(cleanup_error) = fs::remove_file(&staging) {
+            if cleanup_error.kind() != std::io::ErrorKind::NotFound {
+                message.push_str(&format!(
+                    ". Cleanup of {} failed ({cleanup_error})",
+                    staging.display()
+                ));
+            }
+        }
+        return Err(MemoryError::new(
+            "MEMORY_WRITE_FAILED",
+            message,
+            "repair memory permissions",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn read_entries(root: &Path, category: &str) -> Vec<Value> {
@@ -1173,6 +1331,10 @@ pub(super) fn effective_entries_for_scope(root: &Path, global: bool) -> Vec<Valu
 }
 
 pub(super) fn source_digest(root: &Path, global: bool) -> String {
+    source_digest_result(root, global).unwrap_or_else(|error| fail(&error.code, &error.next))
+}
+
+pub(super) fn source_digest_result(root: &Path, global: bool) -> Result<String, MemoryError> {
     let base = if global {
         home_dir().join("global")
     } else {
@@ -1185,21 +1347,26 @@ pub(super) fn source_digest(root: &Path, global: bool) -> String {
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)
         {
-            fail(
+            return Err(MemoryError::new(
                 "MEMORY_SOURCE_SYMLINK",
                 "replace the memory source with a project-owned regular file",
-            );
+                "replace the memory source with a project-owned regular file",
+            ));
         }
         if path.is_file() {
             source.push_str(category);
             source.push('\0');
-            source.push_str(&fs::read_to_string(path).unwrap_or_else(|_| {
-                fail("MEMORY_SOURCE_INVALID", "repair the memory JSONL source")
-            }));
+            source.push_str(&fs::read_to_string(path).map_err(|error| {
+                MemoryError::new(
+                    "MEMORY_SOURCE_INVALID",
+                    error.to_string(),
+                    "repair the memory JSONL source",
+                )
+            })?);
             source.push('\0');
         }
     }
-    digest(&source)
+    Ok(digest(&source))
 }
 
 pub(super) fn tags(value: &Value) -> Vec<String> {
@@ -1316,6 +1483,10 @@ pub(super) fn edge_values(value: &Value) -> Vec<(String, String, Option<f64>, Op
 }
 
 pub(super) fn init_schema(connection: &Connection) {
+    init_schema_result(connection).unwrap_or_else(|error| fail(&error.code, &error.next));
+}
+
+pub(super) fn init_schema_result(connection: &Connection) -> Result<(), MemoryError> {
     connection
         .execute_batch(
             "PRAGMA foreign_keys=ON;
@@ -1357,17 +1528,30 @@ pub(super) fn init_schema(connection: &Connection) {
                value TEXT NOT NULL
              );",
         )
-        .unwrap_or_else(|_| {
-            fail(
+        .map_err(|error| {
+            MemoryError::new(
                 "MEMORY_INDEX_SCHEMA_FAILED",
+                error.to_string(),
                 "repair the local SQLite runtime",
             )
-        });
+        })?;
     let columns = connection
         .prepare("PRAGMA table_info(memory_nodes)")
-        .unwrap()
+        .map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_SCHEMA_FAILED",
+                error.to_string(),
+                "repair the local SQLite runtime",
+            )
+        })?
         .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
+        .map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_SCHEMA_FAILED",
+                error.to_string(),
+                "repair the local SQLite runtime",
+            )
+        })?
         .filter_map(Result::ok)
         .collect::<BTreeSet<_>>();
     if !columns.contains("review_status") {
@@ -1376,7 +1560,13 @@ pub(super) fn init_schema(connection: &Connection) {
                 "ALTER TABLE memory_nodes ADD COLUMN review_status TEXT NOT NULL DEFAULT 'unreviewed'",
                 [],
             )
-            .unwrap();
+            .map_err(|error| {
+                MemoryError::new(
+                    "MEMORY_INDEX_SCHEMA_FAILED",
+                    error.to_string(),
+                    "repair the local SQLite runtime",
+                )
+            })?;
     }
     if !columns.contains("detail_path") {
         connection
@@ -1384,37 +1574,84 @@ pub(super) fn init_schema(connection: &Connection) {
                 "ALTER TABLE memory_nodes ADD COLUMN detail_path TEXT NOT NULL DEFAULT ''",
                 [],
             )
-            .unwrap();
+            .map_err(|error| {
+                MemoryError::new(
+                    "MEMORY_INDEX_SCHEMA_FAILED",
+                    error.to_string(),
+                    "repair the local SQLite runtime",
+                )
+            })?;
     }
+    Ok(())
 }
 
 pub(super) fn sync_index(root: &Path, global: bool) -> Value {
     cli::import_new_l3(root, global);
+    let entries = effective_entries_for_scope(root, global);
+    sync_index_from_entries(root, global, &entries)
+        .unwrap_or_else(|error| fail(&error.code, &error.next))
+}
+
+pub(super) fn sync_index_rebuild_only(root: &Path, global: bool) -> Result<Value, MemoryError> {
+    let entries = effective_entries_for_scope(root, global);
+    sync_index_from_entries(root, global, &entries)
+}
+
+pub(super) fn sync_index_from_entries(
+    root: &Path,
+    global: bool,
+    entries: &[Value],
+) -> Result<Value, MemoryError> {
     let path = db_path(root, global);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap_or_else(|_| {
-            fail(
+        fs::create_dir_all(parent).map_err(|error| {
+            MemoryError::new(
                 "MEMORY_INDEX_WRITE_FAILED",
+                error.to_string(),
                 "repair memory index permissions",
             )
-        });
+        })?;
     }
-    let connection = Connection::open(&path).unwrap_or_else(|_| {
-        fail(
+    let connection = Connection::open(&path).map_err(|error| {
+        MemoryError::new(
             "MEMORY_INDEX_OPEN_FAILED",
+            error.to_string(),
             "repair the local SQLite runtime",
         )
-    });
-    init_schema(&connection);
-    connection.execute("DELETE FROM memory_nodes", []).unwrap();
-    connection.execute("DELETE FROM fts_entries", []).unwrap();
-    connection.execute("DELETE FROM memory_edges", []).unwrap();
-    let entries = effective_entries_for_scope(root, global);
-    let source_digest = source_digest(root, global);
-    for value in &entries {
+    })?;
+    init_schema_result(&connection)?;
+    connection
+        .execute("DELETE FROM memory_nodes", [])
+        .map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_WRITE_FAILED",
+                error.to_string(),
+                "repair the local SQLite runtime",
+            )
+        })?;
+    connection
+        .execute("DELETE FROM fts_entries", [])
+        .map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_WRITE_FAILED",
+                error.to_string(),
+                "repair the local SQLite runtime",
+            )
+        })?;
+    connection
+        .execute("DELETE FROM memory_edges", [])
+        .map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_WRITE_FAILED",
+                error.to_string(),
+                "repair the local SQLite runtime",
+            )
+        })?;
+    let source_digest = source_digest_result(root, global)?;
+    for value in entries {
         let id = entry_id(value);
         assert_id(&id);
-        write_detail(root, global, value);
+        write_detail(root, global, value)?;
         let cat = category(
             value
                 .get("category")
@@ -1444,13 +1681,25 @@ pub(super) fn sync_index(root: &Path, global: bool) -> Value {
         connection.execute(
             "INSERT OR REPLACE INTO memory_nodes (id,category,title,content,tags_json,source_refs_json,importance,layer,created_at,updated_at,project_id,review_status,detail_path) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![id, cat, title, content, serde_json::to_string(&tags).unwrap(), serde_json::to_string(&refs).unwrap(), importance, layer, created, updated, if global { "global".to_string() } else { project_id(root) }, status, detail],
-        ).unwrap_or_else(|_| fail("MEMORY_INDEX_WRITE_FAILED", "repair memory entry fields"));
+        ).map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_WRITE_FAILED",
+                error.to_string(),
+                "repair memory entry fields",
+            )
+        })?;
         connection
             .execute(
                 "INSERT INTO fts_entries (id,category,title,content,tags) VALUES (?1,?2,?3,?4,?5)",
                 params![id, cat, title, content, tags.join(" ")],
             )
-            .unwrap();
+            .map_err(|error| {
+                MemoryError::new(
+                    "MEMORY_INDEX_WRITE_FAILED",
+                    error.to_string(),
+                    "repair the local SQLite runtime",
+                )
+            })?;
         for (target, edge_type, score, model_revision) in edge_values(value) {
             let relation = edge_type
                 .split(':')
@@ -1466,29 +1715,75 @@ pub(super) fn sync_index(root: &Path, global: bool) -> Value {
                     "INSERT OR REPLACE INTO memory_edges (from_id,to_id,relation,edge_type,source,score,model_revision) VALUES (?1,?2,?3,?4,?5,?6,?7)",
                     params![id, target, relation, edge_type, if relation == "candidate_semantic" { "wemm-adapter" } else { "memory-entry" }, score, model_revision],
                 )
-                .unwrap_or_else(|_| fail("MEMORY_INDEX_WRITE_FAILED", "repair a memory relation"));
+                .map_err(|error| {
+                    MemoryError::new(
+                        "MEMORY_INDEX_WRITE_FAILED",
+                        error.to_string(),
+                        "repair a memory relation",
+                    )
+                })?;
         }
     }
-    let index_path = write_memory_index(root, global, &entries);
+    let index_path = write_memory_index(root, global, entries)?;
     connection
         .execute(
             "INSERT OR REPLACE INTO index_profile (key,value) VALUES ('schema_version',?1)",
             params![MEMORY_SCHEMA_VERSION],
         )
-        .unwrap();
-    connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('semantic_backend','wemm-adapter')", []).unwrap();
-    connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('vector_backend','sqlite-vec-compatible schema; extension optional')", []).unwrap();
-    connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('semantic_status','candidate-only; inference-not-configured')", []).unwrap();
-    connection.execute("INSERT OR REPLACE INTO index_profile (key,value) VALUES ('query_order','anchors,exact,category,declared,lesson,fts,semantic,importance,updated_at')", []).unwrap();
+        .map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_WRITE_FAILED",
+                error.to_string(),
+                "repair the local SQLite runtime",
+            )
+        })?;
+    for (key, value) in [
+        ("semantic_backend", "wemm-adapter"),
+        (
+            "vector_backend",
+            "sqlite-vec-compatible schema; extension optional",
+        ),
+        (
+            "semantic_status",
+            "candidate-only; inference-not-configured",
+        ),
+        (
+            "query_order",
+            "anchors,exact,category,declared,lesson,fts,semantic,importance,updated_at",
+        ),
+    ] {
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO index_profile (key,value) VALUES (?1,?2)",
+                params![key, value],
+            )
+            .map_err(|error| {
+                MemoryError::new(
+                    "MEMORY_INDEX_WRITE_FAILED",
+                    error.to_string(),
+                    "repair the local SQLite runtime",
+                )
+            })?;
+    }
     connection
         .execute(
             "INSERT OR REPLACE INTO index_profile (key,value) VALUES ('source_digest',?1)",
             params![source_digest],
         )
-        .unwrap();
-    json!({"database": path, "index": index_path, "scope": if global { "global" } else { "project" }, "entries": entries.len(), "source_digest": source_digest, "semantic_backend": "wemm-adapter", "semantic_status": "candidate-only"})
+        .map_err(|error| {
+            MemoryError::new(
+                "MEMORY_INDEX_WRITE_FAILED",
+                error.to_string(),
+                "repair the local SQLite runtime",
+            )
+        })?;
+    Ok(
+        json!({"database": path, "index": index_path, "scope": if global { "global" } else { "project" }, "entries": entries.len(), "source_digest": source_digest, "semantic_backend": "wemm-adapter", "semantic_status": "candidate-only"}),
+    )
 }
 
 #[path = "memory_cli.rs"]
 mod cli;
+#[path = "memory_governance.rs"]
+mod governance;
 pub use cli::run;

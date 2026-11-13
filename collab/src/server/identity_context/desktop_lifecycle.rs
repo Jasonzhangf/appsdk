@@ -146,6 +146,8 @@ impl ProjectRuntimeManager {
                 verified,
                 &mut ident,
                 &Scope { root: cwd },
+                None,
+                None,
             )?;
         }
         Ok(())

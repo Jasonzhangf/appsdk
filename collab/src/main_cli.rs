@@ -206,14 +206,16 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         next: Option<String>,
     },
-    /// Legacy compatibility entry; Collab does not remove Git resources.
+    /// Legacy compatibility entry; verify and finish owned Git cleanup after close.
     #[command(hide = true)]
     FinalizeCleanup {
         id: String,
         #[arg(long)]
         commit: Option<String>,
     },
-    /// Close a task after its Collab responsibilities are complete.
+    /// Close a task after its Collab responsibilities and owned cleanup are complete.
+    /// A clean declared worktree and branch may be removed after ancestry or
+    /// recorded integration net-content proof succeeds.
     /// With --force the current master may close any task. With no master
     /// assigned, the owner may close its task, or a registered peer may close an
     /// orphaned task after the owner's App Server identity is lost. Force close
@@ -254,8 +256,12 @@ pub(crate) enum MasterCmd {
         #[arg(long)]
         approval: String,
     },
-    /// Delegate master authority to another registered peer (current master only)
-    Delegate { target: String },
+    /// Delegate master authority with the user's explicit approval (current master only)
+    Delegate {
+        target: String,
+        #[arg(long)]
+        approval: Option<String>,
+    },
     /// Send a durable message to the master of another explicit project
     Send {
         #[arg(long)]
@@ -486,6 +492,21 @@ pub(crate) enum WorkerCmd {
         /// Maximum number of recent tmux buffer lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,
+    },
+    /// Let the current project master commit a typed judgment for one snapshot capture
+    Judge {
+        /// The judgment_capture object returned by `worker snapshot`
+        #[arg(long)]
+        capture: String,
+        /// Master's presence judgment: online or unknown
+        #[arg(long)]
+        presence: Option<String>,
+        /// Master's activity judgment: busy, idle, waiting_user, error, or unknown
+        #[arg(long)]
+        activity: Option<String>,
+        /// The visible evidence used for this judgment
+        #[arg(long)]
+        basis: String,
     },
     /// Read one exact peer lifecycle target (defaults to the caller)
     Read {
@@ -746,9 +767,10 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: GoalCmd,
     },
-    /// Block until messages arrive (long-poll)
+    /// Read and consume the current available message batch
     Recv {
-        #[arg(long, default_value_t = 600)]
+        /// Seconds to opt in to waiting for new mail; 0 checks once
+        #[arg(long, default_value_t = 0)]
         timeout: u64,
         /// Replay one committed receive identity instead of consuming new mail
         #[arg(long = "receive-id")]

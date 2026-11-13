@@ -17,6 +17,7 @@ pub enum AgentActivity {
     Busy,
     Idle,
     WaitingUser,
+    Error,
     Unknown,
 }
 
@@ -50,11 +51,11 @@ enum ForegroundKind {
 pub(super) fn classify(foreground_command: &str, visible_screen: &str) -> AgentObservation {
     match foreground_kind(foreground_command) {
         ForegroundKind::Shell => AgentObservation {
-            agent_presence: AgentPresence::Offline,
+            agent_presence: AgentPresence::Unknown,
             activity: AgentActivity::Unknown,
             background: false,
             foreground_command: Some(foreground_command.to_owned()),
-            reason: "foreground_shell".into(),
+            reason: "foreground_shell_without_agent_exit_evidence".into(),
         },
         ForegroundKind::Unknown => AgentObservation {
             agent_presence: AgentPresence::Unknown,
@@ -107,54 +108,31 @@ pub(super) fn classify_codex(foreground_command: &str, visible_screen: &str) -> 
     }
 }
 
-pub(super) fn parse_foreground_command(pane_id: &str, text: &str) -> Result<String, String> {
-    for line in text.lines() {
-        let mut fields = line.splitn(3, '\t');
-        let (Some(session), Some(pane), Some(command)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            return Err("TMUX_FOREGROUND_QUERY_FAILED: malformed pane metadata".into());
-        };
-        let session_digits = session.strip_prefix('$').unwrap_or_default();
-        if session_digits.is_empty()
-            || !session_digits.bytes().all(|byte| byte.is_ascii_digit())
-            || validate_pane_id(pane).is_err()
-        {
-            return Err("TMUX_FOREGROUND_QUERY_FAILED: malformed pane metadata".into());
-        }
-        if pane == pane_id {
-            let command = command.trim();
-            if command.is_empty() || command.chars().any(char::is_control) {
-                return Err("TMUX_FOREGROUND_QUERY_FAILED: empty pane command".into());
-            }
-            return Ok(command.to_owned());
-        }
-    }
-    Err("TMUX_FOREGROUND_QUERY_FAILED: bound pane not returned".into())
-}
-
-fn validate_pane_id(id: &str) -> Result<(), ()> {
-    let digits = id.strip_prefix('%').unwrap_or_default();
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(());
-    }
-    Ok(())
-}
-
-fn foreground_kind(foreground_command: &str) -> ForegroundKind {
+pub(super) fn is_codex_command(foreground_command: &str) -> bool {
     let executable = foreground_command
         .split_whitespace()
         .next()
-        .unwrap_or_default()
-        .rsplit('/')
+        .unwrap_or_default();
+    is_codex_executable(executable)
+}
+
+pub(super) fn is_shell_command(foreground_command: &str) -> bool {
+    let executable = foreground_command
+        .split_whitespace()
         .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if executable == "codex" || executable.starts_with("codex-") {
-        return ForegroundKind::Codex;
-    }
-    if matches!(
-        executable.as_str(),
+        .unwrap_or_default();
+    is_shell_executable(executable)
+}
+
+pub(super) fn is_codex_executable(executable: &str) -> bool {
+    let executable = executable.rsplit('/').next().unwrap_or_default();
+    executable == "codex" || executable.starts_with("codex-")
+}
+
+fn is_shell_executable(executable: &str) -> bool {
+    let executable = executable.rsplit('/').next().unwrap_or_default();
+    matches!(
+        executable,
         "sh" | "bash"
             | "zsh"
             | "fish"
@@ -165,7 +143,14 @@ fn foreground_kind(foreground_command: &str) -> ForegroundKind {
             | "nu"
             | "pwsh"
             | "powershell"
-    ) {
+    )
+}
+
+fn foreground_kind(foreground_command: &str) -> ForegroundKind {
+    if is_codex_command(foreground_command) {
+        return ForegroundKind::Codex;
+    }
+    if is_shell_command(foreground_command) {
         return ForegroundKind::Shell;
     }
     ForegroundKind::Unknown
@@ -234,10 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn shell_with_historical_codex_output_is_offline() {
+    fn shell_with_historical_codex_output_needs_current_process_facts() {
         let screen = format!("Codex TUI\nesc to interrupt\n{PROMPT}");
         let observation = classify("zsh", &screen);
-        assert_eq!(observation.agent_presence, AgentPresence::Offline);
+        assert_eq!(observation.agent_presence, AgentPresence::Unknown);
         assert_eq!(observation.activity, AgentActivity::Unknown);
     }
 
@@ -318,24 +303,5 @@ Press Enter to confirm";
             "recent output without an input state",
         );
         assert_eq!(observation.agent_presence, AgentPresence::Online);
-    }
-
-    #[test]
-    fn foreground_metadata_uses_the_exact_bound_pane() {
-        let text = "$1\t%1\tzsh\n$2\t%2\tcodex\n";
-        assert_eq!(parse_foreground_command("%2", text).unwrap(), "codex");
-    }
-
-    #[test]
-    fn foreground_metadata_malformed_or_missing_is_rejected() {
-        for text in [
-            "broken\n",
-            "session\t%2\tcodex\n",
-            "$2\tpane\tcodex\n",
-            "$2\t%2\t\n",
-        ] {
-            assert!(parse_foreground_command("%2", text).is_err(), "{text:?}");
-        }
-        assert!(parse_foreground_command("%3", "$2\t%2\tcodex\n").is_err());
     }
 }

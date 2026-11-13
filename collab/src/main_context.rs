@@ -490,14 +490,16 @@ pub(crate) fn context_operation_with_intent(
         let control = server::binding_store::BindingControlStore::new(host_paths.state_root())
             .load()
             .map_err(anyhow::Error::msg)?;
-        let mapped_slot = control
-            .lookup(
-                &project_context.project_scope,
-                &project_context.app_scope_id,
-                &facts,
-                Some(&cwd.to_string_lossy()),
-            )
-            .map_err(anyhow::Error::msg)?;
+        let mapped_slot = match control.lookup(
+            &project_context.project_scope,
+            &project_context.app_scope_id,
+            &facts,
+            Some(&cwd.to_string_lossy()),
+        ) {
+            Ok(slot) => slot,
+            Err(_error) if approval.is_some() || grant_approval.is_some() => None,
+            Err(error) => return Err(anyhow::Error::msg(error)),
+        };
         let mapped = mapped_slot.is_some();
         let same_mapped_thread = mapped_slot
             .and_then(|slot| slot.active_binding())
@@ -601,6 +603,14 @@ pub(crate) fn context_operation_with_intent(
     };
     request.approval = approval;
     request.grant_approval = grant_approval;
+    if !query {
+        let _ = crate::context_operation::prepare_mutating_operation(
+            &host_paths,
+            &project_context,
+            Some(correlation.clone()),
+        )?
+        .proof;
+    }
     let response = client::call_with_context_response(
         &scope.sock_path(),
         &Req::IdentityContext {

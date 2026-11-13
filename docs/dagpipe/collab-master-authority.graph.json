@@ -13,6 +13,7 @@
     },
     {
       "id": "transfer_master_authority", "operator": "appsdk.collab_authority.transfer_master", "operator_version": "1",
+      "source_effect_contract": "B1/R2/R4/B4: cross-app source消费先核对CrossScopeSourceRef generation/current，按project/app/binding/holder精确撤旧grant，与源工作保全同批State事件在调度前应用；提交失败保pending及具体错误，重试不撤successor。公开gate: master_authority_scope_isolation_and_concurrent_mutations；窄gate: cross_scope_source_grant_commit_failure_retry_and_successor。",
       "description": "现有 authority owner 处理 transfer/revoke/grant。当前 cwd 项目与 tmux session 的身份先成功恢复为 peer；另有 master 不阻断。明确的 restore_master action 与 authorization 直接替换 incumbent，服务端推导当前身份与 scope，不要求旧 token、target、digest、generation、lease 或第二次批准。当前 session 已是 master 时复用其授权。当前 pane 被授权恢复时退役历史 binding、route 和 grant，保留任务与消息。真实持久化失败显式返回。",
       "inputs": ["authority_scope"], "output": {"id": "master_authority", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

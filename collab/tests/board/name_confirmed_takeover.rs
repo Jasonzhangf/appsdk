@@ -389,7 +389,7 @@ fn rejected_registration_does_not_publish_an_active_identity_without_business_or
     assert!(response["error"]
         .as_str()
         .unwrap()
-        .contains("runtime binding conflict"));
+        .contains("REGISTER_RUNTIME_RELEASE_REJECTED"));
     assert!(
         std::fs::read(&map_path).unwrap() == mapping,
         "refused registration published a new active identity"
@@ -458,7 +458,7 @@ fn concurrent_public_registrations_publish_only_the_runtime_winner() {
     assert!(response["error"]
         .as_str()
         .unwrap()
-        .contains("runtime binding conflict"));
+        .contains("REGISTER_RUNTIME_RELEASE_REJECTED"));
     let state = fixture.current_state();
     assert!(state["workers"].get(*winner).is_some());
     assert!(state["workers"].get(*loser).is_none());

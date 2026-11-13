@@ -10,6 +10,29 @@ pub struct MailboxNameAddress {
     pub name: String,
 }
 
+pub(crate) fn current_name_allows_message(
+    state: &State,
+    control: &super::binding_slot::BindingControlSet,
+    scope: &crate::scope::RouteScope,
+    worker_id: &str,
+    authorized_binding: &super::RuntimeBinding,
+    message: &Message,
+) -> Result<bool, String> {
+    let Some(address) = state.mailbox_name_addresses.get(&message.id) else {
+        return Ok(true);
+    };
+    if address.project_scope != scope.project_scope_id.as_str() {
+        return Ok(false);
+    }
+    Ok(control
+        .current_for_name(&scope.project_scope_id, &scope.app_scope_id, &address.name)?
+        .and_then(|slot| slot.active_binding())
+        .is_some_and(|current| {
+            current.binding.agent_id.as_str() == worker_id
+                && &current.binding == authorized_binding
+        }))
+}
+
 /// Current mailbox mutation input. Native acceptance is delivery evidence,
 /// not a receive receipt. The baseline grants one wake to the new execution carrier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,8 +73,7 @@ pub(crate) fn handoff_events(
                 && match state.mailbox_name_addresses.get(&message.id) {
                     Some(address) => {
                         address.project_scope == project
-                            && (address.name == next.name
-                                || rename_from.iter().any(|name| name == &address.name))
+                            && address.name == next.name
                     }
                     // Worker-addressed mail follows only a known current holder.
                     None => previous.is_some_and(|holder| message.to == holder.worker_id),
@@ -94,6 +116,24 @@ pub(crate) fn handoff_events(
 }
 
 impl State {
+    /// Whether `worker_id` is the current mailbox recipient of `message`.
+    /// Typed name mail is bound to the stable name: the caller must be the
+    /// name's current holder, so a reused actor that now holds another name
+    /// cannot read, consume or ack the released source name's messages. Raw
+    /// worker-addressed mail keeps its direct-send semantics. The occupancy
+    /// read shares the caller's state lock with the handoff commit, so the
+    /// eligibility check and the consumption commit stay serialized.
+    pub(crate) fn message_receivable_by(&self, worker_id: &str, message: &Message) -> bool {
+        if message.to != worker_id {
+            return false;
+        }
+        let Some(address) = self.mailbox_name_addresses.get(&message.id) else {
+            return true;
+        };
+        self.name_occupancy(&address.project_scope, &address.name)
+            .is_some_and(|holder| holder.worker_id == worker_id)
+    }
+
     pub(crate) fn apply_mailbox_handoff(&mut self, handoff: &MailboxHandoff) {
         if let Some(message) = self.msgs.get_mut(&handoff.message_id) {
             if message.to == handoff.previous_recipient
@@ -105,14 +145,9 @@ impl State {
                     message.id.clone(),
                     super::mailbox::default_direct_message_id(&handoff.recipient),
                 );
-                if self.mailbox_name_addresses.contains_key(&message.id) {
-                    self.mailbox_name_addresses.insert(
-                        message.id.clone(),
-                        MailboxNameAddress {
-                            project_scope: handoff.project_scope.clone(),
-                            name: handoff.name.clone(),
-                        },
-                    );
+                if self.target_sessions.contains_key(&message.id) {
+                    self.target_sessions
+                        .insert(message.id.clone(), handoff.session_id.clone());
                 }
             }
         }

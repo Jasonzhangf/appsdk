@@ -218,11 +218,14 @@ collab who
 - `collab ack <id>` acknowledges a single notification.
 - `collab ack --all` is a legacy recovery action for already-delivered notifications;
   do not use it to discard unread content.
-- `collab recv` reads and consumes the returned message batch atomically; a
-  successful receive writes `Delivered` and `Acked` together, so a follow-up
-  ACK is not required. `collab msg`, `collab inbox`, and `collab context` are
-  read-only and do not consume messages. Keep `ack` for legacy clients or
-  explicit recovery of already-delivered messages.
+- `collab recv` reads and consumes the current available message batch atomically.
+  It returns an empty result when no message is available. Use
+  `collab recv --timeout N` only to opt in to waiting up to N seconds for new
+  mail; an arriving message wakes the wait early. A successful nonempty receive
+  writes `Delivered` and `Acked` together, so a follow-up ACK is not required.
+  `collab msg`, `collab inbox`, and `collab context` are read-only and do not
+  consume messages. Keep `ack` for legacy clients or explicit recovery of
+  already-delivered messages.
 - `collab worker status [worker-id]` inspects the selected transport's address
   facts and worker health, including `endpoint_live`, `identity_valid`, `agent_state`,
   `unacked_notifications`, `notifications_paused`, `suspected_offline`, and

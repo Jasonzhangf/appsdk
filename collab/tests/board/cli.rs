@@ -452,6 +452,24 @@ fn fixture_branch_exists(root: &Path, branch: &str) -> bool {
     .success()
 }
 
+fn configure_fixture_worktree_base(fixture: &mut AppFixture) -> PathBuf {
+    let config_path = fixture.root.join("home/.appsdk/config.toml");
+    let base = fixture.root.join("fixture-worktrees");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&base).unwrap();
+    let base = base.canonicalize().unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            "[worktree]\nbase = {:?}\nlayout = \"{{project-key}}/{{task-slug}}\"\n",
+            base.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    fixture.restart_daemon();
+    base
+}
+
 fn run_held_git_integration(
     probe: &HeldGitIntegration,
     during: impl FnOnce(&AppFixture),
@@ -3488,5 +3506,166 @@ fn public_f9_branch_only_task_cleanup_must_survive_cancel() {
         status_after,
         String::from_utf8_lossy(&cancel.stdout),
         String::from_utf8_lossy(&cancel.stderr)
+    );
+}
+
+#[test]
+fn public_f8_unrelated_integration_commit_must_not_delete_unmerged_task_resources() {
+    let mut fixture = AppFixture::new();
+    let base = configure_fixture_worktree_base(&mut fixture);
+    let project = fixture.project.canonicalize().unwrap();
+    let base_commit = init_fixture_git_main(&project);
+    fixture.run_public(&["context"], THREAD_A);
+
+    let task_id = "public-entry-f8";
+    let branch = "codex/f8-resource";
+    let worktree = base.join("project").join(task_id);
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    fixture_git_ok(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            worktree.to_str().unwrap(),
+            "main",
+        ],
+    );
+    std::fs::write(worktree.join("f8-task-work.txt"), "unique task work\n").unwrap();
+    fixture_git_ok(&worktree, &["add", "f8-task-work.txt"]);
+    fixture_git_ok(
+        &worktree,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "unique task work",
+        ],
+    );
+    let task_tip = fixture_git_trim(&fixture_git_ok(
+        &worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    ));
+
+    std::fs::write(
+        project.join("fixture-unrelated.txt"),
+        "unrelated main work\n",
+    )
+    .unwrap();
+    fixture_git_ok(&project, &["add", "fixture-unrelated.txt"]);
+    fixture_git_ok(
+        &project,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "unrelated main work",
+        ],
+    );
+    let unrelated_main_commit = fixture_git_trim(&fixture_git_ok(
+        &project,
+        &["rev-parse", "--verify", "refs/heads/main^{commit}"],
+    ));
+    assert_ne!(task_tip, unrelated_main_commit);
+    assert!(
+        !fixture_git(
+            &project,
+            &["merge-base", "--is-ancestor", branch, "refs/heads/main"],
+        )
+        .status
+        .success(),
+        "the task branch must remain unmerged before close"
+    );
+    assert!(
+        fixture_git(&worktree, &["status", "--porcelain"])
+            .stdout
+            .is_empty(),
+        "the task worktree must start clean"
+    );
+
+    let registered = fixture.run_public(
+        &[
+            "task",
+            "register",
+            task_id,
+            "--worktree",
+            worktree.to_str().unwrap(),
+            "--branch",
+            branch,
+            "--base-commit",
+            &base_commit,
+            "--priority",
+            "p1",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(registered["cleanup"], "pending");
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            task_id,
+            "--worktree",
+            worktree.to_str().unwrap(),
+            "--evidence",
+            "public F8 candidate delivered",
+        ],
+        THREAD_A,
+    );
+    let reviewed = fixture.run_public(
+        &[
+            "task",
+            "review",
+            task_id,
+            "--accept",
+            "--evidence",
+            "public F8 candidate reviewed",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(reviewed["status"], "accepted");
+    let integrated = fixture.run_public(
+        &[
+            "task",
+            "integrated",
+            task_id,
+            "--commit",
+            &unrelated_main_commit,
+            "--evidence",
+            "unrelated main-reachable integration receipt",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(integrated["status"], "merged");
+    assert_eq!(
+        fixture.run_public(&["task", "status", task_id], THREAD_A)["cleanup"]["status"],
+        "pending"
+    );
+
+    let close = fixture.command_public(&["task", "close", task_id], THREAD_A);
+    let close_succeeded = close.status.success();
+    let status_after = fixture.run_public(&["task", "status", task_id], THREAD_A);
+    let branch_survived = fixture_branch_exists(&project, branch);
+    let worktree_survived = worktree.exists();
+    let cleanup_not_verified = status_after["cleanup"]["status"] != "verified";
+    assert!(
+        !close_succeeded
+            && status_after["status"] != "closed"
+            && cleanup_not_verified
+            && branch_survived
+            && worktree_survived,
+        "F8 RED/GREEN: an unrelated main-reachable commit must not authorize deletion of the unmerged task branch or clean worktree. close_succeeded={close_succeeded} status_after={status_after} cleanup_not_verified={cleanup_not_verified} branch_survived={branch_survived} worktree_survived={worktree_survived} stdout={} stderr={}",
+        String::from_utf8_lossy(&close.stdout),
+        String::from_utf8_lossy(&close.stderr)
     );
 }

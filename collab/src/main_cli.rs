@@ -206,14 +206,16 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         next: Option<String>,
     },
-    /// Legacy compatibility entry; Collab does not remove Git resources.
+    /// Legacy compatibility entry; verify and finish owned Git cleanup after close.
     #[command(hide = true)]
     FinalizeCleanup {
         id: String,
         #[arg(long)]
         commit: Option<String>,
     },
-    /// Close a task after its Collab responsibilities are complete.
+    /// Close a task after its Collab responsibilities and owned cleanup are complete.
+    /// A clean declared worktree and branch may be removed after ancestry or
+    /// recorded integration net-content proof succeeds.
     /// With --force the current master may close any task. With no master
     /// assigned, the owner may close its task, or a registered peer may close an
     /// orphaned task after the owner's App Server identity is lost. Force close

@@ -121,3 +121,54 @@
   QQBot 默认 CEO 投递、正式 recv、消费和关联回复验收。
 - 本轮 `collab recv --timeout 30` 只返回 receive ID 和 timeout，没有可消费正文；
   不猜测或伪造通知内容。
+
+## Ontology worktree handoff（2026-11-12 PT）
+
+- 收到并消费消息 `m1794546435512-276`，subject「停止竞写 ontology 工作树并交接」，
+  `collab recv` receive ID `receive-41783-1794550263587565000-0`。发送者是 unknown。
+- 冻结交接对象：
+  `/Volumes/Intel/playground/appsdk/collab-stable-names-20261112`，
+  branch `codex/collab-stable-names-20261112`，PR157。该树属于 ontology 聊天
+  `01a1cf28-1d6f-7bc1-918e-186d04f98666`，不是本 Rex 候选，我不交付、合并、推送或清理该树。
+- 原通知记录我在 04:49 UTC 改写 `collab/src/server/work_assignment.rs`，
+  随后暂存四处合流文件；收到停止指令后已停止写入、暂存、提交、合并、推送和清理，
+  并且没有回滚任何内容。
+- 交接时只读回执：`HEAD` 为 `023b8650`，`git status` 干净，branch ahead 13；
+  后续提交 `48ca5fbf`（2026-11-12 22:06 PST）包含 `work_assignment.rs` 等合流文件。
+  该树当前 `lsof +D` 无打开文件，无仍在写入的本树进程。
+- 未验证项：该工作线尚未通过新组合 Review，我不得代为交付。
+- 交接记录路径：
+  `/Users/fanzhang/Documents/github/appsdk/task-runs/collab-identity-lifecycle-ontology-20261112/note.md`。
+- Rex P0 继续在本人原授权工作树
+  `/Volumes/Intel/playground/appsdk/rex-parity-implementation-20261110` 推进。
+
+## Ontology 语义复核与候选收口（2026-11-13 PT）
+
+按已批准语义复核当前未提交候选，三个产品代码改动均保持 ontology 一致：
+
+1. `send_enter_until` 不再重复调用 `verify_service_until`。通知提交已经先完成正文
+   write 与字节确认，再对同一 server/session/block 执行一次 `send-key enter`；
+   Enter 内部不再另做一次服务代际核实，保留原设计的一条通知路径。
+2. Enter 失败时保留 `operation: send_key` 与底层错误 `class`，不再强制改成
+   `notify` / `Unknown`。这与通知提交图一致：正文阶段和 Enter 阶段分别保留实际
+   `known-not-delivered` / `unknown` 及真实操作字段，不把 Enter 失败伪装成通知入口失败。
+3. `handle_master_status` 增加 `master_wake`，使用现有
+   `project_master_wake_idle_capacity` 投影，与 board 和 context 的 master 唤醒容量
+   保持同一事实来源。
+
+聚焦测试证据：
+
+- `cargo test --manifest-path collab/Cargo.toml --bin collab rex -- --test-threads=1`
+  80 passed，0 failed。
+- `cargo test --manifest-path collab/Cargo.toml --bin collab master_wake -- --test-threads=1`
+  16 passed，0 failed。
+- `cargo fmt --manifest-path collab/Cargo.toml -- --check` 与 `git diff --check` 通过。
+
+下一步：
+
+- 提交当前候选，合入最新 `origin/main`（当前 `ae8ff52b`）并解决冲突，保留 main
+  的身份、名字和任务语义。
+- 合流后重跑 Rex、`master_wake`、`notification_batch_tests`、`channel_inbound_cli`
+  公开用例，并跑完整 Collab bin 套件（`--test-threads=1`）。
+- 校验受影响 DAG 与 `project-memory verify`，再跑公开 Rex E2E。
+- 完成一次独立 milestone review，推 PR，等 CI，再 `gh pr merge --admin`。

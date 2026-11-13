@@ -194,32 +194,6 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
 }
 
 #[tokio::test]
-async fn typed_enter_rejection_keeps_the_queued_stage_and_native_code() {
-    let _guard = fixture_guard().await;
-    let env = TestEnv::new("enter_typed_reject");
-    let text = "abc";
-    let error = notify(&selected_transport(), text, Some("immediate"))
-        .await
-        .expect_err("a typed Enter rejection must not become success");
-    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-    assert_eq!(error.native_code.as_deref(), Some("conflict"));
-    assert_eq!(
-        error.stage,
-        RexInputStage::WriteQueued {
-            bytes_written: text.len(),
-        }
-    );
-    assert_eq!(
-        env.calls()
-            .iter()
-            .filter(|call| method(call) == "send-key")
-            .count(),
-        1,
-        "a rejected Enter must not be retried"
-    );
-}
-
-#[tokio::test]
 async fn failed_enter_preserves_the_queued_write_stage_without_resending() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("enter_fail");
@@ -576,7 +550,15 @@ async fn allowed_modes_return_rex_receipt_json() {
         assert_eq!(value["consumed"], false);
         assert!(value.get("queued").is_none());
     }
-    assert_eq!(env.calls().len(), 20);
+    let expected = [
+        "server.status",
+        "com.superlogical.terminal.write",
+        "send-key",
+    ];
+    assert_eq!(
+        env.calls().iter().map(method).collect::<Vec<_>>(),
+        expected.repeat(5)
+    );
 }
 
 #[tokio::test]

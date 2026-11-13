@@ -184,6 +184,7 @@ fn handle_master_status(server: &Server) -> Resp {
         .as_ref()
         .and_then(|worker| worker_identity_and_endpoint(server, worker).1);
     let state = server.state.lock().unwrap();
+    let projected_master_wake = project_master_wake_idle_capacity(server, &state);
     let workspace = workspace_idle_view(
         server,
         &state,
@@ -198,6 +199,7 @@ fn handle_master_status(server: &Server) -> Resp {
     };
     if let Some(master_object) = master.as_object_mut() {
         master_object.insert("workspace".into(), workspace);
+        master_object.insert("master_wake".into(), json!(projected_master_wake));
     }
     Resp::data(json!({
         "master": master,

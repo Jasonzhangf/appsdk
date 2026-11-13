@@ -1099,7 +1099,6 @@ async fn write_text_until(
 }
 
 async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
-    verify_service_until(endpoint, deadline).await?;
     let call = run_cli(
         "send_enter",
         Path::new(&official_cli_path()),
@@ -1323,8 +1322,8 @@ pub async fn notify(
     };
     if let Err(error) = send_enter_until(endpoint, deadline).await {
         return Err(RexError {
-            operation: "notify",
-            class: NotificationDeliveryClass::Unknown,
+            operation: "send_key",
+            class: error.class,
             stage: text_stage,
             native_code: error.native_code,
             detail: error.detail,

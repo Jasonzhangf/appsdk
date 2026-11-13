@@ -1,4 +1,28 @@
 use super::*;
+fn assignment_ownership(state: &Value) -> std::collections::BTreeMap<String, [Value; 4]> {
+    // TaskAssignment ownership is stable across name_stewardship::tick_locked.
+    // That independent producer may update reflow and updated_ms. The scheduler-free
+    // task_registry_public_queries_do_not_mutate_state test protects full query purity.
+    state["task_assignments"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(key, assignment)| {
+            (
+                key.clone(),
+                [
+                    assignment.get("task_id").expect("task_id").clone(),
+                    assignment.get("name").expect("name").clone(),
+                    assignment.get("session_id").expect("session_id").clone(),
+                    assignment
+                        .get("assignment_revision")
+                        .expect("assignment_revision")
+                        .clone(),
+                ],
+            )
+        })
+        .collect()
+}
 
 #[test]
 fn task_status_follows_assignment_name_after_takeover() {
@@ -76,22 +100,50 @@ fn task_status_follows_assignment_name_after_takeover() {
     assert_eq!(all_source["owner_name"], "Alice", "{all_source}");
     assert_eq!(all_source["owner"], "", "{all_source}");
     assert!(all_source["owner_session_id"].is_null(), "{all_source}");
+    let all_target = all["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "target-bob-work")
+        .unwrap();
+    assert_eq!(all_target["owner_name"], "Bob", "{all_target}");
+    assert_eq!(
+        all_target["owner"], alice["identity"]["worker_id"],
+        "{all_target}"
+    );
+
+    let listed = fixture.run_public(&["task", "status"], THREAD_A);
+    let listed_tasks = listed["tasks"].as_array().unwrap();
+    assert_eq!(listed_tasks.len(), 2, "{listed}");
+    let mut listed_ids: Vec<&str> = listed_tasks
+        .iter()
+        .map(|task| task["id"].as_str().unwrap())
+        .collect();
+    listed_ids.sort_unstable();
+    assert_eq!(
+        listed_ids,
+        ["source-alice-work", "target-bob-work"],
+        "{listed}"
+    );
+    let listed_source = listed_tasks
+        .iter()
+        .find(|task| task["id"] == "source-alice-work")
+        .unwrap();
+    let listed_target = listed_tasks
+        .iter()
+        .find(|task| task["id"] == "target-bob-work")
+        .unwrap();
+    assert_eq!(listed_source, all_source, "{listed}");
+    assert_eq!(listed_target, all_target, "{listed}");
 
     let after_task_reads = fixture.current_state();
     assert_eq!(after_task_reads["tasks"], before_query["tasks"]);
-    assert_eq!(after_task_reads["revision"], before_query["revision"]);
     assert_eq!(
-        after_task_reads["notification_subscriptions"],
-        before_query["notification_subscriptions"]
+        assignment_ownership(&after_task_reads),
+        assignment_ownership(&before_query)
     );
-    assert_eq!(
-        after_task_reads["task_assignments"]["source-alice-work"],
-        before_query["task_assignments"]["source-alice-work"]
-    );
-    assert_eq!(
-        after_task_reads["task_assignments"]["target-bob-work"],
-        before_query["task_assignments"]["target-bob-work"]
-    );
+    // The daemon may commit unrelated maintenance between public snapshots.
+    // Whole-State query purity is covered by the scheduler-free dispatcher test.
 
     let before_context = fixture.current_state();
     let context = fixture.run_public(&["context"], THREAD_A);
@@ -106,8 +158,8 @@ fn task_status_follows_assignment_name_after_takeover() {
     let after_context = fixture.current_state();
     assert_eq!(after_context["tasks"], before_context["tasks"]);
     assert_eq!(
-        after_context["task_assignments"],
-        before_context["task_assignments"]
+        assignment_ownership(&after_context),
+        assignment_ownership(&before_context)
     );
 
     let alice_again = fixture.run_public(&["context"], THREAD_C);
@@ -124,13 +176,10 @@ fn task_status_follows_assignment_name_after_takeover() {
     assert_eq!(target["owner_name"], "Bob", "{target}");
     assert_eq!(target["owner"], alice["identity"]["worker_id"], "{target}");
     let after_second_query = fixture.current_state();
+    // Whole-State purity is covered by the scheduler-free dispatcher test.
     assert_eq!(after_second_query["tasks"], before_second_query["tasks"]);
     assert_eq!(
-        after_second_query["task_assignments"],
-        before_second_query["task_assignments"]
-    );
-    assert_eq!(
-        after_second_query["revision"],
-        before_second_query["revision"]
+        assignment_ownership(&after_second_query),
+        assignment_ownership(&before_second_query)
     );
 }

@@ -362,18 +362,34 @@ pub(crate) fn maintenance_presence(
             thread_status_presence((server.appserver_thread_status)(&transport, thread_id))
         }
         TransportKind::Dsh => dsh_identity_presence(&transport),
-        TransportKind::Rex => {
-            if transport.rex_endpoint.is_some()
-                && transport
-                    .session_id
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-            {
-                IdentityPresence::Unknown
-            } else {
-                IdentityPresence::Missing
-            }
+        TransportKind::Rex => rex_maintenance_presence(&transport),
+    }
+}
+
+/// Rex maintenance presence is decided by the adapter's exact-block probe.
+/// Only a definitive exact-target absence may retire the execution binding;
+/// generation, malformed and unknown failures stay Unknown so the persistent
+/// identity and business duties are preserved.
+fn rex_maintenance_presence(transport: &SelectedTransport) -> IdentityPresence {
+    let Some(endpoint) = transport.rex_endpoint.as_ref() else {
+        return IdentityPresence::Missing;
+    };
+    if endpoint.session_id.trim().is_empty() {
+        return IdentityPresence::Missing;
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return IdentityPresence::Unknown,
+    };
+    match runtime.block_on(crate::client::adapters::rex::resolve_target(endpoint)) {
+        Ok(()) => IdentityPresence::Present,
+        Err(error) if crate::client::adapters::rex::resolve_error_is_definitively_absent(&error) => {
+            IdentityPresence::Missing
         }
+        Err(_) => IdentityPresence::Unknown,
     }
 }
 

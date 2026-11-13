@@ -1518,6 +1518,63 @@ async fn rex_service_generation_change_cannot_move_the_block_anchor() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_status_error_with_service_marker_but_no_typed_change_is_not_recovered() {
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (mut server, root) = test_server();
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink = default_appserver_notification_sink();
+    let fixture = RexCliFixture::new(&root, "status_marker_only");
+    let route = seed_rex_route(&server);
+    let current = rex_transport(
+        "agent-a",
+        "unix:///tmp/rex-fixture.sock",
+        "session:11111111-1111-1111-1111-111111111111",
+        "block:22222222-2222-2222-2222-222222222222",
+    );
+    register_rex_worker(&server, "a", &current);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
+    persist_rex_worker_binding(&server, &route, "a", &current);
+
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let send_root = root.clone();
+    let response =
+        tokio::task::spawn_blocking(move || manager_send_to_rex(&manager, &send_root, "a"))
+            .await
+            .unwrap();
+
+    assert!(!response.ok, "{response:?}");
+    assert!(
+        response.data.get("rex_binding_refresh").is_none(),
+        "a non-generation status error must not enter service refresh: {response:?}"
+    );
+    assert!(
+        response.data.get("rex_binding_retry").is_none(),
+        "{response:?}"
+    );
+    let message_id = response.data["msg_id"].as_str().unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
+        let failure = &state.notification_delivery_failures[message_id];
+        assert!(failure.error.contains("REX_SERVICE_CHANGED"), "{failure:?}");
+        assert!(
+            failure.retryable,
+            "before-write failure remains ordinary known-not-delivered: {failure:?}"
+        );
+    }
+    let calls = fixture.calls();
+    assert!(calls
+        .iter()
+        .all(|call| rex_method(call) != "com.superlogical.terminal.write"));
+    assert!(calls.iter().all(|call| rex_method(call) != "send-key"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn rex_input_receipt_names_the_actual_transport_without_consuming_mail() {
     let response = notification_send_response(

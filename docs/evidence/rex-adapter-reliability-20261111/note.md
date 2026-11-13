@@ -172,3 +172,48 @@
   公开用例，并跑完整 Collab bin 套件（`--test-threads=1`）。
 - 校验受影响 DAG 与 `project-memory verify`，再跑公开 Rex E2E。
 - 完成一次独立 milestone review，推 PR，等 CI，再 `gh pr merge --admin`。
+
+## 合流最新 main 后验证（2026-11-13 PT）
+
+- 候选提交 `3299da4d`；合入 `origin/main` `ae8ff52b` 得到 `91dec687`。
+- 唯一冲突为 `collab-notification-consumption.graph.json` 描述：保留本候选 0.3.0 的
+  精确收件人 / Rex block owner 语义，同时并入 main 的非阻塞 recv 与空结果不生成消费回执。
+- 完整 Collab bin（`--test-threads=1`）：1368 passed，0 failed，1 ignored。首次全量运行有 15 个失败：
+  两个 Rex 恢复用例因真实 CLI 进程退出超时，随后 `TEST_ENV_LOCK` PoisonError 连锁；
+  单独复跑全部通过，第二次全量运行全绿。记为既有测试夹具时序不稳定，不是本候选回归。
+- 聚焦组：`rex` 80、`master_wake` 16、`notification_batch_tests` 36、公开 `channel_inbound_cli` 6，全部通过。
+- 公开 Rex E2E（真实 Rex server，`--ignored`）：4 passed；测试前后 Rex session 列表相同，无残留。
+- 5 个受影响 DAG `dagpipe graph validate` 通过；`project-memory verify` 通过。
+- 独立 milestone review 合同：`milestone-review-20261113-task.md`。
+
+## 精确缺失退役与伪造服务标记验证（2026-11-13 PT）
+
+本轮补上上一节未提交的两个边界，进一步收紧 ontology 的 block anchor 语义：
+
+1. `resolve_target` 只在官方 `session.list`/`session.list_blocks` 返回精确
+   `session_not_found`/`block_not_found`，或 `resolve_target` 的精确 absence
+   结论出现时，才把 stale-identity maintenance 判为 Missing 并退役执行绑定。
+   `server.status` 的 generation/timeout、缺 `sessions`/`blocks` 数组、以及未知
+   原生错误都保留 Unknown，不触发名字绑定退役。
+2. `server.status` 的 service-change 错误增加 typed generation-mismatch 标记；
+   `is_refreshable_service_change` 不再只凭 `REX_SERVICE_CHANGED` 文本判定，
+   而要求 `detail=` 后携带该 typed marker，防止伪造或不完整 native detail 被当作
+   可恢复代际变化。Enter 失败仍保留真实 `send_key` 操作与底层错误 class。
+
+验证：
+
+- `cargo test --manifest-path collab/Cargo.toml --locked --bin collab rex -- --test-threads=1`
+  87 passed，0 failed。
+- 完整 `cargo test --manifest-path collab/Cargo.toml --locked --bin collab -- --test-threads=1`
+  1375 passed，0 failed，1 ignored。
+- 真实 Rex 公开契约
+  `COLLAB_REX_TEST_SERVER=unix:///Users/fanzhang/Library/Application%20Support/rex/server.sock cargo test --manifest-path collab/Cargo.toml --locked --test rex_public_contract -- --ignored --test-threads=1`
+  4 passed，0 failed。
+- `cargo fmt --manifest-path collab/Cargo.toml -- --check`、`git diff --check` 通过。
+- 正式构建入口 `scripts/build-collab.sh` 通过，产物版本
+  `collab_build_version=0.2.0495`。直接 `cargo build --release` 被项目
+  `build.rs` 拒绝，未绕过门禁。
+- 10 个受影响 DAG 全部通过 `dagpipe graph validate`。
+- `project-memory verify` 通过；`project-memory query "rex anchor block session window"`
+  返回三条一致记录，均确认 block 是 anchor、split 创建新 block、布局变化不改 block、
+  仅权威 block 缺失退役名字绑定，没有冲突结论。

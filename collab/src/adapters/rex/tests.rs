@@ -413,6 +413,41 @@ async fn old_rex_targets_are_rejected_before_write() {
     }
 }
 
+#[test]
+fn service_change_marker_without_typed_generation_mismatch_is_not_refreshable() {
+    let spoof = concat!(
+        "REX_NOT_DELIVERED: operation=server.status stage=BeforeWrite ",
+        "native_code=none detail=REX_SERVICE_CHANGED: fixture native detail only"
+    );
+    assert!(!is_refreshable_service_change(spoof));
+}
+
+#[test]
+fn definitive_absence_requires_the_exact_inventory_operation_and_native_code() {
+    let session_missing = RexError::native_rejection(
+        "session.list",
+        RexInputStage::BeforeWrite,
+        "session_not_found".into(),
+        "native session inventory rejected the target",
+    );
+    let block_missing = RexError::native_rejection(
+        "session.list_blocks",
+        RexInputStage::BeforeWrite,
+        "block_not_found".into(),
+        "native block inventory rejected the target",
+    );
+    let wrong_operation = RexError::native_rejection(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "session_not_found".into(),
+        "transport failure must not prove target absence",
+    );
+
+    assert!(resolve_error_is_definitively_absent(&session_missing));
+    assert!(resolve_error_is_definitively_absent(&block_missing));
+    assert!(!resolve_error_is_definitively_absent(&wrong_operation));
+}
+
 #[tokio::test]
 async fn utf8_bytes_are_counted_and_preserved() {
     let _fixture = fixture_guard().await;

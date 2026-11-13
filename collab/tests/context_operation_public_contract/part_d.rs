@@ -44,7 +44,34 @@ fn public_r6_human_fence_preserves_target_work_role_mail_and_survives_restart() 
     let target = map["slots"].as_array().unwrap().iter().find(|slot|
         slot["identity_status"] == "active" && slot["identity_key"]["name"] == "Jenny").unwrap();
     let fence = target["current"]["rex_execution_fence"].clone();
-    assert!(fence["seconds"].is_u64() && fence["microseconds"].as_u64().unwrap() < 1_000_000, "{target}");
+    #[cfg(target_os = "macos")]
+    {
+        assert!(fence["seconds"].is_u64(), "{target}");
+        assert!(
+            fence["microseconds"].as_u64().unwrap() < 1_000_000,
+            "{target}"
+        );
+        assert_eq!(fence.as_object().unwrap().len(), 2, "{target}");
+        assert!(fence.get("clock").is_none(), "{target}");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(fence["clock"], "linux_boottime", "{target}");
+        let native_boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("read native Linux boot ID")
+            .trim()
+            .to_owned();
+        assert_eq!(fence["boot_id"], native_boot_id, "{target}");
+        let native_ticks_per_second =
+            u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+                .expect("read native Linux CLK_TCK");
+        assert_eq!(
+            fence["ticks_per_second"], native_ticks_per_second,
+            "{target}"
+        );
+        assert!(fence["ticks"].is_u64(), "{target}");
+        assert_eq!(fence.as_object().unwrap().len(), 4, "{target}");
+    }
     assert!(!map["slots"].as_array().unwrap().iter().any(|slot|
         slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == old_worker));
 

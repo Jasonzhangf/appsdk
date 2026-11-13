@@ -167,11 +167,11 @@ pub(super) fn prepare_board_invitation_locked(
     if !state.workers.contains_key(&to) {
         return Err(Resp::err("peer not registered"));
     }
-    work_executor_gate_with_control(state, control, route, id, &to)?;
     let slot = control
         .current_for_worker(&route.project_scope_id, &route.app_scope_id, &to)
         .map_err(Resp::err)?
         .ok_or_else(|| Resp::err("peer not registered"))?;
+    execution_admission_gate_with_control(state, control, route, id, &to, &slot.identity_key.name)?;
     let current = slot
         .active_binding()
         .ok_or_else(|| Resp::err("peer not registered"))?;
@@ -624,6 +624,16 @@ fn prepare_board_response_locked(
         let current = current_slot.active_binding().ok_or_else(|| {
             Resp::err("BOARD_TARGET_NAME_REQUIRED: named work requires a current recipient name")
         })?;
+        execution_admission_gate_with_control(
+            state,
+            control,
+            route,
+            id,
+            actor,
+            &current_slot.identity_key.name,
+        )?;
+        // Validate resources before moving their current owner references.
+        board_resume_gate(state, &task.owner, id)?;
         let Some(session) = current.binding.session_id.as_ref() else {
             return Err(Resp::err("BOARD_TARGET_SESSION_REQUIRED"));
         };

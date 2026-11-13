@@ -152,6 +152,9 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         let binding = match board_execution_gate(server, &state, &actor, &id) {
             Ok(binding) => binding, Err(error) => return error,
         };
+        if let Err(error) = execution_admission_gate_for_actor(server, &state, &id, &actor) {
+            return error;
+        }
         let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
             Ok(control) => control, Err(error) => return Resp::err(error),
         };
@@ -259,6 +262,9 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             return not_pending_error;
         };
         if let Err(error) = board_execution_gate(server, &state, &actor, &id) {
+            return error;
+        }
+        if let Err(error) = execution_admission_gate_for_actor(server, &state, &id, &actor) {
             return error;
         }
         claimable = Some(recovered);
@@ -375,6 +381,9 @@ fn board_start_locked(
         Ok(binding) => binding,
         Err(error) => return error,
     };
+    if let Err(error) = execution_admission_gate_for_actor(server, &state, &id, &actor) {
+        return error;
+    }
     let loaded;
     let control = match control {
         Some(control) => control,

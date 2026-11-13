@@ -123,6 +123,109 @@ fn legacy_task_owner_gate(state: &State, task_id: &str, actor: &str) -> Result<(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionCandidateIneligible {
+    PinnedExecutorMismatch,
+    RequiredReviewer,
+}
+
+fn execution_candidate_eligibility(
+    policy: &crate::board::WorkPolicy,
+    candidate_name: &str,
+) -> Result<(), ExecutionCandidateIneligible> {
+    if policy
+        .executor_name
+        .as_deref()
+        .is_some_and(|executor| executor != candidate_name)
+    {
+        return Err(ExecutionCandidateIneligible::PinnedExecutorMismatch);
+    }
+    if policy.reviewer_name.as_deref() == Some(candidate_name) {
+        return Err(ExecutionCandidateIneligible::RequiredReviewer);
+    }
+    Ok(())
+}
+
+fn execution_candidate_gate(
+    state: &State,
+    task_id: &str,
+    candidate_name: &str,
+) -> Result<(), Resp> {
+    let policy = state.effective_work_policy(task_id);
+    match execution_candidate_eligibility(&policy, candidate_name) {
+        Ok(()) => Ok(()),
+        Err(ExecutionCandidateIneligible::PinnedExecutorMismatch) => Err(Resp::err_data(
+            "WORK_EXECUTOR_REQUIRED: task is pinned to another stable name",
+            json!({
+                "task_id": task_id,
+                "candidate_name": candidate_name,
+                "executor_name": policy.executor_name,
+                "delivery_complete": false
+            }),
+        )),
+        Err(ExecutionCandidateIneligible::RequiredReviewer) => Err(Resp::err_data(
+            "WORK_REVIEWER_EXECUTION_CONFLICT: required reviewer cannot execute the same task",
+            json!({
+                "task_id": task_id,
+                "candidate_name": candidate_name,
+                "reviewer_name": policy.reviewer_name,
+                "delivery_complete": false
+            }),
+        )),
+    }
+}
+
+fn execution_admission_gate(
+    server: &Server,
+    state: &State,
+    task_id: &str,
+    actor: &str,
+    candidate_name: &str,
+) -> Result<(), Resp> {
+    work_executor_gate(server, state, task_id, actor)?;
+    execution_candidate_gate(state, task_id, candidate_name)
+}
+
+fn execution_admission_gate_with_control(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    task_id: &str,
+    actor: &str,
+    candidate_name: &str,
+) -> Result<(), Resp> {
+    work_executor_gate_with_control(state, control, route, task_id, actor)?;
+    execution_candidate_gate(state, task_id, candidate_name)
+}
+
+fn execution_admission_gate_for_actor(
+    server: &Server,
+    state: &State,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))?;
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .map_err(Resp::err)?;
+    let Some(slot) = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
+        .map_err(Resp::err)?
+    else {
+        return Ok(());
+    };
+    execution_admission_gate_with_control(
+        state,
+        &control,
+        &route,
+        task_id,
+        actor,
+        slot.identity_key.name.as_str(),
+    )
+}
+
 fn parse_work_policy(
     kind: Option<String>,
     prefer_role: Option<String>,
@@ -556,6 +659,9 @@ fn ticket_slot_candidates(
     let mut candidates = Vec::new();
     if phase == TicketPhaseKind::Execute {
         if let Some(name) = policy.executor_name.as_deref() {
+            if execution_candidate_eligibility(policy, name).is_err() {
+                return Ok(candidates);
+            }
             let current = control
                 .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
                 .map_err(Resp::err)?;
@@ -584,6 +690,11 @@ fn ticket_slot_candidates(
             .map_err(Resp::err)?;
         let Some(slot) = slot else { continue };
         let name = slot.identity_key.name.clone();
+        if phase == TicketPhaseKind::Execute
+            && execution_candidate_eligibility(policy, &name).is_err()
+        {
+            continue;
+        }
         let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
         if phase == TicketPhaseKind::Plan
             && !roles.iter().any(|role| role == "plan" || role == "planner")
@@ -1143,6 +1254,9 @@ pub(super) fn dispatch_eligible_worker_ids(
                 .is_some_and(|presence| presence.presence == name_state::AgentPresence::Offline)
     };
     if let Some(name) = policy.executor_name.as_deref() {
+        if execution_candidate_eligibility(policy, name).is_err() {
+            return Ok(Vec::new());
+        }
         let current = control
             .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
             .map_err(Resp::err)?;
@@ -1159,7 +1273,10 @@ pub(super) fn dispatch_eligible_worker_ids(
         let current = control
             .current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
             .map_err(Resp::err)?;
-        if current.is_some() {
+        if let Some(slot) = current {
+            if execution_candidate_eligibility(policy, &slot.identity_key.name).is_err() {
+                continue;
+            }
             eligible.push(worker.id.clone());
         }
     }
@@ -1462,6 +1579,15 @@ pub(crate) fn ticket_continuation_events_with_pending(
     else {
         return Vec::new();
     };
+    let policy = pending_details
+        .filter(|_| pending_matches)
+        .map(|details| details.work_policy.clone())
+        .unwrap_or_else(|| state.effective_work_policy(&next.task_id));
+    if next.phase == TicketPhaseKind::Execute
+        && execution_candidate_eligibility(&policy, &slot_name).is_err()
+    {
+        return Vec::new();
+    }
     let recovered_phase = ticket_recovery_claim_phase(
         state,
         &slot_name,
@@ -1483,21 +1609,6 @@ pub(crate) fn ticket_continuation_events_with_pending(
         // Reuse the same executor and resource admission as the manual claim
         // path. The planner has no error channel, so an unsafe claim simply
         // emits no events and leaves the queued responsibility intact.
-        if let Some(executor_name) = state.effective_work_policy(&next.task_id).executor_name {
-            let matches = control
-                .current_for_name(
-                    &route.project_scope_id,
-                    &route.app_scope_id,
-                    &executor_name,
-                )
-                .ok()
-                .flatten()
-                .and_then(|slot| slot.active_binding())
-                .is_some_and(|current| current.binding.agent_id.as_str() == worker_id);
-            if !matches {
-                return Vec::new();
-            }
-        }
         if board_resume_gate(state, worker_id, &next.task_id).is_err() {
             return Vec::new();
         }

@@ -490,6 +490,642 @@ fn task<'a>(board: &'a Value, id: &str) -> &'a Value {
         .unwrap()
 }
 
+fn f7_execute_phase(state: &Value, task_id: &str) -> Value {
+    state["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .find(|phase| phase["task_id"] == task_id && phase["phase"] == "execute")
+        .cloned()
+        .unwrap_or_else(|| panic!("missing execute phase for {task_id}: {state}"))
+}
+
+fn f7_messages(state: &Value, subject: &str) -> Vec<Value> {
+    state["msgs"]
+        .as_object()
+        .expect("messages persist")
+        .values()
+        .filter(|message| message["subject"] == subject)
+        .cloned()
+        .collect()
+}
+
+fn f7_goal_subscriptions(state: &Value, task_id: &str) -> Vec<Value> {
+    let subject = format!("goal:task:{task_id}");
+    state["notification_subscriptions"]
+        .as_object()
+        .expect("notification subscriptions persist")
+        .values()
+        .filter(|subscription| subscription["subject"] == subject)
+        .cloned()
+        .collect()
+}
+
+fn f7_assert_no_execute_effects(state: &Value, task_id: &str) {
+    assert!(state["task_assignments"].get(task_id).is_none(), "{state}");
+    assert!(state["task_lifecycle"].get(task_id).is_none(), "{state}");
+    assert!(
+        f7_messages(state, &format!("ticket-claimed:{task_id}")).is_empty(),
+        "{state}"
+    );
+    assert!(f7_goal_subscriptions(state, task_id).is_empty(), "{state}");
+}
+
+fn f7_fixture() -> AppFixture {
+    let fixture = relationship_fixture();
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture
+}
+
+fn f7_publish_flags<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut flags = vec![
+        "--long-horizon-content",
+        "Complete the F7 execution admission task under its current board contract",
+        "--long-horizon-every-ms",
+        "3600000",
+    ];
+    flags.extend_from_slice(extra);
+    flags
+}
+
+#[test]
+fn f7_execution_admission_publication_uses_disjoint_executor() {
+    let fixture = f7_fixture();
+    let published = publish(
+        &fixture,
+        "f7-publish-disjoint",
+        &f7_publish_flags(&["--reviewer", "Alice"]),
+    );
+
+    assert_eq!(published["task"]["status"], "pending", "{published}");
+    assert_eq!(published["task"]["reviewer_name"], "Alice", "{published}");
+    assert!(published["task"]["executor_name"].is_null(), "{published}");
+    assert_eq!(published["goal_schedule"]["armed"], false, "{published}");
+    let phase = &published["ticket"]["phases"][0];
+    assert_eq!(phase["status"], "queued", "{published}");
+    assert_eq!(phase["slot"], "Bob", "{published}");
+    let state = fixture.current_state();
+    let persisted = f7_execute_phase(&state, "f7-publish-disjoint");
+    assert_eq!(persisted["status"], "queued");
+    assert_eq!(persisted["slot_name"], "Bob");
+    f7_assert_no_execute_effects(&state, "f7-publish-disjoint");
+}
+
+#[test]
+fn f7_execution_admission_explicit_reviewer_waits_without_effects() {
+    let fixture = f7_fixture();
+    let published = publish(
+        &fixture,
+        "f7-publish-explicit-reviewer",
+        &f7_publish_flags(&["--executor", "Alice", "--reviewer", "Alice"]),
+    );
+
+    assert_eq!(published["task"]["status"], "pending", "{published}");
+    assert_eq!(published["task"]["executor_name"], "Alice", "{published}");
+    assert_eq!(published["task"]["reviewer_name"], "Alice", "{published}");
+    let phase = &published["ticket"]["phases"][0];
+    assert_eq!(phase["status"], "waiting_assignment", "{published}");
+    assert!(phase["slot"].is_null(), "{published}");
+    assert_eq!(
+        phase["wait_reason"], "specified executor Alice is unavailable",
+        "{published}"
+    );
+    f7_assert_no_execute_effects(&fixture.current_state(), "f7-publish-explicit-reviewer");
+}
+
+#[test]
+fn f7_execution_admission_publication_waits_without_disjoint_candidate() {
+    let fixture = relationship_fixture();
+    fixture.run_public(&["context"], THREAD_B);
+    let published = publish(
+        &fixture,
+        "f7-publish-no-disjoint",
+        &f7_publish_flags(&["--reviewer", "Alice"]),
+    );
+
+    assert_eq!(published["task"]["status"], "pending", "{published}");
+    assert_eq!(published["task"]["reviewer_name"], "Alice", "{published}");
+    let phase = &published["ticket"]["phases"][0];
+    assert_eq!(phase["status"], "waiting_assignment", "{published}");
+    assert!(phase["slot"].is_null(), "{published}");
+    assert_eq!(
+        phase["wait_reason"], "no eligible peer is available",
+        "{published}"
+    );
+    f7_assert_no_execute_effects(&fixture.current_state(), "f7-publish-no-disjoint");
+}
+
+#[test]
+fn f7_execution_admission_explicit_disjoint_executor_continues() {
+    let fixture = f7_fixture();
+    let published = publish(
+        &fixture,
+        "f7-publish-explicit-disjoint",
+        &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
+    );
+
+    assert_eq!(published["task"]["status"], "pending", "{published}");
+    assert_eq!(published["task"]["executor_name"], "Bob", "{published}");
+    assert_eq!(published["task"]["reviewer_name"], "Alice", "{published}");
+    let phase = &published["ticket"]["phases"][0];
+    assert_eq!(phase["status"], "queued", "{published}");
+    assert_eq!(phase["slot"], "Bob", "{published}");
+}
+
+#[test]
+fn f7_execution_admission_dispatch_uses_disjoint_executor() {
+    let fixture = f7_fixture();
+    publish(
+        &fixture,
+        "f7-dispatch-disjoint",
+        &f7_publish_flags(&["--reviewer", "Alice"]),
+    );
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let bob_worker = slot_worker_id(&board, "Bob");
+
+    let dispatched = fixture.run_public(
+        &[
+            "board",
+            "dispatch",
+            "f7-dispatch-disjoint",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+
+    assert_eq!(
+        dispatched["task"]["invited_peer"], bob_worker,
+        "{dispatched}"
+    );
+    assert_eq!(
+        dispatched["task"]["dispatch_selection"], "Bob",
+        "{dispatched}"
+    );
+    assert_eq!(dispatched["task"]["reviewer_name"], "Alice", "{dispatched}");
+    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
+    assert_eq!(
+        dispatched["goal_schedule"]["subscription"]["worker_id"], bob_worker,
+        "{dispatched}"
+    );
+}
+
+#[test]
+fn f7_execution_admission_direct_invite_rejects_reviewer_without_effects() {
+    let fixture = f7_fixture();
+    publish(
+        &fixture,
+        "f7-invite-reviewer",
+        &f7_publish_flags(&["--reviewer", "Alice"]),
+    );
+    let before = fixture.current_state();
+    let before_revision = before["board_details"]["f7-invite-reviewer"]["revision"].clone();
+
+    let error = rejected(
+        &fixture,
+        &[
+            "board",
+            "invite",
+            "f7-invite-reviewer",
+            "--to",
+            "Alice",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        error.contains("WORK_REVIEWER_EXECUTION_CONFLICT"),
+        "{error}"
+    );
+
+    let after = fixture.current_state();
+    assert_eq!(
+        after["board_details"]["f7-invite-reviewer"]["revision"], before_revision,
+        "{after}"
+    );
+    assert!(
+        after["board_details"]["f7-invite-reviewer"]["invitation"].is_null(),
+        "{after}"
+    );
+    assert!(
+        f7_messages(&after, "task-invitation:f7-invite-reviewer").is_empty(),
+        "{after}"
+    );
+    assert!(
+        f7_goal_subscriptions(&after, "f7-invite-reviewer").is_empty(),
+        "{after}"
+    );
+}
+
+#[test]
+fn f7_execution_admission_invite_normalizes_executor_worker_id() {
+    let fixture = f7_fixture();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let alice_worker = slot_worker_id(&board, "Alice");
+    publish(
+        &fixture,
+        "f7-invite-pinned-worker",
+        &f7_publish_flags(&["--executor", "Alice"]),
+    );
+
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "f7-invite-pinned-worker",
+            "--to",
+            &alice_worker,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+
+    assert_eq!(invited["task"]["invited_peer"], alice_worker, "{invited}");
+    assert_eq!(invited["task"]["executor_name"], "Alice", "{invited}");
+    assert_eq!(invited["task"]["status"], "invited", "{invited}");
+    let after = fixture.current_state();
+    assert_eq!(
+        after["board_details"]["f7-invite-pinned-worker"]["invitation"]["peer_id"], alice_worker,
+        "{after}"
+    );
+}
+
+#[test]
+fn f7_execution_admission_invite_rejects_reviewer_worker_id() {
+    let fixture = f7_fixture();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let alice_worker = slot_worker_id(&board, "Alice");
+    publish(
+        &fixture,
+        "f7-invite-reviewer-worker",
+        &f7_publish_flags(&["--reviewer", "Alice"]),
+    );
+    let before = fixture.current_state();
+    let before_revision = before["board_details"]["f7-invite-reviewer-worker"]["revision"].clone();
+
+    let error = rejected(
+        &fixture,
+        &[
+            "board",
+            "invite",
+            "f7-invite-reviewer-worker",
+            "--to",
+            &alice_worker,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        error.contains("WORK_REVIEWER_EXECUTION_CONFLICT"),
+        "{error}"
+    );
+
+    let after = fixture.current_state();
+    assert_eq!(
+        after["board_details"]["f7-invite-reviewer-worker"]["revision"], before_revision,
+        "{after}"
+    );
+    assert!(
+        after["board_details"]["f7-invite-reviewer-worker"]["invitation"].is_null(),
+        "{after}"
+    );
+    assert!(
+        f7_messages(&after, "task-invitation:f7-invite-reviewer-worker").is_empty(),
+        "{after}"
+    );
+    assert!(
+        f7_goal_subscriptions(&after, "f7-invite-reviewer-worker").is_empty(),
+        "{after}"
+    );
+}
+
+#[test]
+fn f7_execution_admission_accept_rechecks_current_reviewer() {
+    let mut fixture = f7_fixture();
+    publish(&fixture, "f7-accept-recheck", &f7_publish_flags(&[]));
+    fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "f7-accept-recheck",
+            "--to",
+            "Bob",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    fixture.update_current_state(|state| {
+        state["board_details"]["f7-accept-recheck"]["work_policy"]["reviewer_name"] = json!("Bob");
+    });
+    let before = fixture.current_state();
+
+    let error = rejected(
+        &fixture,
+        &[
+            "board",
+            "respond",
+            "f7-accept-recheck",
+            "--accept",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_C,
+    );
+    assert!(
+        error.contains("WORK_REVIEWER_EXECUTION_CONFLICT"),
+        "{error}"
+    );
+
+    let after = fixture.current_state();
+    assert_eq!(
+        after["board_details"]["f7-accept-recheck"], before["board_details"]["f7-accept-recheck"],
+        "{after}"
+    );
+    assert_eq!(
+        after["tasks"]["f7-accept-recheck"], before["tasks"]["f7-accept-recheck"],
+        "{after}"
+    );
+    assert!(
+        after["task_assignments"].get("f7-accept-recheck").is_none(),
+        "{after}"
+    );
+}
+
+#[test]
+fn f7_execution_admission_manual_claim_rejects_reviewer() {
+    let fixture = relationship_fixture();
+    fixture.run_public(&["context"], THREAD_B);
+    publish(
+        &fixture,
+        "f7-manual-claim-reviewer",
+        &f7_publish_flags(&["--reviewer", "Alice"]),
+    );
+    let before = fixture.current_state();
+
+    let error = rejected(
+        &fixture,
+        &[
+            "board",
+            "claim",
+            "f7-manual-claim-reviewer",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert!(
+        error.contains("WORK_REVIEWER_EXECUTION_CONFLICT"),
+        "{error}"
+    );
+
+    let after = fixture.current_state();
+    assert_eq!(
+        after["tasks"]["f7-manual-claim-reviewer"], before["tasks"]["f7-manual-claim-reviewer"],
+        "{after}"
+    );
+    assert_eq!(
+        f7_execute_phase(&after, "f7-manual-claim-reviewer"),
+        f7_execute_phase(&before, "f7-manual-claim-reviewer"),
+        "{after}"
+    );
+    f7_assert_no_execute_effects(&after, "f7-manual-claim-reviewer");
+}
+
+#[test]
+fn f7_execution_admission_start_rechecks_current_reviewer() {
+    let fixture = f7_fixture();
+    publish(
+        &fixture,
+        "f7-start-recheck",
+        &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "f7-start-recheck",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_C,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            "f7-start-recheck",
+            "--reviewer",
+            "Bob",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_A,
+    );
+    let before = fixture.current_state();
+
+    let error = rejected(
+        &fixture,
+        &[
+            "board",
+            "start",
+            "f7-start-recheck",
+            "--expected-revision",
+            "3",
+            "--attempt",
+            "1",
+        ],
+        THREAD_C,
+    );
+    assert!(
+        error.contains("WORK_REVIEWER_EXECUTION_CONFLICT"),
+        "{error}"
+    );
+
+    let after = fixture.current_state();
+    assert_eq!(
+        f7_execute_phase(&after, "f7-start-recheck"),
+        f7_execute_phase(&before, "f7-start-recheck"),
+        "{after}"
+    );
+    assert_eq!(
+        f7_execute_phase(&after, "f7-start-recheck")["status"],
+        "claimed"
+    );
+}
+
+#[test]
+fn f7_execution_admission_automatic_continuation_skips_reviewer() {
+    let mut fixture = f7_fixture();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let bob_worker = slot_worker_id(&board, "Bob");
+    let bob_thread = ticket_thread(&fixture, &bob_worker);
+    seed_idle(&mut fixture, &bob_worker, bob_thread);
+
+    let blocker = publish(
+        &fixture,
+        "f7-continuation-blocker",
+        &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
+    );
+    let blocker_revision = blocker["task"]["revision"]
+        .as_u64()
+        .expect("blocker revision")
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "f7-continuation-blocker",
+            "--expected-revision",
+            &blocker_revision,
+            "--attempt",
+            "1",
+        ],
+        THREAD_C,
+    );
+    let queued = publish(
+        &fixture,
+        "f7-continuation-reviewer",
+        &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
+    );
+    let queued_revision = queued["task"]["revision"]
+        .as_u64()
+        .expect("queued revision")
+        .to_string();
+    fixture.run_public(
+        &[
+            "board",
+            "policy",
+            "--scope",
+            "task",
+            "--id",
+            "f7-continuation-reviewer",
+            "--reviewer",
+            "Bob",
+            "--expected-revision",
+            &queued_revision,
+        ],
+        THREAD_A,
+    );
+    let before = fixture.current_state();
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "f7-continuation-blocker",
+            "--evidence",
+            "release the queued slot",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        THREAD_C,
+    );
+
+    let after = fixture.current_state();
+    assert_eq!(
+        f7_execute_phase(&after, "f7-continuation-reviewer"),
+        f7_execute_phase(&before, "f7-continuation-reviewer"),
+        "{after}"
+    );
+    assert_eq!(
+        f7_execute_phase(&after, "f7-continuation-reviewer")["status"],
+        "queued"
+    );
+    f7_assert_no_execute_effects(&after, "f7-continuation-reviewer");
+}
+
+#[test]
+fn f7_execution_admission_disjoint_executor_claims_starts_and_delivers() {
+    let fixture = f7_fixture();
+    publish(
+        &fixture,
+        "f7-valid-delivery",
+        &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "f7-valid-delivery",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_C,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            "f7-valid-delivery",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_C,
+    );
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "f7-valid-delivery",
+            "--evidence",
+            "disjoint executor delivery",
+            "--attempt",
+            "1",
+            "--no-candidate",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(delivered["status"], "delivered");
+}
+
+#[test]
+fn f7_execution_admission_decline_stays_available() {
+    let fixture = f7_fixture();
+    publish(
+        &fixture,
+        "f7-decline",
+        &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "f7-decline",
+            "--to",
+            "Bob",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    let declined = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "f7-decline",
+            "--decline",
+            "--reason",
+            "another owner",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(declined["task"]["status"], "pending");
+    assert_eq!(declined["task"]["executor_name"], "Bob");
+    assert_eq!(declined["task"]["reviewer_name"], "Alice");
+}
+
 fn rejected(fixture: &AppFixture, args: &[&str], thread: &str) -> String {
     let result = fixture.command_public(args, thread);
     assert!(

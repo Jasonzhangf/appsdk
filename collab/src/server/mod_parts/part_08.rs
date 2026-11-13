@@ -2914,19 +2914,31 @@ fn close_task_resources(
     }
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = run_safe_git(root, &["rev-parse", "--verify", &branch_ref])
-            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-        if branch_exists.status.success() {
+        if branch_exists(root, &branch_ref)? {
             let main_ref = "refs/heads/main";
             let merged = run_safe_git(root, &["merge-base", "--is-ancestor", &branch_ref, main_ref])
                 .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-            if !merged.status.success()
-                && !integration_commit_proves_branch_merged(
+            let merged = match merged.status.code() {
+                Some(0) => true,
+                Some(1) => false,
+                _ => {
+                    return Err(format!(
+                        "cannot verify whether branch {branch} is an ancestor of {main_ref}: {}",
+                        String::from_utf8_lossy(&merged.stderr).trim()
+                    ));
+                }
+            };
+            let proven = if merged {
+                true
+            } else {
+                branch_net_content_present_at_integration_commit(
                     root,
                     main_ref,
+                    &branch_ref,
                     recorded_integration,
                 )?
-            {
+            };
+            if !proven {
                 return Err(format!(
                     "branch {branch} is not merged into {main_ref}; refusing delete"
                 ));
@@ -2966,9 +2978,7 @@ fn close_task_resources(
 
     if let Some(branch) = branch {
         let branch_ref = format!("refs/heads/{branch}");
-        let branch_exists = run_safe_git(root, &["rev-parse", "--verify", &branch_ref])
-            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-        if branch_exists.status.success() {
+        if branch_exists(root, &branch_ref)? {
             let deleted = run_safe_git(root, &["branch", "-D", branch])
                 .map_err(|e| format!("cannot delete branch {branch}: {e}"))?;
             if !deleted.status.success() {
@@ -2980,6 +2990,36 @@ fn close_task_resources(
         }
     }
     Ok(())
+}
+
+fn branch_exists(root: &Path, branch_ref: &str) -> Result<bool, String> {
+    let format = run_safe_git(root, &["check-ref-format", branch_ref])
+        .map_err(|e| format!("cannot verify branch {branch_ref}: {e}"))?;
+    match format.status.code() {
+        Some(0) => {}
+        Some(1) => {
+            return Err(format!(
+                "branch {branch_ref} is not a valid ref name; refusing delete"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "cannot verify branch {branch_ref}: {}",
+                String::from_utf8_lossy(&format.stderr).trim()
+            ));
+        }
+    }
+
+    let exists = run_safe_git(root, &["show-ref", "--verify", "--quiet", branch_ref])
+        .map_err(|e| format!("cannot verify branch {branch_ref}: {e}"))?;
+    match exists.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "cannot verify branch {branch_ref}: {}",
+            String::from_utf8_lossy(&exists.stderr).trim()
+        )),
+    }
 }
 
 /// Release a LayerFS task workspace obligation. Collab owns only the isolation
@@ -3002,12 +3042,15 @@ fn close_layerfs_task_workspace(worktree_path: &str) -> Result<(), String> {
 
 /// A squash integration replaces the branch tip with a new commit, so the
 /// branch is not an ancestor of main even though its work landed. The recorded
-/// `integration.commit` is the authoritative proof in that case. The check is
-/// the same reachability question `collab task integrated` answers: resolve the
-/// commit, then require it to be reachable from `refs/heads/main`.
-fn integration_commit_proves_branch_merged(
+/// `integration.commit` is the owner's integration declaration. For cleanup,
+/// require that commit to be reachable from `refs/heads/main` and that the
+/// branch's net changes relative to its unique common ancestor are present
+/// with identical Git tree content in that commit. This proves net content,
+/// not integration causality or exact candidate identity.
+fn branch_net_content_present_at_integration_commit(
     root: &Path,
     main_ref: &str,
+    branch_ref: &str,
     recorded_integration: Option<&str>,
 ) -> Result<bool, String> {
     let Some(commit) = recorded_integration
@@ -3024,15 +3067,143 @@ fn integration_commit_proves_branch_merged(
             )
         })?;
     match commit_is_integrated_in_main(root, commit) {
-        Ok(true) => Ok(true),
-        Ok(false) => Err(format!(
+        Ok(true) => {}
+        Ok(false) => return Err(format!(
             "integration commit {commit} is not reachable from {main_ref} (main_head {main_head}); expected a commit reachable from {main_ref}; refusing delete"
         )),
-        Err(error) => Err(format!(
+        Err(error) => return Err(format!(
             "integration commit {commit} cannot be resolved (main_head {main_head}): {}; expected a commit reachable from {main_ref}; refusing delete",
             error.error.unwrap_or_default()
         )),
     }
+
+    let merge_bases = run_safe_git(root, &["merge-base", "--all", branch_ref, commit])
+        .map_err(|e| format!("cannot find the common ancestor for {branch_ref} and {commit}: {e}"))?;
+    if !merge_bases.status.success() {
+        return Err(format!(
+            "cannot find the common ancestor for {branch_ref} and {commit}: {}",
+            String::from_utf8_lossy(&merge_bases.stderr).trim()
+        ));
+    }
+    let merge_bases = String::from_utf8(merge_bases.stdout)
+        .map_err(|error| format!("common ancestor output is not valid UTF-8: {error}"))?;
+    let merge_bases = merge_bases
+        .lines()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if merge_bases.len() != 1 {
+        return Err(format!(
+            "expected one common ancestor for {branch_ref} and {commit}, found {}; refusing delete",
+            merge_bases.len()
+        ));
+    }
+    let base = &merge_bases[0];
+
+    let changed = run_safe_git_os(
+        root,
+        [
+            std::ffi::OsStr::new("diff"),
+            std::ffi::OsStr::new("--no-ext-diff"),
+            std::ffi::OsStr::new("--no-textconv"),
+            std::ffi::OsStr::new("--no-renames"),
+            std::ffi::OsStr::new("--ignore-submodules=none"),
+            std::ffi::OsStr::new("--name-only"),
+            std::ffi::OsStr::new("-z"),
+            std::ffi::OsStr::new(base),
+            std::ffi::OsStr::new(branch_ref),
+            std::ffi::OsStr::new("--"),
+        ],
+    )
+    .map_err(|e| format!("cannot list net changed paths for {branch_ref}: {e}"))?;
+    if !changed.status.success() {
+        return Err(format!(
+            "cannot list net changed paths for {branch_ref}: {}",
+            String::from_utf8_lossy(&changed.stderr).trim()
+        ));
+    }
+    let paths = parse_nul_os_strings(&changed.stdout, "net changed path")?;
+    if paths.is_empty() {
+        return Err(format!(
+            "branch {branch_ref} has no net changed paths to compare; refusing delete"
+        ));
+    }
+
+    for path in paths {
+        let output = run_safe_git_os(
+            root,
+            [
+                std::ffi::OsStr::new("--literal-pathspecs"),
+                std::ffi::OsStr::new("diff"),
+                std::ffi::OsStr::new("--no-ext-diff"),
+                std::ffi::OsStr::new("--no-textconv"),
+                std::ffi::OsStr::new("--no-renames"),
+                std::ffi::OsStr::new("--ignore-submodules=none"),
+                std::ffi::OsStr::new("--quiet"),
+                std::ffi::OsStr::new(branch_ref),
+                std::ffi::OsStr::new(commit),
+                std::ffi::OsStr::new("--"),
+                path.as_os_str(),
+            ],
+        )
+        .map_err(|e| {
+            format!(
+                "cannot compare net changed path {} for {branch_ref}: {e}",
+                path.to_string_lossy()
+            )
+        })?;
+        match output.status.code() {
+            Some(0) => {}
+            Some(1) => {
+                return Err(format!(
+                    "net changed path {} differs between {branch_ref} and integration commit {commit}; refusing delete",
+                    path.to_string_lossy()
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "cannot compare net changed path {} for {branch_ref}: {}",
+                    path.to_string_lossy(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn run_safe_git_os<I, S>(root: &Path, args: I) -> std::io::Result<std::process::Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    safe_git_command(root)?.args(args).output()
+}
+
+fn parse_nul_os_strings(bytes: &[u8], label: &str) -> Result<Vec<std::ffi::OsString>, String> {
+    if !bytes.is_empty() && !bytes.ends_with(&[0]) {
+        return Err(format!("{label} output is not NUL-terminated"));
+    }
+    let mut values = Vec::new();
+    for value in bytes.split(|byte| *byte == 0) {
+        if value.is_empty() {
+            continue;
+        }
+        #[cfg(unix)]
+        let value = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(value).to_os_string()
+        };
+        #[cfg(not(unix))]
+        let value = std::ffi::OsString::from(
+            std::str::from_utf8(value)
+                .map_err(|error| format!("{label} is not valid UTF-8: {error}"))?,
+        );
+        values.push(value);
+    }
+    Ok(values)
 }
 
 fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {

@@ -674,6 +674,19 @@ fn cleanup_rejects_unmerged_then_removes_only_merged_clean_worktree() {
     assert!(playground.join("wt").is_dir());
 
     assert!(git(&["merge", "-q", "feature"]).status.success());
+    std::fs::write(root.join("playground/wt/dirty.txt"), "dirty\n").unwrap();
+    let dirty = close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/wt"),
+        Some("feature"),
+        None,
+    )
+    .unwrap_err();
+    assert!(dirty.contains("uncommitted changes"), "{dirty}");
+    assert!(playground.join("wt").is_dir());
+    assert!(git(&["rev-parse", "--verify", "feature"]).status.success());
+    std::fs::remove_file(root.join("playground/wt/dirty.txt")).unwrap();
     assert!(close_task_resources(&root, &crate::config::Config::default(), Some("playground/wt"), Some("feature"), None).is_ok());
     assert!(!playground.join("wt").exists());
     assert!(!git(&["rev-parse", "--verify", "feature"]).status.success());
@@ -767,6 +780,306 @@ fn close_task_resources_accepts_squash_only_with_reachable_integration_commit() 
     std::fs::remove_dir_all(root).ok();
 }
 
+fn cleanup_git_repo(label: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "collab-close-{label}-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let playground = root.join("playground");
+    std::fs::create_dir_all(&playground).unwrap();
+    git_ok(&root, &["init", "-q", "--initial-branch=main"]);
+    git_ok(&root, &["config", "user.email", "test@example.com"]);
+    git_ok(&root, &["config", "user.name", "collab test"]);
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    git_ok(&root, &["add", "README.md"]);
+    git_ok(&root, &["commit", "-q", "-m", "base"]);
+    root
+}
+
+fn cleanup_git_worktree(root: &Path, branch: &str, slug: &str) -> PathBuf {
+    let worktree = root.join("playground").join(slug);
+    git_ok(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            worktree.to_str().unwrap(),
+            "main",
+        ],
+    );
+    worktree
+}
+
+fn cleanup_squash_commit(root: &Path, branch: &str) -> String {
+    git_ok(root, &["merge", "--squash", branch]);
+    git_ok(root, &["commit", "-q", "-m", "integration"]);
+    rev_parse(root, "refs/heads/main")
+}
+
+fn cleanup_commit_tree(root: &Path, tree: &str, parents: &[&str], message: &str) -> String {
+    let mut args = vec!["commit-tree", tree];
+    for parent in parents {
+        args.push("-p");
+        args.push(parent);
+    }
+    args.push("-m");
+    args.push(message);
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git commit-tree failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn close_task_resources_rejects_partial_squash_content() {
+    let root = cleanup_git_repo("partial-content");
+    let branch = "feature";
+    let worktree = cleanup_git_worktree(&root, branch, "partial-content");
+    std::fs::write(worktree.join("keep.txt"), "keep\n").unwrap();
+    std::fs::write(worktree.join("missing.txt"), "missing\n").unwrap();
+    git_ok(&worktree, &["add", "-A"]);
+    git_ok(&worktree, &["commit", "-q", "-m", "two task files"]);
+
+    std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+    git_ok(&root, &["add", "keep.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "partial integration"]);
+    let integration = rev_parse(&root, "refs/heads/main");
+
+    let error = close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/partial-content"),
+        Some(branch),
+        Some(&integration),
+    )
+    .unwrap_err();
+    assert!(error.contains("differs"), "{error}");
+    assert!(worktree.exists());
+    assert!(Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_task_resources_rejects_branch_content_added_after_integration() {
+    let root = cleanup_git_repo("later-content");
+    let branch = "feature";
+    let worktree = cleanup_git_worktree(&root, branch, "later-content");
+    std::fs::write(worktree.join("feature.txt"), "initial\n").unwrap();
+    git_ok(&worktree, &["add", "feature.txt"]);
+    git_ok(&worktree, &["commit", "-q", "-m", "initial task content"]);
+
+    std::fs::write(root.join("feature.txt"), "initial\n").unwrap();
+    git_ok(&root, &["add", "feature.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "recorded integration"]);
+    let integration = rev_parse(&root, "refs/heads/main");
+
+    std::fs::write(worktree.join("later.txt"), "later branch content\n").unwrap();
+    git_ok(&worktree, &["add", "later.txt"]);
+    git_ok(&worktree, &["commit", "-q", "-m", "later task content"]);
+
+    let error = close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/later-content"),
+        Some(branch),
+        Some(&integration),
+    )
+    .unwrap_err();
+    assert!(error.contains("differs"), "{error}");
+    assert!(worktree.exists());
+    assert!(Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_task_resources_rejects_empty_net_delta() {
+    let root = cleanup_git_repo("empty-delta");
+    let branch = "feature";
+    let worktree = cleanup_git_worktree(&root, branch, "empty-delta");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "empty task commit"]);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "integration"]);
+    let integration = rev_parse(&root, "refs/heads/main");
+
+    let error = close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/empty-delta"),
+        Some(branch),
+        Some(&integration),
+    )
+    .unwrap_err();
+    assert!(error.contains("no net changed paths"), "{error}");
+    assert!(worktree.exists());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_task_resources_rejects_multiple_merge_bases() {
+    let root = cleanup_git_repo("multiple-bases");
+    let base = rev_parse(&root, "HEAD");
+    let tree = rev_parse(&root, "HEAD^{tree}");
+    let left = cleanup_commit_tree(&root, &tree, &[&base], "left");
+    let right = cleanup_commit_tree(&root, &tree, &[&base], "right");
+    let feature_merge = cleanup_commit_tree(&root, &tree, &[&left, &right], "feature merge");
+    let main_merge = cleanup_commit_tree(&root, &tree, &[&right, &left], "main merge");
+    git_ok(&root, &["update-ref", "refs/heads/feature", &feature_merge]);
+    git_ok(&root, &["update-ref", "refs/heads/main", &main_merge]);
+
+    let bases = Command::new("git")
+        .current_dir(&root)
+        .args(["merge-base", "--all", "refs/heads/feature", "refs/heads/main"])
+        .output()
+        .unwrap();
+    assert!(bases.status.success());
+    assert_eq!(String::from_utf8_lossy(&bases.stdout).lines().count(), 2);
+
+    let error = close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        None,
+        Some("feature"),
+        Some(&main_merge),
+    )
+    .unwrap_err();
+    assert!(error.contains("found 2"), "{error}");
+    assert!(Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_task_resources_reports_git_failure_before_removing_worktree() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-close-git-failure-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let worktree = root.join("playground/wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join("untouched.txt"), "preserve\n").unwrap();
+
+    let error = close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/wt"),
+        Some("feature"),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.contains("no git repository"), "{error}");
+    assert!(worktree.join("untouched.txt").is_file());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_task_resources_distinguishes_missing_and_invalid_branches() {
+    let root = cleanup_git_repo("branch-existence");
+
+    assert!(close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        None,
+        Some("missing"),
+        None,
+    )
+    .is_ok());
+
+    let error = close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        None,
+        Some("bad..name"),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.contains("not a valid ref name"), "{error}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_task_resources_accepts_rename_delete_mode_binary_and_literal_paths() {
+    let root = cleanup_git_repo("content-kinds");
+    let branch = "feature";
+    std::fs::write(root.join("old.txt"), "old\n").unwrap();
+    std::fs::write(root.join("delete.txt"), "delete\n").unwrap();
+    std::fs::write(root.join("mode.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(root.join("binary.bin"), [0_u8, 1, 2, 3]).unwrap();
+    git_ok(&root, &["add", "-A"]);
+    git_ok(&root, &["commit", "-q", "-m", "base files"]);
+
+    let worktree = cleanup_git_worktree(&root, branch, "content-kinds");
+    std::fs::rename(worktree.join("old.txt"), worktree.join("new.txt")).unwrap();
+    std::fs::remove_file(worktree.join("delete.txt")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = worktree.join("mode.sh");
+        let mut permissions = std::fs::metadata(&mode).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&mode, permissions).unwrap();
+    }
+    std::fs::write(worktree.join("binary.bin"), [0_u8, 255, 2, 128]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let literal = PathBuf::from(std::ffi::OsString::from_vec(
+            b"-literal path\n*.txt".to_vec(),
+        ));
+        std::fs::write(worktree.join(literal), "literal path\n").unwrap();
+    }
+    #[cfg(not(unix))]
+    std::fs::write(worktree.join("-literal path\n*.txt"), "literal path\n").unwrap();
+    git_ok(&worktree, &["add", "-A"]);
+    git_ok(&worktree, &["commit", "-q", "-m", "content kinds"]);
+
+    let integration = cleanup_squash_commit(&root, branch);
+    assert!(close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/content-kinds"),
+        Some(branch),
+        Some(&integration),
+    )
+    .is_ok());
+    assert!(!worktree.exists());
+    assert!(!Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Build a task whose branch was squash-merged into `main`. The squash commit
 /// replaces the branch tip, so the branch is not an ancestor of `main`. With
 /// `force_close` the task is closed manually without cleanup; otherwise the
@@ -814,15 +1127,45 @@ fn squash_merged_holder(
             .status
             .success()
     );
+    std::fs::write(
+        root.join("playground/squash-wt/feature-two.txt"),
+        "second task commit\n",
+    )
+    .unwrap();
+    assert!(git(&["-C", "playground/squash-wt", "add", "feature-two.txt"])
+        .status
+        .success());
+    assert!(
+        git(&[
+            "-C",
+            "playground/squash-wt",
+            "commit",
+            "-q",
+            "-m",
+            "second feature commit",
+        ])
+        .status
+        .success()
+    );
     let feature_tip = String::from_utf8_lossy(&git(&["rev-parse", "feature"]).stdout)
         .trim()
         .to_string();
+    std::fs::write(root.join("main-only.txt"), "unrelated main change\n").unwrap();
+    assert!(git(&["add", "main-only.txt"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "unrelated main change"])
+        .status
+        .success());
     assert!(git(&["merge", "--squash", "feature"]).status.success());
     assert!(git(&["commit", "-q", "-m", "squash feature"]).status.success());
     let squash = String::from_utf8_lossy(&git(&["rev-parse", "main"]).stdout)
         .trim()
         .to_string();
     assert_ne!(feature_tip, squash);
+    std::fs::write(root.join("feature.txt"), "main edit after integration\n").unwrap();
+    assert!(git(&["add", "feature.txt"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "later main edit"])
+        .status
+        .success());
 
     register_synthetic_peer(server, "holder", "%holder");
     register(server, "master", "%master");
@@ -942,6 +1285,48 @@ fn finalize_keeps_refusal_without_integration_evidence() {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("not merged")),
+        "{refused:?}"
+    );
+    assert!(root.join("playground/squash-wt").is_dir());
+    assert!(Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/feature"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn finalize_rejects_main_reachable_commit_without_task_net_content() {
+    let (server, root) = test_server();
+    squash_merged_holder(&server, &root, "squash-held", false, true);
+    let base = String::from_utf8(
+        Command::new("git")
+            .current_dir(&root)
+            .args(["rev-list", "--max-parents=0", "refs/heads/main"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let refused = handle_task_finalize_cleanup(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "squash-held".into(),
+        Some(base),
+    );
+    assert!(!refused.ok, "{refused:?}");
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("CLEANUP_FINALIZE_REFUSED")),
         "{refused:?}"
     );
     assert!(root.join("playground/squash-wt").is_dir());

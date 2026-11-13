@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-merge-pending",
   "version": "0.2.0",
-  "description": "One accepted delivery review enters one task lifecycle result. The reviewed delivery is classified explicitly as code or read-only. Code delivery must prove the exact delivered candidate is reachable from refs/heads/main, with or without a current master. Read-only delivery records a typed no_merge_required terminal and does not fabricate integration evidence. Both dispositions pass the normal owned-resource cleanup gate before close. Rework and force-close are separate lifecycle attempts and are not back edges in this SESE graph.",
+  "description": "One accepted delivery review enters one task lifecycle result. The reviewed delivery is classified explicitly as code or read-only. Code delivery records the owner's integration declaration and must prove either branch ancestry from refs/heads/main or, for a non-ancestor branch, a main-reachable integration receipt whose unique common ancestor and non-empty net changed paths have identical Git tree content in that receipt. This is net-content cleanup proof, not exact candidate provenance or integration causality. Read-only delivery records a typed no_merge_required terminal and does not fabricate integration evidence. Both dispositions pass the normal owned-resource cleanup gate before close. Rework and force-close are separate lifecycle attempts and are not back edges in this SESE graph.",
   "inputs": [
     {
       "id": "task_review_accept",

@@ -1635,7 +1635,7 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
 }
 
 #[test]
-fn identity_map_missing_does_not_recover_history_or_transfer_its_work() {
+fn identity_map_missing_registers_fresh_identity_and_projects_name_owned_work() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("identity-map-missing-work");
     let first = fixture.registered_context("identity-map-missing-work-seed", &pane);
@@ -1643,16 +1643,26 @@ fn identity_map_missing_does_not_recover_history_or_transfer_its_work() {
         .as_str()
         .unwrap()
         .to_owned();
+    let old_name = first["result"]["snapshot"]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(old_name, "Alice", "{first}");
+    let task_id = "identity-map-original-task";
     fixture.run_ok(
-        &[
-            "task",
-            "register",
-            "identity-map-original-task",
-            "--next",
-            "keep original owner",
-        ],
+        &["task", "register", task_id, "--next", "keep original owner"],
         Some(&pane),
     );
+    let before_task = fixture.run_ok(&["task", "status", task_id], Some(&pane));
+    assert_eq!(before_task["id"], task_id, "{before_task}");
+    assert_eq!(before_task["status"], "working", "{before_task}");
+    assert_eq!(before_task["owner"], old, "{before_task}");
+    assert_eq!(before_task["owner_name"], old_name, "{before_task}");
+    let before_state = fixture.current_state();
+    let before_record = before_state["tasks"][task_id].clone();
+    let before_assignment = before_state["task_assignments"][task_id].clone();
+    assert_eq!(before_assignment["name"], old_name, "{before_assignment}");
+
     fs::remove_file(fixture.host_state.join("identity-map.json")).unwrap();
     let restored = success_payload(&context_with_agent_session(
         &fixture,
@@ -1660,17 +1670,127 @@ fn identity_map_missing_does_not_recover_history_or_transfer_its_work() {
         "identity-map-missing-work-new-registration",
         &pane,
     ));
-    let new = restored["result"]["snapshot"]["identity"]["worker_id"]
+    let snapshot = &restored["result"]["snapshot"];
+    let new = snapshot["identity"]["worker_id"].as_str().unwrap();
+    assert_ne!(new, old, "a missing map cannot restore a historical worker");
+    assert_eq!(snapshot["name"], old_name, "{restored}");
+    assert!(snapshot["master"].is_null(), "{restored}");
+
+    let map: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
+    let current = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["identity_key"]["name"] == old_name
+                && slot["current"]["binding"]["agent_id"] == new
+        })
+        .expect("the fresh identity must hold the requested stable name");
+    let new_session = current["current"]["binding"]["session_id"]
         .as_str()
         .unwrap();
-    assert_ne!(new, old, "a missing map cannot restore a historical worker");
-    assert!(restored["result"]["snapshot"]["master"].is_null());
-    let task = fixture.run_ok(
-        &["task", "status", "identity-map-original-task"],
+    let read_baseline = fixture.current_state();
+    assert_eq!(
+        read_baseline["tasks"][task_id], before_record,
+        "registration must not rewrite the durable task owner"
+    );
+    assert_eq!(
+        read_baseline["task_assignments"][task_id], before_assignment,
+        "registration must not rewrite the typed assignment"
+    );
+
+    let task = fixture.run_ok(&["task", "status", task_id], Some(&pane));
+    let query = fixture.context_query("identity-map-missing-work-new-registration", Some(&pane));
+    assert_eq!(query["ok"], true, "{query}");
+    assert_eq!(task["id"], task_id, "{task}");
+    assert_eq!(task["status"], before_task["status"], "{task}");
+    assert_eq!(task["owner_name"], old_name, "{task}");
+    assert_eq!(task["owner"], new, "{task}");
+    assert_eq!(task["owner_session_id"], new_session, "{task}");
+
+    let after_state = fixture.current_state();
+    assert_eq!(
+        after_state["tasks"][task_id], before_record,
+        "public reads must not mutate the durable task, owner, revision, or history"
+    );
+    assert_eq!(
+        after_state["task_assignments"][task_id], before_assignment,
+        "public reads must not mutate the typed assignment"
+    );
+    assert_eq!(
+        after_state["msgs"], read_baseline["msgs"],
+        "public reads must not rewrite message consumption evidence"
+    );
+}
+
+#[test]
+fn identity_map_missing_does_not_infer_assignment_for_legacy_task() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("identity-map-missing-legacy");
+    let first = fixture.registered_context("identity-map-missing-legacy-seed", &pane);
+    let old = first["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let old_name = first["result"]["snapshot"]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let task_id = "identity-map-legacy-task";
+    fixture.run_ok(
+        &["task", "register", task_id, "--next", "keep legacy owner"],
         Some(&pane),
     );
-    assert_eq!(task["owner"], old,
-        "fresh registration without a map must not use old business occupancy to inherit work: {task}");
+    let projected = fixture.run_ok(&["task", "status", task_id], Some(&pane));
+    assert_eq!(projected["owner"], old, "{projected}");
+    assert_eq!(projected["owner_name"], old_name, "{projected}");
+
+    fixture.stop_daemon();
+    let state_path = fixture.project_state();
+    let mut document: Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let state = document["state"].as_object_mut().unwrap();
+    state["task_assignments"]
+        .as_object_mut()
+        .unwrap()
+        .remove(task_id)
+        .expect("registered task starts with typed assignment");
+    let legacy_record = state["tasks"][task_id].clone();
+    fs::write(&state_path, serde_json::to_vec(&document).unwrap()).unwrap();
+    fs::remove_file(fixture.host_state.join("identity-map.json")).unwrap();
+    fixture.restart_after_external_stop();
+
+    let restored = success_payload(&context_with_agent_session(
+        &fixture,
+        &fixture.root,
+        "identity-map-missing-legacy-new-registration",
+        &pane,
+    ));
+    let snapshot = &restored["result"]["snapshot"];
+    let new = snapshot["identity"]["worker_id"].as_str().unwrap();
+    assert_ne!(new, old, "a missing map cannot restore a historical worker");
+    assert_eq!(snapshot["name"], old_name, "{restored}");
+
+    let task = fixture.run_ok(&["task", "status", task_id], Some(&pane));
+    assert_eq!(task["id"], task_id, "{task}");
+    assert_eq!(
+        task["owner"], old,
+        "legacy work must keep its durable owner: {task}"
+    );
+    assert!(task["owner_name"].is_null(), "{task}");
+    assert!(task["owner_session_id"].is_null(), "{task}");
+    let state = fixture.current_state();
+    assert!(
+        state["task_assignments"].get(task_id).is_none(),
+        "a public read must not invent a typed assignment: {state}"
+    );
+    assert_eq!(
+        state["tasks"][task_id], legacy_record,
+        "legacy owner, revision, and history must remain unchanged"
+    );
 }
 
 #[test]

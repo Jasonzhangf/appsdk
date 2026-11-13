@@ -1907,6 +1907,11 @@ fn handle_task_finalize_cleanup_current_map(
             return response;
         }
     }
+    // The same checks a normal close applies: a clean worktree inside
+    // ./playground and a branch proven by ancestry or the recorded
+    // integration net-content relation. Dirty, unmerged, or path-escaping
+    // resources are never removed to finish the lifecycle, so a refused
+    // finalize leaves the obligation visible and retryable.
     if let Err(error) = close_task_resources(
         &server.root,
         &server.config,

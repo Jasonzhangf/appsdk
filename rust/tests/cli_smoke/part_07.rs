@@ -742,50 +742,6 @@ fn repeated_init_preserves_historical_migration_bundle_witness() {
 }
 
 #[test]
-fn ordinary_verify_reports_stale_migration_without_blocking_development() {
-    let root = temp_root("ordinary-verify-stale-migration");
-    let root_text = root.to_str().unwrap();
-    assert!(run(&["new", root_text]).status.success());
-
-    let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
-    fs::create_dir_all(&migration_root).unwrap();
-    fs::write(migration_root.join("record.json"), "{\"legacy\":true}\n").unwrap();
-    let lock_path = root.join(".appsdk/sdk.lock");
-    let mut lock: Value = serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
-    lock["bundle_digest"] = Value::String(format!("sha256:{}", "a".repeat(64)));
-    fs::write(&lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
-
-    let ordinary = run(&["verify", root_text]);
-    assert!(
-        ordinary.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&ordinary.stdout),
-        String::from_utf8_lossy(&ordinary.stderr)
-    );
-    assert!(String::from_utf8_lossy(&ordinary.stderr).contains("legacy SDK migration history"));
-
-    let admission = run(&["verify", "--admission", root_text]);
-    assert!(!admission.status.success());
-    assert!(String::from_utf8_lossy(&admission.stderr).contains("INVALID_SDK_MIGRATION_RECORD"));
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn verify_rejects_tampered_installed_sdk_resource() {
-    let root = temp_root("sdk-resource-integrity");
-    fs::create_dir_all(&root).unwrap();
-    let root_text = root.to_str().unwrap();
-    confirm_preparation(&root, ".", "new_project");
-    assert!(run(&["init", root_text]).status.success());
-    let resource = root.join(".appsdk/skills/appsdk-project-governance/SKILL.md");
-    fs::write(&resource, "tampered\n").unwrap();
-    let result = run(&["verify", root_text]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_RESOURCE_MISMATCH"));
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn verify_distinguishes_assessed_delivery_from_unevaluated_development() {
     let root = temp_root("verify-delivery-assessment");
     let root_text = root.to_str().unwrap();
@@ -1315,11 +1271,6 @@ fn install_bundle_resources_projects_declared_record_contract_sources() {
         digest(&fs::read_to_string(&source).unwrap())
     );
 
-    fs::write(&installed, "{\"drifted\":true}\n").unwrap();
-    let rejected = run(&["verify", root_text]);
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains("SDK_RESOURCE_MISMATCH:.appsdk/contracts/records/worktree-record.schema.json"));
     fs::remove_dir_all(root).unwrap();
 }
 

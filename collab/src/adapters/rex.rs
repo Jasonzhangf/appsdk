@@ -830,6 +830,17 @@ fn terminal_write_argv(endpoint: &RexEndpoint) -> Vec<String> {
     )
 }
 
+fn send_key_argv(endpoint: &RexEndpoint) -> Vec<String> {
+    vec![
+        "send-key".to_string(),
+        "-s".to_string(),
+        endpoint.session_id.clone(),
+        "-b".to_string(),
+        endpoint.block_id.clone(),
+        "enter".to_string(),
+    ]
+}
+
 fn terminal_query_argv(endpoint: &RexEndpoint, method: &str) -> Vec<String> {
     api_call_argv(method, Some(endpoint.session_id.as_str()))
 }
@@ -1087,6 +1098,27 @@ async fn write_text_until(
     }
 }
 
+async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
+    verify_service_until(endpoint, deadline).await?;
+    let call = run_cli(
+        "send_enter",
+        Path::new(&official_cli_path()),
+        &endpoint.server,
+        deadline,
+        &send_key_argv(endpoint),
+        None,
+    )
+    .await?;
+    if !call.status.success() {
+        return Err(native_failure(
+            "send_enter",
+            RexInputStage::BeforeWrite,
+            &call,
+        ));
+    }
+    Ok(())
+}
+
 /// Read the latest requested number of text lines from one verified endpoint.
 /// This is a read-only observation: it never writes input, never changes
 /// activity, and never persists the captured text.
@@ -1286,37 +1318,23 @@ pub async fn notify(
         )
     })?;
     let receipt = write_text_until(endpoint, text, deadline).await?;
-    let stage = RexInputStage::WriteQueued {
+    let text_stage = RexInputStage::WriteQueued {
         bytes_written: receipt.bytes_written,
     };
-    let enter_argv = vec![
-        "send-key".to_string(),
-        "enter".to_string(),
-        "-s".to_string(),
-        endpoint.session_id.clone(),
-        "-b".to_string(),
-        endpoint.block_id.clone(),
-    ];
-    let call = run_cli(
-        "send_key",
-        Path::new(&official_cli_path()),
-        &endpoint.server,
-        deadline,
-        &enter_argv,
-        None,
-    )
-    .await
-    .map_err(|mut error| {
-        error.stage = stage;
-        error
-    })?;
-    if !call.status.success() {
-        return Err(native_failure("send_key", stage, &call));
+    if let Err(error) = send_enter_until(endpoint, deadline).await {
+        return Err(RexError {
+            operation: "notify",
+            class: NotificationDeliveryClass::Unknown,
+            stage: text_stage,
+            native_code: error.native_code,
+            detail: error.detail,
+        });
     }
     let value = json!({
         "transport": "rex",
         "bytes_written": receipt.bytes_written,
         "text_queued": true,
+        "enter_accepted": true,
         "submission_queued": true,
         "consumed": false,
         "mode": mode.unwrap_or("immediate"),

@@ -437,14 +437,81 @@ This section owns the project procedure for turning a business flow into a
 skeleton, Operations, reusable operators, and graph configuration. Other
 references route here; do not copy the procedure.
 
+AppSDK governs consumer projects through this procedure and the mechanisms it
+provides. The consumer owns its architecture, business semantics, operator
+implementations, configuration, and acceptance. DAGPipe owns graph compilation
+and execution. AppSDK's own Operations can serve as pilots; migrating one SDK
+command does not by itself establish or verify governance for other projects.
+
+Use this procedure to design the consumer's adoption. When a consumer turns
+an instruction into a mandatory governance rule, use the
+[ontology rule template](ontology-governance.md) to model its Object, Behavior,
+and Relation, record exact clause approval, and bind its executable edge or
+gate with legal and illegal cases and a real observation path. Keep proposed
+clauses marked as candidates until those conditions are met.
+
+For a Rust consumer that must execute an approved rule, put the executable
+extension in the same ontology declaration:
+
+```text
+static rule approval and three-axis model
+  -> ontology.execution operation and commit-node declaration
+  -> registry with the real project operators and gates
+  -> consumer CommitOwner under one consistency boundary
+  -> bind_operation
+  -> CompiledOperation::call
+```
+
+For a Guidance-style manifest, use the normal `appsdk guide compile` entry to
+compile the static declaration and preserve the ontology projection. Use a
+static project fixture to exercise declaration errors, execution projection,
+and legacy compatibility through that same public entry.
+
+For the executable path, follow the
+[ontology execution design](https://github.com/Jasonzhangf/appsdk/blob/main/docs/design/appsdk-ontology-governance.md).
+Use the actual public interfaces from the Rust consumer:
+
+```rust
+pipeline_runtime::governance::validate_execution_declaration(ontology)?;
+let operation = pipeline_runtime::governance::bind_operation(
+    ontology,
+    behavior_id,
+    graph,
+    registry,
+    owner,
+    capabilities,
+)?;
+let result = operation.call(
+    OperationRequest {
+        subject,
+        event,
+        data,
+    },
+    identity,
+    cancellation,
+)?;
+```
+
+Bind once at the real production entrypoint. Call
+`validate_execution_declaration` when a declaration may exist without
+execution, for example before compiling a Guidance projection. Call
+`bind_operation` when the operation must actually execute. The consumer's
+`CommitOwner` reads the current state, builds the complete affected candidate,
+invokes the supplied validation closure, and commits only after that closure
+succeeds. Keep this sequence under the consumer's existing storage consistency
+boundary; the SDK does not add a transaction, retry, or automatic rollback. The
+isolated `governed_catalog` example is a mechanism example, not approval of a
+production business clause.
+
 ### Shape the skeleton
 
 1. Bind the user goal, accepted behavior, acceptance criteria, non-goals,
    owners, and allowed/forbidden paths first. For a new project, reuse the
    existing `appsdk prepare` fields. Do not add a second preparation record.
-2. Define modules, public entrypoints, external ARCs, success and failure
-   endpoints, and observable side effects. Keep the skeleton only as detailed
-   as the current contract requires.
+2. Map the whole project at skeleton level: modules, owners, Operations,
+   public entrypoints, external dependencies, success and failure endpoints,
+   and side effects. Mark unmigrated paths; refine and migrate each selected
+   Operation incrementally.
 3. Split a node only at a stable capability boundary. Do not turn ordinary
    functions into nodes mechanically. A function stays in the owner that
    provides the capability.
@@ -457,8 +524,9 @@ references route here; do not copy the procedure.
 An Operation is one user-visible business action with an input, result, error
 boundary, and declared side effects. It can compose several graph nodes. A
 node invokes one capability in that flow. An operator is the versioned
-implementation bound by the node. Operator ownership follows the capability
-owner.
+implementation bound by the node. Define each selected node's purpose, inputs,
+outputs, errors, side effects, and capability owner. Maintain reusable
+operators with their capability owners instead of duplicating them per node.
 
 ### Define and verify capabilities
 
@@ -474,7 +542,26 @@ declare Operation and node contract
 
 Define the acceptance before implementing a new operator. A graph-only change
 may reuse an already verified operator. A capability change updates its unique
-operator owner and only the affected bindings.
+operator owner and only the affected bindings. Verify each added or changed
+operator through its public interface or a real consumer before wiring it.
+The project's real entrypoint registers the operators and executes the compiled
+graph; a valid design graph alone does not prove that this happens.
+
+For a Rust consumer, obtain the `pipeline_runtime` library using the project's
+actual dependency source, then follow the [DAGPipe usage guide](https://github.com/Jasonzhangf/appsdk/blob/main/dagpipe/docs/usage.md)
+for operator implementation, graph configuration, registration, compilation,
+execution, and output and failure handling. The guide is hosted in the AppSDK
+source repository; the AppSDK Skill installer does not install DAGPipe's Rust
+library or its documentation. The notification example below demonstrates an
+existing SDK entrypoint, not registration of a consumer's own operator. Verify
+other language integrations against their actual supported interface.
+
+The runtime's `Object` type does not validate required business fields; those
+remain the capability owner's contract. Multiple input ARCs in `Whole` mode
+arrive as an array. An operator returns string errors wrapped by the runtime;
+check that the consumer entrypoint can preserve its required error contract.
+The graph has no general per-node business-parameter field. A consumer may
+construct an operator from declared project configuration before registration.
 
 ### New project
 
@@ -499,13 +586,31 @@ current behavior and affected graph
 -> unique-entrypoint regression
 ```
 
-Reuse valid evidence and recheck only the affected guarantees. A combination
-change updates the graph. A capability change updates the owning operator.
-Do not keep the old production path as a fallback.
+Update the affected skeleton and Operation contract before changing the
+implementation. Explain intentional old/new behavior differences. Reuse valid
+evidence and recheck only the affected guarantees. A combination change updates
+the graph. A capability change updates the owning operator. Do not keep the old
+production path as a fallback.
 
-One invocation keeps one compiled graph. A later invocation may select a new
-configuration. Do not add in-flight hot switching unless a later contract
-requires it. Arrange state migration only when the state contract changes.
+One invocation keeps its selected compiled graph. If the business contract also
+requires configuration to remain stable during that invocation, the consumer
+owner must preserve the configuration and operator instance for its lifetime;
+prefer an immutable configured instance instead of mutating a shared instance.
+A fixed graph alone cannot keep external configuration or a process alive.
+Do not add in-flight hot switching unless a later contract requires it. Arrange
+state migration only when the state contract changes, and define how old
+invocations complete or exit during a state-format change.
+
+A failure still allows the other nodes in its scheduled wave to finish, even
+with the default single worker. Later waves do not start. When multiple nodes
+in that wave fail, the primary error follows stable node-ID order, not failure
+time or an implicit business priority. Cancellation does not interrupt a
+blocking operator or an `Items` iteration; an effect may still complete. Put
+an action that must not run after a failed check in a later wave through a real
+dependency. Effect capabilities are declarations and compile-time checks, not
+locks, OS permissions, a sandbox, automatic retry, or rollback. If these runtime
+boundaries cannot preserve a required error, cancellation, or transaction
+contract, keep the existing atomic owner boundary and redesign that connection.
 
 ### Ablation and evidence
 

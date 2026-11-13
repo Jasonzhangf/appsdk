@@ -16,21 +16,23 @@ pub(crate) fn physical_tmux_name(cwd: &str, logical_name: &str) -> Result<String
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("TMUX_SESSION_NAME_INVALID: cwd has no folder name")?;
-    match display_slot(logical_name)? {
-        Some(slot) => Ok(format!("{folder}_{slot}_{logical_name}")),
-        None => Ok(format!("{folder}_{logical_name}")),
-    }
+    let slot = display_slot(logical_name)?;
+    Ok(format!("{folder}_{slot}_{logical_name}"))
 }
 
-pub(crate) fn display_slot(name: &str) -> Result<Option<u32>, String> {
+pub(crate) fn display_slot(name: &str) -> Result<u32, String> {
     if name == "Jenny" {
-        return Ok(Some(1));
+        return Ok(1);
+    }
+    if let Some(number) = peer_registration_number(name) {
+        return number
+            .checked_add(21)
+            .ok_or_else(|| format!("NAME_INVALID: generated name slot exceeds range: {name}"));
     }
     ORDINARY_NAME_POOL
         .iter()
         .position(|candidate| *candidate == name)
-        .map(|index| Some(index as u32 + 2))
-        .or_else(|| free_name_registration_number(name).map(|_| None))
+        .map(|index| index as u32 + 2)
         .ok_or_else(|| format!("NAME_INVALID: unknown registered name {name}"))
 }
 
@@ -95,89 +97,24 @@ pub(crate) fn name_for_registration(
     state: &State,
     control: &super::binding_slot::BindingControlSet,
     binding: &super::RuntimeBinding,
-) -> Result<RegistrationName, String> {
-    if let Some(key) = control.key_for_worker(
-        &binding.project_scope,
-        &binding.app_scope_id,
-        binding.agent_id.as_str(),
-    )? {
-        let registration_number = control
-            .registration_number_for_worker(
-                &binding.project_scope,
-                &binding.app_scope_id,
-                binding.agent_id.as_str(),
-            )?
-            .unwrap_or(
-                control.next_registration_number(&binding.project_scope, &binding.app_scope_id)?,
-            );
-        return Ok(RegistrationName {
-            name: key.name.clone(),
-            registration_number,
-        });
+) -> Result<String, String> {
+    if let Some(key) = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())? {
+        return Ok(key.name.clone());
     }
-    if super::current_master_worker_id(state, Some(&binding.route_scope())).as_deref()
-        == Some(binding.agent_id.as_str())
-    {
-        let registration_number = control
-            .registration_number_for_worker(
-                &binding.project_scope,
-                &binding.app_scope_id,
-                binding.agent_id.as_str(),
-            )?
-            .unwrap_or(
-                control.next_registration_number(&binding.project_scope, &binding.app_scope_id)?,
-            );
-        return Ok(RegistrationName {
-            name: "Jenny".into(),
-            registration_number,
-        });
+    if super::current_master_worker_id(state, Some(&binding.route_scope())).as_deref() == Some(binding.agent_id.as_str()) {
+        return Ok("Jenny".into());
     }
-    let name = control.ordinary_name(
-        &binding.project_scope,
-        &binding.app_scope_id,
-        binding.agent_id.as_str(),
-    )?;
-    let registration_number = if name.starts_with("peer-") {
-        free_name_registration_number(&name)
-            .ok_or_else(|| format!("NAME_INVALID: generated name {name} is malformed"))?
-    } else {
-        control
-            .registration_number_for_worker(
-                &binding.project_scope,
-                &binding.app_scope_id,
-                binding.agent_id.as_str(),
-            )?
-            .unwrap_or(
-                control.next_registration_number(&binding.project_scope, &binding.app_scope_id)?,
-            )
-    };
-    Ok(RegistrationName {
-        name,
-        registration_number,
+    control.ordinary_name(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    display_slot(name).map(|_| ()).map_err(|_| {
+        format!("NAME_INVALID: {name}; expected Jenny, a fixed-pool name, or a canonical peer-<number> name")
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RegistrationName {
-    pub(crate) name: String,
-    pub(crate) registration_number: u64,
-}
-
-pub(crate) fn validate_name(name: &str) -> Result<(), String> {
-    if name == "Jenny"
-        || ORDINARY_NAME_POOL.contains(&name)
-        || free_name_registration_number(name).is_some()
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "NAME_INVALID: {name}; expected Jenny, a fixed-pool name, or peer-<registration_number>"
-        ))
-    }
-}
-
-fn free_name_registration_number(name: &str) -> Option<u64> {
-    let number = name.strip_prefix("peer-")?.parse::<u64>().ok()?;
+pub(crate) fn peer_registration_number(name: &str) -> Option<u32> {
+    let number = name.strip_prefix("peer-")?.parse::<u32>().ok()?;
     (number > 0 && format!("peer-{number}") == name).then_some(number)
 }
 

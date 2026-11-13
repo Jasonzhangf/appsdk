@@ -84,8 +84,6 @@ pub(crate) struct BindingValue {
     pub(crate) physical_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) layout_binding_id: Option<String>,
-    #[serde(default)]
-    pub(crate) registration_number: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +127,6 @@ impl BindingValue {
             },
             physical_name: None,
             layout_binding_id: None,
-            registration_number: 0,
         }
     }
 
@@ -199,7 +196,6 @@ impl BindingValue {
             && self.invocation_cwd == other.invocation_cwd
             && self.physical_name == other.physical_name
             && self.layout_binding_id == other.layout_binding_id
-            && self.registration_number == other.registration_number
     }
 }
 
@@ -214,7 +210,7 @@ pub(crate) enum IdentityStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IdentityBindingSlot {
     pub(crate) identity_key: IdentityBindingKey,
-    pub(crate) display_slot: Option<u32>,
+    pub(crate) display_slot: u32,
     pub(crate) identity_status: IdentityStatus,
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
@@ -782,82 +778,46 @@ impl BindingControlSet {
         app: &AppServerId,
         worker: &str,
     ) -> Result<String, String> {
-        for name in super::name_resolution::ORDINARY_NAME_POOL {
-            if self.slots.iter().any(|slot| {
+        if let Some(name) = self.slots.iter().find_map(|slot| {
+            let name = slot.identity_key.name.as_str();
+            let ordinary = super::name_resolution::ORDINARY_NAME_POOL.contains(&name)
+                || super::name_resolution::peer_registration_number(name).is_some();
+            (&slot.identity_key.project_scope == project
+                && &slot.identity_key.app_scope_id == app
+                && ordinary
+                && slot
+                    .active_binding()
+                    .is_some_and(|value| value.binding.agent_id.as_str() == worker))
+            .then_some(name)
+        }) {
+            return Ok(name.into());
+        }
+        let occupied_by_anyone = |name: &str| {
+            self.slots.iter().any(|slot| {
                 &slot.identity_key.project_scope == project
                     && &slot.identity_key.app_scope_id == app
                     && slot.identity_key.name == name
-                    && slot
-                        .active_binding()
-                        .is_some_and(|value| value.binding.agent_id.as_str() == worker)
-            }) {
-                return Ok(name.into());
-            }
-        }
+                    && slot.active_binding().is_some()
+            })
+        };
         if let Some(name) = super::name_resolution::ORDINARY_NAME_POOL
             .into_iter()
-            .find(|name| {
-                !self.slots.iter().any(|slot| {
-                    &slot.identity_key.project_scope == project
-                        && &slot.identity_key.app_scope_id == app
-                        && slot.identity_key.name == *name
-                        && slot.active_binding().is_some()
-                })
-            })
+            .find(|name| !occupied_by_anyone(name))
         {
-            return Ok(name.to_owned());
+            return Ok(name.into());
         }
-        let registration_number = match self.registration_number_for_worker(project, app, worker)? {
-            Some(number) => number,
-            None => self.next_registration_number(project, app)?,
-        };
-        Ok(format!("peer-{registration_number}"))
-    }
-
-    pub(crate) fn registration_number_for_worker(
-        &self,
-        project: &ProjectScopeId,
-        app: &AppServerId,
-        worker: &str,
-    ) -> Result<Option<u64>, String> {
-        let numbers = self
-            .slots
-            .iter()
-            .filter(|slot| {
-                &slot.identity_key.project_scope == project
-                    && &slot.identity_key.app_scope_id == app
-            })
-            .flat_map(|slot| slot.current.iter().chain(slot.previous.iter()))
-            .filter(|value| {
-                value.binding.agent_id.as_str() == worker && value.registration_number > 0
-            })
-            .map(|value| value.registration_number)
-            .collect::<std::collections::BTreeSet<_>>();
-        if numbers.len() > 1 {
-            return Err(format!(
-                "IDENTITY_MAP_AMBIGUOUS: {worker} carries multiple registration numbers"
-            ));
+        let mut number = 1u32;
+        loop {
+            let name = format!("peer-{number}");
+            if !self.slots.iter().any(|slot| {
+                &slot.identity_key.project_scope == project && slot.identity_key.name == name
+            }) {
+                return Ok(name);
+            }
+            number = number.checked_add(1).ok_or_else(|| {
+                "PEER_NAME_EXHAUSTED: peer-<number> space is exhausted".to_string()
+            })?;
         }
-        Ok(numbers.into_iter().next())
-    }
-
-    pub(crate) fn next_registration_number(
-        &self,
-        project: &ProjectScopeId,
-        app: &AppServerId,
-    ) -> Result<u64, String> {
-        self.slots
-            .iter()
-            .filter(|slot| {
-                &slot.identity_key.project_scope == project
-                    && &slot.identity_key.app_scope_id == app
-            })
-            .flat_map(|slot| slot.current.iter().chain(slot.previous.iter()))
-            .map(|value| value.registration_number)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| "REGISTRATION_NUMBER_EXHAUSTED".into())
     }
 
     pub(crate) fn from_slots(slots: Vec<IdentityBindingSlot>) -> Self {

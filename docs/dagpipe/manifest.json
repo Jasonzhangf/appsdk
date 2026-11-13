@@ -182,6 +182,10 @@
     {
       "id": "appsdk-collab-dispatch-gap-reminder-migration",
       "path": "docs/dagpipe/collab-dispatch-gap-reminder-migration-20261108.graph.json"
+    },
+    {
+      "id": "appsdk-verify-foundation",
+      "path": "contracts/dagpipe/verify-foundation.graph.json"
     }
   ]
 }

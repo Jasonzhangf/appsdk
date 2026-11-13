@@ -100,10 +100,26 @@ impl ProjectRuntimeManager {
                 );
             }
         }
+        // Resolve the explicit name intent before any registration step. The
+        // Register publish boundary consumes it, so an authorized target is
+        // the first published mapping and never an intermediate pool name.
+        let raw_authorization = request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref());
+        let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
+            Ok(intent) => intent,
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        };
+        // Materialization may recreate an existing mapped worker. It still runs
+        // only after an authorized target is parsed, so invalid Jenny/name
+        // intent cannot cause a pre-publication business registration.
         {
             let _identity = self.identity_gate.lock().unwrap();
             if let Err(error) = self.ensure_current_worker_for_context(
-                &context, &facts, request.invocation_cwd.as_deref(),
+                &context,
+                &facts,
+                request.invocation_cwd.as_deref(),
             ) {
                 return (self.host.clone(), Resp::err(error));
             }
@@ -126,6 +142,7 @@ impl ProjectRuntimeManager {
                     .zip(request.invocation_cwd.clone())
                     .map(|(pane, cwd)| name_state::NamePaneAnchor { pane, cwd }),
             )
+            .with_name_intent(intent.clone())
             .with_role_intent(&request);
         let reconciled = self.reconcile_identity_context(
             context.clone(),
@@ -157,14 +174,6 @@ impl ProjectRuntimeManager {
                     )
                 }
             };
-        let raw_authorization = request
-            .grant_approval
-            .as_ref()
-            .or(request.approval.as_ref());
-        let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
-            Ok(intent) => intent,
-            Err(error) => return (runtime, Resp::err(error)),
-        };
         if raw_authorization.is_some_and(|value| value["action"] == "restore_peer") {
             let name = match self.binding_control_store().load().and_then(|map| {
                 map.ordinary_name(
@@ -447,22 +456,11 @@ impl ProjectRuntimeManager {
             .and_then(|slot| slot.active_binding())
             .expect("active key");
         let mut value = original.clone();
-        if value.registration_number == 0 {
-            value.registration_number = map
-                .registration_number_for_worker(
-                    &context.project_scope,
-                    &context.app_scope_id,
-                    worker,
-                )?
-                .unwrap_or(
-                    map.next_registration_number(&context.project_scope, &context.app_scope_id)?,
-                );
-        }
         let target = intent
             .as_ref()
             .map(|intent| intent.requested_name.clone())
             .unwrap_or_else(|| source.name.clone());
-        name_resolution::validate_name(&target)?;
+        name_resolution::display_slot(&target)?;
         if intent
             .as_ref()
             .is_some_and(|intent| !intent.user_authorized)
@@ -572,18 +570,6 @@ impl ProjectRuntimeManager {
                         &ordinary,
                     );
                     let mut outgoing = previous.clone();
-                    if outgoing.registration_number == 0 {
-                        outgoing.registration_number = candidate
-                            .registration_number_for_worker(
-                                &context.project_scope,
-                                &context.app_scope_id,
-                                previous.binding.agent_id.as_str(),
-                            )?
-                            .unwrap_or(candidate.next_registration_number(
-                                &context.project_scope,
-                                &context.app_scope_id,
-                            )?);
-                    }
                     if let Some(endpoint) = &outgoing.binding.tmux_endpoint {
                         outgoing.physical_name = crate::client::adapters::tmux::session_name_if_live(endpoint)?
                             .map(|_| super::tm_layout::physical_name(&outgoing, &outgoing.invocation_cwd, &ordinary))

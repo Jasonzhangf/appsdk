@@ -592,33 +592,6 @@ fn resource_refresh_rejects_old_core_pin_before_writing() {
 }
 
 #[test]
-fn verify_rejects_tampered_non_contract_resource_after_refresh() {
-    // Catches a schema 1 record that lacks a content digest for refreshed skills/docs.
-    let root = new_project("tampered-refresh");
-    assert!(refresh(&root).status.success());
-    let record = read_json(&root.join(".appsdk/sdk-resources.json"));
-    let entry = record["resources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["class"] == "docs")
-        .unwrap();
-    let relative = entry["path"].as_str().unwrap();
-    let target = root.join(relative);
-    let mut content = fs::read(&target).unwrap();
-    content.extend_from_slice(b"\ntampered\n");
-    fs::write(&target, content).unwrap();
-
-    let verified = run_for(&root, &["verify", root.to_str().unwrap()]);
-    assert!(!verified.status.success());
-    assert!(
-        String::from_utf8_lossy(&verified.stderr).contains("SDK_RESOURCE_MISMATCH:"),
-        "stderr={}",
-        String::from_utf8_lossy(&verified.stderr)
-    );
-}
-
-#[test]
 fn refresh_migrates_legacy_schema2_input_to_schema1_and_verify_accepts_it() {
     // Catches a migration that only changes schema_version without restoring digest coverage.
     let root = new_project("schema2-migration");

@@ -1,0 +1,119 @@
+{
+  "id": "appsdk-verify-foundation",
+  "version": "0.1.0",
+  "description": "校验基础段。一次 Null 请求依次经过项目读取、治理映射、声明合同和项目合同检查。调用者为根路径和重置状态构造不可变 typed invocation，校验模式由命令边界持有。节点失败返回同一命令错误出口并停止后续节点。后续校验消费唯一终点 project_checked.project。",
+  "inputs": [
+    {
+      "id": "verify_request",
+      "schema": "Null"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "load_project",
+      "operator": "appsdk.verify.load_project",
+      "operator_version": "1",
+      "description": "读取项目声明。沿现有路径安全检查读取并解析 JSON，以包含 project 原值的 Object 输出。调用者先检查根路径并读取一次重置状态，构造不可变调用资源。",
+      "inputs": ["verify_request"],
+      "output": {
+        "id": "project_loaded",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "governance_baseline",
+      "operator": "appsdk.verify.governance_baseline",
+      "operator_version": "1",
+      "description": "检查治理映射结构和必填字段，保留项目值交给下一节点。",
+      "inputs": ["project_loaded"],
+      "output": {
+        "id": "governance_checked",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "declared_contracts",
+      "operator": "appsdk.verify.declared_contracts",
+      "operator_version": "1",
+      "description": "检查规范声明、分区迁移和记录 schema 语义，保留项目值交给下一节点。",
+      "inputs": ["governance_checked"],
+      "output": {
+        "id": "declarations_checked",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_contract",
+      "operator": "appsdk.verify.project_contract",
+      "operator_version": "1",
+      "description": "检查项目、模块、治理根、归属、构建及适用回归合同。输出已检查项目值，供后续校验消费。",
+      "inputs": ["declarations_checked"],
+      "output": {
+        "id": "project_checked",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "load_project",
+      "to": "governance_baseline",
+      "arc_id": "project_loaded"
+    },
+    {
+      "from": "governance_baseline",
+      "to": "declared_contracts",
+      "arc_id": "governance_checked"
+    },
+    {
+      "from": "declared_contracts",
+      "to": "project_contract",
+      "arc_id": "declarations_checked"
+    }
+  ],
+  "outputs": ["project_checked"]
+}

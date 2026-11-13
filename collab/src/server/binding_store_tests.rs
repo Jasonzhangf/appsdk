@@ -1,11 +1,10 @@
 use super::binding_slot::{
-    BindingControlSet, BindingValue, IdentityBindingKey, IdentityBindingSlot, PendingEffect,
-    PendingEffectKind,
+    BindingControlSet, BindingValue, IdentityBindingKey, PendingEffect, PendingEffectKind,
 };
 use super::binding_store::{BindingControlStore, ControlChange, Durability, StoreChangeOutcome};
 use super::{project_reset::delete_route, HostRouteRecord};
 use crate::identity::{AgentId, AppServerId, BindingId, NativeThreadId, RuntimeId, SessionId};
-use crate::proto::{RexEndpoint, SelectedTransport, TransportKind};
+use crate::proto::{SelectedTransport, TransportKind};
 use crate::scope::ProjectScopeId;
 use crate::server::global_state::RuntimeBinding;
 
@@ -55,52 +54,6 @@ fn value(key: &IdentityBindingKey, agent: &str, runtime: &str) -> BindingValue {
     )
 }
 
-fn rex_value(
-    key: &IdentityBindingKey,
-    agent: &str,
-    runtime: &str,
-    session: &str,
-    block: &str,
-) -> BindingValue {
-    let binding = RuntimeBinding::new_with_session(
-        key.project_scope.clone(),
-        key.app_scope_id.clone(),
-        AgentId::new(agent).unwrap(),
-        RuntimeId::new(runtime).unwrap(),
-        BindingId::new(format!("binding-{runtime}")).unwrap(),
-        Some(SessionId::new(session).unwrap()),
-        None,
-    )
-    .unwrap();
-    BindingValue::new(
-        binding,
-        SelectedTransport {
-            kind: TransportKind::Rex,
-            endpoint: None,
-            namespace: None,
-            session_id: Some(session.into()),
-            thread_id: None,
-            tmux_endpoint: None,
-            rex_endpoint: Some(RexEndpoint {
-                server: "unix:///tmp/rex-store-test.sock".into(),
-                session_id: "rex-session".into(),
-                block_id: block.into(),
-                host_id: Some("host".into()),
-                instance_id: "instance".into(),
-                cwd: key.project_scope.as_str().into(),
-            }),
-            capabilities: vec!["send_message_to_block".into()],
-            self_check: "ok".into(),
-        },
-    )
-}
-
-fn committed_slot(key: IdentityBindingKey, value: BindingValue) -> IdentityBindingSlot {
-    let mut slot = IdentityBindingSlot::new(key.clone());
-    slot.commit(&key, value, Some(0)).unwrap();
-    slot
-}
-
 #[test]
 fn missing_file_loads_an_empty_set() {
     let root = temp_root("missing");
@@ -133,38 +86,6 @@ fn save_then_load_round_trips_current_map() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&content).unwrap()["schema_version"],
         1
-    );
-    std::fs::remove_dir_all(&root).unwrap();
-}
-
-#[test]
-fn legacy_identity_map_without_registration_numbers_still_loads() {
-    let root = temp_root("legacy-registration-number");
-    let store = BindingControlStore::new(&root);
-    let key = key();
-    let mut set = BindingControlSet::new();
-    set.commit(&key, value(&key, "alice", "runtime-a"), Some(0))
-        .unwrap();
-    store.save(&set).unwrap();
-
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
-    for slot in document["slots"].as_array_mut().unwrap() {
-        for side in ["current", "previous"] {
-            if let Some(value) = slot[side].as_object_mut() {
-                value.remove("registration_number");
-            }
-        }
-    }
-    std::fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
-
-    let loaded = store.load().unwrap();
-    let slot = loaded.slot(&key).unwrap();
-    assert_eq!(slot.display_slot, Some(2));
-    assert_eq!(
-        slot.active_binding().unwrap().registration_number,
-        0,
-        "legacy entries must decode without inventing a registration number"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -401,101 +322,6 @@ fn move_name_commit_publishes_one_target_slot_and_retires_the_source() {
         "the retired source slot must not expose a current binding"
     );
     assert_eq!(loaded.active_values().count(), 1);
-    std::fs::remove_dir_all(&root).unwrap();
-}
-
-#[test]
-fn rex_block_replacement_is_one_atomic_publication_and_persists_cleanup() {
-    let root = temp_root("rex-block-replacement");
-    let store = BindingControlStore::new(&root);
-    let alice = key_in("/tmp/collab-binding-store-rex", "alice");
-    let bob = key_in("/tmp/collab-binding-store-rex", "bob");
-    store
-        .commit(ControlChange::Commit {
-            key: alice.clone(),
-            value: rex_value(&alice, "alice", "runtime-a", "alice-session", "block-a"),
-            expected_generation: Some(0),
-        })
-        .unwrap();
-    store
-        .commit(ControlChange::Commit {
-            key: bob.clone(),
-            value: rex_value(&bob, "bob", "runtime-b", "bob-session", "block-b"),
-            expected_generation: Some(0),
-        })
-        .unwrap();
-
-    let winner = rex_value(&alice, "alice", "runtime-c", "alice-session", "block-b");
-    store
-        .commit(ControlChange::Commit {
-            key: alice.clone(),
-            value: winner.clone(),
-            expected_generation: Some(1),
-        })
-        .unwrap();
-
-    let loaded = store.load().unwrap();
-    assert_eq!(loaded.slot(&alice).unwrap().active_binding(), Some(&winner));
-    assert_eq!(
-        loaded.slot(&bob).unwrap().identity_status(),
-        super::binding_slot::IdentityStatus::Unregistered
-    );
-    let block_b_currents = loaded
-        .active_values()
-        .filter(|value| {
-            value.transport.kind == TransportKind::Rex
-                && value
-                    .transport
-                    .rex_endpoint
-                    .as_ref()
-                    .is_some_and(|endpoint| endpoint.block_id == "block-b")
-        })
-        .count();
-    assert_eq!(block_b_currents, 1);
-    assert_eq!(loaded.pending_effects().count(), 0);
-    std::fs::remove_dir_all(&root).unwrap();
-}
-
-#[test]
-fn cleanup_only_rex_replacement_rewrites_the_map_when_winner_is_unchanged() {
-    let root = temp_root("rex-cleanup-only");
-    let store = BindingControlStore::new(&root);
-    let alice = key_in("/tmp/collab-binding-store-rex-cleanup", "alice");
-    let bob = key_in("/tmp/collab-binding-store-rex-cleanup", "bob");
-    let winner = rex_value(&alice, "alice", "runtime-a", "alice-session", "shared");
-    let duplicate = rex_value(&bob, "bob", "runtime-b", "bob-session", "shared");
-    let seeded = BindingControlSet::from_parts(
-        vec![
-            committed_slot(alice.clone(), winner.clone()),
-            committed_slot(bob.clone(), duplicate),
-        ],
-        Vec::new(),
-    );
-    store.save(&seeded).unwrap();
-    let before = std::fs::read(store.path()).unwrap();
-
-    let changed = store
-        .commit(ControlChange::Commit {
-            key: alice.clone(),
-            value: winner.clone(),
-            expected_generation: None,
-        })
-        .unwrap();
-    assert!(matches!(
-        changed.outcome,
-        StoreChangeOutcome::Slot(super::binding_slot::CommitOutcome::Unchanged { generation: 1 })
-    ));
-    assert!(
-        std::fs::read(store.path()).unwrap() != before,
-        "cleanup-only changes must still be published"
-    );
-    let loaded = store.load().unwrap();
-    assert_eq!(loaded.slot(&alice).unwrap().active_binding(), Some(&winner));
-    assert_eq!(
-        loaded.slot(&bob).unwrap().identity_status(),
-        super::binding_slot::IdentityStatus::Unregistered
-    );
-    assert_eq!(loaded.pending_effects().count(), 0);
     std::fs::remove_dir_all(&root).unwrap();
 }
 

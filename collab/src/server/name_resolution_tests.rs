@@ -17,14 +17,16 @@ fn physical_names_preserve_folder_and_include_the_display_slot() {
 
 #[test]
 fn generated_names_have_no_fixed_display_slot() {
-    assert_eq!(display_slot("peer-21").unwrap(), None);
+    assert_eq!(display_slot("peer-1").unwrap(), 22);
+    assert_eq!(display_slot("peer-42").unwrap(), 63);
     assert_eq!(
-        physical_tmux_name("/projects/app-sdk", "peer-21").unwrap(),
-        "app-sdk_peer-21",
-        "a generated free name must not claim a fixed display slot"
+        physical_tmux_name("/projects/app-sdk", "peer-1").unwrap(),
+        "app-sdk_22_peer-1"
     );
-    assert!(
-        display_slot("peer 21").is_err(),
-        "a malformed free name is not a valid display-slot source"
-    );
+    for invalid in ["Peer1", "peer-0", "peer-01", "peer-", "peer-one"] {
+        assert!(
+            display_slot(invalid).is_err(),
+            "{invalid} must not be canonical"
+        );
+    }
 }

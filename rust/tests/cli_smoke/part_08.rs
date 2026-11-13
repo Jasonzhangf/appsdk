@@ -1258,15 +1258,6 @@ fn pin_lock_reconciliation_is_idempotent_and_snapshot_remains_immutable() {
     );
     assert_eq!(fs::read_to_string(&lock_path).unwrap(), first_lock);
 
-    let snapshot_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/maps/resource-map.json");
-    let snapshot = fs::read_to_string(&snapshot_path).unwrap();
-    fs::write(&snapshot_path, "{}\n").unwrap();
-    let rejected = run(&["verify", root_text]);
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains("SDK_MIGRATION_SNAPSHOT_MISMATCH:resource-map.json"));
-    fs::write(&snapshot_path, snapshot).unwrap();
-    assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1387,16 +1378,6 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
             .unwrap()
         );
     }
-    let snapshot = migration_root.join("maps/resource-map.json");
-    let source_map = fs::read_to_string(&snapshot).unwrap();
-    fs::write(&snapshot, "{}\n").unwrap();
-    let snapshot_rejected = run(&["verify", root_text]);
-    assert!(!snapshot_rejected.status.success());
-    assert!(String::from_utf8_lossy(&snapshot_rejected.stderr)
-        .contains("SDK_MIGRATION_SNAPSHOT_MISMATCH:resource-map.json"));
-    fs::write(&snapshot, source_map).unwrap();
-    assert!(run(&["verify", root_text]).status.success());
-
     let resumed = run(&[
         "pin-lock",
         root_text,

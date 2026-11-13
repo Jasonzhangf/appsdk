@@ -111,3 +111,112 @@ there is no executable check.
 If object behavior, relation, or state truth changes, update the ontology,
 then the affected gate or DAG edge, then the unique implementation. The DAG
 does not rewrite ontology truth to match current code.
+
+## 8. Execution declaration
+
+An ontology that must be executed carries `ontology.execution` in the Guidance
+manifest. The optional extension preserves the existing meaning of advisory
+and legacy manifests that omit `execution`.
+
+The extension declares:
+
+- object states and the object-contract operator
+- relation scope, cardinality, and the behaviors allowed to create, replace,
+  or remove it
+- one operation for each `(object, from-state, event)` dispatch
+- the operation graph, protected commit node, and required clauses.
+
+The object-contract and project gates are registered operators. Built-in
+gates are `ontology.object@1`, `ontology.behavior@1`, `ontology.relation@1`,
+and the alias `ontology.transition@1`. A project gate must accept an
+`Object`, return `Bool`, and declare no effects. The protected
+`governance.commit@1` operator is reserved by the SDK and must not be
+registered by the project.
+
+`pipeline_runtime::governance::validate_execution_declaration` performs the
+declaration-only checks: required fields, unique identities, relation
+endpoints, approved clauses, matching axes, graph/commit-edge references, and
+duplicate object/state/event dispatch. Project function resolution and graph
+binding occur in the consumer process.
+
+## 9. Consumer binding and execution
+
+A Rust consumer obtains the graph JSON, constructs its existing `Registry`,
+and passes its commit owner to:
+
+```rust
+pipeline_runtime::governance::bind_operation(
+    ontology,
+    behavior_id,
+    graph,
+    registry,
+    owner,
+    capabilities,
+)
+```
+
+`bind_operation` resolves the operation and required operators through the
+existing `Registry`. It also rejects:
+
+- a graph that does not match the declared graph ID;
+- a missing or non-protected commit node;
+- effectful nodes outside the protected commit;
+- filtered or item-iterated nodes on the governed path;
+- a commit node that does not dominate the single input-to-output path;
+- a clause whose governance edge is not a real incoming edge to the commit;
+- an unresolved project operator or gate.
+
+The returned `CompiledOperation` is the single production entry. Its `call`
+method accepts an `OperationRequest`, DAGPipe `Identity`, and `Cancellation`.
+The SDK replaces the protected commit template with a per-call
+`InvocationCommitOperator`. That operator calls the consumer's `CommitOwner`.
+
+The consumer owner is responsible for its storage consistency boundary. It
+constructs the complete candidate `GovernanceSnapshot`, calls the provided
+validate closure, and commits only after validation succeeds. The closure
+checks object identity and contracts, relation endpoints, scope, cardinality
+and lifecycle permissions, current state, target state, and required clauses.
+Current and candidate snapshots carry the same object identities in this
+increment. Each operation changes the declared state, attributes and relations
+of those existing objects.
+The SDK does not add a transaction engine, retry, or automatic rollback.
+
+The call returns `ExecutionResult`, an admission `GovernanceError`, or the
+normal DAGPipe `ExecutionFailure`. Error codes distinguish declaration,
+reference, gate, graph bypass, object, relation, transition, conflict, and
+owner failures. A rejected admission occurs before the owner commits the
+candidate.
+
+## 10. Consumer observation
+
+The isolated `governed_catalog` example is the first black-box consumer:
+
+```text
+catalog.prepare
+  -> governance.commit
+  -> catalog.receipt
+```
+
+The example reads a static ontology declaration and graph, binds the
+operation once, and executes a JSON script. `apply` submits through
+`CompiledOperation::call`; `query` reads the consumer-owned state. Rejected
+requests return an explicit JSON error and leave the record and relation
+state unchanged.
+
+This example proves the mechanism for one isolated consumer. It does not
+approve a production business clause or claim that Collab, Memory, or another
+production project has been migrated.
+
+## 11. Architecture changes during a project
+
+The consumer updates its ontology and operation graph, checks the affected
+clauses and operators, and binds a replacement `CompiledOperation` for future
+calls. Each bound operation owns its compiled graph and immutable contract
+bindings. Calls already using the previous operation keep those bindings
+until they finish.
+
+The project owner coordinates changes to persisted state and storage adapters
+inside its existing consistency boundary. It supplies the current state to
+the validation callback at commit time. A call whose source state has become
+invalid receives the normal transition rejection. This keeps the governance
+mechanism usable while the project evolves its architecture.

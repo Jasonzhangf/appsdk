@@ -3,6 +3,7 @@
   "functions": [
     {"function_id":"authoritative_requirement_review","owner":"appsdk::review_context","entry_symbols":["review_context","build_review_context","assert_review_requirements_binding"],"required_gates":["goal_confirmed","pre_review_validation","authoritative_requirements_review"]},
     {"function_id":"dagpipe_graph_validation","owner":"appsdk::dagpipe","entry_symbols":["dagpipe::run_cli","dagpipe::validate_graph_contracts","dagpipe::validate_notification_objects"],"required_gates":["dagpipe_graph_single_source_single_sink","dagpipe_notification_object_closure"]},
+    {"function_id":"consumer_ontology_governance","owner":"pipeline_runtime","entry_symbols":["pipeline_runtime::governance::validate_execution_declaration","pipeline_runtime::governance::bind_operation","pipeline_runtime::governance::CompiledOperation::call"],"required_gates":["dagpipe_runtime"]},
     {"function_id":"communication_control","owner":"appsdk::communication","entry_symbols":["communication::run_cli","communication::capabilities"],"required_gates":["communication_contract","communication_replay","communication_route","communication_runtime_identity"]},
     {"function_id":"runtime_identity_registration","owner":"appsdk::runtime","entry_symbols":["global_registry::register_runtime","global_registry::runtime","global_registry::runtime_for_replay"],"required_gates":["communication_runtime_identity"]},
     {"function_id":"runtime_registry_reset","owner":"appsdk::runtime","entry_symbols":["global_registry::reset_runtime_registry","communication::run_cli"],"required_gates":["runtime_registry_reset"]},
@@ -32,7 +33,8 @@
     {"function_id":"development_intake","owner":"appsdk::development_intake","entry_symbols":["bug_intake","bug_intake_query","bug_intake_create","bug_intake_reuse","bug_intake_record_body","bug_intake_triage"],"required_gates":["development_intake_contract"]},
     {"function_id":"guide_tour_review","owner":"appsdk::process_control","entry_symbols":["tour","review","state","node_review","flow_review"],"required_gates":["guidance_tour_order","guidance_review_node_before_flow"]},
     {"function_id":"project_memory_index","owner":"project-memory::index","entry_symbols":["run","sync_index","write_memory_index","query","query_scope","compact","verify","import_details","parse_detail"],"required_gates":["memory_index_deterministic","memory_query_order","memory_markdown_export","memory_markdown_import"]},
-    {"function_id":"project_memory_review","owner":"project-memory::review","entry_symbols":["review","promote","write_entry","write_entry_with_review"],"required_gates":["memory_review_writeback","memory_review_level","memory_global_promotion_explicit"]}
+    {"function_id":"project_memory_review","owner":"project-memory::review","entry_symbols":["review","promote_with_approval","write_entry","write_entry_with_review"],"required_gates":["memory_review_writeback","memory_review_level","memory_global_promotion_explicit"]}
+    ,{"function_id":"project_memory_rule_promotion","owner":"project-memory::governance","entry_symbols":["submit_change"],"required_gates":["memory_rule_promotion"]}
     ,{"function_id":"project_memory_l1_initialization","owner":"project-memory::index","entry_symbols":["initialize_project"],"required_gates":["memory_index_deterministic"]}
   ]
 }

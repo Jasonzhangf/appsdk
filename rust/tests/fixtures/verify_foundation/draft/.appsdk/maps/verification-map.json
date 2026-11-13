@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "gates": [
+    {
+      "gate_id": "fixture-gate",
+      "producer": "fixture::gate",
+      "required_for": [
+        "fixture"
+      ]
+    }
+  ]
+}

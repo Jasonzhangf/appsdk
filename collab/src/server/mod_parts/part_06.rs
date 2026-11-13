@@ -1097,7 +1097,7 @@ pub(crate) fn register_created_peer(
     let main = route.root.to_string_lossy().into_owned();
     let mut effect_id = None;
     let mut before_consume = |prepared: &PreparedRegisterEnvelope| {
-        manager.publish_register_control_before_consume(server, prepared, None, None, None)
+        manager.publish_register_control_before_consume(server, prepared, None, None, None, None)
             .map(|id| { effect_id = Some(id); })
     };
     let response = register_typed_observed(

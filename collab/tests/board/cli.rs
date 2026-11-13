@@ -396,6 +396,62 @@ fn parse_public_response(output: std::process::Output) -> (bool, Value) {
     (success, value)
 }
 
+fn fixture_git(root: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("run fixture Git command")
+}
+
+fn fixture_git_ok(root: &Path, args: &[&str]) -> Output {
+    let output = fixture_git(root, args);
+    assert!(
+        output.status.success(),
+        "git {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn fixture_git_trim(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn init_fixture_git_main(root: &Path) -> String {
+    fixture_git_ok(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("fixture-main.txt"), "fixture main\n").unwrap();
+    fixture_git_ok(root, &["add", "fixture-main.txt"]);
+    fixture_git_ok(
+        root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture main",
+        ],
+    );
+    fixture_git_trim(&fixture_git_ok(
+        root,
+        &["rev-parse", "--verify", "refs/heads/main^{commit}"],
+    ))
+}
+
+fn fixture_branch_exists(root: &Path, branch: &str) -> bool {
+    fixture_git(
+        root,
+        &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+    )
+    .status
+    .success()
+}
+
 fn run_held_git_integration(
     probe: &HeldGitIntegration,
     during: impl FnOnce(&AppFixture),
@@ -3374,4 +3430,63 @@ fn layerfs_live_task_branch_workspace_black_box() {
 
     let closed = fixture.run_public(&["task", "status", "layerfs-live-accept"], THREAD_B);
     assert_eq!(closed["status"], "closed");
+}
+
+#[test]
+fn public_f9_branch_only_task_cleanup_must_survive_cancel() {
+    let mut fixture = AppFixture::new();
+    let project = fixture.project.canonicalize().unwrap();
+    init_fixture_git_main(&project);
+    let branch = "codex/f9-branch-only";
+    fixture_git_ok(&project, &["branch", branch, "main"]);
+    assert!(fixture_branch_exists(&project, branch));
+    fixture.run_public(&["context"], THREAD_A);
+
+    let task_id = "public-entry-f9";
+    let registered = fixture.run_public(
+        &[
+            "task",
+            "register",
+            task_id,
+            "--branch",
+            branch,
+            "--priority",
+            "p1",
+        ],
+        THREAD_A,
+    );
+    let status_before = fixture.run_public(&["task", "status", task_id], THREAD_A);
+    let board_before = fixture.run_public(&["board", "show"], THREAD_A);
+    let board_task = board_before["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == task_id)
+        .expect("board contains the branch-only task");
+    assert_eq!(status_before["branch"], branch);
+    assert_eq!(board_task["cleanup_status"], "pending");
+
+    let cancel = fixture.command_public(
+        &["task", "update", task_id, "--status", "cancelled"],
+        THREAD_A,
+    );
+    let status_after = fixture.run_public(&["task", "status", task_id], THREAD_A);
+    let branch_survived = fixture_branch_exists(&project, branch);
+    let projection_ok = registered["cleanup"] == "pending"
+        && status_before["cleanup"]["required"] == true
+        && status_before["cleanup"]["status"] == "pending";
+    let cancellation_ok = !cancel.status.success() && status_after["status"] != "cancelled";
+    let responsibility_preserved = status_after["cleanup"]["required"] == true
+        && (status_after["cleanup"]["status"] == "pending"
+            || status_after["cleanup"]["status"] == "unverified");
+    assert!(
+        projection_ok && cancellation_ok && responsibility_preserved && branch_survived,
+        "F9 RED: a branch-only task must expose pending cleanup and cancel must not erase the branch obligation. projection_ok={projection_ok} cancellation_ok={cancellation_ok} responsibility_preserved={responsibility_preserved} branch_survived={branch_survived} registered_cleanup={} status_cleanup={} cancel_succeeded={} status_after={} cancel_stdout={} cancel_stderr={}",
+        registered["cleanup"],
+        status_before["cleanup"],
+        cancel.status.success(),
+        status_after,
+        String::from_utf8_lossy(&cancel.stdout),
+        String::from_utf8_lossy(&cancel.stderr)
+    );
 }

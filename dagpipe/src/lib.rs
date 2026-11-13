@@ -17,6 +17,8 @@ use std::sync::{
 };
 use std::thread;
 
+pub mod governance;
+
 pub type NodeId = String;
 pub type ArcId = String;
 

@@ -590,7 +590,7 @@ pub(crate) fn task_status_is_terminal(status: &str) -> bool {
 }
 
 /// A subscription status that still binds an obligation to its owner.
-fn subscription_status_is_active(status: &str) -> bool {
+pub(crate) fn subscription_status_is_active(status: &str) -> bool {
     matches!(status, "armed" | "notifying")
 }
 
@@ -1186,6 +1186,10 @@ pub struct TaskRec {
 }
 
 impl TaskRec {
+    pub(crate) fn has_owned_resources(&self) -> bool {
+        self.worktree_path.is_some() || self.branch.is_some()
+    }
+
     /// 生效的隔离模式。优先返回记录显式持有的值；历史缺字段的记录按工作空间
     /// 路径推导，避免消费者各自重复前缀判断。
     pub(crate) fn isolation_mode_value(&self) -> String {

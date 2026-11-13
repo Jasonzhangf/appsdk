@@ -1333,3 +1333,67 @@ fn control_set_round_trips_and_rejects_duplicate_keys() {
         Err(SlotError::Invariant(message)) if message.contains("duplicate identity key")
     ));
 }
+
+#[test]
+fn pool_overflow_skips_occupied_peer_numbers_and_reuses_the_current_one() {
+    let project = ProjectScopeId::new("/tmp/collab-binding-slot").unwrap();
+    let app = AppServerId::new("appserver-cli").unwrap();
+    let other_app = AppServerId::new("other-app").unwrap();
+    let mut set = BindingControlSet::new();
+    for (index, name) in super::name_resolution::ORDINARY_NAME_POOL
+        .iter()
+        .enumerate()
+    {
+        let key = IdentityBindingKey::new(project.clone(), app.clone(), *name);
+        set.commit(
+            &key,
+            value(
+                &key,
+                &format!("ordinary-{index}"),
+                &format!("runtime-{index}"),
+                &format!("endpoint-{index}"),
+            ),
+            Some(0),
+        )
+        .unwrap();
+    }
+    let occupied = IdentityBindingKey::new(project.clone(), other_app, "peer-1");
+    set.commit(
+        &occupied,
+        value(
+            &occupied,
+            "other-app-participant",
+            "other-runtime",
+            "other-endpoint",
+        ),
+        Some(0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        set.ordinary_name(&project, &app, "generated-peer").unwrap(),
+        "peer-2"
+    );
+
+    let current = IdentityBindingKey::new(project.clone(), app, "peer-2");
+    set.commit(
+        &current,
+        value(
+            &current,
+            "generated-peer",
+            "generated-runtime",
+            "generated-endpoint",
+        ),
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(
+        set.ordinary_name(
+            &current.project_scope,
+            &current.app_scope_id,
+            "generated-peer"
+        )
+        .unwrap(),
+        "peer-2"
+    );
+}

@@ -27,15 +27,114 @@ assert_workflow_contains() {
 }
 
 assert_workflow_contains 'bash scripts/ci/select-verify-scope.sh'
+assert_workflow_contains 'bash scripts/tests/test-governance-reference-distribution.sh'
 assert_workflow_contains 'workflow_contract: ${{ steps.scope.outputs.workflow_contract }}'
 assert_workflow_contains 'npm: ${{ steps.scope.outputs.npm }}'
+assert_workflow_contains 'rust_verify_foundation: ${{ steps.scope.outputs.rust_verify_foundation }}'
+assert_workflow_contains 'rust_ontology_governance: ${{ steps.scope.outputs.rust_ontology_governance }}'
+assert_workflow_contains 'source_registry: ${{ steps.scope.outputs.source_registry }}'
+assert_workflow_contains 'dagpipe_installer: ${{ steps.scope.outputs.dagpipe_installer }}'
+assert_workflow_contains 'cargo run --manifest-path rust/Cargo.toml --locked --bin appsdk -- verify-sdk-source-registry .'
+assert_workflow_contains 'cargo check --manifest-path rust/Cargo.toml --locked --all-targets'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk verify_foundation::tests'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --bin appsdk command_invocation::tests'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test verify_foundation_cli'
+assert_workflow_contains '  windows-verify-foundation:'
+assert_workflow_contains 'cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test cli_smoke dagpipe_validate'
+assert_workflow_contains 'cargo build --release --manifest-path dagpipe/Cargo.toml --locked --bin dagpipe'
+assert_workflow_contains 'pwsh -NoProfile -File scripts/tests/test-windows-dagpipe.ps1'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli'
+assert_workflow_contains 'guidance::ledger::tests::read_plan_rebuilds_cache_with_atomic_writer'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list'
+assert_workflow_contains 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli'
+[[ "$(grep -Fc -- 'cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli' "$workflow")" == 1 ]] ||
+  fail "guidance_ablation_cli must run from one shared condition"
+[[ "$(grep -Ec '^[[:space:]]*cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli$' "$workflow")" == 3 ]] ||
+  fail "memory_governance_cli must cover Ubuntu and the exclusive native Windows routes"
+[[ "$(grep -Fc -- 'cargo test --manifest-path rust/Cargo.toml --locked --test memory_governance_cli -- --list' "$workflow")" == 3 ]] ||
+  fail "all memory governance routes must prove their test target is non-empty"
+[[ "$(grep -Fc -- '  - name: Memory governance CLI tests' "$workflow")" == 3 ]] ||
+  fail "memory governance CLI steps must cover Ubuntu and both Windows routes"
+assert_workflow_contains '  windows-memory:'
+assert_workflow_contains "if: needs.changes.outputs.rust_memory == 'true' && needs.changes.outputs.windows_appsdk != 'true'"
+assert_workflow_contains 'dagpipe::tests::graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs'
+assert_workflow_contains 'dagpipe_validate_notifications_records_invocation_outcomes'
+assert_workflow_contains 'dagpipe_validate_notifications_isolates_invocation_log_failure'
+assert_workflow_contains 'dagpipe_validate_notifications_rejects_invocation_log_link'
+assert_workflow_contains 'dagpipe_validate_notifications_isolates_invocation_log_contention'
+assert_workflow_contains 'dagpipe_validate_notifications_accepts_relative_project_and_graph_paths'
+assert_workflow_contains 'git diff --check "$BASE_SHA...$HEAD_SHA"'
+if ! awk '
+  /^  windows-verify-foundation:/ { active = 1; next }
+  active && /^  [A-Za-z0-9_-]+:/ { exit }
+  active && /(git rev-parse|cargo build --release|cli_smoke|reset_platform_cli|test-install-global-appsdk|appsdk (new|init|compile|freeze|publish)|sha256|checksum|digest)/ { blocked = 1 }
+  END { exit blocked }
+' "$workflow"; then
+  fail "windows-verify-foundation contains a prohibited smoke, package, broad test, digest, or identity probe"
+fi
+if ! awk '
+  /^  windows-verify-foundation:/ { active = 1; next }
+  active && /^  [A-Za-z0-9_-]+:/ { exit }
+  active && $0 == "      needs.changes.outputs.rust_verify_foundation == '\''true'\'' ||" { foundation = 1 }
+  active && $0 == "      needs.changes.outputs.rust_ontology_governance == '\''true'\''" { ontology = 1 }
+  END { exit !(foundation && ontology) }
+' "$workflow"; then
+  fail "windows-verify-foundation is missing its foundation or ontology selection"
+fi
+if ! awk '
+  /^      - / { active = 0 }
+  /^      - name: Verify foundation public CLI tests$/ { active = 1 }
+  active && $0 == "        if: needs.changes.outputs.rust_verify_foundation == '\''true'\''" { selected = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test verify_foundation_cli" { found = 1 }
+  END { exit !(selected && found) }
+' "$workflow"; then
+  fail "windows-verify-foundation does not scope the foundation CLI test to its own selection"
+fi
+if ! awk '
+  /^      - / { active = 0 }
+  /^      - name: Ontology Guidance static CLI tests$/ { active = 1 }
+  active && $0 == "        if: needs.changes.outputs.rust_ontology_governance == '\''true'\''" { ontology = 1 }
+  active && $0 == "          $listed = & cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list" { listed = 1 }
+  active && $0 == "          if ($count -lt 1) { throw \"expected at least one ontology Guidance test\" }" { nonempty = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli" { found = 1 }
+  END { exit !(ontology && listed && nonempty && found) }
+' "$workflow"; then
+  fail "windows-verify-foundation is missing the ontology Guidance static CLI test"
+fi
 if ! awk '
   /^      - / { guidance = 0 }
-  $0 == "        if: needs.changes.outputs.rust_guidance == '\''true'\''" { guidance = 1 }
+  /^      - name: Guidance ablation tests$/ { guidance = 1 }
+  guidance && $0 == "        if: needs.changes.outputs.rust_guidance == '\''true'\''" { rust_guidance = 1 }
   guidance && $0 == "        run: cargo test --manifest-path rust/Cargo.toml --locked --test guidance_ablation_cli" { found = 1 }
-  END { exit !found }
+  END { exit !(rust_guidance && found) }
 ' "$workflow"; then
   fail "workflow is missing guidance_ablation_cli under the Guidance condition"
+fi
+if ! awk '
+  /^      - / { active = 0 }
+  /^      - name: Ontology Guidance static tests$/ { active = 1 }
+  active && $0 == "        if: needs.changes.outputs.rust_ontology_governance == '\''true'\''" { ontology = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli -- --list \\" { listed = 1 }
+  active && $0 == "            | grep -E '\'': test$'\'' > /dev/null" { nonempty = 1 }
+  active && $0 == "          cargo test --manifest-path rust/Cargo.toml --locked --test ontology_governance_cli" { static = 1 }
+  END { exit !(ontology && listed && nonempty && static) }
+' "$workflow"; then
+  fail "workflow is missing static ontology CLI consumers under the ontology condition"
+fi
+if ! awk '
+  /^  windows-dagpipe:/ { active = 1; next }
+  active && /^  [A-Za-z0-9_-]+:/ { exit }
+  active && $0 == "          cargo test --manifest-path dagpipe/Cargo.toml --locked --lib --test ontology_governance --test governed_catalog_cli --example governed_catalog" { tests = 1 }
+  active && $0 == "          cargo build --release --manifest-path dagpipe/Cargo.toml --locked --bin dagpipe" { build = 1 }
+  active && $0 == "      - name: DAGPipe Windows install black-box harness" { harness = 1 }
+  active && $0 == "        run: pwsh -NoProfile -File scripts/tests/test-windows-dagpipe.ps1" { smoke = 1 }
+  END { exit !(tests && build && harness && smoke) }
+' "$workflow"; then
+  fail "windows-dagpipe is missing package tests, build, or its existing native consumer harness"
+fi
+if awk '/^  windows-dagpipe:/ { active = 1; next } active && /^  [A-Za-z0-9_-]+:/ { exit } active && /git rev-parse HEAD/ { found = 1 } END { exit !found }' "$workflow"; then
+  fail "windows-dagpipe performs an unnecessary commit identity query"
 fi
 for job in workflow-contract npm macos-appsdk package-appsdk npm-consumers; do
   assert_workflow_contains "  $job:"
@@ -47,6 +146,9 @@ fi
 # --- behavioral contract: drive the selector through fixture diffs ---
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/verify-selector.XXXXXX")"
 changed_file="$work_dir/changed.txt"
+name_status_file="$work_dir/name-status.txt"
+numstat_file="$work_dir/numstat.txt"
+git_calls_file="$work_dir/git-calls.txt"
 stub_dir="$work_dir/bin"
 mkdir -p "$stub_dir"
 
@@ -58,7 +160,31 @@ case "${1:-}" in
     [[ "${SELECTOR_TEST_BASELINE:-0}" == "1" ]]
     ;;
   diff)
-    cat "${SELECTOR_TEST_CHANGED:?}"
+    printf '%s\n' "$*" >> "${SELECTOR_TEST_GIT_CALLS:?}"
+    path_arg=""
+    for arg in "$@"; do
+      path_arg="$arg"
+    done
+    case " $* " in
+      *" --name-status "*)
+        if [[ -n "${SELECTOR_TEST_NAME_STATUS_FILE:-}" ]]; then
+          awk -F '\t' -v path="$path_arg" '$2 == path || $3 == path { print }' \
+            "$SELECTOR_TEST_NAME_STATUS_FILE"
+        fi
+        ;;
+      *" --numstat "*)
+        if [[ -n "${SELECTOR_TEST_NUMSTAT_FILE:-}" ]]; then
+          awk -F '\t' -v path="$path_arg" '$3 == path { print }' \
+            "$SELECTOR_TEST_NUMSTAT_FILE"
+        fi
+        ;;
+      *)
+        cat "${SELECTOR_TEST_CHANGED:?}"
+        ;;
+    esac
+    ;;
+  show-ref)
+    [[ "${SELECTOR_TEST_DEFAULT_REF:-0}" == "1" ]]
     ;;
   *)
     echo "unexpected git invocation: $*" >&2
@@ -76,12 +202,18 @@ trap cleanup EXIT
 OUT=""
 run_scenario() {
   local name="$1" event="$2" ref_type="$3" baseline="$4" changed="$5"
+  local name_status="${6:-}" numstat="${7:-}" default_ref="${8:-0}"
   SCENARIO="$name"
   printf '%s' "$changed" > "$changed_file"
+  printf '%s' "$name_status" > "$name_status_file"
+  printf '%s' "$numstat" > "$numstat_file"
+  : > "$git_calls_file"
   if ! OUT="$(GITHUB_OUTPUT="" SELECTOR_TEST_BASELINE="$baseline" SELECTOR_TEST_CHANGED="$changed_file" \
+    SELECTOR_TEST_NAME_STATUS_FILE="$name_status_file" SELECTOR_TEST_NUMSTAT_FILE="$numstat_file" \
+    SELECTOR_TEST_GIT_CALLS="$git_calls_file" SELECTOR_TEST_DEFAULT_REF="$default_ref" \
     PATH="$stub_dir:$PATH" \
     EVENT_NAME="$event" REF_TYPE="$ref_type" HEAD_SHA="deadbeef" \
-    PUSH_BEFORE="cafebabe" PR_BASE="cafebabe" \
+    PUSH_BEFORE="cafebabe" PR_BASE="cafebabe" REF_NAME="feature" DEFAULT_BRANCH="main" \
     bash "$selector" 2>"$work_dir/err")"; then
     fail "$name: selector exited non-zero: $(cat "$work_dir/err")"
     OUT=""
@@ -102,8 +234,9 @@ expect_false() {
 
 # Every flag the selector can emit, for the "nothing else selected" checks.
 all_flags=(
-  app_sdk_full rust_guidance rust_communication rust_memory rust_registry
-  rust_producer rust_cli_smoke rust_platform_lock_cli rust_registry_home_cli
+  app_sdk_full source_registry dagpipe_installer rust_guidance rust_communication rust_memory rust_registry
+  rust_producer rust_verify_foundation rust_ontology_governance rust_cli_smoke
+  rust_platform_lock_cli rust_registry_home_cli
   resources dagpipe collab installer docs windows_appsdk windows_dagpipe
   workflow_contract npm
 )
@@ -144,6 +277,159 @@ expect_true "windows_appsdk"
 expect_false "app_sdk_full"
 expect_false "windows_dagpipe"
 expect_false "workflow_contract"
+
+# The verify foundation owners are non-empty targeted selections. Shared owners
+# and unknown paths must keep their existing fail-closed AppSDK selection.
+for owner in \
+  rust/src/main.rs \
+  rust/src/main/project.rs \
+  rust/src/main/governance.rs \
+  rust/src/main/registry.rs \
+  rust/src/main/compile.rs \
+  rust/src/main/verification.rs \
+  rust/src/main/promotion.rs \
+  rust/src/main/command_invocation.rs \
+  rust/src/dagpipe.rs \
+  rust/src/dagpipe_notification.rs \
+  rust/src/main/verify_foundation.rs \
+  contracts/dagpipe/verify-foundation.graph.json \
+  rust/tests/verify_foundation_cli.rs
+do
+  run_scenario "verify-foundation-owner:$owner" "push" "branch" "1" "$owner"
+  expect_only "rust_verify_foundation"
+done
+
+run_scenario "verify-foundation-static-fixture" "push" "branch" "1" \
+  "rust/tests/fixtures/verify_foundation/draft/.appsdk/project.json"
+expect_only "rust_verify_foundation"
+
+run_scenario "verify-foundation-manifest" "push" "branch" "1" \
+  "docs/dagpipe/manifest.json"
+expect_only "rust_verify_foundation docs"
+
+run_scenario "verify-foundation-static-fixture-and-machine-contract" "push" "branch" "1" \
+  $'rust/tests/fixtures/verify_foundation/selected-test-governance.json\ncontracts/records/example.schema.json'
+expect_only "rust_verify_foundation app_sdk_full resources windows_appsdk"
+
+run_scenario "verify-foundation-and-unrelated-source" "push" "branch" "1" \
+  $'rust/src/main/verify_foundation.rs\nrust/src/memory.rs'
+expect_only "rust_verify_foundation rust_memory"
+
+run_scenario "verify-foundation-and-producer" "push" "branch" "1" \
+  $'rust/src/main.rs\nrust/src/main/producer.rs'
+expect_only "rust_verify_foundation rust_producer rust_cli_smoke rust_platform_lock_cli windows_appsdk"
+
+run_scenario "verify-foundation-and-dependency" "push" "branch" "1" \
+  $'rust/src/main/verify_foundation.rs\nrust/Cargo.toml'
+expect_only "rust_verify_foundation app_sdk_full resources windows_appsdk"
+
+run_scenario "verify-foundation-and-machine-contract" "push" "branch" "1" \
+  $'rust/tests/verify_foundation_cli.rs\ncontracts/records/example.schema.json'
+expect_only "rust_verify_foundation app_sdk_full resources windows_appsdk"
+
+run_scenario "verify-foundation-and-template" "push" "branch" "1" \
+  $'rust/tests/verify_foundation_cli.rs\ntemplates/minimal/AGENTS.md'
+expect_only "rust_verify_foundation rust_guidance resources windows_appsdk"
+
+run_scenario "verify-foundation-and-unknown" "push" "branch" "1" \
+  $'rust/tests/verify_foundation_cli.rs\nunknown/file.txt'
+expect_only "rust_verify_foundation app_sdk_full windows_appsdk windows_dagpipe dagpipe_installer"
+
+legacy_numstat=$'0\t49\trust/tests/cli_smoke/part_07.rs\n0\t19\trust/tests/cli_smoke/part_08.rs\n0\t27\trust/tests/sdk_resource_refresh_cli.rs'
+candidate_legacy_status=$'M\trust/tests/cli_smoke/part_07.rs\nM\trust/tests/cli_smoke/part_08.rs\nM\trust/tests/sdk_resource_refresh_cli.rs'
+
+run_scenario "legacy-part-07-deletion" "push" "branch" "1" \
+  "rust/tests/cli_smoke/part_07.rs" "$candidate_legacy_status" "$legacy_numstat"
+expect_only "rust_verify_foundation"
+
+run_scenario "legacy-part-08-deletion" "push" "branch" "1" \
+  "rust/tests/cli_smoke/part_08.rs" "$candidate_legacy_status" "$legacy_numstat"
+expect_only "rust_verify_foundation"
+
+run_scenario "legacy-sdk-resource-refresh-deletion" "push" "branch" "1" \
+  "rust/tests/sdk_resource_refresh_cli.rs" "$candidate_legacy_status" "$legacy_numstat"
+expect_only "rust_verify_foundation"
+
+run_scenario "legacy-deletion-metadata-default-ref" "push" "branch" "0" \
+  "rust/tests/cli_smoke/part_07.rs" "$candidate_legacy_status" "$legacy_numstat" "1"
+expect_only "rust_verify_foundation"
+for expected_call in \
+  'diff --name-only refs/remotes/origin/main...deadbeef' \
+  'diff --name-status --find-renames refs/remotes/origin/main...deadbeef -- rust/tests/cli_smoke/part_07.rs' \
+  'diff --numstat --find-renames refs/remotes/origin/main...deadbeef -- rust/tests/cli_smoke/part_07.rs'
+do
+  if ! grep -Fxq -- "$expected_call" "$git_calls_file"; then
+    fail "legacy-deletion-metadata-default-ref: missing Git call '$expected_call'"
+  fi
+done
+[[ "$(val base_sha)" == "refs/remotes/origin/main" ]] ||
+  fail "legacy-deletion-metadata-default-ref: expected the default ref as base_sha"
+
+run_scenario "legacy-part-07-addition" "push" "branch" "1" \
+  "rust/tests/cli_smoke/part_07.rs" \
+  $'A\trust/tests/cli_smoke/part_07.rs' \
+  $'49\t0\trust/tests/cli_smoke/part_07.rs'
+expect_only "rust_cli_smoke windows_appsdk"
+
+run_scenario "legacy-part-08-rename" "push" "branch" "1" \
+  "rust/tests/cli_smoke/part_08.rs" \
+  $'R100\trust/tests/cli_smoke/part_08.rs\trust/tests/cli_smoke/part_08_moved.rs' \
+  $'0\t0\trust/tests/cli_smoke/part_08.rs => rust/tests/cli_smoke/part_08_moved.rs'
+expect_only "rust_cli_smoke windows_appsdk"
+
+run_scenario "legacy-sdk-resource-refresh-binary" "push" "branch" "1" \
+  "rust/tests/sdk_resource_refresh_cli.rs" \
+  $'D\trust/tests/sdk_resource_refresh_cli.rs' \
+  $'-\t-\trust/tests/sdk_resource_refresh_cli.rs'
+expect_only "app_sdk_full windows_appsdk"
+
+run_scenario "legacy-part-07-unknown-modification" "push" "branch" "1" \
+  "rust/tests/cli_smoke/part_07.rs" \
+  $'M\trust/tests/cli_smoke/part_07.rs' \
+  $'1\t1\trust/tests/cli_smoke/part_07.rs'
+expect_only "rust_cli_smoke windows_appsdk"
+
+run_scenario "legacy-test-support-change" "push" "branch" "1" \
+  "rust/tests/cli_smoke/main.rs"
+expect_only "rust_cli_smoke windows_appsdk"
+
+current_candidate_paths=$(printf '%s\n' \
+  '.agents/skills/appsdk-dev/SKILL.md' \
+  '.github/workflows/verify.yml' \
+  'AGENTS.md' \
+  'contracts/dagpipe/verify-foundation.graph.json' \
+  'docs/dagpipe/manifest.json' \
+  'docs/design/appsdk-local-operator-adoption.md' \
+  'rust/src/dagpipe.rs' \
+  'rust/src/dagpipe_notification.rs' \
+  'rust/src/main.rs' \
+  'rust/src/main/command_invocation.rs' \
+  'rust/src/main/compile.rs' \
+  'rust/src/main/governance.rs' \
+  'rust/src/main/project.rs' \
+  'rust/src/main/promotion.rs' \
+  'rust/src/main/registry.rs' \
+  'rust/src/main/verification.rs' \
+  'rust/src/main/verify_foundation.rs' \
+  'rust/tests/cli_smoke/part_07.rs' \
+  'rust/tests/cli_smoke/part_08.rs' \
+  'rust/tests/fixtures/verify_foundation/compiled/.appsdk/project.json' \
+  'rust/tests/fixtures/verify_foundation/compiled/.appsdk/sdk.lock' \
+  'rust/tests/fixtures/verify_foundation/draft/.appsdk/maps/function-map.json' \
+  'rust/tests/fixtures/verify_foundation/draft/.appsdk/maps/mainline-call-map.json' \
+  'rust/tests/fixtures/verify_foundation/draft/.appsdk/maps/module-registry.json' \
+  'rust/tests/fixtures/verify_foundation/draft/.appsdk/maps/resource-map.json' \
+  'rust/tests/fixtures/verify_foundation/draft/.appsdk/maps/verification-map.json' \
+  'rust/tests/fixtures/verify_foundation/draft/.appsdk/project.json' \
+  'rust/tests/fixtures/verify_foundation/draft/.appsdk/sdk.lock' \
+  'rust/tests/fixtures/verify_foundation/selected-test-governance.json' \
+  'rust/tests/sdk_resource_refresh_cli.rs' \
+  'rust/tests/verify_foundation_cli.rs' \
+  'scripts/ci/select-verify-scope.sh' \
+  'scripts/tests/test-verify-selector.sh')
+run_scenario "current-candidate-diff" "push" "branch" "1" \
+  "$current_candidate_paths" "$candidate_legacy_status" "$legacy_numstat"
+expect_only "rust_verify_foundation docs workflow_contract"
 
 # 4. npm change selects only the npm Node checks on a normal push.
 run_scenario "npm-only" "push" "branch" "1" "npm/appsdk/lib/launcher.js"
@@ -187,7 +473,141 @@ expect_false "workflow_contract"
 run_scenario "dagpipe-lib" "push" "branch" "1" "dagpipe/src/lib.rs"
 expect_true "dagpipe"
 expect_true "windows_dagpipe"
-expect_true "windows_appsdk"
+expect_false "app_sdk_full"
+expect_false "windows_appsdk"
+
+run_scenario "ontology-dagpipe-library" "push" "branch" "1" "dagpipe/src/governance.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "dagpipe-installer-owner" "push" "branch" "1" "dagpipe/src/bin/dagpipe.rs"
+expect_only "dagpipe windows_dagpipe dagpipe_installer"
+
+run_scenario "ontology-with-installer-owner" "push" "branch" "1" \
+  $'dagpipe/src/governance.rs\ndagpipe/src/bin/dagpipe.rs'
+expect_only "dagpipe windows_dagpipe dagpipe_installer"
+
+run_scenario "ontology-dagpipe-test" "push" "branch" "1" "dagpipe/tests/ontology_governance.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-dagpipe-example" "push" "branch" "1" "dagpipe/examples/governed_catalog.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-dagpipe-cli" "push" "branch" "1" "dagpipe/tests/governed_catalog_cli.rs"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-dagpipe-fixture" "push" "branch" "1" \
+  "dagpipe/tests/fixtures/ontology-governance/consumer/illegal-session.jsonl"
+expect_only "dagpipe windows_dagpipe"
+
+run_scenario "ontology-guidance-compiler" "push" "branch" "1" "rust/src/guidance/compiler.rs"
+expect_only "rust_ontology_governance"
+
+run_scenario "guidance-atomic-writer" "push" "branch" "1" "rust/src/guidance/ledger.rs"
+expect_only "rust_ontology_governance"
+
+run_scenario "guidance-atomic-writer-mixed" "push" "branch" "1" \
+  $'rust/src/guidance/ledger.rs\nrust/src/communication.rs'
+expect_only "rust_ontology_governance rust_communication rust_platform_lock_cli windows_appsdk"
+
+run_scenario "ontology-guidance-cli" "push" "branch" "1" "rust/tests/ontology_governance_cli.rs"
+expect_only "rust_ontology_governance"
+
+run_scenario "ontology-guidance-fixture" "push" "branch" "1" \
+  "rust/tests/fixtures/ontology-governance/project/.appsdk/project.json"
+expect_only "rust_ontology_governance"
+
+run_scenario "ontology-guidance-schema" "push" "branch" "1" \
+  "contracts/guidance/guidance-manifest.schema.json"
+expect_only "rust_ontology_governance"
+
+# Memory rule governance paths use the existing Memory verification owner.
+for owner in \
+  rust/src/memory.rs \
+  rust/src/memory_cli.rs \
+  rust/src/bin/project-memory.rs \
+  rust/src/memory_governance.rs \
+  rust/tests/memory_governance_cli.rs \
+  contracts/memory/memory-entry.schema.json \
+  contracts/memory/rule-promotion.ontology.json \
+  docs/dagpipe/graphs/project-memory-rule-promotion.graph.json
+do
+  run_scenario "memory-governance-owner:$owner" "push" "branch" "1" "$owner"
+  expect_only "rust_memory"
+done
+
+run_scenario "memory-governance-and-dependency" "push" "branch" "1" \
+  $'rust/src/memory_governance.rs\nrust/Cargo.toml'
+expect_only "rust_memory app_sdk_full resources windows_appsdk"
+
+run_scenario "memory-governance-and-unknown" "push" "branch" "1" \
+  $'rust/src/memory_governance.rs\nunknown/memory-governance.txt'
+expect_only "rust_memory app_sdk_full windows_appsdk windows_dagpipe dagpipe_installer"
+
+run_scenario "memory-governance-and-dagpipe" "push" "branch" "1" \
+  $'docs/dagpipe/graphs/project-memory-rule-promotion.graph.json\ndagpipe/src/lib.rs'
+expect_only "rust_memory dagpipe windows_dagpipe"
+
+run_scenario "project-memory-skill" "push" "branch" "1" \
+  "sdk-skill-sources/project-memory/SKILL.md"
+expect_only "docs workflow_contract"
+
+run_scenario "memory-source-and-skill" "push" "branch" "1" \
+  $'rust/src/memory_governance.rs\ncontracts/maps/resource-map.json\nsdk-skill-sources/project-memory/SKILL.md'
+expect_only "rust_memory source_registry docs workflow_contract"
+
+run_scenario "project-memory-design-doc" "push" "branch" "1" \
+  "docs/design/project-memory.md"
+expect_only "docs"
+
+for map in \
+  contracts/maps/function-map.json \
+  contracts/maps/module-registry.json \
+  contracts/maps/mainline-call-map.json \
+  contracts/maps/resource-map.json \
+  contracts/maps/verification-map.json; do
+  run_scenario "source-map-$map" "push" "branch" "1" "$map"
+  expect_only "source_registry"
+done
+
+run_scenario "source-map-with-dependency" "push" "branch" "1" \
+  $'contracts/maps/module-registry.json\nrust/Cargo.toml'
+expect_only "source_registry app_sdk_full resources windows_appsdk"
+
+run_scenario "unknown-source-map" "push" "branch" "1" "contracts/maps/unknown-map.json"
+expect_only "app_sdk_full resources windows_appsdk"
+
+run_scenario "ontology-guidance-and-dependency" "push" "branch" "1" \
+  $'rust/src/guidance/compiler.rs\nrust/Cargo.toml'
+expect_only "rust_ontology_governance app_sdk_full resources windows_appsdk"
+
+ontology_candidate_paths=$(printf '%s\n' \
+  '.agents/skills/appsdk-dev/SKILL.md' \
+  '.github/workflows/verify.yml' \
+  'contracts/guidance/guidance-manifest.schema.json' \
+  'contracts/maps/function-map.json' \
+  'contracts/maps/module-registry.json' \
+  'dagpipe/examples/governed_catalog.rs' \
+  'dagpipe/src/governance.rs' \
+  'dagpipe/src/lib.rs' \
+  'dagpipe/tests/fixtures/ontology-governance/activate.graph.json' \
+  'dagpipe/tests/fixtures/ontology-governance/binding/unknown-gate.json' \
+  'dagpipe/tests/fixtures/ontology-governance/catalog-guidance.json' \
+  'dagpipe/tests/fixtures/ontology-governance/consumer/illegal-session.jsonl' \
+  'dagpipe/tests/fixtures/ontology-governance/legal-session.jsonl' \
+  'dagpipe/tests/governed_catalog_cli.rs' \
+  'dagpipe/tests/ontology_governance.rs' \
+  'dagpipe/tests/support/ontology_governance.rs' \
+  'docs/design/appsdk-ontology-governance.md' \
+  'rust/src/guidance/compiler.rs' \
+  'rust/tests/fixtures/ontology-governance/project/.appsdk/project.json' \
+  'rust/tests/ontology_governance_cli.rs' \
+  'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md' \
+  'sdk-skill-sources/appsdk-project-governance/references/ontology-governance.md' \
+  'scripts/ci/select-verify-scope.sh' \
+  'scripts/tests/test-verify-selector.sh')
+run_scenario "ontology-candidate-diff" "push" "branch" "1" \
+  "$ontology_candidate_paths"
+expect_only "dagpipe rust_ontology_governance source_registry docs windows_dagpipe workflow_contract"
 expect_false "app_sdk_full"
 
 # 10. Unknown path stays fail-closed to the full repository.
@@ -206,7 +626,7 @@ expect_only "windows_appsdk"
 run_scenario "reset-platform-cli" "push" "branch" "1" "rust/tests/reset_platform_cli.rs"
 expect_only "windows_appsdk"
 
-# 11. Missing baseline (force push / first push) stays fail-closed.
+# 11. No usable comparison baseline stays fail-closed.
 run_scenario "no-baseline" "push" "branch" "0" ""
 expect_true "app_sdk_full"
 expect_true "collab"
@@ -233,6 +653,40 @@ run_scenario "appsdk-dev-skill-only" "push" "branch" "1" ".agents/skills/appsdk-
 expect_only "docs"
 
 # 14. Workflow-only change on a pull_request event also selects the contract gate.
+# Governance reference prose needs text and distribution checks. Machine
+# resources and mixed product changes retain their existing consumers.
+run_scenario "governance-reference" "pull_request" "branch" "1" \
+  "sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md"
+expect_only "docs workflow_contract"
+
+run_scenario "reference-distribution-test" "push" "branch" "1" \
+  "scripts/tests/test-governance-reference-distribution.sh"
+expect_only "workflow_contract"
+
+run_scenario "reference-and-guidance" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\nsdk-skill-sources/appsdk-project-governance/appsdk-guidance.json'
+expect_only "docs workflow_contract rust_guidance resources installer windows_appsdk"
+
+run_scenario "reference-non-markdown" "push" "branch" "1" \
+  "sdk-skill-sources/appsdk-project-governance/references/runtime.json"
+expect_only "rust_guidance resources installer windows_appsdk"
+
+run_scenario "reference-and-schema" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\ncontracts/records/example.schema.json'
+expect_only "docs workflow_contract app_sdk_full resources windows_appsdk"
+
+run_scenario "reference-and-template" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\ntemplates/minimal/AGENTS.md'
+expect_only "docs workflow_contract rust_guidance resources windows_appsdk"
+
+run_scenario "reference-and-rust" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\nrust/src/main.rs'
+expect_only "docs workflow_contract rust_verify_foundation"
+
+run_scenario "reference-and-unknown" "pull_request" "branch" "1" \
+  $'sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md\nunknown/file.txt'
+expect_only "docs workflow_contract app_sdk_full windows_appsdk windows_dagpipe dagpipe_installer"
+
 run_scenario "pr-workflow" "pull_request" "branch" "1" ".github/workflows/verify.yml"
 expect_only "workflow_contract"
 
@@ -243,7 +697,146 @@ expect_only "rust_guidance windows_appsdk"
 # 16. The Guidance milestone keeps its resource, installer, and workflow owners.
 run_scenario "guidance-selector-milestone" "pull_request" "branch" "1" \
   $'rust/tests/guidance_ablation_cli.rs\nrust/src/guidance/compiler.rs\nsdk-skill-sources/appsdk-project-governance/appsdk-guidance.json\nscripts/ci/select-verify-scope.sh\nscripts/tests/test-verify-selector.sh\n.github/workflows/verify.yml'
-expect_only "rust_guidance windows_appsdk resources installer workflow_contract"
+expect_only "rust_guidance rust_ontology_governance resources installer windows_appsdk workflow_contract"
+
+# Real Git history proves that a feature push excludes changes inherited from
+# main while preserving its own changes. Branch names provide the fixture refs.
+history_repo="$work_dir/history"
+git init -q "$history_repo"
+git -C "$history_repo" config user.name 'Selector Fixture'
+git -C "$history_repo" config user.email 'selector@appsdk.invalid'
+git -C "$history_repo" config commit.gpgsign false
+git -C "$history_repo" checkout -q -b main
+printf 'seed\n' > "$history_repo/seed.txt"
+git -C "$history_repo" add seed.txt
+git -C "$history_repo" commit -q -m seed
+git -C "$history_repo" branch main-before
+git -C "$history_repo" checkout -q -b consumer-docs
+mkdir -p "$history_repo/sdk-skill-sources/appsdk-project-governance/references"
+printf 'guide\n' > "$history_repo/sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md"
+git -C "$history_repo" add sdk-skill-sources
+git -C "$history_repo" commit -q -m 'consumer guide'
+git -C "$history_repo" branch feature-before
+git -C "$history_repo" checkout -q main
+mkdir -p "$history_repo/rust/src"
+printf 'upstream\n' > "$history_repo/rust/src/main.rs"
+git -C "$history_repo" add rust/src/main.rs
+git -C "$history_repo" commit -q -m 'upstream source'
+git -C "$history_repo" update-ref refs/remotes/origin/main main
+git -C "$history_repo" checkout -q consumer-docs
+git -C "$history_repo" merge -q --no-edit main
+
+run_history_scenario() {
+  SCENARIO="$1"
+  OUT="$(cd "$history_repo" && GITHUB_OUTPUT="" \
+    REF_NAME="$2" DEFAULT_BRANCH="$3" PUSH_BEFORE="$4" HEAD_SHA="$5" \
+    PR_BASE="$4" EVENT_NAME="${6:-push}" REF_TYPE="${7:-branch}" \
+    bash "$selector")"
+}
+
+git -C "$history_repo" diff --name-only feature-before HEAD | grep -Fxq rust/src/main.rs
+run_history_scenario "feature-push-after-main-merge" consumer-docs main feature-before HEAD
+expect_only "docs workflow_contract"
+
+run_history_scenario "default-branch-push" main main main-before main
+expect_only "rust_verify_foundation"
+
+run_history_scenario "feature-push-default-ref-missing" consumer-docs missing feature-before HEAD
+expect_only "rust_verify_foundation"
+
+run_history_scenario "feature-push-name-missing" "" main feature-before HEAD
+expect_only "rust_verify_foundation"
+run_history_scenario "feature-push-default-name-missing" consumer-docs "" feature-before HEAD
+expect_only "rust_verify_foundation"
+run_history_scenario "feature-push-ref-type-missing" consumer-docs main feature-before HEAD push unknown
+expect_only "rust_verify_foundation"
+run_history_scenario "pr-with-branch-metadata" consumer-docs main feature-before HEAD pull_request
+expect_only "rust_verify_foundation"
+
+run_history_scenario "tag-with-branch-metadata" consumer-docs main feature-before HEAD push tag
+expect_true "release"
+expect_true "resources"
+expect_true "windows_appsdk"
+run_history_scenario "dispatch-with-branch-metadata" consumer-docs main feature-before HEAD workflow_dispatch
+expect_true "release"
+expect_true "resources"
+expect_true "windows_appsdk"
+
+run_history_scenario "feature-push-before-missing" consumer-docs main missing-before HEAD
+expect_only "docs workflow_contract"
+run_history_scenario "feature-push-before-zero" consumer-docs main 00000000 HEAD
+expect_only "docs workflow_contract"
+run_history_scenario "feature-push-before-empty" consumer-docs main "" HEAD
+expect_only "docs workflow_contract"
+[[ "$(val base_sha)" == "refs/remotes/origin/main" ]] ||
+  fail "feature-push-before-empty: expected default ref as the Docs comparison base"
+
+run_history_scenario "feature-push-default-ref-missing-before-empty" consumer-docs missing "" HEAD
+expect_true "app_sdk_full"
+expect_true "collab"
+run_history_scenario "feature-push-default-ref-missing-before-zero" consumer-docs missing 00000000 HEAD
+expect_true "app_sdk_full"
+expect_true "installer"
+run_history_scenario "feature-push-default-ref-missing-before-unparseable" consumer-docs missing not-a-commit HEAD
+expect_true "app_sdk_full"
+expect_true "windows_dagpipe"
+
+# A newer default branch must not appear as deletions in an older feature.
+git -C "$history_repo" checkout -q main
+mkdir -p "$history_repo/contracts"
+printf '{}\n' > "$history_repo/contracts/new.schema.json"
+git -C "$history_repo" add contracts
+git -C "$history_repo" commit -q -m 'later upstream schema'
+git -C "$history_repo" update-ref refs/remotes/origin/main main
+git -C "$history_repo" checkout -q consumer-docs
+run_history_scenario "feature-push-behind-default" consumer-docs main feature-before HEAD
+expect_only "docs workflow_contract"
+
+printf '{}\n' > "$history_repo/sdk-skill-sources/appsdk-project-governance/appsdk-guidance.json"
+git -C "$history_repo" add sdk-skill-sources
+git -C "$history_repo" commit -q -m 'feature guidance'
+run_history_scenario "feature-owned-machine-change" consumer-docs main feature-before HEAD
+expect_only "docs workflow_contract rust_guidance resources installer windows_appsdk"
+
+git -C "$history_repo" branch no-contribution main
+run_history_scenario "feature-empty-contribution" no-contribution main feature-before no-contribution
+expect_true "app_sdk_full"
+expect_true "collab"
+run_history_scenario "feature-empty-contribution-zero-before" no-contribution main 00000000 no-contribution
+expect_true "app_sdk_full"
+expect_true "windows_dagpipe"
+
+git -C "$history_repo" checkout -q --orphan unrelated
+git -C "$history_repo" commit -q -m 'unrelated history'
+git -C "$history_repo" update-ref refs/remotes/origin/unrelated unrelated
+git -C "$history_repo" checkout -q consumer-docs
+SCENARIO="feature-diff-no-common-ancestor"
+if (cd "$history_repo" && EVENT_NAME=push REF_TYPE=branch REF_NAME=consumer-docs \
+  DEFAULT_BRANCH=unrelated PUSH_BEFORE=feature-before HEAD_SHA=HEAD GITHUB_OUTPUT="" \
+  bash "$selector" > "$work_dir/unrelated.out" 2> "$work_dir/unrelated.err"); then
+  fail 'uncomputable feature diff was accepted'
+fi
+
+SCENARIO="feature-diff-no-common-ancestor-zero-before"
+if (cd "$history_repo" && EVENT_NAME=push REF_TYPE=branch REF_NAME=consumer-docs \
+  DEFAULT_BRANCH=unrelated PUSH_BEFORE=00000000 HEAD_SHA=HEAD GITHUB_OUTPUT="" \
+  bash "$selector" > "$work_dir/unrelated-zero.out" 2> "$work_dir/unrelated-zero.err"); then
+  fail 'uncomputable feature diff with zero before was accepted'
+fi
+
+git -C "$history_repo" checkout -q main
+mkdir -p "$history_repo/rust/tests/cli_smoke"
+printf 'retained fixture\n' > "$history_repo/rust/tests/cli_smoke/part_07.rs"
+git -C "$history_repo" add rust/tests/cli_smoke/part_07.rs
+git -C "$history_repo" commit -q -m 'retained legacy target'
+git -C "$history_repo" update-ref refs/remotes/origin/main main
+git -C "$history_repo" checkout -q -b legacy-deletion
+git -C "$history_repo" rm -q rust/tests/cli_smoke/part_07.rs
+git -C "$history_repo" commit -q -m 'retire legacy assertions'
+run_history_scenario "feature-push-deletion-only-zero-before" legacy-deletion main 00000000 HEAD
+expect_only "rust_verify_foundation"
+run_history_scenario "feature-push-deletion-only-empty-before" legacy-deletion main "" HEAD
+expect_only "rust_verify_foundation"
 
 if ((failures > 0)); then
   printf 'selector contract: %d failure(s)\n' "$failures" >&2

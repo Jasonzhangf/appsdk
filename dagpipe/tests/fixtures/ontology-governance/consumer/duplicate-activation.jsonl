@@ -1,0 +1,3 @@
+{"command":"apply","event":"activate","record":"r1","title":"First title","group":"g1"}
+{"command":"apply","event":"activate","record":"r1","title":"Second title","group":"g1"}
+{"command":"query","record":"r1"}

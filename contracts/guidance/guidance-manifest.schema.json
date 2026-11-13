@@ -16,6 +16,26 @@
     "required": ["ontology"]
   },
   "$comment": "When any rule declares ontology_clause, ontology is required. Cross-array identity, clause axis_id resolution, relation endpoint resolution, must_have/must_not_have contradiction, and the strict bidirectional one-to-one rule-clause binding are enforced by `appsdk guide compile`.",
+  "$defs": {
+    "execution_operator": {
+      "type": "object",
+      "required": ["operator", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "operator": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "execution_cardinality": {
+      "type": "object",
+      "required": ["min", "max"],
+      "additionalProperties": false,
+      "properties": {
+        "min": {"type": "integer", "minimum": 0},
+        "max": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]}
+      }
+    }
+  },
   "properties": {
     "schema_version": {"const": 1},
     "skill_id": {"type": "string", "minLength": 1},
@@ -40,6 +60,96 @@
       "additionalProperties": false,
       "properties": {
         "schema_version": {"const": 1},
+        "execution": {
+          "type": "object",
+          "required": ["version", "objects", "relations", "operations"],
+          "additionalProperties": false,
+          "properties": {
+            "version": {"const": 1},
+            "objects": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["object_id", "states", "contract"],
+                "additionalProperties": false,
+                "properties": {
+                  "object_id": {"type": "string", "minLength": 1},
+                  "states": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1}
+                  },
+                  "contract": {"$ref": "#/$defs/execution_operator"}
+                }
+              }
+            },
+            "relations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "relation_id",
+                  "scope",
+                  "forward",
+                  "create_by",
+                  "replace_by",
+                  "remove_by"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "relation_id": {"type": "string", "minLength": 1},
+                  "scope": {"enum": ["same_scope", "cross_scope"]},
+                  "forward": {"$ref": "#/$defs/execution_cardinality"},
+                  "reverse": {"$ref": "#/$defs/execution_cardinality"},
+                  "create_by": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1}
+                  },
+                  "replace_by": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1}
+                  },
+                  "remove_by": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1}
+                  }
+                }
+              }
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "behavior_id",
+                  "object_id",
+                  "event",
+                  "graph_id",
+                  "commit_node",
+                  "clauses"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "behavior_id": {"type": "string", "minLength": 1},
+                  "object_id": {"type": "string", "minLength": 1},
+                  "event": {"type": "string", "minLength": 1},
+                  "graph_id": {"type": "string", "minLength": 1},
+                  "commit_node": {"type": "string", "minLength": 1},
+                  "clauses": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1}
+                  }
+                }
+              }
+            }
+          }
+        },
         "objects": {
           "type": "array",
           "items": {

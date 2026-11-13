@@ -1569,7 +1569,7 @@ impl State {
         {
             missing.push("integration".into());
         }
-        let cleanup_ok = (task.worktree_path.is_none() && task.branch.is_none())
+        let cleanup_ok = !task.has_owned_resources()
             || self
                 .cleanup_receipts
                 .get(task_id)

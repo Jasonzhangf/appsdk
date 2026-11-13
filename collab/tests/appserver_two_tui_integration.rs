@@ -1446,11 +1446,19 @@ fn context_names_takeover_keeps_source_name_work_and_continues_target_name_work(
             after_mutation["tasks"]["source-alice-work"], after["tasks"]["source-alice-work"],
             "{label} must not mutate the source task"
         );
-        assert_eq!(
-            after_mutation["task_assignments"]["source-alice-work"],
-            after["task_assignments"]["source-alice-work"],
-            "{label} must not move the source assignment"
-        );
+        // Independent name stewardship may advance reflow, but a rejected
+        // action cannot change TaskAssignment ownership or its generation.
+        for field in ["task_id", "name", "session_id", "assignment_revision"] {
+            assert_eq!(
+                after_mutation["task_assignments"]["source-alice-work"]
+                    .get(field)
+                    .expect(field),
+                after["task_assignments"]["source-alice-work"]
+                    .get(field)
+                    .expect(field),
+                "{label} must not move the source assignment field {field}"
+            );
+        }
     }
     // Closing is not the last owner-only entry. A closed task still refuses
     // cleanup finalization by the name that lost the assignment.

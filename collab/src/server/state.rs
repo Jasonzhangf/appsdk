@@ -845,6 +845,9 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
                 ResponsibilityEffect::Mutates(binding.agent_id.as_str())
             }
         }
+        // This removes only the retired execution generation. It does not add
+        // or change a task, message, subscription or resource responsibility.
+        Event::GlobalRuntimeExecutionReleased { .. } => ResponsibilityEffect::Safe,
         Event::GlobalMasterGranted { grant } => {
             ResponsibilityEffect::Mutates(grant.agent_id.as_str())
         }
@@ -1751,6 +1754,12 @@ pub enum Event {
         registration: super::global_state::ProjectRegistration,
     },
     GlobalRuntimeBound {
+        binding: super::global_state::RuntimeBinding,
+    },
+    /// Release one exact execution binding after the current identity map no
+    /// longer protects it. This is control-plane state only; it retains the
+    /// worker, credential, tasks, messages, subscriptions and resources.
+    GlobalRuntimeExecutionReleased {
         binding: super::global_state::RuntimeBinding,
     },
     GlobalMasterGranted {

@@ -966,6 +966,8 @@ fn consume_register_typed(
     worker_id: &str,
     transport: &SelectedTransport,
     prepared: PreparedRegisterEnvelope,
+    control: Option<&binding_slot::BindingControlSet>,
+    authorized_replace: Option<&str>,
     name_tmux_session_name: Option<String>,
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
 ) -> Resp {
@@ -973,7 +975,7 @@ fn consume_register_typed(
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
     };
     let command = prepared.typed.command.clone();
-    let committed = server.consume_register(prepared);
+    let committed = server.consume_register(prepared, control, authorized_replace);
     match committed {
         Ok(outcome) => {
             // Map publication already chose the name. Registration never
@@ -1034,6 +1036,7 @@ fn register_typed_observed(
     reuse_existing: bool,
     name_tmux_session_name: Option<String>,
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+    authorized_replace: Option<&str>,
     before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
 ) -> Resp {
     let prepared = match prepare_register_typed(
@@ -1051,20 +1054,31 @@ fn register_typed_observed(
             return Resp::err(format!("typed registrar failed to build command: {error}"))
         }
     };
-    if let Some(before_consume) = before_consume {
+    let control = if let Some(before_consume) = before_consume {
         if let Err(error) = before_consume(&prepared) {
             return Resp::err(error);
         }
-    }
-    let response =
-        consume_register_typed(
-            server,
-            worker_id,
-            transport,
-            prepared,
-            name_tmux_session_name,
-            name_pane_anchor,
-        );
+        match crate::server::binding_store::BindingControlStore::new(
+            server.host_paths.state_root(),
+        )
+        .load()
+        {
+            Ok(control) => Some(control),
+            Err(error) => return Resp::err(error),
+        }
+    } else {
+        None
+    };
+    let response = consume_register_typed(
+        server,
+        worker_id,
+        transport,
+        prepared,
+        control.as_ref(),
+        authorized_replace,
+        name_tmux_session_name,
+        name_pane_anchor,
+    );
     response
 }
 
@@ -1109,6 +1123,7 @@ pub(crate) fn register_created_peer(
         Some(context.project_scope.clone()),
         Some(context.app_scope_id.clone()),
         false,
+        None,
         None,
         None,
         Some(&mut before_consume),
@@ -1260,6 +1275,10 @@ fn handle_register_with_app_scope_inner_bound(
         &mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>,
     >,
 ) -> Resp {
+    let authorized_replace = outer_binding
+        .and_then(RegisterOuterBinding::name_intent)
+        .filter(|intent| intent.user_authorized)
+        .map(|intent| intent.requested_name.as_str());
     let candidates = candidates.unwrap_or_default();
     let agent_session = outer_binding.and_then(RegisterOuterBinding::identity_facts)
         .and_then(|facts| facts.session_id.as_deref());
@@ -1353,6 +1372,7 @@ fn handle_register_with_app_scope_inner_bound(
             outer_binding
                 .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            authorized_replace,
             register_control_first,
         );
         if resp.ok {
@@ -1376,6 +1396,7 @@ fn handle_register_with_app_scope_inner_bound(
         false,
         outer_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
         outer_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+        authorized_replace,
         register_control_first,
     )
 }

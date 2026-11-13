@@ -415,11 +415,108 @@ impl Server {
         })
     }
 
+    /// Plan the exact execution releases one incoming Register needs.
+    ///
+    /// Candidates are limited to the same project, app scope and runtime id
+    /// with a different binding id, so a release can never touch an unrelated
+    /// runtime or scope. A release also needs a valid claim: either the old
+    /// execution is the same principal as the incoming one, or the caller
+    /// carries an explicit user-authorized replacement. A retired execution
+    /// has no current worker and cannot veto the exact current claimant.
+    /// An unrelated active current on the runtime, and any active current the
+    /// caller did not authorize, stay protected.
+    /// The caller owns the register gate and the current-map snapshot.
+    fn register_execution_release_events(
+        &self,
+        state: &State,
+        control: &binding_slot::BindingControlSet,
+        incoming: &RuntimeBinding,
+        authorized_replace: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        let Some(project) = state.global.lookup_project(&incoming.project_scope) else {
+            return Ok(Vec::new());
+        };
+        let candidates: Vec<RuntimeBinding> = project
+            .runtime_bindings
+            .values()
+            .filter(|old| {
+                old.project_scope == incoming.project_scope
+                    && old.app_scope_id == incoming.app_scope_id
+                    && old.runtime_id == incoming.runtime_id
+                    && old.binding_id != incoming.binding_id
+            })
+            .cloned()
+            .collect();
+
+        // Select only the executions this Register is allowed to release.
+        let mut releasable = Vec::new();
+        for old in candidates {
+            if old.same_principal(incoming) {
+                releasable.push(old);
+                continue;
+            }
+            // A retired ledger row has no current worker. It is not a present
+            // identity gate. An explicit user-authorized request may likewise
+            // replace the exact same-runtime claimant it names. Only a live,
+            // unrelated claimant without that authorization stays protected.
+            if authorized_replace.is_some() || !state.workers.contains_key(old.agent_id.as_str()) {
+                releasable.push(old);
+                continue;
+            }
+            return Err(
+                "REGISTER_RUNTIME_RELEASE_REJECTED: releasing another claimant on the same runtime requires an explicit user-authorized replacement"
+                    .into(),
+            );
+        }
+        if !releasable.is_empty()
+            && control.active_values().any(|current| {
+                &current.binding != incoming
+                    && current.binding.project_scope == incoming.project_scope
+                    && current.binding.app_scope_id == incoming.app_scope_id
+                    && current.binding.runtime_id == incoming.runtime_id
+                    && !releasable.iter().any(|old| old == &current.binding)
+            })
+        {
+            return Err(
+                "REGISTER_RUNTIME_RELEASE_REJECTED: another current still owns the runtime".into(),
+            );
+        }
+
+        let mut events = Vec::new();
+        for old in releasable {
+            if state
+                .global
+                .lookup_master_grant_for(&old.route_scope(), &old.binding_id)
+                .is_some()
+            {
+                events.push(Event::GlobalMasterRevoked {
+                    project_scope: old.project_scope.clone(),
+                    binding_id: old.binding_id.clone(),
+                });
+            }
+            if global_state::installed_route_address_key(&old).is_some() {
+                events.push(Event::GlobalCurrentThreadRouteRetired {
+                    binding: old.clone(),
+                });
+            }
+            events.push(Event::GlobalRuntimeExecutionReleased { binding: old });
+        }
+        Ok(events)
+    }
+
     fn consume_register(
         &self,
         prepared: PreparedRegisterEnvelope,
+        control: Option<&binding_slot::BindingControlSet>,
+        authorized_replace: Option<&str>,
     ) -> Result<state::TypedOutcome, notification_contract::MutationError> {
-        self.typed_dispatch_register(prepared.typed, None)
+        self.typed_dispatch_register_with_origin(
+            prepared.typed,
+            None,
+            RegisterOrigin::Registration,
+            control,
+            authorized_replace,
+        )
     }
 
     /// Dispatch one typed command through validation and current-state commit.
@@ -437,7 +534,13 @@ impl Server {
         typed: TypedEnvelope,
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> Result<state::TypedOutcome, notification_contract::MutationError> {
-        self.typed_dispatch_register_with_origin(typed, outer_binding, RegisterOrigin::Registration)
+        self.typed_dispatch_register_with_origin(
+            typed,
+            outer_binding,
+            RegisterOrigin::Registration,
+            None,
+            None,
+        )
     }
 
     fn typed_dispatch_register_with_origin(
@@ -445,21 +548,51 @@ impl Server {
         typed: TypedEnvelope,
         outer_binding: Option<&RegisterOuterBinding>,
         origin: RegisterOrigin,
+        control: Option<&binding_slot::BindingControlSet>,
+        authorized_replace: Option<&str>,
     ) -> Result<state::TypedOutcome, notification_contract::MutationError> {
         typed.envelope.validate().map_err(|error| {
             notification_contract::MutationError::InvalidCommand(error.to_string())
         })?;
         let mut st = self.state.lock().unwrap();
-        self.validate_typed_register(&st, &typed)?;
-        let mut events = Vec::new();
+        let TypedCommand::RegisterWorker { binding: incoming, .. } = &typed.command;
+        // Plan and apply the exact execution releases this Register is allowed
+        // to make before validating the incoming binding, so publication-side
+        // prevalidation and this business consume share one release sequence.
+        let release_events = match control {
+            Some(control) => self
+                .register_execution_release_events(&st, control, incoming, authorized_replace)
+                .map_err(notification_contract::MutationError::InvalidCommand)?,
+            None => Vec::new(),
+        };
+        let mut candidate = st.clone();
+        // Capture whether this app scope already held a runtime execution
+        // before the release, so a same-runtime replacement keeps its existing
+        // peer bootstrap outcome instead of looking like a first registration.
+        let had_runtime_history = candidate
+            .global
+            .lookup_project(&incoming.project_scope)
+            .is_some_and(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .any(|old| old.app_scope_id == incoming.app_scope_id)
+            });
+        for event in &release_events {
+            candidate
+                .apply_checked(event)
+                .map_err(notification_contract::MutationError::InvalidState)?;
+        }
+        self.validate_typed_register(&candidate, &typed)?;
+        let mut events = release_events;
         let TypedCommand::RegisterWorker { worker, binding, .. } = &typed.command;
         let first_business = match origin {
             RegisterOrigin::Registration => true,
             RegisterOrigin::CurrentPrincipal => false,
             RegisterOrigin::InitialCurrentContinuation { .. } => {
-                !st.global.command_receipts.values().any(|receipt|
+                !candidate.global.command_receipts.values().any(|receipt|
                     receipt.operation_id == typed.envelope.operation_id)
-                    && !st.global.lookup_project(&binding.project_scope).is_some_and(|project|
+                    && !candidate.global.lookup_project(&binding.project_scope).is_some_and(|project|
                         project.runtime_bindings.values().any(|current| current.same_principal(binding)))
             }
         };
@@ -485,7 +618,7 @@ impl Server {
                         let control = binding_store::BindingControlStore::new(self.host_paths.state_root())
                             .load().map_err(notification_contract::MutationError::InvalidCommand)?;
                         for claimant in pane_claimants(
-                            &st,
+                            &candidate,
                             binding.agent_id.as_str(),
                             &binding.route_scope(),
                             endpoint,
@@ -506,7 +639,7 @@ impl Server {
                         }
                     }
                     for claimant in session_claimants(
-                        &st,
+                        &candidate,
                         binding.agent_id.as_str(),
                         &binding.binding_id,
                         &binding.route_scope(),
@@ -535,7 +668,7 @@ impl Server {
                     events.push(Event::GlobalRuntimeBound {
                         binding: binding.clone(),
                     });
-                    if let Some(project) = st.global.lookup_project(&binding.project_scope)
+                    if let Some(project) = candidate.global.lookup_project(&binding.project_scope)
                         .filter(|_| first_business)
                     {
                         if let Some(mut policy) = project
@@ -548,11 +681,8 @@ impl Server {
                                 RegisterOrigin::InitialCurrentContinuation { explicit_peer } => explicit_peer,
                                 _ => outer_binding.is_some_and(|outer| outer.explicit_peer),
                             };
-                            let history = project
-                                .runtime_bindings
-                                .values()
-                                .any(|old| old.app_scope_id == binding.app_scope_id);
-                            let incumbent = st.master_worker_id.is_some()
+                            let history = had_runtime_history;
+                            let incumbent = candidate.master_worker_id.is_some()
                                 || project
                                     .master_grants
                                     .values()
@@ -616,14 +746,14 @@ impl Server {
         });
         if let Some(transport) = selected_transport_for_worker(worker) {
             events.extend(default_direct_message_events(
-                &st,
+                &candidate,
                 &worker.id,
                 &transport,
                 now_ms(),
             ));
         }
         let mut notices = Vec::new();
-        if first_business && !st.workers.contains_key(&worker.id) {
+        if first_business && !candidate.workers.contains_key(&worker.id) {
             let control = binding_store::BindingControlStore::new(self.host_paths.state_root()).load()
                 .map_err(notification_contract::MutationError::InvalidCommand)?;
             let route = binding.route_scope();
@@ -634,13 +764,13 @@ impl Server {
                 slot.identity_key.name != "Jenny"
                     && slot.active_binding().is_some_and(|current| current.binding == *binding))
             {
-                if let Some(master) = current_master_worker_id(&st, Some(&route))
-                    .filter(|master| master != &worker.id && st.workers.contains_key(master))
+                if let Some(master) = current_master_worker_id(&candidate, Some(&route))
+                    .filter(|master| master != &worker.id && candidate.workers.contains_key(master))
                 {
                     if control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &master)
                         .map_err(notification_contract::MutationError::InvalidCommand)?.is_some()
                     {
-                        notices = relationship_notice_events(&st, &control, &route, &master,
+                        notices = relationship_notice_events(&candidate, &control, &route, &master,
                             "peer-registered", format!("{} 已注册为当前peer。读取 collab context / collab board show 查看当前成员及可分配工作；此通知不自动派单。", current.identity_key.name))
                             .map_err(notification_contract::MutationError::InvalidCommand)?;
                         events.extend(notices.clone());
@@ -968,7 +1098,7 @@ mod scoped_register_tests {
         let first_effect = manager
             .publish_register_control_before_consume(&server, &first, None, None, None, None)
             .unwrap();
-        server.consume_register(first).unwrap();
+        server.consume_register(first, None, None).unwrap();
         manager.consume_register_effect(Some(&first_effect)).unwrap();
         let before = server.state.lock().unwrap().workers["rename-owner"].clone();
         let map = manager.binding_control_store().load().unwrap();
@@ -989,7 +1119,7 @@ mod scoped_register_tests {
         let second_effect = manager
             .publish_register_control_before_consume(&server, &second, None, None, None, None)
             .unwrap();
-        server.consume_register(second).unwrap();
+        server.consume_register(second, None, None).unwrap();
         manager.consume_register_effect(Some(&second_effect)).unwrap();
         let state = server.state.lock().unwrap();
         assert_eq!(serde_json::to_value(&state.workers["rename-owner"]).unwrap(), serde_json::to_value(before).unwrap());
@@ -1000,6 +1130,333 @@ mod scoped_register_tests {
         drop(state);
         assert!(manager.binding_control_store().load().unwrap().holds_current_binding(&binding));
         drop(tmux);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retired_runtime_without_a_name_slot_is_not_a_history_veto() {
+        // Public self-unregister retains the stable-name slot as a previous
+        // value. This in-memory state isolates the planner behavior for the
+        // separately unreachable case where no slot owns the retired row.
+        let (server, root) = peer_tests::test_server();
+        let server = Arc::new(server);
+        let app = AppServerId::new("tui-default").unwrap();
+        let project_scope =
+            GlobalState::canonical_project_scope(&root).unwrap();
+        let transport = peer_tests::test_appserver_transport("desktop-thread");
+
+        let old = server
+            .prepare_register_envelope_for_scope(
+                "Alice",
+                "old-token",
+                &transport,
+                project_scope.clone(),
+                root.to_str().unwrap(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let old_binding = match &old.typed.command {
+            TypedCommand::RegisterWorker { binding, .. } => binding.clone(),
+        };
+        server.typed_dispatch(old.typed).unwrap();
+        let grant = global_state::MasterGrant::new(
+            old_binding.project_scope.clone(),
+            old_binding.app_scope_id.clone(),
+            old_binding.agent_id.clone(),
+            "project",
+            "user",
+            "fixture user approved the historical master grant",
+            old_binding.binding_id.clone(),
+            now_ms(),
+        )
+        .unwrap();
+        server
+            .commit_checked(&[Event::GlobalMasterGranted { grant }])
+            .unwrap();
+
+        let retired = {
+            let mut state = server.state.lock().unwrap();
+            let binding = state
+                .global
+                .lookup_project(&project_scope)
+                .unwrap()
+                .runtime_bindings
+                .values()
+                .next()
+                .unwrap()
+                .clone();
+            assert!(state.workers.remove("Alice").is_some());
+            binding
+        };
+
+        let incoming = server
+            .prepare_register_envelope_for_scope(
+                "Bob",
+                "new-token",
+                &transport,
+                project_scope.clone(),
+                root.to_str().unwrap(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let TypedCommand::RegisterWorker {
+            binding: incoming_binding,
+            ..
+        } = &incoming.typed.command
+        else {
+            panic!("fixture prepared a non-register command");
+        };
+        let incoming_binding = incoming_binding.clone();
+        let control = binding_slot::BindingControlSet::new();
+        {
+            let state = server.state.lock().unwrap();
+            let events = server
+                .register_execution_release_events(&state, &control, &incoming_binding, None)
+                .expect("a missing historical name slot must not veto a retired runtime release");
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Event::GlobalRuntimeExecutionReleased { binding } if binding == &retired
+                )),
+                "the exact retired runtime row must be released: {events:?}"
+            );
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Event::GlobalMasterRevoked { binding_id, .. }
+                        if binding_id == &retired.binding_id
+                )),
+                "the retired exact master grant must be revoked: {events:?}"
+            );
+        }
+        server
+            .typed_dispatch_register_with_origin(
+                incoming.typed,
+                None,
+                RegisterOrigin::Registration,
+                Some(&control),
+                None,
+            )
+            .unwrap();
+        let state = server.state.lock().unwrap();
+        assert!(state.global.lookup_binding(&retired.binding_id).is_none());
+        assert!(
+            state
+                .global
+                .lookup_master_grant_for(&retired.route_scope(), &retired.binding_id)
+                .is_none()
+        );
+        assert!(
+            state
+                .global
+                .lookup_master_grant_for(&incoming_binding.route_scope(), &incoming_binding.binding_id)
+                .is_none(),
+            "a new claimant must not inherit the retired exact master grant"
+        );
+        assert!(state.workers.contains_key("Bob"));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_registration_does_not_release_a_different_live_claimant() {
+        let (server, root) = peer_tests::test_server();
+        let server = Arc::new(server);
+        let app = AppServerId::new("tui-default").unwrap();
+        let project_scope =
+            GlobalState::canonical_project_scope(&root).unwrap();
+        let transport = peer_tests::test_appserver_transport("desktop-thread");
+
+        let old = server
+            .prepare_register_envelope_for_scope(
+                "Alice",
+                "old-token",
+                &transport,
+                project_scope.clone(),
+                root.to_str().unwrap(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let old_transport = match &old.typed.command {
+            TypedCommand::RegisterWorker { worker, .. } => worker.transport.clone().unwrap(),
+        };
+        let old_binding = match &old.typed.command {
+            TypedCommand::RegisterWorker { binding, .. } => binding.clone(),
+        };
+        server.typed_dispatch(old.typed).unwrap();
+
+        let incoming = server
+            .prepare_register_envelope_for_scope(
+                "Bob",
+                "new-token",
+                &transport,
+                project_scope.clone(),
+                root.to_str().unwrap(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let incoming_binding = match &incoming.typed.command {
+            TypedCommand::RegisterWorker { binding, .. } => binding,
+        };
+        let name = binding_slot::IdentityBindingKey::new(
+            incoming_binding.project_scope.clone(),
+            incoming_binding.app_scope_id.clone(),
+            "Alice",
+        );
+        let mut control = binding_slot::BindingControlSet::new();
+        control
+            .commit(
+                &name,
+                binding_slot::BindingValue::new(old_binding, old_transport),
+                None,
+            )
+            .unwrap();
+        let state = server.state.lock().unwrap();
+        let error = server
+            .register_execution_release_events(
+                &state,
+                &control,
+                incoming_binding,
+                None,
+            )
+            .expect_err("an ordinary registration must not release a live claimant");
+        assert!(
+            error.contains("requires an explicit user-authorized replacement"),
+            "{error}"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_release_plan_ignores_unrelated_project_app_and_runtime_claims() {
+        let (server, root) = peer_tests::test_server();
+        let server = Arc::new(server);
+        let app = AppServerId::new("tui-default").unwrap();
+        let project_scope =
+            GlobalState::canonical_project_scope(&root).unwrap();
+        let transport = peer_tests::test_appserver_transport("desktop-thread");
+        let old = server
+            .prepare_register_envelope_for_scope(
+                "Alice",
+                "old-token",
+                &transport,
+                project_scope.clone(),
+                root.to_str().unwrap(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let TypedCommand::RegisterWorker {
+            binding: old_binding,
+            ..
+        } = &old.typed.command
+        else {
+            panic!("fixture prepared a non-register command");
+        };
+        let old_binding = old_binding.clone();
+        server.typed_dispatch(old.typed).unwrap();
+        {
+            let mut state = server.state.lock().unwrap();
+            assert!(state.workers.remove("Alice").is_some());
+        }
+
+        let incoming = server
+            .prepare_register_envelope_for_scope(
+                "Bob",
+                "new-token",
+                &transport,
+                project_scope.clone(),
+                root.to_str().unwrap(),
+                app.clone(),
+                false,
+            )
+            .unwrap();
+        let TypedCommand::RegisterWorker {
+            binding: incoming_binding,
+            ..
+        } = &incoming.typed.command
+        else {
+            panic!("fixture prepared a non-register command");
+        };
+        let incoming_binding = incoming_binding.clone();
+
+        let mut wrong_app = incoming_binding.clone();
+        wrong_app.agent_id = AgentId::new("wrong-app-peer").unwrap();
+        wrong_app.app_scope_id = AppServerId::new("other-app").unwrap();
+        wrong_app.binding_id = BindingId::new("binding-wrong-app").unwrap();
+        let mut other_runtime = incoming_binding.clone();
+        other_runtime.agent_id = AgentId::new("other-runtime-peer").unwrap();
+        other_runtime.runtime_id = RuntimeId::new("runtime-other").unwrap();
+        other_runtime.binding_id = BindingId::new("binding-other-runtime").unwrap();
+        server
+            .commit_checked(&[
+                Event::GlobalRuntimeBound {
+                    binding: other_runtime.clone(),
+                },
+            ])
+            .unwrap();
+
+        let mut control = binding_slot::BindingControlSet::new();
+        control
+            .commit(
+                &binding_slot::IdentityBindingKey::new(
+                    project_scope.clone(),
+                    AppServerId::new("other-app").unwrap(),
+                    "Alice",
+                ),
+                binding_slot::BindingValue::new(wrong_app.clone(), transport.clone()),
+                None,
+            )
+            .unwrap();
+        control
+            .commit(
+                &binding_slot::IdentityBindingKey::new(
+                    project_scope,
+                    app,
+                    "Bob",
+                ),
+                binding_slot::BindingValue::new(other_runtime.clone(), transport),
+                None,
+            )
+            .unwrap();
+        let state = server.state.lock().unwrap();
+        let events = server
+            .register_execution_release_events(
+                &state,
+                &control,
+                &incoming_binding,
+                None,
+            )
+            .expect("unrelated app and runtime history must not reject the current Register");
+        let released: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::GlobalRuntimeExecutionReleased { binding } => Some(binding),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            released,
+            vec![&old_binding],
+            "the release plan must touch only the exact same-app runtime row"
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            Event::GlobalRuntimeBound { binding }
+                if binding == &wrong_app || binding == &other_runtime
+        )));
+        assert!(
+            state
+                .global
+                .lookup_binding(&other_runtime.binding_id)
+                .is_some()
+        );
+        drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 

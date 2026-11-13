@@ -67,7 +67,7 @@ impl ProjectRuntimeManager {
                 && effect.operation_id == prepared.nested_operation_id)
             .map(|effect| RegisterOrigin::InitialCurrentContinuation { explicit_peer: effect.name != "Jenny" })
             .unwrap_or(RegisterOrigin::CurrentPrincipal);
-        runtime.typed_dispatch_register_with_origin(prepared.typed, None, origin)
+        runtime.typed_dispatch_register_with_origin(prepared.typed, None, origin, None, None)
             .map_err(|error| format!("CURRENT_WORKER_MATERIALIZATION_FAILED: {error}"))?;
         if !runtime.state.lock().unwrap().workers.contains_key(worker) {
             return Err("CURRENT_WORKER_MATERIALIZATION_INCOMPLETE: Register receipt has no worker".into());
@@ -460,13 +460,36 @@ impl ProjectRuntimeManager {
             runtime_context: None,
         };
         let _register = self.register_gate.lock().unwrap();
-        let state = runtime.state.lock().unwrap();
-        prepared.typed.envelope.validate()
-            .map_err(|error| format!("typed registrar rejected registration: {}",
-                notification_contract::MutationError::InvalidCommand(error.to_string())))?;
-        runtime.validate_typed_register(&state, &prepared.typed)
-            .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
+        let state_guard = runtime.state.lock().unwrap();
+        prepared.typed.envelope.validate().map_err(|error| {
+            format!(
+                "typed registrar rejected registration: {}",
+                notification_contract::MutationError::InvalidCommand(error.to_string())
+            )
+        })?;
         let control = self.binding_control_store().load()?;
+        let authorized_replace = name_intent
+            .filter(|intent| intent.user_authorized)
+            .map(|intent| intent.requested_name.as_str());
+        let release_events = runtime
+            .register_execution_release_events(
+                &state_guard,
+                &control,
+                binding,
+                authorized_replace,
+            )
+            .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
+        let mut candidate = state_guard.clone();
+        for event in &release_events {
+            candidate
+                .apply_checked(event)
+                .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
+        }
+        runtime
+            .validate_typed_register(&candidate, &prepared.typed)
+            .map_err(|error| format!("typed registrar rejected registration: {error}"))?;
+        drop(state_guard);
+        let state = candidate;
         let name = match name_intent {
             Some(intent) => {
                 if !intent.user_authorized {

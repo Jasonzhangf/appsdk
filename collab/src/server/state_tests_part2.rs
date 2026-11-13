@@ -489,6 +489,134 @@ use super::*;
     }
 
     #[test]
+    fn explicit_periodic_goal_repairs_only_an_already_due_nominal_trigger() {
+        for (label, consumed_ms, expected_trigger) in [
+            ("future nominal", 1_900, 3_000),
+            ("equal nominal", 3_000, 4_000),
+            ("overdue nominal", 5_000, 6_000),
+        ] {
+            let mut state = State::default();
+            state.apply(&Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: format!("sub-{label}"),
+                    worker_id: "master".into(),
+                    event: "deadline".into(),
+                    subject: Some(format!("goal:{label}")),
+                    target: "thread-master".into(),
+                    method: "appserver".into(),
+                    trigger_ms: Some(2_000),
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: Some(1_000),
+                    repeat_count: 3,
+                    fired_count: 0,
+                    expires_ms: 20_000,
+                    status: "armed".into(),
+                    created_ms: 1_000,
+                    updated_ms: 1_000,
+                    status_reason: None,
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
+                    periodic_declared: true,
+                    goal_content: None,
+                },
+            });
+            state.apply(&Event::NotificationConsumed {
+                subscription_id: format!("sub-{label}"),
+                message_id: format!("message-{label}"),
+                consumed_ms,
+            });
+            let subscription = &state.notification_subscriptions[&format!("sub-{label}")];
+            assert_eq!(
+                subscription.trigger_ms,
+                Some(expected_trigger),
+                "{label}: {subscription:?}"
+            );
+            assert_eq!(subscription.fired_count, 1, "{label}: {subscription:?}");
+            assert_eq!(subscription.status, "armed", "{label}: {subscription:?}");
+        }
+    }
+
+    #[test]
+    fn receive_committed_passes_durable_time_to_periodic_goal_once() {
+        let subscription_id = "sub-receive-committed-periodic";
+        let message_id = "message-receive-committed-periodic";
+        let mut state = State::default();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.into(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("goal:receive-committed".into()),
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(2_000),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(1_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 20_000,
+                status: "armed".into(),
+                created_ms: 1_000,
+                updated_ms: 1_000,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+                periodic_declared: true,
+                goal_content: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: message_id.into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notification".into(),
+                subject: Some("deadline:goal:receive-committed".into()),
+                body: "scheduled occurrence".into(),
+                in_reply_to: None,
+                created_ms: 2_000,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: message_id.into(),
+            subscription_id: subscription_id.into(),
+        });
+
+        let receipt = crate::server::state::ReceiveReceipt {
+            receive_id: "receive-periodic-goal".into(),
+            worker_id: "master".into(),
+            route_scope: None,
+            message_ids: vec![message_id.into()],
+            received_ms: 5_000,
+        };
+        state
+            .apply_checked(&Event::ReceiveCommitted {
+                receipt: receipt.clone(),
+                ids: vec![message_id.into()],
+            })
+            .unwrap();
+        let subscription = &state.notification_subscriptions[subscription_id];
+        assert_eq!(subscription.fired_count, 1);
+        assert_eq!(subscription.trigger_ms, Some(6_000));
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(state.msgs[message_id].state, "read");
+
+        state
+            .apply_checked(&Event::ReceiveCommitted {
+                receipt,
+                ids: vec![message_id.into()],
+            })
+            .unwrap();
+        let subscription = &state.notification_subscriptions[subscription_id];
+        assert_eq!(subscription.fired_count, 1);
+        assert_eq!(subscription.trigger_ms, Some(6_000));
+    }
+
+    #[test]
     fn ack_after_timer_consumption_does_not_double_consume() {
         let subscription_id = "sub-ack-timer";
         let message_id = "message-ack-timer";

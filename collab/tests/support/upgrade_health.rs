@@ -29,6 +29,12 @@ pub fn test_guard() -> TestGuard {
     }
 }
 
+pub fn prepare_check_state(state_root: &Path) {
+    std::fs::create_dir_all(state_root.join("fixture-home")).unwrap();
+    std::fs::create_dir_all(state_root.join("fixture-cargo")).unwrap();
+    std::fs::create_dir_all(state_root.join("fixture-build")).unwrap();
+}
+
 pub fn temp_root(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -59,12 +65,7 @@ pub fn run_check_with_dsh_session(
     local: bool,
     dsh_session_id: Option<&str>,
 ) -> Output {
-    let home = state_root.join("fixture-home");
-    let cargo_home = state_root.join("fixture-cargo");
-    let build_state = state_root.join("fixture-build");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&cargo_home).unwrap();
-    std::fs::create_dir_all(&build_state).unwrap();
+    prepare_check_state(state_root);
     let mut command = Command::new(cli);
     command.args(["status", "--check"]);
     if local {
@@ -72,12 +73,19 @@ pub fn run_check_with_dsh_session(
     }
     command
         .current_dir(project_root)
-        .env("HOME", &home)
-        .env("CARGO_HOME", &cargo_home)
+        .env("HOME", state_root.join("fixture-home"))
+        .env("CARGO_HOME", state_root.join("fixture-cargo"))
         .env("COLLAB_STATE_DIR", state_root)
-        .env("COLLAB_BUILD_STATE_DIR", &build_state)
+        .env("COLLAB_BUILD_STATE_DIR", state_root.join("fixture-build"))
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
+        .env_remove("REX_BIN_DIR")
+        .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+        .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
+        .env_remove("CODEX_APP_SERVER_SOCKET")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CODEX_SESSION_ID")
         .env_remove("DSH_SESSION_ID")
@@ -89,6 +97,14 @@ pub fn run_check_with_dsh_session(
 }
 
 pub fn snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    snapshot_impl(path, false)
+}
+
+pub fn snapshot_with_dirs(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    snapshot_impl(path, true)
+}
+
+fn snapshot_impl(path: &Path, include_dirs: bool) -> Vec<(PathBuf, Vec<u8>)> {
     let mut entries = Vec::new();
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return entries;
@@ -105,13 +121,16 @@ pub fn snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         return entries;
     }
     if metadata.is_dir() {
+        if include_dirs {
+            entries.push((path.to_path_buf(), Vec::new()));
+        }
         let Ok(children) = std::fs::read_dir(path) else {
             return entries;
         };
         let mut children: Vec<_> = children.flatten().collect();
         children.sort_by_key(|entry| entry.path());
         for child in children {
-            entries.extend(snapshot(&child.path()));
+            entries.extend(snapshot_impl(&child.path(), include_dirs));
         }
         return entries;
     }

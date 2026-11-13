@@ -136,6 +136,85 @@ fn find_subscription<'a>(status: &'a Value, subscription_id: &str) -> &'a Value 
         .expect("subscription stays observable")
 }
 
+fn reconcile_periodic_goal(
+    fixture: &Fixture,
+    pane: &Pane,
+    goal_id: &str,
+    owner: &str,
+    trigger_ms: i64,
+    interval_ms: i64,
+    repeat: u32,
+) -> Value {
+    let trigger_ms = trigger_ms.to_string();
+    let interval_ms = interval_ms.to_string();
+    let repeat = repeat.to_string();
+    fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_id,
+            "--owner",
+            owner,
+            "--desired",
+            "active",
+            "--at-ms",
+            &trigger_ms,
+            "--every-ms",
+            &interval_ms,
+            "--repeat",
+            &repeat,
+            "--ttl-seconds",
+            "300",
+        ],
+        Some(pane),
+    )
+}
+
+fn wait_for_deadline_inbox(
+    fixture: &Fixture,
+    pane: &Pane,
+    goal_id: &str,
+    excluded: Option<&str>,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let inbox = fixture.run_ok(&["inbox"], Some(pane));
+        if let Some(id) = deadline_message_ids(&inbox, goal_id)
+            .into_iter()
+            .find(|id| excluded != Some(id.as_str()))
+        {
+            return id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a public goal occurrence: {inbox}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_until_epoch_ms(target_ms: i64) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while now_epoch_ms() < target_ms {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for epoch timestamp {target_ms}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn receipt_millis(receipt: &Value) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(
+        receipt["fetched_at"]
+            .as_str()
+            .expect("receive receipt names fetched_at"),
+    )
+    .expect("receive fetched_at is RFC3339")
+    .timestamp_millis()
+}
+
 #[test]
 fn explicit_periodic_goal_deadline_consumes_three_restarts_and_stops_on_end() {
     let (mut fixture, pane) = single_pane_fixture("goal-periodic-blackbox");
@@ -354,5 +433,218 @@ fn undeclared_goal_deadline_stays_one_shot() {
     assert_eq!(
         occurrence["status_reason"], "goal-deadline-one-shot-delivered",
         "a one-shot goal must record its single-delivery reason: {occurrence}"
+    );
+}
+
+#[test]
+fn overdue_periodic_goal_recv_repairs_cadence_without_reset() {
+    let (fixture, pane) = single_pane_fixture("goal-cadence-repair-blackbox");
+    let registered = fixture.registered_context(&pane, true);
+    let owner = registered["name"]
+        .as_str()
+        .expect("context receipt names the occupancy")
+        .to_owned();
+
+    let goal_id = "goal-cadence-repair-blackbox";
+    let interval_ms = 8_000i64;
+    let repeat = 5u32;
+    let trigger_ms = now_epoch_ms() + interval_ms;
+    let armed = reconcile_periodic_goal(
+        &fixture,
+        &pane,
+        goal_id,
+        &owner,
+        trigger_ms,
+        interval_ms,
+        repeat,
+    );
+    assert_eq!(armed["status"], "armed", "{armed}");
+    let subscription_id = armed["subscription"]["id"]
+        .as_str()
+        .expect("armed occurrence names its subscription")
+        .to_owned();
+    let initial_subscription = armed["subscription"].clone();
+
+    let first_message_id = wait_for_deadline_inbox(&fixture, &pane, goal_id, None);
+    let before_reconcile = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let before_subscription = find_subscription(&before_reconcile, &subscription_id).clone();
+    let before_pending = fixture.run_ok(&["inbox"], Some(&pane));
+    assert_eq!(
+        deadline_message_ids(&before_pending, goal_id),
+        vec![first_message_id.clone()],
+        "the genuine pending occurrence must remain observable before reconcile"
+    );
+
+    let reconciled = reconcile_periodic_goal(
+        &fixture,
+        &pane,
+        goal_id,
+        &owner,
+        trigger_ms,
+        interval_ms,
+        repeat,
+    );
+    assert_eq!(
+        reconciled["subscription"]["id"], subscription_id,
+        "{reconciled}"
+    );
+    let after_reconcile = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let reconciled_subscription = find_subscription(&after_reconcile, &subscription_id);
+    for field in [
+        "id",
+        "worker_id",
+        "event",
+        "subject",
+        "target",
+        "method",
+        "trigger_ms",
+        "trigger_times_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+        "created_ms",
+        "status",
+        "periodic_declared",
+        "goal_content",
+    ] {
+        assert_eq!(
+            reconciled_subscription[field], before_subscription[field],
+            "same-interval reconcile must preserve {field}: {reconciled_subscription}"
+        );
+    }
+    assert_eq!(
+        deadline_message_ids(&fixture.run_ok(&["inbox"], Some(&pane)), goal_id),
+        vec![first_message_id.clone()],
+        "same-interval reconcile must preserve the original pending message"
+    );
+
+    wait_until_epoch_ms(trigger_ms + interval_ms.saturating_mul(2) + 100);
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&pane));
+    assert_eq!(received["replayed"], false, "{received}");
+    assert_eq!(received["count"], 1, "{received}");
+    assert_eq!(
+        deadline_message_ids(&received, goal_id),
+        vec![first_message_id.clone()],
+        "{received}"
+    );
+    let receive_id = received["receive_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .expect("ordinary recv returns its generated receive id")
+        .to_owned();
+    let consumed_ms = receipt_millis(&received);
+    let first_message = fixture.run_ok(&["msg", &first_message_id], Some(&pane));
+    assert_eq!(first_message["state"], "read", "{first_message}");
+
+    let after = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let after_subscription = find_subscription(&after, &subscription_id);
+    let expected_trigger = consumed_ms.saturating_add(interval_ms);
+    assert_eq!(
+        after_subscription["trigger_ms"], expected_trigger,
+        "overdue consumption must use the durable receive time: {after}"
+    );
+    assert_eq!(
+        after_subscription["fired_count"],
+        before_subscription["fired_count"].as_u64().unwrap() + 1,
+        "{after_subscription}"
+    );
+    for field in [
+        "id",
+        "worker_id",
+        "event",
+        "subject",
+        "target",
+        "method",
+        "interval_ms",
+        "repeat_count",
+        "expires_ms",
+        "created_ms",
+        "status",
+        "periodic_declared",
+        "goal_content",
+    ] {
+        assert_eq!(
+            after_subscription[field], before_subscription[field],
+            "consumption must preserve {field}: {after_subscription}"
+        );
+    }
+
+    let replayed = fixture.run_ok(
+        &["recv", "--timeout", "0", "--receive-id", &receive_id],
+        Some(&pane),
+    );
+    assert_eq!(replayed["replayed"], true, "{replayed}");
+    assert_eq!(replayed["messages"], received["messages"], "{replayed}");
+    let after_replay = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let replayed_subscription = find_subscription(&after_replay, &subscription_id);
+    assert_eq!(
+        replayed_subscription["fired_count"], after_subscription["fired_count"],
+        "receive-id replay must not consume again: {after_replay}"
+    );
+    assert_eq!(
+        replayed_subscription["trigger_ms"], expected_trigger,
+        "receive-id replay must not move the cursor: {after_replay}"
+    );
+
+    let reconciled_after = reconcile_periodic_goal(
+        &fixture,
+        &pane,
+        goal_id,
+        &owner,
+        trigger_ms,
+        interval_ms,
+        repeat,
+    );
+    assert_eq!(
+        reconciled_after["subscription"]["trigger_ms"], expected_trigger,
+        "same-interval reconcile must preserve the repaired cursor: {reconciled_after}"
+    );
+    let immediate = fixture.run_ok(&["recv", "--timeout", "0"], Some(&pane));
+    assert!(
+        deadline_message_ids(&immediate, goal_id).is_empty(),
+        "the repaired trigger must prevent an immediate catch-up occurrence: {immediate}"
+    );
+
+    wait_until_epoch_ms(expected_trigger + 100);
+    let second_message_id =
+        wait_for_deadline_inbox(&fixture, &pane, goal_id, Some(&first_message_id));
+    let before_second = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let before_second_subscription = find_subscription(&before_second, &subscription_id);
+    assert_eq!(
+        before_second_subscription["trigger_ms"], expected_trigger,
+        "{before_second_subscription}"
+    );
+
+    let second_received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&pane));
+    assert_eq!(second_received["count"], 1, "{second_received}");
+    assert_eq!(
+        deadline_message_ids(&second_received, goal_id),
+        vec![second_message_id],
+        "{second_received}"
+    );
+    let after_second = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let after_second_subscription = find_subscription(&after_second, &subscription_id);
+    assert_eq!(
+        after_second_subscription["trigger_ms"],
+        expected_trigger + interval_ms,
+        "a future nominal trigger must remain unchanged: {after_second_subscription}"
+    );
+    assert_eq!(
+        after_second_subscription["fired_count"],
+        before_second_subscription["fired_count"].as_u64().unwrap() + 1,
+        "{after_second_subscription}"
+    );
+    assert_eq!(
+        after_second_subscription["interval_ms"], initial_subscription["interval_ms"],
+        "{after_second_subscription}"
+    );
+    assert_eq!(
+        after_second_subscription["repeat_count"], initial_subscription["repeat_count"],
+        "{after_second_subscription}"
+    );
+    assert_eq!(
+        after_second_subscription["expires_ms"], initial_subscription["expires_ms"],
+        "{after_second_subscription}"
     );
 }

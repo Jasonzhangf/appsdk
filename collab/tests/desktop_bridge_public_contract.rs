@@ -245,6 +245,17 @@ fn desktop_command(fixture: &Fixture, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn desktop_command_at(fixture: &Fixture, cwd: &Path, args: &[&str]) -> Output {
+    fixture
+        .configured_command(args, None)
+        .current_dir(cwd)
+        .env("CODEX_SESSION_ID", "desktop-session")
+        .env("CODEX_THREAD_ID", "desktop-thread")
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+        .output()
+        .unwrap()
+}
+
 fn publish_capability(fixture: &Fixture, bridge: &DesktopBridgeFixture) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let cwd = fixture.root.canonicalize().unwrap();
@@ -1215,5 +1226,612 @@ fn anonymous_cli_send_to_directory_peer_delivers_precise_thread_to_native_bridge
     assert_eq!(
         current["workers"], registered_workers,
         "anonymous send must not register a new sender identity"
+    );
+}
+
+#[test]
+fn desktop_same_runtime_different_binding_authorized_restore_reaches_registration_red() {
+    let fixture = Fixture::without_tmux("desktop-runtime-binding-red");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+
+    let initial = desktop_command(&fixture, &["context", "--work-roles", "architect"]);
+    assert!(
+        initial.status.success(),
+        "initial Desktop registration setup failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let initial_snapshot = &initial["result"]["snapshot"];
+    assert_eq!(
+        initial_snapshot["identity"]["role"], "worker",
+        "the fixture must start from an ordinary peer"
+    );
+    assert_eq!(
+        initial_snapshot["role_brief"]["derivation"]["kind"], "peer",
+        "the fixture must start from peer authority"
+    );
+    assert_eq!(
+        initial_snapshot["work_roles"],
+        json!(["architect"]),
+        "the initial public Desktop request must persist architect"
+    );
+    let old_worker = initial_snapshot["identity"]["worker_id"]
+        .as_str()
+        .expect("initial Desktop registration has a worker id")
+        .to_owned();
+    let old_binding = initial_snapshot["binding"]["binding_id"]
+        .as_str()
+        .expect("initial Desktop registration has a binding id")
+        .to_owned();
+    let old_runtime = initial_snapshot["binding"]["runtime_id"]
+        .as_str()
+        .expect("initial Desktop registration has a runtime id")
+        .to_owned();
+    let old_name = initial_snapshot["identity"]["display_name"]
+        .as_str()
+        .expect("initial Desktop registration has a stable name")
+        .to_owned();
+
+    let task_id = "desktop-runtime-binding-red-work";
+    let task = desktop_command(
+        &fixture,
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "retain this work across the authorized restore",
+        ],
+    );
+    assert!(
+        task.status.success(),
+        "public task setup failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&task.stdout),
+        String::from_utf8_lossy(&task.stderr)
+    );
+    let task: Value = serde_json::from_slice(&task.stdout).unwrap();
+    assert_eq!(task["task"], task_id, "{task}");
+    assert_eq!(task["owner"], old_worker, "{task}");
+
+    let closed = desktop_command(&fixture, &["worker", "close", "--self"]);
+    assert!(
+        closed.status.success(),
+        "public self-unregister setup failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&closed.stdout),
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    let closed: Value = serde_json::from_slice(&closed.stdout).unwrap();
+    assert_eq!(
+        closed["result"]["outcome"], "complete",
+        "self-unregister must complete before the restore attempt"
+    );
+    assert!(
+        fixture.current_state()["workers"][old_worker.as_str()].is_null(),
+        "self-unregister must retire only the old worker before the RED attempt"
+    );
+    let state_after_close = fixture.current_state();
+    let old_ledger = state_after_close["global"]["projects"]
+        .as_object()
+        .and_then(|projects| projects.values().next())
+        .and_then(|project| project["runtime_bindings"].as_object())
+        .and_then(|bindings| bindings.get(&old_binding))
+        .expect("self-unregister keeps the retired execution ledger");
+    assert_eq!(
+        old_ledger["runtime_id"], old_runtime,
+        "the retired binding must retain the original runtime identity"
+    );
+    assert!(
+        old_ledger["native_thread_id"].is_null(),
+        "self-unregister must clear the retired native thread route"
+    );
+    let old_receipts = state_after_close["global"]["command_receipts"].clone();
+
+    let approval = format!(
+        r#"{{"action":"restore_name","requested_name":"{}","authorization":"fixture user authorizes current same-runtime restore","replace_confirmed":true}}"#,
+        old_name
+    );
+    let restored = desktop_command(
+        &fixture,
+        &[
+            "context",
+            "--approve-grant",
+            &approval,
+            "--work-roles",
+            "architect",
+        ],
+    );
+    assert!(
+        restored.status.success(),
+        "authorized same-runtime Desktop restore must register the current peer and role: stdout={} stderr={}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let restored_worker = restored["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("authorized restore has a worker id")
+        .to_owned();
+    let restored_binding = restored["result"]["snapshot"]["binding"]["binding_id"]
+        .as_str()
+        .expect("authorized restore has a binding id")
+        .to_owned();
+    assert_eq!(
+        restored["result"]["snapshot"]["identity"]["role"], "worker",
+        "authorized restore must not inherit master authority"
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["role_brief"]["derivation"]["kind"], "peer",
+        "authorized restore must remain a peer"
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["work_roles"],
+        json!(["architect"]),
+        "authorized restore must retain the requested architect role"
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["identity"]["display_name"], old_name,
+        "authorized restore must retain the explicitly requested stable name"
+    );
+    assert_ne!(
+        restored["result"]["snapshot"]["binding"]["binding_id"], old_binding,
+        "the public self-unregister path must create a distinct current binding"
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["binding"]["runtime_id"], old_runtime,
+        "the same Desktop session/thread must retain its runtime identity"
+    );
+    let state_after_restore = fixture.current_state();
+    let runtime_bindings = state_after_restore["global"]["projects"]
+        .as_object()
+        .and_then(|projects| projects.values().next())
+        .and_then(|project| project["runtime_bindings"].as_object())
+        .expect("restored project has a runtime ledger");
+    assert_eq!(
+        runtime_bindings.len(),
+        1,
+        "the authorized same-runtime replacement must release the retired binding"
+    );
+    assert!(
+        runtime_bindings.contains_key(&restored_binding),
+        "the restored binding must be the one current execution"
+    );
+    let restored_receipts = &state_after_restore["global"]["command_receipts"];
+    for (receipt_id, receipt) in old_receipts.as_object().expect("close leaves receipts") {
+        assert_eq!(
+            restored_receipts.get(receipt_id),
+            Some(receipt),
+            "authorized restore must preserve receipt {receipt_id}"
+        );
+    }
+    let retained_task = desktop_command(&fixture, &["task", "status", task_id]);
+    assert!(
+        retained_task.status.success(),
+        "the authorized restore must not lose existing work: stdout={} stderr={}",
+        String::from_utf8_lossy(&retained_task.stdout),
+        String::from_utf8_lossy(&retained_task.stderr)
+    );
+    let retained_task: Value = serde_json::from_slice(&retained_task.stdout).unwrap();
+    assert_eq!(retained_task["id"], task_id, "{retained_task}");
+    assert_eq!(retained_task["status"], "working", "{retained_task}");
+    assert_eq!(
+        retained_task["next_step"], "retain this work across the authorized restore",
+        "{retained_task}"
+    );
+    let repeated = desktop_command(&fixture, &["context"]);
+    assert!(
+        repeated.status.success(),
+        "ordinary repeat context must be idempotent: stdout={} stderr={}",
+        String::from_utf8_lossy(&repeated.stdout),
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(
+        repeated["result"]["snapshot"]["identity"]["worker_id"], restored_worker,
+        "repeat context must not register a second carrier"
+    );
+    assert_eq!(
+        repeated["result"]["snapshot"]["binding"]["binding_id"], restored_binding,
+        "repeat context must not create another binding"
+    );
+    assert_eq!(
+        repeated["result"]["snapshot"]["identity"]["display_name"], old_name,
+        "repeat context must retain the restored name without repeating the approval"
+    );
+    assert_eq!(
+        repeated["result"]["snapshot"]["work_roles"],
+        json!(["architect"]),
+        "repeat context must retain the restored architect role without repeating the request"
+    );
+}
+
+#[test]
+fn desktop_same_runtime_explicit_different_name_ignores_retired_history() {
+    let fixture = Fixture::without_tmux("desktop-runtime-binding-new-name");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+
+    let initial = desktop_command(&fixture, &["context", "--work-roles", "architect"]);
+    assert!(
+        initial.status.success(),
+        "initial Desktop registration setup failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let old_worker = initial["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("initial Desktop registration has a worker id")
+        .to_owned();
+    let old_binding = initial["result"]["snapshot"]["binding"]["binding_id"]
+        .as_str()
+        .expect("initial Desktop registration has a binding id")
+        .to_owned();
+    let old_runtime = initial["result"]["snapshot"]["binding"]["runtime_id"]
+        .as_str()
+        .expect("initial Desktop registration has a runtime id")
+        .to_owned();
+
+    let task_id = "desktop-runtime-binding-new-name-work";
+    let task = desktop_command(
+        &fixture,
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "remain owned by the retired historical worker",
+        ],
+    );
+    assert!(task.status.success());
+    let task: Value = serde_json::from_slice(&task.stdout).unwrap();
+    assert_eq!(task["owner"], old_worker, "{task}");
+
+    let closed = desktop_command(&fixture, &["worker", "close", "--self"]);
+    assert!(closed.status.success());
+    let before_restore = fixture.current_state();
+    let old_receipts = before_restore["global"]["command_receipts"].clone();
+
+    let approval = r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture user explicitly registers Bob on the current Desktop runtime","replace_confirmed":true}"#;
+    let restored = desktop_command(
+        &fixture,
+        &[
+            "context",
+            "--approve-grant",
+            approval,
+            "--work-roles",
+            "architect",
+        ],
+    );
+    assert!(
+        restored.status.success(),
+        "explicit Bob registration must ignore the retired Alice ledger: stdout={} stderr={}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let restored_snapshot = &restored["result"]["snapshot"];
+    let restored_worker = restored_snapshot["identity"]["worker_id"]
+        .as_str()
+        .expect("Bob registration has a worker id")
+        .to_owned();
+    let restored_binding = restored_snapshot["binding"]["binding_id"]
+        .as_str()
+        .expect("Bob registration has a binding id")
+        .to_owned();
+    assert_ne!(restored_worker, old_worker);
+    assert_eq!(restored_snapshot["identity"]["display_name"], "Bob");
+    assert_eq!(restored_snapshot["identity"]["role"], "worker");
+    assert_eq!(
+        restored_snapshot["role_brief"]["derivation"]["kind"],
+        "peer"
+    );
+    assert_eq!(restored_snapshot["work_roles"], json!(["architect"]));
+    assert_ne!(restored_binding, old_binding);
+    assert_eq!(restored_snapshot["binding"]["runtime_id"], old_runtime);
+
+    let after_restore = fixture.current_state();
+    let runtime_bindings = after_restore["global"]["projects"]
+        .as_object()
+        .and_then(|projects| projects.values().next())
+        .and_then(|project| project["runtime_bindings"].as_object())
+        .expect("Bob registration has a runtime ledger");
+    assert_eq!(runtime_bindings.len(), 1);
+    assert!(runtime_bindings.contains_key(&restored_binding));
+    let retained = &after_restore["tasks"][task_id];
+    assert_eq!(retained["owner"], old_worker, "{retained}");
+    assert_eq!(retained["status"], "working", "{retained}");
+    let restored_receipts = &after_restore["global"]["command_receipts"];
+    for (receipt_id, receipt) in old_receipts.as_object().expect("close leaves receipts") {
+        assert_eq!(
+            restored_receipts.get(receipt_id),
+            Some(receipt),
+            "Bob registration must preserve historical receipt {receipt_id}"
+        );
+    }
+}
+
+#[test]
+fn desktop_same_runtime_explicit_different_name_replaces_active_holder() {
+    let fixture = Fixture::without_tmux("desktop-runtime-binding-active-name");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+
+    let initial = desktop_command(&fixture, &["context", "--work-roles", "architect"]);
+    assert!(
+        initial.status.success(),
+        "initial Desktop registration setup failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let initial_snapshot = &initial["result"]["snapshot"];
+    let old_worker = initial_snapshot["identity"]["worker_id"]
+        .as_str()
+        .expect("initial Desktop registration has a worker id")
+        .to_owned();
+    let old_runtime = initial_snapshot["binding"]["runtime_id"]
+        .as_str()
+        .expect("initial Desktop registration has a runtime id")
+        .to_owned();
+    let old_name = initial_snapshot["identity"]["display_name"]
+        .as_str()
+        .expect("initial Desktop registration has a stable name")
+        .to_owned();
+    assert_ne!(old_name, "Bob");
+
+    let task_id = "desktop-runtime-binding-active-name-work";
+    let task = desktop_command(
+        &fixture,
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "remain with the replaced historical worker",
+        ],
+    );
+    assert!(task.status.success());
+    let task: Value = serde_json::from_slice(&task.stdout).unwrap();
+    assert_eq!(task["owner"], old_worker, "{task}");
+
+    let before_restore = fixture.current_state();
+    let old_receipts = before_restore["global"]["command_receipts"].clone();
+    assert!(
+        !before_restore["workers"][old_worker.as_str()].is_null(),
+        "the explicitly replaced holder must remain present before Bob registers"
+    );
+
+    let approval = format!(
+        r#"{{"action":"restore_name","requested_name":"Bob","authorization":"fixture user explicitly replaces the active Desktop name {} with Bob","replace_confirmed":true}}"#,
+        old_name
+    );
+    let restored = desktop_command(
+        &fixture,
+        &[
+            "context",
+            "--approve-grant",
+            &approval,
+            "--work-roles",
+            "architect",
+        ],
+    );
+    assert!(
+        restored.status.success(),
+        "explicit Bob registration must replace the active same-runtime holder: stdout={} stderr={}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let restored_snapshot = &restored["result"]["snapshot"];
+    let restored_binding = restored_snapshot["binding"]["binding_id"]
+        .as_str()
+        .expect("Bob registration has a binding id")
+        .to_owned();
+    assert_eq!(restored_snapshot["identity"]["display_name"], "Bob");
+    assert_eq!(restored_snapshot["identity"]["role"], "worker");
+    assert_eq!(
+        restored_snapshot["role_brief"]["derivation"]["kind"],
+        "peer"
+    );
+    assert_eq!(restored_snapshot["work_roles"], json!(["architect"]));
+    assert_eq!(restored_snapshot["binding"]["runtime_id"], old_runtime);
+
+    let after_restore = fixture.current_state();
+    let runtime_bindings = after_restore["global"]["projects"]
+        .as_object()
+        .and_then(|projects| projects.values().next())
+        .and_then(|project| project["runtime_bindings"].as_object())
+        .expect("Bob registration has a runtime ledger");
+    assert_eq!(runtime_bindings.len(), 1);
+    assert!(runtime_bindings.contains_key(&restored_binding));
+    assert!(
+        !after_restore["workers"][old_worker.as_str()].is_null(),
+        "replacing the execution binding must retain the old worker record"
+    );
+    let retained = &after_restore["tasks"][task_id];
+    assert_eq!(retained["owner"], old_worker, "{retained}");
+    assert_eq!(retained["status"], "working", "{retained}");
+    let restored_receipts = &after_restore["global"]["command_receipts"];
+    for (receipt_id, receipt) in old_receipts.as_object().expect("setup leaves receipts") {
+        assert_eq!(
+            restored_receipts.get(receipt_id),
+            Some(receipt),
+            "active-holder replacement must preserve historical receipt {receipt_id}"
+        );
+    }
+
+    let repeated = desktop_command(&fixture, &["context"]);
+    assert!(repeated.status.success());
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(
+        repeated["result"]["snapshot"]["identity"]["display_name"],
+        "Bob"
+    );
+    assert_eq!(
+        repeated["result"]["snapshot"]["binding"]["binding_id"],
+        restored_binding
+    );
+}
+
+#[test]
+fn desktop_same_runtime_ordinary_context_replaces_retired_binding_without_approval() {
+    let fixture = Fixture::without_tmux("desktop-runtime-binding-negative");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+
+    let initial = desktop_command(&fixture, &["context", "--work-roles", "architect"]);
+    assert!(
+        initial.status.success(),
+        "initial Desktop registration setup failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let old_worker = initial["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .expect("initial Desktop registration has a worker id")
+        .to_owned();
+    let old_binding = initial["result"]["snapshot"]["binding"]["binding_id"]
+        .as_str()
+        .expect("initial Desktop registration has a binding id")
+        .to_owned();
+    let old_runtime = initial["result"]["snapshot"]["binding"]["runtime_id"]
+        .as_str()
+        .expect("initial Desktop registration has a runtime id")
+        .to_owned();
+
+    let task_id = "desktop-runtime-binding-negative-work";
+    let task = desktop_command(
+        &fixture,
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "remain owned after an unauthorized restore attempt",
+        ],
+    );
+    assert!(task.status.success());
+    let task: Value = serde_json::from_slice(&task.stdout).unwrap();
+    assert_eq!(task["owner"], old_worker, "{task}");
+
+    let closed = desktop_command(&fixture, &["worker", "close", "--self"]);
+    assert!(closed.status.success());
+    let before_restore = fixture.current_state();
+    let old_receipts = before_restore["global"]["command_receipts"].clone();
+
+    let registered = desktop_command(&fixture, &["context", "--work-roles", "architect"]);
+    assert!(
+        registered.status.success(),
+        "ordinary same-session context must replace a retired same-runtime ledger row: stdout={} stderr={}",
+        String::from_utf8_lossy(&registered.stdout),
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
+    let registered_snapshot = &registered["result"]["snapshot"];
+    let registered_worker = registered_snapshot["identity"]["worker_id"]
+        .as_str()
+        .expect("ordinary recovery has a worker id")
+        .to_owned();
+    let registered_binding = registered_snapshot["binding"]["binding_id"]
+        .as_str()
+        .expect("ordinary recovery has a binding id")
+        .to_owned();
+    assert_ne!(registered_worker, old_worker);
+    assert!(
+        registered_snapshot["identity"]["display_name"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty()),
+        "ordinary recovery must publish a valid current name: {registered_snapshot}"
+    );
+    assert_eq!(registered_snapshot["identity"]["role"], "worker");
+    assert_eq!(
+        registered_snapshot["role_brief"]["derivation"]["kind"],
+        "peer"
+    );
+    assert_eq!(registered_snapshot["work_roles"], json!(["architect"]));
+    assert_ne!(registered_binding, old_binding);
+    assert_eq!(registered_snapshot["binding"]["runtime_id"], old_runtime);
+
+    let state = fixture.current_state();
+    let runtime_bindings = state["global"]["projects"]
+        .as_object()
+        .and_then(|projects| projects.values().next())
+        .and_then(|project| project["runtime_bindings"].as_object())
+        .expect("ordinary recovery has a runtime ledger");
+    assert_eq!(runtime_bindings.len(), 1);
+    assert!(runtime_bindings.contains_key(&registered_binding));
+    let retained = &state["tasks"][task_id];
+    assert_eq!(retained["owner"], old_worker, "{retained}");
+    assert_eq!(retained["status"], "working", "{retained}");
+    let registered_receipts = &state["global"]["command_receipts"];
+    for (receipt_id, receipt) in old_receipts.as_object().expect("close leaves receipts") {
+        assert_eq!(
+            registered_receipts.get(receipt_id),
+            Some(receipt),
+            "ordinary recovery must preserve historical receipt {receipt_id}"
+        );
+    }
+}
+
+#[test]
+fn desktop_same_runtime_authorized_restore_does_not_cross_project_scope() {
+    let fixture = Fixture::without_tmux("desktop-runtime-binding-cross-project");
+    let runtime = fixture.host_state.join("runtime/desktop");
+    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
+    publish_capability(&fixture, &bridge);
+
+    let initial = desktop_command(&fixture, &["context", "--work-roles", "architect"]);
+    assert!(initial.status.success());
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let old_binding = initial["result"]["snapshot"]["binding"]["binding_id"]
+        .as_str()
+        .expect("initial Desktop registration has a binding id")
+        .to_owned();
+    let old_name = initial["result"]["snapshot"]["identity"]["display_name"]
+        .as_str()
+        .expect("initial Desktop registration has a stable name")
+        .to_owned();
+
+    let other_project = fixture.root.join("other-project");
+    std::fs::create_dir_all(&other_project).unwrap();
+    seed_baseline(&other_project);
+    let approval = format!(
+        r#"{{"action":"restore_name","requested_name":"{}","authorization":"fixture user authorizes only the current project","replace_confirmed":true}}"#,
+        old_name
+    );
+    let denied = desktop_command_at(
+        &fixture,
+        &other_project,
+        &[
+            "context",
+            "--approve-grant",
+            &approval,
+            "--work-roles",
+            "architect",
+        ],
+    );
+    assert!(
+        !denied.status.success(),
+        "an explicitly authorized restore in another project must not cross the project scope"
+    );
+
+    let state = fixture.current_state();
+    let canonical_root = fixture.root.canonicalize().unwrap();
+    let project = state["global"]["projects"]
+        .as_object()
+        .and_then(|projects| projects.get(canonical_root.to_str().unwrap()))
+        .expect("the original project remains registered");
+    assert!(
+        project["runtime_bindings"]
+            .as_object()
+            .is_some_and(|bindings| bindings.contains_key(&old_binding)),
+        "the cross-project attempt must not release the original Desktop binding"
     );
 }

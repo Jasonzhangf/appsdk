@@ -235,7 +235,7 @@ impl State {
                 }
                 return;
             };
-            let next_trigger = subscription
+            let nominal_next_trigger = subscription
                 .trigger_ms
                 .map(|trigger| trigger.saturating_add(interval))
                 .unwrap_or_else(|| {
@@ -243,6 +243,10 @@ impl State {
                         .created_ms
                         .saturating_add(interval.saturating_mul(subscription.fired_count as i64))
                 });
+            let next_trigger = consumed_ms
+                .filter(|consumed| nominal_next_trigger <= *consumed)
+                .map(|consumed| consumed.saturating_add(interval))
+                .unwrap_or(nominal_next_trigger);
             subscription.trigger_ms = Some(next_trigger);
             subscription.status = "armed".into();
             subscription.status_reason = None;
@@ -279,6 +283,53 @@ impl State {
         }
         if let Some(consumed_ms) = consumed_ms {
             subscription.updated_ms = consumed_ms;
+        }
+    }
+
+    fn mark_read_and_consume(&mut self, ids: &[String], received_ms: Option<i64>) {
+        for id in ids {
+            if let Some(message) = self.msgs.get_mut(id) {
+                message.state = "read".into();
+            }
+            let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
+                continue;
+            };
+            let Some(subscription) = self.notification_subscriptions.get(&subscription_id) else {
+                continue;
+            };
+            let consumes_on_read = subscription.event != "direct-message"
+                || subscription.trigger_ms.is_some()
+                || !subscription.trigger_times_ms.is_empty()
+                || subscription.interval_ms.is_some();
+            if !consumes_on_read {
+                continue;
+            }
+            let fired_count = subscription.fired_count;
+            let read_count = self
+                .wake_bindings
+                .iter()
+                .filter(|(_, bound)| *bound == &subscription_id)
+                .filter(|(message_id, _)| {
+                    self.msgs
+                        .get(*message_id)
+                        .is_some_and(|message| message.state == "read")
+                })
+                .count() as u32;
+            if read_count <= fired_count {
+                continue;
+            }
+            let consumed_ms = if subscription.event == "master-idle" {
+                self.msgs.get(id).and_then(|message| {
+                    [message.last_wake_attempt_ms, message.created_ms]
+                        .into_iter()
+                        .find(|timestamp| *timestamp > 0)
+                })
+            } else if is_goal_deadline(subscription) && subscription.periodic_declared {
+                received_ms
+            } else {
+                None
+            };
+            self.consume_notification(&subscription_id, consumed_ms);
         }
     }
 
@@ -957,7 +1008,7 @@ impl State {
                 self.receive_receipts
                     .insert(receipt.receive_id.clone(), receipt.clone());
                 self.apply_checked(&Event::Delivered { ids: ids.clone() })?;
-                self.apply_checked(&Event::Acked { ids: ids.clone() })?;
+                self.mark_read_and_consume(ids, Some(receipt.received_ms));
             }
             Event::Delivered { ids } => {
                 for id in ids {
@@ -990,52 +1041,7 @@ impl State {
                 }
             }
             Event::Acked { ids } => {
-                for id in ids {
-                    if let Some(m) = self.msgs.get_mut(id) {
-                        m.state = "read".into();
-                    }
-                    let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
-                        continue;
-                    };
-                    let Some(subscription) = self.notification_subscriptions.get(&subscription_id)
-                    else {
-                        continue;
-                    };
-                    let consumes_on_read = subscription.event != "direct-message"
-                        || subscription.trigger_ms.is_some()
-                        || !subscription.trigger_times_ms.is_empty()
-                        || subscription.interval_ms.is_some();
-                    if !consumes_on_read {
-                        continue;
-                    }
-                    let fired_count = subscription.fired_count;
-                    let read_count = self
-                        .wake_bindings
-                        .iter()
-                        .filter(|(_, bound)| *bound == &subscription_id)
-                        .filter(|(message_id, _)| {
-                            self.msgs
-                                .get(*message_id)
-                                .is_some_and(|message| message.state == "read")
-                        })
-                        .count() as u32;
-                    // recv records Delivered + Acked without a separate
-                    // NotificationConsumed event. Compare durable read
-                    // occurrences with the cursor so timer delivery, which
-                    // already records NotificationConsumed, remains idempotent.
-                    if read_count > fired_count {
-                        let consumed_ms = if subscription.event == "master-idle" {
-                            self.msgs.get(id).and_then(|message| {
-                                [message.last_wake_attempt_ms, message.created_ms]
-                                    .into_iter()
-                                    .find(|timestamp| *timestamp > 0)
-                            })
-                        } else {
-                            None
-                        };
-                        self.consume_notification(&subscription_id, consumed_ms);
-                    }
-                }
+                self.mark_read_and_consume(ids, None);
             }
             Event::Superseded { ids } => {
                 for id in ids {
@@ -1317,6 +1323,13 @@ impl State {
                 self.apply_global_event(&GlobalEvent::RuntimeBound {
                     binding: binding.clone(),
                 })?;
+            }
+            Event::GlobalRuntimeExecutionReleased { binding } => {
+                let mut next = self.global.clone();
+                next.release_runtime_execution(binding)
+                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                next.set_counters(self.sequence, self.revision);
+                self.global = next;
             }
             Event::GlobalMasterGranted { grant } => {
                 self.apply_global_event(&GlobalEvent::MasterGranted {

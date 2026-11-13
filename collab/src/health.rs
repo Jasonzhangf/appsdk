@@ -57,7 +57,6 @@ impl std::error::Error for HealthError {}
 
 pub(crate) fn status_check(local_only: bool) -> anyhow::Result<()> {
     let deadline = Instant::now() + CHECK_DEADLINE;
-    let scope = Scope::resolve()?;
     local_pair_check(&deadline)?;
 
     if local_only {
@@ -77,6 +76,7 @@ pub(crate) fn status_check(local_only: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let scope = Scope::resolve()?;
     let host_paths = HostPaths::resolve()?;
     let socket = host_paths.sock_path();
     let ping = ping_with_deadline(&socket, &deadline)?;

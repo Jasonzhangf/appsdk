@@ -143,6 +143,65 @@ fn local_check_rejects_malformed_frame() {
 }
 
 #[test]
+fn local_check_does_not_require_registered_route() {
+    let _test = test_guard();
+    let root = temp_root("local-route-free");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let state_root = root.join("host-state");
+    prepare_check_state(&state_root);
+    let cli = copy_pair(&root);
+    let listener = UnixListener::bind(state_root.join("server.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let state_before = snapshot_with_dirs(&state_root);
+    let project_before = snapshot_with_dirs(&project_root);
+
+    let output = run_check(&cli, &project_root, &state_root, true);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["outcome"], "success", "{value}");
+    assert_eq!(value["checks"]["local"]["status"], "passed", "{value}");
+    assert_eq!(value["checks"]["local"]["mcp_version"], VERSION, "{value}");
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "status --check --local probed the controlled daemon listener"
+    );
+    assert_eq!(
+        snapshot_with_dirs(&state_root),
+        state_before,
+        "status --check --local mutated host state"
+    );
+    assert_eq!(
+        snapshot_with_dirs(&project_root),
+        project_before,
+        "status --check --local created project control state"
+    );
+
+    let output = run_check(&cli, &project_root, &state_root, false);
+    assert_ne!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(
+        text(&output).contains("no registered Collab route contains cwd"),
+        "{}",
+        text(&output)
+    );
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "route-free status --check probed the controlled daemon listener"
+    );
+    assert_eq!(
+        snapshot_with_dirs(&state_root),
+        state_before,
+        "route-free status --check mutated host state"
+    );
+    assert_eq!(
+        snapshot_with_dirs(&project_root),
+        project_before,
+        "route-free status --check created project control state"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn full_check_rejects_wrong_daemon_version() {
     let _test = test_guard();
     let root = temp_root("daemon-version");

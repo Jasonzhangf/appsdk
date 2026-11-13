@@ -1205,7 +1205,7 @@ fn validate_wire_route_principals(
             let state = server.state.lock().unwrap();
             let Some(worker) = state.workers.get(worker_id) else {
                 return Err(format!(
-                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no resident identity",
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no registered runtime binding",
                     worker_id
                 ));
             };

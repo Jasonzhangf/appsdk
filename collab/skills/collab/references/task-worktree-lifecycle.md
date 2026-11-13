@@ -155,6 +155,34 @@ Git metadata or a local worktree when the project uses LayerFS.
 - Cancellation cannot bypass cleanup. Dirty/missing/unproven paths are never
   force-removed. Terminal state without a receipt is an audit failure.
 
+## Same-task transfer and late artifacts
+
+A formal same-task transfer is an ownership handoff, not a new task or a new
+workspace. Accepting the transfer updates the task owner only. Before writing
+in the transferred workspace, the current owner verifies the actual resource,
+its existing content, and whether an old writer is still active or unknown.
+
+- Keep the original path, branch, tracked dirty changes, untracked files,
+  evidence, and resource references. Never use reset, checkout, stash, deletion,
+  or cleanup to make the handoff look clean.
+- Record the handoff in the existing task contract: task, path, write scope,
+  old and current owners, active-writer facts, dirty content, evidence
+  location, and handoff result.
+- If a writer is active or its state is unknown, pause only the affected write.
+  Let the original executor leave that write scope normally, then confirm the
+  handoff. Do not terminate a host, old process, or old writer to obtain access.
+- A normal writer exit and handoff allow the current owner to continue writing
+  in the same task workspace while preserving the prior work.
+- A late artifact keeps its original task, stable name, session, and attempt
+  source. The old executor may send it to the current task owner through the
+  normal ordinary-message path.
+- Receiving a late artifact does not change the task owner, status, delivery,
+  or review facts. The current owner must actually read and evaluate it before
+  recording adoption, partial adoption, or rejection with the reason.
+- If an adopted artifact becomes a formal delivery, the current owner uses its
+  current identity and current attempt through the normal task delivery flow.
+  Do not relabel the old attempt as current.
+
 Delivery, review, and applicable integration are separate durable milestones.
 `task deliver` records evidence and an explicit delivery kind. Code delivery
 uses `--worktree`; the exact delivered candidate must resolve before

@@ -77,6 +77,27 @@ fn master_authority_revoke_events(state: &State, route_scope: &RouteScope) -> Ve
         .collect()
 }
 
+/// Release only the grant carried by this exact source binding and holder.
+/// The source-effect owner checks the map generation/current before calling.
+fn master_authority_revoke_binding_events(state: &State, binding: &RuntimeBinding) -> Vec<Event> {
+    state
+        .global
+        .lookup_project_for_route(&binding.route_scope())
+        .into_iter()
+        .flat_map(|project| project.master_grants.values())
+        .filter(|grant| {
+            grant.project_scope == binding.project_scope
+                && grant.app_scope_id == binding.app_scope_id
+                && grant.binding_id == binding.binding_id
+                && grant.agent_id == binding.agent_id
+        })
+        .map(|grant| Event::GlobalMasterRevoked {
+            project_scope: grant.project_scope.clone(),
+            binding_id: grant.binding_id.clone(),
+        })
+        .collect()
+}
+
 /// Finds the bindings that an incoming registration reclaims.
 ///
 /// A tmux pane has one owner, and the pane id is the whole anchor a tmux
@@ -443,7 +464,22 @@ fn base_role_brief(
 /// `base_role_brief` remains the owner of identity, authority and mandatory
 /// runtime constraints. The selected identity template adds its workflow text,
 /// then configured specialty cards are appended in the current work-role order.
-fn current_role_brief(
+fn role_brief(
+    server: &Server,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    worker_id: &str,
+) -> Result<serde_json::Value, String> {
+    role_brief_if_current(server, state, control, worker_id)?
+        .ok_or("IDENTITY_MAP_NOT_FOUND: worker has no current mapping".into())
+}
+
+/// Build a role brief only when the worker owns a current identity mapping.
+///
+/// Public status reads retain historical workers after a replacement. Those
+/// workers have no current role, but strict identity operations still use
+/// `role_brief` above and keep the original missing-mapping error.
+fn role_brief_if_current(
     server: &Server,
     state: &State,
     control: &binding_slot::BindingControlSet,
@@ -477,31 +513,6 @@ fn current_role_brief(
     let workflow = effective_workflow_templates(state, project_scope.as_str(), base_role, &roles);
     apply_workflow_template(&mut brief, &workflow, base_role == "peer" && peer_specialty);
     Ok(Some(brief))
-}
-
-fn role_brief(
-    server: &Server,
-    state: &State,
-    control: &binding_slot::BindingControlSet,
-    worker_id: &str,
-) -> Result<serde_json::Value, String> {
-    current_role_brief(server, state, control, worker_id)?
-        .ok_or_else(|| "IDENTITY_MAP_NOT_FOUND: worker has no current mapping".into())
-}
-
-fn current_role_briefs_by_worker(
-    server: &Server,
-    state: &State,
-    control: &binding_slot::BindingControlSet,
-) -> Result<std::collections::HashMap<String, Option<serde_json::Value>>, String> {
-    state
-        .workers
-        .keys()
-        .map(|worker_id| {
-            current_role_brief(server, state, control, worker_id)
-                .map(|brief| (worker_id.clone(), brief))
-        })
-        .collect()
 }
 
 fn apply_workflow_template(

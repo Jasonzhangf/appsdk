@@ -860,6 +860,7 @@
                         created_ms: now_ms(),
                         original_status: None,
                         original_owner: None,
+                        automatic_source: None,
                     }),
                     ..crate::board::BoardTaskDetails::default()
                 },

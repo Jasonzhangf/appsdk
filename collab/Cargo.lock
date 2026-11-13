@@ -280,6 +280,7 @@ dependencies = [
  "clap",
  "gix",
  "libc",
+ "percent-encoding",
  "rand",
  "serde",
  "serde_json",

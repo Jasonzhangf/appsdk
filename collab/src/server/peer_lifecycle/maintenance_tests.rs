@@ -403,6 +403,107 @@ fn open_task(owner: &str, id: &str) -> TaskRec {
     }
 }
 
+#[test]
+fn managed_visibility_read_dispatch_is_authorized_and_pure() {
+    let (mut server, root) = test_server();
+    install_appserver_status(&mut server);
+    let parent = register_appserver(&server, "parent", "thread-present");
+    let child = register_appserver(&server, "child", "thread-cold");
+    let other = register_appserver(&server, "other", "thread-unknown");
+    server.commit(&[
+        Event::GlobalCurrentThreadRouteSet {
+            binding: parent.clone(),
+        },
+        Event::GlobalCurrentThreadRouteSet { binding: child },
+        Event::GlobalCurrentThreadRouteSet { binding: other },
+    ]);
+    let mut task = open_task("child", "managed-work");
+    task.worktree_path = Some(root.join("managed-work").display().to_string());
+    task.branch = Some("codex/managed-work".into());
+    server.commit(&[
+        Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "managed-private".into(),
+                parent: "parent".into(),
+                peer: "child".into(),
+                status: "ready".into(),
+                thread_id: Some("thread-cold".into()),
+                profile: None,
+                created_ms: 1,
+                ready_deadline_ms: 0,
+                last_message: Some("private-assignment".into()),
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: None,
+                create_operation_id: None,
+                binding_id: None,
+            },
+        },
+        Event::TaskCreated { task },
+    ]);
+    let context = ProjectContext {
+        app_scope_id: parent.app_scope_id.clone(),
+        canonical_root: server.root.display().to_string(),
+        project_scope: parent.project_scope.clone(),
+        runtime_context: None,
+    };
+    let server = Arc::new(server);
+    // No scheduler runs here: every byte must remain unchanged across Read.
+    let read = |actor: &str, target: Option<&str>| {
+        let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+        let map_path = server.host_paths.state_root().join("identity-map.json");
+        let map_before = std::fs::read(&map_path).unwrap();
+        let disk_before = std::fs::read(&server.state_path).unwrap();
+        let response = dispatch_with_route_context(
+            &server,
+            Req::PeerLifecycle {
+                request: PeerLifecycleRequest::Read {
+                    worker_id: actor.into(),
+                    token: format!("token-{actor}"),
+                    target_id: target.map(str::to_owned),
+                },
+            },
+            Some(context.clone()),
+        );
+        assert_eq!(
+            serde_json::to_value(&*server.state.lock().unwrap()).unwrap(),
+            before,
+            "Read mutated State for {actor}/{target:?}"
+        );
+        assert_eq!(
+            std::fs::read(&map_path).unwrap(),
+            map_before,
+            "Read mutated identity map"
+        );
+        assert_eq!(
+            std::fs::read(&server.state_path).unwrap(),
+            disk_before,
+            "Read mutated persisted State"
+        );
+        response
+    };
+    let own = read("other", None);
+    assert!(own.ok, "{own:?}");
+    assert!(own.data["result"]["projection"].get("managed").is_none());
+    let denied = read("other", Some("child"));
+    assert_eq!(denied.data["result"]["outcome"], "refused", "{denied:?}");
+    assert!(denied.data["result"].get("projection").is_none());
+    assert!(!denied.data.to_string().contains("managed-private"));
+    let assert_managed = |response: Resp| {
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.data["result"]["projection"]["managed"][0]["id"], "managed-private",
+            "{response:?}"
+        );
+        assert!(!response.data.to_string().contains("private-assignment"));
+    };
+    assert_managed(read("parent", Some("child")));
+    promote_master(&server, "other", "fixture managed visibility authority");
+    assert_managed(read("other", Some("child")));
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn exact_fence(worker_id: &str, binding: &RuntimeBinding) -> ResponsibilityFence {
     ResponsibilityFence {
         operation_id: format!("close-{worker_id}"),

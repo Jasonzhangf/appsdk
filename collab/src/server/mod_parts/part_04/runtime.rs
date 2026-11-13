@@ -1,4 +1,11 @@
 impl ProjectRuntimeManager {
+    pub(crate) fn with_tmux_monitor_state<R>(
+        &self, runtime: &Server,
+        operation: impl FnOnce(&binding_slot::BindingControlSet, &mut State) -> Result<R, String>,
+    ) -> Result<R, String> {
+        self.with_current_state(runtime, operation)
+    }
+
     #[cfg(test)]
     fn ensure_resident_identity_context_route(
         &self,
@@ -152,6 +159,7 @@ impl ProjectRuntimeManager {
         if let Some(handle) = self.host.rex_monitor.runtime_handle() {
             runtime.rex_monitor.install_runtime_handle(handle);
         }
+        runtime.invalidate_restored_agent_observations()?;
         restore_registered_peer_default_leases(&runtime);
         purge_expired_storage(&runtime, now_ms());
         Ok((runtime, project_lock))
@@ -673,6 +681,642 @@ impl ProjectRuntimeManager {
         self.dispatch_sync_with_register_binding(project_context, req, None)
     }
 
+    fn with_current_state_response<R>(
+        &self,
+        runtime: &Server,
+        operation: impl FnOnce(
+            &crate::server::binding_slot::BindingControlSet,
+            &mut State,
+        ) -> Result<R, Resp>,
+    ) -> Result<R, Resp> {
+        let _register = self.register_gate.lock().unwrap();
+        let control = self.binding_control_store().load().map_err(Resp::err)?;
+        let mut state = runtime.state.lock().unwrap();
+        operation(&control, &mut state)
+    }
+
+    fn with_current_task_state_response<R>(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        actor: &str,
+        token: &str,
+        operation: impl FnOnce(
+            &binding_slot::BindingControlSet,
+            &mut State,
+            &RuntimeBinding,
+        ) -> Result<R, Resp>,
+    ) -> Result<R, Resp> {
+        self.with_current_state_response(runtime, |control, state| {
+            let (worker, binding) = project_route_actor_with_binding(state, context, actor, token)?;
+            let current = control.current_for_worker(
+                &context.project_scope,
+                &context.app_scope_id,
+                actor,
+            ).map_err(Resp::err)?
+                .and_then(|slot| slot.active_binding())
+                .ok_or_else(|| Resp::err("TASK_CURRENT_BINDING_REQUIRED: actor has no current stable name"))?;
+            let transport_matches = worker.transport.as_ref().is_some_and(|transport| {
+                same_selected_endpoint(&current.transport, transport)
+            });
+            if current.binding != binding || !transport_matches {
+                return Err(Resp::err(
+                    "TASK_CURRENT_BINDING_REQUIRED: the authenticated request binding is no longer current",
+                ));
+            }
+            operation(control, state, &binding)
+        })
+    }
+
+    fn dispatch_current_map_request(
+        &self,
+        runtime: &Server,
+        project_context: Option<&ProjectContext>,
+        req: &Req,
+    ) -> Option<Resp> {
+        if mutation_blocked_during_project_reset(req)
+            && runtime.state.lock().unwrap().admission_frozen()
+        {
+            return Some(Resp::err(
+                "PROJECT_RESET_PENDING: this scope is completing an already committed project reset",
+            ));
+        }
+        if let Some(response) = unaccepted_task_mutation_gate(runtime, req) {
+            return Some(response);
+        }
+        match req {
+            Req::Board {
+                worker_id,
+                token,
+                command,
+            } if matches!(
+                command,
+                crate::board::BoardCommand::Invite { .. }
+                    | crate::board::BoardCommand::Respond { .. }
+                    | crate::board::BoardCommand::Dispatch { .. }
+                    | crate::board::BoardCommand::Start { .. }
+                    | crate::board::BoardCommand::Update { .. }
+                    | crate::board::BoardCommand::Describe { .. }
+                    | crate::board::BoardCommand::DeclineAssigned { .. }
+                    | crate::board::BoardCommand::Policy { .. }
+            ) =>
+            {
+                Some(dispatch_board_command_current_map(
+                    self,
+                    runtime,
+                    project_context,
+                    worker_id.clone(),
+                    token.clone(),
+                    command,
+                ))
+            }
+            Req::TaskRegister {
+                worker_id,
+                token,
+                task_id,
+                owner,
+                feature_id,
+                worktree_path,
+                branch,
+                base_commit,
+                priority,
+                next_step,
+                goal_prompt,
+            } => Some(self.dispatch_task_register_current(
+                runtime,
+                worker_id.clone(),
+                token.clone(),
+                task_id.clone(),
+                owner.clone(),
+                feature_id.clone(),
+                worktree_path.clone(),
+                branch.clone(),
+                base_commit.clone(),
+                priority.clone(),
+                next_step.clone(),
+                goal_prompt.clone(),
+            )),
+            Req::TaskRelocate {
+                worker_id,
+                token,
+                task_id,
+                worktree_path,
+                branch,
+                base_commit,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(self.dispatch_task_relocate_current(
+                    runtime,
+                    context,
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    worktree_path.clone(),
+                    branch.clone(),
+                    base_commit.clone(),
+                ))
+            }
+            Req::TaskUpdate {
+                worker_id,
+                token,
+                task_id,
+                status,
+                next_step,
+                blocker_action,
+                decision_reason,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(
+                    self.dispatch_task_update_current(
+                        runtime,
+                        context,
+                        worker_id.clone(),
+                        token.clone(),
+                        task_id.clone(),
+                        status.clone(),
+                        next_step.clone(),
+                        blocker_action.clone(),
+                        decision_reason.clone(),
+                    )
+                    .unwrap_or_else(|error| error),
+                )
+            }
+            Req::TaskAccept {
+                worker_id,
+                token,
+                task_id,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(
+                    self.dispatch_task_accept_current(
+                        runtime,
+                        context,
+                        worker_id.clone(),
+                        token.clone(),
+                        task_id.clone(),
+                    )
+                    .unwrap_or_else(|error| error),
+                )
+            }
+            Req::TaskWait {
+                worker_id,
+                token,
+                task_id,
+                blocking_task_id,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(
+                    self.dispatch_task_wait_current(
+                        runtime,
+                        context,
+                        worker_id.clone(),
+                        token.clone(),
+                        task_id.clone(),
+                        blocking_task_id.clone(),
+                    )
+                    .unwrap_or_else(|error| error),
+                )
+            }
+            Req::TaskDeliver {
+                worker_id,
+                token,
+                task_id,
+                evidence,
+                attempt,
+                worktree,
+                no_candidate,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(
+                    self.dispatch_task_deliver_current(
+                        runtime,
+                        context,
+                        worker_id.clone(),
+                        token.clone(),
+                        task_id.clone(),
+                        evidence.clone(),
+                        *attempt,
+                        worktree.clone(),
+                        *no_candidate,
+                    )
+                    .unwrap_or_else(|error| error),
+                )
+            }
+            Req::TaskReview {
+                worker_id,
+                token,
+                task_id,
+                accept,
+                rework,
+                evidence,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(
+                    self.dispatch_task_review_current(
+                        runtime,
+                        context,
+                        worker_id.clone(),
+                        token.clone(),
+                        task_id.clone(),
+                        *accept,
+                        *rework,
+                        evidence.clone(),
+                    )
+                    .unwrap_or_else(|error| error),
+                )
+            }
+            Req::TaskIntegrated {
+                worker_id,
+                token,
+                task_id,
+                commit,
+                evidence,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(handle_task_integrated_current_map(
+                    self,
+                    runtime,
+                    context,
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    commit.clone(),
+                    evidence.clone(),
+                ))
+            }
+            Req::TaskClose {
+                worker_id,
+                token,
+                task_id,
+                force,
+                reason,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(handle_task_close_current_map(
+                    self,
+                    runtime,
+                    context,
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    *force,
+                    reason.clone(),
+                ))
+            }
+            Req::TaskFinalizeCleanup {
+                worker_id,
+                token,
+                task_id,
+                commit,
+            } => {
+                let Some(context) = project_context else {
+                    return Some(Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
+                    ));
+                };
+                Some(handle_task_finalize_cleanup_current_map(
+                    self,
+                    runtime,
+                    context,
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    commit.clone(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn dispatch_task_relocate_current(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker_id: String,
+        token: String,
+        task_id: String,
+        worktree_path: String,
+        branch: Option<String>,
+        base_commit: Option<String>,
+    ) -> Resp {
+        let admission = self.with_current_task_state_response(
+            runtime,
+            context,
+            &worker_id,
+            &token,
+            |control, state, _| {
+                task_owner_gate_with_control(
+                    state,
+                    control,
+                    &RouteScope {
+                        project_scope_id: context.project_scope.clone(),
+                        app_scope_id: context.app_scope_id.clone(),
+                    },
+                    &task_id,
+                    &worker_id,
+                )
+            },
+        );
+        if let Err(response) = admission {
+            return response;
+        }
+        let declared = match declare_task_workspace(
+            &runtime.root,
+            &runtime.config,
+            &worktree_path,
+        ) {
+            Ok(declared) => declared,
+            Err(error) => return Resp::err(error),
+        };
+        match self.with_current_task_state_response(
+            runtime,
+            context,
+            &worker_id,
+            &token,
+            |control, state, _| {
+                Ok(task_relocate_locked(
+                    runtime,
+                    state,
+                    Some(control),
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    declared.clone(),
+                    branch.clone(),
+                    base_commit.clone(),
+                ))
+            },
+        ) {
+            Ok(response) | Err(response) => response,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_task_update_current(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker_id: String,
+        token: String,
+        task_id: String,
+        status: Option<String>,
+        next_step: Option<String>,
+        blocker_action: Option<String>,
+        decision_reason: Option<String>,
+    ) -> Result<Resp, Resp> {
+        self.with_current_task_state_response(
+            runtime,
+            context,
+            &worker_id,
+            &token,
+            |control, state, _| {
+                Ok(task_update_locked(
+                    runtime,
+                    state,
+                    Some(control),
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    status.clone(),
+                    next_step.clone(),
+                    blocker_action.clone(),
+                    decision_reason.clone(),
+                ))
+            },
+        )
+    }
+
+    fn dispatch_task_accept_current(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker_id: String,
+        token: String,
+        task_id: String,
+    ) -> Result<Resp, Resp> {
+        self.with_current_task_state_response(
+            runtime,
+            context,
+            &worker_id,
+            &token,
+            |control, state, _| {
+                Ok(handle_task_accept_locked(
+                    runtime,
+                    state,
+                    Some(control),
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                ))
+            },
+        )
+    }
+
+    fn dispatch_task_wait_current(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker_id: String,
+        token: String,
+        task_id: String,
+        blocking_task_id: String,
+    ) -> Result<Resp, Resp> {
+        self.with_current_task_state_response(
+            runtime,
+            context,
+            &worker_id,
+            &token,
+            |control, state, _| {
+                Ok(handle_task_wait_locked(
+                    runtime,
+                    state,
+                    Some(control),
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    blocking_task_id.clone(),
+                ))
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_task_deliver_current(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker_id: String,
+        token: String,
+        task_id: String,
+        evidence: Option<String>,
+        attempt: Option<u64>,
+        worktree: Option<String>,
+        no_candidate: bool,
+    ) -> Result<Resp, Resp> {
+        let (response, pending_notice) = self.with_current_task_state_response(
+            runtime,
+            context,
+            &worker_id,
+            &token,
+            |control, state, _| {
+                let mut pending_notice = None;
+                let response = handle_task_deliver_with_intent_locked(
+                    runtime,
+                    state,
+                    Some(control),
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    evidence.clone(),
+                    attempt,
+                    worktree.clone(),
+                    no_candidate,
+                    &mut pending_notice,
+                );
+                Ok((response, pending_notice))
+            },
+        )?;
+        Ok(finish_task_deliver_notification(
+            runtime,
+            response,
+            pending_notice,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_task_review_current(
+        &self,
+        runtime: &Server,
+        context: &ProjectContext,
+        worker_id: String,
+        token: String,
+        task_id: String,
+        accept: bool,
+        rework: bool,
+        evidence: String,
+    ) -> Result<Resp, Resp> {
+        let (response, pending_wake) = self.with_current_task_state_response(
+            runtime,
+            context,
+            &worker_id,
+            &token,
+            |control, state, _| {
+                let mut pending_wake = None;
+                let response = handle_task_review_locked(
+                    runtime,
+                    state,
+                    Some(control),
+                    worker_id.clone(),
+                    token.clone(),
+                    task_id.clone(),
+                    accept,
+                    rework,
+                    evidence.clone(),
+                    &mut pending_wake,
+                );
+                Ok((response, pending_wake))
+            },
+        )?;
+        Ok(finish_task_review_notification(runtime, response, pending_wake))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_task_register_current(
+        &self,
+        runtime: &Server,
+        worker_id: String,
+        token: String,
+        task_id: String,
+        owner: Option<String>,
+        feature_id: Option<String>,
+        worktree_path: Option<String>,
+        branch: Option<String>,
+        base_commit: Option<String>,
+        priority: String,
+        next_step: Option<String>,
+        goal_prompt: Option<String>,
+    ) -> Resp {
+        match self.with_current_state_response(runtime, |control, state| {
+            Ok(handle_task_register_with_next_locked(
+                runtime,
+                state,
+                Some(control),
+                worker_id.clone(),
+                token.clone(),
+                task_id.clone(),
+                owner.clone(),
+                feature_id.clone(),
+                worktree_path.clone(),
+                branch.clone(),
+                base_commit.clone(),
+                priority.clone(),
+                next_step.clone(),
+                goal_prompt.clone(),
+            ))
+        }) {
+            Ok(response) | Err(response) => response,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_with_current_map_bound(
+        &self,
+        runtime: &Arc<Server>,
+        req: Req,
+        project_context: Option<ProjectContext>,
+        register_binding: Option<&RegisterOuterBinding>,
+        register_control_first: Option<
+            &mut dyn FnMut(
+                &PreparedRegisterEnvelope,
+            ) -> Result<Option<state::TypedOutcome>, String>,
+        >,
+    ) -> Resp {
+        if let Some(response) =
+            self.dispatch_current_map_request(runtime, project_context.as_ref(), &req)
+        {
+            return response;
+        }
+        dispatch_with_route_context_bound(
+            runtime,
+            req,
+            project_context,
+            register_binding,
+            register_control_first,
+        )
+    }
+
     /// Context already holds identity_gate when supplying its internal binder.
     /// Raw Register owns that same gate through publication and finalization.
     fn dispatch_sync_with_register_binding(
@@ -847,6 +1491,101 @@ impl ProjectRuntimeManager {
                 identity_context.unwrap_or_else(|| IdentityContextRequest::legacy(facts));
             return self.identity_context(context, identity_context);
         }
+        if let Req::Inbox { worker_id, token } = &req {
+            let runtime = match self.select_runtime(&context) {
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let scope = RouteScope {
+                project_scope_id: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+            };
+            let response = self.with_current_state(&runtime, |control, state| {
+                let (_, authorized_binding) =
+                    match project_route_actor_with_binding(state, &context, worker_id, token) {
+                        Ok(authorized) => authorized,
+                        Err(response) => return Ok(response),
+                    };
+                let mut inbox = Vec::new();
+                for message in state.inbox_of(worker_id) {
+                    if name_mailbox::current_name_allows_message(
+                        state,
+                        control,
+                        &scope,
+                        worker_id,
+                        &authorized_binding,
+                        message,
+                    )? {
+                        inbox.push(message);
+                    }
+                }
+                Ok(inbox_projection(state, inbox))
+            }).unwrap_or_else(Resp::err);
+            return (runtime, response);
+        }
+        if let Req::Ack {
+            worker_id,
+            token,
+            ids,
+        } = &req
+        {
+            let runtime = match self.select_runtime(&context) {
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let scope = RouteScope {
+                project_scope_id: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+            };
+            let response = self
+                .with_current_state(&runtime, |control, state| {
+                    let (_, authorized_binding) =
+                        match project_route_actor_with_binding(state, &context, worker_id, token) {
+                            Ok(authorized) => authorized,
+                            Err(response) => return Ok(response),
+                        };
+                    Ok(handle_ack_locked(
+                        &runtime,
+                        state,
+                        Some((control, &scope, &authorized_binding)),
+                        worker_id,
+                        token,
+                        ids.clone(),
+                    ))
+                })
+                .unwrap_or_else(Resp::err);
+            return (runtime, response);
+        }
+        if let Req::WorkerStatusJudgment {
+            worker_id,
+            token,
+            capture,
+            presence,
+            activity,
+            basis,
+        } = &req
+        {
+            let runtime = match self.select_runtime(&context) {
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let response = self
+                .with_current_state(&runtime, |control, state| {
+                    Ok(handle_worker_status_judgment(
+                        &runtime,
+                        state,
+                        control,
+                        worker_id,
+                        token,
+                        capture,
+                        *presence,
+                        *activity,
+                        basis,
+                    ))
+                })
+                .unwrap_or_else(Resp::err);
+            return (runtime, response);
+        }
         let register_binding = outer_binding.filter(|_| matches!(req, Req::Register { .. }));
         let key = Self::route_key(&context);
         let is_register = matches!(req, Req::Register { .. });
@@ -873,6 +1612,7 @@ impl ProjectRuntimeManager {
                 register_binding
                     .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding.and_then(|binding| binding.rex_recovery().cloned()),
                 register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
@@ -883,7 +1623,7 @@ impl ProjectRuntimeManager {
             ) {
                 Resp::err(error)
             } else {
-                dispatch_with_route_context_bound(
+                self.dispatch_with_current_map_bound(
                     &runtime,
                     req,
                     Some(context.clone()),
@@ -922,6 +1662,7 @@ impl ProjectRuntimeManager {
                 register_binding
                     .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding.and_then(|binding| binding.rex_recovery().cloned()),
                 register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
@@ -932,7 +1673,7 @@ impl ProjectRuntimeManager {
             ) {
                 Resp::err(error)
             } else {
-                dispatch_with_route_context_bound(
+                self.dispatch_with_current_map_bound(
                     &runtime,
                     req,
                     Some(context.clone()),
@@ -976,6 +1717,7 @@ impl ProjectRuntimeManager {
                 register_binding
                     .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
                 register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+                register_binding.and_then(|binding| binding.rex_recovery().cloned()),
                 register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
@@ -986,7 +1728,7 @@ impl ProjectRuntimeManager {
             ) {
                 Resp::err(error)
             } else {
-                dispatch_with_route_context_bound(
+                self.dispatch_with_current_map_bound(
                     &self.host,
                     req,
                     Some(context.clone()),
@@ -1050,6 +1792,7 @@ impl ProjectRuntimeManager {
             register_binding.and_then(|binding| binding.identity_facts().cloned()),
             register_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
+            register_binding.and_then(|binding| binding.rex_recovery().cloned()),
             register_binding.and_then(|binding| binding.name_intent().cloned()),
             &mut register_effect_id,
         );
@@ -1060,7 +1803,7 @@ impl ProjectRuntimeManager {
         ) {
             Resp::err(error)
         } else {
-            dispatch_with_route_context_bound(
+            self.dispatch_with_current_map_bound(
                 &runtime,
                 req,
                 Some(context.clone()),

@@ -137,6 +137,7 @@ fn tick_at_with_runtime(server: &Server, recovery_server: Option<&Arc<Server>>, 
                     (_, super::name_state::AgentActivity::Busy) => "working",
                     (_, super::name_state::AgentActivity::Idle) => "idle",
                     (_, super::name_state::AgentActivity::WaitingUser) => "waiting_user",
+                    (_, super::name_state::AgentActivity::Error) => "error",
                     _ => "unknown",
                 };
                 match label {
@@ -1191,6 +1192,10 @@ pub(super) fn current_board_patrol_activity(
                     crate::client::adapters::tmux::AgentPresence::Online,
                     crate::client::adapters::tmux::AgentActivity::WaitingUser,
                 ) => AgentActivity::WaitingUser,
+                (
+                    crate::client::adapters::tmux::AgentPresence::Online,
+                    crate::client::adapters::tmux::AgentActivity::Error,
+                ) => AgentActivity::Error,
                 _ => AgentActivity::Unknown,
             })
         }
@@ -3836,6 +3841,7 @@ mod tests {
                 created_ms: 1,
                 original_status: None,
                 original_owner: None,
+                automatic_source: None,
             });
         drop(state);
         super::dispatch_gap_check_at(&server, now + 2);

@@ -1,3 +1,9 @@
+struct PendingTaskReviewWake {
+    message_id: String,
+    subscription_id: String,
+    now: i64,
+}
+
 fn handle_task_review(
     server: &Server,
     worker_id: String,
@@ -7,7 +13,38 @@ fn handle_task_review(
     rework: bool,
     evidence: String,
 ) -> Resp {
-    let mut st = server.state.lock().unwrap();
+    let mut pending_wake = None;
+    let response = {
+        let mut st = server.state.lock().unwrap();
+        handle_task_review_locked(
+            server,
+            &mut st,
+            None,
+            worker_id,
+            token,
+            task_id,
+            accept,
+            rework,
+            evidence,
+            &mut pending_wake,
+        )
+    };
+    finish_task_review_notification(server, response, pending_wake)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_task_review_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    accept: bool,
+    rework: bool,
+    evidence: String,
+    pending_wake: &mut Option<PendingTaskReviewWake>,
+) -> Resp {
     if let Err(error) = verify(&st, &worker_id, &token) {
         return error;
     }
@@ -33,11 +70,17 @@ fn handle_task_review(
         Ok(None) => return Resp::err("reviewer project route is not ready"),
         Err(error) => return Resp::err(error),
     };
-    let control =
-        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-            Ok(control) => control,
-            Err(error) => return Resp::err(error),
-        };
+    let loaded;
+    let control = match control {
+        Some(control) => control,
+        None => {
+            loaded = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control,
+                Err(error) => return Resp::err(error),
+            };
+            &loaded
+        }
+    };
     let reviewer_name = if let Some(name) = required_reviewer.as_deref() {
         let holder =
             match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
@@ -52,7 +95,13 @@ fn handle_task_review(
         }
         Some(name.to_owned())
     } else {
-        if !task_integration_authorized(server, &st, &task, &worker_id) {
+        if !task_integration_authorized_with_control(
+            server,
+            st,
+            Some(control),
+            &task,
+            &worker_id,
+        ) {
             return Resp::err("task review requires task owner or live master authority");
         }
         match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker_id) {
@@ -171,26 +220,15 @@ fn handle_task_review(
             }
         }
     }
-    if let Err(error) = server.commit_locked(&mut st, &events) {
-        drop(st);
+    if let Err(error) = server.commit_locked_checked_with_control(st, &events, control) {
         return Resp::err(format!("TASK_REVIEW_DURABILITY_FAILED: {error}"));
     }
-    drop(st);
-    let mut notification_attempt_failure: Option<String> = None;
     if let Some((message_id, subscription_id)) = pending_notification {
-        // Surface any non-accepted wake attempt as an explicit repair terminal;
-        // pending_merges stays durable regardless.
-        match attempt_notification_detailed_with_at(server, &message_id, &subscription_id, now) {
-            NotificationAttempt::Accepted
-            | NotificationAttempt::Consumed
-            | NotificationAttempt::Deferred => {}
-            NotificationAttempt::Rejected(error) => {
-                notification_attempt_failure = Some(error);
-            }
-            NotificationAttempt::NotAttempted(error) => {
-                notification_attempt_failure = Some(error);
-            }
-        }
+        *pending_wake = Some(PendingTaskReviewWake {
+            message_id,
+            subscription_id,
+            now,
+        });
     }
     let mut review_data = json!({
         "task": task_id,
@@ -209,17 +247,42 @@ fn handle_task_review(
     if notification_missing {
         apply_mailbox_only_repair_fields(&mut review_data);
         review_data["notification"] = json!("mailbox-only-no-subscription");
-    } else if let Some(error) = notification_attempt_failure {
-        review_data["durable"] = json!(true);
-        review_data["notification"] = json!("subscribed-not-sent");
-        review_data["notification_error"] = json!(error);
-        review_data["failure"] = json!("notification_delivery_failed");
-        review_data["repair_required"] = json!(true);
-        review_data["escalation"] = json!(
+    }
+    Resp::data(review_data)
+}
+
+fn finish_task_review_notification(
+    server: &Server,
+    mut response: Resp,
+    pending_wake: Option<PendingTaskReviewWake>,
+) -> Resp {
+    let Some(wake) = pending_wake else {
+        return response;
+    };
+    let failure = match attempt_notification_detailed_with_at(
+        server,
+        &wake.message_id,
+        &wake.subscription_id,
+        wake.now,
+    ) {
+        NotificationAttempt::Accepted
+        | NotificationAttempt::Consumed
+        | NotificationAttempt::Deferred => None,
+        NotificationAttempt::Rejected(error) | NotificationAttempt::NotAttempted(error) => {
+            Some(error)
+        }
+    };
+    if let Some(error) = failure {
+        response.data["durable"] = json!(true);
+        response.data["notification"] = json!("subscribed-not-sent");
+        response.data["notification_error"] = json!(error);
+        response.data["failure"] = json!("notification_delivery_failed");
+        response.data["repair_required"] = json!(true);
+        response.data["escalation"] = json!(
             "the merge obligation is durable but this wake was not delivered; do not retry this wake, have the master run `collab recv` and rebind the selected wake transport"
         );
     }
-    Resp::data(review_data)
+    response
 }
 
 struct ValidatedTaskIntegration {
@@ -231,6 +294,7 @@ struct ValidatedTaskIntegration {
 fn validate_task_integration(
     server: &Server,
     state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
     worker_id: &str,
     token: &str,
     task_id: &str,
@@ -254,7 +318,7 @@ fn validate_task_integration(
             task_id, task.status
         )));
     }
-    if !task_integration_authorized(server, state, &task, worker_id) {
+    if !task_integration_authorized_with_control(server, state, control, &task, worker_id) {
         return Err(Resp::err(
             "task integrated requires task owner or live master authority",
         ));
@@ -312,10 +376,23 @@ fn handle_task_integrated(
 ) -> Resp {
     let commit = commit.trim();
     let evidence = evidence.trim();
+    handle_task_integrated_prepared(server, worker_id, token, task_id, commit, evidence, None)
+}
+
+fn handle_task_integrated_prepared(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    commit: &str,
+    evidence: &str,
+    control: Option<&binding_slot::BindingControlSet>,
+) -> Resp {
     let first_review_subject_revision = {
         let st = server.state.lock().unwrap();
-        match validate_task_integration(server, &st, &worker_id, &token, &task_id, commit, evidence)
-        {
+        match validate_task_integration(
+            server, &st, control, &worker_id, &token, &task_id, commit, evidence,
+        ) {
             Ok(validated) => validated.review_subject_revision,
             Err(error) => return error,
         }
@@ -347,7 +424,7 @@ fn handle_task_integrated(
 
     let mut st = server.state.lock().unwrap();
     let current = match validate_task_integration(
-        server, &st, &worker_id, &token, &task_id, commit, evidence,
+        server, &st, control, &worker_id, &token, &task_id, commit, evidence,
     ) {
         Ok(validated) => validated,
         Err(error) => return error,
@@ -364,6 +441,29 @@ fn handle_task_integrated(
         );
     }
 
+    commit_task_integration_locked(
+        server,
+        &mut st,
+        control,
+        worker_id,
+        task_id,
+        commit,
+        evidence,
+        current,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_task_integration_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: String,
+    task_id: String,
+    commit: &str,
+    evidence: &str,
+    current: ValidatedTaskIntegration,
+) -> Resp {
     let now = now_ms();
     let mut integrated_task = current.task;
     integrated_task.status = "merged".into();
@@ -394,8 +494,16 @@ fn handle_task_integrated(
             events.push(Event::Superseded { ids: stale_notices });
         }
     }
-    if let Err(error) = server.commit_locked(&mut st, &events) {
-        drop(st);
+    let commit_result = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(st, &events, control)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server
+            .commit_locked(st, &events)
+            .map_err(|error| error.to_string()),
+    };
+    if let Err(error) = commit_result {
         return Resp::err(format!("TASK_INTEGRATED_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({
@@ -407,6 +515,109 @@ fn handle_task_integrated(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn handle_task_integrated_current_map(
+    manager: &ProjectRuntimeManager,
+    server: &Server,
+    context: &crate::proto::ProjectContext,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    commit: String,
+    evidence: String,
+) -> Resp {
+    let commit = commit.trim().to_owned();
+    let evidence = evidence.trim().to_owned();
+    let first_review_subject_revision = match manager.with_current_task_state_response(
+        server,
+        context,
+        &worker_id,
+        &token,
+        |control, state, _| {
+            validate_task_integration(
+                server,
+                state,
+                Some(control),
+                &worker_id,
+                &token,
+                &task_id,
+                &commit,
+                &evidence,
+            )
+            .map(|validated| validated.review_subject_revision)
+        },
+    ) {
+        Ok(revision) => revision,
+        Err(response) => return response,
+    };
+
+    #[cfg(debug_assertions)]
+    held_integration_resolution_test_seam(&server.root);
+
+    let head = match resolve_authoritative_main_head(&server.root) {
+        Ok(head) => head,
+        Err(error) => return error,
+    };
+    match commit_is_integrated_in_main(&server.root, &commit) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Resp::err_data(
+                "TASK_INTEGRATION_COMMIT_MISMATCH",
+                json!({
+                    "provided": commit,
+                    "main_head": head,
+                    "expected": format!(
+                        "commit already reachable from refs/heads/main (main tip {head})"
+                    ),
+                }),
+            )
+        }
+        Err(error) => return error,
+    }
+
+    match manager.with_current_task_state_response(
+        server,
+        context,
+        &worker_id,
+        &token,
+        |control, state, _| {
+            let current = validate_task_integration(
+                server,
+                state,
+                Some(control),
+                &worker_id,
+                &token,
+                &task_id,
+                &commit,
+                &evidence,
+            )?;
+            if current.review_subject_revision != first_review_subject_revision {
+                return Err(Resp::err_data(
+                    "TASK_INTEGRATION_SUBJECT_CHANGED",
+                    json!({
+                        "task_id": task_id,
+                        "expected_review_subject_revision": first_review_subject_revision,
+                        "current_review_subject_revision": current.review_subject_revision,
+                        "rule": "the reviewed delivery changed while the supplied commit was being proved; rework and re-deliver before applying this integration request",
+                    }),
+                ));
+            }
+            Ok(commit_task_integration_locked(
+                server,
+                state,
+                Some(control),
+                worker_id.clone(),
+                task_id.clone(),
+                &commit,
+                &evidence,
+                current,
+            ))
+        },
+    ) {
+        Ok(response) | Err(response) => response,
+    }
+}
+
 fn handle_task_close(
     server: &Server,
     worker_id: String,
@@ -415,16 +626,202 @@ fn handle_task_close(
     force: bool,
     reason: Option<String>,
 ) -> Resp {
-    let mut st = server.state.lock().unwrap();
-    let Some(worker) = st.workers.get(&worker_id).cloned() else {
-        return Resp::err(format!("worker {} not registered", worker_id));
+    handle_task_close_with_control(
+        server, worker_id, token, task_id, force, reason, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_task_close_with_control(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    force: bool,
+    reason: Option<String>,
+    control: Option<&binding_slot::BindingControlSet>,
+) -> Resp {
+    let prepared = {
+        let st = server.state.lock().unwrap();
+        match prepare_task_close_locked(server, &st, control, &worker_id, &token, &task_id, force, reason)
+        {
+            Ok(prepared) => prepared,
+            Err(response) => return response,
+        }
+    };
+    let owner_presence = if force {
+        close_endpoint_presence(server, &prepared.owner_target)
+    } else {
+        IdentityPresence::Unknown
+    };
+    if !force {
+        let receipt_reusable = prepared
+            .observed_receipt
+            .as_ref()
+            .is_some_and(|receipt| cleanup_receipt_is_reusable(&server.root, receipt));
+        if !receipt_reusable {
+            if let Err(error) = close_task_resources(
+                &server.root,
+                &server.config,
+                prepared.task.worktree_path.as_deref(),
+                prepared.task.branch.as_deref(),
+                prepared.lifecycle.integration_commit.as_deref(),
+            ) {
+                return Resp::err(error);
+            }
+        }
+    }
+    let owner_presence = if force {
+        close_endpoint_presence(server, &prepared.owner_target)
+    } else {
+        IdentityPresence::Unknown
+    };
+    let outcome = {
+        let mut st = server.state.lock().unwrap();
+        match commit_task_close_locked(
+            server,
+            &mut st,
+            control,
+            &worker_id,
+            &token,
+            &task_id,
+            force,
+            owner_presence,
+            prepared,
+        ) {
+            Ok(outcome) => outcome,
+            Err(response) => return response,
+        }
+    };
+    for (message_id, subscription_id) in outcome.notifications {
+        attempt_notification(server, &message_id, &subscription_id);
+    }
+    outcome.response
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_task_close_current_map(
+    manager: &ProjectRuntimeManager,
+    server: &Server,
+    context: &crate::proto::ProjectContext,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    force: bool,
+    reason: Option<String>,
+) -> Resp {
+    let prepared = match manager.with_current_task_state_response(
+        server,
+        context,
+        &worker_id,
+        &token,
+        |control, state, _| {
+            prepare_task_close_locked(
+                server,
+                state,
+                Some(control),
+                &worker_id,
+                &token,
+                &task_id,
+                force,
+                reason.clone(),
+            )
+        },
+    ) {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
+    };
+    let owner_presence = if force {
+        close_endpoint_presence(server, &prepared.owner_target)
+    } else {
+        IdentityPresence::Unknown
+    };
+    if !force {
+        let receipt_reusable = prepared
+            .observed_receipt
+            .as_ref()
+            .is_some_and(|receipt| cleanup_receipt_is_reusable(&server.root, receipt));
+        if !receipt_reusable {
+            if let Err(error) = close_task_resources(
+                &server.root,
+                &server.config,
+                prepared.task.worktree_path.as_deref(),
+                prepared.task.branch.as_deref(),
+                prepared.lifecycle.integration_commit.as_deref(),
+            ) {
+                return Resp::err(error);
+            }
+        }
+    }
+    let owner_presence = if force {
+        close_endpoint_presence(server, &prepared.owner_target)
+    } else {
+        owner_presence
+    };
+    let outcome = match manager.with_current_task_state_response(
+        server,
+        context,
+        &worker_id,
+        &token,
+        |control, state, _| {
+            commit_task_close_locked(
+                server,
+                state,
+                Some(control),
+                &worker_id,
+                &token,
+                &task_id,
+                force,
+                owner_presence,
+                prepared,
+            )
+        },
+    ) {
+        Ok(outcome) => outcome,
+        Err(response) => return response,
+    };
+    for (message_id, subscription_id) in outcome.notifications {
+        attempt_notification(server, &message_id, &subscription_id);
+    }
+    outcome.response
+}
+
+struct TaskClosePrepared {
+    task: TaskRec,
+    lifecycle: state::TaskLifecycleRecord,
+    observed_receipt: Option<CleanupReceipt>,
+    owner_target: CloseEndpointTarget,
+    force_reason: Option<String>,
+}
+
+struct TaskCloseCommitOutcome {
+    response: Resp,
+    notifications: Vec<(String, String)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_task_close_locked(
+    server: &Server,
+    st: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: &str,
+    token: &str,
+    task_id: &str,
+    force: bool,
+    reason: Option<String>,
+) -> Result<TaskClosePrepared, Resp> {
+    let Some(worker) = st.workers.get(worker_id).cloned() else {
+        return Err(Resp::err(format!("worker {worker_id} not registered")));
     };
     if worker.token != token {
-        return Resp::err("token mismatch: identity does not own this worker_id");
+        return Err(Resp::err(
+            "token mismatch: identity does not own this worker_id",
+        ));
     }
-    let Some(task) = st.tasks.get(&task_id).cloned() else {
-        return Resp::err(format!("task {} not found", task_id));
+    let Some(task) = st.tasks.get(task_id).cloned() else {
+        return Err(Resp::err(format!("task {task_id} not found")));
     };
+    let owner_target = close_endpoint_target(st, &task.owner);
     if force {
         let reason = reason
             .as_deref()
@@ -432,175 +829,25 @@ fn handle_task_close(
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let Some(reason) = reason else {
-            return Resp::err("force close requires a non-empty --reason");
+            return Err(Resp::err("force close requires a non-empty --reason"));
         };
-        let observed_owner = close_endpoint_target(&st, &task.owner);
-        let observed_task = json!(task);
-        drop(st);
-        let owner_presence = close_endpoint_presence(server, &observed_owner);
-        let mut st = server.state.lock().unwrap();
-        if st.workers.get(&worker_id) != Some(&worker)
-            || close_endpoint_target(&st, &task.owner) != observed_owner
-            || st.tasks.get(&task_id).map(|task| json!(task)) != Some(observed_task)
-        {
-            return Resp::err("TASK_CLOSE_TARGET_CHANGED: observed owner, task or binding changed");
-        }
-        let master_holder = match current_master_holder(server, &st) {
-            Ok(master) => master,
-            Err(error) => return Resp::err(error),
-        };
-        // Only a definitively missing owner address is treated as dead. A
-        // cold thread may simply be idle on the endpoint and an unknown probe
-        // is not evidence of death, so neither authorizes force-closing
-        // another peer's task.
-        let owner_identity_live = owner_presence != IdentityPresence::Missing;
-        let authorized = master_holder.as_deref() == Some(worker_id.as_str())
-            || (master_holder.is_none() && (task.owner == worker_id || !owner_identity_live));
-        if !authorized {
-            return Resp::err_data(
-                "manual force close is not authorized for this caller",
-                json!({
-                    "master_holder": master_holder,
-                    "task_owner": task.owner,
-                    "requester": worker_id,
-                    "rule": "the current master may close any task; with no master assigned, the owner may close its task or a registered peer may close an orphaned task whose owner address is definitively missing",
-                    "owner_identity_live": owner_identity_live,
-                }),
-            );
-        }
-        if task.status == "closed" {
-            if let Some(receipt) = st.cleanup_receipts.get(&task.id).filter(|receipt| {
-                receipt.task_id == task.id
-                    && receipt.worktree_path == task.worktree_path
-                    && receipt.branch == task.branch
-            }) {
-                let cleanup_verified = receipt.verification == CleanupVerification::Verified;
-                return Resp::data(json!({
-                    "task": task.id,
-                    "status": task.status,
-                    "owner": task.owner,
-                    "manual": true,
-                    "delivery_complete": st.delivery_completion_projection(&task.id).0,
-                    "reason": receipt.manual_reason,
-                    "receipt_id": receipt.id,
-                    "cleanup": {
-                        "result": if cleanup_verified { "verified" } else { "unverified" },
-                        "reason": receipt.manual_reason,
-                    },
-                    "superseded_pending_keepalives": [],
-                    "stale_workers": stale_worker_views(&st, &|worker| {
-                        worker_presence_in_state(server, &st, worker)
-                    }),
-                    "idempotent": true,
-                    "next_action": if cleanup_verified {
-                        "manual close recorded; resource cleanup complete"
-                    } else {
-                        "manual close recorded; worktree/branch cleanup remains unverified"
-                    },
-                }));
-            }
-        }
-        let mut closed = task;
-        closed.status = "closed".into();
-        closed.wait = None;
-        closed.next_step = Some(format!("manual close: {reason}"));
-        closed.updated_ms = now_ms();
-        let receipt = CleanupReceipt {
-            id: format!("cleanup-manual-{}-{}", closed.id, closed.updated_ms),
-            task_id: closed.id.clone(),
-            worktree_path: closed.worktree_path.clone(),
-            branch: closed.branch.clone(),
-            verified_ms: closed.updated_ms,
-            verification: CleanupVerification::Unverified,
-            manual_reason: Some(reason.clone()),
-        };
-        let superseded: Vec<String> = st
-            .msgs
-            .values()
-            .filter(|m| {
-                m.to == closed.owner
-                    && m.mtype == "keepalive"
-                    && matches!(m.state.as_str(), "pending" | "delivered")
-            })
-            .map(|m| m.id.clone())
-            .collect();
-        let mut events: Vec<Event> = vec![
-            Event::CleanupVerified {
-                receipt: receipt.clone(),
-            },
-            Event::TaskUpdated {
-                task: closed.clone(),
-            },
-        ];
-        if st.pending_merges.contains_key(&closed.id) {
-            let stale_notices = pending_merge_notice_ids(&st, &closed.id);
-            events.push(Event::MergeResolved {
-                task_id: closed.id.clone(),
-                resolved_by: worker_id.clone(),
-                reason: Some(format!("force close: {reason}")),
-                at_ms: closed.updated_ms,
-            });
-            if !stale_notices.is_empty() {
-                events.push(Event::Superseded { ids: stale_notices });
-            }
-        }
-        if !superseded.is_empty() {
-            events.push(Event::Superseded {
-                ids: superseded.clone(),
-            });
-        }
-        let other_actionable = st.tasks.values().any(|t| {
-            t.id != closed.id
-                && t.owner == closed.owner
-                && crate::server::keepalive::actionable(&t.status)
+        return Ok(TaskClosePrepared {
+            task,
+            lifecycle: st.task_lifecycle.get(task_id).cloned().unwrap_or_default(),
+            observed_receipt: None,
+            owner_target,
+            force_reason: Some(reason),
         });
-        if !other_actionable {
-            if let Some(record) = st.keepalives.get(&closed.owner).cloned() {
-                if record.unacked > 0 || record.last_notice_id.is_some() {
-                    let mut updated = record;
-                    updated.unacked = 0;
-                    updated.last_notice_id = None;
-                    events.push(Event::KeepaliveUpdated {
-                        worker_id: closed.owner.clone(),
-                        record: updated,
-                    });
-                }
-            }
-        }
-        if let Err(error) = server.commit_locked(&mut st, &events) {
-            drop(st);
-            return Resp::err(format!("TASK_CLOSE_DURABILITY_FAILED: {error}"));
-        }
-        let stale_workers =
-            stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
-        drop(st);
-        return Resp::data(json!({
-            "task": closed.id,
-            "status": closed.status,
-            "owner": closed.owner,
-            "manual": true,
-            "delivery_complete": false,
-            "reason": reason,
-            "receipt_id": receipt.id,
-            "cleanup": {
-                "result": "unverified",
-                "reason": receipt.manual_reason,
-            },
-            "superseded_pending_keepalives": superseded,
-            "stale_workers": stale_workers,
-            "next_action": "manual close recorded; worktree/branch cleanup remains unverified",
-        }));
     }
-    if task.owner != worker_id {
-        let master_holder = match current_master_holder(server, &st) {
-            Ok(master) => master,
-            Err(error) => return Resp::err(error),
-        };
-        if master_holder.as_deref() != Some(worker_id.as_str()) {
-            return Resp::err("task close requires task owner or current master authority");
+    if task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id).is_err() {
+        let master_holder = current_master_holder(server, st).map_err(Resp::err)?;
+        if master_holder.as_deref() != Some(worker_id) {
+            return Err(Resp::err(
+                "task close requires task owner or current master authority",
+            ));
         }
     }
-    let lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    let lifecycle = st.task_lifecycle.get(task_id).cloned().unwrap_or_default();
     let read_only_accepted = task.status == "accepted"
         && lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly
         && lifecycle
@@ -609,12 +856,10 @@ fn handle_task_close(
             .is_some_and(|value| !value.trim().is_empty())
         && lifecycle.reviewer.is_some()
         && lifecycle.reviewed_ms.is_some();
-    if let Err(error) = work_review_gate(&st, &task_id) {
-        return error;
-    }
+    work_review_gate(st, task_id)?;
     if task.status != "merged" && !read_only_accepted {
-        if let Some(request) = st.pending_merges.get(&task_id) {
-            return Resp::err_data(
+        if let Some(request) = st.pending_merges.get(task_id) {
+            return Err(Resp::err_data(
                 "TASK_MERGE_PENDING",
                 json!({
                     "task_id": task_id,
@@ -622,14 +867,14 @@ fn handle_task_close(
                     "requested_by": request.requested_by,
                     "rule": "master must merge the accepted candidate onto refs/heads/main and record `collab task integrated --commit <sha> --evidence \"<text>\"` before close",
                 }),
-            );
+            ));
         }
-        return Resp::err(format!(
+        return Err(Resp::err(format!(
             "task {} must be merged by its owner before close (current: {})",
             task_id, task.status
-        ));
+        )));
     }
-    let lifecycle_complete = st.task_lifecycle.get(&task_id).is_some_and(|record| {
+    let lifecycle_complete = st.task_lifecycle.get(task_id).is_some_and(|record| {
         record
             .delivery_evidence
             .as_deref()
@@ -659,36 +904,234 @@ fn handle_task_close(
             }
     });
     if !lifecycle_complete {
-        return Resp::err(format!(
+        return Err(Resp::err(format!(
             "task {} cannot close before delivery, review, and integration evidence",
             task_id
-        ));
+        )));
     }
-    let receipt_reusable = st
+    let observed_receipt = st
         .cleanup_receipts
-        .get(&task.id)
+        .get(task_id)
         .filter(|receipt| {
             receipt.task_id == task.id
                 && receipt.worktree_path == task.worktree_path
                 && receipt.branch == task.branch
         })
-        .is_some_and(|receipt| cleanup_receipt_is_reusable(&server.root, receipt));
-    if !receipt_reusable {
-        if let Err(e) = close_task_resources(
-            &server.root,
-            &server.config,
-            task.worktree_path.as_deref(),
-            task.branch.as_deref(),
-            lifecycle.integration_commit.as_deref(),
-        ) {
-            return Resp::err(e);
+        .cloned();
+    Ok(TaskClosePrepared {
+        task,
+        lifecycle,
+        observed_receipt,
+        owner_target,
+        force_reason: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_task_close_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: &str,
+    token: &str,
+    task_id: &str,
+    force: bool,
+    owner_presence: IdentityPresence,
+    prepared: TaskClosePrepared,
+) -> Result<TaskCloseCommitOutcome, Resp> {
+    if let Err(error) = verify(st, worker_id, token) {
+        return Err(error);
+    }
+    let Some(task) = st.tasks.get(task_id).cloned() else {
+        return Err(Resp::err(format!("task {task_id} not found")));
+    };
+    if json!(task) != json!(prepared.task)
+        || close_endpoint_target(st, &task.owner) != prepared.owner_target
+    {
+        return Err(Resp::err(
+            "TASK_CLOSE_TARGET_CHANGED: observed owner, task or binding changed",
+        ));
+    }
+    if force {
+        let reason = prepared
+            .force_reason
+            .clone()
+            .ok_or_else(|| Resp::err("force close requires a non-empty --reason"))?;
+        let master_holder = current_master_holder(server, st).map_err(Resp::err)?;
+        // Only a definitively missing owner address is treated as dead. A
+        // cold thread may simply be idle on the endpoint and an unknown probe
+        // is not evidence of death, so neither authorizes force-closing
+        // another peer's task.
+        let owner_identity_live = owner_presence != IdentityPresence::Missing;
+        let owner_matches =
+            task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id).is_ok();
+        let authorized = master_holder.as_deref() == Some(worker_id)
+            || (master_holder.is_none() && (owner_matches || !owner_identity_live));
+        if !authorized {
+            return Err(Resp::err_data(
+                "manual force close is not authorized for this caller",
+                json!({
+                    "master_holder": master_holder,
+                    "task_owner": task.owner,
+                    "requester": worker_id,
+                    "rule": "the current master may close any task; with no master assigned, the owner may close its task or a registered peer may close an orphaned task whose owner address is definitively missing",
+                    "owner_identity_live": owner_identity_live,
+                }),
+            ));
+        }
+        if task.status == "closed" {
+            if let Some(receipt) = st.cleanup_receipts.get(&task.id).filter(|receipt| {
+                receipt.task_id == task.id
+                    && receipt.worktree_path == task.worktree_path
+                    && receipt.branch == task.branch
+            }) {
+                let cleanup_verified = receipt.verification == CleanupVerification::Verified;
+                return Ok(TaskCloseCommitOutcome {
+                    response: Resp::data(json!({
+                        "task": task.id,
+                        "status": task.status,
+                        "owner": task.owner,
+                        "manual": true,
+                        "delivery_complete": st.delivery_completion_projection(&task.id).0,
+                        "reason": receipt.manual_reason,
+                        "receipt_id": receipt.id,
+                        "cleanup": {
+                            "result": if cleanup_verified { "verified" } else { "unverified" },
+                            "reason": receipt.manual_reason,
+                        },
+                        "superseded_pending_keepalives": [],
+                        "stale_workers": stale_worker_views(st, &|worker| {
+                            worker_presence_in_state(server, st, worker)
+                        }),
+                        "idempotent": true,
+                        "next_action": if cleanup_verified {
+                            "manual close recorded; resource cleanup complete"
+                        } else {
+                            "manual close recorded; worktree/branch cleanup remains unverified"
+                        },
+                    })),
+                    notifications: Vec::new(),
+                });
+            }
+        }
+        let mut closed = task;
+        closed.status = "closed".into();
+        closed.wait = None;
+        closed.next_step = Some(format!("manual close: {reason}"));
+        closed.updated_ms = now_ms();
+        let receipt = CleanupReceipt {
+            id: format!("cleanup-manual-{}-{}", closed.id, closed.updated_ms),
+            task_id: closed.id.clone(),
+            worktree_path: closed.worktree_path.clone(),
+            branch: closed.branch.clone(),
+            verified_ms: closed.updated_ms,
+            verification: CleanupVerification::Unverified,
+            manual_reason: Some(reason.clone()),
+        };
+        let superseded: Vec<String> = st
+            .msgs
+            .values()
+            .filter(|message| {
+                message.to == closed.owner
+                    && message.mtype == "keepalive"
+                    && matches!(message.state.as_str(), "pending" | "delivered")
+            })
+            .map(|message| message.id.clone())
+            .collect();
+        let mut events: Vec<Event> = vec![
+            Event::CleanupVerified {
+                receipt: receipt.clone(),
+            },
+            Event::TaskUpdated {
+                task: closed.clone(),
+            },
+        ];
+        if st.pending_merges.contains_key(&closed.id) {
+            let stale_notices = pending_merge_notice_ids(st, &closed.id);
+            events.push(Event::MergeResolved {
+                task_id: closed.id.clone(),
+                resolved_by: worker_id.to_owned(),
+                reason: Some(format!("force close: {reason}")),
+                at_ms: closed.updated_ms,
+            });
+            if !stale_notices.is_empty() {
+                events.push(Event::Superseded { ids: stale_notices });
+            }
+        }
+        if !superseded.is_empty() {
+            events.push(Event::Superseded {
+                ids: superseded.clone(),
+            });
+        }
+        let other_actionable = st.tasks.values().any(|candidate| {
+            candidate.id != closed.id
+                && candidate.owner == closed.owner
+                && crate::server::keepalive::actionable(&candidate.status)
+        });
+        if !other_actionable {
+            if let Some(record) = st.keepalives.get(&closed.owner).cloned() {
+                if record.unacked > 0 || record.last_notice_id.is_some() {
+                    let mut updated = record;
+                    updated.unacked = 0;
+                    updated.last_notice_id = None;
+                    events.push(Event::KeepaliveUpdated {
+                        worker_id: closed.owner.clone(),
+                        record: updated,
+                    });
+                }
+            }
+        }
+        commit_task_close_events(server, st, control, &events)?;
+        let stale_workers = stale_worker_views(st, &|worker| worker_presence_in_state(server, st, worker));
+        return Ok(TaskCloseCommitOutcome {
+            response: Resp::data(json!({
+                "task": closed.id,
+                "status": closed.status,
+                "owner": closed.owner,
+                "manual": true,
+                "delivery_complete": false,
+                "reason": reason,
+                "receipt_id": receipt.id,
+                "cleanup": {
+                    "result": "unverified",
+                    "reason": receipt.manual_reason,
+                },
+                "superseded_pending_keepalives": superseded,
+                "stale_workers": stale_workers,
+                "next_action": "manual close recorded; worktree/branch cleanup remains unverified",
+            })),
+            notifications: Vec::new(),
+        });
+    }
+    if st
+        .task_lifecycle
+        .get(task_id)
+        .map(|record| json!(record))
+        != Some(json!(prepared.lifecycle))
+        || st.cleanup_receipts.get(task_id).map(|receipt| json!(receipt))
+            != prepared
+                .observed_receipt
+                .as_ref()
+                .map(|receipt| json!(receipt))
+    {
+        return Err(Resp::err(
+            "TASK_CLOSE_TARGET_CHANGED: task, lifecycle or receipt changed during cleanup",
+        ));
+    }
+    if task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id).is_err() {
+        let master_holder = current_master_holder(server, st).map_err(Resp::err)?;
+        if master_holder.as_deref() != Some(worker_id) {
+            return Err(Resp::err(
+                "task close requires task owner or current master authority",
+            ));
         }
     }
+    work_review_gate(st, task_id)?;
     let mut closed = task;
     closed.status = "closed".to_string();
     closed.wait = None;
     closed.next_step = Some(
-        if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+        if prepared.lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
             "closed after reviewed read-only delivery and owner cleanup".to_string()
         } else {
             "closed after owner merge and cleanup".to_string()
@@ -707,12 +1150,12 @@ fn handle_task_close(
     let superseded: Vec<String> = st
         .msgs
         .values()
-        .filter(|m| {
-            m.to == closed.owner
-                && m.mtype == "keepalive"
-                && matches!(m.state.as_str(), "pending" | "delivered")
+        .filter(|message| {
+            message.to == closed.owner
+                && message.mtype == "keepalive"
+                && matches!(message.state.as_str(), "pending" | "delivered")
         })
-        .map(|m| m.id.clone())
+        .map(|message| message.id.clone())
         .collect();
     let mut close_events: Vec<Event> = vec![
         Event::CleanupVerified {
@@ -725,10 +1168,10 @@ fn handle_task_close(
     if !superseded.is_empty() {
         close_events.push(Event::Superseded { ids: superseded });
     }
-    let other_actionable = st.tasks.values().any(|t| {
-        t.id != closed.id
-            && t.owner == closed.owner
-            && crate::server::keepalive::actionable(&t.status)
+    let other_actionable = st.tasks.values().any(|candidate| {
+        candidate.id != closed.id
+            && candidate.owner == closed.owner
+            && crate::server::keepalive::actionable(&candidate.status)
     });
     if !other_actionable {
         if let Some(record) = st.keepalives.get(&closed.owner).cloned() {
@@ -743,42 +1186,56 @@ fn handle_task_close(
             }
         }
     }
-    if let Err(error) = server.commit_locked(&mut st, &close_events) {
-        drop(st);
-        return Resp::err(format!("TASK_CLOSE_DURABILITY_FAILED: {error}"));
-    }
-
-    let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
+    commit_task_close_events(server, st, control, &close_events)?;
+    let notifications =
+        release_dependents_of_closed_task_with_control(server, st, &closed.id, control)
+            .map_err(|error| Resp::err(format!("TASK_CLOSE_RELEASE_FAILED: {error}")))?;
     let (delivery_complete, completion_missing) = st.delivery_completion_projection(&closed.id);
-
-    let stale_workers =
-        stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
-    drop(st);
-    for (message_id, subscription_id) in subscribed_notifications {
-        attempt_notification(server, &message_id, &subscription_id);
-    }
-    Resp::data(json!({
-        "task": closed.id,
-        "status": closed.status,
-        "owner": closed.owner,
-        "delivery_complete": delivery_complete,
-        "completion_missing": completion_missing,
-        "disposition": if lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
-            "no_merge_required"
-        } else {
-            "integrated"
-        },
-        "cleanup": {
-            "worktree": closed.worktree_path,
-            "branch": closed.branch,
-            "result": "verified",
-            "receipt_id": receipt.id,
-        },
-        "stale_workers": stale_workers,
-        "notification": "subscribed resource waiters only",
-        "next_action": "lifecycle complete",
-    }))
+    let stale_workers = stale_worker_views(st, &|worker| worker_presence_in_state(server, st, worker));
+    Ok(TaskCloseCommitOutcome {
+        response: Resp::data(json!({
+            "task": closed.id,
+            "status": closed.status,
+            "owner": closed.owner,
+            "delivery_complete": delivery_complete,
+            "completion_missing": completion_missing,
+            "disposition": if prepared.lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly {
+                "no_merge_required"
+            } else {
+                "integrated"
+            },
+            "cleanup": {
+                "worktree": closed.worktree_path,
+                "branch": closed.branch,
+                "result": "verified",
+                "receipt_id": receipt.id,
+            },
+            "stale_workers": stale_workers,
+            "notification": "subscribed resource waiters only",
+            "next_action": "lifecycle complete",
+        })),
+        notifications,
+    })
 }
+
+fn commit_task_close_events(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    events: &[Event],
+) -> Result<(), Resp> {
+    let result = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(st, events, control)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server
+            .commit_locked(st, events)
+            .map_err(|error| error.to_string()),
+    };
+    result.map_err(|error| Resp::err(format!("TASK_CLOSE_DURABILITY_FAILED: {error}")))
+}
+
 
 /// Finish the release half of a cleanup completion whose verified receipt may
 /// already be durable. A finalize commits the verified receipt first and then
@@ -787,8 +1244,21 @@ fn handle_task_close(
 /// here, and the operation is idempotent: a released waiter no longer carries a
 /// wait on the closed task, so a retry releases nobody and sends no duplicate
 /// notification.
-fn resume_cleanup_release(server: &Server, st: &mut State, task_id: &str) -> Vec<(String, String)> {
-    release_dependents_of_closed_task(server, st, task_id)
+fn resume_cleanup_release(
+    server: &Server,
+    st: &mut State,
+    task_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    resume_cleanup_release_with_control(server, st, task_id, None)
+}
+
+fn resume_cleanup_release_with_control(
+    server: &Server,
+    st: &mut State,
+    task_id: &str,
+    control: Option<&binding_slot::BindingControlSet>,
+) -> Result<Vec<(String, String)>, String> {
+    release_dependents_of_closed_task_with_control(server, st, task_id, control)
 }
 
 /// A competing owner of the closed task's declared worktree/branch. A closed
@@ -834,7 +1304,16 @@ fn release_dependents_of_closed_task(
     server: &Server,
     st: &mut State,
     closed_id: &str,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, String> {
+    release_dependents_of_closed_task_with_control(server, st, closed_id, None)
+}
+
+fn release_dependents_of_closed_task_with_control(
+    server: &Server,
+    st: &mut State,
+    closed_id: &str,
+    control: Option<&binding_slot::BindingControlSet>,
+) -> Result<Vec<(String, String)>, String> {
     let waiting = waiting_dependents_of(st, closed_id);
     let mut subscribed_notifications = Vec::new();
     for mut waiter_task in waiting {
@@ -891,9 +1370,16 @@ fn release_dependents_of_closed_task(
             ]);
             subscribed_notifications.push((message_id, subscription.id));
         }
-        server.commit_locked_reporting(st, &events);
+        match control {
+            Some(control) => {
+                server
+                    .commit_locked_checked_with_control(st, &events, control)
+                    .map_err(|error| error.to_string())?;
+            }
+            None => server.commit_locked_reporting(st, &events),
+        }
     }
-    subscribed_notifications
+    Ok(subscribed_notifications)
 }
 
 /// Forced termination records an explicit manual close without claiming its
@@ -908,129 +1394,264 @@ fn handle_task_finalize_cleanup(
     task_id: String,
     integration_commit: Option<String>,
 ) -> Resp {
-    let provided_integration = match integration_commit.as_deref() {
+    handle_task_finalize_cleanup_with_control(
+        server,
+        worker_id,
+        token,
+        task_id,
+        integration_commit,
+        None,
+    )
+}
+
+fn handle_task_finalize_cleanup_with_control(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    integration_commit: Option<String>,
+    control: Option<&binding_slot::BindingControlSet>,
+) -> Resp {
+    let provided_integration = match normalize_finalize_integration_commit(integration_commit.as_deref())
+    {
+        Ok(commit) => commit,
+        Err(response) => return response,
+    };
+    let prepared = {
+        let st = server.state.lock().unwrap();
+        match prepare_task_finalize_locked(
+            server,
+            &st,
+            &worker_id,
+            &token,
+            &task_id,
+            provided_integration.as_deref(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(response) => return response,
+        }
+    };
+    let owner_presence = close_endpoint_presence(server, &prepared.owner_target);
+    let authorized = {
+        let mut st = server.state.lock().unwrap();
+        match authorize_task_finalize_locked(
+            server,
+            &mut st,
+            control,
+            &worker_id,
+            &task_id,
+            owner_presence,
+            &prepared,
+        ) {
+            Ok(outcome) => outcome,
+            Err(response) => return response,
+        }
+    };
+    if let Some(outcome) = authorized {
+        for (message_id, subscription_id) in outcome.notifications {
+            attempt_notification(server, &message_id, &subscription_id);
+        }
+        return outcome.response;
+    }
+    if let Some(commit) = provided_integration.as_deref() {
+        if let Err(response) = prove_finalize_integration_commit(server, commit) {
+            return response;
+        }
+    }
+    if let Err(error) = close_task_resources(
+        &server.root,
+        &server.config,
+        prepared.task.worktree_path.as_deref(),
+        prepared.task.branch.as_deref(),
+        prepared.integration_evidence.as_deref(),
+    ) {
+        return Resp::err_data(
+            format!("CLEANUP_FINALIZE_REFUSED: {error}"),
+            json!({
+                "task": prepared.task.id,
+                "cleanup": {
+                    "result": "unverified",
+                    "reason": prepared.observed_receipt.and_then(|receipt| receipt.manual_reason),
+                },
+                "finalized": false,
+                "next_action": "resolve the reported resource problem, then rerun finalize-cleanup",
+            }),
+        );
+    }
+    let owner_presence = close_endpoint_presence(server, &prepared.owner_target);
+    let outcome = {
+        let mut st = server.state.lock().unwrap();
+        match commit_task_finalize_locked(
+            server,
+            &mut st,
+            control,
+            &worker_id,
+            &task_id,
+            owner_presence,
+            prepared,
+        ) {
+            Ok(outcome) => outcome,
+            Err(response) => return response,
+        }
+    };
+    for (message_id, subscription_id) in outcome.notifications {
+        attempt_notification(server, &message_id, &subscription_id);
+    }
+    outcome.response
+}
+
+fn normalize_finalize_integration_commit(value: Option<&str>) -> Result<Option<String>, Resp> {
+    match value {
         Some(value) => {
             let value = value.trim();
             if value.is_empty() {
-                return Resp::err_data(
+                Err(Resp::err_data(
                     "CLEANUP_FINALIZE_COMMIT_INVALID",
                     json!({
                         "provided": value,
                         "expected": "a non-empty commit sha reachable from refs/heads/main",
                     }),
-                );
+                ))
+            } else {
+                Ok(Some(value.to_owned()))
             }
-            Some(value.to_owned())
         }
-        None => None,
-    };
-    let mut st = server.state.lock().unwrap();
-    let Some(worker) = st.workers.get(&worker_id).cloned() else {
-        return Resp::err(format!("worker {} not registered", worker_id));
+        None => Ok(None),
+    }
+}
+
+struct TaskFinalizePrepared {
+    task: TaskRec,
+    lifecycle: Option<state::TaskLifecycleRecord>,
+    observed_receipt: Option<CleanupReceipt>,
+    integration_evidence: Option<String>,
+    owner_target: CloseEndpointTarget,
+}
+
+struct TaskFinalizeCommitOutcome {
+    response: Resp,
+    notifications: Vec<(String, String)>,
+}
+
+fn prepare_task_finalize_locked(
+    _server: &Server,
+    st: &State,
+    worker_id: &str,
+    token: &str,
+    task_id: &str,
+    provided_integration: Option<&str>,
+) -> Result<TaskFinalizePrepared, Resp> {
+    let Some(worker) = st.workers.get(worker_id).cloned() else {
+        return Err(Resp::err(format!("worker {worker_id} not registered")));
     };
     if worker.token != token {
-        return Resp::err("token mismatch: identity does not own this worker_id");
-    }
-    let Some(task) = st.tasks.get(&task_id).cloned() else {
-        return Resp::err(format!("task {} not found", task_id));
-    };
-    if task.status != "closed" {
-        return Resp::err(format!(
-            "task {} must be closed before cleanup finalization (current: {})",
-            task_id, task.status
+        return Err(Resp::err(
+            "token mismatch: identity does not own this worker_id",
         ));
     }
-    let observed_owner = close_endpoint_target(&st, &task.owner);
-    let observed_task = json!(task);
-    drop(st);
-    let owner_presence = close_endpoint_presence(server, &observed_owner);
-    let mut st = server.state.lock().unwrap();
-    if st.workers.get(&worker_id) != Some(&worker)
-        || close_endpoint_target(&st, &task.owner) != observed_owner
-        || st.tasks.get(&task_id).map(|task| json!(task)) != Some(observed_task)
-    {
-        return Resp::err(
-            "CLEANUP_FINALIZE_TARGET_CHANGED: observed owner, task or binding changed",
-        );
-    }
-    let master_holder = match current_master_holder(server, &st) {
-        Ok(master) => master,
-        Err(error) => return Resp::err(error),
+    let Some(task) = st.tasks.get(task_id).cloned() else {
+        return Err(Resp::err(format!("task {task_id} not found")));
     };
-    // Only a definitively missing owner address is treated as dead, matching
-    // the force-close authorization rule.
-    let owner_identity_live = owner_presence != IdentityPresence::Missing;
-    let authorized = task.owner == worker_id
-        || master_holder.as_deref() == Some(worker_id.as_str())
-        || (master_holder.is_none() && !owner_identity_live);
-    if !authorized {
-        return Resp::err_data(
-            "cleanup finalization is not authorized for this caller",
-            json!({
-                "master_holder": master_holder,
-                "task_owner": task.owner,
-                "requester": worker_id,
-                "owner_identity_live": owner_identity_live,
-                "rule": "task owner, the current master, or a peer closing an orphaned task may finalize cleanup",
-            }),
-        );
+    if task.status != "closed" {
+        return Err(Resp::err(format!(
+            "task {} must be closed before cleanup finalization (current: {})",
+            task_id, task.status
+        )));
     }
-    if let Some(commit) = provided_integration.as_deref() {
-        // An explicit commit is the operator's integration declaration for a
-        // task that was force-closed without recorded integration. Validate
-        // its reachability and the branch net-content relation through the
-        // same cleanup owner as normal close so a stale or unrelated commit
-        // cannot authorize deletion.
-        let main_head = match resolve_authoritative_main_head(&server.root) {
-            Ok(head) => head,
-            Err(error) => return error,
-        };
-        match commit_is_integrated_in_main(&server.root, commit) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Resp::err_data(
-                    "CLEANUP_FINALIZE_COMMIT_NOT_IN_MAIN",
-                    json!({
-                        "provided": commit,
-                        "main_head": main_head,
-                        "expected": "a commit reachable from refs/heads/main",
-                    }),
-                )
-            }
-            Err(error) => return error,
-        }
-    }
-    let recorded_integration = st
-        .task_lifecycle
-        .get(&task.id)
-        .and_then(|record| record.integration_commit.clone())
-        .filter(|value| !value.trim().is_empty());
-    let integration_evidence = provided_integration.or(recorded_integration);
-    let existing = st
+    let observed_receipt = st
         .cleanup_receipts
-        .get(&task.id)
-        .cloned()
+        .get(task_id)
         .filter(|receipt| {
             receipt.task_id == task.id
                 && receipt.worktree_path == task.worktree_path
                 && receipt.branch == task.branch
-        });
-    if existing
+        })
+        .cloned();
+    let lifecycle = st.task_lifecycle.get(task_id).cloned();
+    let recorded_integration = lifecycle
         .as_ref()
-        .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified)
-    {
-        let receipt_id = existing.map(|receipt| receipt.id);
-        let released = waiting_dependents_of(&st, &task.id)
-            .into_iter()
-            .map(|waiter| waiter.id)
-            .collect::<Vec<_>>();
-        let notifications = resume_cleanup_release(server, &mut st, &task.id);
-        let (delivery_complete, completion_missing) = st.delivery_completion_projection(&task.id);
-        drop(st);
-        for (message_id, subscription_id) in notifications {
-            attempt_notification(server, &message_id, &subscription_id);
-        }
-        return Resp::data(json!({
+        .and_then(|record| record.integration_commit.clone())
+        .filter(|value| !value.trim().is_empty());
+    let integration_evidence = provided_integration
+        .map(str::to_owned)
+        .or(recorded_integration);
+    Ok(TaskFinalizePrepared {
+        task,
+        lifecycle,
+        observed_receipt,
+        integration_evidence,
+        owner_target: close_endpoint_target(st, &st.tasks[task_id].owner),
+    })
+}
+
+fn task_finalize_authorized(
+    server: &Server,
+    st: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: &str,
+    task_id: &str,
+    owner_presence: IdentityPresence,
+) -> Result<(), Resp> {
+    let Some(task) = st.tasks.get(task_id) else {
+        return Err(Resp::err(format!("task {task_id} not found")));
+    };
+    let master_holder = current_master_holder(server, st).map_err(Resp::err)?;
+    // Only a definitively missing owner address is treated as dead, matching
+    // the force-close authorization rule.
+    let owner_identity_live = owner_presence != IdentityPresence::Missing;
+    let owner_matches =
+        task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id).is_ok();
+    let authorized = owner_matches
+        || master_holder.as_deref() == Some(worker_id)
+        || (master_holder.is_none() && !owner_identity_live);
+    if authorized {
+        return Ok(());
+    }
+    Err(Resp::err_data(
+        "cleanup finalization is not authorized for this caller",
+        json!({
+            "master_holder": master_holder,
+            "task_owner": task.owner,
+            "requester": worker_id,
+            "owner_identity_live": owner_identity_live,
+            "rule": "task owner, the current master, or a peer closing an orphaned task may finalize cleanup",
+        }),
+    ))
+}
+
+fn task_finalize_receipt_changed(
+    prepared: &TaskFinalizePrepared,
+    current: Option<&CleanupReceipt>,
+) -> bool {
+    let current = current.filter(|receipt| {
+        receipt.task_id == prepared.task.id
+            && receipt.worktree_path == prepared.task.worktree_path
+            && receipt.branch == prepared.task.branch
+    });
+    current.map(|receipt| json!(receipt))
+        != prepared
+            .observed_receipt
+            .as_ref()
+            .map(|receipt| json!(receipt))
+}
+
+fn idempotent_task_finalize_outcome(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    task: &TaskRec,
+    receipt_id: String,
+) -> Result<TaskFinalizeCommitOutcome, Resp> {
+    let released = waiting_dependents_of(st, &task.id)
+        .into_iter()
+        .map(|waiter| waiter.id)
+        .collect::<Vec<_>>();
+    let notifications =
+        resume_cleanup_release_with_control(server, st, &task.id, control)
+            .map_err(|error| Resp::err(format!("TASK_CLEANUP_RELEASE_FAILED: {error}")))?;
+    let (delivery_complete, completion_missing) = st.delivery_completion_projection(&task.id);
+    Ok(TaskFinalizeCommitOutcome {
+        response: Resp::data(json!({
             "task": task.id,
             "owner": task.owner,
             "cleanup": {"result": "verified", "receipt_id": receipt_id},
@@ -1039,31 +1660,252 @@ fn handle_task_finalize_cleanup(
             "completion_missing": completion_missing,
             "released_dependents": released,
             "next_action": "resource cleanup complete; inspect task delivery status",
-        }));
+        })),
+        notifications,
+    })
+}
+
+fn authorize_task_finalize_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: &str,
+    task_id: &str,
+    owner_presence: IdentityPresence,
+    prepared: &TaskFinalizePrepared,
+) -> Result<Option<TaskFinalizeCommitOutcome>, Resp> {
+    if st.tasks.get(task_id).map(|task| json!(task)) != Some(json!(prepared.task))
+        || close_endpoint_target(st, &prepared.task.owner) != prepared.owner_target
+    {
+        return Err(Resp::err(
+            "CLEANUP_FINALIZE_TARGET_CHANGED: observed owner, task or binding changed",
+        ));
     }
-    // A closed task is not a scheduling holder, so another task can take over
-    // the same worktree or branch after the force close. Removing it here would
-    // destroy a live owner's resource, so refuse before touching the
-    // filesystem or git and leave the obligation retryable.
-    if let Some(competing) = competing_resource_owner(&st, &task) {
-        return Resp::err_data(
+    task_finalize_authorized(server, st, control, worker_id, task_id, owner_presence)?;
+    if st
+        .task_lifecycle
+        .get(task_id)
+        .map(|record| json!(record))
+        != prepared.lifecycle.as_ref().map(|record| json!(record))
+    {
+        return Err(Resp::err(
+            "CLEANUP_FINALIZE_TARGET_CHANGED: lifecycle evidence changed",
+        ));
+    }
+    let current_receipt = st.cleanup_receipts.get(task_id);
+    if current_receipt
+        .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified)
+    {
+        return idempotent_task_finalize_outcome(
+            server,
+            st,
+            control,
+            &prepared.task,
+            current_receipt.map(|receipt| receipt.id.clone()).unwrap_or_default(),
+        )
+        .map(Some);
+    }
+    if task_finalize_receipt_changed(prepared, current_receipt) {
+        return Err(Resp::err(
+            "CLEANUP_FINALIZE_TARGET_CHANGED: observed receipt changed",
+        ));
+    }
+    if let Some(competing) = competing_resource_owner(st, &prepared.task) {
+        return Err(Resp::err_data(
             format!(
                 "CLEANUP_FINALIZE_REFUSED: task {} declared worktree/branch {} which is owned by non-closed task {}",
                 task_id,
-                task.worktree_path.as_deref().unwrap_or("-"),
+                prepared.task.worktree_path.as_deref().unwrap_or("-"),
                 competing
             ),
             json!({
-                "task": task.id,
+                "task": prepared.task.id,
                 "competing_task": competing,
                 "cleanup": {
                     "result": "unverified",
-                    "reason": existing.and_then(|receipt| receipt.manual_reason),
+                    "reason": prepared.observed_receipt.as_ref().and_then(|receipt| receipt.manual_reason.clone()),
                 },
                 "finalized": false,
                 "rule": "finalization may remove only resources no non-closed task still references",
             }),
-        );
+        ));
+    }
+    Ok(None)
+}
+
+fn prove_finalize_integration_commit(server: &Server, commit: &str) -> Result<(), Resp> {
+    // An explicit commit is operator-supplied proof for a task that was
+    // force-closed without recorded integration. Validate it exactly like
+    // `collab task integrated` so a stale or unrelated commit cannot
+    // authorize deletion.
+    let main_head = resolve_authoritative_main_head(&server.root)?;
+    match commit_is_integrated_in_main(&server.root, commit) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Resp::err_data(
+            "CLEANUP_FINALIZE_COMMIT_NOT_IN_MAIN",
+            json!({
+                "provided": commit,
+                "main_head": main_head,
+                "expected": "a commit reachable from refs/heads/main",
+            }),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn commit_task_finalize_locked(
+    server: &Server,
+    st: &mut State,
+    control: Option<&binding_slot::BindingControlSet>,
+    worker_id: &str,
+    task_id: &str,
+    owner_presence: IdentityPresence,
+    prepared: TaskFinalizePrepared,
+) -> Result<TaskFinalizeCommitOutcome, Resp> {
+    if let Some(outcome) = authorize_task_finalize_locked(
+        server,
+        st,
+        control,
+        worker_id,
+        task_id,
+        owner_presence,
+        &prepared,
+    )? {
+        return Ok(outcome);
+    }
+    let now = now_ms();
+    let receipt = CleanupReceipt {
+        id: format!("cleanup-final-{}-{}", prepared.task.id, now),
+        task_id: prepared.task.id.clone(),
+        worktree_path: prepared.task.worktree_path.clone(),
+        branch: prepared.task.branch.clone(),
+        verified_ms: now,
+        verification: CleanupVerification::Verified,
+        manual_reason: prepared
+            .observed_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.manual_reason.clone()),
+    };
+    let commit = match control {
+        Some(control) => server
+            .commit_locked_checked_with_control(
+                st,
+                &[Event::CleanupVerified {
+                    receipt: receipt.clone(),
+                }],
+                control,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => server
+            .commit_locked(
+                st,
+                &[Event::CleanupVerified {
+                    receipt: receipt.clone(),
+                }],
+            )
+            .map_err(|error| error.to_string()),
+    };
+    if let Err(error) = commit {
+        return Err(Resp::err(format!("TASK_CLEANUP_DURABILITY_FAILED: {error}")));
+    }
+    let released = waiting_dependents_of(st, &prepared.task.id)
+        .into_iter()
+        .map(|waiter| waiter.id)
+        .collect::<Vec<_>>();
+    let notifications =
+        resume_cleanup_release_with_control(server, st, &prepared.task.id, control)
+            .map_err(|error| Resp::err(format!("TASK_CLEANUP_RELEASE_FAILED: {error}")))?;
+    let (delivery_complete, completion_missing) = st.delivery_completion_projection(&prepared.task.id);
+    let stale_workers = stale_worker_views(st, &|worker| worker_presence_in_state(server, st, worker));
+    Ok(TaskFinalizeCommitOutcome {
+        response: Resp::data(json!({
+            "task": prepared.task.id,
+            "owner": prepared.task.owner,
+            "cleanup": {
+                "worktree": prepared.task.worktree_path,
+                "branch": prepared.task.branch,
+                "result": "verified",
+                "receipt_id": receipt.id,
+                "manual_reason": receipt.manual_reason,
+            },
+            "released_dependents": released,
+            "stale_workers": stale_workers,
+            "finalized": true,
+            "delivery_complete": delivery_complete,
+            "completion_missing": completion_missing,
+            "idempotent": false,
+            "next_action": "resource cleanup complete; inspect task delivery status",
+        })),
+        notifications,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_task_finalize_cleanup_current_map(
+    manager: &ProjectRuntimeManager,
+    server: &Server,
+    context: &crate::proto::ProjectContext,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    integration_commit: Option<String>,
+) -> Resp {
+    let provided_integration = match normalize_finalize_integration_commit(integration_commit.as_deref())
+    {
+        Ok(commit) => commit,
+        Err(response) => return response,
+    };
+    let prepared = match manager.with_current_task_state_response(
+        server,
+        context,
+        &worker_id,
+        &token,
+        |_control, state, _| {
+            prepare_task_finalize_locked(
+                server,
+                state,
+                &worker_id,
+                &token,
+                &task_id,
+                provided_integration.as_deref(),
+            )
+        },
+    ) {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
+    };
+    let owner_presence = close_endpoint_presence(server, &prepared.owner_target);
+    let authorized = match manager.with_current_task_state_response(
+        server,
+        context,
+        &worker_id,
+        &token,
+        |control, state, _| {
+            authorize_task_finalize_locked(
+                server,
+                state,
+                Some(control),
+                &worker_id,
+                &task_id,
+                owner_presence,
+                &prepared,
+            )
+        },
+    ) {
+        Ok(outcome) => outcome,
+        Err(response) => return response,
+    };
+    if let Some(outcome) = authorized {
+        for (message_id, subscription_id) in outcome.notifications {
+            attempt_notification(server, &message_id, &subscription_id);
+        }
+        return outcome.response;
+    }
+    if let Some(commit) = provided_integration.as_deref() {
+        if let Err(response) = prove_finalize_integration_commit(server, commit) {
+            return response;
+        }
     }
     // The same checks a normal close applies: a clean worktree inside
     // ./playground and a branch proven by ancestry or the recorded
@@ -1073,77 +1915,140 @@ fn handle_task_finalize_cleanup(
     if let Err(error) = close_task_resources(
         &server.root,
         &server.config,
-        task.worktree_path.as_deref(),
-        task.branch.as_deref(),
-        integration_evidence.as_deref(),
+        prepared.task.worktree_path.as_deref(),
+        prepared.task.branch.as_deref(),
+        prepared.integration_evidence.as_deref(),
     ) {
         return Resp::err_data(
             format!("CLEANUP_FINALIZE_REFUSED: {error}"),
             json!({
-                "task": task.id,
+                "task": prepared.task.id,
                 "cleanup": {
                     "result": "unverified",
-                    "reason": existing.and_then(|receipt| receipt.manual_reason),
+                    "reason": prepared.observed_receipt.as_ref().and_then(|receipt| receipt.manual_reason.clone()),
                 },
                 "finalized": false,
                 "next_action": "resolve the reported resource problem, then rerun finalize-cleanup",
             }),
         );
     }
-    let now = now_ms();
-    let receipt = CleanupReceipt {
-        id: format!("cleanup-final-{}-{}", task.id, now),
-        task_id: task.id.clone(),
-        worktree_path: task.worktree_path.clone(),
-        branch: task.branch.clone(),
-        verified_ms: now,
-        verification: CleanupVerification::Verified,
-        manual_reason: existing.and_then(|receipt| receipt.manual_reason),
-    };
-    if let Err(error) = server.commit_locked(
-        &mut st,
-        &[Event::CleanupVerified {
-            receipt: receipt.clone(),
-        }],
+    let owner_presence = close_endpoint_presence(server, &prepared.owner_target);
+    let outcome = match manager.with_current_task_state_response(
+        server,
+        context,
+        &worker_id,
+        &token,
+        |control, state, _| {
+            commit_task_finalize_locked(
+                server,
+                state,
+                Some(control),
+                &worker_id,
+                &task_id,
+                owner_presence,
+                prepared,
+            )
+        },
     ) {
-        drop(st);
-        return Resp::err(format!("TASK_CLEANUP_DURABILITY_FAILED: {error}"));
-    }
-    let released = waiting_dependents_of(&st, &task.id)
-        .into_iter()
-        .map(|waiter| waiter.id)
-        .collect::<Vec<_>>();
-    let notifications = resume_cleanup_release(server, &mut st, &task.id);
-    let (delivery_complete, completion_missing) = st.delivery_completion_projection(&task.id);
-    let stale_workers =
-        stale_worker_views(&st, &|worker| worker_presence_in_state(server, &st, worker));
-    drop(st);
-    for (message_id, subscription_id) in notifications {
+        Ok(outcome) => outcome,
+        Err(response) => return response,
+    };
+    for (message_id, subscription_id) in outcome.notifications {
         attempt_notification(server, &message_id, &subscription_id);
     }
-    Resp::data(json!({
-        "task": task.id,
-        "owner": task.owner,
-        "cleanup": {
-            "worktree": task.worktree_path,
-            "branch": task.branch,
-            "result": "verified",
-            "receipt_id": receipt.id,
-            "manual_reason": receipt.manual_reason,
+    outcome.response
+}
+
+struct TaskOwnerProjection {
+    owner: String,
+    owner_name: Option<String>,
+    owner_session_id: Option<String>,
+}
+
+fn task_owner_projection(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
+    task: &TaskRec,
+) -> Result<TaskOwnerProjection, String> {
+    let assignment = state.task_assignment(&task.id);
+    if matches!(task.status.as_str(), "closed" | "cancelled") {
+        return Ok(TaskOwnerProjection {
+            owner: task.owner.clone(),
+            owner_name: assignment.map(|assignment| assignment.name.clone()),
+            owner_session_id: assignment.map(|assignment| assignment.session_id.clone()),
+        });
+    }
+    let Some(assignment) = assignment else {
+        return Ok(TaskOwnerProjection {
+            owner: task.owner.clone(),
+            owner_name: None,
+            owner_session_id: None,
+        });
+    };
+    let route = route.ok_or_else(|| {
+        format!(
+            "TASK_ROUTE_SCOPE_REQUIRED: task {} assignment {} has no project/app route",
+            task.id, assignment.name
+        )
+    })?;
+    let current = control
+        .current_for_name(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &assignment.name,
+        )?
+        .and_then(|slot| slot.active_binding());
+    Ok(TaskOwnerProjection {
+        owner: current
+            .map(|current| current.binding.agent_id.to_string())
+            .unwrap_or_default(),
+        owner_name: Some(assignment.name.clone()),
+        owner_session_id: current
+            .and_then(|current| current.binding.session_id.as_ref().map(ToString::to_string)),
+    })
+}
+
+fn task_view_with_identity(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
+    task: &TaskRec,
+) -> Result<serde_json::Value, String> {
+    let projection = task_owner_projection(state, control, route, task)?;
+    let mut view = task_view(state, task);
+    if let Some(object) = view.as_object_mut() {
+        object.insert("owner_name".into(), json!(projection.owner_name));
+        object.insert("owner".into(), json!(projection.owner));
+        object.insert("owner_session_id".into(), json!(projection.owner_session_id));
+    }
+    Ok(view)
+}
+
+fn task_cleanup_view(state: &State, task: &TaskRec) -> serde_json::Value {
+    let cleanup_required = task.has_owned_resources();
+    let cleanup_receipt = state.cleanup_receipts.get(&task.id);
+    if !cleanup_required && cleanup_receipt.is_none() {
+        return serde_json::Value::Null;
+    }
+    json!({
+        "required": cleanup_required,
+        "status": if !cleanup_required {
+            "not_required"
+        } else if cleanup_receipt.is_some_and(|receipt| {
+            receipt.verification == CleanupVerification::Verified
+        }) {
+            "verified"
+        } else if cleanup_receipt.is_some() {
+            "unverified"
+        } else {
+            "pending"
         },
-        "released_dependents": released,
-        "stale_workers": stale_workers,
-        "finalized": true,
-        "delivery_complete": delivery_complete,
-        "completion_missing": completion_missing,
-        "idempotent": false,
-        "next_action": "resource cleanup complete; inspect task delivery status",
-    }))
+        "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
+    })
 }
 
 fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
-    let cleanup_required = task.has_owned_resources();
-    let cleanup_receipt = state.cleanup_receipts.get(&task.id);
     let lifecycle = state.task_lifecycle.get(&task.id);
     // A read projects only the sections that carry a fact. A task that has not
     // delivered shows no delivery/review/integration block instead of a page of
@@ -1236,25 +2141,9 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
             }),
         );
     }
-    if cleanup_required || cleanup_receipt.is_some() {
-        sections.insert(
-            "cleanup".into(),
-            json!({
-                "required": cleanup_required,
-                "status": if !cleanup_required {
-                    "not_required"
-                } else if cleanup_receipt.is_some_and(|receipt| {
-                    receipt.verification == CleanupVerification::Verified
-                }) {
-                    "verified"
-                } else if cleanup_receipt.is_some() {
-                    "unverified"
-                } else {
-                    "pending"
-                },
-                "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
-            }),
-        );
+    let cleanup = task_cleanup_view(state, task);
+    if !cleanup.is_null() {
+        sections.insert("cleanup".into(), cleanup);
     }
     sections.insert("updated_at".into(), json!(iso(task.updated_ms)));
     let mut view = json!({
@@ -1383,34 +2272,6 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
-    let mut tasks: Vec<serde_json::Value> = st
-        .tasks
-        .values()
-        .filter(|task| task.owner == worker_id)
-        // `context` is the caller's current work view. An owned closed task is
-        // history only when the existing delivery, merge and resource
-        // projections say no duty remains; explicit status/task reads still
-        // show the full record.
-        .filter(|task| {
-            if task.status != "closed" {
-                return true;
-            }
-            let (delivery_complete, _) = st.delivery_completion_projection(&task.id);
-            !delivery_complete || st.pending_merges.contains_key(&task.id)
-        })
-        .map(|task| task_view(&st, task))
-        .collect();
-    tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    let caller_role_brief = match role_brief(server, &st, &control, &worker_id) {
-        Ok(brief) => brief,
-        Err(error) => return Resp::err(error),
-    };
-    let role = caller_role_brief
-        .get("role")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("worker")
-        .to_owned();
-    let authority = caller_role_brief["authority"].clone();
     // The caller's own runtime binding is the receipt that addresses this
     // route. `collab context` is the single bootstrap read, so it owns the
     // read-back path for a peer whose local copy of that receipt was lost.
@@ -1443,6 +2304,38 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             Err(error) => return Resp::err(error),
         },
     };
+    let mut tasks = Vec::new();
+    for task in st.tasks.values() {
+        let view = match task_view_with_identity(&st, &control, route_scope.as_ref(), task) {
+            Ok(view) => view,
+            Err(error) => return Resp::err(error),
+        };
+        if view["owner"].as_str() != Some(worker_id.as_str()) {
+            continue;
+        }
+        // `context` is the caller's current work view. An owned closed task is
+        // history only when the existing delivery, merge and resource
+        // projections say no duty remains; explicit status/task reads still
+        // show the full record.
+        if task.status == "closed" {
+            let (delivery_complete, _) = st.delivery_completion_projection(&task.id);
+            if delivery_complete && !st.pending_merges.contains_key(&task.id) {
+                continue;
+            }
+        }
+        tasks.push(view);
+    }
+    tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    let current_role_brief = match role_brief(server, &st, &control, &worker_id) {
+        Ok(brief) => brief,
+        Err(error) => return Resp::err(error),
+    };
+    let role = current_role_brief
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("worker")
+        .to_owned();
+    let authority = current_role_brief["authority"].clone();
     let mapped = match route_scope.as_ref() {
         Some(route) => match control.current_for_worker(
             &route.project_scope_id,
@@ -1471,7 +2364,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                     "path": binding.worktree_root,
                     "base_commit": binding.base_commit,
                     "status": task.map(|task| task.status.as_str()).unwrap_or("unknown"),
-                    "cleanup": task.map(|task| task_view(&st, task)["cleanup"].clone()),
+                    "cleanup": task.map(|task| task_cleanup_view(&st, task)),
                 })
             })
             .collect::<Vec<_>>();
@@ -1589,6 +2482,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                 Some(crate::server::name_state::AgentActivity::Busy) => "busy",
                 Some(crate::server::name_state::AgentActivity::Idle) => "idle",
                 Some(crate::server::name_state::AgentActivity::WaitingUser) => "waiting_user",
+                Some(crate::server::name_state::AgentActivity::Error) => "error",
                 _ => "unknown",
             };
             activities.insert(peer.id.clone(), activity.to_string());
@@ -1853,7 +2747,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                 .get(&peer.id)
                 .cloned()
                 .unwrap_or_else(|| "unknown".into());
-            let availability = if matches!(activity_str.as_str(), "busy" | "waiting_user") {
+            let availability = if matches!(activity_str.as_str(), "busy" | "waiting_user" | "error") {
                 "busy"
             } else if activity_str == "idle" {
                 "idle"
@@ -2005,6 +2899,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         "name": mapped.identity_key.name,
         "session_id": mapped_current.binding.session_id,
         "layout": tm_layout::projection(mapped_current),
+        "physical_anchor": identity_context::physical_anchor_projection(mapped_current, &mapped.identity_key.name),
         "binding": binding,
         "registered": true,
         "project_root": server.root,
@@ -2015,7 +2910,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             "role": role,
             "transport": mapped_current.transport,
         },
-        "role_brief": caller_role_brief,
+        "role_brief": current_role_brief,
         "work_roles": work_roles_by_worker.get(&worker.id).cloned().unwrap_or_default(),
         "work_policies": work_policies,
         "pending_reply_obligations": pending_reply_obligations,

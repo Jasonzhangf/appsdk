@@ -9,30 +9,11 @@ pub(crate) const ORDINARY_NAME_POOL: [&str; 20] = [
     "Leo", "Mia", "Noah", "Olivia", "Peter", "Quinn", "Rose", "Sam", "Tina",
 ];
 
-/// Physical tmux labels are scoped by the actual execution directory.
-/// Logical occupancy keys remain the declared Collab names.
-pub(crate) fn physical_tmux_name(cwd: &str, logical_name: &str) -> Result<String, String> {
-    let folder = std::path::Path::new(cwd)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("TMUX_SESSION_NAME_INVALID: cwd has no folder name")?;
-    let slot = display_slot(logical_name)?;
-    Ok(format!("{folder}_{slot}_{logical_name}"))
-}
-
-pub(crate) fn display_slot(name: &str) -> Result<u32, String> {
-    if name == "Jenny" {
-        return Ok(1);
-    }
-    if let Some(number) = peer_registration_number(name) {
-        return number
-            .checked_add(21)
-            .ok_or_else(|| format!("NAME_INVALID: generated name slot exceeds range: {name}"));
-    }
-    ORDINARY_NAME_POOL
-        .iter()
-        .position(|candidate| *candidate == name)
-        .map(|index| index as u32 + 2)
+pub(crate) fn display_slot(name: &str) -> Result<Option<u32>, String> {
+    if name == "Jenny" { return Ok(Some(1)); }
+    ORDINARY_NAME_POOL.iter().position(|candidate| *candidate == name)
+        .map(|index| Some(index as u32 + 2))
+        .or_else(|| peer_registration_number(name).map(|_| None))
         .ok_or_else(|| format!("NAME_INVALID: unknown registered name {name}"))
 }
 
@@ -40,9 +21,8 @@ pub(crate) fn display_slot(name: &str) -> Result<u32, String> {
 pub(crate) struct NameIntent {
     pub requested_name: String,
     pub user_authorized: bool,
-    /// A user-requested name change carries the caller's previous names with it.
-    /// Role recovery that allocates an ordinary name for the same carrier is not
-    /// a rename and must leave existing name work and mail at the old name.
+    /// Legacy handoff policy retained for stored intents. New name and role
+    /// operations leave source-name work and mail at their original names.
     pub moves_existing_names: bool,
     /// Typed takeover confirmation for a name held by another carrier. The
     /// legacy promote approval text never sets this; only the explicit typed
@@ -87,9 +67,40 @@ pub(crate) fn parse_name_intent(
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|text| !text.trim().is_empty()),
         },
-        moves_existing_names: true,
+        moves_existing_names: false,
         replace_confirmed,
     }))
+}
+
+/// Pin legacy work to its known source name before the carrier releases that
+/// name. This uses the existing business occupancy selected by the published
+/// handoff intent and grants no identity authority.
+pub(crate) fn preserve_source_work_events(
+    state: &State,
+    project_scope: &str,
+    source_names: &[String],
+    target_name: &str,
+    now: i64,
+) -> Vec<Event> {
+    let mut tasks: Vec<_> = state.tasks.values()
+        .filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled")
+            && state.task_assignment(&task.id).is_none())
+        .collect();
+    tasks.sort_by(|left, right| left.id.cmp(&right.id));
+    tasks.into_iter().filter_map(|task| {
+        let source = source_names.iter()
+            .filter(|name| name.as_str() != target_name)
+            .filter_map(|name| state.name_occupancy(project_scope, name))
+            .find(|source| source.worker_id == task.owner)?;
+        Some(Event::TaskAssignmentUpdated { assignment: TaskAssignment {
+            task_id: task.id.clone(),
+            name: source.name.clone(),
+            session_id: source.session_id.clone(),
+            assignment_revision: 1,
+            reflow: None,
+            updated_ms: now,
+        } })
+    }).collect()
 }
 
 /// New registration uses the current map or allocates an available name.
@@ -108,13 +119,20 @@ pub(crate) fn name_for_registration(
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
-    display_slot(name).map(|_| ()).map_err(|_| {
-        format!("NAME_INVALID: {name}; expected Jenny, a fixed-pool name, or a canonical peer-<number> name")
-    })
+    if name == "Jenny"
+        || ORDINARY_NAME_POOL.contains(&name)
+        || peer_registration_number(name).is_some()
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "NAME_INVALID: {name}; expected Jenny, a fixed-pool name, or peer-<number>"
+        ))
+    }
 }
 
-pub(crate) fn peer_registration_number(name: &str) -> Option<u32> {
-    let number = name.strip_prefix("peer-")?.parse::<u32>().ok()?;
+pub(crate) fn peer_registration_number(name: &str) -> Option<u64> {
+    let number = name.strip_prefix("peer-")?.parse::<u64>().ok()?;
     (number > 0 && format!("peer-{number}") == name).then_some(number)
 }
 
@@ -153,8 +171,7 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
         // later re-take by a different session, but a same-session commit is
         // still a no-op.
         let matches_target_name = existing.is_some_and(|assignment| {
-            previous.is_some()
-                && assignment.name == occupancy.name
+            assignment.name == occupancy.name
                 && (target_held_by_other || assignment.session_id != occupancy.session_id)
         });
         let matches_caller_name = matches_rename_from || matches_target_name;

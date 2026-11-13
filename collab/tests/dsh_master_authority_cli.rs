@@ -2424,9 +2424,15 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
         &ctx_a,
         json!({"target_id":"workerB"}),
     );
-    assert_ok(&delegated);
-    assert_eq!(delegated["master"], "workerB", "{delegated}");
-    assert_scope(&delegated, &fixture.root);
+    must_refuse(&delegated);
+    assert!(delegated["error"]
+        .as_str()
+        .unwrap()
+        .contains("MASTER_AUTHORIZATION_REQUIRED"));
+    assert_eq!(
+        status(&fixture, &fixture.root)["master"]["worker_id"],
+        "workerA"
+    );
     let before_refusals = status(&fixture, &fixture.root);
     let wrong_token = clear(
         &fixture,
@@ -2484,7 +2490,7 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
     let unreachable = status(&fixture, &fixture.root);
     assert_ok(&unreachable);
     assert_eq!(
-        unreachable["master"]["worker_id"], "workerB",
+        unreachable["master"]["worker_id"], "workerA",
         "{unreachable}"
     );
     assert_ne!(
@@ -2501,7 +2507,7 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
         "fixture approved clear",
     );
     assert_ok(&clear_a);
-    assert_eq!(clear_a["previous_worker_id"], "workerB", "{clear_a}");
+    assert_eq!(clear_a["previous_worker_id"], "workerA", "{clear_a}");
     fixture.restart_daemon();
 
     let after_restart = status(&fixture, &fixture.root);

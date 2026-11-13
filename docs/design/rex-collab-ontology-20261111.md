@@ -1,6 +1,6 @@
 # Rex 与 Collab 适配 Ontology
 
-状态：current behavior design。本文是
+状态：current behavior design 与 Rex adapter 的正式源合同。本文是
 [Rex 完整语义模型](rex-project-agent-lifecycle-architect-20261110.md) 的从属
 Adapter 技术视图，只记录 Rex adapter、snapshot 和活动观察细节。对象所有权、
 身份、block 当前归属和生命周期由整篇模型及各既有 owner 定义；本文不建立
@@ -39,7 +39,8 @@ block 仍存在但被另一身份成功替换时，旧名字的处理仍待协�
 | --- | --- | --- | --- | --- |
 | Rex block anchor | Rex block entity | block identity；当前所属 window/layout 可变化 | Rex；current owner 由 binding owner 保存 | `session.inspect` 布局与 block inventory、官方 block API |
 | Rex endpoint locator | server + service generation + session + block | host、instance、cwd；用于查找/核实 block anchor | binding owner 与 Rex adaptor | 官方 CLI 参数、typed binding |
-| 通知提交 | 一次通知消息对一次 terminal body write 和一次独立 Enter | 原始正文、正文排队字节、Enter 接受 | `collab/src/adapters/rex.rs` | write 与 send-key receipt、fixture invocation |
+| Rex session 名 | 项目 cwd 末级目录 | session 名、当前项目 | Rex session owner | 官方 session/block 查询 |
+| 通知提交 | 一次通知消息对一次 terminal body write 和一次独立 Enter | 原始正文、正文排队字节、输入阶段、Enter 接受 | `collab/src/adapters/rex.rs` | write、send-key 与 submission receipt、fixture invocation |
 | 临时 snapshot | endpoint + 请求行数 + 一次 capture | 最新文本行、传输类型、非持久 | Rex adaptor 与 snapshot handler | `collab snapshot TARGET_ID` |
 | 程序状态记录 | 一条 Rex program-status record | id、state、kind、owner、updated_at | adaptor 解码，monitor 投影 | `program_status`、activity view |
 | foreground owner | 当前前台进程 | pid、name | 官方 `terminal.process` | process query |
@@ -65,6 +66,8 @@ block 仍存在但被另一身份成功替换时，旧名字的处理仍待协�
 - 正文阶段和 Enter 阶段分别保留 `known-not-delivered` / `unknown` 及实际阶段。正式 receive/consumption 由 notification-consumption owner 提交。
 - 已接受或 unknown 的尝试保留原 binding 和原结果；换绑不能撤回已排队输入，
   也不能将旧结果记到新身份。后续旧身份尝试在通知入口被拒绝。
+- 成功回执包含 `text_queued`、`enter_accepted`、`submission_queued` 和
+  `consumed=false`。读取、执行和消费各沿所属回执确认。
 
 ### Snapshot 读取
 
@@ -76,13 +79,22 @@ block 仍存在但被另一身份成功替换时，旧名字的处理仍待协�
 
 ### 活动投影
 
-`（当前状态记录，当前 foreground owner） -> （busy|idle|waiting_user|unknown）`
+`（当前状态记录，当前 foreground owner） -> （busy|idle|waiting_user|error|unknown）`
 
 - owner 的 pid 和 name 必须同时匹配当前 foreground。
 - 过期或不完整 owner 的状态不参与活动判定。
 - 有效 `blocked` 优先映射 waiting_user；有效 `working` 映射 busy。
-- 有效 `idle`、`done`、`error`、未知或缺失 state 映射 idle。
-- 无有效记录、查询失败或证据缺口保持 unknown。
+- 有效记录上的 `idle`、`done`、`error` 和未知 state 都映射 idle，不投射伪造忙碌。
+- 无有效记录、查询失败、owner 不匹配或证据缺口保持 unknown。
+
+### Session 命名
+
+`（项目 cwd，身份或角色变化） -> （cwd 末级目录命名的 Rex session，当前 block 继续承载执行）`
+
+- 创建项目 session 时使用项目 cwd 末级目录名。
+- 用户明确指定其他名称时按用户指令；peer 不因身份、角色或任务自动改名。
+- Rex 使用当前 block endpoint，不要求也不推导 tmux pane 位置 1。
+- 身份和角色变化更新 Collab current binding，不改写 Rex session 名或移动 block。
 
 ### 拒绝标签
 
@@ -97,6 +109,7 @@ Rex 标签只由通知结果映射 owner 生成，adapter 和 CLI 不重复包�
 | endpoint 承载通知提交 | endpoint -> submission | 1:N | submission 只写已核实 endpoint |
 | endpoint 支持 snapshot | endpoint -> snapshot | 1:N | snapshot 只读 |
 | 状态记录属于 foreground | foreground -> status record | 1:N | pid/name 同时匹配才有效 |
+| Rex session 对应 project cwd | Rex session -> project cwd | 每个项目session对应一个项目cwd | session 名由 cwd 末级目录确定，明确用户改名除外 |
 | 通知提交产生拒绝 | submission -> rejection | 0..1 | 拒绝保留原错 |
 | 项目名字的 current holder/anchor | project stable name -> current holder/anchor | 1..1 under approved B1; interaction with timed detach and replacement unresolved; confirmed absent block retires name relation | 活动名字唯一对应 current holder/anchor；确证对应 block 不存在时退役名字，unknown 不退役。该 absence 结论不决定 timed detach 或 replacement 后的名字-anchor 关系 |
 | Rex block 的布局归属 | block -> window -> layer/layout leaf | 按 Rex inspect 的实际实体关系；layout leaf 引用 block | resize/move/swap 可改变布局关系但不改 block anchor；split 创建新 block anchor |

@@ -1,3 +1,94 @@
+    #[test]
+    fn tmux_runtime_activation_preserves_precise_reference_and_existing_wait() {
+        let (server, root, _) = test_server();
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        let endpoint = crate::proto::TmuxEndpoint {
+            socket_path: "/explicit/tmux-activation.sock".into(), server_pid: 123,
+            tmux_session_id: "$1".into(), pane_id: "%1".into(), pane_pid: 456,
+            codex_session_id: Some("tmux-activation-session".into()), codex_thread_id: None,
+        };
+        let binding = commit_tmux_typed_fixture(&server, "tmux-activation-worker", "token",
+            AppServerId::new("appserver-cli").unwrap(), endpoint.clone());
+        let control = manager.binding_control_store().load().unwrap();
+        let slot = control.current_for_worker(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())
+            .unwrap().unwrap();
+        let record: name_monitor::ObservedTmuxExecutionRecord = serde_json::from_value(serde_json::json!({
+            "target": { "key": slot.identity_key, "generation": slot.generation(), "binding": binding,
+                "endpoint": endpoint }, "execution": { "pid": 700, "start_id": "100:1" }
+        })).unwrap();
+        server.try_commit(&[
+            Event::TmuxExecutionObserved { worker_id: "tmux-activation-worker".into(), record },
+            Event::AgentPresenceObserved { presence: name_state::AgentPresenceRecord {
+                project_scope: binding.project_scope.as_str().into(), worker_id: "tmux-activation-worker".into(),
+                session_id: "tmux-activation-session".into(), presence: name_state::AgentPresence::Online,
+                reason: "before restart".into(), observed_ms: 1,
+            } },
+            Event::NameReassignmentScheduled { project_scope: binding.project_scope.as_str().into(),
+                name: slot.identity_key.name.clone(), schedule: name_state::start_return_wait(None, "original", 1) },
+        ]).unwrap();
+        let before = current_state::load(&server.state_path, false).unwrap();
+        let context = context_with_app(&root, "appserver-cli");
+        let (activated, _) = manager.build_runtime(&ProjectRuntimeManager::route_key(&context), &root, &root).unwrap();
+        let state = activated.state.lock().unwrap();
+        assert_eq!(state.tmux_executions, before.tmux_executions);
+        assert_eq!(state.name_reassignments, before.name_reassignments);
+        assert_eq!(serde_json::to_value(&state.notification_subscriptions).unwrap(), serde_json::to_value(&before.notification_subscriptions).unwrap());
+        assert_eq!(state.agent_presence(binding.project_scope.as_str(), "tmux-activation-worker").unwrap().presence, name_state::AgentPresence::Unknown);
+        drop(state);
+        drop(activated);
+        drop(manager);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_activation_invalidates_restored_agent_observations() {
+        let (host, root, _) = test_server();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host.host_paths).unwrap();
+        let context = context_with_app(&root, "restart-observation-app");
+        let worker = "restart-observation-worker";
+        let runtime = committed_native_scope_fixture(
+            &manager, &context, worker, "restart-observation-token", "restart-observation-thread",
+        );
+        let session = runtime.state.lock().unwrap().workers[worker]
+            .transport.as_ref().unwrap().session_id.clone().unwrap();
+        let project = context.project_scope.as_str();
+        runtime.try_commit(&[
+            Event::AgentPresenceObserved { presence: name_state::AgentPresenceRecord {
+                project_scope: project.into(), worker_id: worker.into(), session_id: session.clone(),
+                presence: name_state::AgentPresence::Online, reason: "previous runtime sample".into(), observed_ms: 1,
+            } },
+            Event::AgentActivityObserved { activity: name_state::AgentActivityRecord {
+                project_scope: project.into(), worker_id: worker.into(), session_id: session.clone(),
+                activity: name_state::AgentActivity::Idle, background: false,
+                reason: "previous runtime sample".into(), observed_ms: 1, idle_since_ms: Some(1),
+            } },
+            Event::NameReassignmentScheduled {
+                project_scope: project.into(), name: "Alice".into(),
+                schedule: name_state::start_return_wait(None, "Alice", 1),
+            },
+        ]).unwrap();
+        let saved = current_state::load(&runtime.state_path, false).unwrap();
+        assert_eq!(saved.agent_presence(project, worker).unwrap().presence, name_state::AgentPresence::Online);
+        let subscriptions = serde_json::to_value(&saved.notification_subscriptions).unwrap();
+        let waits = serde_json::to_value(&saved.name_reassignments).unwrap();
+        let (activated, _) = manager.build_runtime(
+            &ProjectRuntimeManager::route_key(&context), &runtime.root, &runtime.storage_root,
+        ).unwrap();
+        let state = activated.state.lock().unwrap();
+        assert_eq!(state.agent_presence(project, worker).unwrap().presence, name_state::AgentPresence::Unknown);
+        assert_eq!(state.agent_activity(project, worker).unwrap().activity, name_state::AgentActivity::Unknown);
+        assert_eq!(state.agent_activity(project, worker).unwrap().idle_since_ms, None);
+        assert_eq!(serde_json::to_value(&state.notification_subscriptions).unwrap(), subscriptions);
+        assert_eq!(serde_json::to_value(&state.name_reassignments).unwrap(), waits);
+        drop(state);
+        drop(activated);
+        drop(runtime);
+        drop(manager);
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn manager_isolates_app_and_project_routes_and_loads_each_current_runtime() {
         let (server, host_root, host_state_path) = test_server();

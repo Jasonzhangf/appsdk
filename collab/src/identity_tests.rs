@@ -181,6 +181,78 @@ fn absent_map_never_recovers_a_credential_archive() {
 }
 
 #[test]
+fn registered_rex_caller_cannot_borrow_a_successor_session_from_the_same_block() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("identity-rex-current-session");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let scope = Scope { root: root.clone() };
+    let paths = HostPaths::for_state_root(&root.join("state")).unwrap();
+    let mut transport = selected();
+    transport.kind = TransportKind::Rex;
+    transport.endpoint = None;
+    transport.namespace = None;
+    transport.thread_id = None;
+    transport.session_id = Some("successor-agent-session".into());
+    transport.rex_endpoint = Some(crate::proto::RexEndpoint {
+        server: "unix:///tmp/rex-current-session.sock".into(),
+        session_id: "session:11111111-1111-1111-1111-111111111111".into(),
+        block_id: "block:22222222-2222-2222-2222-222222222222".into(),
+        host_id: Some("host".into()),
+        instance_id: "instance".into(),
+        cwd: root.to_string_lossy().into_owned(),
+    });
+    let mut runtime = runtime_identity("binding-rex-current-session");
+    runtime.session_id = Some(SessionId::new("successor-agent-session").unwrap());
+    runtime.native_thread_id = None;
+    let mut identity = draft_identity_with_id(&scope, "agent-1").unwrap();
+    persist_current_binding_at(&paths, &scope, &mut identity, runtime, transport.clone()).unwrap();
+    let runtime = identity.runtime.as_ref().unwrap();
+    let project = identity.project_scope.clone().unwrap();
+    let binding = crate::server::global_state::RuntimeBinding::new_with_session(
+        project.clone(),
+        runtime.appserver_id.clone(),
+        runtime.agent_id.clone(),
+        runtime.runtime_id.clone(),
+        runtime.binding_id.clone(),
+        runtime.session_id.clone(),
+        None,
+    )
+    .unwrap();
+    BindingControlStore::new(paths.state_root())
+        .commit(crate::server::binding_store::ControlChange::Commit {
+            key: IdentityBindingKey::new(project, runtime.appserver_id.clone(), "Alice"),
+            value: BindingValue::new(binding, transport.clone()),
+            expected_generation: None,
+        })
+        .unwrap();
+    let endpoint = transport.rex_endpoint.unwrap();
+    let mut facts = IdentityFacts {
+        session_id: Some("successor-agent-session".into()),
+        rex: Some(crate::proto::RexCandidate {
+            server: endpoint.server,
+            session_id: endpoint.session_id,
+            block_id: endpoint.block_id,
+            cwd: endpoint.cwd,
+        }),
+        ..Default::default()
+    };
+    assert!(registered_from_map(&paths, &scope, &facts)
+        .unwrap()
+        .is_some());
+    facts.session_id = Some("displaced-agent-session".into());
+    let stale = registered_from_map(&paths, &scope, &facts);
+    assert!(
+        stale.is_err(),
+        "ordinary commands must not acquire the successor's current identity from its block"
+    );
+    assert!(stale
+        .unwrap_err()
+        .to_string()
+        .contains("IDENTITY_SESSION_NOT_CURRENT"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn mapped_credential_failure_does_not_select_another_worker() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let root = test_root("identity-exact-credential");

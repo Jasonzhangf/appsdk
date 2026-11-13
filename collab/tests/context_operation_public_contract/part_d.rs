@@ -13,6 +13,96 @@ fn identity_map_reset_intent_finishes_before_startup_restoration() {
     assert!(!restored["slots"].as_array().unwrap().iter().any(|slot| slot["identity_key"]["project_scope"] == scope));
 }
 
+// Public CLI/wire consumer: a human replacement without an old Rex
+// association creates a durable boundary. The displaced caller later takes
+// a usable ordinary name while Jenny retains role, work and pending mail.
+#[test]
+fn public_r6_human_fence_preserves_target_work_role_mail_and_survives_restart() {
+    let (mut fixture, master_host, child_host, master, child) =
+        lifecycle_native_pair_fixture("human-fence-r6-public", "ack_only");
+    let old_worker = master["worker_id"].as_str().unwrap();
+    let new_worker = child["worker_id"].as_str().unwrap();
+    lifecycle_register_task(&fixture, &master, "human-fence-target-work");
+    let sent = fixture.configured_command(
+        &["send", "--to", old_worker, "--subject", "human-fence-pending", "retain target mail"], None,
+    ).env("CODEX_APP_SERVER_SOCKET", child_host.endpoint().strip_prefix("unix://").unwrap())
+        .env("CODEX_SESSION_ID", "lifecycle-child-session")
+        .env("CODEX_THREAD_ID", "lifecycle-child-thread").output().unwrap();
+    assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
+    let sent: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    let message_id = sent["msg_id"].as_str().unwrap();
+    let child_facts = json!({"session_id":"lifecycle-child-session", "thread_id":"lifecycle-child-thread",
+        "endpoint":child_host.endpoint(), "namespace":"codex_tui"});
+    let restored = fixture.configured_command(&["context", "--op", "human-fence-takeover",
+        "--provide", &child_facts.to_string(), "--approve-grant",
+        r#"{"action":"restore_master","authorization":"human replaces Jenny"}"#], None).output().unwrap();
+    assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let target = map["slots"].as_array().unwrap().iter().find(|slot|
+        slot["identity_status"] == "active" && slot["identity_key"]["name"] == "Jenny").unwrap();
+    let fence = target["current"]["rex_execution_fence"].clone();
+    #[cfg(target_os = "macos")]
+    {
+        assert!(fence["seconds"].is_u64(), "{target}");
+        assert!(
+            fence["microseconds"].as_u64().unwrap() < 1_000_000,
+            "{target}"
+        );
+        assert_eq!(fence.as_object().unwrap().len(), 2, "{target}");
+        assert!(fence.get("clock").is_none(), "{target}");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(fence["clock"], "linux_boottime", "{target}");
+        let native_boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("read native Linux boot ID")
+            .trim()
+            .to_owned();
+        assert_eq!(fence["boot_id"], native_boot_id, "{target}");
+        let native_ticks_per_second =
+            u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+                .expect("read native Linux CLK_TCK");
+        assert_eq!(
+            fence["ticks_per_second"], native_ticks_per_second,
+            "{target}"
+        );
+        assert!(fence["ticks"].is_u64(), "{target}");
+        assert_eq!(fence.as_object().unwrap().len(), 4, "{target}");
+    }
+    assert!(!map["slots"].as_array().unwrap().iter().any(|slot|
+        slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == old_worker));
+
+    let old_facts = json!({"session_id":"lifecycle-master-session", "thread_id":"lifecycle-master-thread",
+        "endpoint":master_host.endpoint(), "namespace":"codex_tui"});
+    let returned = fixture.context_provide("human-fence-old-register", &old_facts, None);
+    assert_eq!(returned["result"]["outcome"], "completed", "{returned}");
+    let name = returned["result"]["snapshot"]["name"].as_str().unwrap().to_owned();
+    assert_ne!(name, "Jenny");
+    let again = fixture.context_provide("human-fence-old-name-usable", &old_facts, None);
+    assert_eq!(again["result"]["snapshot"]["name"], name, "{again}");
+    assert_eq!(again["result"]["snapshot"]["master"]["worker_id"], new_worker, "{again}");
+    let task = &fixture.current_state()["tasks"]["human-fence-target-work"];
+    assert_eq!(task["owner"], new_worker, "{task}");
+    fixture.restart_daemon();
+    let current = fixture.context_provide("human-fence-current-after-restart", &child_facts, None);
+    assert_eq!(current["result"]["snapshot"]["name"], "Jenny", "{current}");
+    let current_map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let target = current_map["slots"].as_array().unwrap().iter().find(|slot|
+        slot["identity_status"] == "active" && slot["identity_key"]["name"] == "Jenny").unwrap();
+    assert_eq!(target["current"]["rex_execution_fence"], fence);
+    assert_eq!(target["current"]["binding"]["agent_id"], new_worker);
+    let received = fixture.configured_command(&["recv", "--timeout", "2"], None)
+        .env("CODEX_APP_SERVER_SOCKET", child_host.endpoint().strip_prefix("unix://").unwrap())
+        .env("CODEX_SESSION_ID", "lifecycle-child-session")
+        .env("CODEX_THREAD_ID", "lifecycle-child-thread").output().unwrap();
+    assert!(received.status.success(), "{}", String::from_utf8_lossy(&received.stderr));
+    let received: Value = serde_json::from_slice(&received.stdout).unwrap();
+    assert!(received["messages"].as_array().unwrap().iter().any(|message| message["id"] == message_id), "{received}");
+}
+
 #[test]
 fn peer_lifecycle_c1_unfinished_task_refuses_close_without_archive() {
     let (fixture, _master_host, child_host, master, child) =
@@ -840,8 +930,156 @@ fn register_appserver_binding(
     response
 }
 
-// Explicit Rex facts must reach the Rex adapter even when the agent session
-// already has a mapped AppServer binding.
+#[test]
+fn public_context_rex_target_conflict_reaches_admission_without_old_history_rejection() {
+    let mut fixture = Fixture::without_tmux("rex-target-session-conflict");
+    let alice_host = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "conflict-alice.sock",
+        "conflict-alice-session",
+        "conflict-alice-thread",
+        "ack_only",
+    );
+    let bob_host = TestAppServer::start_with_effect_at(
+        &fixture.root,
+        "conflict-bob.sock",
+        "conflict-bob-session",
+        "conflict-bob-thread",
+        "ack_only",
+    );
+    let alice = fixture.context_provide(
+        "rex-conflict-register-alice",
+        &json!({
+            "session_id": "conflict-alice-session",
+            "thread_id": "conflict-alice-thread",
+            "endpoint": alice_host.endpoint(),
+            "namespace": "codex_tui"
+        }),
+        None,
+    );
+    assert_eq!(alice["result"]["snapshot"]["name"], "Alice", "{alice}");
+    let bob = fixture.context_provide(
+        "rex-conflict-register-bob",
+        &json!({
+            "session_id": "conflict-bob-session",
+            "thread_id": "conflict-bob-thread",
+            "endpoint": bob_host.endpoint(),
+            "namespace": "codex_tui"
+        }),
+        None,
+    );
+    assert_eq!(bob["result"]["snapshot"]["name"], "Bob", "{bob}");
+
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    for slot in map["slots"].as_array_mut().unwrap() {
+        match slot["identity_key"]["name"].as_str() {
+            Some("Alice") => {
+                slot["current"]["transport"] = json!({
+                    "kind": "rex",
+                    "session_id": "conflict-agent-session",
+                    "rex_endpoint": {
+                        "server": "unix:///tmp/conflict-rex.sock",
+                        "session_id": "session:11111111-1111-4111-8111-111111111111",
+                        "block_id": "block:22222222-2222-4222-8222-222222222222",
+                        "instance_id": "conflict-rex-instance",
+                        "cwd": fixture.root
+                    },
+                    "capabilities": ["send_message_to_block"],
+                    "self_check": "ok"
+                });
+                slot["current"]["host"]["host_type"] = json!("rex");
+            }
+            Some("Bob") => {
+                slot["current"]["binding"]["session_id"] = json!("conflict-agent-session");
+                slot["current"]["transport"]["session_id"] = json!("conflict-agent-session");
+            }
+            _ => {}
+        }
+    }
+    fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+    fixture.restart_daemon();
+
+    let provide = json!({
+        "session_id": "conflict-agent-session",
+        "rex": {
+            "server": "unix:///tmp/conflict-rex.sock",
+            "session_id": "session:11111111-1111-4111-8111-111111111111",
+            "block_id": "block:22222222-2222-4222-8222-222222222222",
+            "cwd": fixture.root
+        }
+    })
+    .to_string();
+    let before = fixture.current_resources();
+    for query in [false, true] {
+        let mut args = vec!["context", "--op", "rex-conflict-plain", "--provide", &provide];
+        if query {
+            args.push("--query");
+        }
+        let output = fixture.configured_command(&args, None).output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !error.contains("IDENTITY_MAP_REX_TARGET_MISMATCH")
+                && !String::from_utf8_lossy(&output.stdout)
+                    .contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
+            "old Rex identity history must not reject the new recovery: {error}"
+        );
+        if query {
+            assert!(output.status.success(), "{output:?}");
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                response["result"]["snapshot"]["name"], "Bob",
+                "the exact agent session selects its current holder: {response}"
+            );
+        } else {
+            assert!(!output.status.success(), "{output:?}");
+            assert!(
+                error.contains("REX_"),
+                "plain recovery must reach the Rex admission boundary: {error}"
+            );
+        }
+    }
+    assert_eq!(
+        fixture.current_resources(),
+        before,
+        "a failed ordinary context must not mutate identity or business state"
+    );
+
+    let approval = json!({
+        "decision": "approved",
+        "action": "restore_name",
+        "requested_name": "Alice",
+        "authorization": "fixture user explicitly replaces Alice"
+    })
+    .to_string();
+    let approved = fixture
+        .configured_command(
+            &[
+                "context",
+                "--op",
+                "rex-conflict-approved",
+                "--approve-grant",
+                &approval,
+                "--provide",
+                &provide,
+            ],
+            None,
+        )
+        .output()
+        .unwrap();
+    let approved_error = String::from_utf8_lossy(&approved.stderr);
+    assert!(
+        !approved_error.contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
+        "explicit human replacement must also reach Rex admission: {approved_error}"
+    );
+    assert!(
+        approved_error.contains("REX_"),
+        "the approved request must reach the Rex admission boundary: {approved_error}"
+    );
+}
+
+// Explicit Rex facts must reach the Rex adapter even when the name/session is
+// already bound to desktop_bridge and the old Desktop runtime is gone.
 #[test]
 fn public_context_rex_facts_reach_rex_adapter_after_mapped_appserver_binding() {
     let fixture = Fixture::without_tmux("rex-facts-after-appserver");

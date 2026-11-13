@@ -446,27 +446,41 @@ fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
     fixture.write_frame_and_enter(
         &receiver,
         "osc-status",
-        "state=working:id=collab-live:app=collab-live",
+        "state=working:id=collab-live:app=codex",
     );
     let busy = fixture.wait_agent_state(&receiver, "working");
     assert_eq!(busy["activity"], "busy");
-    assert_eq!(busy["agent_presence"], "unknown");
+    assert_eq!(busy["agent_presence"], "online");
     fixture.write_frame_and_enter(
         &receiver,
         "osc-status",
-        "state=blocked:kind=question:id=collab-live:app=collab-live",
+        "state=blocked:kind=question:id=collab-live:app=codex",
     );
     let question = fixture.wait_agent_state(&receiver, "waiting_user");
     assert_eq!(question["activity"], "waiting_user");
     fixture.write_frame_and_enter(
         &receiver,
         "osc-status",
-        "state=done:id=collab-live:app=collab-live",
+        "state=done:id=collab-live:app=codex",
     );
     // A valid done record for the current foreground owner is not working.
     // Under the fixed projection it reports idle instead of the old unknown.
     let done = fixture.wait_agent_state(&receiver, "idle");
     assert_eq!(done["activity"], "idle");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=error:id=collab-live:app=codex",
+    );
+    let error_state = fixture.wait_agent_state(&receiver, "idle");
+    assert_eq!(error_state["activity"], "idle");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=future_state:id=collab-live:app=codex",
+    );
+    let future_state = fixture.wait_agent_state(&receiver, "idle");
+    assert_eq!(future_state["activity"], "idle");
 
     let notify_status = fixture.run_ok(&["notify", "status"], Some(&receiver.agent_session_id));
     let lease = direct_subscription(&notify_status, &receiver_id);

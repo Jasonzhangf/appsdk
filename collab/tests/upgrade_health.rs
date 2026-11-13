@@ -84,6 +84,8 @@ fn local_check_rejects_wrong_mcp_version() {
     scripted_mcp(
         &cli,
         r#"#!/bin/sh
+IFS= read -r initialize_request || exit 1
+IFS= read -r tools_request || exit 1
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"collab","version":"0.2.9999"}}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
 "#,
@@ -109,6 +111,8 @@ fn local_check_rejects_missing_tool() {
     scripted_mcp(
         &cli,
         r#"#!/bin/sh
+IFS= read -r initialize_request || exit 1
+IFS= read -r tools_request || exit 1
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"collab","version":"0.2.0000"}}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
 "#,
@@ -131,7 +135,10 @@ fn local_check_rejects_malformed_frame() {
     let state_root = root.join("host-state");
     std::fs::create_dir_all(&state_root).unwrap();
     let cli = copy_pair(&root);
-    scripted_mcp(&cli, "#!/bin/sh\nprintf 'this is not json\\n'\n");
+    scripted_mcp(
+        &cli,
+        "#!/bin/sh\nIFS= read -r initialize_request || exit 1\nIFS= read -r tools_request || exit 1\nprintf 'this is not json\\n'\n",
+    );
     let output = run_check(&cli, &project_root, &state_root, true);
     assert_ne!(output.status.code(), Some(0), "{}", text(&output));
     assert!(

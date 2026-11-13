@@ -518,7 +518,7 @@ pub(super) fn seed_committed_owner(
             expected_generation: None,
         })
         .unwrap();
-    let response = consume_register_typed(server, worker_id, transport, prepared, None, None);
+    let response = consume_register_typed(server, worker_id, transport, prepared, None, None, None);
     assert!(response.ok, "committed registration fixture: {response:?}");
     let mut state = server.state.lock().unwrap();
     let previous = state.name_occupancy(&project, &name);

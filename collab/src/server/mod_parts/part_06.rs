@@ -968,12 +968,16 @@ fn consume_register_typed(
     prepared: PreparedRegisterEnvelope,
     name_tmux_session_name: Option<String>,
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
+    consumed: Option<state::TypedOutcome>,
 ) -> Resp {
     let registered_at = match &prepared.typed.command {
         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
     };
     let command = prepared.typed.command.clone();
-    let committed = server.consume_register(prepared);
+    let committed = match consumed {
+        Some(outcome) => Ok(outcome),
+        None => server.consume_register(prepared, None),
+    };
     match committed {
         Ok(outcome) => {
             // Map publication already chose the name. Registration never
@@ -1034,7 +1038,11 @@ fn register_typed_observed(
     reuse_existing: bool,
     name_tmux_session_name: Option<String>,
     name_pane_anchor: Option<crate::server::name_state::NamePaneAnchor>,
-    before_consume: Option<&mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>>,
+    before_consume: Option<
+        &mut dyn FnMut(
+            &PreparedRegisterEnvelope,
+        ) -> Result<Option<state::TypedOutcome>, String>,
+    >,
 ) -> Resp {
     let prepared = match prepare_register_typed(
         server,
@@ -1051,11 +1059,13 @@ fn register_typed_observed(
             return Resp::err(format!("typed registrar failed to build command: {error}"))
         }
     };
-    if let Some(before_consume) = before_consume {
-        if let Err(error) = before_consume(&prepared) {
-            return Resp::err(error);
-        }
-    }
+    let consumed = match before_consume {
+        Some(hook) => match hook(&prepared) {
+            Ok(outcome) => outcome,
+            Err(error) => return Resp::err(error),
+        },
+        None => None,
+    };
     let response =
         consume_register_typed(
             server,
@@ -1064,6 +1074,7 @@ fn register_typed_observed(
             prepared,
             name_tmux_session_name,
             name_pane_anchor,
+            consumed,
         );
     response
 }
@@ -1097,8 +1108,15 @@ pub(crate) fn register_created_peer(
     let main = route.root.to_string_lossy().into_owned();
     let mut effect_id = None;
     let mut before_consume = |prepared: &PreparedRegisterEnvelope| {
-        manager.publish_register_control_before_consume(server, prepared, None, None, None, None)
-            .map(|id| { effect_id = Some(id); })
+        let (id, outcome) = manager.publish_and_consume_register_control(
+            server,
+            prepared,
+            None,
+            None,
+            None,
+        )?;
+        effect_id = Some(id);
+        Ok(Some(outcome))
     };
     let response = register_typed_observed(
         server,
@@ -1257,7 +1275,9 @@ fn handle_register_with_app_scope_inner_bound(
     recover_existing: bool,
     outer_binding: Option<&RegisterOuterBinding>,
     register_control_first: Option<
-        &mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<(), String>,
+        &mut dyn FnMut(
+            &PreparedRegisterEnvelope,
+        ) -> Result<Option<state::TypedOutcome>, String>,
     >,
 ) -> Resp {
     let candidates = candidates.unwrap_or_default();

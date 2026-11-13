@@ -898,11 +898,86 @@ fn attempt_tmux_notification_with_retry(
             "board patrol notice no longer has canonical eligible tasks".into(),
         );
     }
+    let typed_wake_authority = {
+        let has_typed_wake = state.msgs.values().any(|message| {
+            message.to == recipient
+                && state.wake_bindings.contains_key(&message.id)
+                && state.mailbox_name_addresses.contains_key(&message.id)
+        });
+        if !has_typed_wake {
+            None
+        } else {
+            let route = match server_route_scope(server, &state) {
+                Ok(Some(route)) => route,
+                Ok(None) => {
+                    return NotificationAttempt::Rejected(
+                        "CURRENT_MAP_ROUTE_UNAVAILABLE: typed wake requires a registered project route"
+                            .into(),
+                    )
+                }
+                Err(error) => return NotificationAttempt::Rejected(error.into()),
+            };
+            let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control,
+                Err(error) => return NotificationAttempt::Rejected(error),
+            };
+            let Some(project) = state.global.lookup_project_for_route(&route) else {
+                return NotificationAttempt::Rejected(
+                    "CURRENT_MAP_BINDING_UNAVAILABLE: typed wake route has no project registration"
+                        .into(),
+                );
+            };
+            let mut bindings = project.runtime_bindings.values().filter(|binding| {
+                binding.project_scope == route.project_scope_id
+                    && binding.app_scope_id == route.app_scope_id
+                    && binding.agent_id.as_str() == recipient
+            });
+            let Some(binding) = bindings.next().cloned() else {
+                return NotificationAttempt::Rejected(
+                    "CURRENT_MAP_BINDING_UNAVAILABLE: typed wake recipient has no current runtime binding"
+                        .into(),
+                );
+            };
+            if bindings.next().is_some() {
+                return NotificationAttempt::Rejected(
+                    "CURRENT_MAP_BINDING_AMBIGUOUS: typed wake recipient has multiple runtime bindings"
+                        .into(),
+                );
+            }
+            Some((route, control, binding))
+        }
+    };
+    let typed_wake_allowed = match typed_wake_authority.as_ref() {
+        Some((route, control, binding)) => {
+            let mut allowed = std::collections::HashSet::new();
+            for message in state.msgs.values() {
+                if !state.mailbox_name_addresses.contains_key(&message.id) {
+                    continue;
+                }
+                match name_mailbox::current_name_allows_message(
+                    &state,
+                    control,
+                    route,
+                    recipient,
+                    binding,
+                    message,
+                ) {
+                    Ok(true) => {
+                        allowed.insert(message.id.clone());
+                    }
+                    Ok(false) => {}
+                    Err(error) => return NotificationAttempt::Rejected(error),
+                }
+            }
+            Some(allowed)
+        }
+        None => None,
+    };
     let unacked_notifications = state
         .msgs
         .values()
         .filter(|message| {
-            message.to == recipient
+            state.message_receivable_by(recipient, message)
                 && message.state == "delivered"
                 && !state.handoff_wake_pending(message)
         })
@@ -933,7 +1008,9 @@ fn attempt_tmux_notification_with_retry(
         );
     }
     if transport.kind == TransportKind::Dsh
-        && state.msgs.get(message_id).is_some_and(|message| message.to == recipient && message.state == "read")
+        && state.msgs.get(message_id).is_some_and(|message| {
+            state.message_receivable_by(recipient, message) && message.state == "read"
+        })
         && state.receive_receipts.values().any(|receipt| receipt.worker_id == recipient
             && receipt.message_ids.iter().any(|id| id == message_id))
     {
@@ -951,7 +1028,14 @@ fn attempt_tmux_notification_with_retry(
             let binding = state.wake_bindings.get(&message.id)?;
             let sub = state.notification_subscriptions.get(binding)?;
             let message_explicit = is_explicit_notification(&state, message);
-            (message.to == recipient
+            let map_allows = match state.mailbox_name_addresses.get(&message.id) {
+                Some(_) => typed_wake_allowed
+                    .as_ref()
+                    .is_some_and(|allowed| allowed.contains(&message.id)),
+                None => true,
+            };
+            (state.message_receivable_by(recipient, message)
+                && map_allows
                 && state.scheduler_message_deliverable(&message.id)
                 && (!state.board_patrol_notice_ids.contains(&message.id) || patrol_current)
                 && message_explicit == explicit
@@ -1014,7 +1098,7 @@ fn attempt_tmux_notification_with_retry(
             let binding = state.wake_bindings.get(&message.id)?;
             let sub = state.notification_subscriptions.get(binding)?;
             let message_explicit = is_explicit_notification(&state, message);
-            (message.to == recipient
+            (state.message_receivable_by(recipient, message)
                 && message_explicit == explicit
                 && state
                     .delivery_modes
@@ -1125,9 +1209,23 @@ fn attempt_tmux_notification_with_retry(
             );
             let accepted_ms = now_ms();
             let mut state = server.state.lock().unwrap();
+            // The native call ran outside the state lock. Attribute its receipt
+            // only to messages whose current wake is still this delivery's;
+            // a late acceptance must never overwrite the current holder's
+            // evidence or failure.
+            let owned = batch
+                .iter()
+                .filter(|entry| {
+                    state.wake_bindings.get(&entry.1) == Some(&entry.2)
+                        && state
+                            .msgs
+                            .get(&entry.1)
+                            .is_some_and(|message| message.to == recipient)
+                })
+                .collect::<Vec<_>>();
             server.commit_locked_reporting(
                 &mut state,
-                &batch
+                &owned
                     .iter()
                     .map(|message| Event::NotificationDeliveryAccepted {
                         message_id: message.1.clone(),
@@ -1136,6 +1234,12 @@ fn attempt_tmux_notification_with_retry(
                     })
                     .collect::<Vec<_>>(),
             );
+            if owned.len() < batch.len() {
+                append_log(
+                    &server.log_path(),
+                    &format!("WAKE_ATTRIBUTION_DROPPED recipient={recipient} message={seed_id} dropped={}", batch.len() - owned.len()),
+                );
+            }
             NotificationAttempt::Accepted
         }
         Err(error) => {
@@ -1152,8 +1256,18 @@ fn attempt_tmux_notification_with_retry(
             // left "attempted without outcome". Retryability still follows the
             // single real classification: only a known-undelivered error can
             // resume automatically.
+            // Same attribution gate as the accepted path: a failure observed
+            // after the message moved to another holder belongs to this
+            // superseded delivery, not to the current holder's wake.
             let failed_ids = batch
                 .iter()
+                .filter(|entry| {
+                    state.wake_bindings.get(&entry.1) == Some(&entry.2)
+                        && state
+                            .msgs
+                            .get(&entry.1)
+                            .is_some_and(|message| message.to == recipient)
+                })
                 .map(|message| message.1.clone())
                 .collect::<Vec<_>>();
             server.commit_locked_reporting(
@@ -1579,7 +1693,7 @@ impl ProjectRuntimeManager {
         };
 
         if let Err(refresh_error) =
-            self.refresh_rex_notification_binding(runtime, project_context, &recipient)
+            refresh_rex_notification_binding(self, runtime, project_context, &recipient)
         {
             response.data["rex_binding_refresh"] = json!("failed");
             response.data["rex_binding_refresh_error"] = json!(refresh_error);
@@ -1696,6 +1810,82 @@ fn notification_rejected_label(notification_method: &str, error: &str) -> String
         "rex" => format!("REX_NOTIFICATION_REJECTED: {error}"),
         _ => format!("TMUX_NOTIFICATION_REJECTED: {error}"),
     }
+}
+
+/// Refresh only the service generation of one exact Rex notification binding.
+/// The server, session and block anchor must remain unchanged.
+fn refresh_rex_notification_binding(
+    manager: &ProjectRuntimeManager,
+    runtime: &Server,
+    context: &ProjectContext,
+    recipient: &str,
+) -> Result<SelectedTransport, String> {
+    let control = manager
+        .binding_control_store()
+        .load()
+        .map_err(|error| error.to_string())?;
+    let key = control
+        .key_for_worker(&context.project_scope, &context.app_scope_id, recipient)?
+        .cloned()
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no current binding"))?;
+    let slot = control
+        .slot(&key)
+        .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: binding slot disappeared".to_string())?;
+    let value = slot
+        .active_binding()
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding"))?;
+    let saved_transport = value.transport.clone();
+    let endpoint = saved_transport
+        .rex_endpoint
+        .as_ref()
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_CHANGED: {recipient} is not currently bound to Rex"))?;
+    let agent_session_id = saved_transport
+        .session_id
+        .as_deref()
+        .ok_or_else(|| format!("REX_AGENT_SESSION_MISSING: {recipient} has no agent session"))?;
+    let candidate = crate::proto::RexCandidate {
+        server: endpoint.server.clone(),
+        session_id: endpoint.session_id.clone(),
+        block_id: endpoint.block_id.clone(),
+        cwd: endpoint.cwd.clone(),
+    };
+    let refreshed = tokio::runtime::Handle::try_current()
+        .map_err(|_| "REX_ENDPOINT_REJECTED: daemon runtime is unavailable".to_string())?
+        .block_on(crate::client::adapters::rex::verify_candidate(
+            &candidate,
+            agent_session_id,
+        ))
+        .map_err(|error| error.to_string())?;
+    let refreshed_endpoint = refreshed
+        .rex_endpoint
+        .as_ref()
+        .ok_or_else(|| "REX_CURRENT_BINDING_CHANGED: refreshed binding has no Rex endpoint".to_string())?;
+    if refreshed.kind != TransportKind::Rex
+        || refreshed_endpoint.server != endpoint.server
+        || refreshed_endpoint.session_id != endpoint.session_id
+        || refreshed_endpoint.block_id != endpoint.block_id
+    {
+        return Err(format!(
+            "REX_CURRENT_BINDING_CHANGED: refreshed target is not the same server/session/block for {recipient}"
+        ));
+    }
+    let ident = crate::identity::read_persisted(&manager.host.host_paths, recipient)
+        .map_err(|error| format!("{error:#}"))?
+        .ok_or_else(|| format!("IDENTITY_CREDENTIAL_MISSING: mapped worker {recipient} is not registered"))?;
+    let mut identity = ident;
+    let scope = crate::scope::Scope {
+        root: runtime.root.clone(),
+    };
+    manager
+        .refresh_session_transport_for_notification(
+            runtime,
+            &value.binding,
+            refreshed.clone(),
+            &mut identity,
+            &scope,
+        )
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(refreshed)
 }
 
 /// The repair belongs to the selected transport. A rejected dsh wake means the

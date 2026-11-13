@@ -478,7 +478,12 @@ async fn write_unknown_and_short_write_never_enter() {
         let error = notify(&selected_transport(), "a complete body", Some("immediate"))
             .await
             .expect_err("write outcome must be unknown");
-        assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+        assert_eq!(
+            error.class,
+            NotificationDeliveryClass::Unknown,
+            "scenario={scenario}, error={error:?}, calls={:?}",
+            env.calls()
+        );
         assert_eq!(error.stage, stage);
         let calls = env.calls();
         assert_eq!(calls.len(), 2);

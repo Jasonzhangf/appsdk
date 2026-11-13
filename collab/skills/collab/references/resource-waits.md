@@ -52,6 +52,8 @@ exclusive fact, uncovered authorization or changed user constraint.
 Master authority and recovery follow [migration-daemon](migration-daemon.md#master-and-deprecated-interfaces).
 
 Dirty, active, shared, or unknown resources remain PROTECTED_HOLD. Do not
-remove them or terminate their owner's process. If the wait cycle follows a
+remove them or terminate their owner's process. For a formal same-task handoff,
+follow [same-task transfer and late artifacts](task-worktree-lifecycle.md#same-task-transfer-and-late-artifacts).
+If the wait cycle follows a
 consumed one-shot goal or deadline wake and scheduling must continue, re-arm
 that wake explicitly before ending the cycle.

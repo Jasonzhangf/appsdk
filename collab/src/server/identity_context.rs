@@ -2,6 +2,28 @@ use super::*;
 use crate::identity::{self, RuntimeIdentity};
 use crate::proto::{AppServerCandidate, IdentityContextRequest, IdentityFacts};
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct RexRecoveryBaseline {
+    pub(crate) key: crate::server::binding_slot::IdentityBindingKey,
+    pub(crate) generation: u64,
+    pub(crate) current: crate::server::binding_slot::BindingValue,
+}
+
+#[derive(Clone)]
+pub(crate) enum RexRecoveryAdmission {
+    Verified(crate::server::binding_slot::VerifiedRexExecutionAssociation),
+    Missing(String),
+    CallerMismatch(String),
+    DisplacedExecution(crate::server::binding_slot::VerifiedRexExecutionAssociation),
+}
+
+#[derive(Clone)]
+pub(crate) struct RexRecoveryObservation {
+    pub(crate) baseline: Option<RexRecoveryBaseline>,
+    pub(crate) transport: crate::proto::SelectedTransport,
+    pub(crate) admission: RexRecoveryAdmission,
+}
+
 include!("identity_context/mapped_context.rs");
 include!("identity_context/recovery.rs");
 include!("identity_context/dsh_rebind.rs");

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-master-authority",
   "version": "0.2.0",
-  "description": "一次授权请求到一次回执的三节点 SESE：解析当前主体与 project/app scope，现有 authority owner 原子替换或清除授权，返回持久回执或明确错误。普通 context 先恢复当前 cwd 项目及 tmux session 的身份；无 master 为 peer，有 incumbent 仍为可用 peer。一次 restore_master action 与非空 authorization 即可直接替换当前 incumbent；daemon 推导身份和 scope，不要求历史 token、target、generation、digest、lease 或第二次批准，且 incumbent 的物理 session 已确认消失不妨碍逻辑所有权替换。明确用户授权也允许 successor 保留其现有 linked layout position，立即在 position 5 成为 Jenny；layout position 不是授权 veto。当前身份已是 master 则普通恢复复用授权。当前 pane 的授权恢复会退役其历史 binding、route 与 grant，包括以前的项目；保留普通任务与消息。普通 authenticated command 仍验证当前 token/binding/scope，明确授权的恢复不受历史身份和工作负载阻断。promote/clear/delegate 复用 typed revoke/grant owner；通信与持久提交分开报告。真实 reducer、scope、binding 和 I/O 错误显式返回。",
+  "description": "一次授权请求到一次回执的三节点 SESE：解析当前主体与 project/app scope，现有 authority owner 原子替换或清除授权，返回持久回执或明确错误。普通 context 先恢复当前 cwd 项目及 tmux session 的身份；无 master 为 peer，有 incumbent 仍为可用 peer。一次 restore_master action 与非空 authorization 即可直接替换当前 incumbent；daemon 推导身份和 scope，不要求历史 token、target、generation、digest、lease 或第二次批准。当前身份已是 master 则普通恢复复用授权。当前 pane 的授权恢复会退役其历史 binding、route 与 grant，包括以前的项目；保留普通任务与消息。普通 authenticated command 仍验证当前 token/binding/scope，明确授权的恢复不受历史身份和工作负载阻断。promote/clear/delegate 复用 typed revoke/grant owner；通信与持久提交分开报告。真实 reducer、scope、binding 和 I/O 错误显式返回。",
   "inputs": [{"id": "authority_request", "schema": "Object"}],
   "nodes": [
     {
@@ -13,7 +13,8 @@
     },
     {
       "id": "transfer_master_authority", "operator": "appsdk.collab_authority.transfer_master", "operator_version": "1",
-      "description": "现有 authority owner 处理 transfer/revoke/grant。当前 cwd 项目与 tmux session 的身份先成功恢复为 peer；另有 master 不阻断。明确的 restore_master action 与 authorization 直接替换 incumbent，服务端推导当前身份与 scope，不要求旧 token、target、digest、generation、lease 或第二次批准。旧的已记录 tmux session 被精确核实不存在时，跳过其物理改名但不跳过 logical grant/name/task/message transition；其他观察或可执行文件错误保持原错。当前 session 已是 master 时复用其授权。当前 pane 被授权恢复时退役历史 binding、route 和 grant，保留任务与消息。真实持久化失败显式返回。",
+      "source_effect_contract": "B1/R2/R4/B4: cross-app source消费先核对CrossScopeSourceRef generation/current，按project/app/binding/holder精确撤旧grant，与源工作保全同批State事件在调度前应用；提交失败保pending及具体错误，重试不撤successor。公开gate: master_authority_scope_isolation_and_concurrent_mutations；窄gate: cross_scope_source_grant_commit_failure_retry_and_successor。",
+      "description": "现有 authority owner 处理 transfer/revoke/grant。当前 cwd 项目与 tmux session 的身份先成功恢复为 peer；另有 master 不阻断。明确的 restore_master action 与 authorization 直接替换 incumbent，服务端推导当前身份与 scope，不要求旧 token、target、digest、generation、lease 或第二次批准。当前 session 已是 master 时复用其授权。当前 pane 被授权恢复时退役历史 binding、route 和 grant，保留任务与消息。真实持久化失败显式返回。",
       "inputs": ["authority_scope"], "output": {"id": "master_authority", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"

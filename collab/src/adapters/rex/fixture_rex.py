@@ -243,7 +243,42 @@ def send_key() -> None:
     emit({})
 
 
+def pwd() -> None:
+    emit({"pwd": "file:///tmp/rex-fixture-cwd", "owner": {"pid": 4242, "name": "python3"}})
+
+
+def configured_owner() -> tuple[int, str] | None:
+    pid = os.environ.get("COLLAB_TEST_REX_OWNER_PID")
+    name = os.environ.get("COLLAB_TEST_REX_OWNER_NAME")
+    try:
+        if pid and name:
+            value = int(pid)
+            if value > 1:
+                return value, name
+    except ValueError:
+        pass
+    return None
+
+
 def process() -> None:
+    owner = configured_owner()
+    if owner:
+        pid, name = owner
+        emit(
+            {
+                "last_exit": None,
+                "child": {
+                    "pid": pid,
+                    "user_id": 501,
+                    "name": name,
+                    "path": f"/tmp/{name}",
+                    "cwd": "/tmp/rex-fixture-cwd",
+                },
+                "foreground": {"pid": pid, "user_id": 501, "name": name},
+                "home": "/Users/fixture",
+            }
+        )
+        return
     emit(
         {
             "last_exit": None,
@@ -264,12 +299,26 @@ def process() -> None:
     )
 
 
-def pwd() -> None:
-    emit({"pwd": "file:///tmp/rex-fixture-cwd", "owner": {"pid": 4242, "name": "python3"}})
-
-
 def program_status() -> None:
     mode = scenario()
+    owner = configured_owner()
+    if owner:
+        pid, name = owner
+        emit(
+            {
+                "records": [
+                    {
+                        "id": "agent",
+                        "state": "working",
+                        "app": "fixture",
+                        "msg": "busy",
+                        "owner": {"pid": pid, "name": name},
+                        "updated_at": "2026-11-12T00:00:00Z",
+                    }
+                ]
+            }
+        )
+        return
     if mode == "status_working":
         emit(
             {

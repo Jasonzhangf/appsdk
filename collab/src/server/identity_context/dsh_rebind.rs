@@ -234,6 +234,8 @@ impl ProjectRuntimeManager {
                 &Scope {
                     root: runtime.root.clone(),
                 },
+                None,
+                None,
             )?;
         }
         enroll(&ident, &next)

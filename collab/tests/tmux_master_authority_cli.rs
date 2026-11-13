@@ -468,11 +468,15 @@ fn context_session_reuse_and_minimal_master_approval() {
     assert!(!current["next_actions"]
         .to_string()
         .contains("--approve-grant"));
+    let returned = fixture.run_context(&["context"], Some(&incumbent));
+    assert_eq!(returned["identity"]["role"], "worker", "{returned}");
+    assert_eq!(returned["master"]["worker_id"], worker, "{returned}");
+    let returned_worker = returned["identity"]["worker_id"].as_str().unwrap();
     let sent = fixture.run_ok(
         &[
             "sendmessage",
             "--to",
-            &incumbent_worker,
+            returned_worker,
             "--subject",
             "master",
             "master recovery message",
@@ -768,6 +772,9 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
         .or_else(|| sent["message_id"].as_str())
         .expect("send names the durable message")
         .to_owned();
+    let task_before = fixture.current_state_for(&fixture.root, &app_scope_id)["tasks"]
+        ["authority-clear-task"]
+        .clone();
 
     let cleared = fixture.run_ok(
         &[
@@ -792,12 +799,19 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
     assert_scope("empty context", &context, &project_scope, &app_scope_id);
     assert_eq!(context["identity"]["role"], "worker");
     assert!(
-        context["tasks"]
+        !context["tasks"]
             .as_array()
             .expect("context lists tasks")
             .iter()
             .any(|task| task["id"] == "authority-clear-task"),
-        "clear must not delete tasks: {context}"
+        "the new ordinary name must not inherit Jenny's work: {context}"
+    );
+    let retained = fixture.run_ok(&["task", "status", "authority-clear-task"], Some(&pane));
+    assert_eq!(retained["owner_name"], "Jenny", "{retained}");
+    assert_eq!(retained["owner"], "", "{retained}");
+    assert_eq!(
+        fixture.current_state_for(&fixture.root, &app_scope_id)["tasks"]["authority-clear-task"],
+        task_before
     );
     assert!(
         context["inbox"]["messages"]
@@ -847,12 +861,19 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
     let restarted_context = fixture.run_context(&["context"], Some(&pane));
     assert!(restarted_context["master"].is_null(), "{restarted_context}");
     assert!(
-        restarted_context["tasks"]
+        !restarted_context["tasks"]
             .as_array()
             .expect("restarted context lists tasks")
             .iter()
             .any(|task| task["id"] == "authority-clear-task"),
-        "restart must preserve tasks: {restarted_context}"
+        "restart must preserve name ownership: {restarted_context}"
+    );
+    let retained = fixture.run_ok(&["task", "status", "authority-clear-task"], Some(&pane));
+    assert_eq!(retained["owner_name"], "Jenny", "{retained}");
+    assert_eq!(retained["owner"], "", "{retained}");
+    assert_eq!(
+        fixture.current_state_for(&fixture.root, &app_scope_id)["tasks"]["authority-clear-task"],
+        task_before
     );
     assert!(
         restarted_context["inbox"]["messages"]
@@ -1590,11 +1611,135 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
         });
         let promote = json!({"op":"MasterPromote", "worker_id":worker,
             "token":token, "approval":"approved scope fixture", "project_context":route});
+        if index == 1 {
+            // Fail only source State publication after the cross-app map
+            // commit. The public retry must finish the remaining effect.
+            let source_path = fixture.project_state_for(&fixture.root, "authority-app-a");
+            let held_path = fixture.root.join("source-grant-state-held.json");
+            std::fs::rename(&source_path, &held_path).unwrap();
+            std::fs::create_dir(&source_path).unwrap();
+            let failed = wire_request(&socket, &promote);
+            let pending_map: Value = serde_json::from_slice(
+                &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+            )
+            .unwrap();
+            // Restore before assertions so even an unexpected receipt keeps
+            // fixture-owned storage available for normal shutdown.
+            std::fs::remove_dir(&source_path).unwrap();
+            std::fs::rename(&held_path, &source_path).unwrap();
+            assert_eq!(failed["ok"], false, "{failed}");
+            assert!(
+                failed["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("PENDING_EFFECT_CROSS_SCOPE_SOURCE_FAILED"),
+                "{failed}"
+            );
+            assert!(
+                pending_map["effects"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|effect| {
+                        effect["app_scope_id"] == "authority-app-b"
+                            && effect["target_worker_id"] == worker
+                    }),
+                "source failure must retain the bounded target intent"
+            );
+            let source_state = fixture.current_state_for(&fixture.root, "authority-app-a");
+            let project = route["project_scope"].as_str().unwrap();
+            assert!(
+                source_state["global"]["projects"][project]["master_grants"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .any(|grant| grant["agent_id"] == "scope-worker-0"),
+                "failed source commit must keep the old grant until retry"
+            );
+        }
         let result = wire_request(&socket, &promote);
         assert_eq!(result["ok"], true, "scope promote: {result}");
+        if index == 1 {
+            let map: Value = serde_json::from_slice(
+                &std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                map["effects"].as_array().unwrap().iter().all(|effect| {
+                    effect["app_scope_id"] != "authority-app-b"
+                        || effect["target_worker_id"] != worker
+                }),
+                "successful retry must complete its intent"
+            );
+        }
         routes.push((worker, token, route, promote));
     }
-    for (worker, token, route, _) in &routes {
+    // Jenny is unique across app scopes in a project. The second promotion
+    // displaced the first scope's holder; a different project stays isolated.
+    let (displaced_worker, displaced_token, displaced_route, _) = &routes[0];
+    let source_state = fixture.current_state_for(&fixture.root, "authority-app-a");
+    let grants = &source_state["global"]["projects"]
+        [displaced_route["project_scope"].as_str().unwrap()]["master_grants"];
+    assert!(grants.is_object(), "typed grants must be present");
+    assert!(
+        grants
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|grant| { grant["agent_id"] != *displaced_worker }),
+        "displaced holder still has a typed grant"
+    );
+    let old_status = wire_request(
+        &socket,
+        &json!({"op":"MasterStatus", "project_context":displaced_route}),
+    );
+    assert!(old_status["master"].is_null(), "{old_status}");
+    let denied = wire_request(
+        &socket,
+        &json!({"op":"MasterWakeHold",
+        "worker_id":displaced_worker, "token":displaced_token,
+        "reason":"displaced holder cannot hold", "ttl_seconds":60,
+        "project_context":displaced_route}),
+    );
+    assert_eq!(denied["ok"], false, "{denied}");
+    let source_after = fixture.current_state_for(&fixture.root, "authority-app-a");
+    assert!(source_state["master_wake"].is_object());
+    assert_eq!(
+        source_state["master_wake"]["wake_hold"],
+        source_after["master_wake"]["wake_hold"]
+    );
+    for (worker, token, route, _) in &routes[1..] {
+        let held = wire_request(
+            &socket,
+            &json!({"op":"MasterWakeHold",
+            "worker_id":worker, "token":token, "reason":"current master allowed",
+            "ttl_seconds":60, "project_context":route}),
+        );
+        assert_eq!(held["ok"], true, "{held}");
+        let root = Path::new(route["canonical_root"].as_str().unwrap());
+        let held_state = fixture.current_state_for(root, route["app_scope_id"].as_str().unwrap());
+        assert_eq!(
+            held_state["master_wake"]["wake_hold"]["reason"],
+            "current master allowed"
+        );
+        let released = wire_request(
+            &socket,
+            &json!({"op":"MasterWakeRelease",
+            "worker_id":worker, "token":token, "project_context":route}),
+        );
+        assert_eq!(released["ok"], true, "{released}");
+    }
+    let displaced = wire_request(
+        &socket,
+        &json!({"op":"Context", "worker_id":displaced_worker,
+            "token":displaced_token,"project_context":displaced_route}),
+    );
+    assert_eq!(displaced["ok"], false, "{displaced}");
+    assert!(displaced["error"]
+        .as_str()
+        .unwrap()
+        .contains("IDENTITY_MAP_NOT_FOUND"));
+    for (worker, token, route, _) in &routes[1..] {
         for request in [
             json!({"op":"MasterStatus", "project_context":route}),
             json!({"op":"Context", "worker_id":worker,"token":token,"project_context":route}),
@@ -1607,7 +1752,7 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
             assert_eq!(result["master"]["worker_id"], *worker, "{result}");
         }
     }
-    let (worker, token, route, promote) = &routes[0];
+    let (worker, token, route, promote) = &routes[1];
     let clear = json!({"op":"MasterClear", "worker_id":worker, "token":token,
         "approval":"approved concurrent fixture", "project_context":route});
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
@@ -1647,7 +1792,7 @@ fn master_authority_scope_isolation_and_concurrent_mutations() {
             &json!({"op":"MasterStatus", "project_context":route}),
         );
         assert_eq!(status["ok"], true, "{status}");
-        if index == 0 {
+        if index <= 1 {
             assert!(status["master"].is_null(), "{status}");
         } else {
             assert_eq!(status["master"]["worker_id"], *worker, "{status}");

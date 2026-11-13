@@ -217,3 +217,17 @@
 - `project-memory verify` 通过；`project-memory query "rex anchor block session window"`
   返回三条一致记录，均确认 block 是 anchor、split 创建新 block、布局变化不改 block、
   仅权威 block 缺失退役名字绑定，没有冲突结论。
+
+## 最终候选回归与交付前状态（2026-11-13 PT）
+
+- 完整 Collab bin 首次重跑出现 1 个真实 tmux fixture failure：默认
+  `IsolatedTmux::start()` 未显式启动 shell，ready probe 在 tmux 启动进程退出后未被
+  执行；其余 27 个 `PoisonError` 是 `TEST_ENV_LOCK` 连锁失败。
+- 修复只作用于测试夹具：默认隔离 tmux session 显式启动 `/bin/sh`，并保留唯一 marker
+  probe 作为 shell 可执行性确认。受影响 tmux 组随后通过 `38 passed, 0 failed, 1 ignored`。
+- 修复后的完整命令
+  `cargo test --manifest-path collab/Cargo.toml --locked --bin collab -- --test-threads=1`
+  通过：`1491 passed, 0 failed, 2 ignored`，耗时 421.02 秒。
+- 该失败没有改变 Rex ontology 或生产路径；`TEST_ENV_LOCK` 连锁不再出现。当前候选仍需
+  完成基于最新 `origin/main=56548a85` 的独立 milestone review、提交、push、PR CI、
+  main 合并和正式 `scripts/build-collab.sh` 构建。

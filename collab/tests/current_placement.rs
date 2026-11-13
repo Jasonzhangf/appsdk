@@ -167,9 +167,11 @@ fn external_project_peer_status_uses_its_project_binding() {
         &project,
         &["context", "--op", "external-status-context"],
     );
-    let worker = context_snapshot(&restored)["identity"]["worker_id"]
-        .as_str()
-        .unwrap();
+    let snapshot = context_snapshot(&restored);
+    wait_for_agent_observations(snapshot);
+    let worker = snapshot["identity"]["worker_id"].as_str().unwrap();
+    let app = snapshot["binding"]["app_scope_id"].as_str().unwrap();
+    let current = fixture.current_mapping_for(&project, app, worker);
     let status = run_in_pane_at(
         &fixture,
         &pane,
@@ -186,7 +188,24 @@ fn external_project_peer_status_uses_its_project_binding() {
         .unwrap();
     assert_eq!(peer["identity_valid"], true, "{peer}");
     assert_eq!(peer["endpoint_live"], true, "{peer}");
-    assert_eq!(peer["presence"], "present", "{peer}");
+    // This fixture runs a shell, so a live endpoint proves the route but not
+    // an agent execution. Keep that missing observation explicit.
+    assert_eq!(peer["status"], "unknown", "{peer}");
+    assert_eq!(peer["presence"], "unknown", "{peer}");
+    assert_eq!(peer["agent_state"], "unknown", "{peer}");
+    assert_eq!(peer["transport_view"]["activity"], "unknown", "{peer}");
+    assert_eq!(peer["transport_view"]["thread_state"], "unknown", "{peer}");
+    assert_eq!(
+        peer["transport_view"]["presence_observation"]["reason"],
+        "foreground_shell_without_agent_exit_evidence",
+        "{peer}"
+    );
+    for field in ["endpoint", "namespace", "session_id"] {
+        assert_eq!(
+            peer["transport"][field], current["transport"][field],
+            "status transport must use the exact current binding field: {field}"
+        );
+    }
 }
 
 #[test]

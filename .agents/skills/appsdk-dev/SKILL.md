@@ -89,9 +89,9 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
   并用 `cargo check --all-targets` 检查其余调用者的编译兼容性。安装器 owner、
   包依赖、未知路径和 release 选择 `dagpipe_installer`，继续执行包级测试及适用
   原生安装黑盒。日常纯治理变更复用这一选择，减少无关安装及摘要用例。
-- `contracts/maps/module-registry.json` 与 `function-map.json` 选择
-  `source_registry`，检查 JSON 结构并从公开入口核对源码归属。其他 maps 继续沿既有
-  合同路由。DAGPipe 的 AppSDK consumer 运行模块单测和 `dagpipe_validate` 公开
+- `contracts/maps/` 中的 module-registry、function-map、mainline-call-map、resource-map
+  和 verification-map 选择 `source_registry`，从公开入口核对源码归属与绑定。
+  未知 map 沿共享合同路由扩大检查。DAGPipe 的 AppSDK consumer 运行模块单测和 `dagpipe_validate` 公开
   用例。后者覆盖图与通知校验，生命周期记录链由其实际 owner 变化时选测。
 - 上述共享文件可能同时承载其他职责。只改其他职责时，必须在同一变更补对应
   consumer 测试和选路，并由正常 Review 核对；selector 不解析源码符号、审批
@@ -114,6 +114,13 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 - 治理 Skill 的 `references/*.md` 参考正文变更选择 Docs 和 workflow-contract。
   后者使用正式安装器在隔离环境验证正文升级、导航和缺失目标拒绝。
   同一 diff 的机器 Guidance、schema、模板、源码和其他资源仍按各自路径选测。
+- `sdk-skill-sources/project-memory/SKILL.md` 正文选择 Docs 和 workflow-contract。
+  Memory 其他分发资产保留资源与 installer 路由。
+- Memory 源码、公开 CLI target、schema、ontology 和规则晋升图选择 `rust_memory`。
+  Ubuntu 检查三个声明 JSON 并执行 `memory_governance_cli`。
+  Memory-only 在独立 `windows-memory` job 原生执行同一 target。
+  混合输入同时选择 `windows_appsdk` 时，Memory target 由该通用 Windows job 执行。
+  AppSDK full 和 release 也在通用 Windows job 执行该 target，两条 Windows 路径互斥。
 - 普通功能分支 push 在精确默认分支 ref 可用时，按其与 head 的共同祖先选择
   完整 feature contribution，包括首次 push 的空/全零 before；默认 ref 不可用时
   才使用有效 before。两者都不可用或 contribution 为空时仍 full fallback。

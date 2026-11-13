@@ -8,7 +8,7 @@
 
 - 项目根：`/Volumes/Intel/playground/appsdk/rex-parity-implementation-20261110`
 - base：`origin/main`（`56548a85`）
-- commit：`679d9a08`（审查该提交相对 `origin/main` 的候选差异）
+- commit：`d390a7ae`（审查该提交相对 `origin/main` 的候选差异）
 - scope.mode：`milestone`
 
 ## 审查目标
@@ -32,7 +32,7 @@
 - 整体模型：`docs/design/rex-project-agent-lifecycle-architect-20261110.md`
 - Adapter ontology：`docs/design/rex-collab-ontology-20261111.md`
 - DAG：`docs/dagpipe/collab-rex-adaptor.graph.json` 和 `docs/dagpipe/collab-notification-consumption.graph.json`
-- 候选 diff：`git diff origin/main...679d9a08`，重点为 `collab/src/adapters/rex.rs`、`collab/src/server/rex_monitor.rs`、`collab/src/server/notification_batch_tests.rs`、`collab/src/server/mod_parts/part_08.rs`、`collab/src/server/binding_slot.rs`、`collab/src/adapters/tmux.rs`、`collab/tests/rex_public_contract.rs`
+- 候选 diff：`git diff origin/main...d390a7ae`，重点为 `collab/src/adapters/rex.rs`、`collab/src/server/rex_monitor.rs`、`collab/src/server/notification_batch_tests.rs`、`collab/src/server/mod_parts/part_08.rs`、`collab/src/server/binding_slot.rs`、`collab/src/adapters/tmux.rs`、`collab/tests/rex_public_contract.rs`
 
 ## 作者已完成验证
 
@@ -54,7 +54,7 @@
 严格输出一个 JSON 对象，禁止 Markdown、代码围栏、`VERDICT`、`PASS`、`FAIL`、`confidence` 或自行裁决。
 
 - `contract_version` 固定为 `"1"`。
-- `scope` 仅含 `mode`、`commit`、`base`，回显 `milestone`、`679d9a08`、`56548a85`。
+- `scope` 仅含 `mode`、`commit`、`base`，回显 `milestone`、`d390a7ae`、`56548a85`。
 - `module_boundary_evidence` 数组，每项含非空字符串 `module`、`owner`、`paths`、`edges`、`resources`、`gates`。
 - `findings` 数组，每项含 `severity`（P0/P1/P2）、`file`、正整数 `line`、`rule`、`evidence`、`remediation`。
 - 无发现时 `findings` 为空数组。

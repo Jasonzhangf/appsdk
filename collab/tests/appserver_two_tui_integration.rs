@@ -50,6 +50,8 @@ mod patrol_subscriptions;
 mod project_patrol_subscribe;
 #[path = "board/reply_obligations.rs"]
 mod reply_obligations_cli;
+#[path = "board/task_registry_projection.rs"]
+mod task_registry_projection;
 #[path = "board/work_roles.rs"]
 mod work_roles_cli;
 #[path = "board/workflow_templates.rs"]
@@ -488,6 +490,12 @@ fn name_mailbox_public_handoff_recv_preserves_old_consumed_history() {
         THREAD_B,
     );
     assert_eq!(replay["messages"], received["messages"]);
+    // The displaced carrier has no companion identity until its own context.
+    let old_holder = fixture.command_public(&["recv", "--timeout", "0"], THREAD_A);
+    assert!(!old_holder.status.success());
+    assert!(String::from_utf8_lossy(&old_holder.stderr).contains("BOARD_IDENTITY_REQUIRED"));
+    let registered = fixture.run_public(&["context"], THREAD_A);
+    assert_ne!(registered["name"], "Alice");
     assert_eq!(
         fixture.run_public(
             &[
@@ -745,7 +753,7 @@ fn context_names_authorized_new_session_continues_named_open_tasks_and_preserves
     assert_eq!(state["task_assignments"]["closed"], closed);
     assert_eq!(state["tasks"]["closed"], closed_task);
     let displaced = fixture.run_public(&["context"], THREAD_A);
-    assert_eq!(displaced["identity"]["worker_id"], worker);
+    assert_ne!(displaced["identity"]["worker_id"], worker);
     assert_ne!(displaced["name"], "Alice");
     fixture.restart_daemon();
     let restored = fixture.run_public(&["context"], THREAD_B);
@@ -1055,7 +1063,7 @@ fn context_names_full_pool_allocates_unique_generated_names_and_reloads_them() {
     assert_eq!(restored["identity"]["worker_id"], incoming_worker);
     assert_eq!(restored["name"], target);
     let displaced = fixture.run_public(&["context"], &contexts[0].0);
-    assert_eq!(displaced["identity"]["worker_id"], first_worker);
+    assert_ne!(displaced["identity"]["worker_id"], first_worker);
     assert_eq!(displaced["name"], released);
     let map_path = fixture.host_state.join("identity-map.json");
     let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
@@ -2065,26 +2073,21 @@ fn context_names_primary_effect_failure_keeps_both_identities_and_recovers_named
         .iter()
         .filter(|slot| slot["identity_status"] == "active")
         .collect();
-    assert_eq!(active.len(), 2);
-    for worker in [
-        &first["identity"]["worker_id"],
-        &second["identity"]["worker_id"],
-    ] {
-        assert_eq!(
-            active
-                .iter()
-                .filter(|slot| &slot["current"]["binding"]["agent_id"] == worker)
-                .count(),
-            1
-        );
-    }
+    // R6 commits only the new holder. The displaced carrier obtains a new
+    // ordinary identity only when it next calls context.
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["identity_key"]["name"], "Alice");
+    assert_eq!(
+        active[0]["current"]["binding"]["agent_id"],
+        second["identity"]["worker_id"]
+    );
     let pending: Vec<_> = map["effects"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|effect| effect["operation_id"] == "ordinary-name-effects-fail")
         .collect();
-    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.len(), 1);
     let state_failed = fixture.current_state();
     assert_eq!(state_failed["tasks"], state_before["tasks"]);
     assert_eq!(
@@ -2099,27 +2102,52 @@ fn context_names_primary_effect_failure_keeps_both_identities_and_recovers_named
     let restored = fixture.run_public(&["context"], THREAD_B);
     assert_eq!(restored["name"], "Alice");
     let state = fixture.current_state();
-    for id in ["target-name-work", "source-name-work"] {
-        assert_eq!(state["tasks"][id]["owner"], second["identity"]["worker_id"]);
-    }
+    assert_eq!(
+        state["tasks"]["target-name-work"]["owner"],
+        second["identity"]["worker_id"]
+    );
+    // R5 keeps the source task at Bob even though the same carrier took Alice.
+    assert_eq!(
+        state["tasks"]["source-name-work"],
+        state_before["tasks"]["source-name-work"]
+    );
     assert_eq!(
         state["task_assignments"]["target-name-work"]["name"],
         "Alice"
     );
-    assert_eq!(
-        state["task_assignments"]["source-name-work"],
-        state_before["task_assignments"]["source-name-work"]
-    );
+    let source = &state["task_assignments"]["source-name-work"];
+    let source_before = &state_before["task_assignments"]["source-name-work"];
+    for field in ["name", "session_id", "assignment_revision"] {
+        assert_eq!(source[field], source_before[field]);
+    }
+    assert_eq!(source["reflow"]["reason"], "name_unoccupied");
+    let replayed = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(replayed["name"], "Alice");
+    let after_replay = fixture.current_state();
+    assert_eq!(after_replay["tasks"], state["tasks"]);
+    assert_eq!(after_replay["task_assignments"], state["task_assignments"]);
     let displaced = fixture.run_public(&["context"], THREAD_A);
-    assert_eq!(
+    assert_ne!(
         displaced["identity"]["worker_id"],
         first["identity"]["worker_id"]
     );
     assert_eq!(displaced["name"], "Bob");
-    assert_eq!(fixture.current_state()["tasks"], state["tasks"]);
+    let resumed = fixture.current_state();
     assert_eq!(
-        fixture.current_state()["task_assignments"],
-        state["task_assignments"]
+        resumed["tasks"]["target-name-work"],
+        state["tasks"]["target-name-work"]
+    );
+    assert_eq!(
+        resumed["task_assignments"]["target-name-work"],
+        state["task_assignments"]["target-name-work"]
+    );
+    assert_eq!(
+        resumed["tasks"]["source-name-work"]["owner"],
+        displaced["identity"]["worker_id"]
+    );
+    assert_eq!(
+        resumed["task_assignments"]["source-name-work"]["name"],
+        "Bob"
     );
 }
 
@@ -2201,6 +2229,18 @@ fn human_retirement_releases_ordinary_name_and_allows_reallocation() {
     let msg_id = sent["msg_id"].as_str().unwrap().to_owned();
 
     // Without the explicit human authorization the release is refused.
+    let direct = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            bob_worker,
+            "--subject",
+            "retire-direct",
+            "unconsumed direct message follows the retired name",
+        ],
+        THREAD_A,
+    );
+    let direct_id = direct["msg_id"].as_str().unwrap().to_owned();
     let refused = fixture.command_public(
         &[
             "context",
@@ -2301,6 +2341,25 @@ fn human_retirement_releases_ordinary_name_and_allows_reallocation() {
     assert_ne!(
         reallocated["identity"]["worker_id"], bob_worker,
         "the free name goes to a new carrier: {reallocated}"
+    );
+    let received = fixture.run_public(
+        &[
+            "recv",
+            "--receive-id",
+            "retired-bob-successor",
+            "--timeout",
+            "0",
+        ],
+        THREAD_C,
+    );
+    let messages = received["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|message| message["id"] == msg_id),
+        "{received}"
+    );
+    assert!(
+        messages.iter().any(|message| message["id"] == direct_id),
+        "{received}"
     );
 
     // Replaying the original operation does not retire the successor.
@@ -2988,6 +3047,102 @@ struct AppFixture {
 }
 
 impl AppFixture {
+    // Restart invalidates persisted samples. Feed current native facts through
+    // the public session probe instead of reusing a pre-restart observation.
+    fn observe_native_agent(&self, worker: &str, presence: &str, activity: &str) {
+        let mapping: Value = serde_json::from_slice(
+            &std::fs::read(self.host_state.join("identity-map.json")).unwrap(),
+        )
+        .unwrap();
+        let slot = mapping["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|slot| {
+                slot["identity_status"] == "active"
+                    && slot["current"]["binding"]["agent_id"] == worker
+            })
+            .unwrap();
+        let target_thread = slot["current"]["transport"]["thread_id"].as_str().unwrap();
+        {
+            let mut native = self.state.lock().unwrap();
+            let target = native
+                .entry(target_thread.to_owned())
+                .or_insert_with(ThreadState::new);
+            target.reject_as_missing = presence == "offline";
+            target.status = match (presence, activity) {
+                ("online", "idle") => "idle",
+                ("online", "busy") => "active",
+                ("online", "waiting_user") => "waiting_user",
+                _ => "notLoaded",
+            }
+            .into();
+            target.turns.clear();
+        }
+        if presence == "online" && self.current_state()["workers"].get(worker).is_none() {
+            // An idle, unavailable business row can be reclaimed independently
+            // of its stable current map. A real returning context restores it.
+            let restored = self.run_public(&["context"], target_thread);
+            assert_eq!(restored["identity"]["worker_id"], worker);
+        }
+        let state = self.current_state();
+        let mut targets = std::collections::BTreeSet::new();
+        let mut observer_thread = THREAD_A.to_owned();
+        for peers in state["agent_presence"].as_object().unwrap().values() {
+            targets.extend(peers.as_object().unwrap().keys().cloned());
+        }
+        for project in state["global"]["projects"].as_object().unwrap().values() {
+            for grant in project["master_grants"].as_object().unwrap().values() {
+                let master = grant["agent_id"].as_str().unwrap();
+                targets.insert(master.to_owned());
+                observer_thread = state["workers"][master]["transport"]["thread_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+            }
+        }
+        for target in targets {
+            if self.current_state()["workers"].get(&target).is_some() {
+                let output =
+                    self.command_public(&["worker", "snapshot", &target], &observer_thread);
+                if !output.status.success() {
+                    // A concurrent native-absence maintenance pass can finish
+                    // removing this unused business row before capture.
+                    assert!(
+                        String::from_utf8_lossy(&output.stderr)
+                            .contains(&format!("target worker {target} not registered")),
+                        "{output:?}"
+                    );
+                    assert!(self.current_state()["workers"].get(&target).is_none());
+                    let thread = mapping["slots"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|slot| slot["current"]["binding"]["agent_id"] == target)
+                        .unwrap()["current"]["transport"]["thread_id"]
+                        .as_str()
+                        .unwrap();
+                    assert!(self.state.lock().unwrap()[thread].reject_as_missing);
+                }
+            }
+        }
+        if presence != "unknown" {
+            let current = self.current_state();
+            let project = self.project.canonicalize().unwrap();
+            if presence == "offline" && current["workers"].get(worker).is_none() {
+                // Maintenance may reclaim an unavailable row with no work.
+                // That is real absence of capacity, not an unknown row made
+                // idle. The current name map remains available for its return.
+                assert!(self.state.lock().unwrap()[target_thread].reject_as_missing);
+            } else {
+                assert_eq!(
+                    current["agent_presence"][project.to_str().unwrap()][worker]["presence"],
+                    presence
+                );
+            }
+        }
+    }
+
     fn project_state_for(&self, project: &Path, app: &str) -> PathBuf {
         let project = project.canonicalize().unwrap();
         let routes: Vec<Value> =
@@ -3849,6 +4004,13 @@ fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
         state["master_wake"]["newly_idle_workers"] = json!([worker_a]);
         state["master_wake"]["generation"] = json!(1);
         state["master_wake"]["delivery_state"] = json!("pending");
+        // This pending batch comes from a completed working episode. A restart
+        // can prune its old idle projection until the current probe succeeds.
+        state["keepalives"][&worker_a] = json!({
+            "observed":"unknown", "idle_since_ms":0, "activity_ms":1,
+            "last_notice_ms":0, "last_notice_id":null, "unacked":0,
+            "suspected_offline":false, "working_seen":true
+        });
     };
 
     // Unknown recipient presence must not deliver, and the pending idle set
@@ -3863,6 +4025,7 @@ fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
 
     // Confirming the master online delivers the same idle set exactly once.
     app_fixture.update_current_state(|state| seed(state, "online"));
+    app_fixture.observe_native_agent(&worker_a, "online", "idle");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if idle_notifications_to(&app_fixture.current_state(), &worker_b) >= 1 {
@@ -4515,7 +4678,18 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     assert_eq!(status["scope"]["project_scope"], project_scope);
     assert_eq!(status["scope"]["app_scope_id"], app_scope_id);
 
-    // The replaced holder remains a peer and may publish its own work.
+    // R6 does not create a companion. Only the old holder's next context
+    // registers an ordinary peer that can publish new work.
+    let old_holder = fixture.command_public(&["board", "show"], THREAD_A);
+    assert!(!old_holder.status.success());
+    assert!(String::from_utf8_lossy(&old_holder.stderr).contains("BOARD_IDENTITY_REQUIRED"));
+    let resumed = fixture.run_public(&["context"], THREAD_A);
+    assert_ne!(resumed["identity"]["worker_id"], worker_a);
+    assert_ne!(resumed["name"], "Jenny");
+    let worker_a = resumed["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let published_by_peer = fixture.run_public(
         &[
             "board",

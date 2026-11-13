@@ -85,7 +85,7 @@
       "id": "执行生命周期互斥分支",
       "operator": "appsdk.collab_peer_lifecycle.execute_lifecycle_branch",
       "operator_version": "1",
-      "description": "Owner是peer lifecycle close/branch dispatcher。Read/Update/Query只执行各自当前owner动作；Close先核对当前binding与责任准入。可证明缺席的Desktop only retires current binding/route and anchor，保留peer身份、名字、任务、消息、credential和master grant事实；present或unknown保持现状。旧generation迟到start/result拒绝，不改写历史。",
+      "description": "Owner是peer lifecycle close/branch dispatcher。Read/Update/Query只执行各自当前owner动作；Close先核对当前binding与责任准入。self-close按本次精确worker/session的名字关系，为尚无名字地址且无显式session限制的未消费消息保留既有MailboxNameAddress；已有地址与消费历史不改。随后停止旧binding、route和默认接收订阅，保留该订阅关联的业务消息，不产生Superseded；后续合法名字holder沿现有mailbox接续。gate为self_close_clears_old_anchors_before_cross_project_context及同入口收件回归，消息ID、正文、真实消费历史与任务保持。可证明缺席的Desktop only retires current binding/route and anchor，保留peer身份、名字、任务、消息、credential和master grant事实；present或unknown保持现状。旧generation迟到start/result拒绝，不改写历史。",
       "inputs": [
         "已准入生命周期意图"
       ],

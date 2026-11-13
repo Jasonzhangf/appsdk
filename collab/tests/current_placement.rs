@@ -186,7 +186,14 @@ fn external_project_peer_status_uses_its_project_binding() {
         .unwrap();
     assert_eq!(peer["identity_valid"], true, "{peer}");
     assert_eq!(peer["endpoint_live"], true, "{peer}");
-    assert_eq!(peer["presence"], "present", "{peer}");
+    // This fixture runs a shell, so a live endpoint proves the route but not
+    // an agent execution. Keep that missing observation explicit.
+    assert_eq!(peer["presence"], "unknown", "{peer}");
+    assert_eq!(
+        peer["transport_view"]["presence_observation"]["reason"],
+        "foreground_shell_without_agent_exit_evidence",
+        "{peer}"
+    );
 }
 
 #[test]

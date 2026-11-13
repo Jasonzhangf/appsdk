@@ -385,8 +385,18 @@ fn task_conflicts(
     feature_id: Option<String>,
     worktree_path: Option<String>,
 ) -> Resp {
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+    {
+        Ok(control) => control,
+        Err(error) => return Resp::err(error),
+    };
     let st = server.state.lock().unwrap();
-    let conflicts: Vec<serde_json::Value> = st
+    let route_scope = match server_route_scope(server, &st) {
+        Ok(route_scope) => route_scope,
+        Err(error) => return Resp::err(error),
+    };
+    let mut conflicts = Vec::new();
+    for task in st
         .tasks
         .values()
         .filter(|task| {
@@ -394,8 +404,12 @@ fn task_conflicts(
                 && ((feature_id.is_some() && task.feature_id == feature_id)
                     || (worktree_path.is_some() && task.worktree_path == worktree_path))
         })
-        .map(|task| task_view(&st, task))
-        .collect();
+    {
+        match task_view_with_identity(&st, &control, route_scope.as_ref(), task) {
+            Ok(view) => conflicts.push(view),
+            Err(error) => return Resp::err(error),
+        }
+    }
     Resp::data(json!({"conflicts": conflicts}))
 }
 
@@ -514,9 +528,56 @@ fn worker_status_summary_with_maps(
     tasks: &std::collections::HashMap<String, TaskRec>,
     msgs: &std::collections::HashMap<String, Message>,
     keepalives: &std::collections::HashMap<String, crate::server::keepalive::Record>,
-    role_brief: serde_json::Value,
+    role_brief: Option<serde_json::Value>,
     w: &WorkerRec,
 ) -> Result<serde_json::Value, String> {
+    let unacked_notifications = msgs
+        .values()
+        .filter(|m| m.to == w.id && m.state == "delivered")
+        .count();
+    let pending_notifications = msgs
+        .values()
+        .filter(|m| m.to == w.id && m.state == "pending")
+        .count();
+    let notifications_paused = false;
+    let keepalive = keepalives.get(&w.id);
+    let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
+    let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
+    let (display_name, work_roles) = {
+        let state = server.state.lock().unwrap();
+        let route = server_route_scope(server, &state)?;
+        (
+            worker_display_name(control, route.as_ref(), &w.id)?,
+            worker_work_roles(&state, control, route.as_ref(), &w.id)?,
+        )
+    };
+
+    let Some(role_brief) = role_brief else {
+        return Ok(json!({
+            "id": w.id,
+            "display_name": display_name,
+            "work_roles": work_roles,
+            "role": null,
+            "role_brief": null,
+            "transport": null,
+            "status": "identity-mismatch",
+            "presence": "unknown",
+            "endpoint_live": null,
+            "identity_valid": false,
+            "agent_state": "unknown",
+            "route_match": null,
+            "transport_view": null,
+            "unacked_notifications": unacked_notifications,
+            "pending_notifications": pending_notifications,
+            "notifications_paused": false,
+            "unacked_keepalives": unacked_keepalives,
+            "suspected_offline": suspected_offline,
+            "diagnostic": "worker record is retained without a current identity mapping; run `collab context` for ordinary registration",
+            "active_task": null,
+            "active_status": null,
+        }));
+    };
+
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
@@ -536,18 +597,6 @@ fn worker_status_summary_with_maps(
         (Some(true), Some("error")) => "error",
         _ => "unknown",
     };
-    let unacked_notifications = msgs
-        .values()
-        .filter(|m| m.to == w.id && m.state == "delivered")
-        .count();
-    let pending_notifications = msgs
-        .values()
-        .filter(|m| m.to == w.id && m.state == "pending")
-        .count();
-    let notifications_paused = false;
-    let keepalive = keepalives.get(&w.id);
-    let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
-    let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
     let status = if !identity_valid {
         "identity-mismatch"
     } else if endpoint_live == Some(false) {
@@ -567,12 +616,6 @@ fn worker_status_summary_with_maps(
         Some("SESSION_THREAD_BINDING_MISMATCH: selected transport does not prove the registered identity; preserve the registered binding and use `collab context` as the only repair entry; do not edit or infer the binding")
     } else {
         None
-    };
-    let (display_name, work_roles) = {
-        let state = server.state.lock().unwrap();
-        let route=server_route_scope(server,&state)?;
-        (worker_display_name(control, route.as_ref(), &w.id)?,
-         worker_work_roles(&state, control, route.as_ref(), &w.id)?)
     };
     Ok(json!({
         "id": w.id,

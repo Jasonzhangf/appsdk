@@ -708,3 +708,73 @@ fn routed_ack_rejects_same_principal_old_binding_after_map_refresh() {
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Source persistence failure must retain the intent and exact old grant;
+/// retry removes it once, while a later source generation owns its new grant.
+#[test]
+fn cross_scope_source_grant_commit_failure_retry_and_successor() {
+    use super::binding_slot::{BindingControlSet, IdentityBindingKey, PendingEffect, PendingEffectKind};
+    use super::binding_store::{BindingControlStore, ControlChange};
+    let (server, root, state_path) = test_server();
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let binding = commit_host_route_fixture(&manager, &server, "source-grant", "token-source-grant", "app-source-grant",
+        crate::proto::TmuxEndpoint {
+            socket_path: root.join("source.sock").display().to_string(),
+            server_pid: 42, tmux_session_id: "$1".into(), pane_id: "%1".into(), pane_pid: 99,
+            codex_session_id: Some("source-session".into()), codex_thread_id: Some("source-thread".into()),
+        });
+    grant_master_fixture(&server, &binding);
+    let store = BindingControlStore::new(server.host_paths.state_root());
+    let source_key = IdentityBindingKey::new(binding.project_scope.clone(), binding.app_scope_id.clone(), "Jenny");
+    let control = store.load().unwrap();
+    let source_value = control.slot(&source_key).unwrap().active_binding().unwrap().clone();
+    let source = BindingControlSet::cross_scope_source_ref(control.slot(&source_key).unwrap()).unwrap();
+    let target_key = IdentityBindingKey::new(binding.project_scope.clone(), AppServerId::new("app-target-grant").unwrap(), "Jenny");
+    let mut target_value = source_value.clone();
+    target_value.binding.app_scope_id = target_key.app_scope_id.clone();
+    target_value.tab_id.app_scope_id = target_key.app_scope_id.clone();
+    let effect = PendingEffect {
+        role: None, kind: PendingEffectKind::NameAcrossScopes { sources: vec![source.clone()] },
+        effect_id: "source-grant-retry".into(), operation_id: "source-grant-retry".into(),
+        project_scope: binding.project_scope.clone(), app_scope_id: target_key.app_scope_id.clone(),
+        name: "Jenny".into(), previous_worker_id: None, previous_session_id: None,
+        target_worker_id: binding.agent_id.to_string(), target_session_id: "source-session".into(),
+        occupancy_revision: 1, source_names: vec![], moves_existing_names: false, pane_anchor: None, created_ms: now_ms(),
+    };
+    store.commit(ControlChange::MoveNameWithEffect {
+        target: target_key.clone(), value: target_value, source_names: vec![], expected_generation: Some(0),
+        effect: effect.clone(), companion: None,
+    }).unwrap();
+    let released = store.load().unwrap();
+    assert!(!released.validate_cross_scope_source(&source).unwrap());
+    // Use the existing fixture filesystem failure seam, with no product hook.
+    let saved = root.join("source-state-held.json");
+    std::fs::rename(&state_path, &saved).unwrap();
+    std::fs::create_dir(&state_path).unwrap();
+    let error = manager.recover_pending_effect_locked(&released, &effect).unwrap_err();
+    assert!(error.contains("PENDING_EFFECT_CROSS_SCOPE_SOURCE_FAILED"), "{error}");
+    assert!(store.load().unwrap().pending_effect(&effect.effect_id).is_some());
+    assert!(current_master_grant(&server.state.lock().unwrap(), Some(&binding.route_scope())).is_some());
+    std::fs::remove_dir(&state_path).unwrap();
+    std::fs::rename(saved, &state_path).unwrap();
+    manager.consume_cross_scope_source_locked(&released, &effect, effect.cross_scope_sources()).unwrap();
+    assert!(current_master_grant(&server.state.lock().unwrap(), Some(&binding.route_scope())).is_none());
+    assert!(current_master_grant(&current_state::load(&state_path, false).unwrap(), Some(&binding.route_scope())).is_none());
+    let after = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+    manager.consume_cross_scope_source_locked(&released, &effect, effect.cross_scope_sources()).unwrap();
+    assert_eq!(after, serde_json::to_value(&*server.state.lock().unwrap()).unwrap());
+    // The later holder deliberately reuses the old binding: binding-id-only
+    // revocation would remove this new grant. The source generation forbids it.
+    store.commit(ControlChange::Unregister { key: target_key, expected_generation: None }).unwrap();
+    store.commit(ControlChange::Commit { key: source_key, value: source_value, expected_generation: None }).unwrap();
+    let grant = global_state::MasterGrant::new(binding.project_scope.clone(), binding.app_scope_id.clone(),
+        binding.agent_id.clone(), "project", "operator", "approved successor", binding.binding_id.clone(), now_ms()).unwrap();
+    server.commit(&[Event::GlobalMasterGranted { grant }]);
+    let successor = store.load().unwrap();
+    let before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();
+    let error = manager.consume_cross_scope_source_locked(&successor, &effect, effect.cross_scope_sources()).unwrap_err();
+    assert!(error.contains("CROSS_SCOPE_SOURCE_CHANGED"), "{error}");
+    assert_eq!(before, serde_json::to_value(&*server.state.lock().unwrap()).unwrap());
+    assert!(store.load().unwrap().pending_effect(&effect.effect_id).is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}

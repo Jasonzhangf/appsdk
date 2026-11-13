@@ -1297,7 +1297,7 @@ fn worker_status_keeps_tmux_liveness_unknown_despite_offline_keepalive_hint() {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         &keepalives,
-        json!({"role": "peer"}),
+        Some(json!({"role": "peer"})),
         &worker,
     ).unwrap();
     assert_eq!(summary["status"], "unknown");

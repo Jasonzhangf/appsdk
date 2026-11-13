@@ -196,6 +196,47 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
     );
     assert_eq!(task["task"], "self-close-open-task", "{task}");
 
+    let consumed = run_ok_at(
+        &fixture,
+        &source_root,
+        &pane,
+        &[
+            "send",
+            "--unknown-sender",
+            "--to",
+            &source_id,
+            "--subject",
+            "already consumed",
+            "--content",
+            "keep consumed history",
+            "--delivery",
+            "queued",
+        ],
+        false,
+    );
+    let consumed_id = consumed["msg_id"].as_str().unwrap();
+    let receipt = run_ok_at(
+        &fixture,
+        &source_root,
+        &pane,
+        &[
+            "recv",
+            "--receive-id",
+            "before-self-close",
+            "--timeout",
+            "0",
+        ],
+        false,
+    );
+    assert!(
+        receipt["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == consumed_id),
+        "{receipt}"
+    );
+
     let sent = run_ok_at(
         &fixture,
         &source_root,
@@ -339,6 +380,74 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
     assert_eq!(
         source_final["receive_receipts"],
         source_before["receive_receipts"]
+    );
+
+    // A separate current caller reacquires the now-unoccupied source name.
+    // It consumes the original queued message, not a recreated copy or history.
+    let session = "self-close-returned-holder";
+    let created = tmux(
+        &fixture.tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-s",
+            session,
+            "-c",
+            source_root.to_str().unwrap(),
+            "sleep 600",
+        ],
+    );
+    fixture.track_tmux_session(session);
+    let returned_pane = Pane {
+        pane_id: String::from_utf8(created.stdout).unwrap().trim().to_owned(),
+        server_pid: pane.server_pid,
+        session_anchor: "self-close-new-agent-session".into(),
+        thread_anchor: "self-close-new-agent-thread".into(),
+    };
+    let returned = register_context(
+        &fixture,
+        &source_root,
+        &returned_pane,
+        "self-close-reacquired-name",
+        false,
+    );
+    let source_name = source["result"]["snapshot"]["name"]
+        .as_str()
+        .expect("original name");
+    let returned_name = returned["result"]["snapshot"]["name"]
+        .as_str()
+        .expect("returned name");
+    assert_eq!(returned_name, source_name);
+    let receive_args = ["recv", "--receive-id", "after-self-close", "--timeout", "0"];
+    let received = run_ok_at(&fixture, &source_root, &returned_pane, &receive_args, false);
+    let messages = received["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == msg_id && message["body"] == message_before["body"]),
+        "{received}"
+    );
+    assert!(
+        !messages.iter().any(|message| message["id"] == consumed_id),
+        "{received}"
+    );
+    let replay = run_ok_at(&fixture, &source_root, &returned_pane, &receive_args, false);
+    assert_eq!(replay["messages"], received["messages"]);
+    let after_receive = fixture.current_state_for(&source_root, &source_app_scope);
+    assert_eq!(
+        after_receive["msgs"][consumed_id],
+        source_before["msgs"][consumed_id]
+    );
+    assert_eq!(
+        after_receive["tasks"]["self-close-open-task"]["id"],
+        task_before["id"]
+    );
+    assert_eq!(
+        after_receive["tasks"]["self-close-open-task"]["status"],
+        task_before["status"]
     );
     drop(fixture);
     std::fs::remove_dir_all(target_root).expect("remove isolated target project");

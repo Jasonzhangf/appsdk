@@ -67,7 +67,6 @@ fn assignment_unavailability(state: &State, control: &binding_slot::BindingContr
 fn board_task_view_with_master(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, viewer: Option<&str>, master: Option<&str>, route: Option<&RouteScope>) -> Result<Option<BoardTaskView>, String> {
     let Some(details) = state.board_details.get(&task.id) else { return Ok(None); };
     let master_view = viewer.is_some_and(|viewer| Some(viewer) == master);
-    if !board_task_visible(state, task, viewer) && !master_view { return Ok(None); }
     let lifecycle = state.task_lifecycle.get(&task.id);
     let cleanup = state.cleanup_receipts.get(&task.id);
     let policy=state.effective_work_policy(&task.id);
@@ -81,6 +80,9 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
     let current_owner = if historical { Some(task.owner.as_str()) }
         else if assignment.is_some() { current.map(|current| current.binding.agent_id.as_str()) }
         else { Some(task.owner.as_str()) };
+    let private_owner = viewer.is_some_and(|viewer| current_owner.is_some_and(|owner|
+        viewer == owner || board_parent_for_actor(state, owner) == Some(viewer)));
+    if !details.public_visibility && !private_owner && !master_view { return Ok(None); }
     let reassignment_reason = assignment_unavailability(state, control, task, route)?.map(str::to_owned);
     let owner = if reassignment_reason.is_some() {
         String::new()
@@ -224,6 +226,22 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         }
     }
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
+    // Resolve responsibility from the same assignment/current relation as the
+    // task row. A carrier taking another name does not take its source work.
+    let mut responsibilities = Vec::new();
+    for task in state.tasks.values().filter(|task| board_execution_responsibility(&task.status)) {
+        let owner = match state.task_assignment(&task.id).zip(route.as_ref()) {
+            Some((assignment, route)) => match control.current_for_name(
+                &route.project_scope_id, &route.app_scope_id, &assignment.name,
+            ) {
+                Ok(slot) => slot.and_then(|slot| slot.active_binding())
+                    .map(|current| current.binding.agent_id.as_str()),
+                Err(error) => return Resp::err(error),
+            },
+            None => Some(task.owner.as_str()),
+        };
+        responsibilities.push((task, owner));
+    }
     let mut workers = Vec::new();
     for worker in state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)) {
         let slot = match route.as_ref() {
@@ -287,6 +305,14 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             Vec::new()
         };
         subscription_ids.sort();
+        let mut task_ids: Vec<_> = responsibilities.iter().filter(|(task, owner)| {
+            (owner.is_some_and(|owner| owner == worker.id)
+                // Preserve the existing unmapped custody view for the
+                // master. Unoccupied named work also remains in tasks.
+                || (owner.is_none() && identity_status == "unmapped" && task.owner == worker.id))
+                && (visible_responsibility || board_public_task(&state, &task.id))
+        }).map(|(task, _)| task.id.clone()).collect();
+        task_ids.sort();
         workers.push(BoardMemberView {
             id: worker.id.clone(),
             identity_status,
@@ -294,7 +320,7 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             role,
             work_roles,
             status: observations.get(&worker.id).map(|(status, _)| *status).unwrap_or("unknown").into(),
-            task_ids: tasks.iter().filter(|task| task.owner == worker.id && board_execution_responsibility(&task.status)).map(|task| task.id.clone()).collect(),
+            task_ids,
             resource_task_ids,
             subscription_ids,
             invitation_ids: tasks.iter().filter(|task| task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),

@@ -170,21 +170,23 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
             preferred["task"]["invited_peer"],
             alice["identity"]["worker_id"]
         );
-        // Keep the first task's ownership/invitation for selection while
-        // releasing its finite goal slot before another explicit override.
-        fixture.run_public(
-            &[
-                "goal",
-                "reconcile",
-                "--goal-id",
-                "task:first",
-                "--owner",
-                "Alice",
-                "--desired",
-                "ended",
-            ],
-            THREAD_A,
-        );
+        // An unaccepted invitation has no task schedule owner. Only an
+        // accepted task needs its finite goal slot released here.
+        if owned {
+            fixture.run_public(
+                &[
+                    "goal",
+                    "reconcile",
+                    "--goal-id",
+                    "task:first",
+                    "--owner",
+                    "Alice",
+                    "--desired",
+                    "ended",
+                ],
+                THREAD_A,
+            );
+        }
         publish(
             &fixture,
             "pinned",
@@ -1739,10 +1741,7 @@ fn ticket_start_and_result_require_the_current_claimed_attempt() {
         ],
         other_thread,
     );
-    assert!(
-        not_owner.contains("TICKET_CLAIM_OWNER_MISMATCH"),
-        "{not_owner}"
-    );
+    assert!(not_owner.contains("TASK_OWNER_REQUIRED"), "{not_owner}");
 
     // Result before Started is rejected and leaves the phase claimed.
     let premature = rejected(
@@ -2303,6 +2302,7 @@ fn seed_idle(fixture: &mut AppFixture, worker_id: &str, thread: &str) {
             "idle_since_ms": 1
         });
     });
+    fixture.observe_native_agent(worker_id, "online", "idle");
 }
 
 fn slot_worker_id(board: &Value, slot: &str) -> String {

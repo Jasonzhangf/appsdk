@@ -152,6 +152,32 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
         },
     ]);
 
+    let template = server.state.lock().unwrap().msgs["self-pending-message"].clone();
+    let mut delivered = template.clone();
+    delivered.id = "self-delivered-message".into();
+    delivered.state = "delivered".into();
+    let mut addressed = template.clone();
+    addressed.id = "self-other-name-message".into();
+    let other_address = super::super::name_mailbox::MailboxNameAddress {
+        project_scope: binding.project_scope.as_str().to_owned(),
+        name: "Bob".into(),
+    };
+    let mut pinned = template;
+    pinned.id = "self-session-pinned-message".into();
+    server.commit(&[
+        state::Event::Sent { msg: delivered },
+        state::Event::Sent { msg: addressed },
+        state::Event::MailboxNameAddressed {
+            message_id: "self-other-name-message".into(),
+            address: other_address.clone(),
+        },
+        state::Event::Sent { msg: pinned },
+        state::Event::TargetSessionBound {
+            message_id: "self-session-pinned-message".into(),
+            target_session: "explicit-original-session".into(),
+        },
+    ]);
+
     let request = self_close_request(&server, &context, peer, "self-with-open-work");
     let response = handle(&server, Some(&context), request, None);
     let result = &response.data["result"];
@@ -174,6 +200,25 @@ fn self_close_with_open_task_succeeds_and_preserves_business_records() {
     assert!(state.workers.contains_key(other));
     assert!(state.tasks.contains_key("self-open-task"));
     assert!(state.msgs.contains_key("self-pending-message"));
+    assert_eq!(
+        state.mailbox_name_addresses["self-pending-message"].name,
+        "Jenny"
+    );
+    assert_eq!(
+        state.mailbox_name_addresses["self-delivered-message"].name,
+        "Jenny"
+    );
+    assert_eq!(
+        state.mailbox_name_addresses["self-other-name-message"],
+        other_address
+    );
+    assert!(!state
+        .mailbox_name_addresses
+        .contains_key("self-session-pinned-message"));
+    assert_eq!(
+        state.target_sessions["self-session-pinned-message"],
+        "explicit-original-session"
+    );
     assert_eq!(
         state.notification_subscriptions["self-subscription"].status,
         "cancelled"

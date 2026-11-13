@@ -41,7 +41,7 @@ impl ProjectRuntimeManager {
         };
         let value = slot.active_binding().expect("lookup selects active current");
         let pending = control.pending_effects().find(|effect|
-            effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+            effect.is_register()
                 && effect.project_scope == context.project_scope
                 && effect.app_scope_id == context.app_scope_id
                 && effect.name == slot.identity_key.name
@@ -92,11 +92,11 @@ impl ProjectRuntimeManager {
             worker, &credential.token, &value.transport, value.binding.project_scope.clone(),
             &runtime.root.to_string_lossy(), value.binding.app_scope_id.clone(),
             false, Some(&value.binding), pending.filter(|effect|
-                effect.kind == crate::server::binding_slot::PendingEffectKind::Register)
+                effect.is_register())
                 .map(|effect| effect.operation_id.as_str()),
         )?;
         let origin = pending.filter(|effect|
-            effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+            effect.is_register()
                 && effect.operation_id == prepared.nested_operation_id)
             .map(|effect| RegisterOrigin::InitialCurrentContinuation { explicit_peer: effect.name != "Jenny" })
             .unwrap_or(RegisterOrigin::CurrentPrincipal);
@@ -795,7 +795,7 @@ impl ProjectRuntimeManager {
         // Publish an authorized target directly. The displaced holder obtains
         // an ordinary name only when it next registers; source work stays put.
         let moves_existing_names = name_intent.is_some();
-        let effect = Self::handoff_effect(
+        let mut effect = Self::handoff_effect(
             &control,
             &state,
             &context,
@@ -809,6 +809,32 @@ impl ProjectRuntimeManager {
             false,
             pane_anchor.clone(),
         );
+        if moves_existing_names {
+            let mut sources: Vec<_> = control
+                .project_currents_for_name(&context.project_scope, &name)
+                .into_iter()
+                .filter(|slot| slot.identity_key.app_scope_id != context.app_scope_id)
+                .filter_map(crate::server::binding_slot::BindingControlSet::cross_scope_source_ref)
+                .collect();
+            if let Some(facts) = facts {
+                if let Some(source) = control.project_current_for_facts_excluding_app(
+                    &context.project_scope,
+                    Some(&context.app_scope_id),
+                    facts,
+                    pane_anchor.as_ref().map(|pane| pane.cwd.as_str()),
+                )? {
+                    if let Some(source) = crate::server::binding_slot::BindingControlSet::cross_scope_source_ref(source) {
+                        if !sources.iter().any(|existing| existing.key == source.key) {
+                            sources.push(source);
+                        }
+                    }
+                }
+            }
+            if !sources.is_empty() {
+                let pending = effect.as_mut().ok_or("BINDING_CONTROL_REGISTER_EFFECT_MISSING")?;
+                pending.kind = crate::server::binding_slot::PendingEffectKind::RegisterAcrossScopes { sources };
+            }
+        }
         let key = crate::server::binding_slot::IdentityBindingKey::new(
             context.project_scope.clone(),
             context.app_scope_id.clone(),
@@ -1061,6 +1087,12 @@ impl ProjectRuntimeManager {
         sources: &[crate::server::binding_slot::CrossScopeSourceRef],
     ) -> Result<(), String> {
         for source in sources {
+            // Only the exact released generation may consume this intent.
+            // In particular a later current, even reusing a binding id, owns
+            // its own grant and must not be revoked by an older retry.
+            if control.validate_cross_scope_source(source)? {
+                return Err("PENDING_EFFECT_CROSS_SCOPE_SOURCE_NOT_RELEASED".into());
+            }
             let slot = control
                 .slot(&source.key)
                 .ok_or("PENDING_EFFECT_CROSS_SCOPE_SOURCE_MISSING")?;
@@ -1085,13 +1117,14 @@ impl ProjectRuntimeManager {
             // Keep no target or other source State lock while this one is held.
             let mut state = runtime.state.lock().unwrap();
             let source_name = source.key.name.clone();
-            let mut events = crate::server::name_resolution::preserve_source_work_events(
+            let mut events = master_authority_revoke_binding_events(&state, &previous.binding);
+            events.extend(crate::server::name_resolution::preserve_source_work_events(
                 &state,
                 effect.project_scope.as_str(),
                 std::slice::from_ref(&source_name),
                 &effect.name,
                 effect.created_ms,
-            );
+            ));
             let mut candidate = state.clone();
             for event in &events {
                 candidate
@@ -1316,7 +1349,7 @@ impl ProjectRuntimeManager {
             .active_binding()
             .ok_or("PENDING_EFFECT_MAPPING_INACTIVE")?;
         if effect.is_name_like()
-            || effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+            || effect.is_register()
         {
             self.materialize_current_worker_locked(&runtime, control, value, Some(effect))?;
         }
@@ -1433,7 +1466,7 @@ impl ProjectRuntimeManager {
                     .map_err(|error| format!("PENDING_EFFECT_BINDING_COMMIT_FAILED: {error}"))?;
             }
         }
-        if effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+        if effect.is_register()
             && (state
                 .global
                 .lookup_binding_for(&route_scope, &value.binding.binding_id)
@@ -1586,7 +1619,7 @@ impl ProjectRuntimeManager {
         )
         .map_err(|error| format!("PENDING_EFFECT_CREDENTIAL_FAILED: {error}"))?;
         if effect.is_name_like()
-            || effect.kind == crate::server::binding_slot::PendingEffectKind::Register
+            || effect.is_register()
         {
             let mut publications = Vec::new();
             if let Some(previous) = slot.reference_previous().filter(|previous| {

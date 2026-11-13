@@ -1623,6 +1623,44 @@ pub(super) fn exact_binding_retirement_events(
     retired.native_thread_id = None;
     retired.tmux_endpoint = None;
     let mut events = Vec::new();
+    if preserve_default_messages {
+        // Preserve the business name relation before removing the current
+        // carrier. A later Register has no active predecessor to infer it from.
+        let name = state
+            .name_occupancies
+            .get(target.project_scope.as_str())
+            .and_then(|names| {
+                names.values().find(|name| {
+                    name.worker_id == target.worker_id
+                        && binding.session_id.as_ref().map(|session| session.as_str())
+                            == Some(name.session_id.as_str())
+                })
+            });
+        if let Some(name) = name {
+            let mut messages: Vec<_> = state
+                .msgs
+                .values()
+                .filter(|message| {
+                    message.to == target.worker_id
+                        && matches!(message.state.as_str(), "pending" | "delivered")
+                        && !state.mailbox_name_addresses.contains_key(&message.id)
+                        && !state.target_sessions.contains_key(&message.id)
+                })
+                .collect();
+            messages.sort_by(|a, b| a.id.cmp(&b.id));
+            events.extend(
+                messages
+                    .into_iter()
+                    .map(|message| state::Event::MailboxNameAddressed {
+                        message_id: message.id.clone(),
+                        address: super::name_mailbox::MailboxNameAddress {
+                            project_scope: target.project_scope.as_str().to_owned(),
+                            name: name.name.clone(),
+                        },
+                    }),
+            );
+        }
+    }
     let mut superseded = Vec::new();
     for subscription_id in &subscription_ids {
         let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
@@ -1735,7 +1773,7 @@ fn retire_control_plane_target(
             snapshot,
             snapshot_captured_ms,
             identity_cleanup == IdentityCleanup::Unregister,
-            false,
+            self_unregister,
             self_unregister,
         ) {
             Ok(prepared) => (prepared.events, prepared.binding, prepared.subscription_ids),

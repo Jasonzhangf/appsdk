@@ -745,6 +745,11 @@ fn same_stable_name_new_session_retains_the_cancelled_project_patrol() {
     assert_eq!(records[0]["worker_id"], new_worker);
     assert_eq!(records[0]["status"], "cancelled");
 
+    let old_unregistered = fixture.command_public(&["notify", "status"], THREAD_A);
+    assert!(!old_unregistered.status.success());
+    assert!(rejection_text(&old_unregistered).contains("BOARD_IDENTITY_REQUIRED"));
+    let peer = fixture.run_public(&["context"], THREAD_A);
+    assert_ne!(peer["name"], "Jenny");
     let old_status = fixture.run_public(&["notify", "status"], THREAD_A);
     assert!(
         !project_patrol_subscriptions(&old_status)

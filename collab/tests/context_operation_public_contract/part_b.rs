@@ -495,7 +495,7 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
         text(&refused)
     );
     assert!(
-        text(&refused).contains("TICKET_PHASE_NOT_CLAIMED"),
+        text(&refused).contains("TASK_OWNER_REQUIRED"),
         "{}",
         text(&refused)
     );
@@ -506,13 +506,46 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
         bob_assignment_after["session_id"],
         bob_assignment_before["session_id"]
     );
-    assert_eq!(bob_assignment_after["reflow"]["delivery"], "pending");
-    assert_eq!(bob_assignment_after["reflow"]["reason"], "name_unoccupied");
+    assert_eq!(
+        bob_assignment_after["assignment_revision"],
+        bob_assignment_before["assignment_revision"]
+    );
     assert_eq!(after["tasks"][task_id], before["tasks"][task_id]);
     assert_eq!(
         after["ticket_phases"], before["ticket_phases"],
         "a refused start must not advance the Bob ticket"
     );
+
+    let board = fixture.run_ok(&["board", "show"], Some(&pane));
+    let shown = board["tasks"].as_array().unwrap().iter()
+        .find(|task| task["id"] == task_id).expect("Jenny sees retained Bob work");
+    assert_eq!(shown["owner_name"], "Bob", "{shown}");
+    assert_eq!(shown["owner"], "", "{shown}");
+    assert!(shown["owner_session_id"].is_null(), "{shown}");
+    assert_eq!(
+        shown["reassignment_reason"], "name_unoccupied", "{shown}"
+    );
+
+    // Reflow notification progresses on the daemon timer, independently of refusal.
+    assert!(wait_until(Duration::from_secs(15), || {
+        fixture.current_state()["task_assignments"][task_id]["reflow"]["reason"]
+            == "name_unoccupied"
+    }), "daemon must observe the unavailable Bob assignment");
+    let progressed = fixture.current_state();
+    let assignment = &progressed["task_assignments"][task_id];
+    assert_eq!(assignment["name"], "Bob");
+    assert_eq!(assignment["session_id"], bob_assignment_before["session_id"]);
+    assert_eq!(
+        assignment["assignment_revision"],
+        bob_assignment_before["assignment_revision"]
+    );
+    assert!(matches!(
+        assignment["reflow"]["delivery"].as_str(),
+        Some("pending" | "delivered" | "failed")
+    ), "{assignment}");
+    assert!(assignment["reflow"]["episode"].as_u64().is_some_and(|episode| episode > 0));
+    assert_eq!(progressed["tasks"][task_id], before["tasks"][task_id]);
+    assert_eq!(progressed["ticket_phases"], before["ticket_phases"]);
 }
 
 #[test]
@@ -1177,7 +1210,7 @@ fn offline_incumbent_name_change_does_not_block_current_messages() {
     let next_worker = next["worker_id"].as_str().unwrap();
     let queued = fixture.configured_command(&[
         "send", "--to", sender["worker_id"].as_str().unwrap(), "--subject", "retain-current-message",
-        "--content", "retain this message through credential write failure",
+        "--content", "retain this message through offline incumbent takeover",
     ], None)
         .env("CODEX_APP_SERVER_SOCKET", next_host.endpoint().strip_prefix("unix://").unwrap())
         .env("CODEX_SESSION_ID", "lifecycle-child-session")
@@ -1224,26 +1257,14 @@ fn offline_incumbent_name_change_does_not_block_current_messages() {
     let retained_credential = credential_path.with_extension("retained");
     fs::rename(&credential_path, &retained_credential).unwrap();
     fs::create_dir(&credential_path).unwrap();
-    let refused = promote();
-    let failure = format!("{} {}", String::from_utf8_lossy(&refused.stdout),
-        String::from_utf8_lossy(&refused.stderr));
-    assert!(!refused.status.success(), "a real credential replacement failure cannot succeed");
-    assert!(failure.contains("PENDING_EFFECT_CREDENTIAL_FAILED"), "{failure}");
-    assert!(!failure.contains("selected tmux transport has no tmux endpoint"), "{failure}");
-    let blocked_recv = fixture.configured_command(&["recv", "--timeout", "1"], None)
-        .env("CODEX_APP_SERVER_SOCKET", sender_host.endpoint().strip_prefix("unix://").unwrap())
-        .env("CODEX_SESSION_ID", "sender-session")
-        .env("CODEX_THREAD_ID", "sender-thread")
-        .output().unwrap();
-    assert!(!blocked_recv.status.success());
-    let pending: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
-    assert!(!pending["effects"].as_array().unwrap().is_empty());
-    let pending_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    assert_ne!(pending_state["state"]["msgs"][queued_id]["state"], "read");
+    // R6 does not allocate a companion or rewrite the displaced credential.
+    // An unwritable old credential must not block the current holder's work.
+    let promoted = promote();
+    assert!(credential_path.is_dir(), "takeover must not rewrite the displaced credential");
+    let current_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_ne!(current_state["state"]["msgs"][queued_id]["state"], "read");
     fs::remove_dir(&credential_path).unwrap();
     fs::rename(&retained_credential, &credential_path).unwrap();
-    let promoted = promote();
-    drop(promote);
     let sent = fixture.configured_command(&[
         "send", "--to", next_worker, "--subject", "current-after-takeover", "--content",
         "current message must not depend on the offline incumbent address",
@@ -1268,17 +1289,13 @@ fn offline_incumbent_name_change_does_not_block_current_messages() {
         .any(|message| message["subject"] == "current-after-takeover"));
     let saved: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
     assert!(saved["effects"].as_array().unwrap().is_empty());
-    let retained = saved["slots"].as_array().unwrap().iter().find(|slot|
-        slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == old_worker
-    ).expect("the offline identity must remain in the current map");
-    assert_ne!(retained["identity_key"]["name"], "Jenny");
-    assert!(retained["current"]["transport"].get("tmux_endpoint").is_none());
+    assert!(saved["slots"].as_array().unwrap().iter().all(|slot|
+        !(slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == old_worker)
+    ), "the displaced holder must not receive a companion current: {saved}");
     let master = lifecycle_wire(&fixture, &next, json!({"op":"MasterStatus"}));
     assert_eq!(master["master"]["worker_id"], next["worker_id"]);
-    let workers = lifecycle_wire(&fixture, &next, json!({"op":"Workers"}));
-    let old_view = workers["workers"].as_array().unwrap().iter()
-        .find(|worker| worker["id"] == old_worker).unwrap();
-    assert_ne!(old_view["endpoint_live"], true);
+    // The old holder has no current identity until its next ordinary context;
+    // it is not a retained live worker under an eagerly allocated companion.
     let task = lifecycle_wire(&fixture, &sender, json!({"op":"TaskStatus","task_id":"retained-current-work"}));
     assert_eq!(task["ok"], true, "{task}");
     assert_eq!(task["owner"], sender["worker_id"]);
@@ -3653,14 +3670,12 @@ fn public_goal_schedule_and_pending_wake_move_across_agent_session_to_new_jenny(
         "{successor_goal}"
     );
 
-    let old_status = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let old_status = fixture.command(&["notify", "status"], Some(&pane));
+    let old_status_text = text(&old_status);
+    assert!(!old_status.status.success(), "{old_status_text}");
     assert!(
-        !old_status["subscriptions"]
-            .as_array()
-            .expect("notify status lists old subscriptions")
-            .iter()
-            .any(|subscription| subscription["id"] == subscription_id),
-        "old worker must not retain the goal subscription: {old_status}"
+        old_status_text.contains("BOARD_IDENTITY_REQUIRED"),
+        "the displaced holder has no companion current or subscription authority: {old_status_text}"
     );
 
     let state = fixture.current_state();
@@ -3689,7 +3704,7 @@ fn public_goal_schedule_and_pending_wake_move_across_agent_session_to_new_jenny(
     let denied_text = text(&denied);
     assert!(!denied.status.success(), "{denied_text}");
     assert!(
-        denied_text.contains("GOAL_SCHEDULE_OWNER_MISMATCH"),
+        denied_text.contains("BOARD_IDENTITY_REQUIRED"),
         "old worker must be rejected as the goal owner: {denied_text}"
     );
 

@@ -10,6 +10,10 @@ fn generated_peer_names_do_not_invent_an_unlinked_position() {
     assert_eq!(peer_registration_number("peer-01"), None);
     assert_eq!(peer_registration_number("Peer1"), None);
     assert_eq!(display_slot("peer-1").unwrap(), None);
+    assert_eq!(display_slot("peer-42").unwrap(), None);
+    for invalid in ["Peer1", "peer-0", "peer-01", "peer-", "peer-one"] {
+        assert!(display_slot(invalid).is_err(), "{invalid} must not be canonical");
+    }
 }
 
 #[test]
@@ -31,13 +35,4 @@ fn name_and_role_takeovers_keep_source_name_work() {
     .unwrap()
     .unwrap();
     assert!(!ordinary_rename.moves_existing_names);
-}
-
-#[test]
-fn generated_names_use_only_canonical_peer_numbers() {
-    assert_eq!(display_slot("peer-1").unwrap(), 22);
-    assert_eq!(display_slot("peer-42").unwrap(), 63);
-    for invalid in ["Peer1", "peer-0", "peer-01", "peer-", "peer-one"] {
-        assert!(display_slot(invalid).is_err(), "{invalid} must not be canonical");
-    }
 }

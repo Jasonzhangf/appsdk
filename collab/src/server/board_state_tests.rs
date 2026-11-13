@@ -681,6 +681,184 @@ fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
 }
 
 #[test]
+fn task_view_with_identity_follows_current_name_and_preserves_closed_history() {
+    let (server, root, route) = board_name_fixture();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        let open =
+            task_view_with_identity(&state, &control, Some(&route), &state.tasks["named-work"])
+                .unwrap();
+        assert_eq!(open["owner_name"], "Alice");
+        assert_eq!(open["owner"], "old");
+        assert_eq!(open["owner_session_id"], "session-old");
+
+        let mut closed = state.tasks["named-work"].clone();
+        closed.status = "closed".into();
+        let closed = task_view_with_identity(&state, &control, Some(&route), &closed).unwrap();
+        assert_eq!(closed["owner_name"], "Alice");
+        assert_eq!(closed["owner"], "old");
+        assert_eq!(closed["owner_session_id"], "session-old");
+    }
+
+    let source = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "current")
+        .unwrap()
+        .unwrap();
+    let value = control
+        .slot(source)
+        .unwrap()
+        .active_binding()
+        .unwrap()
+        .clone();
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: binding_slot::IdentityBindingKey::new(
+                route.project_scope_id.clone(),
+                route.app_scope_id.clone(),
+                "Alice",
+            ),
+            value,
+            source_names: vec![source.name.clone()],
+            expected_generation: None,
+        })
+        .unwrap();
+    let control = store.load().unwrap();
+    let state = server.state.lock().unwrap();
+    let open = task_view_with_identity(&state, &control, Some(&route), &state.tasks["named-work"])
+        .unwrap();
+    assert_eq!(open["owner_name"], "Alice");
+    assert_eq!(open["owner"], "current");
+    assert_eq!(open["owner_session_id"], "session-current");
+
+    let mut closed = state.tasks["named-work"].clone();
+    closed.status = "closed".into();
+    let closed = task_view_with_identity(&state, &control, Some(&route), &closed).unwrap();
+    assert_eq!(closed["owner"], "old");
+    assert_eq!(closed["owner_session_id"], "session-old");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_view_with_identity_preserves_legacy_and_empty_holder_cases() {
+    let (server, root, route) = board_name_fixture();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let mut state = server.state.lock().unwrap();
+    state.task_assignments.remove("named-work");
+    let legacy =
+        task_view_with_identity(&state, &control, Some(&route), &state.tasks["named-work"])
+            .unwrap();
+    assert_eq!(legacy["owner"], "old");
+    assert!(legacy["owner_name"].is_null());
+    assert!(legacy["owner_session_id"].is_null());
+
+    state.task_assignments.insert(
+        "named-work".into(),
+        crate::server::name_state::TaskAssignment {
+            task_id: "named-work".into(),
+            name: "Alice".into(),
+            session_id: "recorded-session".into(),
+            assignment_revision: 1,
+            reflow: None,
+            updated_ms: 1,
+        },
+    );
+    let empty = task_view_with_identity(
+        &state,
+        &binding_slot::BindingControlSet::default(),
+        Some(&route),
+        &state.tasks["named-work"],
+    )
+    .unwrap();
+    assert_eq!(empty["owner_name"], "Alice");
+    assert_eq!(empty["owner"], "");
+    assert!(empty["owner_session_id"].is_null());
+
+    let missing_route = task_view_with_identity(
+        &state,
+        &binding_slot::BindingControlSet::default(),
+        None,
+        &state.tasks["named-work"],
+    )
+    .unwrap_err();
+    assert!(
+        missing_route.contains("TASK_ROUTE_SCOPE_REQUIRED"),
+        "{missing_route}"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_view_with_identity_propagates_ambiguous_current_map() {
+    let (server, root, route) = board_name_fixture();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let key = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "old")
+        .unwrap()
+        .unwrap()
+        .clone();
+    let slot = control.slot(&key).unwrap().clone();
+    let ambiguous = binding_slot::BindingControlSet::from_slots(vec![slot.clone(), slot]);
+    let state = server.state.lock().unwrap();
+    let error =
+        task_view_with_identity(&state, &ambiguous, Some(&route), &state.tasks["named-work"])
+            .unwrap_err();
+    assert!(error.contains("IDENTITY_MAP_AMBIGUOUS"), "{error}");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn task_conflicts_keeps_membership_and_projects_current_holder() {
+    let (server, root, route) = board_name_fixture();
+    {
+        let mut state = server.state.lock().unwrap();
+        state.tasks.get_mut("named-work").unwrap().feature_id = Some("registry-conflict".into());
+    }
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let source = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "current")
+        .unwrap()
+        .unwrap();
+    let value = control
+        .slot(source)
+        .unwrap()
+        .active_binding()
+        .unwrap()
+        .clone();
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: binding_slot::IdentityBindingKey::new(
+                route.project_scope_id.clone(),
+                route.app_scope_id.clone(),
+                "Alice",
+            ),
+            value,
+            source_names: vec![source.name.clone()],
+            expected_generation: None,
+        })
+        .unwrap();
+
+    let response = task_conflicts(&server, Some("registry-conflict".into()), None);
+    assert!(response.ok, "{:?}", response.error);
+    let conflicts = response.data["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1, "{:?}", response.data);
+    assert_eq!(conflicts[0]["id"], "named-work");
+    assert_eq!(conflicts[0]["owner_name"], "Alice");
+    assert_eq!(conflicts[0]["owner"], "current");
+    assert_eq!(conflicts[0]["owner_session_id"], "session-current");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn internal_safety_blocked_writes_never_create_business_approval_records() {
     let (server, root) = test_server();
     let mut state = server.state.lock().unwrap();

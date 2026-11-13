@@ -679,7 +679,17 @@ fn dispatch_with_route_context_bound(
         } => handle_task_finalize_cleanup(server, worker_id, token, task_id, commit),
         Req::TaskDispatch { worker_id, token } => handle_task_dispatch(server, worker_id, token),
         Req::TaskStatus { task_id } => {
+            let control =
+                match binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+                {
+                    Ok(control) => control,
+                    Err(error) => return Resp::err(error),
+                };
             let st = server.state.lock().unwrap();
+            let route_scope = match server_route_scope(server, &st) {
+                Ok(route_scope) => route_scope,
+                Err(error) => return Resp::err(error),
+            };
             match task_id {
                 Some(id) => match st.tasks.get(&id) {
                     Some(task) => {
@@ -692,7 +702,10 @@ fn dispatch_with_route_context_bound(
                                 return Resp::err(error);
                             }
                         }
-                        Resp::data(task_view(&st, task))
+                        match task_view_with_identity(&st, &control, route_scope.as_ref(), task) {
+                            Ok(view) => Resp::data(view),
+                            Err(error) => Resp::err(error),
+                        }
                     }
                     None => Resp::err(format!("task {} not found", id)),
                 },
@@ -708,9 +721,14 @@ fn dispatch_with_route_context_bound(
                             }
                         }
                     }
-                    Resp::data(
-                        json!({"tasks": st.tasks.values().map(|task| task_view(&st, task)).collect::<Vec<_>>() }),
-                    )
+                    let mut tasks = Vec::new();
+                    for task in st.tasks.values() {
+                        match task_view_with_identity(&st, &control, route_scope.as_ref(), task) {
+                            Ok(view) => tasks.push(view),
+                            Err(error) => return Resp::err(error),
+                        }
+                    }
+                    Resp::data(json!({"tasks": tasks}))
                 }
             }
         }
@@ -758,15 +776,21 @@ fn dispatch_with_route_context_bound(
             let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
                 Ok(control) => control, Err(error) => return Resp::err(error),
             };
-            record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .map(|worker_id| role_brief_if_current(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
                     .collect::<Result<std::collections::HashMap<_, _>, String>>();
                 let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                drop(st);
+                for (worker_id, brief) in &role_briefs {
+                    if brief.is_some() {
+                        record_ordinary_peer_presence_edges(server, Some(worker_id));
+                    }
+                }
+                let st = server.state.lock().unwrap();
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -784,7 +808,7 @@ fn dispatch_with_route_context_bound(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
-                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
+                        role_briefs.get(&w.id).cloned().unwrap_or(None),
                         w,
                     )
                 })
@@ -806,15 +830,22 @@ fn dispatch_with_route_context_bound(
             let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
                 Ok(control) => control, Err(error) => return Resp::err(error),
             };
-            record_ordinary_peer_presence_edges(server, worker_id.as_deref());
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .filter(|candidate| worker_id.as_ref().is_none_or(|selected| selected == *candidate))
+                    .map(|worker_id| role_brief_if_current(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
                     .collect::<Result<std::collections::HashMap<_, _>, String>>();
                 let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
+                drop(st);
+                for (worker_id, brief) in &role_briefs {
+                    if brief.is_some() {
+                        record_ordinary_peer_presence_edges(server, Some(worker_id));
+                    }
+                }
+                let st = server.state.lock().unwrap();
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
@@ -833,7 +864,7 @@ fn dispatch_with_route_context_bound(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
-                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
+                        role_briefs.get(&w.id).cloned().unwrap_or(None),
                         w,
                     )
                 })
@@ -905,7 +936,6 @@ fn dispatch_with_route_context_bound(
             let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
                 Ok(control) => control, Err(error) => return Resp::err(error),
             };
-            record_ordinary_peer_presence_edges(server, None);
             let (
                 workers_rec,
                 tasks,
@@ -924,11 +954,29 @@ fn dispatch_with_route_context_bound(
                 let role_briefs = st
                     .workers
                     .keys()
-                    .map(|worker_id| role_brief(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
+                    .map(|worker_id| role_brief_if_current(server, &st, &control, worker_id).map(|brief| (worker_id.clone(), brief)))
                     .collect::<Result<std::collections::HashMap<_, _>, String>>();
                 let role_briefs = match role_briefs { Ok(briefs) => briefs, Err(error) => return Resp::err(error) };
-                let mut tasks: Vec<serde_json::Value> =
-                    st.tasks.values().map(|task| task_view(&st, task)).collect();
+                drop(st);
+                for (worker_id, brief) in &role_briefs {
+                    if brief.is_some() {
+                        record_ordinary_peer_presence_edges(server, Some(worker_id));
+                    }
+                }
+                let st = server.state.lock().unwrap();
+                let route_scope = match server_route_scope(server, &st) {
+                    Ok(route_scope) => route_scope,
+                    Err(error) => return Resp::err(error),
+                };
+                let mut tasks = match st
+                    .tasks
+                    .values()
+                    .map(|task| task_view_with_identity(&st, &control, route_scope.as_ref(), task))
+                    .collect::<Result<Vec<_>, String>>()
+                {
+                    Ok(tasks) => tasks,
+                    Err(error) => return Resp::err(error),
+                };
                 tasks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
                 let mut subagents: Vec<crate::subagent::Record> =
                     st.subagents.values().cloned().collect();
@@ -959,7 +1007,7 @@ fn dispatch_with_route_context_bound(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
-                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
+                        role_briefs.get(&w.id).cloned().unwrap_or(None),
                         w,
                     )
                 })
@@ -1302,6 +1350,12 @@ fn validate_wire_route_principals(
             (current.binding.agent_id.as_str() == worker_id).then_some(&current.binding)
         });
         let Some(binding) = matches.next() else {
+            // Only this read-only selection may inspect a retained record in
+            // the routed project state. Membership is not current identity.
+            let state = server.state.lock().unwrap();
+            if state.workers.contains_key(worker_id) {
+                return Ok(());
+            }
             return Err(format!(
                 "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no registered runtime binding",
                 worker_id

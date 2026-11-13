@@ -72,7 +72,7 @@ fn master_name_uses_current_map_when_read_projection_is_peer() {
     promote_master(&server, "master", "user approval");
     let worker = server.state.lock().unwrap().workers["master"].clone();
     let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
-    let summary = worker_status_summary_with_maps(&server, &control, &Default::default(), &Default::default(), &Default::default(), json!({"role":"peer"}), &worker).unwrap();
+    let summary = worker_status_summary_with_maps(&server, &control, &Default::default(), &Default::default(), &Default::default(), Some(json!({"role":"peer"})), &worker).unwrap();
     assert_eq!(summary["display_name"], "Jenny");
     assert_eq!(summary["role"], "peer");
     std::fs::remove_dir_all(root).unwrap();

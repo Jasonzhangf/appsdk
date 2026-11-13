@@ -471,7 +471,7 @@ impl ProjectRuntimeManager {
         let pending: Vec<_> = control
             .pending_effects()
             .filter(|effect| {
-                effect.kind == PendingEffectKind::Register
+                effect.is_register()
                     && effect.project_scope == context.project_scope
                     && effect.app_scope_id == context.app_scope_id
                     && effect.name == slot.identity_key.name

@@ -2,6 +2,124 @@ use super::*;
 
 const THREAD_C: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fdd";
 
+#[test]
+fn board_name_projection_keeps_unoccupied_source_private_work_off_current_bob() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &[
+            "context",
+            "--approve-grant",
+            r#"{"action":"restore_master","authorization":"fixture user selects Jenny"}"#,
+        ],
+        THREAD_C,
+    );
+    assert_eq!(alice["name"], "Alice");
+    for (id, session) in [
+        ("source-alice-private", THREAD_A),
+        ("target-bob-private", THREAD_B),
+        ("source-alice-public", THREAD_A),
+    ] {
+        fixture.run_public(
+            &["task", "register", id, "--next", "retain name duty"],
+            session,
+        );
+    }
+    // Privacy is an existing stored input, as in the unmapped-worker consumer.
+    // All registration, takeover and board reads still use the public CLI.
+    fixture.update_current_state(|state| {
+        for id in ["source-alice-private", "target-bob-private"] {
+            state["board_details"][id]["public_visibility"] = json!(false);
+        }
+    });
+    let member = |board: &Value, id: &Value| {
+        board["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| &row["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let owner_board = fixture.run_public(&["board", "show"], THREAD_A);
+    assert_eq!(
+        member(&owner_board, &alice["identity"]["worker_id"])["task_ids"],
+        json!(["source-alice-private", "source-alice-public"])
+    );
+    let other_board = fixture.run_public(&["board", "show"], THREAD_B);
+    assert_eq!(
+        member(&other_board, &alice["identity"]["worker_id"])["task_ids"],
+        json!(["source-alice-public"])
+    );
+
+    let takeover = fixture.run_public(&["context", "--approve-grant",
+        r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture user replaces Bob","replace_confirmed":true}"#], THREAD_A);
+    assert_eq!(takeover["name"], "Bob");
+    assert_eq!(
+        takeover["identity"]["worker_id"],
+        alice["identity"]["worker_id"]
+    );
+    let before = fixture.current_state();
+    for session in [THREAD_A, THREAD_C] {
+        let board = fixture.run_public(&["board", "show"], session);
+        let bob = member(&board, &takeover["identity"]["worker_id"]);
+        assert_eq!(bob["display_name"], "Bob");
+        assert_eq!(
+            bob["task_ids"],
+            json!(["target-bob-private"]),
+            "current Bob must not inherit Alice duties: {bob}"
+        );
+        if session == THREAD_C {
+            for id in ["source-alice-private", "source-alice-public"] {
+                let task = board["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["id"] == id)
+                    .expect("Jenny retains unoccupied Alice duty");
+                assert_eq!(task["owner_name"], "Alice");
+                assert_eq!(task["owner"], "");
+                assert!(task["owner_session_id"].is_null());
+                assert_eq!(task["needs_reassignment"], true);
+                assert_eq!(task["reassignment_reason"], "name_unoccupied");
+            }
+        } else {
+            assert!(
+                !board.to_string().contains("source-alice-private"),
+                "Bob cannot see Alice private work: {board}"
+            );
+            assert!(board["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == "source-alice-public"));
+        }
+    }
+    let after = fixture.current_state();
+    for field in ["tasks", "task_assignments"] {
+        assert_eq!(
+            after[field], before[field],
+            "board reads must not mutate {field}"
+        );
+    }
+    // The displaced Bob carrier can register as Alice and resume Alice work.
+    // This also checks that filtering did not simply hide source duties forever.
+    let resumed = fixture.run_public(&["context"], THREAD_B);
+    assert_eq!(resumed["name"], "Alice");
+    let resumed_board = fixture.run_public(&["board", "show"], THREAD_B);
+    assert_eq!(
+        member(&resumed_board, &resumed["identity"]["worker_id"])["task_ids"],
+        json!(["source-alice-private", "source-alice-public"])
+    );
+    let bob_board = fixture.run_public(&["board", "show"], THREAD_A);
+    assert_eq!(
+        member(&bob_board, &takeover["identity"]["worker_id"])["task_ids"],
+        json!(["target-bob-private"])
+    );
+    assert!(!bob_board.to_string().contains("source-alice-private"));
+}
+
 fn setup() -> (AppFixture, String, String) {
     let mut fixture = AppFixture::new();
     let first = fixture.run_public(&["context"], THREAD_A);
@@ -1185,7 +1303,8 @@ fn display_name_defaults_follow_current_master_without_renaming_identity() {
     // Handoff does not operate the former executor. Its own later context
     // call obtains an ordinary pool name without taking Jenny back.
     let resumed_peer = fixture.run_public(&["context"], THREAD_A);
-    assert_eq!(resumed_peer["identity"]["worker_id"], master);
+    let resumed_worker = resumed_peer["identity"]["worker_id"].as_str().unwrap();
+    assert_ne!(resumed_worker, master);
     assert_eq!(resumed_peer["identity"]["display_name"], "Alice");
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     assert_eq!(board["master"]["worker_id"], peer);
@@ -1195,7 +1314,7 @@ fn display_name_defaults_follow_current_master_without_renaming_identity() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|w| w["id"] == master)
+            .find(|w| w["id"] == resumed_worker)
             .unwrap()["display_name"],
         "Alice"
     );

@@ -1954,9 +1954,96 @@ fn handle_task_finalize_cleanup_current_map(
     outcome.response
 }
 
-fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
+struct TaskOwnerProjection {
+    owner: String,
+    owner_name: Option<String>,
+    owner_session_id: Option<String>,
+}
+
+fn task_owner_projection(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
+    task: &TaskRec,
+) -> Result<TaskOwnerProjection, String> {
+    let assignment = state.task_assignment(&task.id);
+    if matches!(task.status.as_str(), "closed" | "cancelled") {
+        return Ok(TaskOwnerProjection {
+            owner: task.owner.clone(),
+            owner_name: assignment.map(|assignment| assignment.name.clone()),
+            owner_session_id: assignment.map(|assignment| assignment.session_id.clone()),
+        });
+    }
+    let Some(assignment) = assignment else {
+        return Ok(TaskOwnerProjection {
+            owner: task.owner.clone(),
+            owner_name: None,
+            owner_session_id: None,
+        });
+    };
+    let route = route.ok_or_else(|| {
+        format!(
+            "TASK_ROUTE_SCOPE_REQUIRED: task {} assignment {} has no project/app route",
+            task.id, assignment.name
+        )
+    })?;
+    let current = control
+        .current_for_name(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &assignment.name,
+        )?
+        .and_then(|slot| slot.active_binding());
+    Ok(TaskOwnerProjection {
+        owner: current
+            .map(|current| current.binding.agent_id.to_string())
+            .unwrap_or_default(),
+        owner_name: Some(assignment.name.clone()),
+        owner_session_id: current
+            .and_then(|current| current.binding.session_id.as_ref().map(ToString::to_string)),
+    })
+}
+
+fn task_view_with_identity(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
+    task: &TaskRec,
+) -> Result<serde_json::Value, String> {
+    let projection = task_owner_projection(state, control, route, task)?;
+    let mut view = task_view(state, task);
+    if let Some(object) = view.as_object_mut() {
+        object.insert("owner_name".into(), json!(projection.owner_name));
+        object.insert("owner".into(), json!(projection.owner));
+        object.insert("owner_session_id".into(), json!(projection.owner_session_id));
+    }
+    Ok(view)
+}
+
+fn task_cleanup_view(state: &State, task: &TaskRec) -> serde_json::Value {
     let cleanup_required = task.worktree_path.is_some();
     let cleanup_receipt = state.cleanup_receipts.get(&task.id);
+    if !cleanup_required && cleanup_receipt.is_none() {
+        return serde_json::Value::Null;
+    }
+    json!({
+        "required": cleanup_required,
+        "status": if !cleanup_required {
+            "not_required"
+        } else if cleanup_receipt.is_some_and(|receipt| {
+            receipt.verification == CleanupVerification::Verified
+        }) {
+            "verified"
+        } else if cleanup_receipt.is_some() {
+            "unverified"
+        } else {
+            "pending"
+        },
+        "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
+    })
+}
+
+fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
     let lifecycle = state.task_lifecycle.get(&task.id);
     // A read projects only the sections that carry a fact. A task that has not
     // delivered shows no delivery/review/integration block instead of a page of
@@ -2049,25 +2136,9 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
             }),
         );
     }
-    if cleanup_required || cleanup_receipt.is_some() {
-        sections.insert(
-            "cleanup".into(),
-            json!({
-                "required": cleanup_required,
-                "status": if !cleanup_required {
-                    "not_required"
-                } else if cleanup_receipt.is_some_and(|receipt| {
-                    receipt.verification == CleanupVerification::Verified
-                }) {
-                    "verified"
-                } else if cleanup_receipt.is_some() {
-                    "unverified"
-                } else {
-                    "pending"
-                },
-                "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
-            }),
-        );
+    let cleanup = task_cleanup_view(state, task);
+    if !cleanup.is_null() {
+        sections.insert("cleanup".into(), cleanup);
     }
     sections.insert("updated_at".into(), json!(iso(task.updated_ms)));
     let mut view = json!({
@@ -2196,34 +2267,6 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
-    let mut tasks: Vec<serde_json::Value> = st
-        .tasks
-        .values()
-        .filter(|task| task.owner == worker_id)
-        // `context` is the caller's current work view. An owned closed task is
-        // history only when the existing delivery, merge and resource
-        // projections say no duty remains; explicit status/task reads still
-        // show the full record.
-        .filter(|task| {
-            if task.status != "closed" {
-                return true;
-            }
-            let (delivery_complete, _) = st.delivery_completion_projection(&task.id);
-            !delivery_complete || st.pending_merges.contains_key(&task.id)
-        })
-        .map(|task| task_view(&st, task))
-        .collect();
-    tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    let current_role_brief = match role_brief(server, &st, &control, &worker_id) {
-        Ok(brief) => brief,
-        Err(error) => return Resp::err(error),
-    };
-    let role = current_role_brief
-        .get("role")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("worker")
-        .to_owned();
-    let authority = current_role_brief["authority"].clone();
     // The caller's own runtime binding is the receipt that addresses this
     // route. `collab context` is the single bootstrap read, so it owns the
     // read-back path for a peer whose local copy of that receipt was lost.
@@ -2256,6 +2299,38 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             Err(error) => return Resp::err(error),
         },
     };
+    let mut tasks = Vec::new();
+    for task in st.tasks.values() {
+        let view = match task_view_with_identity(&st, &control, route_scope.as_ref(), task) {
+            Ok(view) => view,
+            Err(error) => return Resp::err(error),
+        };
+        if view["owner"].as_str() != Some(worker_id.as_str()) {
+            continue;
+        }
+        // `context` is the caller's current work view. An owned closed task is
+        // history only when the existing delivery, merge and resource
+        // projections say no duty remains; explicit status/task reads still
+        // show the full record.
+        if task.status == "closed" {
+            let (delivery_complete, _) = st.delivery_completion_projection(&task.id);
+            if delivery_complete && !st.pending_merges.contains_key(&task.id) {
+                continue;
+            }
+        }
+        tasks.push(view);
+    }
+    tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    let current_role_brief = match role_brief(server, &st, &control, &worker_id) {
+        Ok(brief) => brief,
+        Err(error) => return Resp::err(error),
+    };
+    let role = current_role_brief
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("worker")
+        .to_owned();
+    let authority = current_role_brief["authority"].clone();
     let mapped = match route_scope.as_ref() {
         Some(route) => match control.current_for_worker(
             &route.project_scope_id,
@@ -2284,7 +2359,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                     "path": binding.worktree_root,
                     "base_commit": binding.base_commit,
                     "status": task.map(|task| task.status.as_str()).unwrap_or("unknown"),
-                    "cleanup": task.map(|task| task_view(&st, task)["cleanup"].clone()),
+                    "cleanup": task.map(|task| task_cleanup_view(&st, task)),
                 })
             })
             .collect::<Vec<_>>();

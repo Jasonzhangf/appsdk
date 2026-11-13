@@ -10,6 +10,9 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PendingEffectKind {
     Register,
+    RegisterAcrossScopes {
+        sources: Vec<CrossScopeSourceRef>,
+    },
     Name,
     /// Explicit takeover where one or more source currents live in other app
     /// scopes. Every exact source current is released in the same control
@@ -349,6 +352,13 @@ pub(crate) struct CrossScopeSourceRef {
 }
 
 impl PendingEffect {
+    pub(crate) fn is_register(&self) -> bool {
+        matches!(
+            self.kind,
+            PendingEffectKind::Register | PendingEffectKind::RegisterAcrossScopes { .. }
+        )
+    }
+
     pub(crate) fn is_name_like(&self) -> bool {
         matches!(
             self.kind,
@@ -358,7 +368,8 @@ impl PendingEffect {
 
     pub(crate) fn cross_scope_sources(&self) -> &[CrossScopeSourceRef] {
         match &self.kind {
-            PendingEffectKind::NameAcrossScopes { sources } => sources,
+            PendingEffectKind::NameAcrossScopes { sources }
+            | PendingEffectKind::RegisterAcrossScopes { sources } => sources,
             _ => &[],
         }
     }

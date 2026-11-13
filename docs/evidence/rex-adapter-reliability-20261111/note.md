@@ -250,4 +250,4 @@
 - 独立 reviewer 针对 `87acb6d4` 未发现 P0/P1，提出 1 个 P2：恢复谓词此前只解析格式化错误字符串，原生 `server.status` 错误若伪造同名 detail 可能获得错误的恢复资格。
 - 已在 `e4430cf2` 修复：恢复条件现在还要求 `native_code=none`；新增原生错误伪造 marker 的拒绝用例和本地 typed generation-mismatch 的放行用例。
 - 修复后 Rex 聚焦组单线程通过 `119 passed, 0 failed`，格式和 diff 检查通过。
-- 当前必须基于 `e4430cf2` 重新执行最终独立 milestone review；无 P0/P1 后再 push、等 CI、合并和正式构建。
+- 当前必须基于包含审查范围记录的最终提交 `679d9a08` 重新执行独立 milestone review；无 P0/P1 后再 push、等 CI、合并和正式构建。

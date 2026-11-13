@@ -718,6 +718,90 @@ fn f7_execution_admission_direct_invite_rejects_reviewer_without_effects() {
 }
 
 #[test]
+fn f7_execution_admission_invite_normalizes_executor_worker_id() {
+    let fixture = f7_fixture();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let alice_worker = slot_worker_id(&board, "Alice");
+    publish(
+        &fixture,
+        "f7-invite-pinned-worker",
+        &f7_publish_flags(&["--executor", "Alice"]),
+    );
+
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "f7-invite-pinned-worker",
+            "--to",
+            &alice_worker,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+
+    assert_eq!(invited["task"]["invited_peer"], alice_worker, "{invited}");
+    assert_eq!(invited["task"]["executor_name"], "Alice", "{invited}");
+    assert_eq!(invited["task"]["status"], "invited", "{invited}");
+    let after = fixture.current_state();
+    assert_eq!(
+        after["board_details"]["f7-invite-pinned-worker"]["invitation"]["peer_id"], alice_worker,
+        "{after}"
+    );
+}
+
+#[test]
+fn f7_execution_admission_invite_rejects_reviewer_worker_id() {
+    let fixture = f7_fixture();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let alice_worker = slot_worker_id(&board, "Alice");
+    publish(
+        &fixture,
+        "f7-invite-reviewer-worker",
+        &f7_publish_flags(&["--reviewer", "Alice"]),
+    );
+    let before = fixture.current_state();
+    let before_revision = before["board_details"]["f7-invite-reviewer-worker"]["revision"].clone();
+
+    let error = rejected(
+        &fixture,
+        &[
+            "board",
+            "invite",
+            "f7-invite-reviewer-worker",
+            "--to",
+            &alice_worker,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert!(
+        error.contains("WORK_REVIEWER_EXECUTION_CONFLICT"),
+        "{error}"
+    );
+
+    let after = fixture.current_state();
+    assert_eq!(
+        after["board_details"]["f7-invite-reviewer-worker"]["revision"], before_revision,
+        "{after}"
+    );
+    assert!(
+        after["board_details"]["f7-invite-reviewer-worker"]["invitation"].is_null(),
+        "{after}"
+    );
+    assert!(
+        f7_messages(&after, "task-invitation:f7-invite-reviewer-worker").is_empty(),
+        "{after}"
+    );
+    assert!(
+        f7_goal_subscriptions(&after, "f7-invite-reviewer-worker").is_empty(),
+        "{after}"
+    );
+}
+
+#[test]
 fn f7_execution_admission_accept_rechecks_current_reviewer() {
     let mut fixture = f7_fixture();
     publish(&fixture, "f7-accept-recheck", &f7_publish_flags(&[]));

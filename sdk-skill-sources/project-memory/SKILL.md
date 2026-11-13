@@ -27,11 +27,73 @@ remains readable for import compatibility but is not a new output location.
 
 - New CLI entries default to level 3 (`unreviewed`).
 - Level 2 is reviewed and reusable; level 1 is reviewed and critical.
-- Only a real review with evidence may promote an entry. Use `promote` or a
-  run-note `memory_review`; ordinary writes cannot self-assign level 1/2.
+- Only a real review with evidence may promote an ordinary entry. Use `promote`
+  or a run-note `memory_review`; ordinary writes cannot self-assign level 1/2.
+- Review level and status never approve a rule. Rule promotion also requires an
+  explicit user approval declaration that matches the entry scope and revision.
 - Categories (`plan`, `path`, `knowledge`, `lesson`) describe content, not
   review level. Tags are retrieval/classification features; one entry may have
   multiple tags.
+
+## Rule promotion
+
+`entry_kind` is `fact` or `rule`. A missing value means an old or unclassified
+record. Facts and rule candidates remain writable and searchable without
+approval. A rule candidate may have an incomplete clause, but it is not an
+approved rule.
+
+The latest raw event owns the complete effective `rule_control`. Its clause
+records the rule scope, scenario, trigger, allowed and forbidden actions, state
+change, effects, owner, evidence, and target governance binding. A change to the
+title, content, or complete clause creates a new rule revision. Tags, source
+references, importance, review metadata, timestamps, projections, and approval
+metadata do not.
+
+Rule approval is separate from review and task acceptance. The approval
+declaration must name the target project or global Memory scope, entry ID,
+revision, source, and original user approval text. It does not prove a person's
+identity. It also does not replace `rule_control.clause.scope`, which states the
+business scope of the stored rule.
+
+Use the structured paths:
+
+```text
+project-memory entry <project> --input <entry.json> [--global]
+project-memory promote <project> --id <id> --level <1|2> \
+  --evidence <review-ref> --approval <approval.json> [--global]
+project-memory import [project] [--global]
+```
+
+`--input` carries a structured entry. A new rule is saved as a candidate, even
+if its input claims approval; the result must say the approval was not applied.
+For an existing candidate, `promote --approval` submits the matching approval
+and requested level together. Explicit import can carry the same structured
+data for an existing candidate. `review --run`, automatic L3 intake, and
+migration cannot submit approval or promote a rule to level 1/2.
+
+`--global` selects global Memory. It does not make a project rule global by
+itself. The approval declaration must match the selected scope.
+
+Rule promotion uses the Memory operation bound to the existing SDK
+`bind_operation` commit boundary. It commits one classification JSONL file
+under the scope lock after rereading current raw state and validating the rule
+and approval target. Detail, Markdown, and SQLite projections are separate and
+rebuildable.
+
+If raw commit succeeds but projection fails, the result reports the commit and
+the real error, with a recovery command:
+
+```text
+project-memory index <project> --rebuild-only
+project-memory export <project> --rebuild-only
+project-memory index <project> --global --rebuild-only
+project-memory export <project> --global --rebuild-only
+```
+
+`--rebuild-only` reads the selected raw scope and rebuilds only its projection.
+It does not scan Markdown, accept new L3 entries, append events, or repeat
+promotion. A successful Memory promotion proves only that Memory accepted the
+revision; it does not prove that another consumer executed the stored rule.
 
 Classify every durable entry as exactly one of:
 
@@ -54,14 +116,17 @@ project-memory query <text> [project]
 project-memory get <memory-id> [project]
 project-memory entry --title <title> --text <content> [--tag <tag>]
 project-memory entry --id <id> --category <category> --title <title> --text <content> [--tag <tag>]
+project-memory entry <project> --input <entry.json> [--global]
 project-memory query --tag <tag> [text] [project]
 project-memory review --run <run-id>
-project-memory promote --id <id> --level <1|2> --evidence <ref>
+project-memory promote <project> --id <id> --level <1|2> --evidence <ref> --approval <approval.json> [--global]
 project-memory migrate [project]
 project-memory import [project] [--global]
 project-memory reentry [project] --run <run-id>
 project-memory index
 project-memory export
+project-memory index <project> --rebuild-only [--global]
+project-memory export <project> --rebuild-only [--global]
 project-memory compact
 project-memory verify
 ```

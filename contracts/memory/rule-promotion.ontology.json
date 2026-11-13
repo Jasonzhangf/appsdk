@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "objects": [
+    {
+      "id": "memory.entry",
+      "name": "Memory 条目",
+      "definition": "一个 scope 内具有稳定 ID 的 Memory 记录",
+      "identity": "TargetScope + entry ID",
+      "owner": "Project Memory submit_memory_change",
+      "attributes": [
+        "entry_kind",
+        "category",
+        "title",
+        "content",
+        "rule_control",
+        "memory_level",
+        "review_status",
+        "review_evidence"
+      ],
+      "perception": "project-memory get, raw JSONL, CLI 提交或拒绝回执",
+      "must_have": [
+        "scope 与 ID 明确",
+        "一个 ID 只有一个 category",
+        "规则控制由最新完整事件承载"
+      ],
+      "must_not_have": [
+        "从 review 或索引推导用户批准",
+        "通过省略字段改变已有 rule 的性质"
+      ],
+      "source": [
+        "memory/L3/appsdk-memory-agent-ontology-governance.md",
+        "memory/L3/appsdk-memory-approval-scope.md",
+        "memory/L3/appsdk-governance-edge-gate-requirement.md"
+      ]
+    }
+  ],
+  "behaviors": [
+    {
+      "id": "memory.promote_rule",
+      "name": "晋升规则记忆",
+      "owner": "MemoryCommitOwner",
+      "precondition": [
+        "已有 rule_candidate",
+        "本次提交完整 clause、匹配用户批准并请求 L1/L2"
+      ],
+      "input": [
+        "已解析的 entry patch",
+        "可选 review 请求",
+        "显式批准声明"
+      ],
+      "output": [
+        "raw 提交回执"
+      ],
+      "transition": {"from": "rule_candidate", "to": "rule_approved"},
+      "effects": [
+        "锁内重读并验证成功后，替换本 scope 分类 raw 文件一次"
+      ],
+      "perception": "CLI JSON 回执、raw JSONL、project-memory get",
+      "must_have": [
+        "锁内重读",
+        "验证成功后提交",
+        "提交后重建投影并保留实际结果"
+      ],
+      "must_not_have": [
+        "拒绝后修改 raw",
+        "把 Memory 回执解释成下游规则已执行"
+      ],
+      "source": [
+        "memory/L3/appsdk-memory-agent-ontology-governance.md",
+        "memory/L3/appsdk-governance-edge-gate-requirement.md"
+      ]
+    },
+    {
+      "id": "memory.update_approved_rule",
+      "name": "替换已批准规则记忆",
+      "owner": "MemoryCommitOwner",
+      "precondition": [
+        "已有 rule_approved",
+        "新版本具有对应新批准，或本次只作同语义整理"
+      ],
+      "input": [
+        "已解析的 entry patch",
+        "可选 review 请求",
+        "显式批准声明"
+      ],
+      "output": [
+        "raw 提交回执"
+      ],
+      "transition": {"from": "rule_approved", "to": "rule_approved"},
+      "effects": [
+        "锁内重读并验证成功后，替换本 scope 分类 raw 文件一次"
+      ],
+      "perception": "CLI JSON 回执、raw JSONL、project-memory get",
+      "must_have": [
+        "锁内重读",
+        "验证成功后提交",
+        "提交后重建投影并保留实际结果"
+      ],
+      "must_not_have": [
+        "拒绝后修改 raw",
+        "把 Memory 回执解释成下游规则已执行"
+      ],
+      "source": [
+        "memory/L3/appsdk-memory-agent-ontology-governance.md",
+        "memory/L3/appsdk-governance-edge-gate-requirement.md"
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "id": "memory.approval_target",
+      "name": "批准目标",
+      "from": "memory.entry",
+      "to": "memory.entry",
+      "kind": "approval-target",
+      "direction": "entry to itself",
+      "cardinality": "每个 entry 至多一个当前批准目标",
+      "perception": "raw rule_control.approval 与拒绝回执",
+      "must_have": [
+        "指向同一个 scope 与 entry",
+        "批准 revision 等于候选 revision"
+      ],
+      "must_not_have": [
+        "跨 scope、跨 ID 或旧 revision 批准"
+      ],
+      "source": [
+        "memory/L3/appsdk-memory-agent-ontology-governance.md"
+      ]
+    }
+  ],
+  "clauses": [
+    {
+      "clause_id": "M1",
+      "rule_id": "M1",
+      "axis": "object",
+      "axis_id": "memory.entry",
+      "scope": "Project Memory 本次规则晋升或已批准规则替换",
+      "rule": "接受明确指向本 scope、本 entry 和本次条款 revision 的用户批准；review、任务验收或非空 evidence 不能替代用户批准。",
+      "scenario": "请求规则批准晋升或替换",
+      "trigger": "两个规则 Operation 事件",
+      "allowed_actions": ["接受明确用户批准声明"],
+      "forbidden_actions": ["review、任务验收替代批准"],
+      "state_before": "rule_candidate 或 rule_approved",
+      "state_after": "rule_approved",
+      "effects": ["无批准则拒绝，零 raw 修改"],
+      "owner": "Project Memory",
+      "evidence": [
+        "memory/L3/appsdk-memory-agent-ontology-governance.md",
+        "rust/tests/memory_governance_cli.rs",
+        "contracts/memory/memory-entry.schema.json",
+        "docs/dagpipe/graphs/project-memory-rule-promotion.graph.json"
+      ],
+      "approval": {
+        "state": "approved",
+        "source": "memory/L3/appsdk-memory-agent-ontology-governance.md §1-2",
+        "text": "记忆晋升的唯一审批人是用户；独立 review PASS 与 master 任务验收都不是记忆批准。"
+      },
+      "governance": {
+        "edge": "project-memory-rule-promotion/prepare->commit",
+        "gate_kind": "attribute",
+        "check": "memory.user_approval@1",
+        "allow_case": "user-approval-matched",
+        "deny_case": "evidence-only-promotion",
+        "observation": "两个公开 Memory CLI 的 JSON 回执、raw JSONL 和 get"
+      }
+    },
+    {
+      "clause_id": "M2",
+      "rule_id": "M2",
+      "axis": "object",
+      "axis_id": "memory.entry",
+      "scope": "Project Memory 本次规则晋升或已批准规则替换",
+      "rule": "普通保存与规则受控修改共用统一入口；事实、草稿和同语义整理保持可用，已批准规则控制不得通过省略或类型改变绕过。",
+      "scenario": "普通保存与规则受控修改共用入口",
+      "trigger": "统一 owner 分派后的规则 Operation",
+      "allowed_actions": ["保留事实、草稿和同语义整理能力"],
+      "forbidden_actions": ["删控制字段绕过已有 rule"],
+      "state_before": "当前 entry",
+      "state_after": "合法规则候选聚合",
+      "effects": ["不得通过更新请求丢失已有控制"],
+      "owner": "Project Memory",
+      "evidence": [
+        "memory/L3/appsdk-memory-approval-scope.md",
+        "rust/tests/memory_governance_cli.rs",
+        "contracts/memory/memory-entry.schema.json",
+        "docs/dagpipe/graphs/project-memory-rule-promotion.graph.json"
+      ],
+      "approval": {
+        "state": "approved",
+        "source": "memory/L3/appsdk-memory-approval-scope.md §1-3",
+        "text": "审批队列只包含规则与 ontology 条款；与规则无关的项目事实按事实记录并保留证据。"
+      },
+      "governance": {
+        "edge": "project-memory-rule-promotion/prepare->commit",
+        "gate_kind": "attribute",
+        "check": "memory.control_preservation@1",
+        "allow_case": "same-semantics-control-omitted",
+        "deny_case": "approved-rule-control-bypass",
+        "observation": "两个公开 Memory CLI 的 JSON 回执、raw JSONL 和 get"
+      }
+    },
+    {
+      "clause_id": "M3",
+      "rule_id": "M3",
+      "axis": "object",
+      "axis_id": "memory.entry",
+      "scope": "Project Memory 本次规则晋升或已批准规则替换",
+      "rule": "规则请求进入批准状态时必须提交完整条款；不完整条款仍可保存和检索，但不得晋升。",
+      "scenario": "规则请求进入批准状态",
+      "trigger": "两个规则 Operation 事件",
+      "allowed_actions": ["提交完整规则条款"],
+      "forbidden_actions": ["不完整 clause 进入批准状态"],
+      "state_before": "待提交规则",
+      "state_after": "完整的 rule_approved",
+      "effects": ["不完整则拒绝，草稿仍可另存"],
+      "owner": "Project Memory",
+      "evidence": [
+        "memory/L3/appsdk-memory-agent-ontology-governance.md",
+        "rust/tests/memory_governance_cli.rs",
+        "contracts/memory/memory-entry.schema.json",
+        "docs/dagpipe/graphs/project-memory-rule-promotion.graph.json"
+      ],
+      "approval": {
+        "state": "approved",
+        "source": "memory/L3/appsdk-memory-agent-ontology-governance.md §4, §6; current AGENTS ontology boundary",
+        "text": "每条 durable 记忆按 ontology 记录：生效场景、触发事件、允许动作、影响状态；无法定位场景与状态的条目不入库。旧记忆缺少上述字段的须翻新；翻新同样经用户审批后入库，未批不改语义。"
+      },
+      "governance": {
+        "edge": "project-memory-rule-promotion/prepare->commit",
+        "gate_kind": "attribute",
+        "check": "memory.rule_contract@1",
+        "allow_case": "complete-clause",
+        "deny_case": "incomplete-promoted-clause",
+        "observation": "两个公开 Memory CLI 的 JSON 回执、raw JSONL 和 get"
+      }
+    },
+    {
+      "clause_id": "M4",
+      "rule_id": "M4",
+      "axis": "relation",
+      "axis_id": "memory.approval_target",
+      "scope": "Project Memory 本次规则晋升或已批准规则替换",
+      "rule": "批准声明必须指向本 scope、本 entry 和本次 candidate revision；旧批准、其他 ID 或其他 scope 的批准不能改写未批新语义。",
+      "scenario": "本次批准指向候选版本",
+      "trigger": "两个规则 Operation 事件",
+      "allowed_actions": ["接受准确匹配的批准目标"],
+      "forbidden_actions": ["复用其他 scope、ID 或旧 revision 批准"],
+      "state_before": "当前批准目标",
+      "state_after": "唯一匹配的批准目标",
+      "effects": ["错配则拒绝，原规则保持"],
+      "owner": "Project Memory",
+      "evidence": [
+        "memory/L3/appsdk-memory-agent-ontology-governance.md",
+        "rust/tests/memory_governance_cli.rs",
+        "contracts/memory/memory-entry.schema.json",
+        "docs/dagpipe/graphs/project-memory-rule-promotion.graph.json"
+      ],
+      "approval": {
+        "state": "approved",
+        "source": "memory/L3/appsdk-memory-agent-ontology-governance.md §6",
+        "text": "旧记忆缺少上述字段的须翻新；翻新同样经用户审批后入库，未批不改语义。"
+      },
+      "governance": {
+        "edge": "project-memory-rule-promotion/prepare->commit",
+        "gate_kind": "relation",
+        "check": "memory.approval_target@1",
+        "allow_case": "same-scope-id-revision",
+        "deny_case": "wrong-scope-id-or-revision",
+        "observation": "两个公开 Memory CLI 的 JSON 回执、raw JSONL 和 get"
+      }
+    }
+  ],
+  "execution": {
+    "version": 1,
+    "objects": [
+      {
+        "object_id": "memory.entry",
+        "states": ["record", "rule_candidate", "rule_approved"],
+        "contract": {
+          "operator": "memory.entry_contract",
+          "version": "1"
+        }
+      }
+    ],
+    "relations": [
+      {
+        "relation_id": "memory.approval_target",
+        "scope": "same_scope",
+        "forward": {"min": 0, "max": 1},
+        "reverse": {"min": 0, "max": 1},
+        "create_by": ["memory.promote_rule"],
+        "replace_by": ["memory.update_approved_rule"],
+        "remove_by": []
+      }
+    ],
+    "operations": [
+      {
+        "behavior_id": "memory.promote_rule",
+        "object_id": "memory.entry",
+        "event": "promote_rule",
+        "graph_id": "project-memory-rule-promotion",
+        "commit_node": "commit",
+        "clauses": ["M1", "M2", "M3", "M4"]
+      },
+      {
+        "behavior_id": "memory.update_approved_rule",
+        "object_id": "memory.entry",
+        "event": "update_approved_rule",
+        "graph_id": "project-memory-rule-promotion",
+        "commit_node": "commit",
+        "clauses": ["M1", "M2", "M3", "M4"]
+      }
+    ]
+  }
+}

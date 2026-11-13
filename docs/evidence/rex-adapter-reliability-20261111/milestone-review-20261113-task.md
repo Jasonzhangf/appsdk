@@ -8,7 +8,7 @@
 
 - 项目根：`/Volumes/Intel/playground/appsdk/rex-parity-implementation-20261110`
 - base：`origin/main`（`56548a85`）
-- commit：null（审查当前分支相对 `origin/main` 的候选差异，并包含当前未提交的最终 fixture 修复）
+- commit：`e4430cf2`（审查该提交相对 `origin/main` 的候选差异）
 - scope.mode：`milestone`
 
 ## 审查目标
@@ -32,11 +32,11 @@
 - 整体模型：`docs/design/rex-project-agent-lifecycle-architect-20261110.md`
 - Adapter ontology：`docs/design/rex-collab-ontology-20261111.md`
 - DAG：`docs/dagpipe/collab-rex-adaptor.graph.json` 和 `docs/dagpipe/collab-notification-consumption.graph.json`
-- 候选 diff：`git diff origin/main...HEAD` 加当前工作树 diff，重点为 `collab/src/adapters/rex.rs`、`collab/src/server/rex_monitor.rs`、`collab/src/server/notification_batch_tests.rs`、`collab/src/server/mod_parts/part_08.rs`、`collab/src/server/binding_slot.rs`、`collab/src/adapters/tmux.rs`、`collab/tests/rex_public_contract.rs`
+- 候选 diff：`git diff origin/main...e4430cf2`，重点为 `collab/src/adapters/rex.rs`、`collab/src/server/rex_monitor.rs`、`collab/src/server/notification_batch_tests.rs`、`collab/src/server/mod_parts/part_08.rs`、`collab/src/server/binding_slot.rs`、`collab/src/adapters/tmux.rs`、`collab/tests/rex_public_contract.rs`
 
 ## 作者已完成验证
 
-- `cargo test --manifest-path collab/Cargo.toml --locked --bin collab -- --test-threads=1`：1491 passed，0 failed，2 ignored。此前一次全量运行中的 1 个 tmux fixture failure 已定位为默认隔离 shell 未显式启动，随后触发的 27 个 `TEST_ENV_LOCK` PoisonError 为连锁；修复夹具后完整套件通过。最终 fixture 修复是显式启动 `/bin/sh`，不改变生产路径。
+- `cargo test --manifest-path collab/Cargo.toml --locked --bin collab -- --test-threads=1`：1491 passed，0 failed，2 ignored。此前一次全量运行中的 1 个 tmux fixture failure 已定位为默认隔离 shell 未显式启动，随后触发的 27 个 `TEST_ENV_LOCK` PoisonError 为连锁；修复夹具后完整套件通过。最终 fixture 修复已包含在提交 `87acb6d4`，显式启动 `/bin/sh`，不改变生产路径；最终候选另含 `e4430cf2` 的 typed recovery marker 修复。
 - `rex`、`master_wake`、`notification_batch_tests` 聚焦组全部通过。
 - `appserver_two_tui_integration channel_inbound_cli`：6 passed。
 - `COLLAB_REX_TEST_SERVER=... cargo test --test rex_public_contract -- --ignored`：4 passed，真实 Rex 会话，无残留 session。
@@ -54,7 +54,7 @@
 严格输出一个 JSON 对象，禁止 Markdown、代码围栏、`VERDICT`、`PASS`、`FAIL`、`confidence` 或自行裁决。
 
 - `contract_version` 固定为 `"1"`。
-- `scope` 仅含 `mode`、`commit`、`base`，回显 `milestone`、`null`、`56548a85`。
+- `scope` 仅含 `mode`、`commit`、`base`，回显 `milestone`、`e4430cf2`、`56548a85`。
 - `module_boundary_evidence` 数组，每项含非空字符串 `module`、`owner`、`paths`、`edges`、`resources`、`gates`。
 - `findings` 数组，每项含 `severity`（P0/P1/P2）、`file`、正整数 `line`、`rule`、`evidence`、`remediation`。
 - 无发现时 `findings` 为空数组。

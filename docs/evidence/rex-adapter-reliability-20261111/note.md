@@ -231,3 +231,23 @@
 - 该失败没有改变 Rex ontology 或生产路径；`TEST_ENV_LOCK` 连锁不再出现。当前候选仍需
   完成基于最新 `origin/main=56548a85` 的独立 milestone review、提交、push、PR CI、
   main 合并和正式 `scripts/build-collab.sh` 构建。
+
+## 提交前最终候选（2026-11-13 PT）
+
+- 最终夹具与 Rex activity 修复已提交为 `87acb6d4`：
+  `fix(collab): complete Rex activity and fixture readiness`。
+- `origin/main=56548a85` 已是当前提交的祖先；未发生新的冲突，候选相对
+  `origin/main` 保留 Rex block-anchor、同目标代际刷新、精确缺失退役和主线身份/任务语义。
+- 提交后聚焦回归：
+  `cargo test --manifest-path collab/Cargo.toml --locked --bin collab rex -- --test-threads=1`
+  为 `117 passed, 0 failed`；`master_wake`、`notification_batch_tests` 和
+  `channel_inbound_cli` 继续通过。
+- 旧 review 输出不适用于本候选。必须重新执行合同
+  `milestone-review-20261113-task.md`，其当前候选为 `87acb6d4`，再进入远端交付。
+
+## 最终审查前 P2 收口（2026-11-13 PT）
+
+- 独立 reviewer 针对 `87acb6d4` 未发现 P0/P1，提出 1 个 P2：恢复谓词此前只解析格式化错误字符串，原生 `server.status` 错误若伪造同名 detail 可能获得错误的恢复资格。
+- 已在 `e4430cf2` 修复：恢复条件现在还要求 `native_code=none`；新增原生错误伪造 marker 的拒绝用例和本地 typed generation-mismatch 的放行用例。
+- 修复后 Rex 聚焦组单线程通过 `119 passed, 0 failed`，格式和 diff 检查通过。
+- 当前必须基于 `e4430cf2` 重新执行最终独立 milestone review；无 P0/P1 后再 push、等 CI、合并和正式构建。

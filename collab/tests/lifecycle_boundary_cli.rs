@@ -1503,3 +1503,73 @@ fn up_never_signals_a_pid_that_is_not_the_recorded_collab_daemon() {
         "an unverified PID must not cause any replacement"
     );
 }
+
+#[test]
+fn up_never_signals_a_live_collab_pid_that_does_not_own_the_lock() {
+    let mut fixture = IsolatedDaemon::start(None);
+    freeze_fixture_daemon(&fixture);
+    let mut stale = fixture
+        .base_command("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a second collab process");
+    assert_eq!(
+        unsafe { libc::kill(stale.id() as libc::pid_t, libc::SIGSTOP) },
+        0
+    );
+    std::fs::write(fixture.host.join("server.pid"), stale.id().to_string()).unwrap();
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    let stale_alive = stale.try_wait().unwrap().is_none();
+    let daemon_alive = fixture
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none();
+    let _ = unsafe { libc::kill(stale.id() as libc::pid_t, libc::SIGKILL) };
+    let _ = stale.wait();
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("DAEMON_REPLACE_REFUSED"), "{text}");
+    assert!(
+        stale_alive,
+        "a live collab PID that does not own daemon.lock must not be signalled"
+    );
+    assert!(
+        daemon_alive,
+        "the recorded lock owner must remain untouched"
+    );
+}
+
+#[test]
+fn up_never_signals_a_live_collab_pid_with_a_stale_lock_start_identity() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let daemon_pid = freeze_fixture_daemon(&fixture);
+    std::fs::write(
+        fixture.host.join("daemon.lock"),
+        format!("collab-daemon {daemon_pid} forged-start-identity\n"),
+    )
+    .unwrap();
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    let daemon_alive = fixture
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none();
+    let _ = unsafe { libc::kill(daemon_pid as libc::pid_t, libc::SIGKILL) };
+    let _ = fixture.child.as_mut().unwrap().wait();
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("DAEMON_REPLACE_REFUSED"), "{text}");
+    assert!(
+        daemon_alive,
+        "a daemon whose lock start identity is stale must not be signalled"
+    );
+}

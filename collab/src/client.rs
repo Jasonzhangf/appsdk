@@ -543,10 +543,11 @@ pub struct ReplacedDaemon {
 /// and a daemon that is still starting (lock held, no socket yet) are left
 /// alone, so the caller keeps its normal start path for them.
 ///
-/// Only the PID recorded in `pid_path` is signalled, and only after it is
-/// verified to be a live `collab` process while the writer lock is held.
-/// SIGTERM comes first; SIGKILL follows only when the lock is still held after
-/// a bounded wait and the PID still verifies.
+/// Only the PID recorded in `pid_path` is signalled, and only after the lock
+/// file names the same PID and process start identity and both `pid_path` and
+/// the lock owner still verify. SIGTERM comes first; SIGKILL follows only when
+/// the lock is still held after a bounded wait and the same owner still
+/// verifies.
 pub fn replace_unresponsive_daemon(
     sock: &Path,
     pid_path: &Path,
@@ -570,20 +571,23 @@ pub fn replace_unresponsive_daemon(
         ),
     }
     let pid = verified_daemon_pid(pid_path)?;
+    let lock_path = server_dir.join("daemon.lock");
+    let owner = verified_lock_owner(&lock_path, pid)?;
     for (signal, name) in [(libc::SIGTERM, "SIGTERM"), (libc::SIGKILL, "SIGKILL")] {
-        if signal == libc::SIGKILL {
-            // Re-verify before escalating: the PID must still be the same
-            // live collab process that holds the lock.
-            verified_daemon_pid(pid_path).and_then(|current| {
-                if current == pid {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "DAEMON_REPLACE_REFUSED: recorded daemon PID changed from {pid} to {current} during replacement"
-                    ))
-                }
-            })?;
+        // Bind every signal to the same lock owner and process instance.
+        // Checking only the PID file would accept PID reuse or a stale PID
+        // after another collab process acquired the lock.
+        if lock_availability(server_dir) != LockAvailability::Held {
+            anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: host writer lock was released before {name}; no process was signalled"
+            );
         }
+        if verified_daemon_pid(pid_path)? != pid {
+            anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: recorded daemon PID changed before {name}; no process was signalled"
+            );
+        }
+        verified_lock_owner(&lock_path, pid)?.require_same(&owner)?;
         if unsafe { libc::kill(pid, signal) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
@@ -607,6 +611,66 @@ pub fn replace_unresponsive_daemon(
         "DAEMON_REPLACE_FAILED: recorded daemon PID {pid} still holds the host writer lock in {} after SIGKILL",
         server_dir.display()
     )
+}
+
+struct LockOwner {
+    pid: libc::pid_t,
+    start_id: String,
+}
+
+impl LockOwner {
+    fn require_same(&self, expected: &Self) -> anyhow::Result<()> {
+        if self.pid == expected.pid && self.start_id == expected.start_id {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "DAEMON_REPLACE_REFUSED: daemon.lock owner changed from PID {} ({}) to PID {} ({}); no process was signalled",
+            expected.pid,
+            expected.start_id,
+            self.pid,
+            self.start_id
+        )
+    }
+}
+
+/// Read and verify the owner written by the daemon that currently holds
+/// `daemon.lock`. An empty or malformed record is not an owner proof.
+fn verified_lock_owner(lock_path: &Path, pid: libc::pid_t) -> anyhow::Result<LockOwner> {
+    let refused = |detail: String| {
+        anyhow::anyhow!(
+            "DAEMON_REPLACE_REFUSED: {detail}; the unresponsive daemon was not signalled"
+        )
+    };
+    let text = std::fs::read_to_string(lock_path)
+        .map_err(|error| refused(format!("cannot read {}: {error}", lock_path.display())))?;
+    let mut fields = text.split_whitespace();
+    let marker = fields.next();
+    let owner_pid = fields
+        .next()
+        .and_then(|value| value.parse::<libc::pid_t>().ok());
+    let start_id = fields.next();
+    if marker != Some("collab-daemon")
+        || owner_pid != Some(pid)
+        || start_id.is_none()
+        || fields.next().is_some()
+    {
+        return Err(refused(format!(
+            "daemon.lock does not name recorded daemon PID {pid} and one process start identity"
+        )));
+    }
+    let start_id = start_id.unwrap().to_owned();
+    let current_start =
+        crate::host_runtime::exact_process_start_id(pid as u32).map_err(|error| {
+            refused(format!(
+                "process identity is unavailable for PID {pid}: {error}"
+            ))
+        })?;
+    if current_start.as_deref() != Some(start_id.as_str()) {
+        return Err(refused(format!(
+            "recorded daemon PID {pid} no longer matches lock owner start identity {start_id}"
+        )));
+    }
+    Ok(LockOwner { pid, start_id })
 }
 
 /// Read the recorded daemon PID and verify that it names a live `collab`

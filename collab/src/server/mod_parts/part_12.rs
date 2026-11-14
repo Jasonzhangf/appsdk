@@ -418,6 +418,23 @@ fn acquire_daemon_lock(lock_path: &Path, socket_path: &Path) -> anyhow::Result<s
     }
 }
 
+fn write_daemon_lock_owner(lock_file: &std::fs::File) -> anyhow::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let pid = std::process::id();
+    let start_id = crate::host_runtime::exact_process_start_id(pid)
+        .map_err(|error| anyhow::anyhow!("daemon lock owner start identity unavailable: {error}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("daemon lock owner PID {pid} has no process start identity")
+        })?;
+    let mut file = lock_file;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    write!(file, "collab-daemon {pid} {start_id}\n")?;
+    file.sync_data()?;
+    Ok(())
+}
+
 /// Acquire the same host writer lock used by the resident daemon. Offline
 /// maintenance commands use this to prove no daemon writer exists before they
 /// mutate durable state.
@@ -705,7 +722,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     host_paths.ensure_root()?;
     let sock_path = host_paths.socket_path();
     // The host lock is the daemon writer admission gate.
-    let _lock_file = acquire_daemon_lock(&host_paths.lock_path(), &sock_path)?;
+    let lock_file = acquire_daemon_lock(&host_paths.lock_path(), &sock_path)?;
+    write_daemon_lock_owner(&lock_file)?;
 
     let project_scope = GlobalState::canonical_project_scope(&scope.root)
         .map_err(|error| anyhow::anyhow!("PROJECT_SCOPE_UNKNOWN: {error}"))?;

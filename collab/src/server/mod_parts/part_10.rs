@@ -555,7 +555,7 @@ fn worker_status_summary_with_maps(
     let Some(role_brief) = role_brief else {
         return Ok(json!({
             "id": w.id,
-            "display_name": display_name,
+            "display_name": if display_name.is_empty() { None } else { Some(display_name) },
             "identity_status": "unmapped",
             "work_roles": work_roles,
             "role": null,

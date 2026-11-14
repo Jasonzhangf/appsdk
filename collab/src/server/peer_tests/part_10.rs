@@ -1713,6 +1713,7 @@ fn worker_status_unmapped_requires_canonical_project_without_current_side_effect
         &Default::default(), &Default::default(), &Default::default(), None, &worker).unwrap();
     assert_eq!(projection["identity_status"], "unmapped");
     assert_eq!(projection["identity_valid"], false);
+    assert!(projection["display_name"].is_null());
     for field in ["role", "role_brief", "transport", "transport_view", "route_match", "active_task", "active_status"] {
         assert!(projection[field].is_null(), "{field}: {projection}");
     }

@@ -884,6 +884,32 @@ impl ProjectRuntimeManager {
             invocation_cwd,
             allow_explicit_rex_rebind,
         )? };
+        if let Some(identity) = session_identity.as_ref() {
+            if let Some(candidate) = facts.tmux.as_ref() {
+                let control = self
+                    .binding_control_store()
+                    .load()
+                    .map_err(anyhow::Error::msg)?;
+                let claimed_by_other_subject = control.slots().any(|slot| {
+                    slot.identity_key.project_scope == context.project_scope
+                        && slot.identity_key.app_scope_id == context.app_scope_id
+                        && slot.active_binding().is_some_and(|value| {
+                            value.binding.agent_id.as_str() != identity.worker_id.as_str()
+                                && value.transport.kind == crate::proto::TransportKind::Tmux
+                                && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                                    saved.socket_path == candidate.endpoint.socket_path
+                                        && saved.tmux_session_id
+                                            == candidate.endpoint.tmux_session_id
+                                })
+                        })
+                });
+                if claimed_by_other_subject {
+                    anyhow::bail!(
+                        "IDENTITY_ANCHOR_CONFLICT: the observed tmux placement belongs to another registered subject"
+                    );
+                }
+            }
+        }
         let required =
             if session_identity.is_some() || self.has_current_desktop_binding(&context, &facts)? {
                 Vec::new()

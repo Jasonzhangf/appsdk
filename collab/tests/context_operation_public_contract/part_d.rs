@@ -997,20 +997,11 @@ fn public_context_rex_target_conflict_reaches_admission_without_old_history_reje
                     .contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
             "old Rex identity history must not reject the new recovery: {error}"
         );
-        if query {
-            assert!(output.status.success(), "{output:?}");
-            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(
-                response["result"]["snapshot"]["name"], "Bob",
-                "the exact agent session selects its current holder: {response}"
-            );
-        } else {
-            assert!(!output.status.success(), "{output:?}");
-            assert!(
-                error.contains("REX_"),
-                "plain recovery must reach the Rex admission boundary: {error}"
-            );
-        }
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            error.contains("IDENTITY_ANCHOR_CONFLICT"),
+            "a cross-subject Rex block/session match must be a typed explicit failure: {error}"
+        );
     }
     assert_eq!(
         fixture.current_resources(),

@@ -2560,11 +2560,22 @@ fn task_update_locked(
             decision_reason,
         );
     }
-    if task.owner != worker_id && board_check_master_locked(server, st, &worker_id).is_err() {
+    let is_master = board_check_master_locked(server, st, &worker_id).is_ok();
+    if task.owner != worker_id && !is_master {
         return Resp::err("only the task owner may update its lifecycle");
     }
+    if task.owner == worker_id {
+        if let Err(error) =
+            task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+        {
+            return error;
+        }
+    }
     let original_status = task.status.clone();
-    if status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed")) {
+    let owner_is_actor = task.owner == worker_id;
+    if owner_is_actor
+        && status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed"))
+    {
         let result = match control {
             Some(control) => server_route_scope(server, st)
                 .map_err(Resp::err)

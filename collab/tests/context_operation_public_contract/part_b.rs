@@ -46,7 +46,7 @@ fn bind_fixed_test_position(
 }
 
 #[test]
-fn identity_map_links_fixed_manifest_position_and_allows_approved_master_promotion() {
+fn identity_map_links_fixed_manifest_position_and_refuses_nonfirst_master_promotion() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("identity-map-layout-pane-five");
     let path = fixture
@@ -77,7 +77,8 @@ fn identity_map_links_fixed_manifest_position_and_allows_approved_master_promoti
         .unwrap()["current"];
     assert_eq!(current["layout_binding_id"], "tm_fixed_five");
     assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_5_Alice");
-    let promoted = fixture.command(
+    let before = fs::read(&map_path).unwrap();
+    let refused = fixture.command(
         &[
             "master",
             "promote",
@@ -87,11 +88,21 @@ fn identity_map_links_fixed_manifest_position_and_allows_approved_master_promoti
         Some(&pane),
     );
     assert!(
-        promoted.status.success(),
-        "explicit user approval permits the existing position: {}",
-        text(&promoted)
+        !refused.status.success(),
+        "only fixed position one may become Jenny: {}",
+        text(&refused)
     );
-    assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_5_Jenny");
+    assert!(
+        text(&refused).contains("MASTER_SLOT_REQUIRED"),
+        "{}",
+        text(&refused)
+    );
+    assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_5_Alice");
+    assert_eq!(
+        fs::read(&map_path).unwrap(),
+        before,
+        "refused promotion cannot publish identity changes"
+    );
     assert_eq!(
         fs::read(&path).unwrap(),
         manifest,
@@ -102,7 +113,7 @@ fn identity_map_links_fixed_manifest_position_and_allows_approved_master_promoti
         restored["result"]["snapshot"]["identity"]["worker_id"],
         worker
     );
-    assert_eq!(restored["result"]["snapshot"]["name"], "Jenny");
+    assert_eq!(restored["result"]["snapshot"]["name"], "Alice");
 }
 
 #[test]

@@ -11,18 +11,16 @@ fn approved_restore_master_replaces_absent_session_on_live_server() {
 }
 
 #[test]
-fn approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message() {
-    assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message(false);
+fn approved_nonfirst_successor_is_rejected_and_preserves_message() {
+    assert_approved_nonfirst_successor_preserves_identity_task_and_message(false);
 }
 
 #[test]
-fn approved_restore_master_nonfirst_successor_replaces_absent_incumbent_and_preserves_message() {
-    assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message(true);
+fn approved_restore_master_nonfirst_successor_is_rejected_and_preserves_message() {
+    assert_approved_nonfirst_successor_preserves_identity_task_and_message(true);
 }
 
-fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_message(
-    restore: bool,
-) {
+fn assert_approved_nonfirst_successor_preserves_identity_task_and_message(restore: bool) {
     let (mut fixture, incumbent) = single_pane_fixture("promote-layout-incumbent");
     let created = tmux(
         &fixture.tmux_socket,
@@ -150,24 +148,25 @@ fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_me
     let message_id = sent["msg_id"].as_str().unwrap();
     let before = fixture.current_state_for(&fixture.root, "appserver-cli");
     assert_eq!(before["msgs"][message_id]["state"], "pending");
+    let map_before_rejection: Value =
+        serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
     let incumbent_session = fixture.owned_sessions[0].clone();
     tmux(
         &fixture.tmux_socket,
         &["kill-session", "-t", &incumbent_session],
     );
 
-    if restore {
-        let restored = fixture.run_context(
+    let rejected = if restore {
+        fixture.command(
             &[
                 "context",
                 "--approve-grant",
                 r#"{"action":"restore_master","authorization":"user approves position-five successor","replace_confirmed":true}"#,
             ],
             Some(&successor),
-        );
-        assert_eq!(restored["master"]["worker_id"], successor_worker);
+        )
     } else {
-        let promoted = fixture.run_ok(
+        fixture.command(
             &[
                 "master",
                 "promote",
@@ -175,11 +174,17 @@ fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_me
                 "user approves position-five successor",
             ],
             Some(&successor),
-        );
-        assert_eq!(promoted["master"], successor_worker);
-    }
+        )
+    };
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("MASTER_SLOT_REQUIRED"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(registered["identity"]["role"], "worker");
     let status = fixture.run_ok(&["master", "status"], Some(&successor));
-    assert_eq!(status["master"]["worker_id"], successor_worker);
+    assert_eq!(status["master"]["worker_id"], old_worker);
     let board = fixture.run_ok(&["board", "show"], Some(&successor));
     let masters: Vec<_> = board["workers"]
         .as_array()
@@ -188,9 +193,10 @@ fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_me
         .filter(|worker| worker["role"] == "master")
         .collect();
     assert_eq!(masters.len(), 1, "{board}");
-    assert_eq!(masters[0]["id"], successor_worker);
+    assert_eq!(masters[0]["id"], old_worker);
 
     let after_map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    assert_eq!(after_map, map_before_rejection);
     let successor_slot = after_map["slots"]
         .as_array()
         .unwrap()
@@ -200,7 +206,7 @@ fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_me
                 && slot["current"]["binding"]["agent_id"] == successor_worker
         })
         .unwrap();
-    assert_eq!(successor_slot["identity_key"]["name"], "Jenny");
+    assert_eq!(successor_slot["identity_key"]["name"], "Alice");
     assert_eq!(
         successor_slot["current"]["layout_binding_id"],
         "tm_fixed_five"
@@ -229,7 +235,7 @@ fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_me
         )
         .unwrap()
         .trim(),
-        "project_alpha_5_Jenny"
+        "project_alpha_5_Alice"
     );
     assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest);
 
@@ -240,7 +246,7 @@ fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_me
         Some(&successor),
     );
     assert_eq!(old_task["id"], task_before["id"]);
-    assert_eq!(old_task["owner"], successor_worker, "{old_task}");
+    assert_eq!(old_task["owner"], old_worker, "{old_task}");
     assert_eq!(old_task["status"], "working", "{old_task}");
     assert_eq!(old_task["next_step"], task_before["next_step"]);
     let after = fixture.current_state_for(&fixture.root, "appserver-cli");
@@ -261,7 +267,7 @@ fn assert_approved_nonfirst_successor_replaces_absent_incumbent_and_preserves_me
         after["msgs"][message_id]["from"],
         before["msgs"][message_id]["from"]
     );
-    assert_eq!(after["msgs"][message_id]["to"], successor_worker);
+    assert_eq!(after["msgs"][message_id]["to"], old_worker);
 }
 
 fn assert_approved_master_replaces_absent_session(restore: bool) {
@@ -327,9 +333,18 @@ fn assert_approved_master_replaces_absent_session(restore: bool) {
     assert_eq!(current["identity"]["worker_id"], worker);
     let workers = fixture.run_ok(&["list"], Some(&successor));
     assert!(
-        workers.to_string().contains(old_worker),
-        "old peer identity retained: {workers}"
+        !workers["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|target| target["worker_id"] == old_worker),
+        "replaced holder must not remain current: {workers}"
     );
+    assert!(workers["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|target| target["worker_id"] == worker && target["display_name"] == "Jenny"));
 }
 
 #[test]

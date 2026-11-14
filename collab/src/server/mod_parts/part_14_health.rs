@@ -260,6 +260,7 @@ mod tests {
             storage_root: root.clone(),
             state_path: state_path.clone(),
             host_paths: HostPaths::for_state_root(&host).unwrap(),
+            register_gate: Arc::new(Mutex::new(())),
             state: Mutex::new(State::default()),
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(SelectedTransport {

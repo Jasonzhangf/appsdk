@@ -212,12 +212,12 @@ impl ProjectRuntimeManager {
         }
 
         let manager = Arc::new(Self {
-            host,
+            host: Arc::clone(&host),
             host_root: PathBuf::from(host_root.as_str()),
             route_file,
             routes: Mutex::new(routes),
             project_locks: Mutex::new(std::collections::BTreeMap::new()),
-            register_gate: Mutex::new(()),
+            register_gate: Arc::clone(&host.register_gate),
             identity_gate: Mutex::new(()),
             federation_accept_gate: Mutex::new(()),
             runtime_init_gates: Mutex::new(std::collections::BTreeMap::new()),

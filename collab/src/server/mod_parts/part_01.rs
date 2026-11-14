@@ -498,7 +498,7 @@ enum NotificationDeliveryError {
 }
 
 #[derive(Debug)]
-enum NotificationAttempt {
+pub(crate) enum NotificationAttempt {
     Accepted,
     Consumed,
     Deferred,
@@ -832,6 +832,7 @@ pub struct Server {
     pub storage_root: PathBuf,
     pub state_path: PathBuf,
     pub(crate) host_paths: HostPaths,
+    pub(crate) register_gate: Arc<Mutex<()>>,
     pub state: Mutex<State>,
     pub appserver_candidate_check: Arc<AppServerCandidateCheck>,
     #[cfg(not(test))]

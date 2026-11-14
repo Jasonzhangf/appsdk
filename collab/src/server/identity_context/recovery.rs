@@ -620,21 +620,6 @@ impl ProjectRuntimeManager {
                     "IDENTITY_MAP_BINDING_CHANGED: Rex recovery baseline no longer matches the published current"
                 );
             }
-            let target_matches = baseline
-                .current
-                .transport
-                .rex_endpoint
-                .as_ref()
-                .is_some_and(|endpoint| {
-                    endpoint.server == candidate.server
-                        && endpoint.session_id == candidate.session_id
-                        && endpoint.block_id == candidate.block_id
-                });
-            if !target_matches {
-                anyhow::bail!(
-                    "IDENTITY_MAP_REX_TARGET_MISMATCH: Rex recovery baseline changed before commit"
-                );
-            }
         }
         match &recovery.admission {
             RexRecoveryAdmission::Verified(execution) => {
@@ -842,6 +827,21 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| anyhow::anyhow!("PENDING_EFFECT_CREDENTIAL_MISSING"))?;
         Ok(next)
     }
+
+    pub(crate) fn refresh_session_transport_for_notification(
+        &self,
+        runtime: &Server,
+        saved: &RuntimeBinding,
+        transport: SelectedTransport,
+        ident: &mut identity::Identity,
+        scope: &Scope,
+    ) -> anyhow::Result<RuntimeBinding> {
+        if transport.kind != TransportKind::Rex {
+            anyhow::bail!("REX_CURRENT_BINDING_CHANGED: notification refresh requires Rex transport");
+        }
+        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None)
+    }
+
     fn reconcile_identity_context(
         &self,
         context: ProjectContext,
@@ -884,6 +884,32 @@ impl ProjectRuntimeManager {
             invocation_cwd,
             allow_explicit_rex_rebind,
         )? };
+        if let Some(identity) = session_identity.as_ref() {
+            if let Some(candidate) = facts.tmux.as_ref() {
+                let control = self
+                    .binding_control_store()
+                    .load()
+                    .map_err(anyhow::Error::msg)?;
+                let claimed_by_other_subject = control.slots().any(|slot| {
+                    slot.identity_key.project_scope == context.project_scope
+                        && slot.identity_key.app_scope_id == context.app_scope_id
+                        && slot.active_binding().is_some_and(|value| {
+                            value.binding.agent_id.as_str() != identity.worker_id.as_str()
+                                && value.transport.kind == crate::proto::TransportKind::Tmux
+                                && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                                    saved.socket_path == candidate.endpoint.socket_path
+                                        && saved.tmux_session_id
+                                            == candidate.endpoint.tmux_session_id
+                                })
+                        })
+                });
+                if claimed_by_other_subject {
+                    anyhow::bail!(
+                        "IDENTITY_ANCHOR_CONFLICT: the observed tmux placement belongs to another registered subject"
+                    );
+                }
+            }
+        }
         let required =
             if session_identity.is_some() || self.has_current_desktop_binding(&context, &facts)? {
                 Vec::new()
@@ -1782,10 +1808,12 @@ mod anchor_provenance_tests {
         );
 
         let current_control = manager.binding_control_store().load().unwrap();
-        let target_name = current_control.active_values()
+        let target_key = current_control.active_values()
             .find(|value| value.binding.session_id.as_ref().is_some_and(|session| session.as_str() == "session-s1"))
             .and_then(|value| current_control.key_for_worker(&context.project_scope, &context.app_scope_id, value.binding.agent_id.as_str()).unwrap())
-            .unwrap().name.clone();
+            .cloned()
+            .unwrap();
+        let target_name = target_key.name.clone();
         std::env::set_var("COLLAB_TEST_REX_OWNER_PID", owner0.owner_pid.to_string());
         let (_, human_restored) = tokio::task::spawn_blocking({
             let manager = manager.clone();
@@ -1859,16 +1887,49 @@ mod anchor_provenance_tests {
         let returned_name = displaced_return.data["result"]["snapshot"]["name"].as_str().unwrap();
         assert_ne!(returned_name, target_name, "ordinary registration must not reclaim the human-selected target");
         let control = manager.binding_control_store().load().unwrap();
-        let target = control.current_for_name(&context.project_scope, &context.app_scope_id, &target_name).unwrap().unwrap().active_binding().unwrap();
-        assert_eq!(target.binding.session_id.as_ref().unwrap().as_str(), "session-s0");
-        assert_eq!(target.rex_execution.as_ref().unwrap().owner_pid, owner0.owner_pid);
-        assert_eq!(target.rex_execution_fence, Some(crate::server::binding_slot::RexExecutionFence::from_start_id(
-            &crate::host_runtime::exact_process_start_id(owner2.owner_pid).unwrap().unwrap()).unwrap()));
-        let returned = control.current_for_name(&context.project_scope, &context.app_scope_id, returned_name).unwrap().unwrap().active_binding().unwrap();
+        let target_slot = control.slot(&target_key).unwrap();
+        assert_eq!(
+            target_slot.identity_status(),
+            crate::server::binding_slot::IdentityStatus::Unregistered
+        );
+        let target_previous = target_slot
+            .reference_previous()
+            .expect("the displaced target binding is preserved");
+        assert_eq!(
+            target_previous.binding.session_id.as_ref().unwrap().as_str(),
+            "session-s0"
+        );
+        assert_eq!(
+            target_previous.rex_execution.as_ref().unwrap().owner_pid,
+            owner0.owner_pid
+        );
+        let returned = control
+            .current_for_name(
+                &context.project_scope,
+                &context.app_scope_id,
+                returned_name,
+            )
+            .unwrap()
+            .unwrap()
+            .active_binding()
+            .unwrap();
         assert_eq!(returned.binding.session_id.as_ref().unwrap().as_str(), "session-s1");
-        assert_ne!(returned.binding.agent_id, target.binding.agent_id);
         assert_eq!(returned.transport.kind, TransportKind::Rex);
-        assert_eq!(returned.transport.rex_endpoint, target.transport.rex_endpoint);
+        assert_eq!(
+            returned.transport.rex_endpoint,
+            target_previous.transport.rex_endpoint
+        );
+        assert_eq!(
+            control
+                .active_values()
+                .filter(|value| {
+                    value.transport.kind == TransportKind::Rex
+                        && value.transport.rex_endpoint == returned.transport.rex_endpoint
+                })
+                .count(),
+            1,
+            "the later successful publication is the block's only current owner"
+        );
         assert_eq!(control.lookup(&context.project_scope, &context.app_scope_id, &request1.facts, None)
             .unwrap().unwrap().identity_key.name, returned_name);
         let (_, returned_again) = tokio::task::spawn_blocking({
@@ -1879,8 +1940,27 @@ mod anchor_provenance_tests {
         assert!(returned_again.ok, "ordinary name must remain usable: {returned_again:?}");
         assert_eq!(returned_again.data["result"]["snapshot"]["name"], returned_name);
         let final_control = manager.binding_control_store().load().unwrap();
-        let final_target = final_control.current_for_name(&context.project_scope, &context.app_scope_id, &target_name).unwrap().unwrap().active_binding().unwrap();
-        assert_eq!(final_target, target, "ordinary context must leave the human-selected current unchanged");
+        assert!(
+            final_control
+                .current_for_name(&context.project_scope, &context.app_scope_id, &target_name)
+                .unwrap()
+                .is_none(),
+            "the target name stays retired after the block's newer owner publishes"
+        );
+        assert_eq!(
+            final_control
+                .current_for_name(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    returned_name,
+                )
+                .unwrap()
+                .unwrap()
+                .active_binding()
+                .unwrap(),
+            returned,
+            "ordinary context continues the block's current owner"
+        );
         owner2.stop();
         owner0.stop();
         owner1.stop();

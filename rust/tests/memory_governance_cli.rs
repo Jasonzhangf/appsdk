@@ -477,6 +477,72 @@ fn ordinary_and_unclassified_records_remain_usable_without_approval() {
 }
 
 #[test]
+fn classifying_a_legacy_record_as_fact_keeps_the_classification() {
+    let scratch = Scratch::new("legacy-fact-classification");
+    let project = scratch.project();
+    let root = canonical_string(&project);
+    let legacy = json!({
+        "id": "legacy-fact",
+        "category": "knowledge",
+        "title": "Legacy fact",
+        "content": "A verified project fact.",
+        "tags": ["legacy"],
+        "source_refs": ["fixture"],
+        "memory_level": 3,
+        "review_status": "unreviewed"
+    });
+    let raw = scratch.raw_path(false, "knowledge");
+    append_raw(&raw, &legacy);
+
+    let input = scratch.write_json(
+        "legacy-fact.json",
+        &json!({
+            "id": "legacy-fact",
+            "category": "knowledge",
+            "title": "Legacy fact",
+            "content": "A verified project fact.",
+            "tags": ["legacy"],
+            "entry_kind": "fact"
+        }),
+    );
+    let classified = scratch.run(
+        &project,
+        MemoryCli::ProjectMemory,
+        &["entry", &root, "--input", &input],
+    );
+    assert_success(&classified);
+    let latest = latest_for_id(&raw, "legacy-fact");
+    assert_eq!(latest["entry_kind"], "fact", "{latest}");
+    assert!(latest.get("rule_control").is_none(), "{latest}");
+    assert_eq!(latest["content"], "A verified project fact.", "{latest}");
+
+    let with_control = scratch.write_json(
+        "legacy-fact-control.json",
+        &json!({
+            "id": "legacy-fact",
+            "category": "knowledge",
+            "entry_kind": "fact",
+            "rule_control": {"revision": 1, "clause": {"rule": "not a rule"}}
+        }),
+    );
+    let before = read_raw(&raw);
+    let rejected = scratch.run(
+        &project,
+        MemoryCli::ProjectMemory,
+        &["entry", &root, "--input", &with_control],
+    );
+    assert!(
+        !rejected.status.success(),
+        "a fact must not carry rule_control"
+    );
+    assert_eq!(
+        read_raw(&raw),
+        before,
+        "rejected input must leave raw unchanged"
+    );
+}
+
+#[test]
 fn review_records_rule_evidence_without_rule_promotion_and_keeps_fact_review() {
     let scratch = Scratch::new("review-paths");
     let project = scratch.project();

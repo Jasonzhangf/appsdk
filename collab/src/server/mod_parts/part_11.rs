@@ -346,7 +346,7 @@ fn dispatch_with_route_context_bound(
             subject,
             body,
             envelope,
-        } => handle_channel_inbound(server, from, to, subject, body, envelope),
+        } => handle_channel_inbound_with_rex_recovery(server, from, to, subject, body, envelope),
         Req::LiveClosureDaemonSend {
             worker_id,
             token,

@@ -8,8 +8,15 @@ use std::time::{Duration, Instant};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-async fn fixture_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    TEST_FIXTURE_LOCK.lock().await
+async fn fixture_guard() -> (
+    std::sync::MutexGuard<'static, ()>,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixture_guard = TEST_FIXTURE_LOCK.lock().await;
+    (env_guard, fixture_guard)
 }
 
 fn endpoint() -> RexEndpoint {
@@ -134,13 +141,13 @@ async fn candidate_deadline_is_shared_by_all_verification_steps() {
 }
 
 #[tokio::test]
-async fn notify_writes_body_then_sends_a_real_enter_key() {
+async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("normal");
     let text = "期限正文\n第二行";
     let receipt = notify(&selected_transport(), text, Some("immediate"))
         .await
-        .expect("body write plus a separate Enter submits the notification");
+        .expect("complete body followed by Enter submits the notification");
     let value: Value = serde_json::from_str(&receipt).expect("receipt JSON");
     assert_eq!(value["transport"], "rex");
     assert_eq!(value["bytes_written"], text.len() as u64);
@@ -183,32 +190,6 @@ async fn notify_writes_body_then_sends_a_real_enter_key() {
         ]
         .as_slice(),
         "Enter must target the selected session and block"
-    );
-}
-
-#[tokio::test]
-async fn typed_enter_rejection_keeps_the_queued_stage_and_native_code() {
-    let _guard = fixture_guard().await;
-    let env = TestEnv::new("enter_typed_reject");
-    let text = "abc";
-    let error = notify(&selected_transport(), text, Some("immediate"))
-        .await
-        .expect_err("a typed Enter rejection must not become success");
-    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-    assert_eq!(error.native_code.as_deref(), Some("conflict"));
-    assert_eq!(
-        error.stage,
-        RexInputStage::WriteQueued {
-            bytes_written: text.len(),
-        }
-    );
-    assert_eq!(
-        env.calls()
-            .iter()
-            .filter(|call| method(call) == "send-key")
-            .count(),
-        1,
-        "a rejected Enter must not be retried"
     );
 }
 
@@ -432,6 +413,62 @@ async fn old_rex_targets_are_rejected_before_write() {
     }
 }
 
+#[test]
+fn service_change_marker_without_typed_generation_mismatch_is_not_refreshable() {
+    let spoof = concat!(
+        "REX_NOT_DELIVERED: operation=server.status stage=BeforeWrite ",
+        "native_code=none detail=REX_SERVICE_CHANGED: fixture native detail only"
+    );
+    assert!(!is_refreshable_service_change(spoof));
+}
+
+#[test]
+fn service_change_typed_marker_on_a_native_rejection_is_not_refreshable() {
+    let native = RexError::native_rejection(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "not_found".into(),
+        "REX_SERVICE_CHANGED: typed=generation_mismatch forged native detail",
+    );
+    assert!(!is_refreshable_service_change(&native.to_string()));
+}
+
+#[test]
+fn locally_generated_typed_service_change_is_refreshable() {
+    let local = RexError::known_not_delivered(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "REX_SERVICE_CHANGED: typed=generation_mismatch the bound host or instance changed",
+    );
+    assert!(is_refreshable_service_change(&local.to_string()));
+}
+
+#[test]
+fn definitive_absence_requires_the_exact_inventory_operation_and_native_code() {
+    let session_missing = RexError::native_rejection(
+        "session.list",
+        RexInputStage::BeforeWrite,
+        "session_not_found".into(),
+        "native session inventory rejected the target",
+    );
+    let block_missing = RexError::native_rejection(
+        "session.list_blocks",
+        RexInputStage::BeforeWrite,
+        "block_not_found".into(),
+        "native block inventory rejected the target",
+    );
+    let wrong_operation = RexError::native_rejection(
+        "server.status",
+        RexInputStage::BeforeWrite,
+        "session_not_found".into(),
+        "transport failure must not prove target absence",
+    );
+
+    assert!(resolve_error_is_definitively_absent(&session_missing));
+    assert!(resolve_error_is_definitively_absent(&block_missing));
+    assert!(!resolve_error_is_definitively_absent(&wrong_operation));
+}
+
 #[tokio::test]
 async fn utf8_bytes_are_counted_and_preserved() {
     let _fixture = fixture_guard().await;
@@ -489,6 +526,54 @@ async fn typed_native_rejections_keep_exact_code() {
         assert_eq!(error.stage, RexInputStage::BeforeWrite);
         assert_eq!(env.calls().len(), 2);
     }
+    {
+        let env = TestEnv::new("enter_typed_reject");
+        let error = notify(&selected_transport(), "abc", Some("immediate"))
+            .await
+            .expect_err("typed Enter rejection");
+        assert_eq!(error.operation, "send_key");
+        assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
+        assert_eq!(error.native_code.as_deref(), Some("conflict"));
+        assert_eq!(error.stage, RexInputStage::WriteQueued { bytes_written: 3 });
+        assert_eq!(
+            env.calls().iter().map(method).collect::<Vec<_>>(),
+            [
+                "server.status",
+                "com.superlogical.terminal.write",
+                "send-key"
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn enter_unknown_and_opaque_failure_never_rewrite_or_retry() {
+    let _fixture = fixture_guard().await;
+    for (scenario, class) in [
+        ("enter_fail", NotificationDeliveryClass::Unknown),
+        ("enter_unknown", NotificationDeliveryClass::Unknown),
+    ] {
+        let env = TestEnv::new(scenario);
+        let error = notify(&selected_transport(), "a complete body", Some("immediate"))
+            .await
+            .expect_err("failed Enter must not report successful submission");
+        assert_eq!(error.operation, "send_key");
+        assert_eq!(error.class, class);
+        assert_eq!(
+            error.stage,
+            RexInputStage::WriteQueued {
+                bytes_written: "a complete body".len()
+            }
+        );
+        assert_eq!(
+            env.calls().iter().map(method).collect::<Vec<_>>(),
+            [
+                "server.status",
+                "com.superlogical.terminal.write",
+                "send-key"
+            ]
+        );
+    }
 }
 
 #[tokio::test]
@@ -526,7 +611,15 @@ async fn allowed_modes_return_rex_receipt_json() {
         assert_eq!(value["consumed"], false);
         assert!(value.get("queued").is_none());
     }
-    assert_eq!(env.calls().len(), 20);
+    let expected = [
+        "server.status",
+        "com.superlogical.terminal.write",
+        "send-key",
+    ];
+    assert_eq!(
+        env.calls().iter().map(method).collect::<Vec<_>>(),
+        expected.repeat(5)
+    );
 }
 
 #[tokio::test]
@@ -1027,7 +1120,6 @@ impl Drop for WhoamiEnv {
 }
 
 fn with_rex_env<T>(session: Option<&str>, block: Option<&str>, run: impl FnOnce() -> T) -> T {
-    let _lock = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let previous: Vec<_> = ["REX_SESSION", "REX_BLOCK"]
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))

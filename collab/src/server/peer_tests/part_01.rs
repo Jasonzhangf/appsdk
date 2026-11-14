@@ -24,8 +24,8 @@ impl IsolatedTmux {
             std::process::id(),
             SOCKET_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        let output = Command::new("tmux")
-            .args([
+        let output = with_tmux(|tmux| {
+            tmux.args([
                 "-S",
                 socket.to_str().unwrap(),
                 "new-session",
@@ -40,15 +40,16 @@ impl IsolatedTmux {
                 pane_command,
             ])
             .output()
-            .unwrap();
+            .unwrap()
+        });
         assert!(
             output.status.success(),
             "start isolated tmux: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         if spare_pane {
-            let split = Command::new("tmux")
-                .args([
+            let split = with_tmux(|tmux| {
+                tmux.args([
                     "-S",
                     socket.to_str().unwrap(),
                     "split-window",
@@ -60,7 +61,8 @@ impl IsolatedTmux {
                     pane_command,
                 ])
                 .output()
-                .unwrap();
+                .unwrap()
+            });
             assert!(
                 split.status.success(),
                 "split isolated tmux: {}",
@@ -79,8 +81,8 @@ impl IsolatedTmux {
     }
 
     pub(crate) fn endpoints(&self) -> Vec<crate::proto::TmuxEndpoint> {
-        let panes = Command::new("tmux")
-            .args([
+        let panes = with_tmux(|tmux| {
+            tmux.args([
                 "-S",
                 self.socket.to_str().unwrap(),
                 "list-panes",
@@ -89,7 +91,8 @@ impl IsolatedTmux {
                 "#{pane_id}",
             ])
             .output()
-            .unwrap();
+            .unwrap()
+        });
         assert!(panes.status.success());
         String::from_utf8(panes.stdout)
             .unwrap()
@@ -122,8 +125,8 @@ impl IsolatedTmux {
             std::process::id(),
             SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
         );
-        let created = Command::new("tmux")
-            .args([
+        let created = with_tmux(|tmux| {
+            tmux.args([
                 "-S",
                 self.socket.to_str().unwrap(),
                 "new-session",
@@ -138,7 +141,8 @@ impl IsolatedTmux {
                 &self.pane_command,
             ])
             .output()
-            .unwrap();
+            .unwrap()
+        });
         assert!(
             created.status.success(),
             "add isolated tmux session: {}",
@@ -253,8 +257,8 @@ impl IsolatedTmux {
     }
 
     fn display_message(&self, target: &str) -> std::process::Output {
-        Command::new("tmux")
-            .args([
+        with_tmux(|tmux| {
+            tmux.args([
                 "-S",
                 self.socket.to_str().unwrap(),
                 "display-message",
@@ -265,11 +269,12 @@ impl IsolatedTmux {
             ])
             .output()
             .unwrap()
+        })
     }
 
     fn kill_pane(&self, pane_id: &str) {
-        let output = Command::new("tmux")
-            .args([
+        let output = with_tmux(|tmux| {
+            tmux.args([
                 "-S",
                 self.socket.to_str().unwrap(),
                 "kill-pane",
@@ -277,7 +282,8 @@ impl IsolatedTmux {
                 pane_id,
             ])
             .output()
-            .unwrap();
+            .unwrap()
+        });
         assert!(
             output.status.success(),
             "kill test-owned tmux pane {pane_id}: {}",
@@ -288,17 +294,25 @@ impl IsolatedTmux {
     fn close_owned_sessions(&self) {
         let sessions = self.sessions.borrow_mut().drain(..).collect::<Vec<_>>();
         for session in sessions {
-            let _ = Command::new("tmux")
-                .args([
+            let _ = with_tmux(|tmux| {
+                tmux.args([
                     "-S",
                     self.socket.to_str().unwrap(),
                     "kill-session",
                     "-t",
                     &session,
                 ])
-                .output();
+                .output()
+            });
         }
     }
+}
+
+fn with_tmux<R>(run: impl FnOnce(&mut Command) -> R) -> R {
+    let _guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    run(&mut Command::new("tmux"))
 }
 
 thread_local! {
@@ -889,6 +903,7 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
             storage_root: root.clone(),
             state_path,
             host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
+            register_gate: Arc::new(Mutex::new(())),
             state: Mutex::new(State::default()),
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(test_appserver_transport(&candidate.thread_id))

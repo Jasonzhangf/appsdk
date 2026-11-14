@@ -1,5 +1,18 @@
 # Collab Rex 适配可靠性修复执行计划
 
+> 2026-11-12 当前修订：真实 Codex TUI 验收显示，正文和 CR 放在一次
+> `terminal.write` 中会把内容留在输入草稿而不提交。因此本文件后续关于
+> “一次 write 包含正文和 CR”的段落是历史方案，已被当前合同取代。当前通知
+> 合同是：先原样写入正文并验证完整 UTF-8 字节，再对同一
+> server/session/block 执行一次独立 `send-key enter`。正文阶段或 Enter
+> 阶段的拒绝、短写和 unknown 都不得重写正文、重复 Enter 或切换目标。
+>
+> 同一修订还增加服务代际恢复：只有 `stage=BeforeWrite`、
+> `operation=server.status` 的 `REX_SERVICE_CHANGED` 可以刷新现有绑定的服务
+> 代际，并在 server/session/block 完全不变时重试原持久消息一次。QQBot CEO
+> 入站、timer、standing patrol、keepalive 和 host/runtime 后台路径复用该
+> 恢复 owner。
+
 ## 目标与交付边界
 
 修复 Collab Rex 通道的四项实际行为：

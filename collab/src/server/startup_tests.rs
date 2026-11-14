@@ -267,6 +267,7 @@ fn startup_route_fixture(name: &str) -> StartupRouteFixture {
         storage_root: host_root,
         state_path,
         host_paths: host_paths.clone(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(State::default()),
         appserver_candidate_check: default_appserver_candidate_check(),
         appserver_notification_sink: default_appserver_notification_sink(),

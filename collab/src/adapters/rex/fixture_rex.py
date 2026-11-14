@@ -12,6 +12,12 @@ Names must NOT start with `REX_` because the primitive strips every inherited
 `REX_*` variable before spawning this fixture.
   REXPRIMITIVE_LOG_DIR   directory that receives invocations.jsonl (required)
   REXPRIMITIVE_SCENARIO  scenario name (default: normal)
+  REXPRIMITIVE_SCENARIO_FILE
+                         optional file containing the current scenario name
+  REXPRIMITIVE_BARRIER_DIR
+                         optional directory for test-owned pause controls
+  REXPRIMITIVE_BLOCKS_FILE
+                         optional JSON array of block ids exposed by the fixture
 
 Each invocation appends one JSON line to invocations.jsonl:
   {"serial":n,"argv":[...],"stdin":"...","rex_env":[...],"cwd":"..."}
@@ -20,11 +26,18 @@ Scenarios (override behavior keyed by the extracted method):
   normal                 all calls succeed
   non_terminal_block     session.list_blocks returns a non-terminal creator
   session_missing        session.list omits the requested session
+  session_malformed      session.list returns an incomplete response
+  block_missing          session.list_blocks omits the requested block
+  blocks_malformed       session.list_blocks returns an incomplete response
+  status_marker_only     server.status fails with the service marker but no
+                         typed service-generation mismatch
+  status_unknown         server.status fails without proving absence
   write_short            write returns bytes_written = 1
   write_unknown          write exits 124 with no JSON (timeout-like)
   write_typed_reject     write exits 1 with a structured native error code
   enter_fail             send-key exits 3 with stderr text
   enter_typed_reject     send-key exits 1 with a structured native error code
+  enter_unknown          send-key exits 124 without a success result
   events_stream          events emits matching terminal events then stays open
   events_malformed       events emits one valid event then a broken JSON line
 """
@@ -53,7 +66,43 @@ def log_dir() -> str:
 
 
 def scenario() -> str:
+    path = os.environ.get("REXPRIMITIVE_SCENARIO_FILE")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = handle.read().strip()
+            if value:
+                return value
+        except FileNotFoundError:
+            pass
     return os.environ.get("REXPRIMITIVE_SCENARIO", "normal")
+
+
+def barrier_path(name: str) -> str | None:
+    directory = os.environ.get("REXPRIMITIVE_BARRIER_DIR")
+    if not directory:
+        return None
+    return os.path.join(directory, name)
+
+
+def maybe_pause_method(serial: int, method: str) -> None:
+    control = barrier_path("pause-method")
+    entered = barrier_path("method-entered")
+    release = barrier_path("method-release")
+    if not control or not entered or not release:
+        return
+    try:
+        with open(control, encoding="utf-8") as handle:
+            target = handle.read().strip()
+    except FileNotFoundError:
+        return
+    if target != method:
+        return
+    os.unlink(control)
+    with open(entered, "w", encoding="utf-8") as handle:
+        handle.write(str(serial))
+    while not os.path.exists(release):
+        time.sleep(0.01)
 
 
 def record(serial: int, argv: list[str], stdin: str) -> None:
@@ -139,40 +188,73 @@ def server_version() -> None:
 
 
 def server_status() -> None:
+    if scenario() == "status_marker_only":
+        sys.stderr.write("REX_SERVICE_CHANGED: fixture native detail only\n")
+        raise SystemExit(3)
+    if scenario() == "status_unknown":
+        sys.stderr.write("fixture: status unavailable\n")
+        raise SystemExit(3)
     if scenario() == "missing_instance":
         emit({"host_id": "host-fixture"})
         return
+    instance = (
+        "instance-fixture-refreshed"
+        if scenario().startswith("service_changed")
+        else "instance-fixture"
+    )
     emit(
         {
             "rex_version": "0.1.0",
             "platform": "darwin",
             "dirty": False,
             "host_id": "host-fixture",
-            "instance_id": "instance-fixture",
+            "instance_id": instance,
         }
     )
 
 
 def session_list() -> None:
-    if scenario() == "session_missing":
+    if scenario() == "session_malformed":
+        emit({})
+        return
+    if scenario() in {"session_missing", "service_changed_session_missing"}:
         emit({"sessions": []})
         return
     emit({"sessions": [{"session_id": SESSION, "label": "fixture"}, {"session_id": OTHER_SESSION, "label": "other"}]})
 
 
 def list_blocks() -> None:
+    if scenario() == "blocks_malformed":
+        emit({})
+        return
+    if scenario() == "block_missing":
+        emit({"blocks": []})
+        return
     creator = "com.other.creator" if scenario() == "non_terminal_block" else TERMINAL
+    blocks = [BLOCK]
+    path = os.environ.get("REXPRIMITIVE_BLOCKS_FILE")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle)
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                blocks = value
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+    if scenario() == "service_changed_wrong_block":
+        blocks = ["block:44444444-4444-4444-4444-444444444444"]
     emit(
         {
             "blocks": [
                 {
-                    "block_id": BLOCK,
+                    "block_id": block,
                     "creator_name": creator,
                     "flavor": "com.superlogical.terminal.shell",
                     "placement": "window",
                     "window_id": "window-fixture",
                     "host_id": "host-fixture",
                 }
+                for block in blocks
             ]
         }
     )
@@ -206,6 +288,8 @@ def send_key() -> None:
     if mode == "enter_typed_reject":
         emit({"error": {"code": "conflict", "message": "session not attached"}})
         raise SystemExit(1)
+    if mode == "enter_unknown":
+        raise SystemExit(124)
     emit({})
 
 
@@ -425,8 +509,10 @@ def main() -> int:
     argv = sys.argv[1:]
     require_prefix(argv)
     stdin = read_stdin()
-    record(next_serial(), argv, stdin)
+    serial = next_serial()
+    record(serial, argv, stdin)
     method = extract_method(argv)
+    maybe_pause_method(serial, method)
     if scenario() == "slow_all":
         time.sleep(1)
     if scenario() == "slow_status" and method == "server.status":

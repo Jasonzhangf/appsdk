@@ -3387,6 +3387,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", session)
             .env("CODEX_THREAD_ID", thread)
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
@@ -3413,6 +3416,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
@@ -3438,6 +3444,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", session)
             .env_remove("CODEX_THREAD_ID")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
@@ -3461,6 +3470,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
@@ -3486,6 +3498,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
@@ -3509,6 +3524,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
@@ -3535,6 +3553,9 @@ impl AppFixture {
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex future host")
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("COLLAB_WORKER")
@@ -3614,6 +3635,9 @@ impl AppFixture {
             .env_remove("COLLAB_APPSERVER_NAMESPACE")
             .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
             .env_remove("CODEX_MCP_NODE_PATH")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("CODEX_SESSION_ID")
@@ -3629,7 +3653,10 @@ impl AppFixture {
         daemon_readiness::wait_for_ping(
             self.daemon.as_mut().unwrap(),
             &self.host_state.join("server.sock"),
-            Duration::from_secs(5),
+            // This fixture is often run on a loaded host alongside other
+            // worktree builds. Keep the readiness assertion but tolerate slow
+            // startup instead of flaking at five seconds.
+            Duration::from_secs(30),
         );
     }
 
@@ -4722,6 +4749,9 @@ fn wrong_appserver_endpoint_fails_closed() {
         .env("COLLAB_APPSERVER_SOCKET", &missing)
         .env_remove("CODEX_APP_SERVER_SOCKET")
         .env_remove("COLLAB_APPSERVER_NAMESPACE")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
         .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
         .env("CODEX_SESSION_ID", THREAD_A)
         .env("CODEX_THREAD_ID", THREAD_A)
@@ -5431,6 +5461,9 @@ fn forged_appserver_endpoint_and_missing_project_context_fail_closed() {
         .env_remove("COLLAB_APPSERVER_SOCKET")
         .env_remove("CODEX_APP_SERVER_SOCKET")
         .env_remove("COLLAB_APPSERVER_NAMESPACE")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("CODEX_SESSION_ID")

@@ -3,7 +3,7 @@ use super::*;
 use crate::server::current_state;
 use crate::server::state::{now_ms, Event, Message};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn wake_text_keeps_location_action_and_one_read_action_only() {
@@ -119,6 +119,7 @@ fn test_server() -> (crate::server::Server, PathBuf) {
             storage_root: root.clone(),
             state_path,
             host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
+            register_gate: Arc::new(Mutex::new(())),
             state: Mutex::new(crate::server::state::State::default()),
             appserver_candidate_check: crate::server::default_appserver_candidate_check(),
             appserver_notification_sink: crate::server::default_appserver_notification_sink(),

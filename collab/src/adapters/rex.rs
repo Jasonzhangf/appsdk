@@ -23,6 +23,7 @@ pub const NOT_DELIVERED_PREFIX: &str = "REX_NOT_DELIVERED:";
 pub const UNKNOWN_PREFIX: &str = "REX_UNKNOWN:";
 pub const KNOWN_DELIVERED_PREFIX: &str = "REX_DELIVERED:";
 pub const TERMINAL_CREATOR: &str = "com.superlogical.terminal";
+const SERVICE_CHANGE_TYPED_MARKER: &str = "REX_SERVICE_CHANGED: typed=generation_mismatch";
 pub const NATIVE_REJECTION_CODES: [&str; 7] = [
     "bad_request",
     "block_not_found",
@@ -34,6 +35,22 @@ pub const NATIVE_REJECTION_CODES: [&str; 7] = [
 ];
 
 const DEFAULT_TIMEOUT_SECS: f64 = 10.0;
+
+/// True only for the proven-before-write service generation failure.
+///
+/// This is narrow on purpose. It lets the notification owner refresh the same
+/// server/session/block binding before retrying once. A write or Enter result
+/// that is unknown must never match this predicate.
+pub fn is_refreshable_service_change(error: &str) -> bool {
+    error.contains(NOT_DELIVERED_PREFIX)
+        && error.contains("operation=server.status")
+        && error.contains("stage=BeforeWrite")
+        && error.contains("native_code=none")
+        && error
+            .split_once("detail=")
+            .map(|(_, detail)| detail)
+            .is_some_and(|detail| detail.starts_with(SERVICE_CHANGE_TYPED_MARKER))
+}
 
 #[cfg(any(target_os = "macos", test))]
 fn installed_macos_cli(system_applications: &Path, user_home: Option<&Path>) -> PathBuf {
@@ -981,6 +998,19 @@ pub async fn resolve_target(endpoint: &RexEndpoint) -> Result<(), RexError> {
     resolve_target_until(endpoint, Instant::now() + default_timeout()?).await
 }
 
+/// Only the adapter's own exact-target absence conclusion can retire a Rex
+/// execution binding. Service-generation, timeout, malformed and unknown
+/// failures stay Unknown in the stale-identity maintenance path.
+pub fn resolve_error_is_definitively_absent(error: &RexError) -> bool {
+    matches!(
+        (error.operation, error.native_code.as_deref()),
+        ("session.list", Some("session_not_found"))
+            | ("session.list_blocks", Some("block_not_found"))
+    ) || (error.operation == "resolve_target"
+        && (error.detail == "exact Rex session was not present"
+            || error.detail == "exact terminal block was not present in the session"))
+}
+
 async fn resolve_target_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
     verify_service_until(endpoint, deadline).await?;
     let session_call = run_cli(
@@ -993,15 +1023,20 @@ async fn resolve_target_until(endpoint: &RexEndpoint, deadline: Instant) -> Resu
     )
     .await?;
     let sessions = parse_json_call("session.list", &session_call)?;
-    let found_session = sessions
+    let session_items = sessions
         .get("sessions")
         .and_then(Value::as_array)
-        .map(|items| {
-            items.iter().filter_map(Value::as_object).any(|item| {
-                item.get("session_id").and_then(Value::as_str) == Some(&endpoint.session_id)
-            })
-        })
-        .unwrap_or(false);
+        .ok_or_else(|| {
+            json_payload_error(
+                "session.list",
+                RexInputStage::BeforeWrite,
+                "official Rex CLI session.list response omitted the sessions array",
+            )
+        })?;
+    let found_session = session_items
+        .iter()
+        .filter_map(Value::as_object)
+        .any(|item| item.get("session_id").and_then(Value::as_str) == Some(&endpoint.session_id));
     if !found_session {
         return Err(RexError::known_not_delivered(
             "resolve_target",
@@ -1020,16 +1055,20 @@ async fn resolve_target_until(endpoint: &RexEndpoint, deadline: Instant) -> Resu
     )
     .await?;
     let blocks = parse_json_call("session.list_blocks", &blocks_call)?;
-    let found_block = blocks
+    let block_items = blocks
         .get("blocks")
         .and_then(Value::as_array)
-        .map(|items| {
-            items.iter().filter_map(Value::as_object).any(|item| {
-                item.get("block_id").and_then(Value::as_str) == Some(&endpoint.block_id)
-                    && item.get("creator_name").and_then(Value::as_str) == Some(TERMINAL_CREATOR)
-            })
-        })
-        .unwrap_or(false);
+        .ok_or_else(|| {
+            json_payload_error(
+                "session.list_blocks",
+                RexInputStage::BeforeWrite,
+                "official Rex CLI session.list_blocks response omitted the blocks array",
+            )
+        })?;
+    let found_block = block_items.iter().filter_map(Value::as_object).any(|item| {
+        item.get("block_id").and_then(Value::as_str) == Some(&endpoint.block_id)
+            && item.get("creator_name").and_then(Value::as_str) == Some(TERMINAL_CREATOR)
+    });
     if !found_block {
         return Err(RexError::known_not_delivered(
             "resolve_target",
@@ -1074,8 +1113,13 @@ async fn verify_service_until(endpoint: &RexEndpoint, deadline: Instant) -> Resu
         .as_deref()
         .is_none_or(|host| status.get("host_id").and_then(Value::as_str) == Some(host));
     if !instance_matches || !host_matches {
-        return Err(RexError::known_not_delivered("server.status", RexInputStage::BeforeWrite,
-            "REX_SERVICE_CHANGED: the bound host or instance changed; refresh the current Rex binding"));
+        return Err(RexError::known_not_delivered(
+            "server.status",
+            RexInputStage::BeforeWrite,
+            format!(
+                "{SERVICE_CHANGE_TYPED_MARKER} the bound host or instance changed; refresh the current Rex binding"
+            ),
+        ));
     }
     Ok(())
 }
@@ -1138,7 +1182,6 @@ async fn write_text_until(
 }
 
 async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
-    verify_service_until(endpoint, deadline).await?;
     let call = run_cli(
         "send_enter",
         Path::new(&official_cli_path()),
@@ -1362,8 +1405,8 @@ pub async fn notify(
     };
     if let Err(error) = send_enter_until(endpoint, deadline).await {
         return Err(RexError {
-            operation: "notify",
-            class: NotificationDeliveryClass::Unknown,
+            operation: "send_key",
+            class: error.class,
             stage: text_stage,
             native_code: error.native_code,
             detail: error.detail,

@@ -552,7 +552,16 @@ fn worker_status_summary_with_maps(
         )
     };
 
+    let displaced_holder = control.slots().any(|slot| {
+        slot.identity_status() == crate::server::binding_slot::IdentityStatus::Unregistered
+            && slot.active_binding().is_none()
+            && slot
+                .reference_previous()
+                .is_some_and(|previous| previous.binding.agent_id.as_str() == w.id)
+    });
     let Some(role_brief) = role_brief else {
+        let display_name = if displaced_holder { w.id.clone() } else { display_name };
+        let status = if displaced_holder { "unknown" } else { "identity-mismatch" };
         return Ok(json!({
             "id": w.id,
             "display_name": display_name,
@@ -560,7 +569,7 @@ fn worker_status_summary_with_maps(
             "role": null,
             "role_brief": null,
             "transport": null,
-            "status": "identity-mismatch",
+            "status": status,
             "presence": "unknown",
             "endpoint_live": null,
             "identity_valid": false,
@@ -586,16 +595,17 @@ fn worker_status_summary_with_maps(
     let thread_state = transport_view
         .get("thread_state")
         .and_then(serde_json::Value::as_str);
-    let agent_state = match (endpoint_live, thread_state) {
-        (Some(false), _) => "absent",
-        (None, _) => "unknown",
-        (Some(true), Some("notLoaded")) => "cold",
-        (Some(true), Some("idle")) => "idle",
-        (Some(true), Some("waiting_user")) => "waiting_user",
-        (Some(true), Some("working")) => "working",
-        (Some(true), Some("active")) => "working",
-        (Some(true), Some("error")) => "error",
-        _ => "unknown",
+    let agent_state = match endpoint_live {
+        Some(false) => "absent",
+        None => "unknown",
+        Some(true) => match thread_state {
+            Some("notLoaded") => "cold",
+            Some("idle") => "idle",
+            Some("waiting_user") => "waiting_user",
+            Some("working" | "active") => "working",
+            Some("error") => "error",
+            _ => "unknown",
+        },
     };
     let status = if !identity_valid {
         "identity-mismatch"

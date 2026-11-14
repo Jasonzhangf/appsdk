@@ -390,6 +390,100 @@ fn is_valid_identity_query_shape(request: &IdentityContextRequest) -> bool {
     request.query && request.invocation == "query" && request.action == "query"
 }
 
+#[cfg(feature = "lifecycle-test-hooks")]
+fn lifecycle_test_barrier(point: &str) -> anyhow::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let Some(endpoint) = std::env::var_os("COLLAB_LIFECYCLE_TEST_HOOK") else {
+        return Ok(());
+    };
+    let mut stream = UnixStream::connect(&endpoint).map_err(|error| {
+        anyhow::anyhow!(
+            "lifecycle test hook could not connect to {}: {error}",
+            Path::new(&endpoint).display()
+        )
+    })?;
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
+    stream.write_all(point.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut resume = String::new();
+    BufReader::new(stream).read_line(&mut resume)?;
+    if resume.trim() != "resume" {
+        anyhow::bail!(
+            "lifecycle test hook expected resume acknowledgement, received {:?}",
+            resume.trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "lifecycle-test-hooks"))]
+fn lifecycle_test_barrier(_point: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn write_daemon_owner_record(
+    lock_file: &std::fs::File,
+    record: &str,
+) -> anyhow::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut file = lock_file;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    #[cfg(feature = "lifecycle-test-hooks")]
+    {
+        file.write_all(b"collab-daemon-v3 ")?;
+        file.flush()?;
+        lifecycle_test_barrier("owner-publication-partial")?;
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+    }
+    file.write_all(record.as_bytes())?;
+    file.sync_data()?;
+    Ok(())
+}
+
+pub(crate) struct DaemonAdmission {
+    admission: Option<std::fs::File>,
+    publication: Option<crate::host_runtime::PublicationGuard>,
+}
+
+impl DaemonAdmission {
+    fn acquire(lock_path: &Path, socket_path: &Path) -> anyhow::Result<Self> {
+        let publication_path = lock_path.with_file_name("daemon.owner.lock");
+        let publication =
+            crate::host_runtime::PublicationGuard::acquire(&publication_path, true, true)
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+        let admission = acquire_daemon_lock(lock_path, socket_path)?;
+        Ok(Self {
+            admission: Some(admission),
+            publication: Some(publication),
+        })
+    }
+
+    fn admission(&self) -> &std::fs::File {
+        self.admission
+            .as_ref()
+            .expect("daemon admission is retained")
+    }
+
+    fn release_publication(&mut self) {
+        self.publication.take();
+    }
+
+    #[cfg(feature = "lifecycle-test-hooks")]
+    fn release_admission_for_test(&mut self) {
+        if self.admission.is_some()
+            && std::env::var_os("COLLAB_LIFECYCLE_RELEASE_ADMISSION").is_some()
+        {
+            self.admission.take();
+        }
+    }
+}
 
 fn acquire_daemon_lock(lock_path: &Path, socket_path: &Path) -> anyhow::Result<std::fs::File> {
     let file = std::fs::OpenOptions::new()
@@ -418,21 +512,38 @@ fn acquire_daemon_lock(lock_path: &Path, socket_path: &Path) -> anyhow::Result<s
     }
 }
 
+#[cfg(target_os = "macos")]
 fn write_daemon_lock_owner(lock_file: &std::fs::File) -> anyhow::Result<()> {
-    use std::io::{Seek, SeekFrom, Write};
-
     let pid = std::process::id();
+    let generation = format!("{:032x}", rand::random::<u128>());
     let start_id = crate::host_runtime::exact_process_start_id(pid)
         .map_err(|error| anyhow::anyhow!("daemon lock owner start identity unavailable: {error}"))?
         .ok_or_else(|| {
             anyhow::anyhow!("daemon lock owner PID {pid} has no process start identity")
         })?;
-    let mut file = lock_file;
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
-    write!(file, "collab-daemon {pid} {start_id}\n")?;
-    file.sync_data()?;
-    Ok(())
+    let audit_token = crate::host_runtime::own_audit_token()
+        .map_err(|error| anyhow::anyhow!("daemon lock owner audit token unavailable: {error}"))?;
+    write_daemon_owner_record(
+        lock_file,
+        &format!(
+            "collab-daemon-v3 {generation} {pid} {start_id} mac-audit {audit_token}\n"
+        ),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_daemon_lock_owner(lock_file: &std::fs::File) -> anyhow::Result<()> {
+    let pid = std::process::id();
+    let generation = format!("{:032x}", rand::random::<u128>());
+    let start_id = crate::host_runtime::exact_process_start_id(pid)
+        .map_err(|error| anyhow::anyhow!("daemon lock owner start identity unavailable: {error}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("daemon lock owner PID {pid} has no process start identity")
+        })?;
+    write_daemon_owner_record(
+        lock_file,
+        &format!("collab-daemon-v3 {generation} {pid} {start_id} linux-pidfd\n"),
+    )
 }
 
 /// Acquire the same host writer lock used by the resident daemon. Offline
@@ -441,8 +552,55 @@ fn write_daemon_lock_owner(lock_file: &std::fs::File) -> anyhow::Result<()> {
 pub(crate) fn acquire_reset_lock(
     lock_path: &Path,
     socket_path: &Path,
-) -> anyhow::Result<std::fs::File> {
-    acquire_daemon_lock(lock_path, socket_path)
+) -> anyhow::Result<DaemonAdmission> {
+    let admission = DaemonAdmission::acquire(lock_path, socket_path)?;
+    #[cfg(feature = "lifecycle-test-hooks")]
+    lifecycle_test_barrier("reset-admission-held")?;
+    Ok(admission)
+}
+
+#[test]
+fn daemon_owner_publication_orders_admission_and_reset() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-daemon-owner-publication-{}-{:032x}",
+        std::process::id(),
+        rand::random::<u128>()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let host_paths = HostPaths::for_state_root(&root).unwrap();
+    let lock_path = host_paths.lock_path();
+    let socket_path = host_paths.socket_path();
+    let publication_path = lock_path.with_file_name("daemon.owner.lock");
+
+    let external =
+        crate::host_runtime::PublicationGuard::acquire(&publication_path, true, true).unwrap();
+    assert!(
+        DaemonAdmission::acquire(&lock_path, &socket_path).is_err(),
+        "daemon admission must acquire publication before admission"
+    );
+    drop(external);
+
+    let daemon = DaemonAdmission::acquire(&lock_path, &socket_path).unwrap();
+    assert!(
+        crate::host_runtime::PublicationGuard::acquire(&publication_path, false, false).is_err(),
+        "daemon publication must exclude replacement readers"
+    );
+    drop(daemon);
+
+    let reset = acquire_reset_lock(&lock_path, &socket_path).unwrap();
+    assert!(
+        crate::host_runtime::PublicationGuard::acquire(&publication_path, false, false).is_err(),
+        "offline reset must retain exclusive publication for its guard lifetime"
+    );
+    assert!(
+        DaemonAdmission::acquire(&lock_path, &socket_path).is_err(),
+        "offline reset must retain admission for its guard lifetime"
+    );
+    drop(reset);
+
+    crate::host_runtime::PublicationGuard::acquire(&publication_path, false, false)
+        .expect("dropping reset admission must release publication");
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// True when some other host daemon still owns the pre-host-state writer lock.
@@ -722,8 +880,9 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     host_paths.ensure_root()?;
     let sock_path = host_paths.socket_path();
     // The host lock is the daemon writer admission gate.
-    let lock_file = acquire_daemon_lock(&host_paths.lock_path(), &sock_path)?;
-    write_daemon_lock_owner(&lock_file)?;
+    let mut admission = DaemonAdmission::acquire(&host_paths.lock_path(), &sock_path)?;
+    lifecycle_test_barrier("owner-admitted-before-publication")?;
+    write_daemon_lock_owner(admission.admission())?;
 
     let project_scope = GlobalState::canonical_project_scope(&scope.root)
         .map_err(|error| anyhow::anyhow!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
@@ -817,6 +976,14 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     })?;
     let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
     let state_root_metadata = std::fs::symlink_metadata(host_paths.state_root())?;
+    admission.release_publication();
+    #[cfg(feature = "lifecycle-test-hooks")]
+    {
+        admission.release_admission_for_test();
+        if std::env::var_os("COLLAB_LIFECYCLE_RELEASE_ADMISSION").is_some() {
+            lifecycle_test_barrier("owner-admission-released")?;
+        }
+    }
 
     let mut interrupt = Box::pin(tokio::signal::ctrl_c());
     let mut terminate = Box::pin(async {

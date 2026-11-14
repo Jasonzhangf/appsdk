@@ -21,6 +21,14 @@ struct IsolatedDaemon {
 
 impl IsolatedDaemon {
     fn start(password: Option<&str>) -> Self {
+        Self::start_with_env(password, &[], true)
+    }
+
+    fn start_with_env(
+        password: Option<&str>,
+        envs: &[(&str, &str)],
+        wait_until_ready: bool,
+    ) -> Self {
         let root = unique_root("lifecycle");
         let host = root.join("host");
         let home = root.join("home");
@@ -37,21 +45,41 @@ impl IsolatedDaemon {
             .unwrap();
         }
 
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(host.join("test-daemon.log"))
-            .unwrap();
         let binary = std::env::var_os("COLLAB_TEST_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_collab")));
-        let mut command = Command::new(&binary);
+        let mut fixture = Self {
+            binary,
+            root,
+            host,
+            home,
+            child: None,
+            tmux: None,
+        };
+        fixture.spawn_child_with_env(envs);
+        if wait_until_ready {
+            fixture.wait_until_alive();
+        }
+        fixture
+    }
+
+    fn spawn_child(&mut self) {
+        self.spawn_child_with_env(&[]);
+    }
+
+    fn spawn_child_with_env(&mut self, envs: &[(&str, &str)]) {
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.host.join("test-daemon.log"))
+            .unwrap();
+        let mut command = Command::new(&self.binary);
         command
             .arg("serve")
-            .current_dir(&root)
-            .env("HOME", &home)
-            .env("COLLAB_STATE_DIR", &host)
-            .env("CODEX_HOME", &home)
+            .current_dir(&self.root)
+            .env("HOME", &self.home)
+            .env("COLLAB_STATE_DIR", &self.host)
+            .env("CODEX_HOME", &self.home)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("CODEX_SESSION_ID")
@@ -64,17 +92,56 @@ impl IsolatedDaemon {
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log);
-        let child = command.spawn().expect("spawn isolated collab serve");
-        let mut fixture = Self {
-            binary,
-            root,
-            host,
-            home,
-            child: Some(child),
-            tmux: None,
-        };
-        fixture.wait_until_alive();
-        fixture
+        for (name, value) in envs {
+            command.env(name, value);
+        }
+        self.child = Some(command.spawn().expect("spawn isolated collab serve"));
+    }
+
+    fn spawn_daemon_process_with_env(&self, envs: &[(&str, &str)]) -> Child {
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.host.join("test-daemon.log"))
+            .unwrap();
+        let mut command = Command::new(&self.binary);
+        command
+            .arg("serve")
+            .current_dir(&self.root)
+            .env("HOME", &self.home)
+            .env("COLLAB_STATE_DIR", &self.host)
+            .env("CODEX_HOME", &self.home)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("COLLAB_SOCKET_PATH")
+            .env_remove("COLLAB_HOST_SOCKET")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log);
+        for (name, value) in envs {
+            command.env(name, value);
+        }
+        command
+            .spawn()
+            .expect("spawn isolated collab serve process")
+    }
+
+    fn restart_daemon(&mut self) {
+        self.spawn_child();
+        self.wait_until_alive();
+    }
+
+    fn kill_and_reap_daemon(&mut self) {
+        let child = self.child.as_mut().expect("fixture daemon is present");
+        let pid = child.id();
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+        child.wait().expect("reap fixture daemon after SIGKILL");
+        self.child = None;
     }
 
     fn socket(&self) -> PathBuf {
@@ -236,6 +303,46 @@ impl IsolatedDaemon {
         assert_eq!(matched.len(), 1, "one exact current project/app route");
         PathBuf::from(matched[0]["storage_root"].as_str().unwrap())
             .join(".agent-collab/server/state.json")
+    }
+
+    fn central_runtime_state_path(&self) -> PathBuf {
+        fn collect_state_files(path: &Path, found: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect_state_files(&path, found);
+                } else if path.file_name().is_some_and(|name| name == "state.json")
+                    && path
+                        .parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::file_name)
+                        .is_some_and(|name| name == ".agent-collab")
+                {
+                    found.push(path);
+                }
+            }
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut found = Vec::new();
+            collect_state_files(&self.host.join("projects"), &mut found);
+            if found.len() == 1 {
+                return found.pop().unwrap();
+            }
+            assert!(
+                found.is_empty(),
+                "expected at most one central runtime current state, found {found:?}"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "central runtime current state did not appear"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     fn runtime_state(&self, project: &Path) -> Value {
@@ -1406,6 +1513,15 @@ fn freeze_fixture_daemon(fixture: &IsolatedDaemon) -> u32 {
     pid
 }
 
+fn terminate_owned_child(child: &mut Child) {
+    if child.try_wait().unwrap().is_none() {
+        let pid = child.id() as libc::pid_t;
+        let _ = unsafe { libc::kill(pid, libc::SIGCONT) };
+        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = child.wait();
+    }
+}
+
 /// Stop a daemon that `up` launched detached in the isolated state root.
 fn shutdown_isolated_daemon(socket: &Path) {
     if let Ok(mut stream) = UnixStream::connect(socket) {
@@ -1418,6 +1534,180 @@ fn shutdown_isolated_daemon(socket: &Path) {
     while UnixStream::connect(socket).is_ok() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+struct LifecycleHook {
+    listener: UnixListener,
+    socket: PathBuf,
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+impl LifecycleHook {
+    fn new(label: &str) -> Self {
+        let socket = unique_root(label).with_extension("sock");
+        let listener = UnixListener::bind(&socket).expect("bind lifecycle test hook");
+        listener
+            .set_nonblocking(true)
+            .expect("set lifecycle test hook listener nonblocking");
+        Self { listener, socket }
+    }
+
+    fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    fn wait(&self, expected: &str) -> UnixStream {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let (stream, _) = loop {
+            match self.listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for lifecycle hook {expected}"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("receive lifecycle hook {expected}: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), expected, "unexpected lifecycle hook point");
+        stream
+    }
+
+    fn resume(&self, stream: &mut UnixStream) {
+        stream.write_all(b"resume\n").unwrap();
+        stream.flush().unwrap();
+    }
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+impl Drop for LifecycleHook {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+fn up_in_terminal_with_hook(fixture: &IsolatedDaemon, hook: &LifecycleHook) -> Child {
+    let mut terminal = Command::new("script");
+    terminal.arg("-q");
+    if cfg!(target_os = "linux") {
+        let executable = fixture.binary.to_string_lossy().replace('\'', "'\\''");
+        terminal.args(["-e", "-c", &format!("exec '{executable}' up"), "/dev/null"]);
+    } else {
+        terminal.arg("/dev/null").arg(&fixture.binary).arg("up");
+    }
+    terminal
+        .current_dir(&fixture.root)
+        .env("HOME", &fixture.home)
+        .env("CODEX_HOME", &fixture.home)
+        .env("COLLAB_STATE_DIR", &fixture.host)
+        .env("COLLAB_LIFECYCLE_TEST_HOOK", hook.socket())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run collab up with lifecycle hook")
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+fn hook_env(hook: &LifecycleHook) -> (&'static str, String) {
+    (
+        "COLLAB_LIFECYCLE_TEST_HOOK",
+        hook.socket().to_string_lossy().into_owned(),
+    )
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+fn resume_spawned_daemon_publication(hook: &LifecycleHook) {
+    for expected in [
+        "owner-admitted-before-publication",
+        "owner-publication-partial",
+    ] {
+        let mut point = hook.wait(expected);
+        hook.resume(&mut point);
+    }
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+fn transfer_lock_to_successor(fixture: &mut IsolatedDaemon) -> u32 {
+    fixture.kill_and_reap_daemon();
+    fixture.restart_daemon();
+    let successor = recorded_pid(fixture);
+    assert!(
+        ping(&fixture.socket()).is_ok(),
+        "successor must answer Ping"
+    );
+    successor
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+fn assert_refused_and_successor_alive(output: Output, text: &str, successor: u32) -> String {
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("DAEMON_REPLACE_REFUSED"), "{text}");
+    assert!(!text.contains("\"ok\": true"), "{text}");
+    assert!(successor > 1, "successor PID must identify a real process");
+    text.to_owned()
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+fn assert_successor_publication_refused(fixture: &IsolatedDaemon, label: &str) {
+    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+    let log_path = fixture.root.join(format!(
+        "successor-attempt-{label}-{}-{}",
+        std::process::id(),
+        ATTEMPT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let log = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&log_path)
+        .unwrap();
+    let mut command = fixture.base_command("serve");
+    command
+        .env_remove("COLLAB_LIFECYCLE_TEST_HOOK")
+        .env_remove("COLLAB_LIFECYCLE_RELEASE_ADMISSION")
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log);
+    let mut child = command.spawn().expect("attempt successor admission");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            terminate_owned_child(&mut child);
+            panic!("successor admission attempt did not finish: {label}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        !status.success(),
+        "successor admission must be refused: {text}"
+    );
+    assert!(
+        text.contains("DAEMON_OWNER_PUBLICATION_REFUSED"),
+        "successor must fail at owner publication before admission: {text}"
+    );
 }
 
 #[test]
@@ -1451,6 +1741,150 @@ fn up_replaces_a_live_daemon_whose_socket_does_not_answer() {
         replacement_pid.is_some_and(|pid| pid != frozen),
         "a new daemon must own the recorded PID: {text}"
     );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_refuses_owner_publication_while_record_is_partial() {
+    let hook = LifecycleHook::new("partial-owner-publication");
+    let (hook_name, hook_path) = hook_env(&hook);
+    let mut fixture =
+        IsolatedDaemon::start_with_env(None, &[(hook_name, hook_path.as_str())], false);
+    let mut point = hook.wait("owner-admitted-before-publication");
+    hook.resume(&mut point);
+    let mut point = hook.wait("owner-publication-partial");
+    let daemon_pid = fixture.child.as_ref().unwrap().id();
+    let stale_socket = UnixListener::bind(fixture.socket()).unwrap();
+    drop(stale_socket);
+    std::fs::write(fixture.host.join("server.pid"), daemon_pid.to_string()).unwrap();
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("DAEMON_OWNER_PUBLICATION_REFUSED"),
+        "partial owner publication must be refused at the publication lock: {text}"
+    );
+    assert!(
+        fixture
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none(),
+        "a partial proof must never authorize a signal"
+    );
+    hook.resume(&mut point);
+    fixture.wait_until_alive();
+    fixture.kill_and_reap_daemon();
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_replaces_after_owner_publication_completes() {
+    let hook = LifecycleHook::new("complete-owner-publication");
+    let (hook_name, hook_path) = hook_env(&hook);
+    let mut fixture =
+        IsolatedDaemon::start_with_env(None, &[(hook_name, hook_path.as_str())], false);
+    let mut point = hook.wait("owner-admitted-before-publication");
+    hook.resume(&mut point);
+    let mut point = hook.wait("owner-publication-partial");
+    let daemon_pid = fixture.child.as_ref().unwrap().id();
+    let stale_socket = UnixListener::bind(fixture.socket()).unwrap();
+    drop(stale_socket);
+    std::fs::write(fixture.host.join("server.pid"), daemon_pid.to_string()).unwrap();
+    hook.resume(&mut point);
+    fixture.wait_until_alive();
+    let frozen = freeze_fixture_daemon(&fixture);
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    let reachable = ping(&fixture.socket()).is_ok();
+    if reachable {
+        shutdown_isolated_daemon(&fixture.socket());
+    }
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("\"pid\": {frozen}")),
+        "completed owner publication must remain replaceable: {text}"
+    );
+    assert!(reachable, "replacement must answer current Ping: {text}");
+    fixture.wait_for_exit();
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_never_accepts_predecessor_proof_after_successor_admission() {
+    let mut fixture =
+        IsolatedDaemon::start_with_env(None, &[("COLLAB_LIFECYCLE_RELEASE_ADMISSION", "1")], true);
+    freeze_fixture_daemon(&fixture);
+    let successor_hook = LifecycleHook::new("successor-after-admission");
+    let (hook_name, hook_path) = hook_env(&successor_hook);
+    let mut successor = fixture.spawn_daemon_process_with_env(&[(hook_name, hook_path.as_str())]);
+    let _point = successor_hook.wait("owner-admitted-before-publication");
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    let predecessor_alive = fixture
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none();
+    let successor_alive = successor.try_wait().unwrap().is_none();
+    terminate_owned_child(fixture.child.as_mut().unwrap());
+    terminate_owned_child(&mut successor);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("DAEMON_OWNER_PUBLICATION_REFUSED"),
+        "successor admission must be excluded by owner publication: {text}"
+    );
+    assert!(
+        predecessor_alive,
+        "a predecessor proof must not signal its retained process after successor admission: {text}"
+    );
+    assert!(
+        successor_alive,
+        "the successor admission owner must remain alive: {text}"
+    );
+}
+
+#[test]
+fn up_refuses_unsupported_owner_publication_protocol() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let daemon_pid = freeze_fixture_daemon(&fixture);
+    let record_path = fixture.host.join("daemon.lock");
+    let current = std::fs::read_to_string(&record_path).unwrap();
+    let fields = current.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(fields.first(), Some(&"collab-daemon-v3"));
+    let start_id = fields[3];
+    let records = [
+        format!("collab-daemon {daemon_pid} {start_id}\n"),
+        current.replacen("collab-daemon-v3 ", "collab-daemon-v2 ", 1),
+    ];
+    for record in records {
+        std::fs::write(&record_path, record).unwrap();
+        let output = up_in_terminal(&fixture);
+        let text = output_text(&output);
+        assert!(!output.status.success(), "{text}");
+        assert!(
+            text.contains("unsupported owner publication protocol"),
+            "old owner proof must be refused as unsupported: {text}"
+        );
+        assert!(
+            fixture
+                .child
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none(),
+            "unsupported evidence must not signal collab PID {daemon_pid}: {text}"
+        );
+    }
+    terminate_owned_child(fixture.child.as_mut().unwrap());
 }
 
 #[test]
@@ -1571,5 +2005,286 @@ fn up_never_signals_a_live_collab_pid_with_a_stale_lock_start_identity() {
     assert!(
         daemon_alive,
         "a daemon whose lock start identity is stale must not be signalled"
+    );
+}
+
+#[test]
+fn up_refuses_an_empty_legacy_lock_without_signalling_the_live_owner() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let daemon_pid = freeze_fixture_daemon(&fixture);
+    let lock = OpenOptions::new()
+        .write(true)
+        .open(fixture.host.join("daemon.lock"))
+        .unwrap();
+    lock.set_len(0).unwrap();
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    let daemon_alive = fixture
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none();
+    let _ = unsafe { libc::kill(daemon_pid as libc::pid_t, libc::SIGKILL) };
+    let _ = fixture.child.as_mut().unwrap().wait();
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("DAEMON_REPLACE_REFUSED"), "{text}");
+    assert!(
+        daemon_alive,
+        "an empty legacy owner record must not be signalled"
+    );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_refuses_generation_change_before_sigterm() {
+    let mut fixture = IsolatedDaemon::start(None);
+    freeze_fixture_daemon(&fixture);
+    let hook = LifecycleHook::new("owner-before-sigterm");
+    let up = up_in_terminal_with_hook(&fixture, &hook);
+    let mut point = hook.wait("sigterm-before-owner");
+    let successor = transfer_lock_to_successor(&mut fixture);
+    hook.resume(&mut point);
+
+    let output = up.wait_with_output().unwrap();
+    let text = output_text(&output);
+    assert_refused_and_successor_alive(output, &text, successor);
+    assert!(text.contains("SIGTERM"), "{text}");
+    assert!(
+        ping(&fixture.socket()).is_ok(),
+        "successor must remain responsive"
+    );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_prevents_successor_admission_between_proof_and_sigterm() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let frozen = freeze_fixture_daemon(&fixture);
+    let hook = LifecycleHook::new("successor-during-sigterm-proof");
+    let up = up_in_terminal_with_hook(&fixture, &hook);
+    let mut point = hook.wait("sigterm-before-owner");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigterm-before-delivery");
+    assert_successor_publication_refused(&fixture, "sigterm-delivery");
+    assert_eq!(
+        unsafe { libc::kill(frozen as libc::pid_t, libc::SIGCONT) },
+        0,
+        "resume the exact retained fixture before its SIGTERM"
+    );
+    hook.resume(&mut point);
+    resume_spawned_daemon_publication(&hook);
+
+    let output = up.wait_with_output().unwrap();
+    let text = output_text(&output);
+    let reachable = ping(&fixture.socket()).is_ok();
+    if reachable {
+        shutdown_isolated_daemon(&fixture.socket());
+    }
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("\"pid\": {frozen}")) && text.contains("\"signal\": \"SIGTERM\""),
+        "replacement must report the retained SIGTERM target: {text}"
+    );
+    fixture.wait_for_exit();
+    assert!(
+        reachable,
+        "replacement after guarded SIGTERM must answer Ping: {text}"
+    );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_prevents_successor_admission_between_proof_and_sigkill() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let frozen = freeze_fixture_daemon(&fixture);
+    let hook = LifecycleHook::new("successor-during-sigkill-proof");
+    let up = up_in_terminal_with_hook(&fixture, &hook);
+    let mut point = hook.wait("sigterm-before-owner");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigterm-before-delivery");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigkill-before-owner");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigkill-before-delivery");
+    assert_successor_publication_refused(&fixture, "sigkill-delivery");
+    hook.resume(&mut point);
+    resume_spawned_daemon_publication(&hook);
+
+    let output = up.wait_with_output().unwrap();
+    let text = output_text(&output);
+    let reachable = ping(&fixture.socket()).is_ok();
+    if reachable {
+        shutdown_isolated_daemon(&fixture.socket());
+    }
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("\"pid\": {frozen}")) && text.contains("\"signal\": \"SIGKILL\""),
+        "replacement must retain the target through SIGKILL: {text}"
+    );
+    fixture.wait_for_exit();
+    assert!(
+        reachable,
+        "replacement after guarded SIGKILL must answer Ping: {text}"
+    );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_refuses_sigterm_when_the_proved_instance_disappears() {
+    let mut fixture = IsolatedDaemon::start(None);
+    freeze_fixture_daemon(&fixture);
+    let hook = LifecycleHook::new("gone-after-sigterm-proof");
+    let up = up_in_terminal_with_hook(&fixture, &hook);
+    let mut point = hook.wait("sigterm-before-owner");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigterm-before-delivery");
+    fixture.kill_and_reap_daemon();
+    hook.resume(&mut point);
+
+    let output = up.wait_with_output().unwrap();
+    let text = output_text(&output);
+    fixture.restart_daemon();
+    let successor = recorded_pid(&fixture);
+    assert_refused_and_successor_alive(output, &text, successor);
+    assert!(
+        text.contains("SIGTERM target disappeared before delivery"),
+        "{text}"
+    );
+    assert!(text.contains("no signal was delivered"), "{text}");
+    assert!(!text.contains("SIGKILL target disappeared"), "{text}");
+    assert!(
+        ping(&fixture.socket()).is_ok(),
+        "successor must remain responsive"
+    );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_refuses_sigkill_when_the_lock_owner_changed_after_sigterm() {
+    let mut fixture = IsolatedDaemon::start(None);
+    freeze_fixture_daemon(&fixture);
+    let hook = LifecycleHook::new("owner-before-sigkill");
+    let up = up_in_terminal_with_hook(&fixture, &hook);
+    let mut point = hook.wait("sigterm-before-owner");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigterm-before-delivery");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigkill-before-owner");
+    let successor = transfer_lock_to_successor(&mut fixture);
+    hook.resume(&mut point);
+
+    let output = up.wait_with_output().unwrap();
+    let text = output_text(&output);
+    assert_refused_and_successor_alive(output, &text, successor);
+    assert!(text.contains("SIGKILL"), "{text}");
+    assert!(text.contains("SIGTERM was delivered"), "{text}");
+    assert!(!text.contains("no process was signalled"), "{text}");
+    assert!(
+        ping(&fixture.socket()).is_ok(),
+        "successor must remain responsive"
+    );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_refuses_sigkill_when_the_proved_instance_disappears() {
+    let mut fixture = IsolatedDaemon::start(None);
+    freeze_fixture_daemon(&fixture);
+    let hook = LifecycleHook::new("gone-after-sigkill-proof");
+    let up = up_in_terminal_with_hook(&fixture, &hook);
+    let mut point = hook.wait("sigterm-before-owner");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigterm-before-delivery");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigkill-before-owner");
+    hook.resume(&mut point);
+    let mut point = hook.wait("sigkill-before-delivery");
+    fixture.kill_and_reap_daemon();
+    hook.resume(&mut point);
+
+    let output = up.wait_with_output().unwrap();
+    let text = output_text(&output);
+    fixture.restart_daemon();
+    let successor = recorded_pid(&fixture);
+    assert_refused_and_successor_alive(output, &text, successor);
+    assert!(
+        text.contains("SIGKILL target disappeared before delivery"),
+        "{text}"
+    );
+    assert!(text.contains("SIGTERM was delivered"), "{text}");
+    assert!(
+        ping(&fixture.socket()).is_ok(),
+        "successor must remain responsive"
+    );
+}
+
+#[cfg(feature = "lifecycle-test-hooks")]
+#[test]
+fn up_refuses_stale_owner_during_offline_admission() {
+    let mut fixture =
+        IsolatedDaemon::start_with_env(None, &[("COLLAB_LIFECYCLE_RELEASE_ADMISSION", "1")], true);
+    let storage_root = fixture
+        .central_runtime_state_path()
+        .ancestors()
+        .nth(3)
+        .unwrap()
+        .to_path_buf();
+    let daemon_pid = freeze_fixture_daemon(&fixture);
+    let hook = LifecycleHook::new("offline-admission");
+    let (hook_name, hook_path) = hook_env(&hook);
+    let reset_log = fixture.root.join("offline-reset.log");
+    let reset_output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&reset_log)
+        .unwrap();
+    let mut command = fixture.base_command("reset");
+    let mut reset = command
+        .args([
+            "--host",
+            "--storage-root",
+            storage_root.to_str().unwrap(),
+            "--approval",
+            "isolated offline admission test",
+            "--discard-legacy",
+        ])
+        .env(hook_name, hook_path)
+        .env_remove("COLLAB_LIFECYCLE_RELEASE_ADMISSION")
+        .stdin(Stdio::null())
+        .stdout(reset_output.try_clone().unwrap())
+        .stderr(reset_output)
+        .spawn()
+        .expect("start offline reset admission fixture");
+    let mut point = hook.wait("reset-admission-held");
+
+    let output = up_in_terminal(&fixture);
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("DAEMON_OWNER_PUBLICATION_REFUSED"),
+        "offline admission must own publication while retaining admission: {text}"
+    );
+    assert!(
+        fixture
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none(),
+        "stale daemon proof must not signal the live fixture PID {daemon_pid}: {text}"
+    );
+
+    hook.resume(&mut point);
+    let reset_status = reset.wait().unwrap();
+    let reset_text = std::fs::read_to_string(&reset_log).unwrap_or_default();
+    terminate_owned_child(fixture.child.as_mut().unwrap());
+    assert!(!reset_status.success(), "{reset_text}");
+    assert!(
+        reset_text.contains("RESET_DAEMON_LIVE"),
+        "reset must reach its existing live-daemon refusal after the barrier: {reset_text}"
     );
 }

@@ -531,6 +531,41 @@ where
 /// each signal.
 const REPLACE_SIGNAL_WAIT: Duration = Duration::from_secs(5);
 
+#[cfg(feature = "lifecycle-test-hooks")]
+const LIFECYCLE_TEST_HOOK_ENV: &str = "COLLAB_LIFECYCLE_TEST_HOOK";
+
+#[cfg(feature = "lifecycle-test-hooks")]
+fn lifecycle_test_barrier(point: &str) -> anyhow::Result<()> {
+    let Some(endpoint) = std::env::var_os(LIFECYCLE_TEST_HOOK_ENV) else {
+        return Ok(());
+    };
+    let mut stream = UnixStream::connect(&endpoint).with_context(|| {
+        format!(
+            "lifecycle test hook could not connect to {}",
+            Path::new(&endpoint).display()
+        )
+    })?;
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
+    stream.write_all(point.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut resume = String::new();
+    std::io::BufReader::new(stream).read_line(&mut resume)?;
+    if resume.trim() != "resume" {
+        anyhow::bail!(
+            "lifecycle test hook expected resume acknowledgement, received {:?}",
+            resume.trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "lifecycle-test-hooks"))]
+fn lifecycle_test_barrier(_point: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// The recorded daemon that `replace_unresponsive_daemon` stopped.
 pub struct ReplacedDaemon {
     pub pid: u32,
@@ -543,11 +578,9 @@ pub struct ReplacedDaemon {
 /// and a daemon that is still starting (lock held, no socket yet) are left
 /// alone, so the caller keeps its normal start path for them.
 ///
-/// Only the PID recorded in `pid_path` is signalled, and only after the lock
-/// file names the same PID and process start identity and both `pid_path` and
-/// the lock owner still verify. SIGTERM comes first; SIGKILL follows only when
-/// the lock is still held after a bounded wait and the same owner still
-/// verifies.
+/// Only one retained process instance selected from the recorded owner is
+/// signalled. SIGTERM comes first; SIGKILL follows only when the lock is still
+/// held after a bounded wait and the same owner still verifies.
 pub fn replace_unresponsive_daemon(
     sock: &Path,
     pid_path: &Path,
@@ -570,32 +603,79 @@ pub fn replace_unresponsive_daemon(
             server_dir.display()
         ),
     }
-    let pid = verified_daemon_pid(pid_path)?;
     let lock_path = server_dir.join("daemon.lock");
-    let owner = verified_lock_owner(&lock_path, pid)?;
+    let publication_path = server_dir.join("daemon.owner.lock");
+    let (pid, owner, target) = retained_daemon_target(pid_path, &lock_path, &publication_path)?;
+    let mut delivered = None;
     for (signal, name) in [(libc::SIGTERM, "SIGTERM"), (libc::SIGKILL, "SIGKILL")] {
+        lifecycle_test_barrier(&format!("{}-before-owner", name.to_ascii_lowercase()))?;
+        let publication =
+            crate::host_runtime::PublicationGuard::acquire(&publication_path, false, false)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "DAEMON_REPLACE_REFUSED: owner publication unavailable before {name}: \
+                         {error:#}; {}",
+                        signal_effect_text(delivered)
+                    )
+                })?;
+        require_held_admission(&lock_path)?;
         // Bind every signal to the same lock owner and process instance.
         // Checking only the PID file would accept PID reuse or a stale PID
         // after another collab process acquired the lock.
         if lock_availability(server_dir) != LockAvailability::Held {
             anyhow::bail!(
-                "DAEMON_REPLACE_REFUSED: host writer lock was released before {name}; no process was signalled"
+                "DAEMON_REPLACE_REFUSED: host writer lock was released before {name}; {}",
+                signal_effect_text(delivered)
             );
         }
-        if verified_daemon_pid(pid_path)? != pid {
-            anyhow::bail!(
-                "DAEMON_REPLACE_REFUSED: recorded daemon PID changed before {name}; no process was signalled"
-            );
+        match verified_daemon_pid(pid_path) {
+            Ok(current_pid) if current_pid == pid => {}
+            Ok(_) => anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: recorded daemon PID changed before {name}; {}",
+                signal_effect_text(delivered)
+            ),
+            Err(error) => anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: recorded daemon proof failed before {name}: {error:#}; {}",
+                signal_effect_text(delivered)
+            ),
         }
-        verified_lock_owner(&lock_path, pid)?.require_same(&owner)?;
-        if unsafe { libc::kill(pid, signal) } != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(anyhow::Error::new(error).context(format!(
-                    "DAEMON_REPLACE_REFUSED: cannot send {name} to recorded daemon PID {pid}"
-                )));
-            }
+        match verified_lock_owner(&publication, &lock_path, pid) {
+            Ok(current) => current.require_same(&owner).map_err(|error| {
+                anyhow::anyhow!(
+                    "DAEMON_REPLACE_REFUSED: daemon owner changed before {name}: {error:#}; {}",
+                    signal_effect_text(delivered)
+                )
+            })?,
+            Err(error) => anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: daemon owner proof failed before {name}: {error:#}; {}",
+                signal_effect_text(delivered)
+            ),
         }
+        lifecycle_test_barrier(&format!("{}-before-delivery", name.to_ascii_lowercase()))?;
+        match crate::host_runtime::retained_process_instance_is_alive(&target) {
+            Ok(true) => {}
+            Ok(false) => anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: {name} target disappeared before delivery; {}",
+                signal_effect_text(delivered)
+            ),
+            Err(error) => anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: cannot verify retained target before {name}: {error}; {}",
+                signal_effect_text(delivered)
+            ),
+        }
+        match crate::host_runtime::signal_retained_process_instance(&target, signal) {
+            crate::host_runtime::ProcessSignalOutcome::Delivered => delivered = Some(name),
+            crate::host_runtime::ProcessSignalOutcome::InstanceGone => anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: {name} target disappeared before delivery; {}",
+                signal_effect_text(delivered)
+            ),
+            crate::host_runtime::ProcessSignalOutcome::Unavailable(detail)
+            | crate::host_runtime::ProcessSignalOutcome::Failed(detail) => anyhow::bail!(
+                "DAEMON_REPLACE_REFUSED: cannot deliver {name} to recorded daemon PID {pid}: {detail}; {}",
+                signal_effect_text(delivered)
+            ),
+        }
+        drop(publication);
         let deadline = Instant::now() + REPLACE_SIGNAL_WAIT;
         while Instant::now() < deadline {
             if lock_availability(server_dir) == LockAvailability::Unheld {
@@ -613,74 +693,265 @@ pub fn replace_unresponsive_daemon(
     )
 }
 
+fn signal_effect_text(delivered: Option<&'static str>) -> &'static str {
+    match delivered {
+        None => "no signal was delivered",
+        Some(_) => "SIGTERM was delivered; this signal was not delivered",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn retained_daemon_target(
+    pid_path: &Path,
+    lock_path: &Path,
+    publication_path: &Path,
+) -> anyhow::Result<(
+    libc::pid_t,
+    LockOwner,
+    crate::host_runtime::RetainedProcessInstance,
+)> {
+    let publication =
+        crate::host_runtime::PublicationGuard::acquire(publication_path, false, false).map_err(
+            |error| {
+                anyhow::anyhow!("DAEMON_REPLACE_REFUSED: owner publication unavailable: {error:#}")
+            },
+        )?;
+    require_held_admission(lock_path)?;
+    let pid = verified_daemon_pid(pid_path)?;
+    let owner = verified_lock_owner(&publication, lock_path, pid)?;
+    let target = crate::host_runtime::retained_process_instance(pid as u32).map_err(|error| {
+        anyhow::anyhow!("DAEMON_REPLACE_REFUSED: cannot retain daemon PID {pid}: {error}")
+    })?;
+    if !crate::host_runtime::retained_process_instance_is_alive(&target).map_err(|error| {
+        anyhow::anyhow!("DAEMON_REPLACE_REFUSED: cannot verify retained daemon PID {pid}: {error}")
+    })? {
+        anyhow::bail!("DAEMON_REPLACE_REFUSED: retained daemon PID {pid} exited during validation");
+    }
+    if verified_daemon_pid(pid_path)? != pid {
+        anyhow::bail!(
+            "DAEMON_REPLACE_REFUSED: recorded daemon PID changed during target acquisition"
+        );
+    }
+    verified_lock_owner(&publication, lock_path, pid)?.require_same(&owner)?;
+    Ok((pid, owner, target))
+}
+
+#[cfg(target_os = "macos")]
+fn retained_daemon_target(
+    pid_path: &Path,
+    lock_path: &Path,
+    publication_path: &Path,
+) -> anyhow::Result<(
+    libc::pid_t,
+    LockOwner,
+    crate::host_runtime::RetainedProcessInstance,
+)> {
+    let publication =
+        crate::host_runtime::PublicationGuard::acquire(publication_path, false, false).map_err(
+            |error| {
+                anyhow::anyhow!("DAEMON_REPLACE_REFUSED: owner publication unavailable: {error:#}")
+            },
+        )?;
+    require_held_admission(lock_path)?;
+    let pid = verified_daemon_pid(pid_path)?;
+    let owner = verified_lock_owner(&publication, lock_path, pid)?;
+    let target = crate::host_runtime::retained_process_instance(&owner.audit_token, pid as u32)
+        .map_err(|error| {
+            anyhow::anyhow!("DAEMON_REPLACE_REFUSED: cannot retain daemon PID {pid}: {error}")
+        })?;
+    if verified_daemon_pid(pid_path)? != pid {
+        anyhow::bail!(
+            "DAEMON_REPLACE_REFUSED: recorded daemon PID changed during target acquisition"
+        );
+    }
+    verified_lock_owner(&publication, lock_path, pid)?.require_same(&owner)?;
+    Ok((pid, owner, target))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn retained_daemon_target(
+    _pid_path: &Path,
+    _lock_path: &Path,
+    _publication_path: &Path,
+) -> anyhow::Result<(
+    libc::pid_t,
+    LockOwner,
+    crate::host_runtime::RetainedProcessInstance,
+)> {
+    anyhow::bail!(
+        "DAEMON_REPLACE_REFUSED: process-instance signalling is unsupported on this platform"
+    )
+}
+
 struct LockOwner {
+    generation: String,
     pid: libc::pid_t,
     start_id: String,
+    #[cfg(target_os = "macos")]
+    audit_token: String,
 }
 
 impl LockOwner {
     fn require_same(&self, expected: &Self) -> anyhow::Result<()> {
-        if self.pid == expected.pid && self.start_id == expected.start_id {
+        if self.pid == expected.pid
+            && self.generation == expected.generation
+            && self.start_id == expected.start_id
+            && cfg_eq_audit_token(self, expected)
+        {
             return Ok(());
         }
         anyhow::bail!(
-            "DAEMON_REPLACE_REFUSED: daemon.lock owner changed from PID {} ({}) to PID {} ({}); no process was signalled",
+            "DAEMON_REPLACE_REFUSED: daemon.lock owner changed from generation {} PID {} ({}) \
+             to generation {} PID {} ({})",
+            expected.generation,
             expected.pid,
             expected.start_id,
+            self.generation,
             self.pid,
             self.start_id
         )
     }
 }
 
+#[cfg(target_os = "macos")]
+fn cfg_eq_audit_token(left: &LockOwner, right: &LockOwner) -> bool {
+    left.audit_token == right.audit_token
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cfg_eq_audit_token(_left: &LockOwner, _right: &LockOwner) -> bool {
+    true
+}
+
 /// Read and verify the owner written by the daemon that currently holds
 /// `daemon.lock`. An empty or malformed record is not an owner proof.
-fn verified_lock_owner(lock_path: &Path, pid: libc::pid_t) -> anyhow::Result<LockOwner> {
-    let refused = |detail: String| {
-        anyhow::anyhow!(
-            "DAEMON_REPLACE_REFUSED: {detail}; the unresponsive daemon was not signalled"
-        )
-    };
+fn verified_lock_owner(
+    publication: &crate::host_runtime::PublicationGuard,
+    lock_path: &Path,
+    pid: libc::pid_t,
+) -> anyhow::Result<LockOwner> {
+    let owner = read_lock_owner(publication, lock_path, pid)?;
+    verify_lock_owner_start(lock_path, &owner, pid)?;
+    Ok(owner)
+}
+
+fn read_lock_owner(
+    _publication: &crate::host_runtime::PublicationGuard,
+    lock_path: &Path,
+    pid: libc::pid_t,
+) -> anyhow::Result<LockOwner> {
+    let refused = |detail: String| anyhow::anyhow!("DAEMON_REPLACE_REFUSED: {detail}");
     let text = std::fs::read_to_string(lock_path)
         .map_err(|error| refused(format!("cannot read {}: {error}", lock_path.display())))?;
+    parse_lock_owner(&text, pid).map_err(refused)
+}
+
+fn parse_lock_owner(text: &str, pid: libc::pid_t) -> Result<LockOwner, String> {
     let mut fields = text.split_whitespace();
     let marker = fields.next();
-    let owner_pid = fields
-        .next()
-        .and_then(|value| value.parse::<libc::pid_t>().ok());
-    let start_id = fields.next();
-    if marker != Some("collab-daemon")
-        || owner_pid != Some(pid)
-        || start_id.is_none()
-        || fields.next().is_some()
-    {
-        return Err(refused(format!(
-            "daemon.lock does not name recorded daemon PID {pid} and one process start identity"
-        )));
+    if marker != Some("collab-daemon-v3") {
+        return Err(format!(
+            "daemon.lock uses an unsupported owner publication protocol; \
+             expected complete collab-daemon-v3 proof for PID {pid}"
+        ));
     }
-    let start_id = start_id.unwrap().to_owned();
+    let generation = fields
+        .next()
+        .filter(|value| value.len() == 32 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            format!("daemon.lock v3 proof for PID {pid} has an invalid admission generation")
+        })?
+        .to_owned();
+    fields
+        .next()
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<libc::pid_t>().ok())
+        .filter(|owner_pid| *owner_pid > 1 && *owner_pid == pid)
+        .ok_or_else(|| {
+            format!("daemon.lock v3 proof does not name recorded daemon PID {pid} with a valid PID")
+        })?;
+    let start_id = fields
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("daemon.lock v3 proof for PID {pid} lacks one start identity"))?
+        .to_owned();
+    #[cfg(target_os = "macos")]
+    let audit_token = {
+        if fields.next() != Some("mac-audit") {
+            return Err(format!(
+                "daemon.lock v3 proof for PID {pid} does not declare the macOS audit-token platform"
+            ));
+        }
+        let token = fields.by_ref().take(8).collect::<Vec<_>>();
+        if token.len() != 8
+            || token.iter().any(|word| {
+                !word.bytes().all(|byte| byte.is_ascii_digit()) || word.parse::<u32>().is_err()
+            })
+            || fields.next().is_some()
+        {
+            return Err(format!(
+                "daemon.lock v3 proof for PID {pid} does not contain one complete audit token"
+            ));
+        }
+        token.join(" ")
+    };
+    #[cfg(target_os = "linux")]
+    if fields.next() != Some("linux-pidfd") || fields.next().is_some() {
+        return Err(format!(
+            "daemon.lock v3 proof for PID {pid} does not declare the Linux pidfd platform"
+        ));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Err(format!(
+        "daemon.lock v3 process-instance proof is unsupported on this platform for PID {pid}"
+    ));
+    Ok(LockOwner {
+        generation,
+        pid,
+        start_id,
+        #[cfg(target_os = "macos")]
+        audit_token,
+    })
+}
+
+fn require_held_admission(lock_path: &Path) -> anyhow::Result<()> {
+    let Some(server_dir) = lock_path.parent() else {
+        anyhow::bail!("DAEMON_REPLACE_REFUSED: daemon.lock has no parent directory");
+    };
+    if lock_availability(server_dir) == LockAvailability::Held {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "DAEMON_REPLACE_REFUSED: daemon admission lock is not held at {}",
+        lock_path.display()
+    )
+}
+
+fn verify_lock_owner_start(
+    _lock_path: &Path,
+    owner: &LockOwner,
+    pid: libc::pid_t,
+) -> anyhow::Result<()> {
+    let refused = |detail: String| anyhow::anyhow!("DAEMON_REPLACE_REFUSED: {detail}");
     let current_start =
         crate::host_runtime::exact_process_start_id(pid as u32).map_err(|error| {
             refused(format!(
                 "process identity is unavailable for PID {pid}: {error}"
             ))
         })?;
-    if current_start.as_deref() != Some(start_id.as_str()) {
+    if current_start.as_deref() != Some(owner.start_id.as_str()) {
         return Err(refused(format!(
-            "recorded daemon PID {pid} no longer matches lock owner start identity {start_id}"
+            "recorded daemon PID {pid} no longer matches lock owner start identity {}",
+            owner.start_id
         )));
     }
-    Ok(LockOwner { pid, start_id })
+    Ok(())
 }
 
 /// Read the recorded daemon PID and verify that it names a live `collab`
 /// process other than this one.
 fn verified_daemon_pid(pid_path: &Path) -> anyhow::Result<libc::pid_t> {
-    let refused = |detail: String| {
-        anyhow::anyhow!(
-            "DAEMON_REPLACE_REFUSED: {detail}; the unresponsive daemon was not signalled"
-        )
-    };
+    let refused = |detail: String| anyhow::anyhow!("DAEMON_REPLACE_REFUSED: {detail}");
     let text = std::fs::read_to_string(pid_path)
         .map_err(|error| refused(format!("cannot read {}: {error}", pid_path.display())))?;
     let pid = text
@@ -1399,6 +1670,38 @@ mod tests {
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         assert_eq!(rc, 0, "hold fixture lock");
         file
+    }
+
+    #[test]
+    fn owner_proof_requires_complete_v3_generation_and_platform_marker() {
+        let generation = "0123456789abcdef0123456789abcdef";
+        #[cfg(target_os = "linux")]
+        let record = format!("collab-daemon-v3 {generation} 42 linux:boot:100:7 linux-pidfd\n");
+        #[cfg(target_os = "macos")]
+        let record = format!(
+            "collab-daemon-v3 {generation} 42 1700000000:1 mac-audit \
+             1 2 3 4 5 6 7 8\n"
+        );
+        let owner = parse_lock_owner(&record, 42).expect("complete v3 proof must parse");
+        assert_eq!(owner.generation, generation);
+        assert_eq!(owner.pid, 42);
+
+        for invalid in [
+            "collab-daemon 42 start".to_owned(),
+            format!("collab-daemon-v3 short 42 start linux-pidfd\n"),
+            record.replace("collab-daemon-v3 ", "collab-daemon-v2 "),
+        ] {
+            assert!(
+                parse_lock_owner(&invalid, 42).is_err(),
+                "unsupported or malformed proof must be refused: {invalid:?}"
+            );
+        }
+
+        let mut changed = owner;
+        changed.generation = "fedcba9876543210fedcba9876543210".into();
+        assert!(changed
+            .require_same(&parse_lock_owner(&record, 42).unwrap())
+            .is_err());
     }
 
     #[test]

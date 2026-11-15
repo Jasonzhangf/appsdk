@@ -1952,6 +1952,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 repeat_count,
                 goal_subject,
                 reason,
+                operation,
             } = cmd;
             let value: serde_json::Value = call_project(
                 &scope,
@@ -1971,6 +1972,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     repeat_count,
                     goal_subject,
                     reason,
+                    operation,
                 },
             )?;
             out(&value);

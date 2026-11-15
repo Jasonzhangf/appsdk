@@ -1,5 +1,24 @@
 use state::{GoalScheduleBinding, GoalScheduleContent};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GoalScheduleOperation {
+    Explicit,
+    Edit,
+    Derived,
+}
+
+impl GoalScheduleOperation {
+    fn from_request(operation: Option<String>) -> Result<Self, Resp> {
+        match operation.as_deref() {
+            None => Ok(Self::Explicit),
+            Some("edit") => Ok(Self::Edit),
+            Some(operation) => Err(Resp::err(format!(
+                "GOAL_SCHEDULE_OPERATION_INVALID: unknown operation {operation}"
+            ))),
+        }
+    }
+}
+
 struct GoalScheduleChange {
     goal_id: String,
     goal_owner: String,
@@ -11,7 +30,7 @@ struct GoalScheduleChange {
     interval_ms: Option<i64>,
     repeat_count: Option<u32>,
     content: Option<GoalScheduleContent>,
-    renew_ended: bool,
+    operation: GoalScheduleOperation,
 }
 
 fn handle_goal_schedule_for_actor(
@@ -120,7 +139,7 @@ fn commit_goal_schedule(
             &details,
             Some(target),
             change.desired == "ended",
-            true,
+            change.operation,
             None,
         ) {
             Ok(result) => result,
@@ -208,6 +227,48 @@ fn prepare_goal_schedule(
             .cmp(&left.created_ms)
             .then_with(|| left.id.cmp(&right.id))
     });
+    if change.operation == GoalScheduleOperation::Edit && change.desired != "active" {
+        return Err(Resp::err(
+            "GOAL_SCHEDULE_EDIT_REQUIRES_ACTIVE: edit keeps desired=active",
+        ));
+    }
+    let edit_current = if change.operation == GoalScheduleOperation::Edit {
+        let current: Vec<_> = matching
+            .iter()
+            .filter(|subscription| {
+                subscription.expires_ms > now
+                    && matches!(subscription.status.as_str(), "armed" | "transport-lost")
+            })
+            .collect();
+        if current.len() > 1 {
+            return Err(Resp::err(
+                "GOAL_SCHEDULE_TARGET_AMBIGUOUS: edit requires one current goal",
+            ));
+        }
+        current.first().copied()
+    } else {
+        None
+    };
+    if change.operation == GoalScheduleOperation::Edit && matching.is_empty() {
+        return Err(Resp::err(
+            "GOAL_SCHEDULE_TARGET_NOT_FOUND: edit requires an existing exact goal",
+        ));
+    }
+    if change.operation == GoalScheduleOperation::Edit && edit_current.is_none() {
+        return terminal_goal_edit_schedule(change, target, &matching[0], now);
+    }
+    if change.operation == GoalScheduleOperation::Derived
+        && task_id.is_some()
+        && !matching.is_empty()
+        && matching.iter().all(|subscription| {
+            matches!(
+                subscription.status.as_str(),
+                "cancelled" | "consumed" | "expired" | "suppressed"
+            )
+        })
+    {
+        return Ok((Vec::new(), Resp::data(serde_json::Value::Null)));
+    }
     let mut events = Vec::new();
     let mut retired = Vec::new();
     let mut superseded = Vec::new();
@@ -231,41 +292,40 @@ fn prepare_goal_schedule(
                 && matching
                     .iter()
                     .any(|subscription| subscription.periodic_declared);
-        let existing = matching
-            .iter()
-            .find(|subscription| {
-                subscription.status == "armed"
-                    && subscription.expires_ms > now
-                    && if periodic_request {
-                        subscription.periodic_declared
-                    } else {
-                        !subscription.periodic_declared
-                            && subscription.trigger_ms == change.trigger_ms
-                    }
-            })
-            .or_else(|| {
-                matching.iter().find(|subscription| {
-                    periodic_request
-                        && subscription.periodic_declared
-                        && subscription.status == "transport-lost"
+        let existing = if let Some(current) = edit_current {
+            Some(current)
+        } else {
+            matching
+                .iter()
+                .find(|subscription| {
+                    subscription.status == "armed"
                         && subscription.expires_ms > now
+                        && if periodic_request {
+                            subscription.periodic_declared
+                        } else {
+                            !subscription.periodic_declared
+                                && subscription.trigger_ms == change.trigger_ms
+                        }
                 })
-            })
-            .or_else(|| {
-                // A task-linked schedule whose holder retired keeps its
-                // identity, content, progress and cadence while it waits for
-                // the next committed owner.
-                matching.iter().find(|subscription| {
-                    task_id.is_some()
-                        && subscription.status == "waiting-owner"
-                        && subscription.periodic_declared
+                .or_else(|| {
+                    matching.iter().find(|subscription| {
+                        periodic_request
+                            && subscription.periodic_declared
+                            && subscription.status == "transport-lost"
+                            && subscription.expires_ms > now
+                    })
                 })
-            });
-        if task_id.is_some() && existing.is_none() && !matching.is_empty() && !change.renew_ended {
-            return Err(Resp::err(
-                "GOAL_SCHEDULE_RENEWAL_REQUIRED: task batch has ended",
-            ));
-        }
+                .or_else(|| {
+                    // A task-linked schedule whose holder retired keeps its
+                    // identity, content, progress and cadence while it waits
+                    // for the next committed owner.
+                    matching.iter().find(|subscription| {
+                        task_id.is_some()
+                            && subscription.status == "waiting-owner"
+                            && subscription.periodic_declared
+                    })
+                })
+        };
         let interval = change.interval_ms.or_else(|| {
             existing
                 .filter(|_| change.trigger_ms.is_none())
@@ -450,6 +510,87 @@ fn prepare_goal_schedule(
     Ok((events, response))
 }
 
+fn terminal_goal_edit_schedule(
+    change: &GoalScheduleChange,
+    target: &str,
+    existing: &NotificationSubscription,
+    now: i64,
+) -> Result<(Vec<Event>, Resp), Resp> {
+    if let Some(GoalScheduleContent::Inline { content }) = &change.content {
+        if content.trim().is_empty() {
+            return Err(Resp::err("GOAL_SCHEDULE_CONTENT_REQUIRED"));
+        }
+    }
+    if change.interval_ms.is_some_and(|interval| interval <= 0) {
+        return Err(Resp::err("interval_ms must be greater than zero"));
+    }
+    if change
+        .repeat_count
+        .is_some_and(|repeat| !(1..=state::MAX_NOTIFICATION_REPEATS).contains(&repeat))
+    {
+        return Err(Resp::err("repeat_count must be between 1 and 100"));
+    }
+    if change
+        .ttl_seconds
+        .is_some_and(|ttl| ttl == 0 || ttl > MAX_NOTIFICATION_TTL_SECONDS)
+    {
+        return Err(Resp::err(format!(
+            "ttl_seconds must be between 1 and {MAX_NOTIFICATION_TTL_SECONDS}"
+        )));
+    }
+    let interval = change.interval_ms.or(existing.interval_ms);
+    if interval.is_none() && change.repeat_count.is_some() {
+        return Err(Resp::err(
+            "GOAL_SCHEDULE_PERIOD_INCOMPLETE: repeat requires interval_ms",
+        ));
+    }
+
+    let mut subscription = existing.clone();
+    subscription.worker_id = target.into();
+    subscription.interval_ms = interval;
+    subscription.repeat_count = change.repeat_count.unwrap_or(existing.repeat_count);
+    subscription.periodic_declared = existing.periodic_declared || interval.is_some();
+    if let Some(content) = change.content.clone() {
+        let binding = subscription
+            .goal_content
+            .get_or_insert_with(|| GoalScheduleBinding {
+                source: None,
+                ttl_seconds: change.ttl_seconds.unwrap_or(0),
+            });
+        binding.source = Some(content);
+    }
+    if let Some(ttl_seconds) = change.ttl_seconds {
+        let binding = subscription
+            .goal_content
+            .get_or_insert_with(|| GoalScheduleBinding {
+                source: change.content.clone(),
+                ttl_seconds,
+            });
+        binding.ttl_seconds = ttl_seconds;
+    }
+    let changed = &subscription != existing;
+    let mut events = Vec::new();
+    if changed {
+        subscription.updated_ms = now;
+        events.push(Event::NotificationSubscribed {
+            subscription: subscription.clone(),
+        });
+    }
+    let response = Resp::data(json!({
+        "goal_id": change.goal_id,
+        "goal_owner": (!change.goal_owner.is_empty()).then_some(&change.goal_owner),
+        "desired": change.desired,
+        "status": subscription.status,
+        "one_shot": !subscription.periodic_declared,
+        "subscription": subscription,
+        "retired_subscription_ids": [],
+        "superseded_message_ids": [],
+        "deduplicated": events.is_empty(),
+        "max_repeat_count": state::MAX_NOTIFICATION_REPEATS,
+    }));
+    Ok((events, response))
+}
+
 fn task_goal_events(
     server: &Server,
     state: &State,
@@ -457,7 +598,7 @@ fn task_goal_events(
     details: &crate::board::BoardTaskDetails,
     selected: Option<&str>,
     ended: bool,
-    renew_ended: bool,
+    operation: GoalScheduleOperation,
     current_control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<(Vec<Event>, serde_json::Value), Resp> {
     let Some(spec) = &details.long_horizon else {
@@ -527,7 +668,7 @@ fn task_goal_events(
         content: Some(GoalScheduleContent::BoardTask {
             task_id: task.id.clone(),
         }),
-        renew_ended,
+        operation,
     };
     let (events, response) = prepare_goal_schedule(state, target, &change, now_ms())?;
     Ok((events, response.data))
@@ -650,10 +791,6 @@ fn task_goal_transition_events(
         if !ended && target.is_none() {
             continue;
         }
-        // A committed ownership change may renew a fully consumed task batch.
-        // An invitation alone is not a transfer and must not renew or move the
-        // schedule.
-        let owner_transfer = old_task.is_some_and(|old| old.owner != task.owner);
         let (goal_events, _) = task_goal_events(
             server,
             after,
@@ -661,7 +798,7 @@ fn task_goal_transition_events(
             details,
             target.as_deref(),
             ended,
-            owner_transfer,
+            GoalScheduleOperation::Derived,
             control,
         )?;
         events.extend(goal_events);

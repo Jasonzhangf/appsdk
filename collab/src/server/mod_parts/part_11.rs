@@ -439,11 +439,18 @@ fn dispatch_with_route_context_bound(
             repeat_count,
             goal_subject,
             reason,
-        } => handle_goal_schedule_for_actor(server, &worker_id, &token, GoalScheduleChange {
-            goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, reason, interval_ms,
-            repeat_count, content: content.map(|content| GoalScheduleContent::Inline { content }),
-            renew_ended: true,
-        }),
+            operation,
+        } => {
+            let operation = match GoalScheduleOperation::from_request(operation) {
+                Ok(operation) => operation,
+                Err(error) => return error,
+            };
+            handle_goal_schedule_for_actor(server, &worker_id, &token, GoalScheduleChange {
+                goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, reason, interval_ms,
+                repeat_count, content: content.map(|content| GoalScheduleContent::Inline { content }),
+                operation,
+            })
+        }
         Req::Poll { .. } => {
             Resp::err("Poll is only handled by the async daemon connection path; use collab recv")
         }

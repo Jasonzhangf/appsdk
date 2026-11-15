@@ -56,6 +56,7 @@ async fn wire_notification_mutation_requires_runtime_and_read_status_stays_compa
             worker_id: worker.into(), token: token.into(), goal_id: "wire-goal".into(), goal_owner: "Alice".into(),
             desired: "ended".into(), trigger_ms: None, ttl_seconds: None, interval_ms: None,
             repeat_count: None, goal_subject: None, reason: Some("fixture cleanup".into()),
+            operation: None,
         }).await;
     assert!(reconciled.ok, "{reconciled:?}");
     std::fs::remove_dir_all(root).unwrap();

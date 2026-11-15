@@ -3,6 +3,137 @@ include!("goal_project_patrol.rs");
 include!("goal_subscribe_rearm.rs");
 
 #[test]
+fn legacy_goal_without_id_is_read_only_and_keeps_selection_rules() {
+    let root = temp_root("goal-legacy-no-id");
+    fs::create_dir_all(root.join(".appsdk-control")).unwrap();
+    fs::create_dir_all(root.join("fake-bin")).unwrap();
+    let fake_collab = root.join("fake-bin/collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    install_goal_test_context(&fake_collab, &root);
+
+    let legacy_goal = root.join("legacy.md");
+    fs::write(&legacy_goal, "# Ship It\n\n推动目标完成。\n").unwrap();
+    let legacy_path = root.join(".appsdk-control/long-task-goal.json");
+    let legacy_bytes = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "owner": "master-peer",
+        "goal_path": legacy_goal.display().to_string(),
+        "interval": "10m",
+        "active": true,
+        "registered_at": "2026-09-07T00:00:00Z"
+    }))
+    .unwrap();
+    fs::write(&legacy_path, &legacy_bytes).unwrap();
+
+    let show = || {
+        Command::new(binary())
+            .args(["longhorizon", "show", "--json"])
+            .current_dir(&root)
+            .env("PATH", root.join("fake-bin"))
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+
+    let legacy_show = show();
+    assert!(
+        legacy_show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy_show.stderr)
+    );
+    let legacy_json: Value = serde_json::from_slice(&legacy_show.stdout).unwrap();
+    assert_eq!(legacy_json["goal"]["registered"], true);
+    assert_eq!(legacy_json["goal"]["record_source"], "legacy-read-only");
+    assert!(legacy_json["goal"]["objective"]
+        .as_str()
+        .unwrap()
+        .contains("# Ship It"));
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+    let legacy_list = Command::new(binary())
+        .args(["goal", "list", "--json"])
+        .current_dir(&root)
+        .env("PATH", root.join("fake-bin"))
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        legacy_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy_list.stderr)
+    );
+    let legacy_list: Value = serde_json::from_slice(&legacy_list.stdout).unwrap();
+    assert_eq!(legacy_list["count"], 1);
+    let legacy_goal_id = legacy_list["goals"][0]["goal_id"].as_str().unwrap();
+
+    let records = goal_test_owner_control_dir(&root, "master-peer").join("records");
+    fs::create_dir_all(&records).unwrap();
+    fs::write(
+        records.join("same-goal.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "goal_id": legacy_goal_id,
+            "owner": "master-peer",
+            "goal_path": legacy_goal.display().to_string(),
+            "desired": "subscribed",
+            "active": true,
+            "interval": "10m"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let scoped_show = show();
+    assert!(
+        scoped_show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scoped_show.stderr)
+    );
+    let scoped_json: Value = serde_json::from_slice(&scoped_show.stdout).unwrap();
+    assert_eq!(scoped_json["goal"]["record_source"], "owner-scoped");
+    assert!(scoped_json["goal"]["objective"]
+        .as_str()
+        .unwrap()
+        .contains("# Ship It"));
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+
+    let second_goal = root.join("second.md");
+    fs::write(&second_goal, "# Second Goal\n").unwrap();
+    fs::write(
+        records.join("second-goal.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "goal_id": "sha256:second-goal",
+            "owner": "master-peer",
+            "goal_path": second_goal.display().to_string(),
+            "desired": "subscribed",
+            "active": true,
+            "interval": "10m"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let ambiguous_show = show();
+    assert!(ambiguous_show.status.success());
+    let ambiguous_json: Value = serde_json::from_slice(&ambiguous_show.stdout).unwrap();
+    assert_eq!(ambiguous_json["goal"]["registered"], false);
+    assert!(ambiguous_json["goal"]["record_error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_RECORD_SELECTOR_REQUIRED"));
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_cancel_failure_keeps_exact_subscription_record() {
     let root = temp_root("goal-cancel-failure");
     fs::create_dir_all(&root).unwrap();

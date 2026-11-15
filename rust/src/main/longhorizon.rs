@@ -114,6 +114,19 @@ fn goal_record_path(scope: &GoalScope, goal_id: &str) -> PathBuf {
         .join(format!("{}.json", goal_record_component(goal_id)))
 }
 
+fn goal_path_identity(scope: &GoalScope, goal_path: &str) -> String {
+    let path = Path::new(goal_path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        scope.project.join(path)
+    };
+    path.canonicalize()
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn goal_record_from_file(file: &Path, owner: &str) -> Result<Option<Value>, String> {
     let Some(mut record) = read_goal_file(file)? else {
         return Ok(None);
@@ -197,9 +210,16 @@ pub(super) fn goal_records_read(scope: &GoalScope) -> Result<Vec<Value>, String>
             .as_str()
             .filter(|goal_id| !goal_id.trim().is_empty())
             .map(str::to_owned)
+            .or_else(|| {
+                record["goal_path"]
+                    .as_str()
+                    .filter(|goal_path| !goal_path.trim().is_empty())
+                    .map(|goal_path| sha256(&goal_path_identity(scope, goal_path)))
+            })
         else {
             continue;
         };
+        record["goal_id"] = Value::String(goal_id.clone());
         if records.contains_key(&goal_id) {
             continue;
         }

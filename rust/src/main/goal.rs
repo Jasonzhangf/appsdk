@@ -428,32 +428,31 @@ fn goal_record_observation(
         .map(|goal_id| format!("goal:{goal_id}"))
         .unwrap_or_default();
     let mut lookup_error = None;
-    let remote = match subscription_id
+    let primary_lookup = subscription_id
         .as_deref()
         .map(|id| goal_subscription_status(root, scope, id))
-    {
-        Some(Ok(remote)) => Some(remote),
-        Some(Err(error)) => {
+        .unwrap_or_else(|| Err("GOAL_STATUS_SUBSCRIPTION_ID_MISSING".into()));
+    let remote = match primary_lookup {
+        Ok(remote) => Some(remote),
+        Err(error) => {
             lookup_error = Some(error);
-            goal_subscription_by_subject_candidates(root, scope, Some(record), &canonical_subject)
-                .ok()
-                .flatten()
-                .map(|(id, status, subscription, subject)| {
+            match goal_subscription_by_subject_candidates(
+                root,
+                scope,
+                Some(record),
+                &canonical_subject,
+            ) {
+                Ok(Some((id, status, subscription, subject))) => {
                     observed["subscription_id"] = Value::String(id);
                     observed["subject"] = Value::String(subject);
-                    (status, subscription)
-                })
-        }
-        None => {
-            lookup_error = Some("GOAL_STATUS_SUBSCRIPTION_ID_MISSING".into());
-            goal_subscription_by_subject_candidates(root, scope, Some(record), &canonical_subject)
-                .ok()
-                .flatten()
-                .map(|(id, status, subscription, subject)| {
-                    observed["subscription_id"] = Value::String(id);
-                    observed["subject"] = Value::String(subject);
-                    (status, subscription)
-                })
+                    Some((status, subscription))
+                }
+                Ok(None) => None,
+                Err(subject_error) => {
+                    lookup_error = Some(subject_error);
+                    None
+                }
+            }
         }
     };
     let Some((remote_status, remote_record)) = remote else {
@@ -1500,11 +1499,20 @@ where
                 updated["revision"] =
                     Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
                 if let Err(error) = goal_record_write(&scope, &updated) {
-                    updated["active"] = Value::Bool(false);
-                    updated["observed"] = Value::String("unknown".into());
-                    updated["error"] = Value::String(error.clone());
+                    updated["active"] = Value::Bool(remote_status == "armed");
+                    updated["collab_subscribed"] = Value::Bool(remote_status == "armed");
+                    updated["observed"] = Value::String(remote_status.clone());
+                    updated["remote_state"] = Value::String(remote_status.clone());
+                    updated["local_persistence_error"] = Value::String(error.clone());
+                    updated["error"] = Value::String(format!(
+                        "GOAL_EDIT_REMOTE_APPLIED_LOCAL_PERSISTENCE_FAILED:{error}; goal_id={goal_id}; remote_status={remote_status}; remote receipt is retained in edit_receipt; the remote edit is applied while the local projection failed; rerun the same edit after restoring local storage"
+                    ));
                     drop(_goal_lock);
-                    goal_fail(format_json, &error, Some(&updated));
+                    goal_fail(
+                        format_json,
+                        updated["error"].as_str().unwrap(),
+                        Some(&updated),
+                    );
                 }
             }
             if format_json {

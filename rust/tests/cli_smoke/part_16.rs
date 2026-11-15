@@ -2280,6 +2280,150 @@ esac
 }
 
 #[test]
+fn goal_list_observation_preserves_subject_lookup_errors() {
+    let root = temp_root("goal-observation-errors");
+    fs::create_dir_all(root.join("fake-bin")).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_collab = root.join("fake-bin/collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "goal reconcile")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) goal_owner="$2"; shift ;;
+      esac
+      shift
+    done
+    printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-initial\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:$goal_id\"}}"
+    ;;
+  "notify status")
+    case "${STATUS_MODE:-success}" in
+      success)
+        printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-fallback\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:legacy-retained\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\"}]}"
+        ;;
+      ambiguous)
+        printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-legacy\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:legacy-retained\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\"},{\"id\":\"sub-canonical\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:${OBSERVED_GOAL_ID}\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\"}]}"
+        ;;
+      malformed)
+        printf '%s\n' 'not-json'
+        ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    install_goal_test_context(&fake_collab, &root);
+    let run = |args: &[&str], status_mode: &str| {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&root)
+            .env("PATH", root.join("fake-bin"))
+            .env("STATUS_MODE", status_mode)
+            .env("OBSERVED_GOAL_ID", "placeholder")
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+    let subscribed = run(
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--json",
+        ],
+        "success",
+    );
+    assert!(
+        subscribed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&subscribed.stderr)
+    );
+    let subscribed: Value = serde_json::from_slice(&subscribed.stdout).unwrap();
+    let goal_id = subscribed["goal_id"].as_str().unwrap().to_owned();
+    let record_path = goal_test_record_path(&root);
+    let mut record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["subscription_id"] = Value::String("sub-missing".into());
+    record["subject"] = Value::String("goal:legacy-retained".into());
+    fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let before = fs::read(&record_path).unwrap();
+
+    let run_list = |status_mode: &str| {
+        Command::new(binary())
+            .args(["goal", "list", "--json"])
+            .current_dir(&root)
+            .env("PATH", root.join("fake-bin"))
+            .env("STATUS_MODE", status_mode)
+            .env("OBSERVED_GOAL_ID", &goal_id)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+
+    let matched = run_list("success");
+    assert!(
+        matched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&matched.stderr)
+    );
+    let matched: Value = serde_json::from_slice(&matched.stdout).unwrap();
+    let matched_goal = &matched["goals"][0];
+    assert_eq!(matched_goal["goal_id"], goal_id);
+    assert_eq!(matched_goal["subscription_id"], "sub-fallback");
+    assert_eq!(matched_goal["active"], true);
+    assert!(matched_goal["observation_error"].is_null());
+    assert!(matched_goal["record"]["error"].is_null());
+    assert_eq!(fs::read(&record_path).unwrap(), before);
+
+    let ambiguous = run_list("ambiguous");
+    assert!(
+        ambiguous.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ambiguous.stderr)
+    );
+    let ambiguous: Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
+    let ambiguous_goal = &ambiguous["goals"][0];
+    assert_eq!(ambiguous_goal["goal_id"], goal_id);
+    assert!(ambiguous_goal["observation_error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_RECONCILE_SUBJECT_AMBIGUOUS"));
+    assert!(ambiguous_goal["record"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_RECONCILE_SUBJECT_AMBIGUOUS"));
+    assert_eq!(fs::read(&record_path).unwrap(), before);
+
+    let malformed = run_list("malformed");
+    assert!(
+        malformed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+    let malformed: Value = serde_json::from_slice(&malformed.stdout).unwrap();
+    let malformed_goal = &malformed["goals"][0];
+    assert_eq!(malformed_goal["goal_id"], goal_id);
+    assert!(malformed_goal["observation_error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_RECONCILE_RESPONSE_INVALID"));
+    assert!(malformed_goal["record"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_RECONCILE_RESPONSE_INVALID"));
+    assert_eq!(fs::read(&record_path).unwrap(), before);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_owner_scoped_peer_native_and_master_lifecycle() {
     let root = temp_root("goal-owner-scoped");
     fs::create_dir_all(root.join("fake-bin")).unwrap();

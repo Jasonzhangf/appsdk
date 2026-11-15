@@ -562,6 +562,136 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
 }
 
 #[test]
+fn goal_edit_reports_remote_applied_when_local_record_write_fails() {
+    let root = temp_root("goal-edit-persistence-failure");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+set -e
+case "$1 $2" in
+  "goal reconcile")
+    operation=
+    goal_id=
+    goal_owner=
+    every=
+    repeat=
+    ttl=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --operation) operation="$2"; shift ;;
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) goal_owner="$2"; shift ;;
+        --every-ms) every="$2"; shift ;;
+        --repeat) repeat="$2"; shift ;;
+        --ttl-seconds) ttl="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ "$operation" = "edit" ] && [ ! -f ".remote-edit-accepted" ]; then
+      /usr/bin/touch .remote-edit-accepted
+      /bin/chmod a-w ".appsdk-control/goals/6d61737465722d70656572/records"
+    fi
+    printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-edit\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:$goal_id\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\",\"interval_ms\":${every:-300000},\"repeat_count\":${repeat:-100},\"ttl_seconds\":${ttl:-604800}}}"
+    ;;
+  "notify status")
+    printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-edit\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:${EDITED_GOAL_ID}\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\"}]}"
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    install_goal_test_context(&fake_collab, &root);
+    let subscribed = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        subscribed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&subscribed.stderr)
+    );
+    let subscribed: Value = serde_json::from_slice(&subscribed.stdout).unwrap();
+    let goal_id = subscribed["goal_id"].as_str().unwrap().to_owned();
+    let records_dir = goal_test_records_dir(&root);
+    let record_path = goal_test_record_path(&root);
+    let before = fs::read(&record_path).unwrap();
+
+    let edit = || {
+        Command::new(binary())
+            .args([
+                "goal",
+                "edit",
+                "--goal-id",
+                &goal_id,
+                "--interval",
+                "3m",
+                "--repeat",
+                "4",
+                "--json",
+            ])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env("EDITED_GOAL_ID", &goal_id)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+
+    let failed = edit();
+    fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(failed.status.code(), Some(1));
+    let failed: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["goal_id"], goal_id);
+    assert_eq!(failed["active"], true);
+    assert_eq!(failed["desired"], "subscribed");
+    assert_eq!(failed["observed"], "armed");
+    assert_eq!(failed["remote_state"], "armed");
+    assert_eq!(failed["subscription_id"], "sub-edit");
+    assert_eq!(failed["edit_receipt"]["status"], "armed");
+    assert_eq!(failed["edit_receipt"]["subscription"]["id"], "sub-edit");
+    assert_eq!(failed["collab_subscription"]["id"], "sub-edit");
+    assert_eq!(failed["interval"], "3m");
+    assert_eq!(failed["repeat_count"], 4);
+    assert!(failed["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_EDIT_REMOTE_APPLIED_LOCAL_PERSISTENCE_FAILED"));
+    assert!(failed["error"]
+        .as_str()
+        .unwrap()
+        .contains("remote edit is applied while the local projection failed"));
+    assert_eq!(fs::read(&record_path).unwrap(), before);
+    assert!(root.join(".remote-edit-accepted").is_file());
+
+    let retried = edit();
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
+    assert_eq!(retried["ok"], true);
+    assert_eq!(retried["subscription_id"], "sub-edit");
+    assert_eq!(retried["receipt"]["subscription"]["id"], "sub-edit");
+    assert_eq!(retried["record"]["interval"], "3m");
+    assert_eq!(retried["record"]["repeat_count"], 4);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_stale_lock_is_recovered_after_owner_exit() {
     let root = temp_root("goal-stale-lock");
     let control_dir = goal_test_control_dir(&root);

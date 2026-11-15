@@ -48,6 +48,30 @@ fn name_holder<'a>(
         .map(|current| current.binding.agent_id.as_str()))
 }
 
+/// The recorded recipient or the current carrier of its stable name still
+/// owns the open obligation after succession.
+pub(crate) fn recipient_matches(
+    control: &super::binding_slot::BindingControlSet,
+    app: &crate::identity::AppServerId,
+    obligation: &ReplyObligation,
+    worker_id: &str,
+) -> Result<bool, String> {
+    if obligation.recipient_worker_id == worker_id {
+        let project = crate::scope::ProjectScopeId::new(&obligation.project)
+            .map_err(|error| error.to_string())?;
+        if control
+            .current_for_worker(&project, app, worker_id)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    match obligation.recipient_name.as_deref() {
+        Some(name) => Ok(name_holder(control, &obligation.project, app, name)? == Some(worker_id)),
+        None => Ok(false),
+    }
+}
+
 /// Verify that `from` is the original recipient (or the current carrier of the
 /// recipient name) replying to `to`, the original sender (or the current
 /// carrier of the sender name). Anything else must be rejected before enqueue.
@@ -58,11 +82,7 @@ pub(crate) fn validate_reply(
     from: &str,
     to: &str,
 ) -> Result<(), String> {
-    let sender_ok = obligation.recipient_worker_id == from
-        || match obligation.recipient_name.as_deref() {
-            Some(name) => name_holder(control, &obligation.project, app, name)? == Some(from),
-            None => false,
-        };
+    let sender_ok = recipient_matches(control, app, obligation, from)?;
     let target_ok = obligation.from_worker_id == to
         || match obligation.from_name.as_deref() {
             Some(name) => {

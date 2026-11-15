@@ -35,6 +35,14 @@ unknown 或不可达均不等于没有 master。仅确认没有 master 且用户
 可做的回复、协作请求和本人任务后，无可执行事项才 idle。peer 默认向委托者或 master
 回报，只有用户直接要求、需要用户决定或影响用户的重大异常才向用户说明。
 
+名字接替后，原消息的历史发件人和收件人仍按既有参与者关系读取。若两者都不匹配，
+当前义务收件人还可读取该精确 ID 的原消息；这一补充读取权只来自仍未关闭的 reply
+obligation，并同时核对调用者 project、app，以及记录的收件人当前 binding 或其稳定名字
+的当前 holder。记录 worker ID 本身不构成跨 app 授权。
+读取沿用既有 message-status 结果，不消费、不重入队、不清义务，也不改变提醒或投递
+状态。无关消息、已关闭义务和 settle 后的历史消息不获得该补充读取权；回复目标仍只取
+当前 obligation projection。
+
 ## daemon 标记的操作 DAG
 
 对应 [正式 DAGpipe 图](../../../docs/dagpipe/collab-reply-obligation.graph.json)。
@@ -47,11 +55,13 @@ flowchart TD
   A --> B{判定本次操作}:::decision
   B -->|发送要求回复的消息| C[(保存待回复标记)]:::data
   B -->|实际关联回复| D[(提交回复并清除标记)]:::data
+  B -->|当前义务收件人读取原消息| R[返回只读原消息]:::action
   B -->|idle 且仍有标记| E[(记录本轮提醒)]:::data
   B -->|无需动作或拒绝| Z([返回明确结果]):::boundary
   C --> N[通过现有通知路径投递]:::action
   D --> N
   E --> N
+  R --> Z
   N --> Z
   classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A
   classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A

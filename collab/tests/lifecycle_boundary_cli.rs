@@ -935,6 +935,40 @@ fn context_does_not_start_for_absent_or_stale_endpoints() {
 }
 
 #[test]
+fn context_admits_the_invocation_root_before_rex_target_validation() {
+    let fixture = IsolatedDaemon::start(None);
+    let project_b = unique_root("rex-root-preflight-project-b");
+    std::fs::create_dir_all(project_b.join(".agent-collab")).unwrap();
+    let provide = json!({
+        "session_id": "agent-session-rex-root-preflight",
+        "rex": {
+            "server": "unix:///tmp/rex-root-preflight-not-contacted.sock",
+            "session_id": "session:invalid",
+            "block_id": "block:invalid",
+            "cwd": project_b.display().to_string(),
+        }
+    })
+    .to_string();
+    let output = fixture
+        .base_command("context")
+        .current_dir(&project_b)
+        .args(["--op", "rex-root-preflight-cli", "--provide", &provide])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", output_text(&output));
+    let text = output_text(&output);
+    assert!(
+        !text.contains("does not match project root"),
+        "the daemon resident root must not reject the invocation project: {text}"
+    );
+    assert!(
+        text.contains("REX_"),
+        "the request must continue to real Rex target validation: {text}"
+    );
+    let _ = std::fs::remove_dir_all(project_b);
+}
+
+#[test]
 fn unauthenticated_shutdown_is_allowed_when_no_password_is_configured() {
     // With no `[maintenance] password` set, shutdown requires no credentials.
     // Each request stops the daemon, so give every case its own isolated child.

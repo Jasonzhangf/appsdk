@@ -1283,7 +1283,12 @@ fn handle_register_with_app_scope_inner_bound(
     let candidates = candidates.unwrap_or_default();
     let agent_session = outer_binding.and_then(RegisterOuterBinding::identity_facts)
         .and_then(|facts| facts.session_id.as_deref());
-    let selected = match validate_transport_candidates_for_session(server, &candidates, &cwd, agent_session) {
+    let selected = match validate_transport_candidates_for_session(
+        &server.root,
+        &candidates,
+        &cwd,
+        agent_session,
+    ) {
         Ok(selected) => selected,
         Err(error) => return Resp::err(error),
     };

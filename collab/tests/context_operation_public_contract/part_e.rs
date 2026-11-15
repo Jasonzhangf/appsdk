@@ -9,7 +9,7 @@ fn unmapped_worker_row(response: &Value, worker_id: &str) -> Value {
 }
 
 fn assert_unmapped_worker_read(row: &Value) {
-    assert_eq!(row["display_name"], "", "{row}");
+    assert!(row["display_name"].is_null(), "{row}");
     assert_eq!(row["work_roles"], json!([]), "{row}");
     assert!(row["role"].is_null(), "{row}");
     assert!(row["role_brief"].is_null(), "{row}");

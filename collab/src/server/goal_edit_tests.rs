@@ -417,3 +417,62 @@ fn goal_edit_multiple_current_batches_are_ambiguous_and_non_mutating_red() {
     );
     assert_eq!(state.notification_subscriptions, before);
 }
+
+#[test]
+fn explicit_task_goal_renewal_creates_a_new_batch_and_preserves_terminal_history() {
+    let now = now_ms();
+    let mut state = State::default();
+    edit_worker(&mut state, "edit-worker");
+    let mut terminal = edit_subscription("sub-terminal", "edit-worker", "consumed", now - 120_000);
+    terminal.subject = Some("goal:task:renew-me".into());
+    terminal.goal_content = Some(GoalScheduleBinding {
+        source: Some(GoalScheduleContent::BoardTask {
+            task_id: "renew-me".into(),
+        }),
+        ttl_seconds: 600,
+    });
+    state
+        .notification_subscriptions
+        .insert(terminal.id.clone(), terminal.clone());
+
+    let (events, response) = prepare_goal_schedule(
+        &state,
+        "edit-worker",
+        &GoalScheduleChange {
+            goal_id: "task:renew-me".into(),
+            goal_owner: "edit-worker".into(),
+            desired: "active".into(),
+            trigger_ms: None,
+            ttl_seconds: Some(600),
+            goal_subject: None,
+            reason: None,
+            interval_ms: Some(60_000),
+            repeat_count: Some(3),
+            content: Some(GoalScheduleContent::BoardTask {
+                task_id: "renew-me".into(),
+            }),
+            operation: GoalScheduleOperation::Explicit,
+        },
+        now,
+    )
+    .unwrap();
+    let renewals: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::NotificationSubscribed { subscription } => Some(subscription),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(renewals.len(), 1, "{events:?}");
+    let renewed = renewals[0];
+    assert_ne!(renewed.id, terminal.id);
+    assert_eq!(renewed.status, "armed");
+    assert_eq!(renewed.fired_count, 0);
+    assert_eq!(response.data["subscription"]["id"], renewed.id);
+
+    for event in &events {
+        state.apply_checked(event).unwrap();
+    }
+    assert_eq!(state.notification_subscriptions[&terminal.id], terminal);
+    assert_eq!(state.notification_subscriptions.len(), 2);
+}

@@ -4,7 +4,7 @@ use state::{GoalScheduleBinding, GoalScheduleContent};
 enum GoalScheduleOperation {
     Explicit,
     Edit,
-    Derived { renew_ended: bool },
+    Derived,
 }
 
 impl GoalScheduleOperation {
@@ -257,6 +257,18 @@ fn prepare_goal_schedule(
     if change.operation == GoalScheduleOperation::Edit && edit_current.is_none() {
         return terminal_goal_edit_schedule(change, target, &matching[0], now);
     }
+    if change.operation == GoalScheduleOperation::Derived
+        && task_id.is_some()
+        && !matching.is_empty()
+        && matching.iter().all(|subscription| {
+            matches!(
+                subscription.status.as_str(),
+                "cancelled" | "consumed" | "expired" | "suppressed"
+            )
+        })
+    {
+        return Ok((Vec::new(), Resp::data(serde_json::Value::Null)));
+    }
     let mut events = Vec::new();
     let mut retired = Vec::new();
     let mut superseded = Vec::new();
@@ -314,13 +326,6 @@ fn prepare_goal_schedule(
                     })
                 })
         };
-        if let GoalScheduleOperation::Derived { renew_ended } = change.operation {
-            if task_id.is_some() && existing.is_none() && !matching.is_empty() && !renew_ended {
-                return Err(Resp::err(
-                    "GOAL_SCHEDULE_RENEWAL_REQUIRED: task batch has ended",
-                ));
-            }
-        }
         let interval = change.interval_ms.or_else(|| {
             existing
                 .filter(|_| change.trigger_ms.is_none())
@@ -786,10 +791,6 @@ fn task_goal_transition_events(
         if !ended && target.is_none() {
             continue;
         }
-        // A committed ownership change may renew a fully consumed task batch.
-        // An invitation alone is not a transfer and must not renew or move the
-        // schedule.
-        let owner_transfer = old_task.is_some_and(|old| old.owner != task.owner);
         let (goal_events, _) = task_goal_events(
             server,
             after,
@@ -797,9 +798,7 @@ fn task_goal_transition_events(
             details,
             target.as_deref(),
             ended,
-            GoalScheduleOperation::Derived {
-                renew_ended: owner_transfer,
-            },
+            GoalScheduleOperation::Derived,
             control,
         )?;
         events.extend(goal_events);

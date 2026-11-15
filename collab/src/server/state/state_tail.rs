@@ -43,6 +43,9 @@ pub struct State {
     /// daemon-owned control record; message bodies never carry it.
     pub reply_obligations: HashMap<String, ReplyObligation>,
     pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
+    /// Immutable original addresses for cross-project messages. Current holders
+    /// are resolved only through the host identity map, never from this record.
+    pub(crate) cross_project_addresses: HashMap<String, super::cross_project_receipt::Addresses>,
     pub mailbox_handoff_wakes: HashMap<String, u32>,
     /// Per-external-conversation default delivery target, keyed by
     /// `<channel>:<channel-instance>:<conversation>`. Control state only;
@@ -97,6 +100,9 @@ pub struct State {
     pub delivery_source_threads: HashMap<String, String>,
     pub notification_subscriptions: HashMap<String, NotificationSubscription>,
     pub wake_bindings: HashMap<String, String>,
+    /// Deadline summary membership. The wake binding selects delivery only;
+    /// these members own their independent finite consumption budgets.
+    pub deadline_summaries: HashMap<String, std::collections::BTreeMap<String, i64>>,
     /// Project-mirrored global CEO grant. `CeoGrantSet` is the only writer;
     /// `None` revokes the grant and never touches bootstrap history.
     pub ceo_grant: Option<crate::ceo::CeoGrant>,

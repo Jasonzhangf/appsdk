@@ -281,7 +281,8 @@ fn resolve_send_name_address(
     // `sendmessage`, `default` and channel-inbound routing share one address
     // owner. It resolves `ceo`/bare project keys through the typed grant and
     // rejects case-folded ambiguity instead of selecting the first holder.
-    match resolve_named_target(state, control, &route, &current_key, &target)? {
+    let grant = current_host_grant_for_address(server, &current_key, &target)?;
+    match resolve_named_target(state, grant.as_ref(), control, &route, &current_key, &target)? {
         Some(resolved) => {
             authoritative_send_binding(state, &route, &resolved.worker_id)
                 .map_err(str::to_owned)?;
@@ -409,14 +410,9 @@ fn handle_channel_inbound_impl(
         Err(error) => return Resp::err(error),
     };
     let project_key = canonical_project_key(&server.root);
-    let is_ceo = intent.address.eq_ignore_ascii_case("ceo")
-        || project_key
-            .as_deref()
-            .is_some_and(|key| intent.address.eq_ignore_ascii_case(key));
-    let local_grant = if is_ceo {
-        st.ceo_grant.clone()
-    } else {
-        None
+    let local_grant = match current_host_grant_for_address(server, project_key.as_deref().unwrap_or(""), &intent.address) {
+        Ok(grant) => grant,
+        Err(error) => return Resp::err(error),
     };
     let mut response = channel_inbound_commit_with_state(
         server,
@@ -433,8 +429,7 @@ fn handle_channel_inbound_impl(
 }
 
 /// Lock-free inbound admission used by the host-aware manager path. The caller
-/// holds `target_state` (and, when the target differs from the host, holds the
-/// host state first). This commit parses the authoritative holder under the
+/// holds HostControl before `target_state`. This commit parses the current holder under the
 /// same guard and never re-locks the target state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn channel_inbound_commit_with_state(
@@ -479,7 +474,7 @@ pub(crate) fn channel_inbound_commit_with_state(
         let worker_id = if intent.explicit_to && target_state.workers.contains_key(&intent.address) {
             intent.address.clone()
         } else {
-            match resolve_address(target_state, &control, &route, &project_key, &intent.address) {
+            match resolve_address(target_state, ceo_grant, &control, &route, &project_key, &intent.address) {
                 Ok(worker_id) => worker_id,
                 Err(error) => return Resp::err(error),
             }
@@ -630,6 +625,16 @@ fn channel_inbound_finish(
         }
         return;
     };
+    let method = {
+        let st = server.state.lock().unwrap();
+        notification_method_for_worker(&st, &to.unwrap_or_default())
+    };
+    if let Some(queued_response) =
+        defer_rex_sender_notification(response.data.clone(), true, method)
+    {
+        *response = queued_response;
+        return;
+    }
     let notification = match recovery_server {
         Some(server) => attempt_notification_detailed_with_rex_recovery(
             server,
@@ -638,10 +643,6 @@ fn channel_inbound_finish(
             now_ms(),
         ),
         None => attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms()),
-    };
-    let method = {
-        let st = server.state.lock().unwrap();
-        notification_method_for_worker(&st, &to.unwrap_or_default())
     };
     *response = notification_send_response(
         response.data.clone(),
@@ -1075,6 +1076,20 @@ fn handle_send_with_task_policy(
                 .cloned();
             let explicit_retry = explicit_retry_refusal(&st, &existing_id).is_none();
             drop(st);
+            let method = {
+                let state = server.state.lock().unwrap();
+                notification_method_for_worker(&state, &to)
+            };
+            if let Some(queued_response) = defer_rex_sender_notification(
+                json!({
+                    "msg_id": existing_id,
+                    "deduplicated": true,
+                }),
+                subscription.is_some(),
+                method,
+            ) {
+                return queued_response;
+            }
             let notification = subscription
                 .as_ref()
                 .map(|subscription| {
@@ -1095,10 +1110,7 @@ fn handle_send_with_task_policy(
                     "deduplicated": true,
                 }),
                 subscription.is_some(),
-                {
-                    let state = server.state.lock().unwrap();
-                    notification_method_for_worker(&state, &to)
-                },
+                method,
                 &notification,
             );
         }
@@ -1228,6 +1240,20 @@ fn handle_send_with_task_policy(
         return Resp::err(format!("SEND_DURABILITY_FAILED: {error}"));
     }
     drop(st);
+    let method = {
+        let state = server.state.lock().unwrap();
+        notification_method_for_worker(&state, &to)
+    };
+    if let Some(queued_response) = defer_rex_sender_notification(
+        json!({
+            "msg_id": mid,
+            "task_id": task_id,
+        }),
+        subscription.is_some(),
+        method,
+    ) {
+        return queued_response;
+    }
     let notification = subscription
         .as_ref()
         .map(|subscription| {
@@ -1242,10 +1268,7 @@ fn handle_send_with_task_policy(
             "task_id": task_id,
         }),
         subscription.is_some(),
-        {
-            let state = server.state.lock().unwrap();
-            notification_method_for_worker(&state, &to)
-        },
+        method,
         &notification,
     )
 }
@@ -1387,6 +1410,7 @@ fn commit_cross_project_message(
     subject: &str,
     body: &str,
     in_reply_to: Option<&str>,
+    addresses: Option<cross_project_receipt::Addresses>,
 ) -> Result<CrossProjectCommitted, Resp> {
     if subject.trim().is_empty() {
         return Err(Resp::err(
@@ -1414,14 +1438,29 @@ fn commit_cross_project_message(
     let subscription = st
         .matching_subscription(to, "direct-message", None, now_ms())
         .cloned();
+    let delivery_mode = if notification_method_for_worker(st, to) == "rex" {
+        "queued"
+    } else {
+        "explicit-notification"
+    };
     let mut events = vec![
         Event::Sent { msg },
         Event::DeliveryMode {
             msg_id: mid.clone(),
-            mode: "explicit-notification".into(),
+            mode: delivery_mode.into(),
             source_thread_id,
         },
     ];
+    if let Some(addresses) = addresses {
+        events.push(Event::MailboxNameAddressed {
+            message_id: mid.clone(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: addresses.recipient.project_scope.as_str().to_owned(),
+                name: addresses.recipient.name.clone(),
+            },
+        });
+        events.push(Event::CrossProjectAddressed { message_id: mid.clone(), addresses });
+    }
     if let Some(subscription) = &subscription {
         events.push(Event::WakeBound {
             message_id: mid.clone(),
@@ -1437,9 +1476,9 @@ fn commit_cross_project_message(
     })
 }
 
-/// Build the public send response and attempt notification after the commit
-/// has released its state guard. Notification never reverses or authorizes the
-/// already durable message.
+/// Build the public send response after the commit has released its state
+/// guard. Rex delivery stays with the daemon timer; other transports use the
+/// existing post-commit notification path.
 fn notify_cross_project_committed(
     server: &Server,
     committed: CrossProjectCommitted,
@@ -1450,6 +1489,24 @@ fn notify_cross_project_committed(
         msg_id,
         subscription,
     } = committed;
+    let notification_method = {
+        let state = server.state.lock().unwrap();
+        notification_method_for_worker(&state, to)
+    };
+    let data = json!({
+        "msg_id": msg_id,
+        "cross_project": true,
+        "sender": sender_worker_id,
+        "recipient": to,
+        "consumed": false,
+    });
+    if let Some(queued_response) = defer_rex_sender_notification(
+        data.clone(),
+        subscription.is_some(),
+        notification_method,
+    ) {
+        return queued_response;
+    }
     let notification = subscription
         .as_ref()
         .map(|subscription| {
@@ -1458,20 +1515,17 @@ fn notify_cross_project_committed(
         .unwrap_or_else(|| {
             NotificationAttempt::NotAttempted("no notification subscription".into())
         });
-    notification_send_response(
-        json!({
-            "msg_id": msg_id,
-            "cross_project": true,
-            "sender": sender_worker_id,
-            "recipient": to,
-        }),
+    let mut response = notification_send_response(
+        data,
         subscription.is_some(),
-        {
-            let state = server.state.lock().unwrap();
-            notification_method_for_worker(&state, to)
-        },
+        notification_method,
         &notification,
-    )
+    );
+    // The mailbox commit is authoritative for send admission. Keep wake
+    // failure in the response data without reporting the send as rejected.
+    response.ok = true;
+    response.error = None;
+    response
 }
 
 fn federation_error_response(error: crate::server::federation::FederationError) -> FederationResponse {
@@ -1587,8 +1641,11 @@ pub(crate) fn resolve_federated_local_recipient(
     let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
         .load()
         .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error.to_string()))?;
+    let grant = current_host_grant_for_address(server, &project_key, &target.name)
+        .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error))?;
     let resolved = crate::server::resolve_named_target(
         state,
+        grant.as_ref(),
         &control,
         &route,
         &project_key,
@@ -1885,9 +1942,8 @@ pub(crate) fn federated_message_receipt(
     federation_receipt_response(&st, reference, requester)
 }
 
-/// Target-side handler kept for direct reducer tests. It checks endpoint
-/// reachability outside the state lock and commits the
-/// message under one target guard.
+/// Target-side handler kept for direct reducer tests. It commits the message
+/// under one target guard; wake delivery is a post-commit owner.
 fn handle_cross_project_send(
     server: &Server,
     sender_worker_id: &str,
@@ -1901,21 +1957,8 @@ fn handle_cross_project_send(
     if source_project.trim().is_empty() {
         return Resp::err("cross-project send requires a resolved source project");
     }
-    // Cross-project messages are durable mailbox entries. Identity admission
-    // must not turn endpoint uncertainty or activity into an enqueue failure.
-    // A tmux peer has a valid address even when its runtime identity remains
-    // Unknown; only a definitively dead endpoint blocks enqueue.
-    let recipient_snapshot = {
-        let state = server.state.lock().unwrap();
-        state.workers.get(to).cloned()
-    };
-    if let Some(recipient) = recipient_snapshot {
-        if worker_identity_and_endpoint(server, &recipient).1 == Some(false) {
-            return Resp::err(
-                "cross-project communication requires a reachable target binding on its server-selected transport",
-            );
-        }
-    }
+    // Cross-project messages are durable mailbox entries. Identity, activity,
+    // and wake reachability do not gate enqueue.
     let mut st = server.state.lock().unwrap();
     let committed = match commit_cross_project_message(
         server,
@@ -1927,6 +1970,7 @@ fn handle_cross_project_send(
         subject,
         body,
         in_reply_to,
+        None,
     ) {
         Ok(committed) => committed,
         Err(response) => return response,
@@ -2561,18 +2605,15 @@ fn task_update_locked(
         );
     }
     let is_master = board_check_master_locked(server, st, &worker_id).is_ok();
-    if task.owner != worker_id && !is_master {
-        return Resp::err("only the task owner may update its lifecycle");
-    }
-    if task.owner == worker_id {
-        if let Err(error) =
-            task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
-        {
-            return error;
-        }
+    // Assigned work follows the current name holder, including while the
+    // durable raw-owner handoff is incomplete.
+    let owner_admission =
+        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id);
+    let owner_is_actor = owner_admission.is_ok();
+    if !is_master {
+        if let Err(error) = owner_admission { return error; }
     }
     let original_status = task.status.clone();
-    let owner_is_actor = task.owner == worker_id;
     if owner_is_actor
         && status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed"))
     {
@@ -2806,7 +2847,10 @@ fn task_block_decide_locked(
     let authorized = if requester_is_master {
         // A master-owned block application goes to the current CEO; without a
         // current CEO it stays pending instead of granting self-approval.
-        is_current_ceo_holder(&st, &worker_id)
+        match is_current_ceo_holder(server, &st, &worker_id) {
+            Ok(current) => current,
+            Err(error) => return Resp::err(error),
+        }
     } else {
         master.as_deref() == Some(worker_id.as_str())
     };
@@ -2900,11 +2944,18 @@ fn task_block_decide_locked(
 /// Whether the caller is the worker currently holding the durable CEO grant.
 /// Mirrors the holder resolution the CEO owner uses, without inventing a
 /// second authority source.
-fn is_current_ceo_holder(st: &State, worker_id: &str) -> bool {
-    st.ceo_grant.as_ref().is_some_and(|grant| {
-        st.name_occupancy(&grant.workspace, &grant.name)
-            .is_some_and(|occupancy| occupancy.worker_id == worker_id)
-    })
+fn is_current_ceo_holder(server: &Server, st: &State, worker_id: &str) -> Result<bool, String> {
+    let view = host_control::HostControl::read_current(&server.host_paths)?;
+    let host = view.state.lock().unwrap();
+    let Some(grant) = host.ceo_grant.as_ref() else { return Ok(false) };
+    let Some(route) = server_route_scope(server, st)? else { return Ok(false) };
+    if grant.workspace != route.project_scope_id.as_str() || grant.app_scope_id != route.app_scope_id.as_str() {
+        return Ok(false);
+    }
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
+    Ok(control.current_for_name(&route.project_scope_id, &route.app_scope_id, &grant.name)?
+        .and_then(|slot| slot.active_binding())
+        .is_some_and(|current| current.binding.agent_id.as_str() == worker_id))
 }
 
 fn stale_worker_views(

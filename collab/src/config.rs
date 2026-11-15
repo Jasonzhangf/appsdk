@@ -710,6 +710,38 @@ pub fn parse(text: &str, root: &Path) -> Result<Config> {
     config.validate()?;
     Ok(config)
 }
+
+fn parse_host(text: &str) -> Result<Config> {
+    let mut input: toml::Value = toml::from_str(text).context("invalid ~/.appsdk/config.toml")?;
+    let projects = input
+        .as_table_mut()
+        .context("config must be a table")?
+        .remove("projects");
+    crate::federation::config::ensure_host_only(projects.as_ref()).map_err(anyhow::Error::msg)?;
+    let mut merged = toml::Value::try_from(Config::default())?;
+    merge(&mut merged, input);
+    let config: Config = merged.try_into()?;
+    config.validate()?;
+    Ok(config)
+}
+
+/// Load only the host-owned configuration.
+///
+/// Project overrides are intentionally ignored here. They are applied by the
+/// selected project runtime through [`load`] using that project's fixed root.
+pub fn load_host() -> Result<Config> {
+    let path = path()?;
+    let mut text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(updated) = remove_retired_transport_config(&text) {
+        std::fs::write(&path, &updated)?;
+        text = updated;
+    }
+    parse_host(&text)
+}
 impl Config {
     /// Build the CEO report policy from the typed quiet-window settings.
     ///
@@ -938,6 +970,34 @@ mod tests {
         assert_eq!(
             c.subagent.profiles["oauth"].model.as_deref(),
             Some("gpt-5.6-luna")
+        );
+    }
+
+    #[test]
+    fn host_config_ignores_project_override_and_scope_is_exact() {
+        let text = r#"
+[timers]
+tick_interval_ms = 5000
+
+[[projects]]
+root = "/project-a"
+[projects.timers]
+tick_interval_ms = 10000
+"#;
+        assert_eq!(parse_host(text).unwrap().timers.tick_interval_ms, 5000);
+        assert_eq!(
+            parse(text, Path::new("/project-a"))
+                .unwrap()
+                .timers
+                .tick_interval_ms,
+            10000
+        );
+        assert_eq!(
+            parse(text, Path::new("/project-b"))
+                .unwrap()
+                .timers
+                .tick_interval_ms,
+            5000
         );
     }
     #[test]

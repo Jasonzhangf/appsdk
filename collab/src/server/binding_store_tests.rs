@@ -55,6 +55,29 @@ fn value(key: &IdentityBindingKey, agent: &str, runtime: &str) -> BindingValue {
     )
 }
 
+fn rex_value(
+    key: &IdentityBindingKey,
+    agent: &str,
+    runtime: &str,
+    server: &str,
+    block: &str,
+) -> BindingValue {
+    let mut value = value(key, agent, runtime);
+    value.transport.kind = TransportKind::Rex;
+    value.transport.endpoint = None;
+    value.transport.namespace = None;
+    value.transport.thread_id = None;
+    value.transport.rex_endpoint = Some(crate::proto::RexEndpoint {
+        server: server.into(),
+        session_id: "session:rex-test".into(),
+        block_id: block.into(),
+        host_id: Some("host-test".into()),
+        instance_id: "instance-test".into(),
+        cwd: key.project_scope.as_str().into(),
+    });
+    value
+}
+
 #[test]
 fn missing_file_loads_an_empty_set() {
     let root = temp_root("missing");
@@ -396,6 +419,68 @@ fn store_commit_is_one_entry_point_for_stable_name_handoff() {
 }
 
 #[test]
+fn unchanged_target_commit_persists_same_block_owner_retirement() {
+    let root = temp_root("same-block-retirement");
+    let store = BindingControlStore::new(&root);
+    let alice = key();
+    let bob = key_in(alice.project_scope.as_str(), "Bob");
+    let mut alice_slot = IdentityBindingSlot::new(alice.clone());
+    alice_slot
+        .commit(
+            &alice,
+            rex_value(
+                &alice,
+                "agent-a",
+                "runtime-a",
+                "unix:///tmp/rex.sock",
+                "block-a",
+            ),
+            None,
+        )
+        .unwrap();
+    let bob_value = rex_value(
+        &bob,
+        "agent-b",
+        "runtime-b",
+        "unix:///tmp/rex.sock",
+        "block-a",
+    );
+    let mut bob_slot = IdentityBindingSlot::new(bob.clone());
+    bob_slot.commit(&bob, bob_value.clone(), None).unwrap();
+    store
+        .save(&BindingControlSet::from_slots(vec![alice_slot, bob_slot]))
+        .unwrap();
+
+    let committed = store
+        .commit(ControlChange::Commit {
+            key: bob.clone(),
+            value: bob_value,
+            expected_generation: Some(1),
+        })
+        .unwrap();
+    assert!(matches!(
+        committed.outcome,
+        StoreChangeOutcome::Slot(super::binding_slot::CommitOutcome::Unchanged { .. })
+    ));
+
+    let loaded = store.load().unwrap();
+    assert!(
+        loaded
+            .slot(&alice)
+            .is_none_or(|slot| slot.active_binding().is_none()),
+        "the replaced block owner must remain retired after reload"
+    );
+    assert_eq!(
+        loaded
+            .slot(&bob)
+            .and_then(IdentityBindingSlot::active_binding)
+            .map(|value| value.binding.agent_id.as_str()),
+        Some("agent-b")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn publication_guard_rejects_cross_app_duplicate_names_and_allows_other_projects() {
     let root = temp_root("project-name-publication-guard");
     let store = BindingControlStore::new(&root);
@@ -625,6 +710,77 @@ fn cross_scope_takeover_releases_source_and_publishes_target_in_one_candidate() 
         "the exact source reference remains in the bounded pending effect"
     );
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn register_source_scope_can_follow_an_anchor_but_name_only_scope_cannot() {
+    let (root, store, target, source_key) = cross_scope_store_fixture("register-anchor-scope");
+    let source_slot = store.load().unwrap().slot(&source_key).cloned().unwrap();
+    let source = BindingControlSet::cross_scope_source_ref(&source_slot).unwrap();
+    let target = IdentityBindingKey::new(
+        ProjectScopeId::new("/tmp/collab-anchor-replacement-project").unwrap(),
+        target.app_scope_id,
+        "Alice",
+    );
+    let mut effect = cross_scope_pending_effect(
+        &target,
+        source.clone(),
+        "register-anchor-scope:operation",
+        "replacement",
+        "replacement-session",
+    );
+    assert!(
+        effect.validate().is_err(),
+        "name-only moves stay within their project"
+    );
+    let before = store.load().unwrap();
+    let change = |effect| ControlChange::MoveNameWithEffect {
+        target: target.clone(),
+        value: value(&target, "replacement", "replacement-runtime"),
+        source_names: Vec::new(),
+        expected_generation: Some(0),
+        effect,
+        companion: None,
+    };
+    assert!(store.commit(change(effect.clone())).is_err());
+    assert_eq!(store.load().unwrap(), before);
+    effect.kind = PendingEffectKind::RegisterAcrossScopes {
+        sources: vec![source.clone()],
+    };
+    effect.validate().unwrap();
+    let mut invalid = effect.clone();
+    invalid.kind = PendingEffectKind::RegisterAcrossScopes {
+        sources: vec![source.clone(), source.clone()],
+    };
+    assert!(
+        invalid.validate().is_err(),
+        "duplicate exact sources cannot be published"
+    );
+    invalid.kind = PendingEffectKind::RegisterAcrossScopes {
+        sources: vec![CrossScopeSourceRef {
+            key: target.clone(),
+            ..source.clone()
+        }],
+    };
+    assert!(
+        invalid.validate().is_err(),
+        "target cannot also be its released source"
+    );
+    store.commit(change(effect)).unwrap();
+    let after = store.load().unwrap();
+    assert!(after.slot(&source_key).unwrap().active_binding().is_none());
+    assert_eq!(
+        after
+            .slot(&target)
+            .unwrap()
+            .active_binding()
+            .unwrap()
+            .binding
+            .agent_id
+            .as_str(),
+        "replacement"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

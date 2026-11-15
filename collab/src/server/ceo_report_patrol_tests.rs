@@ -94,16 +94,19 @@ fn patrol_fixture_inner(
         CEO_NAME
     );
     let workspace = server.root.to_string_lossy().into_owned();
-    server.commit(&[Event::CeoGrantSet {
-        grant: Some(CeoGrant {
-            workspace: workspace.clone(),
-            app_scope_id: "tui-default".into(),
-            name: CEO_NAME.into(),
-            granted_by: "user".into(),
-            approval: "approved".into(),
-            granted_ms: now_ms(),
-        }),
-    }]);
+    host_control::HostControl::read_current(&server.host_paths)
+        .unwrap()
+        .commit_checked(&[host_control::HostChange::CeoGrantSet {
+            grant: Some(CeoGrant {
+                workspace: workspace.clone(),
+                app_scope_id: "tui-default".into(),
+                name: CEO_NAME.into(),
+                granted_by: "user".into(),
+                approval: "approved".into(),
+                granted_ms: now_ms(),
+            }),
+        }])
+        .unwrap();
     assert_eq!(
         server
             .state
@@ -138,17 +141,25 @@ fn idle_fixture() -> PatrolFixture {
     patrol_fixture(status, probes)
 }
 
-fn record_progress(server: &Server, subject: &str, body: &str, urgent: bool) {
-    let project = server.root.to_string_lossy().into_owned();
-    server.commit(&[Event::CeoProgressRecorded {
-        project,
-        content: CeoProgressContent::new(subject, body),
-        urgent,
-    }]);
+fn record_progress(fixture: &PatrolFixture, subject: &str, body: &str, urgent: bool) {
+    let project = fixture.server.root.to_string_lossy().into_owned();
+    fixture
+        .manager
+        .host_control
+        .commit_checked(&[host_control::HostChange::CeoProgressRecorded {
+            project,
+            content: CeoProgressContent::new(subject, body),
+            urgent,
+        }])
+        .unwrap();
 }
 
-fn set_gate(server: &Server, gate: CeoNoticeGate) {
-    server.commit(&[Event::CeoReportNoticeGateUpdated { gate }]);
+fn set_gate(fixture: &PatrolFixture, gate: CeoNoticeGate) {
+    fixture
+        .manager
+        .host_control
+        .commit_checked(&[host_control::HostChange::CeoReportNoticeGateUpdated { gate }])
+        .unwrap();
 }
 
 fn queued_reservation(server: &Server, message_id: &str) {
@@ -184,7 +195,7 @@ fn notice_messages(server: &Server) -> Vec<Message> {
 fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
     let fixture = idle_fixture();
     let quiet = beijing_at(120);
-    record_progress(&fixture.server, "ordinary", "quiet details", false);
+    record_progress(&fixture, "ordinary", "quiet details", false);
     fixture
         .manager
         .tick_ceo_report_patrol(quiet)
@@ -193,7 +204,8 @@ fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
     assert!(notice_messages(&fixture.server).is_empty());
     assert_eq!(
         fixture
-            .server
+            .manager
+            .host_control
             .state
             .lock()
             .unwrap()
@@ -202,7 +214,7 @@ fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
         CeoNoticeGate::default()
     );
 
-    record_progress(&fixture.server, "urgent", "urgent details", true);
+    record_progress(&fixture, "urgent", "urgent details", true);
     fixture
         .manager
         .tick_ceo_report_patrol(quiet)
@@ -214,7 +226,7 @@ fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
     assert_eq!(notice.to, CEO_WORKER);
     assert!(notice.body.contains("carries no prebound content"));
     assert!(!notice.body.contains("urgent details"));
-    let state = fixture.server.state.lock().unwrap();
+    let state = fixture.manager.host_control.state.lock().unwrap();
     assert!(state.ceo_report_state.batches.is_empty());
     assert_eq!(state.ceo_report_state.notice_gate.urgent_generation_seen, 1);
     assert_eq!(
@@ -226,8 +238,11 @@ fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
         .notice_gate
         .pending_message_id
         .is_none());
-    assert_eq!(state.msgs[&notice.id].wake_attempt_count, 1);
     drop(state);
+    assert_eq!(
+        fixture.server.state.lock().unwrap().msgs[&notice.id].wake_attempt_count,
+        1
+    );
 
     let loaded = current_state::load(&fixture.server.state_path, false).unwrap();
     assert_eq!(loaded.delivery_modes[&notice.id], "explicit-notification");
@@ -250,13 +265,14 @@ fn ceo_report_patrol_busy_skips_without_catchup_and_new_window_uses_new_id() {
     });
     let fixture = patrol_fixture(status, probes);
     let start = beijing_at(720);
-    record_progress(&fixture.server, "ordinary", "first", false);
+    record_progress(&fixture, "ordinary", "first", false);
     fixture.manager.tick_ceo_report_patrol(start).unwrap();
     assert_eq!(fixture.probes.load(Ordering::SeqCst), 1);
     assert!(notice_messages(&fixture.server).is_empty());
     assert_eq!(
         fixture
-            .server
+            .manager
+            .host_control
             .state
             .lock()
             .unwrap()
@@ -289,7 +305,7 @@ fn ceo_report_patrol_busy_skips_without_catchup_and_new_window_uses_new_id() {
         .notification_delivery_accepted
         .contains_key(&first.id));
 
-    record_progress(&fixture.server, "ordinary", "second", false);
+    record_progress(&fixture, "ordinary", "second", false);
     fixture
         .manager
         .tick_ceo_report_patrol(start + 2 * PATROL_INTERVAL_MS as i64)
@@ -308,7 +324,7 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
     let queued = idle_fixture();
     queued_reservation(&queued.server, "reserved-queued");
     set_gate(
-        &queued.server,
+        &queued,
         CeoNoticeGate {
             pending_message_id: Some("reserved-queued".into()),
             pending_worker_id: Some(CEO_WORKER.into()),
@@ -322,7 +338,8 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
         0
     );
     assert!(queued
-        .server
+        .manager
+        .host_control
         .state
         .lock()
         .unwrap()
@@ -332,9 +349,9 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
         .is_none());
 
     let unqueued_idle = idle_fixture();
-    record_progress(&unqueued_idle.server, "ordinary", "idle recovery", false);
+    record_progress(&unqueued_idle, "ordinary", "idle recovery", false);
     set_gate(
-        &unqueued_idle.server,
+        &unqueued_idle,
         CeoNoticeGate {
             pending_message_id: Some("reserved-idle".into()),
             pending_worker_id: Some(CEO_WORKER.into()),
@@ -358,9 +375,9 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
         Ok(busy_status(thread_id))
     });
     let unqueued_busy = patrol_fixture(status, probes);
-    record_progress(&unqueued_busy.server, "ordinary", "busy recovery", false);
+    record_progress(&unqueued_busy, "ordinary", "busy recovery", false);
     set_gate(
-        &unqueued_busy.server,
+        &unqueued_busy,
         CeoNoticeGate {
             pending_message_id: Some("reserved-busy".into()),
             pending_worker_id: Some(CEO_WORKER.into()),
@@ -369,8 +386,14 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
     );
     unqueued_busy.manager.tick_ceo_report_patrol(day).unwrap();
     assert_eq!(unqueued_busy.probes.load(Ordering::SeqCst), 1);
-    let state = unqueued_busy.server.state.lock().unwrap();
-    assert!(!state.msgs.contains_key("reserved-busy"));
+    assert!(!unqueued_busy
+        .server
+        .state
+        .lock()
+        .unwrap()
+        .msgs
+        .contains_key("reserved-busy"));
+    let state = unqueued_busy.manager.host_control.state.lock().unwrap();
     assert_eq!(
         state.ceo_report_state.notice_gate.next_due_ms,
         day as u64 + PATROL_INTERVAL_MS
@@ -383,9 +406,9 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
     drop(state);
 
     let quiet_recovery = idle_fixture();
-    record_progress(&quiet_recovery.server, "ordinary", "quiet recovery", false);
+    record_progress(&quiet_recovery, "ordinary", "quiet recovery", false);
     set_gate(
-        &quiet_recovery.server,
+        &quiet_recovery,
         CeoNoticeGate {
             pending_message_id: Some("reserved-quiet".into()),
             pending_worker_id: Some(CEO_WORKER.into()),
@@ -397,8 +420,14 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
         .tick_ceo_report_patrol(quiet)
         .unwrap();
     assert_eq!(quiet_recovery.probes.load(Ordering::SeqCst), 0);
-    let state = quiet_recovery.server.state.lock().unwrap();
-    assert!(!state.msgs.contains_key("reserved-quiet"));
+    assert!(!quiet_recovery
+        .server
+        .state
+        .lock()
+        .unwrap()
+        .msgs
+        .contains_key("reserved-quiet"));
+    let state = quiet_recovery.manager.host_control.state.lock().unwrap();
     assert!(state
         .ceo_report_state
         .notice_gate
@@ -436,14 +465,14 @@ fn ceo_report_patrol_revalidates_route_after_probe_and_preserves_probe_error() {
         Ok(idle_status(thread_id))
     });
     let binding_change = patrol_fixture_inner(status, probes, Some(server_weak));
-    record_progress(&binding_change.server, "ordinary", "binding change", false);
+    record_progress(&binding_change, "ordinary", "binding change", false);
     binding_change
         .manager
         .tick_ceo_report_patrol(day)
         .expect("changed route is a skip, not leaked native input");
     assert_eq!(binding_change.probes.load(Ordering::SeqCst), 1);
     assert!(notice_messages(&binding_change.server).is_empty());
-    let state = binding_change.server.state.lock().unwrap();
+    let state = binding_change.manager.host_control.state.lock().unwrap();
     assert_eq!(
         state.ceo_report_state.notice_gate.next_due_ms,
         day as u64 + PATROL_INTERVAL_MS
@@ -462,7 +491,7 @@ fn ceo_report_patrol_revalidates_route_after_probe_and_preserves_probe_error() {
         Err("native thread read exploded".into())
     });
     let error_fixture = patrol_fixture(error_status, error_probes);
-    record_progress(&error_fixture.server, "ordinary", "probe error", false);
+    record_progress(&error_fixture, "ordinary", "probe error", false);
     let error = error_fixture
         .manager
         .tick_ceo_report_patrol(day)
@@ -472,7 +501,8 @@ fn ceo_report_patrol_revalidates_route_after_probe_and_preserves_probe_error() {
     assert!(notice_messages(&error_fixture.server).is_empty());
     assert_eq!(
         error_fixture
-            .server
+            .manager
+            .host_control
             .state
             .lock()
             .unwrap()
@@ -492,7 +522,7 @@ fn ceo_report_patrol_revalidates_route_after_probe_and_preserves_probe_error() {
 fn ceo_report_patrol_concurrent_ticks_at_beijing_eight_queue_one_notice() {
     let fixture = idle_fixture();
     let now = beijing_at(480);
-    record_progress(&fixture.server, "ordinary", "automatic", false);
+    record_progress(&fixture, "ordinary", "automatic", false);
     let barrier = Arc::new(Barrier::new(3));
     let mut workers = Vec::new();
     for _ in 0..2 {

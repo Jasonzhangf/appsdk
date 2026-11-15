@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 struct IsolatedDaemon {
     binary: PathBuf,
@@ -20,10 +20,6 @@ struct IsolatedDaemon {
 }
 
 impl IsolatedDaemon {
-    fn start(password: Option<&str>) -> Self {
-        Self::start_with_env(password, &[], true)
-    }
-
     fn start_with_env(
         password: Option<&str>,
         envs: &[(&str, &str)],
@@ -142,6 +138,91 @@ impl IsolatedDaemon {
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
         child.wait().expect("reap fixture daemon after SIGKILL");
         self.child = None;
+    }
+
+    fn start(password: Option<&str>) -> Self {
+        Self::start_scenario(password, None, true)
+    }
+
+    fn start_scenario(
+        password: Option<&str>,
+        startup_subdir: Option<&str>,
+        project_marker: bool,
+    ) -> Self {
+        Self::start_scenario_mode(password, startup_subdir, project_marker, false)
+    }
+
+    fn start_scenario_mode(
+        password: Option<&str>,
+        startup_subdir: Option<&str>,
+        project_marker: bool,
+        service: bool,
+    ) -> Self {
+        Self::start_scenario_with(
+            password,
+            startup_subdir,
+            project_marker,
+            service,
+            |_, _, _| {},
+        )
+    }
+
+    fn start_scenario_with(
+        password: Option<&str>,
+        startup_subdir: Option<&str>,
+        project_marker: bool,
+        service: bool,
+        prepare: impl FnOnce(&Path, &Path, &Path),
+    ) -> Self {
+        let root = unique_root("lifecycle");
+        let host = root.join("host");
+        let home = root.join("home");
+        let startup = startup_subdir
+            .map(|name| root.join(name))
+            .unwrap_or_else(|| root.clone());
+        if project_marker {
+            std::fs::create_dir_all(startup.join(".agent-collab/server")).unwrap();
+        } else {
+            std::fs::create_dir_all(&startup).unwrap();
+        }
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        if let Some(password) = password {
+            let config = home.join(".appsdk");
+            std::fs::create_dir_all(&config).unwrap();
+            std::fs::write(
+                config.join("config.toml"),
+                format!("[maintenance]\npassword = \"{password}\"\n"),
+            )
+            .unwrap();
+        }
+        prepare(&root, &host, &home);
+
+        let binary = std::env::var_os("COLLAB_TEST_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_collab")));
+        let child = spawn_isolated_daemon(&binary, &startup, &host, &home, service);
+        let mut fixture = Self {
+            binary,
+            root,
+            host,
+            home,
+            child: Some(child),
+            tmux: None,
+        };
+        fixture.wait_until_alive();
+        fixture
+    }
+
+    fn restart(&mut self, startup: &Path) {
+        self.child = Some(spawn_isolated_daemon(
+            &self.binary,
+            startup,
+            &self.host,
+            &self.home,
+            true,
+        ));
+        self.wait_until_alive();
     }
 
     fn socket(&self) -> PathBuf {
@@ -305,46 +386,6 @@ impl IsolatedDaemon {
             .join(".agent-collab/server/state.json")
     }
 
-    fn central_runtime_state_path(&self) -> PathBuf {
-        fn collect_state_files(path: &Path, found: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(path) else {
-                return;
-            };
-            for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    collect_state_files(&path, found);
-                } else if path.file_name().is_some_and(|name| name == "state.json")
-                    && path
-                        .parent()
-                        .and_then(Path::parent)
-                        .and_then(Path::file_name)
-                        .is_some_and(|name| name == ".agent-collab")
-                {
-                    found.push(path);
-                }
-            }
-        }
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let mut found = Vec::new();
-            collect_state_files(&self.host.join("projects"), &mut found);
-            if found.len() == 1 {
-                return found.pop().unwrap();
-            }
-            assert!(
-                found.is_empty(),
-                "expected at most one central runtime current state, found {found:?}"
-            );
-            assert!(
-                Instant::now() < deadline,
-                "central runtime current state did not appear"
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
-    }
-
     fn runtime_state(&self, project: &Path) -> Value {
         let document: Value =
             serde_json::from_slice(&std::fs::read(self.runtime_state_path(project)).unwrap())
@@ -390,8 +431,1343 @@ impl IsolatedDaemon {
         }
     }
 
+    fn crash(&mut self) {
+        let mut child = self.child.take().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
     fn log_text(&self) -> String {
         std::fs::read_to_string(self.host.join("test-daemon.log")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn serve_startup_cwd_does_not_select_a_project() {
+    for (name, marker) in [
+        ("project-a", true),
+        ("project-b", true),
+        ("plain-dir", false),
+    ] {
+        let fixture = IsolatedDaemon::start_scenario(None, Some(name), marker);
+        let readiness = ping(&fixture.socket()).expect("host readiness");
+        assert_eq!(readiness["host_ready"], true, "{readiness}");
+        assert!(readiness.get("workers").is_none(), "{readiness}");
+        assert!(readiness.get("messages").is_none(), "{readiness}");
+        assert!(readiness.get("tasks").is_none(), "{readiness}");
+        assert!(
+            !fixture.host.join("projects").exists(),
+            "startup cwd selected a project runtime: {readiness}"
+        );
+    }
+}
+
+#[test]
+fn foundation_host_ablation_retains_public_up_recovery_of_owned_child() {
+    let mut fixture = IsolatedDaemon::start(None);
+    let old_pid = fixture.child.as_ref().unwrap().id();
+    assert_eq!(
+        std::fs::read_to_string(fixture.host.join("server.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap(),
+        old_pid
+    );
+    // Only this test's own child is stopped. The listening socket remains
+    // open, but the process can no longer answer a request.
+    assert_eq!(
+        unsafe { libc::kill(old_pid as libc::pid_t, libc::SIGSTOP) },
+        0
+    );
+    assert!(ping(&fixture.socket()).is_err());
+    assert!(UnixStream::connect(fixture.socket()).is_ok());
+
+    let mut terminal = Command::new("script");
+    terminal.arg("-q");
+    if cfg!(target_os = "linux") {
+        let executable = fixture.binary.to_string_lossy().replace('\'', "'\\''");
+        terminal.args(["-e", "-c", &format!("exec '{executable}' up"), "/dev/null"]);
+    } else {
+        terminal.arg("/dev/null").arg(&fixture.binary).arg("up");
+    }
+    let output = terminal
+        .current_dir(&fixture.root)
+        .env("HOME", &fixture.home)
+        .env("CODEX_HOME", &fixture.home)
+        .env("COLLAB_STATE_DIR", &fixture.host)
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+        .env_remove("DSH_SESSION_ID")
+        .env_remove("AGY_SESSION_ID")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
+        .env_remove("REX_TRANSPORT")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = output_text(&output);
+    let reachable = ping(&fixture.socket()).is_ok();
+    let replacement_pid = std::fs::read_to_string(fixture.host.join("server.pid"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    let exited = fixture
+        .child
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_some();
+    // The replacement belongs to this isolated state root. Shut it down
+    // through its public socket even when a later assertion fails.
+    if reachable {
+        let shutdown =
+            wire_request_with_context(&fixture.socket(), json!({"op":"Shutdown","password":null}));
+        assert_eq!(shutdown["ok"], true, "{shutdown}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.socket().exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !fixture.socket().exists(),
+            "isolated replacement did not exit"
+        );
+    }
+    assert!(output.status.success(), "public up failed: {text}");
+    assert!(!text.contains("DAEMON_UNKNOWN"), "{text}");
+    assert!(text.contains(&format!("\"pid\": {old_pid}")), "{text}");
+    assert!(text.contains("\"signal\": \"SIG"), "{text}");
+    assert!(exited, "owned unresponsive daemon was not replaced: {text}");
+    assert!(reachable, "replacement does not answer Ping: {text}");
+    assert!(replacement_pid.is_some_and(|pid| pid != old_pid), "{text}");
+}
+
+#[test]
+fn host_registration_rows_do_not_create_or_schedule_project_routes() {
+    let fixture = IsolatedDaemon::start_scenario_with(
+        None,
+        Some("plain-dir"),
+        false,
+        false,
+        |root, host, _| {
+            let project = root.join("project-without-route");
+            std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+            let scope = project
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            std::fs::write(
+                host.join("host-state.json"),
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "state": {
+                        "master_wake": {
+                            "generation": 1, "goal_due": true,
+                            "scheduling_decision_revision": 0,
+                            "first_pending_ms": 0, "last_updated_ms": 0
+                        },
+                        "global": {
+                            "epoch": 1, "sequence": 0, "revision": 0,
+                            "projects": {(scope.clone()): {
+                                "project_scope": scope,
+                                "registrations": {"appserver-cli": {
+                                    "project_scope": scope,
+                                    "app_scope_id": "appserver-cli",
+                                    "registered_at_ms": 17
+                                }}
+                            }},
+                            "current_thread_routes": [], "legacy_thread_routes": [],
+                            "current_thread_route_tombstones": {}, "command_receipts": {}
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        },
+    );
+    assert_eq!(ping(&fixture.socket()).unwrap()["host_ready"], true);
+    let project = fixture.root.join("project-without-route");
+    let before = std::fs::read(fixture.host.join("host-state.json")).unwrap();
+    let host_state: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(host_state["state"]["master_wake"]["goal_due"], true);
+    let status = fixture
+        .base_command("status")
+        .arg("--all")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(!status.status.success(), "{}", output_text(&status));
+    assert!(
+        output_text(&status).contains("PROJECT_SCOPE_UNKNOWN"),
+        "{}",
+        output_text(&status)
+    );
+    assert!(!fixture.host.join("routes.json").exists());
+    assert!(!fixture.host.join("projects").exists());
+    assert!(!project.join(".agent-collab/server/state.json").exists());
+    assert_eq!(
+        std::fs::read(fixture.host.join("host-state.json")).unwrap(),
+        before
+    );
+    assert_eq!(ping(&fixture.socket()).unwrap()["host_ready"], true);
+}
+
+#[test]
+fn supervised_service_startup_does_not_select_a_project() {
+    let fixture = IsolatedDaemon::start_scenario_mode(None, Some("project-a"), true, true);
+    let readiness = ping(&fixture.socket()).expect("host readiness");
+    assert_eq!(readiness["host_ready"], true, "{readiness}");
+    assert!(readiness.get("workers").is_none(), "{readiness}");
+    assert!(!fixture.host.join("projects").exists(), "{readiness}");
+    assert!(!fixture.host.join("host-control.json").exists());
+    assert!(!fixture.host.join("host-state.json").exists());
+    assert!(!fixture.host.join("service-record.json").exists());
+}
+
+#[test]
+fn host_dispatch_cross_project_mail_stays_in_selected_runtime() {
+    let mut fixture = IsolatedDaemon::start_scenario_with(
+        None,
+        Some("neutral-cwd"),
+        false,
+        false,
+        |root, host, _| {
+            std::fs::write(
+                host.join("host-state.json"),
+                serde_json::to_vec(&json!({"schema_version":1,"state":{}})).unwrap(),
+            )
+            .unwrap();
+            let mut routes = Vec::new();
+            let mut slots = Vec::new();
+            for name in ["source", "target"] {
+                let project = root.join(name);
+                std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+                let project = project.canonicalize().unwrap();
+                let worker = format!("{name}-worker");
+                let binding = json!({"project_scope":project,"app_scope_id":"appserver-cli",
+                    "agent_id":worker,"runtime_id":format!("{name}-runtime"),
+                    "binding_id":format!("{name}-binding"),"session_id":format!("{name}-session"),
+                    "native_thread_id":format!("{name}-thread")});
+                let transport = json!({"kind":"appserver","endpoint":"unix:///tmp/unused-dispatch-fixture.sock",
+                    "namespace":"codex_tui","session_id":format!("{name}-session"),
+                    "thread_id":format!("{name}-thread"),"capabilities":[],"self_check":"static non-tmux fixture"});
+                std::fs::write(project.join(".agent-collab/server/state.json"),
+                    serde_json::to_vec(&json!({"schema_version":1,"state":{
+                        "workers":{(worker.clone()):{"id":worker,"token":format!("{name}-token"),
+                            "cwd":project,"registered_ms":1,"transport":transport}},
+                        "name_occupancies":{(project.to_string_lossy().into_owned()):{
+                            "Alice":{"name":"Alice","worker_id":worker,
+                                "session_id":format!("{name}-session"),"occupancy_revision":1,"updated_ms":1}}},
+                        "global":{"epoch":1,"sequence":0,"revision":0,"projects":{
+                            (project.to_string_lossy().into_owned()):{"project_scope":project,
+                                "registrations":{"appserver-cli":{"project_scope":project,"app_scope_id":"appserver-cli"}},
+                                "runtime_bindings":{(format!("{name}-binding")):binding}}
+                        }}
+                    }})).unwrap()).unwrap();
+                routes.push(json!({"project_scope":project,"canonical_root":project,
+                    "app_scope_id":"appserver-cli","storage_root":project,"registered_ms":1}));
+                slots.push(json!({"identity_key":{"project_scope":project,"app_scope_id":"appserver-cli","name":"Alice"},
+                    "display_slot":2,"identity_status":"active","generation":1,"previous":null,
+                    "current":{"binding":binding,"transport":transport,
+                        "tab_id":{"project_scope":project,"app_scope_id":"appserver-cli"},
+                        "host":{"host_type":"native","agent_kind":null,"profile":null},
+                        "invocation_cwd":project,"physical_name":null}}));
+            }
+            std::fs::write(
+                host.join("routes.json"),
+                serde_json::to_vec(&routes).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                host.join("identity-map.json"),
+                serde_json::to_vec(&json!({"schema_version":1,"slots":slots})).unwrap(),
+            )
+            .unwrap();
+        },
+    );
+    let source = fixture.root.join("source").canonicalize().unwrap();
+    let target = fixture.root.join("target").canonicalize().unwrap();
+    let before = std::fs::read(fixture.host.join("host-state.json")).unwrap();
+    assert!(!fixture.host.join("host-control.json").exists());
+    let bad_grant = wire_request(
+        &fixture.socket(),
+        &target,
+        json!({"op":"Ceo",
+        "worker_id":"target-worker","token":"wrong-token",
+        "command":{"action":"promote","approval":"isolated host control","workspace":target}}),
+    );
+    assert_eq!(bad_grant["ok"], false, "{bad_grant}");
+    assert!(!fixture.host.join("host-control.json").exists());
+    let grant = wire_request(
+        &fixture.socket(),
+        &target,
+        json!({"op":"Ceo",
+        "worker_id":"target-worker","token":"target-token",
+        "command":{"action":"promote","approval":"isolated host control","workspace":target}}),
+    );
+    assert_eq!(grant["ok"], true, "{grant}");
+    assert_eq!(grant["is_current"], true, "{grant}");
+    assert!(fixture.host.join("host-control.json").is_file());
+    let send = |token: &str, reply: Option<&str>| {
+        json!({"op":"CrossProjectSend",
+        "from":"forged","from_project":"ignored","worker_id":"source-worker","token":token,
+        "command":{"command_id":"public-dispatch-command","operation_id":"public-dispatch-operation",
+            "actor_binding_id":"source-binding","scope":{"project_scope_id":source,"app_scope_id":"appserver-cli"}},
+        "to":"target-worker","subject":"public dispatch","body":"durable target mail","in_reply_to":reply})
+    };
+    let rejected = wire_request(&fixture.socket(), &target, send("wrong-token", None));
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap()
+        .contains("token mismatch"));
+    let sent = wire_request(&fixture.socket(), &target, send("source-token", None));
+    assert_eq!(sent["ok"], true, "{sent}");
+    assert_eq!(sent["consumed"], false, "{sent}");
+    let id = sent["msg_id"].as_str().unwrap();
+    let target_state = fixture.runtime_state(&target);
+    assert_eq!(target_state["msgs"][id]["body"], "durable target mail");
+    assert_eq!(
+        target_state["msgs"][id]["from"],
+        format!("source-worker@{}", source.display())
+    );
+    assert!(fixture.runtime_state(&source)["msgs"][id].is_null());
+    let poll = json!({"op":"Poll", "worker_id":"target-worker","token":"target-token",
+        "timeout_ms":0,"receive_id":"dispatch-consume", "project_context":{
+            "project_scope":target,"canonical_root":target,"app_scope_id":"appserver-cli",
+            "runtime_context":{"agent_id":"target-worker","runtime_id":"target-runtime",
+                "appserver_id":"appserver-cli","binding_id":"target-binding",
+                "session_id":"target-session","native_thread_id":"target-thread"}}});
+    let received = wire_request_with_context(&fixture.socket(), poll.clone());
+    assert_eq!(received["ok"], true, "{received}");
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == id));
+    let replayed = wire_request_with_context(&fixture.socket(), poll);
+    assert_eq!(replayed["messages"], received["messages"]);
+    let reply = wire_request(
+        &fixture.socket(),
+        &source,
+        json!({"op":"CrossProjectSend",
+        "from":"ignored","from_project":"ignored","worker_id":"target-worker","token":"target-token",
+        "command":{"command_id":"public-reply-command","operation_id":"public-reply-operation",
+            "actor_binding_id":"target-binding","scope":{"project_scope_id":target,"app_scope_id":"appserver-cli"}},
+        "to":"source-worker","subject":"reply","body":"linked reply","in_reply_to":id}),
+    );
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply_id = reply["msg_id"].as_str().unwrap();
+    assert_eq!(
+        fixture.runtime_state(&source)["msgs"][reply_id]["in_reply_to"],
+        id
+    );
+    assert!(fixture.runtime_state(&target)["msgs"][reply_id].is_null());
+    for project in [&source, &target] {
+        let status = fixture
+            .base_command("status")
+            .arg("--all")
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{}", output_text(&status));
+        let state: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(state["summary"]["workers"], 1, "{state}");
+    }
+    let status = fixture.run("status");
+    assert!(status.status.success(), "{}", output_text(&status));
+    let listed = fixture
+        .base_command("list")
+        .current_dir(fixture.root.join("neutral-cwd"))
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "{}", output_text(&listed));
+    let ceo = fixture.base_command("ceo").arg("status").output().unwrap();
+    assert!(ceo.status.success(), "{}", output_text(&ceo));
+    let ceo: Value = serde_json::from_slice(&ceo.stdout).unwrap();
+    assert_eq!(ceo["ceo"]["approval"], "isolated host control", "{ceo}");
+    assert!(fixture.runtime_state(&target)["ceo_grant"].is_null());
+    let inbound = json!({"op":"ChannelInbound","from":"external-fixture","to":"",
+        "subject":"host CEO channel","body":"[ceo] control route body",
+        "envelope":{"source_channel":"qqbot","channel_instance":"qqbot@fixture",
+            "external_user":"fixture-user","external_conversation":"fixture-conversation",
+            "platform_message_id":"host-control-event","reply_route":"fixture-only",
+            "recipient_address":"ceo","attachments":[]}});
+    let rejected = wire_request(&fixture.socket(), &source, inbound.clone());
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap()
+        .contains("CHANNEL_CEO_STALE_WORKSPACE"));
+    let delivered = wire_request(&fixture.socket(), &target, inbound.clone());
+    // The fixture has no transport server. Mailbox commit and unavailable
+    // notification remain separate public results.
+    assert_eq!(delivered["ok"], false, "{delivered}");
+    assert_eq!(delivered["durable"], true, "{delivered}");
+    assert_eq!(
+        delivered["failure"], "notification_delivery_failed",
+        "{delivered}"
+    );
+    assert!(delivered["notification_error"]
+        .as_str()
+        .unwrap()
+        .contains("ADAPTER_ROUTE_UNAVAILABLE"));
+    let channel_id = delivered["msg_id"].as_str().unwrap();
+    let committed = fixture.runtime_state(&target);
+    assert_eq!(committed["msgs"][channel_id]["to"], "target-worker");
+    assert_eq!(
+        committed["msgs"][channel_id]["body"],
+        "来源：QQBot\n消息：control route body"
+    );
+    assert!(fixture.runtime_state(&source)["msgs"][channel_id].is_null());
+    let duplicate = wire_request(&fixture.socket(), &target, inbound);
+    assert_eq!(duplicate["ok"], true, "{duplicate}");
+    assert_eq!(duplicate["msg_id"], channel_id);
+    assert_eq!(
+        std::fs::read(fixture.host.join("host-state.json")).unwrap(),
+        before
+    );
+    // Opposing public requests must complete without a host-wide state lock.
+    let socket = fixture.socket();
+    let (forward, reverse) = thread::scope(|scope| {
+        let forward = scope.spawn(|| wire_request(&socket, &target, json!({"op":"CrossProjectSend",
+            "from":"ignored","from_project":"ignored","worker_id":"source-worker","token":"source-token",
+            "command":{"command_id":"concurrent-forward","operation_id":"concurrent-forward-op",
+                "actor_binding_id":"source-binding","scope":{"project_scope_id":source,"app_scope_id":"appserver-cli"}},
+            "to":"target-worker","subject":"concurrent","body":"forward"})));
+        let reverse = scope.spawn(|| wire_request(&socket, &source, json!({"op":"CrossProjectSend",
+            "from":"ignored","from_project":"ignored","worker_id":"target-worker","token":"target-token",
+            "command":{"command_id":"concurrent-reverse","operation_id":"concurrent-reverse-op",
+                "actor_binding_id":"target-binding","scope":{"project_scope_id":target,"app_scope_id":"appserver-cli"}},
+            "to":"source-worker","subject":"concurrent","body":"reverse"})));
+        (forward.join().unwrap(), reverse.join().unwrap())
+    });
+    for (response, project, body) in [
+        (&forward, &target, "forward"),
+        (&reverse, &source, "reverse"),
+    ] {
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["consumed"], false, "{response}");
+        let id = response["msg_id"].as_str().unwrap();
+        assert_eq!(fixture.runtime_state(project)["msgs"][id]["body"], body);
+    }
+    let clear = wire_request(
+        &socket,
+        &target,
+        json!({"op":"Ceo","worker_id":"target-worker",
+        "token":"target-token","command":{"action":"clear","approval":"isolated revoke"}}),
+    );
+    assert_eq!(clear["ok"], true, "{clear}");
+    let actor_request = |project: &Path, name: &str, mut request: Value| {
+        request["project_context"] = json!({"project_scope":project,"canonical_root":project,
+            "app_scope_id":"appserver-cli","runtime_context":{
+                "agent_id":format!("{name}-worker"),"runtime_id":format!("{name}-runtime"),
+                "appserver_id":"appserver-cli","binding_id":format!("{name}-binding"),
+                "session_id":format!("{name}-session"),"native_thread_id":format!("{name}-thread")}});
+        wire_request_with_context(&socket, request)
+    };
+    let promote = actor_request(
+        &source,
+        "source",
+        json!({"op":"MasterPromote",
+        "worker_id":"source-worker","token":"source-token","approval":"isolated reset master"}),
+    );
+    assert_eq!(promote["ok"], true, "{promote}");
+    let denied = actor_request(
+        &target,
+        "target",
+        json!({"op":"ProjectReset",
+        "worker_id":"target-worker","token":"target-token"}),
+    );
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert!(denied["error"]
+        .as_str()
+        .unwrap()
+        .contains("RESET_MASTER_REQUIRED"));
+    let reset = actor_request(
+        &source,
+        "source",
+        json!({"op":"ProjectReset",
+        "worker_id":"source-worker","token":"source-token"}),
+    );
+    assert_eq!(reset["ok"], true, "{reset}");
+    assert_eq!(reset["status"], "complete", "{reset}");
+    assert!(!source.join(".agent-collab").exists());
+    assert_eq!(
+        fixture.runtime_state(&target)["msgs"][channel_id]["body"],
+        "来源：QQBot\n消息：control route body"
+    );
+    std::fs::create_dir_all(source.join(".agent-collab")).unwrap();
+    std::fs::write(source.join(".agent-collab/after-reset"), "new data").unwrap();
+    fixture.crash();
+    fixture.restart(&fixture.root.join("neutral-cwd"));
+    assert_eq!(
+        std::fs::read_to_string(source.join(".agent-collab/after-reset")).unwrap(),
+        "new data"
+    );
+    let control: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("host-control.json")).unwrap())
+            .unwrap();
+    assert!(control["state"]["ceo_grant"].is_null());
+    assert_eq!(control["state"]["pending_project_resets"], json!({}));
+}
+
+#[test]
+fn current_map_session_routes_without_host_address_publication() {
+    let fixture = IsolatedDaemon::start_scenario_with(
+        None,
+        Some("plain-dir"),
+        false,
+        false,
+        |root, host, _| {
+            std::fs::write(
+                host.join("host-state.json"),
+                serde_json::to_vec(&json!({"schema_version":1,"state":{}})).unwrap(),
+            )
+            .unwrap();
+            let project = root.join("mapped-project");
+            std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+            let project = project.canonicalize().unwrap();
+            let binding = json!({
+                "project_scope": project, "app_scope_id": "appserver-cli",
+                "agent_id": "mapped-worker", "runtime_id": "mapped-runtime",
+                "binding_id": "mapped-binding", "session_id": "mapped-session",
+                "native_thread_id": "mapped-thread"
+            });
+            let transport = json!({
+                "kind":"appserver", "endpoint":"unix:///tmp/unused-map-fixture.sock",
+                "namespace":"codex_tui", "session_id":"mapped-session",
+                "thread_id":"mapped-thread", "capabilities":[], "self_check":"committed fixture"
+            });
+            std::fs::write(project.join(".agent-collab/server/state.json"),
+                serde_json::to_vec(&json!({"schema_version":1,"state":{
+                    "workers":{"mapped-worker":{"id":"mapped-worker","token":"fixture-token",
+                        "cwd":project,"registered_ms":1,"transport":transport}},
+                    "global":{"epoch":1,"sequence":0,"revision":0,"projects":{
+                        (project.to_string_lossy().into_owned()):{
+                            "project_scope":project,
+                            "registrations":{"appserver-cli":{"project_scope":project,"app_scope_id":"appserver-cli"}},
+                            "runtime_bindings":{"mapped-binding":binding}
+                        }
+                    }},
+                    "target_sessions":{"unread-mail-marker":"unchanged"}
+                }})).unwrap()).unwrap();
+            std::fs::write(
+                host.join("routes.json"),
+                serde_json::to_vec(&json!([{
+                    "project_scope":project,"canonical_root":project,"app_scope_id":"appserver-cli",
+                    "storage_root":project,"registered_ms":1
+                }]))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(host.join("identity-map.json"), serde_json::to_vec(&json!({
+                "schema_version":1,"slots":[{
+                    "identity_key":{"project_scope":project,"app_scope_id":"appserver-cli","name":"Alice"},
+                    "display_slot":2,"identity_status":"active","generation":1,"previous":null,
+                    "current":{"binding":binding,"transport":transport,
+                        "tab_id":{"project_scope":project,"app_scope_id":"appserver-cli"},
+                        "host":{"host_type":"native","agent_kind":null,"profile":null},
+                        "invocation_cwd":project,"physical_name":null}
+                }]
+            })).unwrap()).unwrap();
+        },
+    );
+    let project = fixture.root.join("mapped-project");
+    let legacy_path = fixture.host.join("host-state.json");
+    let before = std::fs::read(&legacy_path).unwrap();
+    let resolved = wire_request(
+        &fixture.socket(),
+        &project,
+        json!({"op":"RouteResolveNative","session_id":"mapped-session"}),
+    );
+    assert_eq!(resolved["ok"], true, "{resolved}");
+    assert_eq!(resolved["agent_id"], "mapped-worker", "{resolved}");
+    let missing = wire_request(
+        &fixture.socket(),
+        &project,
+        json!({"op":"RouteResolveNative","session_id":"old-session"}),
+    );
+    assert_eq!(missing["ok"], false, "{missing}");
+    assert!(missing["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("ROUTE_RESOLVE_NOT_FOUND"));
+    let status = fixture
+        .base_command("status")
+        .arg("--all")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{}", output_text(&status));
+    assert_eq!(
+        std::fs::read(&legacy_path).unwrap(),
+        before,
+        "startup and public route reads must not publish a legacy host address index"
+    );
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(project.join(".agent-collab/server/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        state["state"]["target_sessions"]["unread-mail-marker"],
+        "unchanged"
+    );
+}
+
+#[test]
+fn host_control_reset_handoff_finishes_before_public_readiness() {
+    let fixture = IsolatedDaemon::start_scenario_with(
+        None,
+        Some("plain-dir"),
+        false,
+        false,
+        |root, host, _| {
+            let project = root.join("reset-project");
+            let foreign = root.join("foreign-project/.agent-collab/mailbox");
+            std::fs::create_dir_all(project.join(".agent-collab/mailbox")).unwrap();
+            std::fs::create_dir_all(&foreign).unwrap();
+            std::fs::write(project.join(".agent-collab/mailbox/remove"), "owned").unwrap();
+            std::fs::write(foreign.join("keep"), "foreign unread mail").unwrap();
+            let scope = project
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            std::fs::write(
+                host.join("host-state.json"),
+                serde_json::to_vec(&json!({
+                    "schema_version": 1, "state": {"pending_project_resets": {(scope.clone()): true}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                host.join("host-control.json"),
+                serde_json::to_vec(&json!({
+                    "schema_version":1,"state":{"pending_project_resets":{(scope):true},
+                        "ceo_grant":null,"ceo_bootstraps":{},"ceo_report_state":{},
+                        "commands":{"epoch":1,"sequence":0,"revision":0,"receipts":{}}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        },
+    );
+    assert!(!fixture.root.join("reset-project/.agent-collab").exists());
+    assert_eq!(
+        std::fs::read_to_string(
+            fixture
+                .root
+                .join("foreign-project/.agent-collab/mailbox/keep")
+        )
+        .unwrap(),
+        "foreign unread mail"
+    );
+    let control: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("host-control.json")).unwrap())
+            .unwrap();
+    assert_eq!(control["state"]["pending_project_resets"], json!({}));
+    assert!(control["state"].get("workers").is_none());
+    assert!(control["state"].get("global").is_none());
+    let legacy: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("host-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        legacy["state"]["pending_project_resets"],
+        json!({
+            (fixture.root.join("reset-project").canonicalize().unwrap().to_string_lossy().into_owned()): true
+        })
+    );
+    assert!(control["state"].get("reset_owner_initialized").is_none());
+    assert!(control["state"].get("legacy_migration_completed").is_none());
+    let status = fixture.run("status");
+    assert!(status.status.success(), "{}", output_text(&status));
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["host_ready"], true);
+}
+
+#[test]
+fn legacy_project_state_is_preserved_without_startup_projection() {
+    let fixture = IsolatedDaemon::start_scenario_with(
+        None,
+        Some("plain-dir"),
+        false,
+        false,
+        |root, host, _| {
+            let project = root.join("legacy-project");
+            let server = project.join(".agent-collab/server");
+            std::fs::create_dir_all(&server).unwrap();
+            std::fs::write(
+                server.join("state.json"),
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "state": {
+                        "pending_project_resets": {"reset-marker": true},
+                        "ceo_grant": {
+                            "workspace": project.to_string_lossy(),
+                            "app_scope_id": "appserver-cli",
+                            "name": "CEO",
+                            "granted_by": "user",
+                            "approval": "legacy-approval",
+                            "granted_ms": 1
+                        },
+                        "ceo_report_state": {
+                            "notice_gate": {"next_due_ms": 42}
+                        },
+                        "target_sessions": {"mail-marker": "target"}
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                host.join("service-record.json"),
+                serde_json::to_vec(&json!({
+                    "service_scope_root": project,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        },
+    );
+
+    let readiness = ping(&fixture.socket()).expect("host readiness");
+    assert_eq!(readiness["host_ready"], true, "{readiness}");
+    assert!(!fixture.host.join("host-control.json").exists());
+    let status = fixture.base_command("ceo").arg("status").output().unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(status["ceo"].is_null(), "{status}");
+    assert_eq!(status["is_current"], false, "{status}");
+    assert!(!fixture.host.join("host-state.json").exists());
+
+    let project = fixture.root.join("legacy-project");
+    let legacy: Value = serde_json::from_slice(
+        &std::fs::read(project.join(".agent-collab/server/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(legacy["state"]["ceo_grant"]["approval"], "legacy-approval");
+    assert_eq!(
+        legacy["state"]["pending_project_resets"]["reset-marker"],
+        true
+    );
+    assert_eq!(
+        legacy["state"]["ceo_report_state"]["notice_gate"]["next_due_ms"],
+        42
+    );
+    assert_eq!(legacy["state"]["target_sessions"]["mail-marker"], "target");
+    assert!(!fixture.host.join("routes.json").exists());
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("service-record.json")).unwrap())
+            .unwrap();
+    assert_eq!(record["service_scope_root"], json!(project), "{record}");
+}
+
+#[test]
+fn typed_owner_restarts_without_reimporting_conflicting_legacy_authority() {
+    let mut fixture = IsolatedDaemon::start_scenario_with(
+        None,
+        Some("plain-dir"),
+        false,
+        false,
+        |root, host, _| {
+            let project = root.join("legacy-project");
+            let server = project.join(".agent-collab/server");
+            std::fs::create_dir_all(&server).unwrap();
+            std::fs::write(
+                server.join("state.json"),
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "state": {
+                        "ceo_grant": {
+                            "workspace": project.to_string_lossy(),
+                            "app_scope_id": "appserver-cli",
+                            "name": "CEO",
+                            "granted_by": "user",
+                            "approval": "source-approval",
+                            "granted_ms": 1
+                        },
+                        "target_sessions": {"mail-marker": "target"}
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                host.join("host-state.json"),
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "state": {
+                        "ceo_grant": {
+                            "workspace": project.to_string_lossy(),
+                            "app_scope_id": "appserver-cli",
+                            "name": "CEO",
+                            "granted_by": "user",
+                            "approval": "host-approval",
+                            "granted_ms": 2
+                        },
+                        "legacy_migration_completed":true,
+                        "ceo_bootstraps":{},"ceo_report_state":{},
+                        "commands":{"epoch":1,"sequence":0,"revision":0,"receipts":{}}
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::copy(host.join("host-state.json"), host.join("host-control.json")).unwrap();
+            std::fs::write(
+                host.join("service-record.json"),
+                serde_json::to_vec(&json!({
+                    "service_scope_root": project,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        },
+    );
+    let plain = fixture.root.join("plain-dir");
+    let project = fixture.root.join("legacy-project");
+    let legacy_host_before = std::fs::read(fixture.host.join("host-state.json")).unwrap();
+    let legacy_host: Value = serde_json::from_slice(&legacy_host_before).unwrap();
+    assert_eq!(
+        legacy_host["state"]["ceo_grant"]["approval"],
+        "host-approval"
+    );
+
+    let host_state: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("host-control.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        host_state["state"]["ceo_grant"]["approval"],
+        "host-approval"
+    );
+    assert!(!fixture.host.join("routes.json").exists());
+    let storage_root = project.clone();
+    let project_state = || -> Value {
+        serde_json::from_slice(
+            &std::fs::read(storage_root.join(".agent-collab/server/state.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        project_state()["state"]["target_sessions"]["mail-marker"],
+        "target"
+    );
+
+    fixture.crash();
+    // Reopening a fenced host input would now fail decoding. A stale service
+    // record must not cause historical project discovery after completion.
+    std::fs::write(fixture.host.join("host-state.json"), b"retired legacy host").unwrap();
+    std::fs::write(
+        fixture.host.join("service-record.json"),
+        serde_json::to_vec(&json!({"service_scope_root": fixture.root.join("missing")})).unwrap(),
+    )
+    .unwrap();
+    fixture.restart(&plain);
+
+    let host_state: Value =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("host-control.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        host_state["state"]["ceo_grant"]["approval"],
+        "host-approval"
+    );
+    assert_eq!(
+        project_state()["state"]["target_sessions"]["mail-marker"],
+        "target"
+    );
+    let legacy: Value = serde_json::from_slice(
+        &std::fs::read(project.join(".agent-collab/server/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(legacy["state"]["ceo_grant"]["approval"], "source-approval");
+    assert!(!legacy_host_before.is_empty());
+    assert_eq!(
+        std::fs::read(fixture.host.join("host-state.json")).unwrap(),
+        b"retired legacy host"
+    );
+    assert_eq!(host_state["state"]["legacy_migration_completed"], true);
+}
+
+#[test]
+fn fixed_routes_preserve_two_project_mailboxes_without_project_ledger_import() {
+    let message_created_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let fixture = IsolatedDaemon::start_scenario_with(
+        None,
+        Some("plain-dir"),
+        false,
+        false,
+        |root, host, _| {
+            let project_a = root.join("project-a");
+            let project_b = root.join("project-b");
+            for project in [&project_a, &project_b] {
+                std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+            }
+            let project_a = std::fs::canonicalize(project_a).unwrap();
+            let project_b = std::fs::canonicalize(project_b).unwrap();
+            let scope_a = project_a.to_string_lossy().into_owned();
+            let scope_b = project_b.to_string_lossy().into_owned();
+            let registration = |scope: &str, registered_ms: i64| {
+                json!({
+                    "project_scope": scope,
+                    "app_scope_id": "appserver-cli",
+                    "registered_at_ms": registered_ms,
+                })
+            };
+            let project_state = |scope: &str, task_id: &str, message_id: &str, body: &str| {
+                json!({
+                    "schema_version": 1,
+                    "state": {
+                        "workers": {
+                            "legacy-peer": {
+                                "id": "legacy-peer",
+                                "token": "legacy-token",
+                                "cwd": scope,
+                                "registered_ms": 1
+                            }
+                        },
+                        "tasks": {
+                            (task_id): {
+                                "id": task_id,
+                                "owner": "legacy-peer",
+                                "created_by": "user",
+                                "status": "working",
+                                "created_ms": 1,
+                                "updated_ms": 2
+                            }
+                        },
+                        "msgs": {
+                            (message_id): {
+                                "id": message_id,
+                                "from": "Alice",
+                                "to": "legacy-peer",
+                                "type": "notify",
+                                "body": body,
+                                "created_ms": message_created_ms,
+                                "state": "pending"
+                            }
+                        },
+                        "global": {
+                            "epoch": 1,
+                            "sequence": 0,
+                            "revision": 0,
+                            "projects": {
+                                (scope): {
+                                    "project_scope": scope,
+                                    "registrations": {
+                                        "appserver-cli": registration(scope, 11)
+                                    }
+                                }
+                            },
+                            "current_thread_routes": [],
+                            "legacy_thread_routes": [],
+                            "current_thread_route_tombstones": {},
+                            "command_receipts": {}
+                        }
+                    }
+                })
+            };
+
+            let mut legacy_a = project_state(&scope_a, "task-a", "mail-a", "mailbox-a");
+            std::fs::write(host.join("routes.json"), serde_json::to_vec(&json!([
+                {"project_scope":scope_a,"canonical_root":project_a,"app_scope_id":"appserver-cli",
+                    "storage_root":project_a,"registered_ms":11},
+                {"project_scope":scope_b,"canonical_root":project_b,"app_scope_id":"appserver-cli",
+                    "storage_root":project_b,"registered_ms":22}
+            ])).unwrap()).unwrap();
+            legacy_a["state"]["sequence"] = json!(8);
+            legacy_a["state"]["revision"] = json!(6);
+            legacy_a["state"]["global"]["epoch"] = json!(7);
+            legacy_a["state"]["global"]["sequence"] = json!(8);
+            legacy_a["state"]["global"]["revision"] = json!(6);
+            legacy_a["state"]["global"]["command_receipts"] = json!({
+                "legacy-command": {
+                    "command_id": "legacy-command",
+                    "operation_id": "legacy-operation",
+                    "epoch": 7,
+                    "sequence": 8,
+                    "revision": 6,
+                    "outcome": {"project": scope_b, "accepted": true}
+                }
+            });
+            legacy_a["state"]["global"]["projects"][&scope_b] = json!({
+                "project_scope": scope_b,
+                "registrations": {
+                    "appserver-cli": registration(&scope_b, 22)
+                }
+            });
+            std::fs::write(
+                project_a.join(".agent-collab/server/state.json"),
+                serde_json::to_vec(&legacy_a).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                project_b.join(".agent-collab/server/state.json"),
+                serde_json::to_vec(&project_state(&scope_b, "task-b", "mail-b", "mailbox-b"))
+                    .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                host.join("service-record.json"),
+                serde_json::to_vec(&json!({"service_scope_root": project_a})).unwrap(),
+            )
+            .unwrap();
+        },
+    );
+    let project_a = fixture.root.join("project-a");
+    let project_b = fixture.root.join("project-b");
+
+    assert!(!fixture.host.join("host-state.json").exists());
+    assert!(!fixture.host.join("host-control.json").exists());
+    let original: Value = serde_json::from_slice(
+        &std::fs::read(project_a.join(".agent-collab/server/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(original["state"]["global"]["epoch"], 7);
+    assert_eq!(
+        original["state"]["global"]["command_receipts"]["legacy-command"],
+        json!({
+            "command_id": "legacy-command", "operation_id": "legacy-operation",
+            "epoch": 7, "sequence": 8, "revision": 6,
+            "outcome": {"project": std::fs::canonicalize(&project_b).unwrap(), "accepted": true}
+        })
+    );
+
+    let routes: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(fixture.host.join("routes.json")).unwrap()).unwrap();
+    assert_eq!(routes.len(), 2, "{routes:?}");
+    for project in [&project_a, &project_b] {
+        let scope = std::fs::canonicalize(project)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let matched: Vec<_> = routes
+            .iter()
+            .filter(|route| route["project_scope"] == scope)
+            .collect();
+        assert_eq!(matched.len(), 1, "route for {scope}: {routes:?}");
+        let registered_ms = if project == &project_a { 11 } else { 22 };
+        assert_eq!(matched[0]["registered_ms"], registered_ms, "{routes:?}");
+        assert_eq!(
+            std::fs::canonicalize(matched[0]["storage_root"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(project).unwrap(),
+            "{routes:?}"
+        );
+    }
+
+    for (project, task_id, message_id, body) in [
+        (&project_a, "task-a", "mail-a", "mailbox-a"),
+        (&project_b, "task-b", "mail-b", "mailbox-b"),
+    ] {
+        let status = fixture
+            .base_command("status")
+            .arg("--all")
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{}", output_text(&status));
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert!(
+            status["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["id"] == task_id),
+            "{status}"
+        );
+
+        let mailbox = fixture
+            .base_command("mailbox")
+            .args(["read", "--all"])
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(mailbox.status.success(), "{}", output_text(&mailbox));
+        let mailbox: Value = serde_json::from_slice(&mailbox.stdout).unwrap();
+        assert!(
+            mailbox["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["id"] == message_id && message["body"] == body),
+            "{mailbox}"
+        );
+    }
+}
+
+#[test]
+fn conflicting_fixed_storage_owners_fail_before_state_replace() {
+    let root = unique_root("ambiguous-storage");
+    let host = root.join("host");
+    let home = root.join("home");
+    let startup = root.join("plain-dir");
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&startup).unwrap();
+    let project_a = root.join("project-a");
+    let project_b = root.join("project-b");
+    for project in [&project_a, &project_b] {
+        std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+    }
+    let project_a = std::fs::canonicalize(project_a).unwrap();
+    let project_b = std::fs::canonicalize(project_b).unwrap();
+    let scope_a = project_a.to_string_lossy().into_owned();
+    let scope_b = project_b.to_string_lossy().into_owned();
+    let registration = |scope: &str, registered_ms: i64| {
+        json!({
+            "project_scope": scope,
+            "app_scope_id": "appserver-cli",
+            "registered_at_ms": registered_ms,
+        })
+    };
+    let legacy = json!({
+        "schema_version": 1,
+        "state": {
+            "global": {
+                "epoch": 1,
+                "sequence": 0,
+                "revision": 0,
+                "projects": {
+                    (&scope_a): {
+                        "project_scope": scope_a,
+                        "registrations": {
+                            "appserver-cli": registration(&scope_a, 11)
+                        }
+                    },
+                    (&scope_b): {
+                        "project_scope": scope_b,
+                        "registrations": {
+                            "appserver-cli": registration(&scope_b, 22)
+                        }
+                    }
+                },
+                "current_thread_routes": [],
+                "legacy_thread_routes": [],
+                "current_thread_route_tombstones": {},
+                "command_receipts": {}
+            }
+        }
+    });
+    std::fs::write(
+        project_a.join(".agent-collab/server/state.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        project_b.join(".agent-collab/server/state.json"),
+        serde_json::to_vec(&json!({"schema_version": 1, "state": {"revision": 7}})).unwrap(),
+    )
+    .unwrap();
+    let central_b = {
+        let projects = encoded_storage_path(&host.join("projects"), &scope_b);
+        encoded_storage_path(&projects.join("apps"), "appserver-cli")
+    };
+    std::fs::create_dir_all(central_b.join(".agent-collab/server")).unwrap();
+    std::fs::write(
+        central_b.join(".agent-collab/server/state.json"),
+        serde_json::to_vec(&json!({"schema_version": 1, "state": {"revision": 9}})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        host.join("service-record.json"),
+        serde_json::to_vec(&json!({"service_scope_root": project_a})).unwrap(),
+    )
+    .unwrap();
+    let project_b_before =
+        std::fs::read(project_b.join(".agent-collab/server/state.json")).unwrap();
+    let central_before = std::fs::read(central_b.join(".agent-collab/server/state.json")).unwrap();
+    let routes = serde_json::to_vec(&json!([
+        {"project_scope":scope_a,"canonical_root":project_a,"app_scope_id":"appserver-cli",
+            "storage_root":project_a,"registered_ms":11},
+        {"project_scope":scope_b,"canonical_root":project_b,"app_scope_id":"appserver-cli",
+            "storage_root":project_a,"registered_ms":22}
+    ]))
+    .unwrap();
+    std::fs::write(host.join("routes.json"), &routes).unwrap();
+
+    let binary = std::env::var_os("COLLAB_TEST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_collab")));
+    let mut child = spawn_isolated_daemon(&binary, &startup, &host, &home, false);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let status = loop {
+        match child.try_wait().unwrap() {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!(
+                    "conflicting fixed storage owners must fail startup: {}",
+                    std::fs::read_to_string(host.join("test-daemon.log")).unwrap_or_default()
+                );
+            }
+            None => thread::sleep(Duration::from_millis(25)),
+        }
+    };
+    assert!(!status.success(), "{status}");
+    let log = std::fs::read_to_string(host.join("test-daemon.log")).unwrap();
+    assert!(
+        log.contains("HOST_ROUTE_INVALID: duplicate runtime storage root"),
+        "{log}"
+    );
+    assert_eq!(std::fs::read(host.join("routes.json")).unwrap(), routes);
+    assert_eq!(
+        std::fs::read(project_b.join(".agent-collab/server/state.json")).unwrap(),
+        project_b_before
+    );
+    assert_eq!(
+        std::fs::read(central_b.join(".agent-collab/server/state.json")).unwrap(),
+        central_before
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ordinary_status_reads_the_host_from_a_non_project_directory() {
+    let fixture = IsolatedDaemon::start_scenario(None, Some("plain-dir"), false);
+    let output = fixture
+        .base_command("status")
+        .current_dir(fixture.root.join("plain-dir"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["host_ready"], true, "{value}");
+    assert!(value.get("workers").is_none(), "{value}");
+}
+
+#[test]
+fn host_config_is_global_from_project_and_non_project_directories() {
+    let fixture = IsolatedDaemon::start_scenario(None, Some("project-a"), true);
+    let project_a = fixture.root.join("project-a").canonicalize().unwrap();
+    let project_b = fixture.root.join("project-b");
+    let plain = fixture.root.join("plain-dir");
+    std::fs::create_dir_all(project_b.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+    let config = fixture.home.join(".appsdk/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "[timers]\ntick_interval_ms = 5000\n\n[[projects]]\nroot = {:?}\n[projects.timers]\ntick_interval_ms = 10000\n",
+            project_a.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    for cwd in [&project_a, &project_b, &plain] {
+        let output = fixture
+            .base_command("config")
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["timers"]["tick_interval_ms"], 5000, "{value}");
+    }
+}
+
+#[test]
+fn two_projects_share_one_host_and_keep_their_runtime_state_separate() {
+    let mut fixture = IsolatedDaemon::start_scenario(None, Some("project-a"), true);
+    let project_a = fixture.root.join("project-a");
+    let project_b = fixture.root.join("project-b");
+    std::fs::create_dir_all(project_b.join(".agent-collab")).unwrap();
+
+    let pane_a = fixture.start_tmux_pane();
+    let context_a = fixture.command_at(&project_a, &pane_a, &["context"]);
+    assert!(context_a.status.success(), "{}", output_text(&context_a));
+    let context_a: Value = serde_json::from_slice(&context_a.stdout).unwrap();
+    let binding_a = context_a["result"]["snapshot"]["binding"].clone();
+
+    let window = tmux(
+        &pane_a.socket,
+        &["new-window", "-d", "-P", "-F", "#{pane_id}", "sh -i"],
+    );
+    assert!(window.status.success());
+    let pane_b = TmuxPane {
+        socket: pane_a.socket.clone(),
+        server_pid: pane_a.server_pid,
+        pane_id: String::from_utf8(window.stdout).unwrap().trim().to_owned(),
+        session_anchor: format!("session-b-{}", std::process::id()),
+        thread_anchor: format!("thread-b-{}", std::process::id()),
+    };
+    let context_b = fixture.command_at(&project_b, &pane_b, &["context"]);
+    assert!(context_b.status.success(), "{}", output_text(&context_b));
+    let context_b: Value = serde_json::from_slice(&context_b.stdout).unwrap();
+    let binding_b = context_b["result"]["snapshot"]["binding"].clone();
+
+    assert_ne!(binding_a["project_scope"], binding_b["project_scope"]);
+    assert_ne!(
+        fixture.runtime_state_path(&project_a),
+        fixture.runtime_state_path(&project_b)
+    );
+    let host_as_project = wire_request(
+        &fixture.socket(),
+        &fixture.host,
+        json!({"op":"MasterStatus"}),
+    );
+    assert_eq!(host_as_project["ok"], false, "{host_as_project}");
+    assert!(
+        host_as_project["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("PROJECT_SCOPE_UNKNOWN")),
+        "{host_as_project}"
+    );
+    for (project, binding) in [(&project_a, &binding_a), (&project_b, &binding_b)] {
+        let output = fixture
+            .base_command("status")
+            .arg("--all")
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["summary"]["workers"], 1, "{value}");
+        assert!(
+            value["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|worker| worker["id"] == binding["agent_id"]),
+            "{value}"
+        );
+    }
+
+    let plain = fixture.root.join("plain-dir");
+    std::fs::create_dir_all(&plain).unwrap();
+    for cwd in [&project_a, &project_b, &plain] {
+        let output = fixture
+            .base_command("status")
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["host_ready"], true, "{value}");
+        assert!(value.get("workers").is_none(), "{value}");
     }
 }
 
@@ -438,6 +1814,65 @@ fn unique_root(label: &str) -> PathBuf {
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+fn encoded_storage_path(base: &Path, value: &str) -> PathBuf {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = value.as_bytes();
+    let mut path = base.to_path_buf();
+    for (index, chunk) in bytes.chunks(96).enumerate() {
+        let prefix = if index == 0 {
+            format!("v1-{}-", bytes.len())
+        } else {
+            String::new()
+        };
+        let mut component = String::with_capacity(prefix.len() + chunk.len() * 2);
+        component.push_str(&prefix);
+        for byte in chunk {
+            component.push(HEX[(byte >> 4) as usize] as char);
+            component.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        path.push(component);
+    }
+    path
+}
+
+fn spawn_isolated_daemon(
+    binary: &Path,
+    startup: &Path,
+    host: &Path,
+    home: &Path,
+    service: bool,
+) -> Child {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(host.join("test-daemon.log"))
+        .unwrap();
+    let mut command = Command::new(binary);
+    command.arg("serve");
+    if service {
+        command.arg("--service");
+    }
+    command
+        .current_dir(startup)
+        .env("HOME", home)
+        .env("COLLAB_STATE_DIR", host)
+        .env("CODEX_HOME", home)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .expect("spawn isolated collab serve")
 }
 
 fn tmux(socket: &Path, args: &[&str]) -> Output {
@@ -487,7 +1922,11 @@ fn project_context(root: &Path) -> Value {
 fn wire_request(socket: &Path, root: &Path, request: Value) -> Value {
     let mut envelope = request.as_object().unwrap().clone();
     envelope.insert("project_context".into(), project_context(root));
-    let line = serde_json::to_vec(&envelope).unwrap();
+    wire_request_with_context(socket, Value::Object(envelope))
+}
+
+fn wire_request_with_context(socket: &Path, request: Value) -> Value {
+    let line = serde_json::to_vec(&request).unwrap();
     let mut stream = UnixStream::connect(socket).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -932,40 +2371,6 @@ fn context_does_not_start_for_absent_or_stale_endpoints() {
         assert_eq!(tree(&root), before, "stale={stale}");
         let _ = std::fs::remove_dir_all(root);
     }
-}
-
-#[test]
-fn context_admits_the_invocation_root_before_rex_target_validation() {
-    let fixture = IsolatedDaemon::start(None);
-    let project_b = unique_root("rex-root-preflight-project-b");
-    std::fs::create_dir_all(project_b.join(".agent-collab")).unwrap();
-    let provide = json!({
-        "session_id": "agent-session-rex-root-preflight",
-        "rex": {
-            "server": "unix:///tmp/rex-root-preflight-not-contacted.sock",
-            "session_id": "session:invalid",
-            "block_id": "block:invalid",
-            "cwd": project_b.display().to_string(),
-        }
-    })
-    .to_string();
-    let output = fixture
-        .base_command("context")
-        .current_dir(&project_b)
-        .args(["--op", "rex-root-preflight-cli", "--provide", &provide])
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "{}", output_text(&output));
-    let text = output_text(&output);
-    assert!(
-        !text.contains("does not match project root"),
-        "the daemon resident root must not reject the invocation project: {text}"
-    );
-    assert!(
-        text.contains("REX_"),
-        "the request must continue to real Rex target validation: {text}"
-    );
-    let _ = std::fs::remove_dir_all(project_b);
 }
 
 #[test]
@@ -1489,6 +2894,40 @@ fn project_master_resets_online_and_erases_its_history_without_touching_another_
         restored["result"]["snapshot"]["master"].is_null(),
         "{restored}"
     );
+}
+
+#[test]
+fn context_admits_the_invocation_root_before_rex_target_validation() {
+    let fixture = IsolatedDaemon::start(None);
+    let project_b = unique_root("rex-root-preflight-project-b");
+    std::fs::create_dir_all(project_b.join(".agent-collab")).unwrap();
+    let provide = json!({
+        "session_id": "agent-session-rex-root-preflight",
+        "rex": {
+            "server": "unix:///tmp/rex-root-preflight-not-contacted.sock",
+            "session_id": "session:invalid",
+            "block_id": "block:invalid",
+            "cwd": project_b.display().to_string(),
+        }
+    })
+    .to_string();
+    let output = fixture
+        .base_command("context")
+        .current_dir(&project_b)
+        .args(["--op", "rex-root-preflight-cli", "--provide", &provide])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", output_text(&output));
+    let text = output_text(&output);
+    assert!(
+        !text.contains("does not match project root"),
+        "the daemon resident root must not reject the invocation project: {text}"
+    );
+    assert!(
+        text.contains("REX_"),
+        "the request must continue to real Rex target validation: {text}"
+    );
+    let _ = std::fs::remove_dir_all(project_b);
 }
 
 /// Run the user maintenance entry `collab up` through a pseudo terminal, with
@@ -2260,12 +3699,14 @@ fn up_refuses_sigkill_when_the_proved_instance_disappears() {
 fn up_refuses_stale_owner_during_offline_admission() {
     let mut fixture =
         IsolatedDaemon::start_with_env(None, &[("COLLAB_LIFECYCLE_RELEASE_ADMISSION", "1")], true);
-    let storage_root = fixture
-        .central_runtime_state_path()
-        .ancestors()
-        .nth(3)
-        .unwrap()
-        .to_path_buf();
+    // Host startup no longer materializes a project. This offline admission
+    // fixture explicitly owns its index; it must still refuse the live daemon.
+    let storage_root = fixture.root.clone();
+    std::fs::write(
+        storage_root.join(".agent-collab/server/state.json"),
+        serde_json::to_vec(&json!({"schema_version": 1, "state": {}})).unwrap(),
+    )
+    .unwrap();
     let daemon_pid = freeze_fixture_daemon(&fixture);
     let hook = LifecycleHook::new("offline-admission");
     let (hook_name, hook_path) = hook_env(&hook);

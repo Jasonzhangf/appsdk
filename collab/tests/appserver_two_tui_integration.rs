@@ -26,6 +26,8 @@ mod ceo_patrol_runtime;
 mod channel_inbound_cli;
 #[path = "board/context_minimality.rs"]
 mod context_minimality;
+#[path = "board/cross_project_name_continuity.rs"]
+mod cross_project_name_continuity;
 #[path = "board/degraded_user_maintenance.rs"]
 mod degraded_user_maintenance;
 #[path = "board/directory_unknown_cli.rs"]
@@ -3317,8 +3319,12 @@ impl AppFixture {
     }
 
     fn with_managed_socket(managed_socket: bool) -> Self {
+        Self::with_named_project(managed_socket, "project")
+    }
+
+    fn with_named_project(managed_socket: bool, project_name: &str) -> Self {
         let root = unique_root();
-        let project = root.join("project");
+        let project = root.join(project_name);
         let host_state = root.join("h");
         let app_socket = if managed_socket {
             root.join("home/app-server-control/app-server-control.sock")

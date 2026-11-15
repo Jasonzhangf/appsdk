@@ -665,6 +665,12 @@ fn consume_subscription_for_preflight(
     }
 
     let fired_count = subscription.fired_count.saturating_add(1);
+    if subscription.status == "expired" {
+        return SubscriptionConsumption {
+            fired_count,
+            status: SubscriptionConsumptionStatus::Unchanged,
+        };
+    }
     if is_goal_deadline(subscription) {
         // A single-shot goal deadline (legacy or a non-periodic active request)
         // is consumed on its first occurrence. An explicit periodic goal
@@ -831,10 +837,12 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
         Event::MailboxReassigned { handoff } => {
             ResponsibilityEffect::Mutates(handoff.recipient.as_str())
         }
-        Event::WakeBound { message_id, .. } => match state.msgs.get(message_id) {
-            Some(msg) => ResponsibilityEffect::Mutates(msg.to.as_str()),
-            None => ResponsibilityEffect::Safe,
-        },
+        Event::WakeBound { message_id, .. } | Event::DeadlineSummary { message_id, .. } => {
+            match state.msgs.get(message_id) {
+                Some(msg) => ResponsibilityEffect::Mutates(msg.to.as_str()),
+                None => ResponsibilityEffect::Safe,
+            }
+        }
         Event::Registered { worker } => ResponsibilityEffect::Mutates(worker.id.as_str()),
         Event::MergeRequested { request } => ResponsibilityEffect::Mutates(request.owner.as_str()),
         Event::MasterAssigned { worker_id, .. } => {
@@ -886,6 +894,7 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
     let mut simulated_msgs = st.msgs.clone();
     let mut simulated_subscriptions = st.notification_subscriptions.clone();
     let mut simulated_wake_bindings = st.wake_bindings.clone();
+    let mut simulated_summaries = st.deadline_summaries.clone();
     for event in evs {
         match event {
             Event::ResponsibilityFenceSet { fence } => {
@@ -939,6 +948,12 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
             } => {
                 simulated_wake_bindings.insert(message_id.clone(), subscription_id.clone());
             }
+            Event::DeadlineSummary { message_id, due } => {
+                simulated_summaries.insert(message_id.clone(), due.clone());
+            }
+            Event::NotificationSubscribed { subscription } => {
+                simulated_subscriptions.insert(subscription.id.clone(), subscription.clone());
+            }
             Event::Delivered { ids } => {
                 for id in ids {
                     if let Some(message) = simulated_msgs.get_mut(id) {
@@ -950,8 +965,29 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
             }
             Event::Acked { ids } | Event::ReceiveCommitted { ids, .. } => {
                 for id in ids {
+                    let already_read = simulated_msgs.get(id).is_some_and(|m| m.state == "read");
                     if let Some(message) = simulated_msgs.get_mut(id) {
                         message.state = "read".into();
+                    }
+                    if let Some(members) = simulated_summaries.get(id) {
+                        if !already_read {
+                            for member in members.keys() {
+                                if let Some(sub) = simulated_subscriptions.get_mut(member) {
+                                    let consumed = consume_subscription_for_preflight(sub, None);
+                                    sub.fired_count = consumed.fired_count;
+                                    match consumed.status {
+                                        SubscriptionConsumptionStatus::Unchanged => {}
+                                        SubscriptionConsumptionStatus::Consumed => {
+                                            sub.status = "consumed".into()
+                                        }
+                                        SubscriptionConsumptionStatus::Armed => {
+                                            sub.status = "armed".into()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
                     }
                     let Some(subscription_id) = simulated_wake_bindings.get(id).cloned() else {
                         continue;
@@ -1519,6 +1555,10 @@ pub enum Event {
         message_id: String,
         address: crate::server::name_mailbox::MailboxNameAddress,
     },
+    CrossProjectAddressed {
+        message_id: String,
+        addresses: super::cross_project_receipt::Addresses,
+    },
     MailboxReassigned {
         handoff: crate::server::name_mailbox::MailboxHandoff,
     },
@@ -1585,6 +1625,11 @@ pub enum Event {
         subscription_id: String,
         message_id: String,
         consumed_ms: i64,
+    },
+    DeadlineSummary {
+        message_id: String,
+        /// Subscription -> physical occurrence included in this summary.
+        due: std::collections::BTreeMap<String, i64>,
     },
     WakeBound {
         message_id: String,

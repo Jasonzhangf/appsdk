@@ -15,180 +15,60 @@ impl std::fmt::Display for BindingPublicationError {
 }
 
 impl ProjectRuntimeManager {
+    #[cfg(test)]
     fn new(host: Arc<Server>, host_paths: &crate::scope::HostPaths) -> Result<Arc<Self>, String> {
-        let host_root = GlobalState::canonical_project_scope(&host.root)
-            .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
+        Self::open(HostServices {
+            config: host.config.clone(),
+            host_paths: host_paths.clone(),
+            legacy_state_path: host.state_path.clone(),
+            register_gate: host.register_gate.clone(),
+            appserver_candidate_check: host.appserver_candidate_check.clone(),
+            appserver_notification_sink: host.appserver_notification_sink.clone(),
+            appserver_thread_status: host.appserver_thread_status.clone(),
+            appserver_thread_archive: host.appserver_thread_archive.clone(),
+            runtime_handle: host.rex_monitor.runtime_handle(),
+        })
+    }
+
+    fn open(host: HostServices) -> Result<Arc<Self>, String> {
+        let host_control = host_control::HostControl::read_current(&host.host_paths)?;
+        Self::with_control(host, host_control)
+    }
+
+    fn with_control(host: HostServices, host_control: host_control::HostControl) -> Result<Arc<Self>, String> {
+        let host_paths = &host.host_paths;
         let route_file = host_paths.state_root().join("routes.json");
         // Finish committed deletion before current project state can
         // materialize old state. A real deletion failure stays explicit.
-        let mut pending: Vec<String> = host
-            .state
-            .lock()
-            .unwrap()
-            .pending_project_resets
-            .keys()
-            .cloned()
-            .collect();
-        let map = crate::server::binding_store::BindingControlStore::new(host_paths.state_root()).load()?;
-        for scope in map.pending_resets {
-            if !pending.contains(&scope) { pending.push(scope); }
-        }
+        let store = crate::server::binding_store::BindingControlStore::new(host_paths.state_root());
+        host_control.handoff_pending_resets(&store)?;
+        let pending = store.load()?.pending_resets;
         for scope in pending {
-            project_reset::finish_reset(&host, &route_file, &scope)
-                .map_err(|e| format!("RESET_INCOMPLETE: {e}"))?;
+            if let Err(error) = project_reset::finish_reset(
+                host_paths, &route_file, &scope,
+                &[
+                    host.legacy_state_path.clone(), host_paths.state_root().to_path_buf(),
+                    host.legacy_state_path.with_file_name("daemon.lock"),
+                ],
+            ) {
+                append_log(&host_paths.log_path(), &format!("RESET_INCOMPLETE: scope {scope}: {error}"));
+            }
         }
-        // Remove invalid records durably before the resident registry can
-        // interpret them as recoverable registrations.
+        // Retire deinitialized fixed routes before any project can load.
         for record in load_host_route_records(&route_file)? {
             if project_reset::route_is_deinitialized(Path::new(&record.canonical_root))? {
-                project_reset::retire_stale_project_routes(&host, &record.project_scope)?;
+                project_reset::retire_stale_project_routes(host_paths, &record.project_scope)?;
                 project_reset::delete_route(&route_file, &record)?;
             }
         }
         let mut routes = std::collections::BTreeMap::new();
 
-        // Preserve the resident route discovered from its own reducer.  Old
-        // external registrations are retained as not-ready route metadata so
-        // a client receives an explicit migration error until its project
-        // runtime can be opened.
-        let registry = HostRouteRegistry::for_server(&host)?;
-        for ((app_scope, project_scope), owner) in registry.routes {
-            if project_reset::route_is_deinitialized(Path::new(&project_scope))? {
-                project_reset::retire_stale_project_routes(&host, &project_scope)?;
-                continue;
-            }
-            match owner {
-                HostRouteOwner::ResidentProject { root, .. } => {
-                    routes.insert(
-                        (app_scope, project_scope),
-                        RuntimeRoute {
-                            root: root.clone(),
-                            storage_root: host.storage_root.clone(),
-                            runtime: Some(host.clone()),
-                        },
-                    );
-                }
-                HostRouteOwner::RegisteredNotReady { root } => {
-                    let storage_root = host_paths.app_storage_root(&project_scope, &app_scope);
-                    routes
-                        .entry((app_scope, project_scope))
-                        .or_insert(RuntimeRoute {
-                            root: root.clone(),
-                            storage_root,
-                            runtime: None,
-                        });
-                }
-            }
-        }
-
-        let mut route_records = Vec::new();
+        // Startup reads only fixed routes, never project state to discover them.
         for record in load_host_route_records(&route_file)? {
-            if route_record_is_replayable(&record)? {
-                route_records.push(record);
-            }
-        }
-        if let Some(record) = Self::restore_resident_route_record(
-            &host,
-            host_root.as_str(),
-            &route_file,
-            &route_records,
-        )? {
-            if route_record_is_replayable(&record)? {
-                route_records.push(record);
-            }
-        }
-        // A route record is only usable when its storage path has one owner.
-        // The host resident reducer is an owner even when it has no entry in
-        // routes.json; another reducer cannot share the resident state owner.
-        for record in &route_records {
-            let key = (record.app_scope_id.clone(), record.project_scope.clone());
-            let storage_root = PathBuf::from(&record.storage_root);
-            let canonical_root = Path::new(&record.canonical_root);
-            let resident_self_route = is_resident_self_route(
-                &record.app_scope_id,
-                &record.project_scope,
-                canonical_root,
-                &storage_root,
-                Path::new(host_root.as_str()),
-                &host.storage_root,
-                &host,
-                &routes,
-            )
-            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-            let resident_key = record.app_scope_id == crate::identity::CLI_APP_SERVER_ID
-                && canonical_root == Path::new(host_root.as_str())
-                && record.project_scope == host_root.as_str();
-            if resident_key && !resident_self_route {
-                return Err(format!(
-                    "HOST_ROUTE_REPLAY_FAILED: resident route storage root {} does not match resident host",
-                    record.storage_root
-                ));
-            }
-            let mut owner_key = None;
-            for (candidate_key, route) in &routes {
-                if candidate_key != &key
-                    && storage_roots_equal(&route.storage_root, &storage_root)
-                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
-                {
-                    owner_key = Some(candidate_key.clone());
-                    break;
-                }
-            }
-            if let Some(owner_key) = owner_key {
-                return Err(format!(
-                    "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is already owned by route ({}, {})",
-                    record.storage_root, owner_key.0, owner_key.1
-                ));
-            }
-        }
-
-        for record in route_records {
-            let (key, root, storage_root) = validate_host_route_record(&record, host_paths)?;
-            let resident_self_route = is_resident_self_route(
-                &key.0,
-                &key.1,
-                &root,
-                &storage_root,
-                Path::new(host_root.as_str()),
-                &host.storage_root,
-                &host,
-                &routes,
-            )
-            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-            if resident_self_route {
-                let registration = ProjectRegistration::with_registered_at(
-                    ProjectScopeId::new(key.1.clone())
-                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
-                    AppServerId::new(key.0.clone())
-                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
-                    record.registered_ms,
-                )
-                .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-                let registration_missing = host
-                    .state
-                    .lock()
-                    .unwrap()
-                    .global
-                    .lookup_registration(&registration.project_scope, &registration.app_scope_id)
-                    .is_none();
-                if registration_missing {
-                    host.commit_checked(&[Event::GlobalProjectRegistered { registration }])
-                        .map_err(|error| {
-                            format!(
-                                "HOST_ROUTE_REPLAY_FAILED: restore resident project registration: {error}"
-                            )
-                        })?;
-                }
-                routes.insert(
-                    key,
-                    RuntimeRoute {
-                        root,
-                        storage_root,
-                        runtime: Some(host.clone()),
-                    },
-                );
+            if !route_record_is_replayable(&record)? {
                 continue;
             }
+            let (key, root, storage_root) = validate_host_route_record(&record, host_paths)?;
             routes.insert(
                 key,
                 RuntimeRoute {
@@ -199,12 +79,10 @@ impl ProjectRuntimeManager {
             );
         }
 
-        // Validate the merged table before opening any pending runtime.
-        // A pending alias of the resident
-        // storage must fail closed instead of creating a second reducer.
-        validate_route_owner_table(&host, &routes)?;
+        // Reject shared storage before opening any project runtime.
+        validate_route_owner_table(host_paths, &routes)?;
         // Namespace initialization is a write. Every pending route must first
-        // pass the existing path, resident and shared-owner checks above.
+        // pass the existing path and shared-owner checks above.
         for (key, route) in &routes {
             if route.runtime.is_none() {
                 select_central_runtime_storage(host_paths, &route_file, key, None)?;
@@ -212,8 +90,8 @@ impl ProjectRuntimeManager {
         }
 
         let manager = Arc::new(Self {
-            host: Arc::clone(&host),
-            host_root: PathBuf::from(host_root.as_str()),
+            host: Arc::new(host.clone()),
+            host_control,
             route_file,
             routes: Mutex::new(routes),
             project_locks: Mutex::new(std::collections::BTreeMap::new()),
@@ -225,8 +103,6 @@ impl ProjectRuntimeManager {
             materialization_cap: std::sync::atomic::AtomicUsize::new(
                 MAX_MATERIALIZED_EXTERNAL_RUNTIMES,
             ),
-            #[cfg(test)]
-            fail_current_thread_route_publish: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             materialization_build_delay_ms: std::sync::atomic::AtomicU64::new(0),
         });
@@ -336,136 +212,50 @@ impl ProjectRuntimeManager {
         Ok(manager)
     }
 
-    /// Republish one binding owned by the current recovery request.
-    ///
-    /// Recovery must not fail because another project has an unrelated stale
-    /// route. The same pane and native-address conflicts still fail closed.
+    /// Validate the recovery request's binding against the current map.
+    /// No secondary host address index is published.
     fn reconcile_binding_publication(
         &self,
         binding: &RuntimeBinding,
     ) -> Result<(), BindingPublicationError> {
         self.prune_stale_routes()
             .map_err(BindingPublicationError::Persistence)?;
-        if let Some(owner) = self.pane_owner_other_than(binding) {
+        if let Some(owner) = self.pane_owner_other_than(binding)
+            .map_err(BindingPublicationError::Persistence)? {
             return Err(BindingPublicationError::AddressConflict(format!(
                 "RECOVERY_RECONCILE_REQUIRED: pane for {} belongs to {} binding {}",
                 binding.binding_id, owner.agent_id, owner.binding_id
             )));
         }
 
-        let host = self.host.state.lock().unwrap();
-        if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
-            if let Some(current) = host.global.lookup_unique_tmux_pane_route(endpoint) {
-                if current == binding {
-                    return Ok(());
-                }
-                let same_durable_route = current.same_principal(binding)
-                    && current.binding_id == binding.binding_id
-                    && current.runtime_id == binding.runtime_id
-                    && current.project_scope == binding.project_scope
-                    && current.app_scope_id == binding.app_scope_id;
-                if !same_durable_route {
-                    return Err(BindingPublicationError::AddressConflict(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: host pane route for {} belongs to {}",
-                        binding.binding_id, current.binding_id
-                    )));
-                }
+        let map = self.binding_control_store().load()
+            .map_err(BindingPublicationError::Persistence)?;
+        if !map.holds_current_binding(binding) {
+            return Err(BindingPublicationError::AddressConflict(
+                "RECOVERY_RECONCILE_REQUIRED: binding is not current in identity-map".into()));
+        }
+        if let (Some(session), Some(thread)) = (&binding.session_id, &binding.native_thread_id) {
+            if map.active_values().any(|value| value.binding != *binding
+                && value.binding.session_id.as_ref() == Some(session)
+                && value.binding.native_thread_id.as_ref() == Some(thread)) {
+                return Err(BindingPublicationError::AddressConflict(
+                    "RECOVERY_RECONCILE_REQUIRED: multiple current bindings own the session/thread".into()));
             }
         }
-        if let (Some(session_id), Some(native_thread_id)) = (
-            binding.session_id.as_ref(),
-            binding.native_thread_id.as_ref(),
-        ) {
-            if let Some(current) = host
-                .global
-                .lookup_current_thread_route(session_id, native_thread_id)
-            {
-                if current == binding {
-                    return Ok(());
-                }
-                let same_durable_route = current.same_principal(binding)
-                    && current.binding_id == binding.binding_id
-                    && current.runtime_id == binding.runtime_id
-                    && current.project_scope == binding.project_scope
-                    && current.app_scope_id == binding.app_scope_id
-                    && current.session_id == binding.session_id
-                    && current.native_thread_id == binding.native_thread_id;
-                if !same_durable_route {
-                    return Err(BindingPublicationError::AddressConflict(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: current thread route for {} belongs to {}",
-                        native_thread_id, current.binding_id
-                    )));
-                }
-            }
-        }
-        drop(host);
-        self.host
-            .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-                binding: binding.clone(),
-            }])
-            .map_err(|error| {
-                BindingPublicationError::Persistence(format!(
-                    "RECOVERY_RECONCILE_REQUIRED: {error}"
-                ))
-            })?;
         Ok(())
     }
 
-    /// The live route that owns this binding's pane as a different claim.
-    ///
-    /// One pane owns exactly one binding host-wide, so this is the single
-    /// question every republisher must ask before publishing. A claimant at
-    /// this binding's own address is not an owner: a generation refresh keeps
-    /// its address and must still be published. A claimant that is this same
-    /// durable binding at an older address is this route's own stale entry, and
-    /// the reconciler advances it instead of treating it as another owner. The
-    /// caller decides what to log, because the request path and the startup
-    /// paths report different things.
-    fn pane_owner_other_than(&self, binding: &RuntimeBinding) -> Option<RuntimeBinding> {
-        let host = self.host.state.lock().unwrap();
-        host.global.pane_claimant_other_than(binding).cloned()
-    }
-
-    fn restore_resident_route_record(
-        host: &Arc<Server>,
-        host_root: &str,
-        route_file: &Path,
-        route_records: &[HostRouteRecord],
-    ) -> Result<Option<HostRouteRecord>, String> {
-        let project_scope = ProjectScopeId::new(host_root.to_owned())
-            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-        let app_scope = AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
-            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-        let registration = host
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_registration(&project_scope, &app_scope)
-            .cloned();
-        let Some(registration) = registration else {
-            return Ok(None);
-        };
-        if route_records.iter().any(|record| {
-            record.app_scope_id == registration.app_scope_id.as_str()
-                && record.project_scope == registration.project_scope.as_str()
-        }) {
-            return Ok(None);
-        }
-
-        let storage_root = storage_owner_path(&host.storage_root)
-            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-        let record = HostRouteRecord {
-            app_scope_id: registration.app_scope_id.as_str().into(),
-            project_scope: registration.project_scope.as_str().into(),
-            canonical_root: host_root.to_owned(),
-            storage_root: storage_root.to_string_lossy().into_owned(),
-            registered_ms: registration.registered_at_ms,
-        };
-        append_host_route_record(route_file, &record).map_err(|error| {
-            format!("HOST_ROUTE_REPLAY_FAILED: restore resident route: {error}")
-        })?;
-        Ok(Some(record))
+    /// An exact different current mapping that claims the same physical pane.
+    fn pane_owner_other_than(&self, binding: &RuntimeBinding) -> Result<Option<RuntimeBinding>, String> {
+        let map = self.binding_control_store().load()?;
+        let owner = map.active_values().map(|value| &value.binding).find(|other| {
+            *other != binding && binding.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                other.tmux_endpoint.as_ref().is_some_and(|candidate| {
+                    crate::client::adapters::tmux::same_owned_pane(endpoint, candidate)
+                })
+            })
+        }).cloned();
+        Ok(owner)
     }
 
     fn validate_current_thread_candidate(
@@ -485,38 +275,14 @@ impl ProjectRuntimeManager {
             return Ok(Vec::new());
         };
         let endpoint = &candidate.endpoint;
-        let mut runtimes = vec![self.host.clone()];
-        for runtime in self.runtimes() {
-            if !runtimes
-                .iter()
-                .any(|existing| Arc::ptr_eq(existing, &runtime))
-            {
-                runtimes.push(runtime);
-            }
-        }
+        let map = self.binding_control_store().load()?;
         let mut pane_claims: Vec<(Arc<Server>, RuntimeBinding)> = Vec::new();
-        for runtime in runtimes {
-            let state = runtime.state.lock().unwrap();
-            for binding in state
-                .global
-                .projects
-                .values()
-                .flat_map(|project| project.runtime_bindings.values())
-            {
-                // A tmux registration anchors on its pane id and nothing else.
-                // The Codex ids a tmux endpoint carries are not queryable, and
-                // the pane's shell pid is not an identity, so neither may decide
-                // which binding a second claim replaces. Socket, session and
-                // pane id name one pane on one tmux server.
-                let same_tmux_pane = binding.tmux_endpoint.as_ref().is_some_and(|previous| {
-                    crate::client::adapters::tmux::same_owned_pane(previous, endpoint)
-                });
-                if same_tmux_pane {
-                    if !pane_claims.iter().any(|(_, existing)| existing == binding) {
-                        pane_claims.push((runtime.clone(), binding.clone()));
-                    }
-                    continue;
-                }
+        for binding in map.active_values().map(|value| &value.binding) {
+            if binding.tmux_endpoint.as_ref().is_some_and(|previous| {
+                crate::client::adapters::tmux::same_owned_pane(previous, endpoint)
+            }) {
+                let runtime = self.runtime_for_route_scope(&binding.route_scope())?;
+                pane_claims.push((runtime, binding.clone()));
             }
         }
         // The pane scan above only answers the conflict question. Ownership of

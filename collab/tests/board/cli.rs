@@ -2671,7 +2671,7 @@ fn ordinary_peer_cannot_update_another_live_peers_task() {
     );
     assert_eq!(
         result["error"],
-        "only the task owner may update its lifecycle"
+        "TASK_OWNER_REQUIRED: the task's current stable-name holder may execute it"
     );
 
     let after_board = fixture.run_public(&["board", "show"], THREAD_B);
@@ -2688,9 +2688,326 @@ fn ordinary_peer_cannot_update_another_live_peers_task() {
     assert_eq!(after["status"], "working");
 }
 
+fn master_status_update_case(
+    fixture: &mut AppFixture,
+    master: &str,
+    peer: &str,
+    id: &str,
+    presence: Option<&str>,
+) {
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            id,
+            "--next",
+            "owner executes before manager coordination",
+        ],
+        THREAD_B,
+    );
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let before_board = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()
+        .clone();
+    assert_eq!(before_board["revision"], 1);
+    let project_scope = std::fs::canonicalize(&fixture.project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| {
+        state["agent_presence"][&project_scope][peer] = json!({
+            "project_scope": project_scope,
+            "worker_id": peer,
+            "session_id": THREAD_B,
+            "presence": presence.unwrap_or("online"),
+            "reason": "fixture current owner presence",
+            "observed_ms": 1001
+        });
+    });
+    if presence == Some("offline") {
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .get_mut(THREAD_B)
+            .unwrap()
+            .reject_as_missing = true;
+        fixture.run_public(&["worker", "snapshot", peer], THREAD_A);
+    }
+    if presence.is_none() {
+        fixture.run_public(&["worker", "snapshot", peer], THREAD_A);
+    }
+    let state = fixture.current_state();
+    let current_presence = state["agent_presence"][&project_scope][peer]["presence"].clone();
+    assert_eq!(current_presence, presence.unwrap_or("online"));
+    let before = fixture.run_public(&["task", "status", id], THREAD_A);
+    let updated = fixture.run_public(
+        &[
+            "board",
+            "update",
+            id,
+            "--expected-revision",
+            "1",
+            "--status",
+            "verifying",
+            "--next",
+            "master coordinates verification",
+        ],
+        THREAD_A,
+    );
+    if presence == Some("offline") {
+        assert_eq!(updated["task"]["owner"], "");
+        assert_eq!(updated["task"]["reassignment_reason"], "owner_offline");
+    } else {
+        assert_eq!(updated["task"]["owner"], *peer);
+    }
+    assert_eq!(updated["task"]["publisher"], *peer);
+    assert_eq!(updated["task"]["status"], "verifying");
+    assert_eq!(
+        updated["task"]["next_step"],
+        "master coordinates verification"
+    );
+    assert_eq!(updated["task"]["revision"], 2);
+    assert!(updated["task"]["executor_name"].is_null());
+    let after_status = fixture.run_public(&["task", "status", id], THREAD_A);
+    for field in [
+        "created_by",
+        "owner_session_id",
+        "work_policy",
+        "delivery_evidence",
+        "review_evidence",
+    ] {
+        assert_eq!(after_status[field], before[field], "{field} changed");
+    }
+    let stale = fixture.command_public(
+        &[
+            "board",
+            "update",
+            id,
+            "--expected-revision",
+            "1",
+            "--next",
+            "stale manager observation",
+        ],
+        THREAD_A,
+    );
+    assert!(!stale.status.success());
+    let (_, result) = parse_public_response(stale);
+    assert_eq!(
+        result["error"],
+        "BOARD_STALE_REVISION: reread the board before updating"
+    );
+    let after = fixture.run_public(&["task", "status", id], THREAD_A);
+    assert_eq!(after["owner"], *peer);
+    assert_eq!(after["status"], "verifying");
+    assert_ne!(master, after["owner"]);
+}
+
+#[test]
+fn current_master_updates_peer_status_across_online_owner_presence() {
+    let (mut fixture, master, peer) = setup();
+    master_status_update_case(
+        &mut fixture,
+        &master,
+        &peer,
+        "manager-presence-online",
+        None,
+    );
+}
+
+#[test]
+fn current_master_updates_peer_status_across_offline_owner_presence() {
+    let (mut fixture, master, peer) = setup();
+    master_status_update_case(
+        &mut fixture,
+        &master,
+        &peer,
+        "manager-presence-offline",
+        Some("offline"),
+    );
+}
+
+#[test]
+fn current_master_updates_peer_status_across_unknown_owner_presence() {
+    let (mut fixture, master, peer) = setup();
+    master_status_update_case(
+        &mut fixture,
+        &master,
+        &peer,
+        "manager-presence-unknown",
+        Some("unknown"),
+    );
+}
+
+#[test]
+fn current_master_updates_status_of_task_pinned_to_another_executor() {
+    let (mut fixture, _, peer) = setup();
+    let id = "manager-pinned-executor-status";
+    let published = fixture.run_public(
+        &[
+            "board",
+            "publish",
+            id,
+            "--title",
+            "pinned executor management",
+            "--description",
+            "master status management keeps the real executor",
+            "--delivery-condition",
+            "owner and evidence unchanged",
+            "--test-condition",
+            "public board update passes for current master",
+            "--executor",
+            "Bob",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(published["task"]["executor_name"], "Bob");
+    assert_eq!(published["task"]["status"], "pending");
+    let claimed = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["status"], "working");
+    assert_eq!(claimed["task"]["revision"], 2);
+    assert_eq!(claimed["task"]["executor_name"], "Bob");
+    let before = fixture.run_public(&["task", "status", id], THREAD_A);
+    assert_eq!(before["owner"], peer);
+    let updated = fixture.run_public(
+        &[
+            "board",
+            "update",
+            id,
+            "--expected-revision",
+            "2",
+            "--status",
+            "verifying",
+            "--next",
+            "master coordinates pinned executor verification",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(updated["task"]["owner"], peer);
+    assert_eq!(updated["task"]["publisher"], peer);
+    assert_eq!(updated["task"]["status"], "verifying");
+    assert_eq!(
+        updated["task"]["next_step"],
+        "master coordinates pinned executor verification"
+    );
+    assert_eq!(updated["task"]["revision"], 3);
+    assert_eq!(updated["task"]["executor_name"], "Bob");
+    let after_status = fixture.run_public(&["task", "status", id], THREAD_A);
+    for field in [
+        "created_by",
+        "owner_session_id",
+        "work_policy",
+        "delivery_evidence",
+        "review_evidence",
+    ] {
+        assert_eq!(after_status[field], before[field], "{field} changed");
+    }
+}
+
+#[test]
+fn current_master_updates_private_managed_child_but_ordinary_peer_cannot() {
+    let (mut fixture, master, peer) = setup();
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "managed-master-private",
+            "--next",
+            "managed child executes privately",
+        ],
+        THREAD_C,
+    );
+    let managed = fixture.run_public(&["context"], THREAD_C);
+    let managed_id = managed["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let project_scope = std::fs::canonicalize(&fixture.project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| {
+        let project_scope = project_scope.clone();
+        state["subagents"]["managed-fixture"] = json!({
+            "id": "managed-fixture",
+            "parent": master,
+            "peer": managed_id,
+            "status": "working",
+            "thread_id": THREAD_C,
+            "profile": null,
+            "created_ms": 1,
+            "ready_deadline_ms": 0,
+            "last_message": null,
+            "error": null,
+            "probe_failures": [],
+            "runtime": null
+        });
+        state["board_details"]["managed-master-private"]["public_visibility"] = json!(false);
+        state["agent_presence"][&project_scope][&managed_id] = json!({
+            "project_scope": project_scope,
+            "worker_id": managed_id,
+            "session_id": THREAD_C,
+            "presence": "online",
+            "reason": "fixture current managed child",
+            "observed_ms": 1
+        });
+    });
+    let master_update = fixture.command_public(
+        &[
+            "board",
+            "update",
+            "managed-master-private",
+            "--expected-revision",
+            "1",
+            "--next",
+            "master coordinates private child",
+        ],
+        THREAD_A,
+    );
+    let (success, result) = parse_public_response(master_update);
+    assert!(
+        success,
+        "current master private-task update failed: {result}"
+    );
+    assert_eq!(result["task"]["owner"], managed_id);
+    assert_eq!(
+        result["task"]["next_step"],
+        "master coordinates private child"
+    );
+    let owner = fixture.run_public(&["task", "status", "managed-master-private"], THREAD_C);
+    assert_eq!(owner["owner"], managed_id);
+    assert_ne!(owner["owner"], peer);
+    let ordinary_update = fixture.command_public(
+        &[
+            "board",
+            "update",
+            "managed-master-private",
+            "--expected-revision",
+            "1",
+            "--next",
+            "ordinary peer must not cross the private boundary",
+        ],
+        THREAD_B,
+    );
+    let (ordinary_success, ordinary_result) = parse_public_response(ordinary_update);
+    assert!(!ordinary_success, "{ordinary_result}");
+    assert_eq!(
+        ordinary_result["error"],
+        "BOARD_PRIVATE_TASK: task is outside the caller's board view"
+    );
+}
+
 #[test]
 fn live_bob_successor_updates_unfinished_work_after_public_name_handoff() {
-    let (fixture, _, original_bob) = setup();
+    let (mut fixture, _, original_bob) = setup();
     fixture.run_public(
         &[
             "task",
@@ -2733,6 +3050,60 @@ fn live_bob_successor_updates_unfinished_work_after_public_name_handoff() {
     assert_eq!(handed_task["owner"], successor);
     assert_eq!(handed_task["owner_name"], "Bob");
 
+    let identity_map_path = fixture.host_state.join("identity-map.json");
+    let identity_map: Value =
+        serde_json::from_slice(&std::fs::read(&identity_map_path).unwrap()).unwrap();
+    let handed_slots = identity_map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| {
+            slot["identity_key"]["name"] == "Bob"
+                && slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == successor
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handed_slots.len(),
+        1,
+        "exactly one current Bob binding: {identity_map}"
+    );
+    let handed_generation = handed_slots[0]["generation"].as_u64().unwrap();
+    assert!(handed_generation > 0, "{identity_map}");
+    assert_eq!(
+        handed_slots[0]["current"]["binding"]["session_id"],
+        THREAD_C
+    );
+
+    // Exercise an incomplete business handoff: the stable name has the current
+    // binding generation while the raw task row still points at the old carrier.
+    fixture.update_current_state(|state| {
+        assert_eq!(
+            state["task_assignments"]["bob-successor-update"]["name"],
+            "Bob"
+        );
+        assert_eq!(
+            state["task_assignments"]["bob-successor-update"]["session_id"],
+            THREAD_C
+        );
+        assert_eq!(state["tasks"]["bob-successor-update"]["owner"], successor);
+        state["tasks"]["bob-successor-update"]["owner"] = json!(original_bob);
+    });
+    let divergent = fixture.current_state();
+    assert_eq!(
+        divergent["tasks"]["bob-successor-update"]["owner"],
+        original_bob
+    );
+    let projected = fixture.run_public(&["board", "show"], THREAD_A);
+    let projected_task = projected["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "bob-successor-update")
+        .unwrap();
+    assert_eq!(projected_task["owner"], successor);
+    assert_eq!(projected_task["owner_name"], "Bob");
+
     let updated = fixture.run_public(
         &[
             "board",
@@ -2740,6 +3111,8 @@ fn live_bob_successor_updates_unfinished_work_after_public_name_handoff() {
             "bob-successor-update",
             "--expected-revision",
             &handed_task["revision"].as_u64().unwrap().to_string(),
+            "--status",
+            "working",
             "--next",
             "live Bob successor continues the unfinished task",
         ],
@@ -2750,26 +3123,259 @@ fn live_bob_successor_updates_unfinished_work_after_public_name_handoff() {
         "live Bob successor continues the unfinished task"
     );
     assert_eq!(updated["task"]["owner"], successor);
+    assert_eq!(updated["task"]["status"], "working");
+    let after_update = fixture.current_state();
+    assert_eq!(
+        after_update["tasks"]["bob-successor-update"]["owner"], original_bob,
+        "the lifecycle update must not fake the raw-owner handoff"
+    );
+    assert_eq!(
+        after_update["task_assignments"]["bob-successor-update"]["session_id"],
+        THREAD_C
+    );
+    let identity_map_after: Value =
+        serde_json::from_slice(&std::fs::read(&identity_map_path).unwrap()).unwrap();
+    let handed_slot_after = identity_map_after["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Bob" && slot["identity_status"] == "active")
+        .unwrap();
+    assert_eq!(handed_slot_after["generation"], handed_generation);
+    assert_eq!(
+        handed_slot_after["current"]["binding"]["agent_id"],
+        successor
+    );
+    assert_eq!(
+        handed_slot_after["current"]["binding"]["session_id"],
+        THREAD_C
+    );
 
+    let revision = updated["task"]["revision"].as_u64().unwrap().to_string();
+    let snapshot = fixture.current_state();
+    let stale = fixture.command_public(
+        &[
+            "board",
+            "update",
+            "bob-successor-update",
+            "--expected-revision",
+            &handed_task["revision"].as_u64().unwrap().to_string(),
+            "--next",
+            "stale write",
+        ],
+        THREAD_C,
+    );
+    let (ok, response) = parse_public_response(stale);
+    assert!(!ok, "{response}");
+    assert!(
+        response["error"].as_str().unwrap().contains("REVISION"),
+        "{response}"
+    );
+    assert_eq!(fixture.current_state()["tasks"], snapshot["tasks"]);
+    assert_eq!(
+        fixture.current_state()["board_details"],
+        snapshot["board_details"]
+    );
+
+    const OUTSIDER: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fee";
+    fixture.run_public(&["context"], OUTSIDER);
+    let before_denial = fixture.current_state();
+    let (ok, response) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "update",
+            "bob-successor-update",
+            "--expected-revision",
+            &revision,
+            "--next",
+            "unrelated peer write",
+        ],
+        OUTSIDER,
+    ));
+    assert!(!ok, "{response}");
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("TASK_OWNER_REQUIRED"),
+        "{response}"
+    );
+    assert_eq!(fixture.current_state()["tasks"], before_denial["tasks"]);
+    assert_eq!(
+        fixture.current_state()["board_details"],
+        before_denial["board_details"]
+    );
+
+    let verifying = fixture.run_public(
+        &[
+            "board",
+            "update",
+            "bob-successor-update",
+            "--expected-revision",
+            &revision,
+            "--status",
+            "verifying",
+            "--next",
+            "successor verifies",
+        ],
+        THREAD_C,
+    );
+    assert_eq!(verifying["task"]["status"], "verifying");
+    assert_eq!(verifying["task"]["owner"], successor);
+    let coordinated = fixture.run_public(
+        &[
+            "board",
+            "update",
+            "bob-successor-update",
+            "--expected-revision",
+            &verifying["task"]["revision"].as_u64().unwrap().to_string(),
+            "--next",
+            "scoped master coordinates",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(coordinated["task"]["owner"], successor);
+    assert_eq!(coordinated["task"]["status"], "verifying");
+
+    let before_old_holder = fixture.current_state();
     let old_holder = fixture.command_public(
         &[
             "board",
             "update",
             "bob-successor-update",
             "--expected-revision",
-            &updated["task"]["revision"].as_u64().unwrap().to_string(),
+            &coordinated["task"]["revision"]
+                .as_u64()
+                .unwrap()
+                .to_string(),
             "--next",
             "former Bob must not retain the name authority",
         ],
         THREAD_B,
     );
     assert!(!old_holder.status.success());
+    assert_eq!(fixture.current_state()["tasks"], before_old_holder["tasks"]);
+    assert_eq!(
+        fixture.current_state()["board_details"],
+        before_old_holder["board_details"]
+    );
     let after = fixture.run_public(&["task", "status", "bob-successor-update"], THREAD_C);
     assert_eq!(after["created_by"], original_bob);
-    assert_eq!(
-        after["next_step"],
-        "live Bob successor continues the unfinished task"
+    assert_eq!(after["next_step"], "scoped master coordinates");
+
+    // Use a second native host fixture so its reported cwd is the foreign
+    // project. Both callers register through the same isolated Collab daemon.
+    const FOREIGN: &str = "01a0d641-13f1-7b31-8d84-530f0f2d3fef";
+    let foreign_host = AppFixture::new();
+    let (ok, foreign) = parse_public_response(
+        public_command(
+            &fixture,
+            &[
+                "context",
+                "--approve-grant",
+                r#"{"action":"restore_master","authorization":"fixture foreign scope master"}"#,
+            ],
+            FOREIGN,
+        )
+        .current_dir(&foreign_host.project)
+        .env("COLLAB_APPSERVER_SOCKET", &foreign_host.app_socket)
+        .output()
+        .unwrap(),
     );
+    assert!(ok, "{foreign}");
+    let foreign_state = fixture.current_state_for(&foreign_host.project, "appserver-cli");
+    assert!(
+        foreign_state["global"]["projects"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|project| project["master_grants"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|grant| grant["agent_id"] == foreign["identity"]["worker_id"])),
+        "foreign master grant exists"
+    );
+    let before_foreign = fixture.current_state();
+    let denied = fixture.command_public(
+        &[
+            "board",
+            "update",
+            "bob-successor-update",
+            "--expected-revision",
+            &coordinated["task"]["revision"]
+                .as_u64()
+                .unwrap()
+                .to_string(),
+            "--next",
+            "foreign master write",
+        ],
+        FOREIGN,
+    );
+    assert!(!denied.status.success());
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("BOARD_IDENTITY_REQUIRED"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    assert_eq!(fixture.current_state()["tasks"], before_foreign["tasks"]);
+    assert_eq!(
+        fixture.current_state()["board_details"],
+        before_foreign["board_details"]
+    );
+    // Also exercise daemon authorization with the real foreign credential,
+    // rather than relying only on the CLI's selected-scope lookup refusal.
+    let foreign_worker = foreign["identity"]["worker_id"].as_str().unwrap();
+    let binding = &foreign["binding"];
+    let scope = fixture.project.canonicalize().unwrap();
+    let request = json!({
+        "op": "Board", "worker_id": foreign_worker,
+        "token": foreign_state["workers"][foreign_worker]["token"],
+        "command": {"action":"update", "id":"bob-successor-update",
+            "expected_revision": coordinated["task"]["revision"],
+            "status": null, "next":"foreign credential cannot cross scope"},
+        "project_context": {"project_scope":scope, "canonical_root":scope,
+            "app_scope_id":"appserver-cli", "runtime_context": {
+                "agent_id":binding["agent_id"], "runtime_id":binding["runtime_id"],
+                "appserver_id":binding["app_scope_id"], "binding_id":binding["binding_id"],
+                "session_id":binding["session_id"], "native_thread_id":binding["native_thread_id"]
+            }}
+    });
+    let mut stream = UnixStream::connect(fixture.host_state.join("server.sock")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    writeln!(stream, "{request}").unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(stream)
+        .read_line(&mut line)
+        .unwrap();
+    let denied: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert!(
+        denied["error"]
+            .as_str()
+            .unwrap()
+            .contains("PROJECT_ROUTE_NOT_READY/UNSUPPORTED"),
+        "{denied}"
+    );
+    assert_eq!(fixture.current_state()["tasks"], before_foreign["tasks"]);
+    assert_eq!(
+        fixture.current_state()["board_details"],
+        before_foreign["board_details"]
+    );
+    let after_state = fixture.current_state();
+    for field in [
+        "task_assignments",
+        "task_lifecycle",
+        "pending_merges",
+        "cleanup_receipts",
+    ] {
+        assert_eq!(
+            after_state[field], snapshot[field],
+            "updates preserve {field}"
+        );
+    }
 }
 
 #[test]

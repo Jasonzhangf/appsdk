@@ -30,7 +30,7 @@
       "id": "校验目标名字权限与占用",
       "operator": "appsdk.collab_assignment.authorize_target",
       "operator_version": "1",
-      "description": "自动选人要求当前Online/Idle且没有其他有效邀请预留或当前名字的Claimed/Running执行。主动接受核对当前受邀者、精确binding/session、Online和同一容量事实，排除本次邀请自身；接受请求执行中的Busy或Unknown活动不单独否决。仅持有未执行的工作责任不等同占用执行slot。关闭任务的历史邀请不预留容量。源assignment代际、调度轮次、回归、角色、依赖和资源gate保持。目标无可用工作者时保留归属并记录原因，不自动选择Jenny。",
+      "description": "自动选人仅选择已有长期任务声明的工作；缺声明时保留任务、归属和原调度，继续其他工作，不反复尝试必然失败的邀请。显式邀请仍返回缺声明错误；显式补全声明后可沿原调度继续。自动选人要求当前Online/Idle且没有其他有效邀请预留或当前名字的Claimed/Running执行。主动接受核对当前受邀者、精确binding/session、Online和同一容量事实，排除本次邀请自身；接受请求执行中的Busy或Unknown活动不单独否决。仅持有未执行的工作责任不等同占用执行slot。关闭任务的历史邀请不预留容量。源assignment代际、调度轮次、回归、角色、依赖和资源gate保持。目标无可用工作者时保留归属并记录原因，不自动选择Jenny。",
       "inputs": ["assignment_source"],
       "output": {"id": "authorized_assignment", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

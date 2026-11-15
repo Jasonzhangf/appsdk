@@ -12,7 +12,7 @@ impl ProjectRuntimeManager {
         &self,
         context: ProjectContext,
         request: IdentityContextRequest,
-    ) -> (Arc<Server>, Resp) {
+    ) -> DispatchResult {
         self.mapped_context(context, request)
     }
 
@@ -20,23 +20,23 @@ impl ProjectRuntimeManager {
         &self,
         context: ProjectContext,
         mut request: IdentityContextRequest,
-    ) -> (Arc<Server>, Resp) {
+    ) -> DispatchResult {
         if request.action != "context" && !request.query {
             return (
-                self.host.clone(),
+                None,
                 Resp::err("IDENTITY_ACTION_UNSUPPORTED: identity requests use the current map"),
             );
         }
         let observed = self.observe_identity_facts_with_pane(&context, &request.facts);
         let (facts, pane) = match observed {
             Ok(observed) => observed,
-            Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
+            Err(error) => return (None, Resp::err(format!("{error:#}"))),
         };
         request.facts = facts.clone();
         match self.requested_name_scope_requirement(&context, &request) {
-            Ok(Some(requirement)) => return (self.host.clone(), requirement),
+            Ok(Some(requirement)) => return (None, requirement),
             Ok(None) => {}
-            Err(error) => return (self.host.clone(), Resp::err(error)),
+            Err(error) => return (None, Resp::err(error)),
         }
         if facts.dsh_session_id.is_some() && facts.dsh.is_none() {
             let mapped = self.binding_control_store().load().and_then(|map| {
@@ -54,17 +54,17 @@ impl ProjectRuntimeManager {
                         "field_descriptions":{"dsh":"Current gateway endpoint, runtime, agent, session and cwd"},
                         "action":"collab context --provide '<current dsh binding>'"}}});
                     return (
-                        self.host.clone(),
+                        None,
                         typed_operation_resp(missing_facts_result(&request, &data)),
                     );
                 }
-                Err(error) => return (self.host.clone(), Resp::err(error)),
+                Err(error) => return (None, Resp::err(error)),
                 Ok(true) => {}
             }
         }
         if request.query {
             if let Some(retirement) = self.query_human_retirement(&context, &request) {
-                return retirement;
+                return (Some(retirement.0), retirement.1);
             }
             return self.current_mapped_context(&context, &request);
         }
@@ -83,7 +83,7 @@ impl ProjectRuntimeManager {
                     .is_some_and(|scope| scope != context.app_scope_id.as_str())
             {
                 return (
-                    self.host.clone(),
+                    None,
                     Resp::err("IDENTITY_APPROVAL_SCOPE_MISMATCH"),
                 );
             }
@@ -92,7 +92,7 @@ impl ProjectRuntimeManager {
                 Some("restore_master" | "restore_peer" | "restore_name" | "retire_name")
             ) {
                 return (
-                    self.host.clone(),
+                    None,
                     Resp::err(
                         "IDENTITY_APPROVAL_ACTION_UNSUPPORTED: use current name or role intent",
                     ),
@@ -106,7 +106,7 @@ impl ProjectRuntimeManager {
                 .is_some_and(|text| !text.trim().is_empty() && !text.chars().any(char::is_control))
             {
                 return (
-                    self.host.clone(),
+                    None,
                     Resp::err("IDENTITY_AUTHORIZATION_REQUIRED"),
                 );
             }
@@ -121,7 +121,7 @@ impl ProjectRuntimeManager {
         let raw_authorization = request.grant_approval.as_ref().or(request.approval.as_ref());
         let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
             Ok(intent) => intent,
-            Err(error) => return (self.host.clone(), Resp::err(error)),
+            Err(error) => return (None, Resp::err(error)),
         };
         let allow_explicit_rex_rebind = matches!(request
             .grant_approval
@@ -137,7 +137,7 @@ impl ProjectRuntimeManager {
             ) {
                 Ok(observation) => Some(observation),
                 Err(error) => {
-                    return (self.host.clone(), Resp::err(format!("{error:#}")));
+                    return (None, Resp::err(format!("{error:#}")));
                 }
             }
         } else {
@@ -154,14 +154,13 @@ impl ProjectRuntimeManager {
                 &context,
                 &facts,
                 request.invocation_cwd.as_deref(),
-                allow_explicit_rex_rebind,
             ) {
-                return (self.host.clone(), Resp::err(error));
+                return (None, Resp::err(error));
             }
         }
         // DSH convergence owns the gate when it changes the current binding.
         if let Err(error) = self.reconcile_current_dsh_session(&context, &facts) {
-            return (self.host.clone(), Resp::err(format!("{error:#}")));
+            return (None, Resp::err(format!("{error:#}")));
         }
         let _identity = self.identity_gate.lock().unwrap();
         let correlation = if request.operation_id.is_empty() {
@@ -190,7 +189,7 @@ impl ProjectRuntimeManager {
         );
         let (runtime, mut response) = match reconciled {
             Ok(result) => result,
-            Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
+            Err(error) => return (None, Resp::err(format!("{error:#}"))),
         };
         if !response.ok {
             return (runtime, response);
@@ -211,6 +210,9 @@ impl ProjectRuntimeManager {
                     )
                 }
             };
+        let Some(runtime) = runtime else {
+            return (None, Resp::err("IDENTITY_CONTEXT_READBACK_UNAVAILABLE: registration returned no project runtime"));
+        };
         if raw_authorization.is_some_and(|value| value["action"] == "restore_peer") {
             let name = match self.binding_control_store().load().and_then(|map| {
                 map.ordinary_name(
@@ -220,7 +222,7 @@ impl ProjectRuntimeManager {
                 )
             }) {
                 Ok(name) => name,
-                Err(error) => return (runtime, Resp::err(error)),
+                Err(error) => return (Some(runtime), Resp::err(error)),
             };
             intent = Some(name_resolution::NameIntent {
                 requested_name: name,
@@ -253,7 +255,7 @@ impl ProjectRuntimeManager {
         );
         let name_result = match name_result {
             Ok(result) => result,
-            Err(error) => return (runtime, Resp::err(error)),
+            Err(error) => return (Some(runtime), Resp::err(error)),
         };
         let physical = name_result["physical_anchor"].clone();
         let physical_incomplete = physical["status"] == "incomplete";
@@ -262,16 +264,16 @@ impl ProjectRuntimeManager {
             &identity.worker_id, &identity.token,
             request.invocation == "manual_communication_restore", false) {
             Ok(communication) => communication,
-            Err(error) => return (runtime, Resp::err(error)),
+            Err(error) => return (Some(runtime), Resp::err(error)),
         };
         let mut snapshot =
             context_projection(&runtime, identity.worker_id.clone(), identity.token.clone());
         if !snapshot.ok {
-            return (runtime, snapshot);
+            return (Some(runtime), snapshot);
         }
         response.data["snapshot"] = snapshot.data;
         if request.operation_id.is_empty() && communication.is_none() && !physical_incomplete {
-            return (runtime, response);
+            return (Some(runtime), response);
         }
         let outcome = if physical_incomplete { "incomplete" } else {
             communication.as_ref().map(communication_operation_outcome).unwrap_or("completed")
@@ -294,7 +296,7 @@ impl ProjectRuntimeManager {
             .unwrap_or("PHYSICAL_ANCHOR_INCOMPLETE").to_owned());
         if let Some(communication) = communication { result["result"]["owner_readback"]["communication"] = communication; }
         (
-            runtime,
+            Some(runtime),
             Resp { ok: outcome == "completed", error, data: result },
         )
     }
@@ -371,26 +373,25 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         request: &IdentityContextRequest,
-    ) -> (Arc<Server>, Resp) {
+    ) -> DispatchResult {
         match self.pending_registration_context(context, request) {
-            Ok(Some(result)) => return result,
+            Ok(Some(result)) => return (Some(result.0), result.1),
             Ok(None) => {}
-            Err(error) => return (self.host.clone(), Resp::err(error)),
+            Err(error) => return (None, Resp::err(error)),
         }
         let identity = match self.current_session_identity_at_cwd(
             context,
             &request.facts,
             request.invocation_cwd.as_deref(),
-            false,
         ) {
             Ok(Some(identity)) => identity,
             Ok(None) => {
                 return (
-                    self.host.clone(),
+                    None,
                     Resp::err("IDENTITY_MAP_NOT_FOUND: current caller has no mapping"),
                 )
             }
-            Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
+            Err(error) => return (None, Resp::err(format!("{error:#}"))),
         };
         let runtime = self
             .routes
@@ -400,18 +401,18 @@ impl ProjectRuntimeManager {
             .and_then(|route| route.runtime.clone());
         let Some(runtime) = runtime else {
             return (
-                self.host.clone(),
+                None,
                 Resp::err("IDENTITY_CONTEXT_READBACK_UNAVAILABLE: mapped owner is not loaded"),
             );
         };
         let communication = match self.mapped_communication(&runtime, context,
             &identity.worker_id, &identity.token, false, true) {
             Ok(communication) => communication,
-            Err(error) => return (runtime, Resp::err(error)),
+            Err(error) => return (Some(runtime), Resp::err(error)),
         };
         let mut snapshot = context_projection(&runtime, identity.worker_id.clone(), identity.token);
         if !snapshot.ok {
-            return (runtime, snapshot);
+            return (Some(runtime), snapshot);
         }
         let communication_outcome = communication.as_ref().map(communication_operation_outcome).unwrap_or("completed");
         let physical = snapshot.data["physical_anchor"].clone();
@@ -422,7 +423,7 @@ impl ProjectRuntimeManager {
             "owner_readback":{"physical_anchor":physical}}});
         if let Some(communication) = communication { result["result"]["owner_readback"]["communication"] = communication; }
         (
-            runtime,
+            Some(runtime),
             Resp { ok: communication_outcome == "completed", error: None, data: result },
         )
     }

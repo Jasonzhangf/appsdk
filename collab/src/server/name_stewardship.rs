@@ -185,6 +185,12 @@ pub(super) fn scheduling_events(
             if details.invitation.is_some() {
                 continue;
             }
+            // Automatic selection cannot supply a missing task declaration.
+            // Keep this work and its return schedule for an explicit edit;
+            // an explicit invite still reports the declaration error.
+            if details.long_horizon.is_none() {
+                continue;
+            }
             let assignment_revision = candidate
                 .task_assignment(&task_id)
                 .map_or(0, |assignment| assignment.assignment_revision);

@@ -317,7 +317,7 @@ fn cross_project_send_queues_to_a_live_tmux_master_without_route_projection() {
 }
 
 #[test]
-fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
+fn cross_project_send_durably_accepts_a_missing_tmux_endpoint() {
     let (server, root) = test_server();
     register(&server, "target-master", "%target-master");
     promote_master(&server, "target-master", "user approved target-master");
@@ -338,24 +338,27 @@ fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
         );
     }
 
-    let denied = super::handle_cross_project_send(
+    let accepted = super::handle_cross_project_send(
         &server,
         "appsdk-master",
         "/tmp/appsdk".into(),
         Some("thread-appsdk-master".into()),
         "target-master",
         "feature",
-        "must reject a dead address",
+        "must remain durable without a live wake endpoint",
         None,
     );
-    assert!(!denied.ok);
-    assert!(
-        denied
-            .error
-            .unwrap_or_default()
-            .contains("reachable target binding"),
-        "the reject must name the dead address, not master authority"
-    );
+    assert!(accepted.ok, "{accepted:?}");
+    assert_eq!(accepted.data["durable"], true, "{accepted:?}");
+    assert_eq!(accepted.data["consumed"], false, "{accepted:?}");
+    let msg_id = accepted.data["msg_id"]
+        .as_str()
+        .expect("durable message id");
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[msg_id].to, "target-master");
+    assert_eq!(state.msgs[msg_id].from, "appsdk-master@/tmp/appsdk");
+    assert_eq!(state.msgs[msg_id].state, "pending");
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 

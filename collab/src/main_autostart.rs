@@ -155,21 +155,14 @@ fn validate_state_override() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write the durable service record binding the supervised daemon to the
-/// exact canonical project root. `collab serve --service` reads this to pick
-/// its scope root without a project cwd.
-pub fn write_service_record(root: &Path) -> anyhow::Result<()> {
+/// Ensure the service record describes a host daemon, not a project binding.
+pub fn ensure_service_record() -> anyhow::Result<PathBuf> {
     let host_paths = scope::HostPaths::resolve()?;
-    let state_root = host_paths.state_root();
-    std::fs::create_dir_all(state_root)?;
-    let record = serde_json::json!({
-        "service_scope_root": root,
-    });
-    std::fs::write(
-        state_root.join("service-record.json"),
-        serde_json::to_vec_pretty(&record)?,
-    )?;
-    Ok(())
+    let path = host_paths.state_root().join("service-record.json");
+    if !path.exists() {
+        return scope::write_host_service_record(&host_paths);
+    }
+    Ok(path)
 }
 
 /// Render and persist the launch-agent plist, returning its path. The
@@ -715,10 +708,7 @@ mod plist_tests {
     }
 
     #[test]
-    fn service_record_binds_the_requested_project_root() {
-        // `collab up` must bind the supervised daemon to the current project
-        // before loading the agent. A record bound to the host default root is
-        // the wrong-project binding this test guards against.
+    fn service_record_is_host_level_and_has_no_project_root() {
         let _lock = crate::scope::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -739,12 +729,11 @@ mod plist_tests {
         let _home = EnvGuard::set("HOME", &home);
         let _state = EnvGuard::set(scope::COLLAB_STATE_DIR_ENV, &state);
 
-        write_service_record(&project).unwrap();
-        let recorded = scope::service_scope_root()
-            .expect("service record path resolves")
-            .expect("service record was written");
+        ensure_service_record().unwrap();
+        let recorded = scope::service_scope_root().expect("service record path resolves");
 
-        assert_eq!(recorded, project);
+        assert!(recorded.is_none());
+        assert!(project.is_dir());
         let _ = std::fs::remove_dir_all(root);
     }
 

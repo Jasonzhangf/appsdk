@@ -275,11 +275,10 @@ pub(super) async fn inbound(
     context: Option<ProjectContext>,
     req: Req,
     destination: QualifiedNameAddress,
-) -> (Arc<Server>, Resp) {
-    let host = manager.host.clone();
+) -> DispatchResult {
     let context = match context {
         Some(context) => context,
-        None => return (host, Resp::err("PROJECT_CONTEXT_REQUIRED")),
+        None => return (None, Resp::err("PROJECT_CONTEXT_REQUIRED")),
     };
     let Req::ChannelInbound {
         from: _,
@@ -289,27 +288,27 @@ pub(super) async fn inbound(
         envelope,
     } = req
     else {
-        return (host, Resp::err("FEDERATION_REQUEST_INVALID"));
+        return (None, Resp::err("FEDERATION_REQUEST_INVALID"));
     };
     let server = match manager.select_runtime(&context) {
         Ok(server) => server,
-        Err(error) => return (host, Resp::err(error)),
+        Err(error) => return (None, Resp::err(error)),
     };
     let configuration = match manager.host.config.federation.clone() {
         Some(configuration) => configuration,
         None => {
             return (
-                server,
+                Some(server),
                 Resp::err("FEDERATION_NOT_CONFIGURED: remote channel target requires federation"),
             )
         }
     };
     if let Err(error) = validate_channel_envelope_for_inbound(&envelope) {
-        return (server, Resp::err(error));
+        return (Some(server), Resp::err(error));
     }
     if !envelope.attachments.is_empty() {
         return (
-            server,
+            Some(server),
             Resp::err("CHANNEL_ATTACHMENT_LOCAL_ONLY: remote channel sends support text only"),
         );
     }
@@ -366,15 +365,15 @@ pub(super) async fn inbound(
     let origin = match prepared {
         Ok(Ok(channel_envelope::PlatformEventTarget::LocalMessage(id))) => {
             return (
-                server,
+                Some(server),
                 Resp::data(json!({"msg_id": id, "deduplicated": true})),
             )
         }
         Ok(Ok(channel_envelope::PlatformEventTarget::FederatedOrigin(origin))) => origin,
-        Ok(Err(error)) => return (server, Resp::err(error)),
+        Ok(Err(error)) => return (Some(server), Resp::err(error)),
         Err(error) => {
             return (
-                server,
+                Some(server),
                 Resp::err(format!("CHANNEL_HANDLER_FAILED: {error}")),
             )
         }
@@ -387,12 +386,12 @@ pub(super) async fn inbound(
         .outbound_record(&origin)
         .cloned();
     let Some(candidate) = candidate else {
-        return (server, Resp::err("FEDERATION_CHANNEL_ORIGIN_MISSING"));
+        return (Some(server), Resp::err("FEDERATION_CHANNEL_ORIGIN_MISSING"));
     };
     let response =
         super::federation_runtime::submit_record(manager, server.clone(), configuration, candidate)
             .await;
-    (server, response)
+    (Some(server), response)
 }
 
 async fn deliver_reply_response(

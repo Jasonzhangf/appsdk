@@ -154,6 +154,8 @@ fn poll_messages_with_state(
     // receive receipt commits in the same transaction, so a lost socket
     // response replays the exact batch instead of stranding it.
     let received_ms = now_ms();
+    // The receipt records actual read time. Deadline cadence was already
+    // committed by scheduling and is independent of this transaction.
     let mut events = Vec::new();
     if let Some(receive_id) = receive_id {
         events.push(Event::ReceiveCommitted {
@@ -861,9 +863,6 @@ impl ProjectRuntimeManager {
                 }
                 Err(error) => errors.push(format!("{}: {error}", key.1)),
             }
-        }
-        if !runtimes.iter().any(|existing| Arc::ptr_eq(existing, &self.host)) {
-            runtimes.push(self.host.clone());
         }
         let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
         for runtime in runtimes {

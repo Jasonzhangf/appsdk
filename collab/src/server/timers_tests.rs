@@ -5,6 +5,9 @@ use crate::server::keepalive::Record;
 use crate::server::state::{Event, NotificationSubscription, State, TaskRec, WaitSpec};
 use std::sync::Mutex;
 
+#[path = "goal_overdue_tests.rs"]
+mod goal_overdue_tests;
+
 fn test_server() -> (Arc<Server>, std::path::PathBuf) {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sequence = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -71,7 +74,13 @@ fn subscription_messages<'a>(
     state
         .wake_bindings
         .iter()
-        .filter(|(_, bound)| bound.as_str() == subscription_id)
+        .filter(|(message_id, bound)| {
+            bound.as_str() == subscription_id
+                || state
+                    .deadline_summaries
+                    .get(*message_id)
+                    .is_some_and(|members| members.contains_key(subscription_id))
+        })
         .map(|(message_id, _)| &state.msgs[message_id])
         .collect()
 }

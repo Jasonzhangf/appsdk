@@ -28,7 +28,7 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         request: &IdentityContextRequest,
         approval: &serde_json::Value,
-    ) -> (Arc<Server>, Resp) {
+    ) -> DispatchResult {
         let Some(requested_name) = approval
             .get("requested_name")
             .and_then(serde_json::Value::as_str)
@@ -36,11 +36,11 @@ impl ProjectRuntimeManager {
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
         else {
-            return (self.host.clone(), Resp::err("IDENTITY_RETIRE_NAME_REQUIRED"));
+            return (None, Resp::err("IDENTITY_RETIRE_NAME_REQUIRED"));
         };
         if requested_name != "Jenny" && name_resolution::display_slot(&requested_name).is_err() {
             return (
-                self.host.clone(),
+                None,
                 Resp::err("IDENTITY_RETIRE_NAME_NOT_ORDINARY: retire_name releases ordinary names or Jenny"),
             );
         }
@@ -55,7 +55,7 @@ impl ProjectRuntimeManager {
             .and_then(|route| route.runtime.clone())
         else {
             return (
-                self.host.clone(),
+                None,
                 Resp::err(
                     "IDENTITY_CONTEXT_READBACK_UNAVAILABLE: the retiring project is not loaded",
                 ),
@@ -76,7 +76,7 @@ impl ProjectRuntimeManager {
         if let Some(receipt) = self.retire_receipt_outcome(&runtime, &operation_id) {
             if receipt["result"]["name"].as_str() != Some(requested_name.as_str()) {
                 return (
-                    runtime,
+                    Some(runtime),
                     Resp::err(format!(
                         "IDENTITY_OPERATION_CONFLICT: operation {operation_id} already names {}",
                         receipt["result"]["name"]
@@ -89,7 +89,7 @@ impl ProjectRuntimeManager {
                 self.resume_pending_human_retire(context, &operation_id, &requested_name)
             {
                 return (
-                    runtime,
+                    Some(runtime),
                     Resp::err_data(
                         format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"),
                         json!({"control_committed": true}),
@@ -103,10 +103,10 @@ impl ProjectRuntimeManager {
                 true,
             ) {
                 Ok(view) => view,
-                Err(error) => return (runtime, Resp::err(error)),
+                Err(error) => return (Some(runtime), Resp::err(error)),
             };
             return (
-                runtime,
+                Some(runtime),
                 human_retire_result(
                     request,
                     &operation_id,
@@ -126,10 +126,10 @@ impl ProjectRuntimeManager {
                     true,
                 ) {
                     Ok(view) => view,
-                    Err(error) => return (runtime, Resp::err(error)),
+                    Err(error) => return (Some(runtime), Resp::err(error)),
                 };
                 (
-                    runtime,
+                    Some(runtime),
                     human_retire_result(
                         request,
                         &operation_id,
@@ -140,14 +140,14 @@ impl ProjectRuntimeManager {
                 )
             }
             Err(HumanRetireFailure::Refused(message)) => {
-                (runtime, Resp::err(message))
+                (Some(runtime), Resp::err(message))
             }
             Err(HumanRetireFailure::Committed(message)) => {
                 let data = self
                     .current_retire_view(context, &requested_name, Some(&operation_id), false)
                     .map(|snapshot| json!({"control_committed": true, "snapshot": snapshot}))
                     .unwrap_or_else(|_| json!({"control_committed": true}));
-                (runtime, Resp::err_data(message, data))
+                (Some(runtime), Resp::err_data(message, data))
             }
         }
     }

@@ -5,29 +5,36 @@ fn select_central_runtime_storage(
     publication: Option<&std::sync::Mutex<()>>,
 ) -> Result<PathBuf, String> {
     let central = storage_owner_path(&host_paths.app_storage_root(&key.1, &key.0))?;
-    validate_runtime_storage_root(Path::new(&key.1), &central, host_paths.state_root(),
-        "HOST_ROUTE_DURABILITY_FAILED")?;
+    validate_runtime_storage_root(
+        Path::new(&key.1),
+        &central,
+        host_paths.state_root(),
+        "HOST_ROUTE_DURABILITY_FAILED",
+    )?;
     let _publication = publication.map(|gate| gate.lock().unwrap());
-    if let Some(record) = load_host_route_records(route_file)?
-        .into_iter()
+    let records = load_host_route_records(route_file)?;
+    if let Some(record) = records
+        .iter()
         .find(|record| record.app_scope_id == key.0 && record.project_scope == key.1)
     {
-        let storage = storage_owner_path(Path::new(&record.storage_root))?;
-        validate_runtime_storage_root(Path::new(&key.1), &storage, host_paths.state_root(),
-            "HOST_ROUTE_DURABILITY_FAILED")?;
-        if storage != central {
-            let projects = storage_owner_path(&host_paths.state_root().join("projects"))?;
-            if storage.starts_with(projects) {
-                ensure_current_namespace(&storage, true)?;
-                return Ok(storage);
-            }
+        let (record_key, _, storage) = validate_host_route_record(record, host_paths)
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
+        if record_key != *key {
+            return Err("HOST_ROUTE_DURABILITY_FAILED: route key changed during selection".into());
+        }
+        ensure_current_namespace(&storage, true)?;
+        return Ok(storage);
+    }
+    // Resolve every declared owner before namespace creation. A rejected
+    // registration must not create state in another route's storage, or leave
+    // an unreachable namespace after an ownership read fails.
+    for record in &records {
+        if storage_roots_equal(Path::new(&record.storage_root), &central)? {
             return Err(format!(
-                "CURRENT_STATE_MIGRATION_REQUIRED: {}",
-                record.storage_root
+                "HOST_ROUTE_DURABILITY_FAILED: runtime storage root {} is already owned by route ({}, {})",
+                central.display(), record.app_scope_id, record.project_scope
             ));
         }
-        ensure_current_namespace(&central, true)?;
-        return Ok(central);
     }
     let mapped = crate::server::binding_store::BindingControlStore::new(host_paths.state_root())
         .load()?

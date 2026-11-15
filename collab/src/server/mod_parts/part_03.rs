@@ -211,6 +211,49 @@ fn admit_dsh_candidate(
 
 type RouteKey = (String, String);
 
+/// Host responses have no project. A selected project remains attached even
+/// when its handler rejects the request, for project-owned follow-up effects.
+type DispatchResult = (Option<Arc<Server>>, Resp);
+
+/// Host infrastructure has no project root, reducer, mailbox or command ledger.
+/// Persistent host control belongs exclusively to HostControl.
+#[derive(Clone)]
+struct HostServices {
+    config: crate::config::Config,
+    host_paths: HostPaths,
+    legacy_state_path: PathBuf,
+    register_gate: Arc<Mutex<()>>,
+    appserver_candidate_check: Arc<AppServerCandidateCheck>,
+    #[cfg(not(test))]
+    tmux_notification_sink: Arc<TmuxNotificationSink>,
+    appserver_notification_sink: Arc<TmuxNotificationSink>,
+    appserver_thread_status: Arc<AppServerThreadStatus>,
+    appserver_thread_archive: Arc<AppServerThreadArchive>,
+    runtime_handle: Option<tokio::runtime::Handle>,
+}
+
+impl HostServices {
+    fn for_project(server: &Server) -> Result<Self, String> {
+        Ok(Self {
+            config: crate::config::load_host().map_err(|error| error.to_string())?,
+            host_paths: server.host_paths.clone(),
+            legacy_state_path: host_state::host_state_path(&server.host_paths),
+            register_gate: server.register_gate.clone(),
+            appserver_candidate_check: server.appserver_candidate_check.clone(),
+            #[cfg(not(test))]
+            tmux_notification_sink: server.tmux_notification_sink.clone(),
+            appserver_notification_sink: server.appserver_notification_sink.clone(),
+            appserver_thread_status: server.appserver_thread_status.clone(),
+            appserver_thread_archive: server.appserver_thread_archive.clone(),
+            runtime_handle: server.rex_monitor.runtime_handle(),
+        })
+    }
+
+    fn log_path(&self) -> PathBuf {
+        self.host_paths.log_path()
+    }
+}
+
 /// Current storage and communication location. Identity belongs to the map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,8 +291,8 @@ fn materialized_runtime_budget_error(materialized_external: usize, cap: usize) -
 /// request is first routed here, then dispatched to the selected `Server`.
 struct ProjectRuntimeManager {
     federation_accept_gate: Mutex<()>,
-    host: Arc<Server>,
-    host_root: PathBuf,
+    host: Arc<HostServices>,
+    host_control: host_control::HostControl,
     route_file: PathBuf,
     routes: Mutex<std::collections::BTreeMap<RouteKey, RuntimeRoute>>,
     project_locks: Mutex<std::collections::BTreeMap<PathBuf, std::fs::File>>,
@@ -263,8 +306,6 @@ struct ProjectRuntimeManager {
     /// Same as `MAX_MATERIALIZED_EXTERNAL_RUNTIMES` in production. Tests lower
     /// it so the boundary can be exercised without 64 real reducers.
     materialization_cap: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    fail_current_thread_route_publish: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     materialization_build_delay_ms: std::sync::atomic::AtomicU64,
 }
@@ -340,36 +381,6 @@ fn storage_roots_equal(left: &Path, right: &Path) -> Result<bool, String> {
     Ok(storage_owner_path(left)? == storage_owner_path(right)?)
 }
 
-fn is_resident_self_route(
-    app_scope_id: &str,
-    project_scope: &str,
-    canonical_root: &Path,
-    storage_root: &Path,
-    host_root: &Path,
-    host_storage_root: &Path,
-    host: &Arc<Server>,
-    existing_routes: &std::collections::BTreeMap<RouteKey, RuntimeRoute>,
-) -> Result<bool, String> {
-    if canonical_root != host_root || project_scope != host_root.to_string_lossy() {
-        return Ok(false);
-    }
-    let storage_is_host_owned = storage_roots_equal(storage_root, host_root)?
-        || storage_roots_equal(storage_root, host_storage_root)?;
-    if !storage_is_host_owned {
-        return Ok(false);
-    }
-    match existing_routes.get(&(app_scope_id.to_owned(), project_scope.to_owned())) {
-        Some(route) => Ok(route
-            .runtime
-            .as_ref()
-            .is_some_and(|runtime| Arc::ptr_eq(runtime, host))),
-        // The durable route record is the recovery evidence when the
-        // registration did not survive replay. Canonical root plus a
-        // host-owned storage root cannot be an ordinary non-resident route.
-        None => Ok(true),
-    }
-}
-
 fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -397,11 +408,14 @@ fn validate_runtime_storage_root(
         .map_err(|error| format!("{error_prefix}: resolve project storage owner: {error}"))?;
     let storage_owner = storage_owner_path(storage_root)
         .map_err(|error| format!("{error_prefix}: resolve runtime storage owner: {error}"))?;
+    let host_owner = storage_owner_path(host_root)
+        .map_err(|error| format!("{error_prefix}: resolve host storage owner: {error}"))?;
+    if root_owner.starts_with(&host_owner) {
+        return Err(format!("{error_prefix}: project root is inside the daemon runtime storage root; it cannot own another project's runtime assets"));
+    }
     if storage_owner == root_owner {
         return Ok(root_owner);
     }
-    let host_owner = storage_owner_path(host_root)
-        .map_err(|error| format!("{error_prefix}: resolve host storage owner: {error}"))?;
     let host_projects = host_owner.join("projects");
     if storage_owner.starts_with(&host_projects) {
         return Ok(storage_owner);
@@ -421,40 +435,28 @@ fn validate_runtime_storage_root(
 }
 
 fn validate_route_owner_table(
-    host: &Arc<Server>,
+    host_paths: &HostPaths,
     routes: &std::collections::BTreeMap<RouteKey, RuntimeRoute>,
 ) -> Result<(), String> {
-    let mut owners = std::collections::BTreeMap::<PathBuf, (String, bool)>::new();
+    let mut owners = std::collections::BTreeMap::<PathBuf, String>::new();
     owners.insert(
-        storage_owner_path(&host.root)
+        storage_owner_path(host_paths.state_root())
             .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
-        ("resident host".into(), true),
-    );
-    owners.insert(
-        storage_owner_path(&host.storage_root)
-            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
-        ("resident host".into(), true),
+        "host control storage".into(),
     );
 
     for (key, route) in routes {
         let route_owner = format!("route ({}, {})", key.0, key.1);
-        let is_resident_runtime = route
-            .runtime
-            .as_ref()
-            .is_some_and(|runtime| Arc::ptr_eq(runtime, host));
         let route_storage_root = storage_owner_path(&route.storage_root)
             .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
-        if let Some((owner, is_host)) = owners.get(&route_storage_root) {
-            if is_resident_runtime && *is_host {
-                continue;
-            }
+        if let Some(owner) = owners.get(&route_storage_root) {
             return Err(format!(
                 "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is already owned by {}",
                 route.storage_root.display(),
                 owner
             ));
         }
-        owners.insert(route_storage_root, (route_owner, is_resident_runtime));
+        owners.insert(route_storage_root, route_owner);
     }
     Ok(())
 }

@@ -28,7 +28,7 @@
     },
     {
       "id": "删除项目业务与历史状态",
-      "description": "由现有 current-state writer 在既有锁序内清除目标 scope 的当前消息、任务、订阅、资产与负载；保留其他项目、live DSH 绑定及精确凭据。resident route 恢复先 materialization 再 publication，避免跨项目锁反转；身份仅由当前 map 选择。已提交 reset 待办在启动路由恢复前继续本节点，并在完成前阻止该 scope 重建；部分失败保留待办并返回 RESET_INCOMPLETE，不宣称成功。",
+      "description": "由现有 current-state writer 在既有锁序内清除目标 scope 的当前消息、任务、订阅、资产与负载；保留其他项目、live DSH 绑定及精确凭据。route 建立先 materialization 再 publication，避免跨项目锁反转；身份仅由当前 map 选择。旧 typed owner 的真实 reset 待办先持久化到 identity-map，再原子退役旧副本，成功后才执行清理。已提交 map 待办在启动路由恢复前继续本节点，并在完成前阻止该 scope 重建；部分失败保留待办并返回 RESET_INCOMPLETE，不宣称成功。",
       "operator": "appsdk.collab_control_plane.online_project_reset",
       "operator_version": "1",
       "inputs": ["reset_control_result"],
@@ -39,7 +39,7 @@
     },
     {
       "id": "完成 reset 待办",
-      "description": "仅在业务与存储删除完成后清除 scoped reset 待办；清除失败时 receipt 防止重复删除，重启读取既有 receipt 跳过已完成效果并只重试清除。待办存在期间，新请求不得重建该项目的 routes、身份、名字、grants 或 runtime。成功后该 scope 的 control 与 legacy 条目均不可复活。",
+      "description": "仅在业务与存储删除完成后通过 BindingControlStore 清除 scoped reset 待办。清除失败保留待办，重启继续幂等清理；待办存在期间，新请求不得重建该项目的 routes、身份、名字、grants 或 runtime。旧 typed intent 必须先退役，因此 map 完成后不会从旧副本再次导入；不读取 fenced host-state 或项目 State 的历史 reset 字段。",
       "operator": "appsdk.collab_control_plane.complete_reset_pending",
       "operator_version": "1",
       "inputs": ["online_project_result"],

@@ -368,7 +368,7 @@ fn seed_registered_startup_state(root: &Path, host_paths: &HostPaths) {
     assert!(current_state::save(&storage.join(".agent-collab/server/state.json"), &state).unwrap());
 }
 
-async fn assert_active_isolated_server(socket: &std::path::Path, root: &std::path::Path) {
+async fn assert_host_ready(socket: &std::path::Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !crate::client::alive(socket) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -396,6 +396,17 @@ async fn assert_active_isolated_server(socket: &std::path::Path, root: &std::pat
         ping["degraded"], true,
         "retired local storage is isolated: {ping}"
     );
+    assert_eq!(ping["host_ready"], true, "{ping}");
+    assert!(ping.get("workers").is_none(), "{ping}");
+}
+
+async fn assert_active_isolated_server(socket: &std::path::Path, root: &std::path::Path) {
+    assert_host_ready(socket).await;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
     let context = crate::proto::ProjectContext::for_registered_root_with_app(
         root,
         AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
@@ -510,11 +521,13 @@ async fn reachable_legacy_project_daemon_does_not_block_current_central_runtime(
     let listener = UnixListener::bind(&legacy_socket).expect("bind legacy socket");
     seed_registered_startup_state(&root, &host_paths);
 
-    let running = tokio::spawn(run_with_host_paths(
-        Scope { root: root.clone() },
-        host_paths.clone(),
-    ));
-    assert_active_isolated_server(&host_paths.socket_path(), &root).await;
+    let running = tokio::spawn(run_host(host_paths.clone()));
+    assert_host_ready(&host_paths.socket_path()).await;
+    assert!(host_paths.state_root().join("host-state.json").is_file());
+    assert_eq!(
+        crate::scope::read_service_scope_root(&host_paths).unwrap(),
+        None
+    );
     assert!(legacy_socket.exists());
     let central = host_paths.app_storage_root(
         std::fs::canonicalize(&root).unwrap().to_str().unwrap(),
@@ -615,10 +628,8 @@ async fn established_central_store_is_not_blocked_by_a_retired_legacy_lock() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        ping["workers"], 1,
-        "retired local storage must not veto the established central owner: {ping}"
-    );
+    assert_eq!(ping["host_ready"], true, "{ping}");
+    assert!(ping.get("workers").is_none(), "{ping}");
     assert_eq!(std::fs::read(&legacy).unwrap(), b"");
     let loaded = current_state::load(&state_path, false).unwrap();
     assert_eq!(

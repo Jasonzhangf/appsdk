@@ -984,25 +984,54 @@ fn public_context_rex_target_conflict_reaches_admission_without_old_history_reje
     })
     .to_string();
     let before = fixture.current_resources();
-    for query in [false, true] {
-        let mut args = vec!["context", "--op", "rex-conflict-plain", "--provide", &provide];
-        if query {
-            args.push("--query");
-        }
-        let output = fixture.configured_command(&args, None).output().unwrap();
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !error.contains("IDENTITY_MAP_REX_TARGET_MISMATCH")
-                && !String::from_utf8_lossy(&output.stdout)
-                    .contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
-            "old Rex identity history must not reject the new recovery: {error}"
-        );
-        assert!(!output.status.success(), "{output:?}");
-        assert!(
-            error.contains("IDENTITY_ANCHOR_CONFLICT"),
-            "a cross-subject Rex block/session match must be a typed explicit failure: {error}"
-        );
-    }
+    let output = fixture
+        .configured_command(
+            &["context", "--op", "rex-conflict-plain", "--provide", &provide],
+            None,
+        )
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !error.contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
+        "old Rex identity history must not reject the new recovery: {error}"
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        error.contains("REX_"),
+        "the Rex request must reach its typed admission boundary: {error}"
+    );
+    assert_eq!(
+        fixture.current_resources(),
+        before,
+        "a failed ordinary context must not mutate identity or business state"
+    );
+
+    let query = fixture
+        .configured_command(
+            &[
+                "context",
+                "--op",
+                "rex-conflict-query",
+                "--provide",
+                &provide,
+                "--query",
+            ],
+            None,
+        )
+        .output()
+        .unwrap();
+    assert!(
+        query.status.success(),
+        "read-only query must select the unique current session holder: {}",
+        text(&query)
+    );
+    let query_response: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(
+        query_response["result"]["snapshot"]["name"],
+        "Bob",
+        "the current session selects Bob even when Alice's old Rex block remains in the map: {query_response}"
+    );
     assert_eq!(
         fixture.current_resources(),
         before,

@@ -3031,6 +3031,556 @@ fn ticket_thread(fixture: &AppFixture, worker_id: &str) -> &'static str {
 }
 
 #[test]
+fn working_ticket_continues_after_public_name_takeover() {
+    for running in [false, true] {
+        let fixture = AppFixture::new();
+        fixture.run_public(&["context"], THREAD_A);
+        fixture.run_public(&["context"], THREAD_B);
+        fixture.run_public(&["context"], THREAD_C);
+        fixture.run_public(
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "isolated ticket takeover",
+            ],
+            THREAD_A,
+        );
+        let id = "working-name-takeover";
+        let published = publish(&fixture, id, &[]);
+        let name = published["ticket"]["phases"][0]["slot"].as_str().unwrap();
+        let board = fixture.run_public(&["board", "show"], THREAD_A);
+        let worker = slot_worker_id(&board, name);
+        let old_thread = ticket_thread(&fixture, &worker);
+        fixture.run_public(
+            &["board", "claim", id, "--expected-revision", "1"],
+            old_thread,
+        );
+        if running {
+            fixture.run_public(
+                &[
+                    "board",
+                    "start",
+                    id,
+                    "--expected-revision",
+                    "2",
+                    "--attempt",
+                    "1",
+                ],
+                old_thread,
+            );
+        }
+        let before = fixture.current_state();
+        let approval = json!({"action":"restore_name", "requested_name":name,
+            "authorization":"fixture current holder continues working ticket", "replace_confirmed":true}).to_string();
+        let current =
+            fixture.run_public(&["context", "--approve-grant", &approval], THREAD_HANDOFF);
+        assert_eq!(current["name"], name);
+        let after = fixture.current_state();
+        assert_eq!(after["tasks"][id]["status"], "working");
+        assert_eq!(
+            after["tasks"][id]["owner"],
+            current["identity"]["worker_id"]
+        );
+        assert_eq!(after["task_assignments"][id]["name"], name);
+        assert_eq!(after["task_assignments"][id]["session_id"], THREAD_HANDOFF);
+        assert_eq!(
+            after["board_details"][id]["delivery"],
+            before["board_details"][id]["delivery"]
+        );
+        let revision = after["board_details"][id]["revision"]
+            .as_u64()
+            .unwrap()
+            .to_string();
+        let stale_start = rejected(
+            &fixture,
+            &[
+                "board",
+                "start",
+                id,
+                "--expected-revision",
+                &revision,
+                "--attempt",
+                "1",
+            ],
+            THREAD_HANDOFF,
+        );
+        assert!(
+            stale_start.contains("TICKET_STALE_BINDING"),
+            "{stale_start}"
+        );
+        let stale_deliver = rejected(
+            &fixture,
+            &[
+                "task",
+                "deliver",
+                id,
+                "--evidence",
+                "obsolete result",
+                "--attempt",
+                "1",
+                "--no-candidate",
+            ],
+            THREAD_HANDOFF,
+        );
+        assert!(
+            stale_deliver.contains("TICKET_STALE_BINDING"),
+            "{stale_deliver}"
+        );
+        assert_eq!(
+            fixture.current_state()["ticket_phases"],
+            after["ticket_phases"]
+        );
+        assert_eq!(
+            fixture.current_state()["task_lifecycle"],
+            after["task_lifecycle"]
+        );
+        // Neither the displaced carrier nor a different current name can
+        // recover this responsibility. Do not call context as the old carrier.
+        for thread in [old_thread, THREAD_A] {
+            rejected(
+                &fixture,
+                &["board", "claim", id, "--expected-revision", &revision],
+                thread,
+            );
+            rejected(
+                &fixture,
+                &[
+                    "board",
+                    "start",
+                    id,
+                    "--expected-revision",
+                    &revision,
+                    "--attempt",
+                    "1",
+                ],
+                thread,
+            );
+            rejected(
+                &fixture,
+                &[
+                    "task",
+                    "deliver",
+                    id,
+                    "--evidence",
+                    "wrong carrier",
+                    "--attempt",
+                    "1",
+                    "--no-candidate",
+                ],
+                thread,
+            );
+        }
+        assert_eq!(
+            fixture.current_state()["ticket_phases"],
+            after["ticket_phases"]
+        );
+        let recovered = fixture.run_public(
+            &["board", "claim", id, "--expected-revision", &revision],
+            THREAD_HANDOFF,
+        );
+        let phase = recovered["ticket"]["phases"]
+            .as_array()
+            .expect("public recovery receipt must expose the newly committed attempt")
+            .iter()
+            .find(|phase| phase["status"] == "claimed")
+            .unwrap();
+        let attempt = phase["attempt_generation"].as_u64().unwrap().to_string();
+        assert_eq!(attempt, "2");
+        let committed = fixture.current_state();
+        let phases: Vec<_> = committed["ticket_phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|phase| phase["task_id"] == id)
+            .collect();
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0]["status"], "revoked");
+        assert_eq!(phases[0]["attempt_generation"], 1);
+        assert_eq!(phases[1]["status"], "claimed");
+        assert_eq!(
+            phases[1]["binding_generation"],
+            slot_generation(&fixture, current["identity"]["worker_id"].as_str().unwrap())
+        );
+        let map = identity_map(&fixture);
+        assert_eq!(
+            map["slots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|slot| slot["identity_status"] == "active"
+                    && slot["identity_key"]["name"] == name)
+                .count(),
+            1
+        );
+        let revision = recovered["task"]["revision"].as_u64().unwrap().to_string();
+        let duplicate = rejected(
+            &fixture,
+            &["board", "claim", id, "--expected-revision", &revision],
+            THREAD_HANDOFF,
+        );
+        assert!(duplicate.contains("BOARD_TASK_NOT_PENDING"), "{duplicate}");
+        assert_eq!(
+            fixture.current_state()["ticket_phases"],
+            committed["ticket_phases"]
+        );
+        fixture.run_public(
+            &[
+                "board",
+                "start",
+                id,
+                "--expected-revision",
+                &revision,
+                "--attempt",
+                &attempt,
+            ],
+            THREAD_HANDOFF,
+        );
+        let delivered = fixture.run_public(
+            &[
+                "task",
+                "deliver",
+                id,
+                "--evidence",
+                "current holder result",
+                "--attempt",
+                &attempt,
+                "--no-candidate",
+            ],
+            THREAD_HANDOFF,
+        );
+        assert_eq!(delivered["status"], "delivered");
+        rejected(
+            &fixture,
+            &[
+                "task",
+                "deliver",
+                id,
+                "--evidence",
+                "duplicate result",
+                "--attempt",
+                &attempt,
+                "--no-candidate",
+            ],
+            THREAD_HANDOFF,
+        );
+    }
+}
+
+#[test]
+fn divergent_raw_owner_recovery_claim_uses_current_name_holder() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "divergent raw owner recovery fixture",
+        ],
+        THREAD_A,
+    );
+
+    let id = "divergent-raw-owner-recovery";
+    let unrelated_id = "divergent-raw-owner-unrelated";
+    let published = publish(&fixture, id, &[]);
+    publish(&fixture, unrelated_id, &[]);
+    let name = published["ticket"]["phases"][0]["slot"]
+        .as_str()
+        .expect("ticket has a current stable-name slot")
+        .to_owned();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let old_worker = slot_worker_id(&board, &name);
+    let old_thread = ticket_thread(&fixture, &old_worker);
+    let old_generation = slot_generation(&fixture, &old_worker);
+
+    fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        old_thread,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        old_thread,
+    );
+
+    let before_takeover = fixture.current_state();
+    let delivery_before = before_takeover["board_details"][id]["delivery"].clone();
+    let unrelated_task_before = before_takeover["tasks"][unrelated_id].clone();
+    let unrelated_details_before = before_takeover["board_details"][unrelated_id].clone();
+    let approval = json!({
+        "action": "restore_name",
+        "requested_name": name,
+        "authorization": "fixture current holder recovers divergent raw owner",
+        "replace_confirmed": true
+    })
+    .to_string();
+    let current = fixture.run_public(&["context", "--approve-grant", &approval], THREAD_HANDOFF);
+    assert_eq!(current["name"], name);
+    let current_worker = current["identity"]["worker_id"]
+        .as_str()
+        .expect("current holder has a worker id")
+        .to_owned();
+    let current_session = THREAD_HANDOFF;
+    let current_generation = slot_generation(&fixture, &current_worker);
+    assert!(current_generation > old_generation);
+
+    let after_takeover = fixture.current_state();
+    assert_eq!(after_takeover["tasks"][id]["status"], "working");
+    assert_eq!(after_takeover["tasks"][id]["owner"], current_worker);
+    assert_eq!(after_takeover["task_assignments"][id]["name"], name);
+    assert_eq!(
+        after_takeover["task_assignments"][id]["session_id"],
+        current_session
+    );
+    assert_eq!(
+        after_takeover["board_details"][id]["delivery"],
+        delivery_before
+    );
+    assert_eq!(after_takeover["tasks"][unrelated_id], unrelated_task_before);
+    assert_eq!(
+        after_takeover["board_details"][unrelated_id],
+        unrelated_details_before
+    );
+    let takeover_phases: Vec<_> = after_takeover["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| phase["task_id"] == id && phase["phase"] == "execute")
+        .collect();
+    assert_eq!(takeover_phases.len(), 2, "{takeover_phases:#?}");
+    let old_phase = takeover_phases
+        .iter()
+        .find(|phase| phase["status"] == "revoked")
+        .copied()
+        .expect("old execute phase remains revoked");
+    let queued_phase = takeover_phases
+        .iter()
+        .find(|phase| phase["status"] == "queued")
+        .copied()
+        .expect("replacement execute phase remains queued");
+    assert_eq!(old_phase["binding_generation"], old_generation);
+    assert_eq!(old_phase["attempt_generation"], 1);
+    assert_eq!(queued_phase["binding_generation"], 0);
+    assert_eq!(queued_phase["attempt_generation"], 1);
+
+    let project_scope = current["binding"]["project_scope"]
+        .as_str()
+        .expect("current holder binding has a project scope")
+        .to_owned();
+    let split_worker = current_worker.clone();
+    let split_old_worker = old_worker.clone();
+    fixture.update_current_state(move |state| {
+        state["tasks"][id]["owner"] = json!(split_old_worker);
+        state["agent_activity"][&project_scope][&split_worker] = json!({
+            "project_scope": &project_scope,
+            "worker_id": &split_worker,
+            "session_id": current_session,
+            "activity": "busy",
+            "background": false,
+            "reason": "fixture keeps recovery claim pending",
+            "observed_ms": 1,
+            "idle_since_ms": null
+        });
+    });
+    let split = fixture.current_state();
+    assert_eq!(split["tasks"][id]["owner"], old_worker);
+    assert_eq!(split["tasks"][id]["status"], "working");
+    assert_eq!(split["task_assignments"][id]["name"], name);
+    assert_eq!(split["task_assignments"][id]["session_id"], current_session);
+    assert_eq!(
+        slot_generation(&fixture, &current_worker),
+        current_generation
+    );
+    assert_eq!(split["board_details"][id]["delivery"], delivery_before);
+    assert_eq!(split["tasks"][unrelated_id], unrelated_task_before);
+    assert_eq!(
+        split["board_details"][unrelated_id],
+        unrelated_details_before
+    );
+    let revision = split["board_details"][id]["revision"]
+        .as_u64()
+        .expect("board details have a current revision")
+        .to_string();
+    let stale_revision = split["board_details"][id]["revision"]
+        .as_u64()
+        .expect("board details have a current revision")
+        .saturating_sub(1)
+        .to_string();
+
+    rejected(
+        &fixture,
+        &["board", "claim", id, "--expected-revision", &revision],
+        old_thread,
+    );
+    assert_eq!(
+        fixture.current_state()["tasks"][id],
+        split["tasks"][id],
+        "old carrier rejection must not mutate the task"
+    );
+    assert_eq!(
+        fixture.current_state()["ticket_phases"],
+        split["ticket_phases"],
+        "old carrier rejection must not mutate ticket phases"
+    );
+
+    rejected(
+        &fixture,
+        &["board", "claim", id, "--expected-revision", &revision],
+        THREAD_A,
+    );
+    assert_eq!(
+        fixture.current_state()["tasks"][id],
+        split["tasks"][id],
+        "different current-name rejection must not mutate the task"
+    );
+    assert_eq!(
+        fixture.current_state()["ticket_phases"],
+        split["ticket_phases"],
+        "different current-name rejection must not mutate ticket phases"
+    );
+
+    let stale = rejected(
+        &fixture,
+        &["board", "claim", id, "--expected-revision", &stale_revision],
+        THREAD_HANDOFF,
+    );
+    assert!(stale.contains("BOARD_STALE_REVISION"), "{stale}");
+    assert_eq!(
+        fixture.current_state()["tasks"][id],
+        split["tasks"][id],
+        "stale revision rejection must not mutate the task"
+    );
+    assert_eq!(
+        fixture.current_state()["ticket_phases"],
+        split["ticket_phases"],
+        "stale revision rejection must not mutate ticket phases"
+    );
+
+    let recovered = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", &revision],
+        THREAD_HANDOFF,
+    );
+    let claimed_phase = recovered["ticket"]["phases"]
+        .as_array()
+        .expect("recovery claim returns the existing ticket projection")
+        .iter()
+        .find(|phase| phase["status"] == "claimed")
+        .expect("recovery claim returns the newly claimed attempt");
+    let attempt = claimed_phase["attempt_generation"]
+        .as_u64()
+        .expect("claimed attempt generation")
+        .to_string();
+    assert_eq!(attempt, "2");
+
+    let committed = fixture.current_state();
+    assert!(committed["tasks"].get(id).is_some(), "task ID is preserved");
+    assert_eq!(committed["tasks"][id]["status"], "working");
+    assert_eq!(committed["tasks"][id]["owner"], current_worker);
+    assert_eq!(committed["task_assignments"][id]["name"], name);
+    assert_eq!(
+        committed["task_assignments"][id]["session_id"],
+        current_session
+    );
+    assert_eq!(
+        slot_generation(&fixture, &current_worker),
+        current_generation
+    );
+    assert_eq!(committed["board_details"][id]["delivery"], delivery_before);
+    assert_eq!(committed["tasks"][unrelated_id], unrelated_task_before);
+    assert_eq!(
+        committed["board_details"][unrelated_id],
+        unrelated_details_before
+    );
+    let recovery_phases: Vec<_> = committed["ticket_phases"]
+        .as_array()
+        .expect("ticket phases persist")
+        .iter()
+        .filter(|phase| phase["task_id"] == id && phase["phase"] == "execute")
+        .collect();
+    assert_eq!(recovery_phases.len(), 2, "{recovery_phases:#?}");
+    let preserved_revoked = recovery_phases
+        .iter()
+        .find(|phase| phase["status"] == "revoked")
+        .copied()
+        .expect("the old revoked phase is preserved");
+    let new_claim = recovery_phases
+        .iter()
+        .find(|phase| phase["status"] == "claimed")
+        .copied()
+        .expect("the queued replacement is claimed");
+    assert_eq!(preserved_revoked["task_id"], id);
+    assert_eq!(preserved_revoked["slot_name"], name);
+    assert_eq!(preserved_revoked["attempt_generation"], 1);
+    assert_eq!(preserved_revoked["binding_generation"], old_generation);
+    assert_eq!(new_claim["task_id"], id);
+    assert_eq!(new_claim["slot_name"], name);
+    assert_eq!(new_claim["attempt_generation"], 2);
+    assert_eq!(new_claim["binding_generation"], current_generation);
+
+    let revision = recovered["task"]["revision"]
+        .as_u64()
+        .expect("claim returns the committed task revision")
+        .to_string();
+    let duplicate = rejected(
+        &fixture,
+        &["board", "claim", id, "--expected-revision", &revision],
+        THREAD_HANDOFF,
+    );
+    assert!(duplicate.contains("BOARD_TASK_NOT_PENDING"), "{duplicate}");
+    let after_duplicate = fixture.current_state();
+    assert_eq!(
+        after_duplicate["ticket_phases"], committed["ticket_phases"],
+        "duplicate claim must not create another attempt"
+    );
+    assert_eq!(after_duplicate["tasks"][id], committed["tasks"][id]);
+    assert_eq!(
+        after_duplicate["task_assignments"][id],
+        committed["task_assignments"][id]
+    );
+
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        THREAD_HANDOFF,
+    );
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--evidence",
+            "current stable-name holder result",
+            "--attempt",
+            &attempt,
+            "--no-candidate",
+        ],
+        THREAD_HANDOFF,
+    );
+    assert_eq!(delivered["status"], "delivered");
+    assert_eq!(
+        fixture.current_state()["tasks"][id]["owner"],
+        current_worker
+    );
+}
+
+#[test]
 fn claimed_binding_handoff_reclaims_slot_after_transport_refresh() {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);

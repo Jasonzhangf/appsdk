@@ -806,6 +806,30 @@ fn board_current_map_actor_gate(
     Ok(())
 }
 
+fn board_current_map_update_actor_gate(
+    server: &Server,
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    actor: &str,
+    token: &str,
+    task_id: &str,
+) -> Result<(), Resp> {
+    board_check_actor(state, actor, token)?;
+    if let Some(task) = state.tasks.get(task_id) {
+        if !board_task_visible(state, task, Some(actor))
+            && board_check_master_locked(server, state, actor).is_err()
+            && task_owner_gate_maybe_with_control(
+                server, state, Some(control), task_id, actor,
+            ).is_err()
+        {
+            return Err(Resp::err(
+                "BOARD_PRIVATE_TASK: task is outside the caller's board view",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn board_task_owner_admission(
     server: &Server,
     state: &State,
@@ -1035,7 +1059,7 @@ fn dispatch_board_command_current_map(
                     &actor,
                     &token,
                     |control, state, _| {
-                        board_current_map_actor_gate(state, &actor, &token, id)?;
+                        board_current_map_update_actor_gate(server, state, control, &actor, &token, id)?;
                         board_check_revision(state, id, *expected_revision)?;
                         if status.is_none() && next.is_none() {
                             return Err(Resp::err("provide --status or --next"));
@@ -1213,7 +1237,9 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
         };
         // Check visibility before reporting revision or lifecycle facts.
         if let Some(task) = task_id.and_then(|id| state.tasks.get(id)) {
-            if !board_task_visible(&state, task, Some(&actor)) {
+            let master_update = matches!(command, BoardCommand::Update { .. })
+                && board_check_master_locked(server, &state, &actor).is_ok();
+            if !master_update && !board_task_visible(&state, task, Some(&actor)) {
                 return Resp::err("BOARD_PRIVATE_TASK: task is outside the caller's board view");
             }
         }

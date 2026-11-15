@@ -2198,9 +2198,12 @@ use super::*;
             std::sync::Condvar::new(),
         ));
         let hook_pause = Arc::clone(&pause);
-        *super::TIMER_DUE_COMMIT_PAUSE.lock().unwrap() = Some((
+        let mut hook = super::TIMER_DUE_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *hook = Some((
             subscription_id.to_owned(),
-            Box::new(move || {
+            Arc::new(move || {
                 let (lock, cv) = &*hook_pause;
                 let mut state = lock.lock().unwrap();
                 state.entered = true;
@@ -2217,6 +2220,20 @@ use super::*;
             }),
         ));
         pause
+    }
+
+    fn clear_due_batch_pause() {
+        *super::TIMER_DUE_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    struct DueBatchPauseGuard;
+
+    impl Drop for DueBatchPauseGuard {
+        fn drop(&mut self) {
+            clear_due_batch_pause();
+        }
     }
 
     fn wait_for_due_batch_pause(
@@ -2253,9 +2270,12 @@ use super::*;
         mut reconcile: impl FnMut(),
     ) {
         let pause = install_due_batch_pause(subscription_id);
+        let _pause_guard = DueBatchPauseGuard;
         let tick_server = Arc::clone(server);
         let tick = std::thread::spawn(move || {
-            tick_with_idle_at(&tick_server, now, &|_| false);
+            // Exercise the due-batch owner without unrelated native tmux
+            // observation from the broader maintenance tick.
+            super::tick_with_deadline_wake_at(&tick_server, now);
         });
         wait_for_due_batch_pause(&pause);
         let commit_serialized = server.state.try_lock().is_err();
@@ -2264,7 +2284,6 @@ use super::*;
         }
         release_due_batch_pause(&pause);
         tick.join().expect("timer tick must finish");
-        *super::TIMER_DUE_COMMIT_PAUSE.lock().unwrap() = None;
         if commit_serialized {
             reconcile();
         }

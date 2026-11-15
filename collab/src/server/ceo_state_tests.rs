@@ -295,6 +295,79 @@ fn ceo_handler_progress_records_trims_and_dedups_exact_content() {
 }
 
 #[test]
+fn ceo_production_progress_persists_through_host_control_owner() {
+    let (server, manager) = ceo_handler_fixture();
+    let project_before = std::fs::read(&server.state_path).ok();
+    manager
+        .ceo_record_progress(&server, "host progress".into(), "durable body".into(), true)
+        .unwrap();
+    let path = server.host_paths.state_root().join("host-control.json");
+    assert!(
+        path.is_file(),
+        "production CEO commit must use the host-only owner"
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        saved["state"]["ceo_report_state"]["projects"][server.root.to_str().unwrap()]["revision"],
+        1
+    );
+    assert!(saved["state"].get("workers").is_none());
+    assert!(saved["state"].get("global").is_none());
+    assert_eq!(std::fs::read(&server.state_path).ok(), project_before);
+    let batch = manager.ceo_prepare_report_batch(None).unwrap();
+    let id = batch["batch_id"].as_str().unwrap();
+    let owner = super::host_control::HostControl::read_current(&server.host_paths).unwrap();
+    let state = owner.state.lock().unwrap();
+    let receipt = &state.commands.receipts[&format!("ceo-report-prepare:{id}")];
+    assert_eq!(receipt.outcome, json!({"batch_id": id}));
+    assert_eq!(
+        state.ceo_report_state.batches[id].coverage[server.root.to_str().unwrap()],
+        1
+    );
+    assert_eq!(std::fs::read(&server.state_path).ok(), project_before);
+    drop(state);
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
+fn ceo_control_bootstrap_cancellation_persists_without_project_mutation() {
+    let (server, manager) = ceo_handler_fixture();
+    let before = std::fs::read(&server.state_path).unwrap();
+    manager
+        .host_control
+        .commit_checked(&[
+            super::host_control::HostChange::CeoGrantSet {
+                grant: Some(grant(server.root.to_str().unwrap(), 1)),
+            },
+            super::host_control::HostChange::CeoBootstrapSet {
+                record: bootstrap("control-cancel", "prepared"),
+            },
+        ])
+        .unwrap();
+    assert!(manager
+        .ceo_bootstrap_cancel("control-cancel".into(), String::new())
+        .is_err());
+    let cancelled = manager
+        .ceo_bootstrap_cancel("control-cancel".into(), "approved cancellation".into())
+        .unwrap();
+    assert_eq!(cancelled.data["process_stopped"], false);
+    assert_eq!(cancelled.data["should_launch"], false);
+    let owner = super::host_control::HostControl::read_current(&server.host_paths).unwrap();
+    let state = owner.state.lock().unwrap();
+    assert!(state.ceo_grant.is_some());
+    assert_eq!(state.ceo_bootstraps["control-cancel"].phase, "cancelled");
+    assert_eq!(
+        state.ceo_bootstraps["control-cancel"]
+            .cancellation_approval
+            .as_deref(),
+        Some("approved cancellation")
+    );
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
+    drop(state);
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
 fn ceo_handler_batch_ack_is_urgent_only_during_ordinary_suppression() {
     let (server, manager) = ceo_handler_fixture();
     let (other_server, _other_root) = super::peer_tests::test_server();
@@ -378,8 +451,9 @@ fn ceo_handler_batch_ack_is_urgent_only_during_ordinary_suppression() {
 #[test]
 fn ceo_handler_durable_reply_keeps_receipt_when_progress_record_fails() {
     let (server, manager) = ceo_handler_fixture();
-    std::fs::remove_file(&server.state_path).unwrap();
-    std::fs::create_dir(&server.state_path).unwrap();
+    let path = server.host_paths.state_root().join("host-control.json");
+    assert!(!path.exists());
+    std::fs::create_dir_all(&path).unwrap();
 
     let delivered = Ok(Resp::data(json!({"msg_id":"m-reply","durable":true})));
     let response = manager
@@ -472,7 +546,7 @@ fn ceo_handler_prepare_batch_reports_the_stored_batch_id() {
         .expect("prepared batch id")
         .to_owned();
     {
-        let state = server.state.lock().unwrap();
+        let state = manager.host_control.state.lock().unwrap();
         let stored = state
             .ceo_report_state
             .batches
@@ -562,7 +636,8 @@ fn ceo_promote_guidance_preserves_user_content_and_reports_partial_failure() {
 
 #[test]
 fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
-    let (server, root) = super::peer_tests::test_server();
+    let (mut server, root) = super::peer_tests::test_server();
+    server.root = root.canonicalize().unwrap();
     let transport = super::peer_tests::test_appserver_transport("thread-master");
     let app = crate::identity::AppServerId::new("appserver-cli").unwrap();
     let cwd = server.root.display().to_string();
@@ -620,6 +695,14 @@ fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
     let server = std::sync::Arc::new(server);
     let manager = super::ProjectRuntimeManager::new(server.clone(), &server.host_paths)
         .expect("build manager without a listener");
+    manager.install_runtime(
+        &(
+            crate::identity::CLI_APP_SERVER_ID.into(),
+            scope.as_str().into(),
+        ),
+        server.clone(),
+        None,
+    );
     let response = manager
         .ceo_progress(Some(root.display().to_string()))
         .expect("ceo progress reads the registered project");
@@ -649,7 +732,8 @@ fn ceo_progress_projects_expose_canonical_master_workspace_idle() {
 /// keeps a project without patrol explicit instead of guessing.
 #[test]
 fn ceo_progress_reports_master_patrol_armed_state() {
-    let (server, root) = super::peer_tests::test_server();
+    let (mut server, root) = super::peer_tests::test_server();
+    server.root = root.canonicalize().unwrap();
     super::peer_tests::register(&server, "master", "%master");
     super::peer_tests::promote_master(&server, "master", "user-approved");
 
@@ -658,6 +742,11 @@ fn ceo_progress_reports_master_patrol_armed_state() {
     let server = std::sync::Arc::new(server);
     let manager = super::ProjectRuntimeManager::new(server.clone(), &server.host_paths)
         .expect("build manager without a listener");
+    manager.install_runtime(
+        &("tui-default".into(), scope.as_str().into()),
+        server.clone(),
+        None,
+    );
     let progress = |manager: &super::ProjectRuntimeManager, root: &std::path::Path| {
         manager
             .ceo_progress(Some(root.display().to_string()))

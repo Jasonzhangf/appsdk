@@ -919,9 +919,9 @@ fn delegated_goal_ceo_updates_foreign_peer_and_other_peers_are_refused() {
 }
 
 #[test]
-fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is_enforced() {
+fn delegated_goal_renewal_preserves_existing_work_and_invalid_schedule_is_atomic() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, master_pane) = Fixture::isolated("goal-capacity");
+    let (mut fixture, master_pane) = Fixture::isolated("goal-capacity");
     let root = fixture.root.canonicalize().unwrap();
     register_context(&fixture, &root, &master_pane, "capacity-master", false);
     run_ok_at(
@@ -938,6 +938,7 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
     );
     let peer_pane = create_session(&fixture, "capacity-peer");
     let peer = register_context(&fixture, &root, &peer_pane, "capacity-peer", false);
+    let (peer_id, _) = identity(&peer);
     let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
     let intruder_pane = create_session(&fixture, "capacity-other");
     register_context(&fixture, &root, &intruder_pane, "capacity-other", false);
@@ -955,7 +956,7 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         "--ttl-seconds",
         "300",
     ];
-    let standing = run_ok_at(&fixture, &root, &master_pane, &base, false);
+    run_ok_at(&fixture, &root, &master_pane, &base, false);
     run_ok_at(
         &fixture,
         &root,
@@ -976,21 +977,25 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         ],
         false,
     );
-    let full = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
-    assert_eq!(
-        full["subscriptions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|sub| sub["status"] == "armed")
-            .count(),
-        3
-    );
+    let baseline = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    let baseline_ids = baseline["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|sub| sub["status"] == "armed")
+        .map(|sub| sub["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(baseline_ids.len(), 3);
     let denied = command_at(&fixture, &root, &intruder_pane, &base, false)
         .output()
         .unwrap();
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("GOAL_SCHEDULE_OWNER_MISMATCH"));
+    let after_denied = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    assert_eq!(
+        after_denied["subscriptions"], baseline["subscriptions"],
+        "owner-scope rejection must not mutate subscriptions"
+    );
     let published = run_ok_at(
         &fixture,
         &root,
@@ -1034,6 +1039,131 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
     );
     assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
     let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    let accepted = run_ok_at(
+        &fixture,
+        &root,
+        &peer_pane,
+        &[
+            "board",
+            "respond",
+            "capacity-task",
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        false,
+    );
+    assert_eq!(accepted["goal_schedule"]["armed"], true, "{accepted}");
+    let renewal = accepted["goal_schedule"]["subscription"].clone();
+    let renewal_id = renewal["id"].as_str().expect("renewal subscription id");
+    assert!(
+        !baseline_ids.iter().any(|id| id == renewal_id),
+        "{accepted}"
+    );
+    assert_eq!(renewal["worker_id"], peer_id);
+    assert_eq!(renewal["repeat_count"], 4);
+    assert_eq!(renewal["goal_content"]["source"]["kind"], "board-task");
+    let active = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    let active_subscriptions = active["subscriptions"].as_array().unwrap();
+    assert_eq!(
+        active_subscriptions
+            .iter()
+            .filter(|sub| sub["status"] == "armed")
+            .count(),
+        4,
+        "{active}"
+    );
+    for id in &baseline_ids {
+        assert!(
+            active_subscriptions
+                .iter()
+                .any(|sub| sub["id"] == id.as_str() && sub["status"] == "armed"),
+            "renewal retired unrelated subscription {id}: {active}"
+        );
+    }
+    assert!(
+        active_subscriptions
+            .iter()
+            .any(|sub| sub["id"] == renewal_id && sub["status"] == "armed"),
+        "{active}"
+    );
+
+    fixture.restart_daemon();
+    let recovered = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    let recovered_subscriptions = recovered["subscriptions"].as_array().unwrap();
+    let recovered_renewal = recovered_subscriptions
+        .iter()
+        .find(|sub| sub["id"] == renewal_id)
+        .expect("renewal subscription survives daemon restart");
+    assert_eq!(recovered_renewal["status"], "armed");
+    assert_eq!(recovered_renewal["worker_id"], peer_id);
+    assert_eq!(recovered_renewal["repeat_count"], 4);
+    for id in &baseline_ids {
+        assert!(
+            recovered_subscriptions
+                .iter()
+                .any(|sub| sub["id"] == id.as_str() && sub["status"] == "armed"),
+            "restart lost unrelated subscription {id}: {recovered}"
+        );
+    }
+
+    let invalid_published = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "publish",
+            "capacity-invalid-task",
+            "--title",
+            "Invalid schedule task",
+            "--description",
+            "Preserve acceptance atomicity",
+            "--delivery-condition",
+            "No partial invite",
+            "--test-condition",
+            "Invalid schedule keeps task revision",
+            "--executor",
+            peer_name,
+        ],
+        false,
+    );
+    let invalid_revision = invalid_published["task"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let invalid_dispatched = run_ok_at(
+        &fixture,
+        &root,
+        &master_pane,
+        &[
+            "board",
+            "dispatch",
+            "capacity-invalid-task",
+            "--expected-revision",
+            &invalid_revision,
+            "--long-horizon-content",
+            "Invalid schedule task instructions",
+            "--long-horizon-every-ms",
+            "1000",
+            "--long-horizon-repeat",
+            "4",
+            "--long-horizon-ttl-seconds",
+            "1",
+        ],
+        false,
+    );
+    assert_eq!(
+        invalid_dispatched["goal_schedule"]["armed"], false,
+        "{invalid_dispatched}"
+    );
+    let invalid_revision = invalid_dispatched["task"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let tasks_before_failure = run_ok_at(&fixture, &root, &master_pane, &["board", "show"], false);
+    let subscriptions_before_failure =
+        run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
     let failed = command_at(
         &fixture,
         &root,
@@ -1041,10 +1171,10 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         &[
             "board",
             "respond",
-            "capacity-task",
+            "capacity-invalid-task",
             "--accept",
             "--expected-revision",
-            &revision,
+            &invalid_revision,
         ],
         false,
     )
@@ -1052,64 +1182,45 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
     .unwrap();
     assert!(
         !failed.status.success(),
-        "capacity-full acceptance must fail"
+        "invalid schedule acceptance must fail"
     );
     assert!(
-        String::from_utf8_lossy(&failed.stderr).contains("maximum 3 active subscriptions"),
+        String::from_utf8_lossy(&failed.stderr)
+            .contains("goal deadline trigger must be in the future and before expiry"),
         "{}",
         String::from_utf8_lossy(&failed.stderr)
     );
-    let board = run_ok_at(&fixture, &root, &master_pane, &["board", "show"], false);
-    let task = board["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|task| task["id"] == "capacity-task")
-        .unwrap();
-    assert_eq!(task["revision"], dispatched["task"]["revision"]);
-    assert_eq!(task["owner"], dispatched["task"]["owner"]);
-    assert_eq!(task["invited_peer"], dispatched["task"]["invited_peer"]);
-    assert_eq!(task["long_horizon"], dispatched["task"]["long_horizon"]);
-    let status = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
-    assert!(status["subscriptions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|sub| sub["id"] == standing["subscription"]["id"] && sub["status"] == "armed"));
-    run_ok_at(
-        &fixture,
-        &root,
-        &master_pane,
-        &[
-            "goal",
-            "reconcile",
-            "--goal-id",
-            "capacity-standing",
-            "--owner",
-            peer_name,
-            "--desired",
-            "ended",
-        ],
-        false,
+    let tasks_after_failure = run_ok_at(&fixture, &root, &master_pane, &["board", "show"], false);
+    assert_eq!(
+        tasks_after_failure["tasks"], tasks_before_failure["tasks"],
+        "failed acceptance must not mutate any task"
     );
-    let dispatched = run_ok_at(
-        &fixture,
-        &root,
-        &peer_pane,
-        &[
-            "board",
-            "respond",
-            "capacity-task",
-            "--accept",
-            "--expected-revision",
-            &revision,
-        ],
-        false,
+    let invalid_task = tasks_after_failure["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "capacity-invalid-task")
+        .unwrap();
+    assert_eq!(
+        invalid_task["revision"],
+        invalid_dispatched["task"]["revision"]
+    );
+    assert_eq!(invalid_task["owner"], invalid_dispatched["task"]["owner"]);
+    assert_eq!(
+        invalid_task["invited_peer"],
+        invalid_dispatched["task"]["invited_peer"]
     );
     assert_eq!(
-        dispatched["goal_schedule"]["subscription"]["repeat_count"],
-        4
+        invalid_task["long_horizon"],
+        invalid_dispatched["task"]["long_horizon"]
     );
+    let subscriptions_after_failure =
+        run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
+    assert_eq!(
+        subscriptions_after_failure["subscriptions"], subscriptions_before_failure["subscriptions"],
+        "failed acceptance must not mutate any subscription"
+    );
+
     run_ok_at(
         &fixture,
         &root,
@@ -1131,7 +1242,7 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         .as_array()
         .unwrap()
         .iter()
-        .find(|sub| sub["id"] == dispatched["goal_schedule"]["subscription"]["id"])
+        .find(|sub| sub["id"] == renewal_id)
         .unwrap();
     assert_eq!(subscription["status"], "cancelled");
 }
@@ -1527,7 +1638,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     let dead_row = worker_row(&workers_at(&fixture, &dead_context), &dead_id);
     assert_eq!(dead_row["endpoint_live"], false, "{dead_row}");
 
-    let dead_rejected = wire_request(
+    let dead_accepted = wire_request(
         &fixture.host_state.join("server.sock"),
         &cross_project_request(
             &source_id,
@@ -1535,18 +1646,25 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
             &credentials,
             &dead_id,
             &dead_context,
-            "Reject dead endpoint",
-            "this message must not commit",
+            "Accept dead endpoint",
+            "this message must commit before wake delivery",
             false,
         ),
     );
-    assert_rejected_without_message(
-        &fixture,
-        &dead_context,
-        &dead_id,
-        &dead_rejected,
-        "requires a reachable target binding",
-        before,
+    assert_eq!(dead_accepted["ok"], true, "{dead_accepted}");
+    assert_eq!(dead_accepted["durable"], true, "{dead_accepted}");
+    assert_eq!(dead_accepted["cross_project"], true, "{dead_accepted}");
+    assert_eq!(dead_accepted["sender"], source_id, "{dead_accepted}");
+    assert_eq!(dead_accepted["recipient"], dead_id, "{dead_accepted}");
+    assert_eq!(dead_accepted["consumed"], false, "{dead_accepted}");
+    assert!(
+        dead_accepted["msg_id"].as_str().is_some(),
+        "{dead_accepted}"
+    );
+    assert_eq!(
+        message_count(&fixture, &dead_context, &dead_id),
+        before + 1,
+        "durable message missing after wake failure: {dead_accepted}"
     );
 
     fixture.stop_daemon();

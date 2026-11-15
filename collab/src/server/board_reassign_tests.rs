@@ -3,6 +3,61 @@ use super::name_stewardship::{identity_transition_events, scheduling_events, Nam
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+#[test]
+fn automatic_reassignment_keeps_undeclared_task_without_blocking_declared_work() {
+    let (server, root, route) = identity_return_fixture();
+    assert!(crate::server::peer_tests::seed_committed_owner(&server, "idle2", "token-idle2",
+        &crate::server::peer_tests::test_appserver_transport("thread-idle2"),
+        &server.root.to_string_lossy(), Some(AppServerId::new("tui-default").unwrap())).ok);
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load().unwrap();
+    let mut state = server.state.lock().unwrap();
+    identity_return_observation(&mut state, &route, "old", AgentPresence::Offline, AgentActivity::Unknown);
+    identity_return_observation(&mut state, &route, "idle", AgentPresence::Online, AgentActivity::Idle);
+    identity_return_observation(&mut state, &route, "idle2", AgentPresence::Online, AgentActivity::Idle);
+    let mut healthy = state.tasks["named-work"].clone();
+    healthy.id = "declared-work".into();
+    state.apply_checked(&Event::TaskCreated { task: healthy }).unwrap();
+    let mut details = state.board_details["named-work"].clone();
+    details.invitation = None;
+    state.board_details.insert("declared-work".into(), details);
+    let mut assignment = state.task_assignment("named-work").unwrap().clone();
+    assignment.task_id = "declared-work".into();
+    state.apply_task_assignment(&assignment).unwrap();
+    state.board_details.get_mut("named-work").unwrap().long_horizon = None;
+    let name = state.task_assignment("named-work").unwrap().name.clone();
+    state.apply_checked(&Event::NameReassignmentScheduled {
+        project_scope: route.project_scope_id.as_str().into(), name: name.clone(),
+        schedule: name_state::eligible_after_retirement(&name, 1),
+    }).unwrap();
+    let before = serde_json::to_value(&state.tasks["named-work"]).unwrap();
+    let before_details = serde_json::to_value(&state.board_details["named-work"]).unwrap();
+    for now in [1_000_000_000, 1_000_001_000] {
+        let prepared = scheduling_events(&server, &state, &control, now).expect("an undeclared task must not abort automatic scheduling");
+        assert!(prepared.events.iter().any(|event| matches!(event,
+            Event::BoardDetailsChanged { task_id, details }
+                if task_id == "declared-work" && details.invitation.is_some()
+        )));
+        assert!(!prepared.events.iter().any(|event| matches!(event,
+            Event::BoardDetailsChanged { task_id, .. } if task_id == "named-work"
+        )));
+        assert_eq!(serde_json::to_value(&state.tasks["named-work"]).unwrap(), before);
+        assert_eq!(serde_json::to_value(&state.board_details["named-work"]).unwrap(), before_details);
+    }
+    let error = prepare_board_invitation_locked(&server, &state, &control, &route, None,
+        "named-work", "idle", state.board_details["named-work"].revision, None, None, None, 1_000_002_000)
+        .err().expect("explicit invite must retain its missing declaration error");
+    assert!(error.error.unwrap().contains("BOARD_LONG_HORIZON_CONTENT_REQUIRED"));
+    state.board_details.get_mut("named-work").unwrap().long_horizon =
+        state.board_details["declared-work"].long_horizon.clone();
+    let recovered = scheduling_events(&server, &state, &control, 1_000_003_000).unwrap();
+    assert!(recovered.events.iter().any(|event| matches!(event,
+        Event::BoardDetailsChanged { task_id, details }
+            if task_id == "named-work" && details.invitation.is_some()
+    )), "the existing schedule must resume after the declaration is supplied");
+    drop(state);
+    assert!(server.state.try_lock().is_ok(), "preparation failure must release state");
+    std::fs::remove_dir_all(root).unwrap();
+}
 fn due_automatic_invitation() -> (Server, std::path::PathBuf, RouteScope, u64) {
     let (server, root, route) = identity_return_fixture();
     let control = binding_store::BindingControlStore::new(server.host_paths.state_root())

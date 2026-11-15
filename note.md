@@ -1,5 +1,12 @@
 # AppSDK work log
 
+## 2026-11-14 Goal pending-effect stop-bleeding composition
+
+- Goal: compose the already-handed-off withdrawal and scope-local pending-effect recovery increments so an ended goal batch cannot block independent task, mailbox, invite or reply work. Scope is limited to `collab/src/server/goal_schedule.rs` and nonoverlapping tests in `collab/src/server/board_state_tests.rs`; the shared source worktree is read-only.
+- Graph check: `collab-goal-ownership` and `collab-subscription-lifecycle` already model stable-name carrier continuation, terminal schedule occurrences, explicit renewal and independent direct-message retention. No graph mutation is in scope.
+- Finding: the local test file has the withdrawal regression but not the actual scope-local recovery cases. The schedule transition also lacks the same-name carrier no-op, so replay can treat a name handoff as renewal and reject the checked commit when the batch is consumed or expired.
+- Next: add the recovery/no-op tests, capture RED through `recover_pending_effects_for_scope`, then add the minimal transition guard and rerun focused controls. Do not edit name resolution, Rex notification, daemon, identity or live state.
+
 ## 2026-08-26 Codex bridge feasibility
 
 - External `@minhspark/codex-mcp-bridge` v1.11.1 was cloned into a temporary directory; its own suite passed 138 tests with 1 platform skip.

@@ -21,8 +21,12 @@ fn assert_authorized_promotion_replaces_holder(
 /// position-1 constraint remains covered by the public map/layout cases.
 #[test]
 fn approved_promotion_replaces_unknown_incumbent_without_a_pane_taker() {
-    let (server, root, _) = test_server();
+    let (host, root, _) = test_server();
+    let manager = ProjectRuntimeManager::new(host.clone(), &host.host_paths).unwrap();
     let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+    let context = context_with_app(&root, app.as_str());
+    let server = committed_native_scope_fixture(&manager, &context, "unknown-master",
+        "token-unknown-master", "thread-unknown-master");
     for worker in ["unknown-master", "replacement"] {
         let transport = super::peer_tests::test_appserver_transport(&format!("thread-{worker}"));
         let registered = super::peer_tests::seed_committed_owner(
@@ -43,7 +47,6 @@ fn approved_promotion_replaces_unknown_incumbent_without_a_pane_taker() {
     } }]);
     let identity = runtime_for_registered(&server, &root, "replacement", crate::identity::CLI_APP_SERVER_ID);
     let context = context_with_runtime(&root, crate::identity::CLI_APP_SERVER_ID, &identity);
-    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
     let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
     let before = serde_json::to_value(store.load().unwrap()).unwrap();
     let state_before = serde_json::to_value(&*server.state.lock().unwrap()).unwrap();

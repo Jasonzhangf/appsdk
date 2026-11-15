@@ -22,6 +22,7 @@ axum = { version = "0.8.8", default-features = false, features = ["http1", "json
 
 [features]
 default = []
+lifecycle-test-hooks = []
 
 [dev-dependencies]
 serde_json = "1"

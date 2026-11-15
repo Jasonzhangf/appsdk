@@ -458,9 +458,63 @@
         "version": 5
       },
       "version": 17
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "这个死锁就是你的错误实现方式 下次升级和替换要修改 理论上应该就是restart就可以了",
+          "role": "user",
+          "source": "Codex conversation 01a1882c: production Collab daemon deadlock; user requires restart to be sufficient for upgrade and replacement"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-daemon-restart-recovery-20261101-01",
+        "requirement_id": "req-collab-daemon-restart-recovery",
+        "text": "Collab daemon 的正式 restart/up 维护入口必须能替换进程存活但请求不可达的实例并恢复服务；不得停留在 DAEMON_UNKNOWN 状态歧义并拒绝替换，迫使人工强杀。升级和替换后，restart 即恢复为验收条件。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "这个死锁就是你的错误实现方式 下次升级和替换要修改 理论上应该就是restart就可以了",
+          "role": "user",
+          "source": "Codex conversation 01a1882c: production Collab daemon deadlock; user requires restart to be sufficient for upgrade and replacement"
+        },
+        "requirement_id": "req-collab-daemon-restart-recovery",
+        "status": "active",
+        "text": "Collab daemon 的正式 restart/up 维护入口必须能替换进程存活但请求不可达的实例并恢复服务；不得停留在 DAEMON_UNKNOWN 状态歧义并拒绝替换，迫使人工强杀。升级和替换后，restart 即恢复为验收条件。",
+        "version": 1
+      },
+      "version": 18
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "shcema 需要改写为新版，如果不兼容",
+          "role": "user",
+          "source": "Claude Code conversation ee987f9f-9d1e-4dbe-a09a-cab764a77cc8 (2026-11-13): direct user rulings on the ontology memory audit"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-memory-schema-upgrade-20261113-01",
+        "requirement_id": "req-memory-schema-upgrade",
+        "text": "project-memory 遇到与当前版本不兼容的旧 schema（含索引 schema）时，改写为当前新版 schema，而不是停在不兼容或 stale 状态。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "shcema 需要改写为新版，如果不兼容",
+          "role": "user",
+          "source": "Claude Code conversation ee987f9f-9d1e-4dbe-a09a-cab764a77cc8 (2026-11-13): direct user rulings on the ontology memory audit"
+        },
+        "requirement_id": "req-memory-schema-upgrade",
+        "status": "active",
+        "text": "project-memory 遇到与当前版本不兼容的旧 schema（含索引 schema）时，改写为当前新版 schema，而不是停在不兼容或 stale 状态。",
+        "version": 1
+      },
+      "version": 19
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 17
+  "version": 19
 }

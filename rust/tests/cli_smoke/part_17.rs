@@ -248,6 +248,7 @@ esac
         .unwrap();
     assert!(status_calls >= 3, "subject candidates were not all queried");
 
+    let before_expired_status = fs::read(&record_path).unwrap();
     let expired = Command::new(binary())
         .args(["goal", "status", "--json"])
         .current_dir(&root)
@@ -276,11 +277,13 @@ esac
         "recovery={:?}",
         expired["record"]["recovery"]
     );
+    assert_eq!(fs::read(&record_path).unwrap(), before_expired_status);
 
     let rearmed = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
         .current_dir(&root)
         .env("PATH", &fake_bin)
+        .env("STATUS_EXPIRED", "1")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -509,15 +512,17 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     let root = temp_root("goal-persistence-failure");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
-    let control_dir = goal_test_record_path(&root).parent().unwrap().to_owned();
+    let control_dir = goal_test_control_dir(&root);
     fs::create_dir_all(&control_dir).unwrap();
+    let records_dir = control_dir.join("records");
+    fs::create_dir_all(&records_dir).unwrap();
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
     let marker = root.join("remote-called");
     let fake_touch = fake_bin.join("touch");
     fs::write(
         &fake_touch,
-        "#!/bin/sh\n/bin/chmod a-w .appsdk-control/goals/6d61737465722d70656572\n/usr/bin/touch \"$@\"\n",
+        "#!/bin/sh\n/bin/chmod a-w .appsdk-control/goals/6d61737465722d70656572/records\n/usr/bin/touch \"$@\"\n",
     )
     .unwrap();
     fs::set_permissions(&fake_touch, fs::Permissions::from_mode(0o755)).unwrap();
@@ -552,22 +557,22 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     assert_eq!(payload["subscription_id"], "orphan");
     assert!(marker.exists());
 
-    fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o755)).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn goal_stale_lock_is_recovered_after_owner_exit() {
     let root = temp_root("goal-stale-lock");
-    let control_dir = goal_test_record_path(&root).parent().unwrap().to_owned();
+    let control_dir = goal_test_control_dir(&root);
     fs::create_dir_all(&control_dir).unwrap();
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(fake_bin.join("collab"), "#!/bin/sh\nexit 64\n").unwrap();
     install_goal_test_context(&fake_bin.join("collab"), &root);
-    let run_status = || {
+    let run_mutation = || {
         Command::new(binary())
-            .args(["goal", "status", "--json"])
+            .args(["goal", "cancel", "--json"])
             .current_dir(&root)
             .env("PATH", &fake_bin)
             .output()
@@ -586,10 +591,10 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     )
     .unwrap();
 
-    let status = run_status();
-    assert!(status.status.success());
-    let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
-    assert_eq!(payload["error"], "GOAL_RECORD_NOT_FOUND");
+    let recovered = run_mutation();
+    assert_eq!(recovered.status.code(), Some(1));
+    let payload: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(payload["error"], "GOAL_CANCEL_SUBSCRIPTION_MISSING");
     assert!(!lock_path.exists());
     let stale_metadata = format!("pid={} owner=crashed-goal-worker\n", stale_pid);
     let valid_receipt = fs::read_dir(&control_dir)
@@ -615,10 +620,10 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     );
 
     fs::write(&lock_path, "").unwrap();
-    let empty_lock = run_status();
-    assert!(empty_lock.status.success());
+    let empty_lock = run_mutation();
+    assert_eq!(empty_lock.status.code(), Some(1));
     let empty_payload: Value = serde_json::from_slice(&empty_lock.stdout).unwrap();
-    assert_eq!(empty_payload["error"], "GOAL_RECORD_NOT_FOUND");
+    assert_eq!(empty_payload["error"], "GOAL_CANCEL_SUBSCRIPTION_MISSING");
     assert!(!lock_path.exists());
     let recovery_receipt = fs::read_dir(&control_dir)
         .unwrap()
@@ -642,10 +647,13 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     assert_eq!(recovery_receipt["reason"], "empty metadata");
 
     fs::write(&lock_path, "pid=").unwrap();
-    let truncated_lock = run_status();
-    assert!(truncated_lock.status.success());
+    let truncated_lock = run_mutation();
+    assert_eq!(truncated_lock.status.code(), Some(1));
     let truncated_payload: Value = serde_json::from_slice(&truncated_lock.stdout).unwrap();
-    assert_eq!(truncated_payload["error"], "GOAL_RECORD_NOT_FOUND");
+    assert_eq!(
+        truncated_payload["error"],
+        "GOAL_CANCEL_SUBSCRIPTION_MISSING"
+    );
     assert!(!lock_path.exists());
     let truncated_receipt = fs::read_dir(&control_dir)
         .unwrap()
@@ -675,10 +683,10 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
         format!("pid={} owner=live-owner\n", live_owner.id()),
     )
     .unwrap();
-    let reused_pid = run_status();
-    assert!(reused_pid.status.success());
+    let reused_pid = run_mutation();
+    assert_eq!(reused_pid.status.code(), Some(1));
     let reused_payload: Value = serde_json::from_slice(&reused_pid.stdout).unwrap();
-    assert_eq!(reused_payload["error"], "GOAL_RECORD_NOT_FOUND");
+    assert_eq!(reused_payload["error"], "GOAL_CANCEL_SUBSCRIPTION_MISSING");
 
     let held = OpenOptions::new()
         .read(true)
@@ -692,14 +700,19 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     )
     .unwrap();
     hold_advisory_lock(&held);
-    let busy = run_status();
+    let busy = run_mutation();
     assert_eq!(busy.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&busy.stderr).contains("GOAL_LOCK_BUSY"));
     drop(held);
     live_owner.kill().unwrap();
     live_owner.wait().unwrap();
-    let recovered = run_status();
-    assert!(recovered.status.success());
+    let recovered = run_mutation();
+    assert_eq!(recovered.status.code(), Some(1));
+    let recovered_payload: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(
+        recovered_payload["error"],
+        "GOAL_CANCEL_SUBSCRIPTION_MISSING"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

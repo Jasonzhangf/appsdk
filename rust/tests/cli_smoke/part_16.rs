@@ -1964,6 +1964,321 @@ esac
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn goal_crud_keeps_three_scoped_records_and_read_is_nonmutating() {
+    let root = temp_root("goal-crud");
+    fs::create_dir_all(root.join("fake-bin")).unwrap();
+    for (name, body) in [
+        ("goal-a.md", "# Goal A\nDeliver A.\n"),
+        ("goal-b.md", "# Goal B\nDeliver B.\n"),
+        ("goal-c.md", "# Goal C\nDeliver C.\n"),
+    ] {
+        fs::write(root.join(name), body).unwrap();
+    }
+
+    let fake_collab = root.join("fake-bin/collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+set -e
+state="$PROJECT/remote-goals"
+/bin/mkdir -p "$state"
+case "$1 $2" in
+  "context ")
+    printf '{"name":"crud-owner","session_id":"crud-session","binding":{"project_scope":"%s"},"identity":{"worker_id":"crud-carrier","role":"peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-crud"}}}\n' "$PROJECT"
+    ;;
+  "goal reconcile")
+    goal_id=
+    owner=
+    desired=
+    operation=
+    at=
+    ttl=
+    every=
+    repeat=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) owner="$2"; shift ;;
+        --desired) desired="$2"; shift ;;
+        --operation) operation="$2"; shift ;;
+        --at-ms) at="$2"; shift ;;
+        --ttl-seconds) ttl="$2"; shift ;;
+        --every-ms) every="$2"; shift ;;
+        --repeat) repeat="$2"; shift ;;
+        --content) shift ;;
+      esac
+      shift
+    done
+    key=$(printf '%s' "$goal_id" | /usr/bin/tr -c 'A-Za-z0-9._-' '_')
+    if [ "$desired" = "ended" ]; then
+      printf 'cancelled' > "$state/$key.status"
+      printf '{"goal_id":"%s","goal_owner":"%s","desired":"ended","status":"ended","subscription":null}\n' "$goal_id" "$owner"
+      exit 0
+    fi
+    if [ ! -f "$state/$key.id" ]; then
+      next=$(/bin/cat "$state/next" 2>/dev/null || printf '0')
+      next=$((next + 1))
+      printf '%s' "$next" > "$state/next"
+      printf 'sub-crud-%s' "$next" > "$state/$key.id"
+      printf 'armed' > "$state/$key.status"
+      printf '0' > "$state/$key.fired"
+      printf 'goal:%s' "$goal_id" > "$state/$key.subject"
+      printf '%s' "${at:-600000}" > "$state/$key.trigger"
+      printf '%s' "${ttl:-604800}" > "$state/$key.ttl"
+      printf '%s' "${every:-300000}" > "$state/$key.interval"
+      printf '%s' "${repeat:-100}" > "$state/$key.repeat"
+      printf '9999999999999' > "$state/$key.expiry"
+    elif [ "$operation" = "edit" ]; then
+      status=$(/bin/cat "$state/$key.status")
+      [ -n "$every" ] && printf '%s' "$every" > "$state/$key.interval"
+      [ -n "$repeat" ] && printf '%s' "$repeat" > "$state/$key.repeat"
+      [ -n "$ttl" ] && [ "$status" = "armed" ] && printf '%s' "$ttl" > "$state/$key.ttl"
+    fi
+    id=$(/bin/cat "$state/$key.id")
+    status=$(/bin/cat "$state/$key.status")
+    fired=$(/bin/cat "$state/$key.fired")
+    subject=$(/bin/cat "$state/$key.subject")
+    trigger=$(/bin/cat "$state/$key.trigger")
+    expiry=$(/bin/cat "$state/$key.expiry")
+    interval=$(/bin/cat "$state/$key.interval")
+    repeat_count=$(/bin/cat "$state/$key.repeat")
+    printf '{"goal_id":"%s","goal_owner":"%s","desired":"active","status":"%s","subscription":{"id":"%s","status":"%s","event":"deadline","subject":"%s","worker_id":"crud-carrier","owner":"crud-owner","fired_count":%s,"trigger_ms":%s,"expires_ms":%s,"interval_ms":%s,"repeat_count":%s,"periodic_declared":true}}\n' \
+      "$goal_id" "$owner" "$status" "$id" "$status" "$subject" "$fired" "$trigger" "$expiry" "$interval" "$repeat_count"
+    ;;
+  "notify status")
+    printf '{"subscriptions":['
+    separator=
+    for id_file in "$state"/*.id; do
+      [ -e "$id_file" ] || continue
+      key=${id_file%.id}
+      id=$(/bin/cat "$key.id")
+      status=$(/bin/cat "$key.status")
+      subject=$(/bin/cat "$key.subject")
+      fired=$(/bin/cat "$key.fired")
+      trigger=$(/bin/cat "$key.trigger")
+      expiry=$(/bin/cat "$key.expiry")
+      interval=$(/bin/cat "$key.interval")
+      repeat_count=$(/bin/cat "$key.repeat")
+      printf '%s{"id":"%s","status":"%s","event":"deadline","subject":"%s","worker_id":"crud-carrier","owner":"crud-owner","fired_count":%s,"trigger_ms":%s,"expires_ms":%s,"interval_ms":%s,"repeat_count":%s,"periodic_declared":true}' \
+        "$separator" "$id" "$status" "$subject" "$fired" "$trigger" "$expiry" "$interval" "$repeat_count"
+      separator=,
+    done
+    printf ']}\n'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&root)
+            .env("PATH", root.join("fake-bin"))
+            .env("PROJECT", &root)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+    let run_json = |args: &[&str]| {
+        let result = run(args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+
+    let a = run_json(&[
+        "goal",
+        "subscribe",
+        "--goal",
+        "goal-a.md",
+        "--interval",
+        "5m",
+        "--repeat",
+        "5",
+        "--json",
+    ]);
+    let b = run_json(&[
+        "goal",
+        "subscribe",
+        "--goal",
+        "goal-b.md",
+        "--interval",
+        "6m",
+        "--repeat",
+        "6",
+        "--json",
+    ]);
+    let c = run_json(&[
+        "goal",
+        "subscribe",
+        "--goal",
+        "goal-c.md",
+        "--interval",
+        "7m",
+        "--repeat",
+        "7",
+        "--json",
+    ]);
+    let a_id = a["goal_id"].as_str().unwrap();
+    let b_id = b["goal_id"].as_str().unwrap();
+    let c_id = c["goal_id"].as_str().unwrap();
+    assert_ne!(a_id, b_id);
+    assert_ne!(b_id, c_id);
+    let record_path = |goal_id: &str| {
+        goal_test_owner_control_dir(&root, "crud-owner")
+            .join("records")
+            .join(format!(
+                "{}.json",
+                goal_id
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ))
+    };
+    let a_path = record_path(a_id);
+    let b_path = record_path(b_id);
+    let c_path = record_path(c_id);
+    let a_before_read = fs::read(&a_path).unwrap();
+    let b_before_read = fs::read(&b_path).unwrap();
+    let c_before_read = fs::read(&c_path).unwrap();
+
+    let listed = run_json(&["goal", "list", "--json"]);
+    assert_eq!(listed["count"], 3);
+    assert_eq!(fs::read(&a_path).unwrap(), a_before_read);
+    assert_eq!(fs::read(&b_path).unwrap(), b_before_read);
+    assert_eq!(fs::read(&c_path).unwrap(), c_before_read);
+
+    let status = run_json(&["goal", "status", "--goal-id", a_id, "--json"]);
+    assert_eq!(status["goal_id"], a_id);
+    assert_eq!(status["active"], true);
+    assert_eq!(fs::read(&a_path).unwrap(), a_before_read);
+
+    let ambiguous = run(&["goal", "status", "--json"]);
+    assert_eq!(ambiguous.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr)
+        .contains("GOAL_RECORD_SELECTOR_REQUIRED"));
+
+    let key_a = a_id
+        .as_bytes()
+        .iter()
+        .map(|byte| if byte.is_ascii_alphanumeric() || b"._-".contains(byte) {
+            *byte as char
+        } else {
+            '_'
+        })
+        .collect::<String>();
+    fs::write(root.join(format!("remote-goals/{key_a}.fired")), "2").unwrap();
+    let edited = run_json(&[
+        "goal",
+        "edit",
+        "--goal-id",
+        a_id,
+        "--interval",
+        "8m",
+        "--repeat",
+        "4",
+        "--json",
+    ]);
+    assert_eq!(edited["status"], "armed");
+    assert_eq!(edited["subscription_id"], format!("sub-crud-1"));
+    assert_eq!(edited["record"]["collab_subscription"]["fired_count"], 2);
+    assert_eq!(edited["record"]["interval"], "8m");
+    assert_eq!(edited["record"]["repeat_count"], 4);
+    assert_eq!(edited["receipt"]["subscription"]["id"], "sub-crud-1");
+    assert_eq!(fs::read(&b_path).unwrap(), b_before_read);
+    assert_eq!(fs::read(&c_path).unwrap(), c_before_read);
+    let edited_bytes = fs::read(&a_path).unwrap();
+
+    let updated = run_json(&[
+        "goal",
+        "update",
+        "--goal-id",
+        a_id,
+        "--interval",
+        "8m",
+        "--repeat",
+        "4",
+        "--json",
+    ]);
+    assert_eq!(updated["subscription_id"], "sub-crud-1");
+    assert_eq!(fs::read(&a_path).unwrap(), edited_bytes);
+
+    fs::write(root.join(format!("remote-goals/{key_a}.status")), "consumed").unwrap();
+    let terminal = run_json(&[
+        "goal",
+        "edit",
+        "--goal-id",
+        a_id,
+        "--repeat",
+        "8",
+        "--json",
+    ]);
+    assert_eq!(terminal["status"], "consumed");
+    assert_eq!(terminal["subscription_id"], "sub-crud-1");
+    assert_eq!(terminal["record"]["active"], false);
+    assert_eq!(terminal["record"]["collab_subscription"]["fired_count"], 2);
+    assert_eq!(
+        terminal["record"]["collab_subscription"]["trigger_ms"],
+        edited["record"]["collab_subscription"]["trigger_ms"]
+    );
+    assert_eq!(
+        terminal["record"]["collab_subscription"]["expires_ms"],
+        edited["record"]["collab_subscription"]["expires_ms"]
+    );
+
+    let cancelled = run_json(&["goal", "cancel", "--goal-id", b_id, "--json"]);
+    assert_eq!(cancelled["status"], "cancelled");
+    let b_after_cancel: Value = serde_json::from_slice(&fs::read(&b_path).unwrap()).unwrap();
+    assert_eq!(b_after_cancel["desired"], "unsubscribed");
+    assert_eq!(b_after_cancel["observed"], "cancelled");
+    let c_after_cancel = fs::read(&c_path).unwrap();
+    assert_eq!(c_after_cancel, c_before_read);
+
+    let missing = run(&[
+        "goal",
+        "edit",
+        "--goal-id",
+        "sha256:missing",
+        "--repeat",
+        "2",
+        "--json",
+    ]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("GOAL_RECORD_NOT_FOUND"));
+    let records_dir = goal_test_owner_control_dir(&root, "crud-owner").join("records");
+    let records_after_missing = fs::read_dir(records_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .count();
+    assert_eq!(records_after_missing, 3);
+
+    let prompt = run_json(&["goal", "prompt", "--goal-id", c_id, "--json"]);
+    assert_eq!(prompt["goal_id"], c_id);
+    assert!(prompt["prompt"].as_str().unwrap().contains("goal-c.md"));
+    assert_eq!(fs::read(&c_path).unwrap(), c_after_cancel);
+
+    let after = run_json(&["goal", "list", "--json"]);
+    assert_eq!(after["count"], 3);
+    assert!(after["goals"].as_array().unwrap().iter().any(|goal| {
+        goal["goal_id"] == c_id
+            && goal["record"]["desired"].as_str() == Some("subscribed")
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn goal_owner_scoped_peer_native_and_master_lifecycle() {
     let root = temp_root("goal-owner-scoped");
@@ -2014,16 +2329,30 @@ esac
     assert_eq!(peer["owner"], "Alice");
     let master = run(&root, "Jenny", &["goal", "subscribe", "--goal", "goal.md", "--json"]);
     assert_eq!(master["owner"], "Jenny");
-    let scoped_path = |owner: &str| root.join(".appsdk-control/goals")
-        .join(owner.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>())
-        .join("long-task-goal.json");
-    let master_bytes = fs::read(scoped_path("Jenny")).unwrap();
+    let peer_goal_id = peer["goal_id"].as_str().unwrap();
+    let master_goal_id = master["goal_id"].as_str().unwrap();
+    let scoped_path = |owner: &str, goal_id: &str| {
+        goal_test_owner_control_dir(&root, owner)
+            .join("records")
+            .join(format!(
+                "{}.json",
+                goal_id
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ))
+    };
+    let master_bytes = fs::read(scoped_path("Jenny", master_goal_id)).unwrap();
     let failed_status = Command::new(binary()).args(["goal", "status", "--json"])
         .current_dir(&root).env("PATH", root.join("fake-bin"))
         .env("PROJECT", &root).env("OWNER", "Alice").env("STATUS_FAIL", "1").output().unwrap();
     let failed: Value = serde_json::from_slice(&failed_status.stdout).unwrap();
     assert_eq!(failed["desired"], "recovery_required");
-    assert_eq!(fs::read(scoped_path("Jenny")).unwrap(), master_bytes);
+    assert_eq!(
+        fs::read(scoped_path("Jenny", master_goal_id)).unwrap(),
+        master_bytes
+    );
     let nested = root.join("worktree");
     fs::create_dir_all(&nested).unwrap();
     let continued = run(&nested, "Alice", &["goal", "status", "--json"]);
@@ -2036,7 +2365,13 @@ esac
     run(&root, "Alice", &["goal", "subscribe", "--goal", "goal.md", "--json"]);
     assert_eq!(run(&root, "Alice", &["goal", "status", "--json"])["active"], true);
     // Own-name continuation uses the current carrier but retains the goal.
-    assert_eq!(serde_json::from_slice::<Value>(&fs::read(scoped_path("Alice")).unwrap()).unwrap()["session_id"], "continued-session");
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fs::read(scoped_path("Alice", peer_goal_id)).unwrap()
+        )
+        .unwrap()["session_id"],
+        "continued-session"
+    );
     // A foreign legacy singleton never becomes this peer's goal.
     let legacy_path = root.join(".appsdk-control/long-task-goal.json");
     let mut legacy_record: Value = serde_json::from_slice(&master_bytes).unwrap();
@@ -2047,26 +2382,41 @@ esac
     assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
     // Matching legacy reads are projections only; an explicit cancel promotes
     // the retained subscription to the scoped record and preserves the source.
-    fs::remove_file(scoped_path("Jenny")).unwrap();
+    fs::remove_file(scoped_path("Jenny", master_goal_id)).unwrap();
     let legacy_status = run(&root, "Jenny", &["goal", "status", "--json"]);
     assert_eq!(legacy_status["record"]["record_source"], "legacy-read-only");
     assert_eq!(legacy_status["record"]["owner"], "Jenny");
-    assert!(!scoped_path("Jenny").exists());
+    assert!(!scoped_path("Jenny", master_goal_id).exists());
     run(&root, "Jenny", &["goal", "cancel", "--json"]);
     assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
-    assert_eq!(serde_json::from_slice::<Value>(&fs::read(scoped_path("Jenny")).unwrap()).unwrap()["observed"], "cancelled");
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fs::read(scoped_path("Jenny", master_goal_id)).unwrap()
+        )
+        .unwrap()["observed"],
+        "cancelled"
+    );
     // Scoped owner mismatches fail before reconciliation or remote writes.
-    fs::write(scoped_path("Alice"), &master_bytes).unwrap();
+    fs::write(scoped_path("Alice", peer_goal_id), &master_bytes).unwrap();
     let mismatch = Command::new(binary()).args(["goal", "status", "--json"])
         .current_dir(&root).env("PATH", root.join("fake-bin"))
         .env("PROJECT", &root).env("OWNER", "Alice").output().unwrap();
     assert!(!mismatch.status.success());
     assert!(String::from_utf8_lossy(&mismatch.stderr).contains("GOAL_RECORD_OWNER_MISMATCH"));
-    assert_eq!(fs::read(scoped_path("Alice")).unwrap(), master_bytes);
+    assert_eq!(
+        fs::read(scoped_path("Alice", peer_goal_id)).unwrap(),
+        master_bytes
+    );
     // The owner's held lock blocks only that owner. Independent names can
     // register concurrently, even when they use the same goal document.
-    let held = OpenOptions::new().create(true).read(true).write(true)
-        .open(scoped_path("Alice").with_file_name("long-task-goal.lock")).unwrap();
+    let held = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(
+            goal_test_owner_control_dir(&root, "Alice").join("long-task-goal.lock"),
+        )
+        .unwrap();
     hold_advisory_lock(&held);
     let command = |owner: &str, args: &[&str]| {
         let mut cmd = Command::new(binary());
@@ -2077,7 +2427,12 @@ esac
     };
     let bob = command("Bob", &["goal", "subscribe", "--goal", "goal.md", "--json"]).spawn().unwrap();
     let carol = command("Carol", &["goal", "subscribe", "--goal", "goal.md", "--json"]).spawn().unwrap();
-    let busy = command("Alice", &["goal", "status", "--json"]).output().unwrap();
+    let busy = command(
+        "Alice",
+        &["goal", "subscribe", "--goal", "goal.md", "--json"],
+    )
+    .output()
+    .unwrap();
     assert!(String::from_utf8_lossy(&busy.stderr).contains("GOAL_LOCK_BUSY"));
     assert!(bob.wait_with_output().unwrap().status.success());
     assert!(carol.wait_with_output().unwrap().status.success());
@@ -2085,7 +2440,10 @@ esac
     let continued = command("Bob", &["goal", "status", "--json"])
         .env("SESSION", "second-session").env("CARRIER", "new-worker").output().unwrap();
     assert!(continued.status.success());
-    assert_eq!(serde_json::from_slice::<Value>(&continued.stdout).unwrap()["record"]["session_id"], "second-session");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&continued.stdout).unwrap()["record"]["session_id"],
+        "first"
+    );
     let native_brief = run(&root, "Bob", &["longhorizon", "show", "--json"]);
     assert_eq!(native_brief["role"], "peer");
     assert_eq!(native_brief["goal"]["owner"], "Bob");
@@ -2107,7 +2465,7 @@ esac
         let unknown = command("", &args).output().unwrap();
         assert!(!unknown.status.success());
     }
-    assert!(!scoped_path("Dave").exists());
+    assert!(!goal_test_owner_control_dir(&root, "Dave").exists());
     let managed_brief = command("Dave", &["longhorizon", "show", "--json"])
         .env("DERIVATION", "managed-subagent").output().unwrap();
     assert!(managed_brief.status.success());
@@ -2124,7 +2482,7 @@ esac
         assert_eq!(own["owner"], "Dave");
         assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
         run(&root, "Dave", &["goal", "cancel", "--json"]);
-        fs::remove_file(scoped_path("Dave")).unwrap();
+        fs::remove_file(scoped_path("Dave", own["goal_id"].as_str().unwrap())).unwrap();
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -2149,5 +2507,36 @@ fn install_goal_test_context(collab: &Path, project: &Path) {
 }
 
 fn goal_test_record_path(root: &Path) -> PathBuf {
-    root.join(".appsdk-control/goals/6d61737465722d70656572/long-task-goal.json")
+    let records = goal_test_records_dir(root);
+    let mut paths: Vec<_> = fs::read_dir(&records)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+    match paths.as_slice() {
+        [path] => path.clone(),
+        [] => records.join("no-record.json"),
+        _ => panic!("goal fixture expected one record, found {}", paths.len()),
+    }
+}
+
+fn goal_test_records_dir(root: &Path) -> PathBuf {
+    goal_test_control_dir(root).join("records")
+}
+
+fn goal_test_control_dir(root: &Path) -> PathBuf {
+    goal_test_owner_control_dir(root, "master-peer")
+}
+
+fn goal_test_owner_control_dir(root: &Path, owner: &str) -> PathBuf {
+    root.join(".appsdk-control/goals").join(
+        owner
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
 }

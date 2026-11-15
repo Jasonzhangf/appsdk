@@ -83,6 +83,9 @@ pub(crate) enum GoalCmd {
         goal_subject: Option<String>,
         #[arg(long)]
         reason: Option<String>,
+        /// update an existing exact goal without creating or renewing a batch
+        #[arg(long)]
+        operation: Option<String>,
     },
 }
 

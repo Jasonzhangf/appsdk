@@ -1217,9 +1217,37 @@ fn handle_msg_status(
     };
     if let Some(caller) = caller {
         if msg.from != caller.id && msg.to != caller.id {
-            return Resp::err(format!(
-                "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id}; next: query only messages sent by or addressed to this caller"
-            ));
+            let context = project_context.expect("caller exists only with wire project context");
+            let obligation_match = match st.reply_obligations.get(&msg_id) {
+                Some(obligation)
+                    if obligation.message_id == msg_id
+                        && obligation.project == context.project_scope.as_str() =>
+                {
+                    let control = match binding_store::BindingControlStore::new(
+                        server.host_paths.state_root(),
+                    )
+                    .load()
+                    {
+                        Ok(control) => control,
+                        Err(error) => return Resp::err(error),
+                    };
+                    match reply_obligation::recipient_matches(
+                        &control,
+                        &context.app_scope_id,
+                        obligation,
+                        &caller.id,
+                    ) {
+                        Ok(is_recipient) => is_recipient,
+                        Err(error) => return Resp::err(error),
+                    }
+                }
+                _ => false,
+            };
+            if !obligation_match {
+                return Resp::err(format!(
+                    "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id} and is not the current recipient of its open reply obligation; next: query only messages sent by or addressed to this caller or required by this caller's open reply obligations"
+                ));
+            }
         }
     }
     let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();

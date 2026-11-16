@@ -809,7 +809,6 @@ impl ProjectRuntimeManager {
         let effect_id = format!("register-{}", prepared.nested_operation_id);
         // Publish an authorized target directly. The displaced holder obtains
         // an ordinary name only when it next registers; source work stays put.
-        let mut moves_existing_names = name_intent.is_some();
         let mut effect = Self::handoff_effect(
             &control,
             &state,
@@ -825,7 +824,7 @@ impl ProjectRuntimeManager {
             pane_anchor.clone(),
         );
         let mut sources = Vec::new();
-        if moves_existing_names {
+        if name_intent.is_some() {
             sources = control
                 .project_currents_for_name(&context.project_scope, &name)
                 .into_iter()
@@ -851,16 +850,15 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-        // A verified pane replacement must release its foreign current in
-        // the same map candidate, even without an explicit name move. Leaving
-        // that current active makes both carriers resolve the same anchor and
-        // prevents the post-Register claimant retirement from running.
+        // A verified foreign-app pane replacement retires that app's exact
+        // current in the same publication. Same-app distinct-name principals
+        // remain independent and keep their existing delivery route.
         if let Some(endpoint) = binding.tmux_endpoint.as_ref() {
             for slot in control.slots() {
                 let Some(current) = slot.active_binding() else {
                     continue;
                 };
-                if !current.binding.same_principal(binding)
+                if current.binding.app_scope_id != context.app_scope_id
                     && current
                         .binding
                         .tmux_endpoint
@@ -885,7 +883,6 @@ impl ProjectRuntimeManager {
                 .ok_or("BINDING_CONTROL_REGISTER_EFFECT_MISSING")?;
             pending.kind =
                 crate::server::binding_slot::PendingEffectKind::RegisterAcrossScopes { sources };
-            moves_existing_names = true;
         }
         let key = crate::server::binding_slot::IdentityBindingKey::new(
             context.project_scope.clone(),
@@ -987,16 +984,6 @@ impl ProjectRuntimeManager {
             }
         };
         let change = match effect {
-            Some(effect) if moves_existing_names => {
-                crate::server::binding_store::ControlChange::MoveNameWithEffect {
-                    target: key,
-                    value,
-                    source_names: Vec::new(),
-                    expected_generation: None,
-                    effect,
-                    companion: None,
-                }
-            }
             Some(effect) => crate::server::binding_store::ControlChange::CommitWithEffect {
                 key,
                 value,

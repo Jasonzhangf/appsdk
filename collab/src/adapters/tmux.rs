@@ -561,10 +561,47 @@ fn validate_session_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SESSION_NAME: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestSessionName;
+
+#[cfg(test)]
+impl TestSessionName {
+    /// Only intercept observations of this test's synthetic socket on this thread.
+    pub(crate) fn new(socket: &str, name: &str) -> Self {
+        TEST_SESSION_NAME.with(|saved| {
+            assert!(saved.borrow().is_none());
+            *saved.borrow_mut() = Some((socket.into(), name.into()));
+        });
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestSessionName {
+    fn drop(&mut self) {
+        TEST_SESSION_NAME.with(|saved| *saved.borrow_mut() = None);
+    }
+}
+
 /// Reads the current tmux session name for an observed endpoint. This is the
 /// TUI identity anchor: it stays stable across pane and `$N` changes, unlike
 /// the socket/pane/PID placement.
 pub fn observe_session_name(endpoint: &TmuxEndpoint) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(name) = TEST_SESSION_NAME.with(|saved| {
+        saved
+            .borrow()
+            .as_ref()
+            .filter(|(socket, _)| socket == &endpoint.socket_path)
+            .map(|(_, name)| name.clone())
+    }) {
+        return Ok(name);
+    }
     validate_endpoint(endpoint)?;
     let output = tmux_command(
         &endpoint.socket_path,

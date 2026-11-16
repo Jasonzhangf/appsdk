@@ -179,23 +179,21 @@ fn assert_current_pane_conflict_does_not_block_startup(reverse_slots: bool, has_
         .unwrap();
 
     if has_claimant {
-        manager
-            .reconcile_binding_publication(&claim_a.binding)
-            .unwrap();
+        assert!(
+            manager
+                .reconcile_binding_publication(&claim_a.binding)
+                .is_err(),
+            "two current map rows cannot select a pane claimant by iteration order"
+        );
     }
     let publication = manager.reconcile_controlled_thread_routes(&control);
     assert!(
         publication.is_ok(),
         "a conflicting current map row must not abort startup publication: {publication:?}"
     );
-    assert_eq!(
-        host.state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_unique_tmux_pane_route(&claimed).cloned(),
-        has_claimant.then(|| claim_a.binding.clone()),
-        "publication must preserve an existing claimant or leave an unresolved conflict unpublished"
+    assert!(
+        manager.resolve_route_by_tmux_endpoint(&claimed).is_err(),
+        "conflicting current map rows must stay unresolved until the map owner selects one"
     );
     if has_claimant {
         assert!(manager
@@ -203,15 +201,12 @@ fn assert_current_pane_conflict_does_not_block_startup(reverse_slots: bool, has_
             .is_err());
     }
     // The independent healthy pane must remain addressable.
-    let published_healthy = host
-        .state
-        .lock()
-        .unwrap()
-        .global
-        .lookup_unique_tmux_pane_route(&healthy)
-        .cloned();
+    let published_healthy = manager
+        .resolve_route_by_tmux_endpoint(&healthy)
+        .ok()
+        .map(|route| route.agent_id.as_str().to_owned());
     assert_eq!(
-        published_healthy.map(|binding| binding.agent_id.as_str().to_owned()),
+        published_healthy,
         Some("healthy-peer".to_owned()),
         "startup must keep publishing independent healthy routes"
     );
@@ -366,6 +361,15 @@ fn seed_registered_startup_state(root: &Path, host_paths: &HostPaths) {
         .unwrap();
     let storage = host_paths.app_storage_root(project.as_str(), app.as_str());
     assert!(current_state::save(&storage.join(".agent-collab/server/state.json"), &state).unwrap());
+    let record = HostRouteRecord {
+        app_scope_id: app.as_str().to_owned(),
+        project_scope: project.as_str().to_owned(),
+        canonical_root: project.as_str().to_owned(),
+        storage_root: storage.to_string_lossy().into_owned(),
+        registered_ms: now_ms(),
+    };
+    binding_store::publish_route_records(&host_paths.state_root().join("routes.json"), &[record])
+        .unwrap();
 }
 
 async fn assert_host_ready(socket: &std::path::Path) {
@@ -522,8 +526,7 @@ async fn reachable_legacy_project_daemon_does_not_block_current_central_runtime(
     seed_registered_startup_state(&root, &host_paths);
 
     let running = tokio::spawn(run_host(host_paths.clone()));
-    assert_host_ready(&host_paths.socket_path()).await;
-    assert!(host_paths.state_root().join("host-state.json").is_file());
+    assert_active_isolated_server(&host_paths.socket_path(), &root).await;
     assert_eq!(
         crate::scope::read_service_scope_root(&host_paths).unwrap(),
         None

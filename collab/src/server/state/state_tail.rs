@@ -164,6 +164,44 @@ fn subscription_affects_master_wake(
             || has_current_master_grant(state, &subscription.worker_id, &subscription.target))
 }
 
+fn message_affects_master_wake(state: &State, message_id: &str) -> bool {
+    if let Some(members) = state.deadline_summaries.get(message_id) {
+        return members.keys().any(|subscription_id| {
+            state
+                .notification_subscriptions
+                .get(subscription_id)
+                .is_some_and(|subscription| subscription_affects_master_wake(state, subscription))
+        });
+    }
+    state
+        .wake_bindings
+        .get(message_id)
+        .and_then(|subscription_id| state.notification_subscriptions.get(subscription_id))
+        .is_some_and(|subscription| subscription_affects_master_wake(state, subscription))
+}
+
+fn delivered_message_affects_master_wake(state: &State, message_id: &str) -> bool {
+    if let Some(members) = state.deadline_summaries.get(message_id) {
+        return members.keys().any(|subscription_id| {
+            state
+                .notification_subscriptions
+                .get(subscription_id)
+                .is_some_and(|subscription| subscription_affects_master_wake(state, subscription))
+        });
+    }
+    state
+        .wake_bindings
+        .get(message_id)
+        .and_then(|subscription_id| {
+            let subscription = state.notification_subscriptions.get(subscription_id)?;
+            let message = state.msgs.get(message_id)?;
+            (message.to == subscription.worker_id
+                && has_current_master_grant(state, &subscription.worker_id, &subscription.target))
+            .then_some(subscription)
+        })
+        .is_some()
+}
+
 #[path = "../state_impl.rs"]
 mod state_impl;
 

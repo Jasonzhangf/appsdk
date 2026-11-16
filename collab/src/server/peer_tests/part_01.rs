@@ -1088,6 +1088,20 @@ fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
     .1
 }
 
+/// Seed the committed result of App Server registration without a live endpoint.
+/// Candidate admission remains covered by the App Server adapter tests.
+fn register_committed_appserver(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
+    let app = AppServerId::new("tui-default").unwrap();
+    seed_committed_owner(
+        server,
+        id,
+        &format!("token-{id}"),
+        &test_appserver_transport(thread_id),
+        server.root.to_str().unwrap(),
+        Some(app),
+    )
+}
+
 /// Model the provenance committed by an explicit managed-child Bind after
 /// the child has already been registered in this test server.
 pub(crate) fn bind_test_subagent_record(

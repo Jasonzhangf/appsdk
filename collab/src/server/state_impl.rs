@@ -765,18 +765,10 @@ impl State {
                         return false;
                     }
                     // Idle-batch subjects are generated only for the current
-                    // master; they do not need a timer/master-idle binding.
-                    if message.mtype != "notification" {
-                        return true;
-                    }
-                    self.wake_bindings
-                        .get(message_id)
-                        .and_then(|subscription_id| {
-                            self.notification_subscriptions.get(subscription_id)
-                        })
-                        .is_some_and(|subscription| {
-                            subscription_affects_master_wake(self, subscription)
-                        })
+                    // master; typed notification summaries use their member
+                    // relation because the delivery lease is the default inbox.
+                    message.mtype != "notification"
+                        || message_affects_master_wake(self, message_id)
                 });
                 if failed_master_wake {
                     crate::server::notification_state::mark_master_wake_delivery_failed(
@@ -985,20 +977,9 @@ impl State {
                     }
                 }
                 if ids.iter().any(|id| {
-                    self.wake_bindings.get(id).is_some_and(|subscription_id| {
-                        self.notification_subscriptions
-                            .get(subscription_id)
-                            .is_some_and(|subscription| {
-                                self.msgs.get(id).is_some_and(|message| {
-                                    message.from == "collab-server"
-                                        && message.to == subscription.worker_id
-                                        && has_current_master_grant(
-                                            self,
-                                            &subscription.worker_id,
-                                            &subscription.target,
-                                        )
-                                })
-                            })
+                    self.msgs.get(id).is_some_and(|message| {
+                        message.from == "collab-server"
+                            && delivered_message_affects_master_wake(self, id)
                     })
                 }) {
                     crate::server::notification_state::mark_master_wake_delivered(

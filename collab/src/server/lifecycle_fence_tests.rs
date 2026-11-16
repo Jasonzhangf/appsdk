@@ -415,14 +415,12 @@ fn fence_allows_safe_message_consumption_and_exact_retirement() {
 fn fence_allows_retirement_events_but_not_rebinding_while_fenced() {
     let (server, root) = fence_server();
     server
-        .commit_checked(&[
-            Event::NotificationSubscribed {
-                subscription: subscription(TARGET, "sub-1", "armed"),
-            },
-            Event::ResponsibilityFenceSet {
-                fence: exact_fence(TARGET, "close-op"),
-            },
-        ])
+        .commit_checked(&[Event::NotificationSubscribed {
+            subscription: subscription(TARGET, "sub-1", "armed"),
+        }])
+        .unwrap();
+    server
+        .commit_checked(&[fence_with_snapshot(&server, TARGET, "close-op")])
         .unwrap();
 
     // Retirement of the exact target's obligation stays allowed.

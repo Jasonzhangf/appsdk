@@ -411,10 +411,21 @@ fn deadline_wakeup_does_not_probe_appserver_readiness() {
             }))
         });
     }
-    let tmux = crate::server::peer_tests::IsolatedTmux::start(&root);
-    let endpoints = tmux.endpoints();
-    register_tmux(&server, "master", endpoints[0].clone());
-    register_tmux(&server, "worker", endpoints[1].clone());
+    for worker in ["master", "worker"] {
+        let transport =
+            crate::server::peer_tests::test_appserver_transport(&format!("thread-{worker}"));
+        assert!(
+            crate::server::peer_tests::seed_committed_owner(
+                &server,
+                worker,
+                &format!("token-{worker}"),
+                &transport,
+                root.to_str().unwrap(),
+                Some(crate::identity::AppServerId::new("tui-default").unwrap()),
+            )
+            .ok
+        );
+    }
     let now = now_ms();
     crate::server::peer_tests::promote_master(&server, "master", "user-approved");
     server.commit(&[Event::KeepaliveUpdated {
@@ -425,8 +436,8 @@ fn deadline_wakeup_does_not_probe_appserver_readiness() {
             ..Record::default()
         },
     }]);
-    periodic_deadline_subscription(&server, "master", "periodic:due-master");
-    subscribe(
+    let due = periodic_deadline_subscription(&server, "master", "periodic:due-master");
+    let not_due = subscribe(
         &server,
         "worker",
         "deadline",
@@ -434,15 +445,27 @@ fn deadline_wakeup_does_not_probe_appserver_readiness() {
         Some(now_ms() + 600_000),
     );
     probes.lock().unwrap().clear();
-
-    probes.lock().unwrap().clear();
-    tick_at(&server, now_ms());
+    // Exercise the production deadline scheduler. Whole-daemon tick also runs
+    // independent liveness maintenance, which may legitimately probe AppServer.
+    tick_with_deadline_wake_at(&server, now_ms());
 
     assert!(probes.lock().unwrap().is_empty());
-    assert!(server.state.lock().unwrap().msgs.values().any(|message| {
-        message.to == "master" && message.subject.as_deref() == Some("deadline:periodic:due-master")
-    }));
-    drop(tmux);
+    let state = server.state.lock().unwrap();
+    assert!(state
+        .deadline_summaries
+        .iter()
+        .any(|(message_id, members)| {
+            state.msgs.get(message_id).is_some_and(|message| {
+                message.to == "master"
+                    && message.subject.as_deref() == Some("deadline:summary")
+                    && message.body.contains("Subject: periodic:due-master")
+                    && members.get(&due).is_some_and(|next| *next > now)
+                    && !members.contains_key(&not_due)
+            })
+        }));
+    assert!(!state.msgs.values().any(|message| message.to == "worker"));
+    assert_eq!(state.notification_subscriptions[&not_due].fired_count, 0);
+    drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 

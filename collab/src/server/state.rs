@@ -895,11 +895,25 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
     let mut simulated_subscriptions = st.notification_subscriptions.clone();
     let mut simulated_wake_bindings = st.wake_bindings.clone();
     let mut simulated_summaries = st.deadline_summaries.clone();
+    let batch_retirements: HashSet<String> = evs
+        .iter()
+        .filter_map(|event| match event {
+            Event::NotificationStatus {
+                subscription_id,
+                status,
+                ..
+            }
+            | Event::NotificationSuppressed {
+                subscription_id,
+                status,
+                ..
+            } if subscription_status_retires(status) => Some(subscription_id.clone()),
+            _ => None,
+        })
+        .collect();
     for event in evs {
         match event {
-            Event::ResponsibilityFenceSet { fence } => {
-                fences.insert(fence.operation_id.clone(), fence.clone());
-            }
+            Event::ResponsibilityFenceSet { .. } => {}
             Event::PeerLifecycleOperationRecorded { operation } => {
                 if operation.action == PeerLifecycleAction::Close {
                     if operation.phase == PeerLifecyclePhase::IntentPersisted
@@ -914,14 +928,6 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                             "target_updating: close for {} is excluded by an in-flight update",
                             operation.exact_target().worker_id
                         ));
-                    }
-                    match close_fence_for_operation(operation) {
-                        Some(fence) => {
-                            fences.insert(fence.operation_id.clone(), fence);
-                        }
-                        None => {
-                            fences.remove(&operation.operation_id);
-                        }
                     }
                 }
             }
@@ -1075,36 +1081,54 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
             _ => {}
         }
 
-        let ResponsibilityEffect::Mutates(target) = responsibility_effect(st, event) else {
-            continue;
-        };
-        if let Some(fence) = fences
-            .values()
-            .find(|fence| fence.is_active() && fence.worker_id == target)
-        {
-            return Err(format!(
-                "target_closing: responsibility for {} is fenced by operation {}",
-                fence.worker_id, fence.operation_id
-            ));
-        }
-        let current_update_operation_id = match event {
-            Event::PeerLifecycleOperationRecorded { operation }
-                if operation.action == PeerLifecycleAction::Update =>
+        if let ResponsibilityEffect::Mutates(target) = responsibility_effect(st, event) {
+            if let Some(fence) = fences
+                .values()
+                .find(|fence| fence.is_active() && fence.worker_id == target)
             {
-                Some(operation.operation_id.as_str())
+                return Err(format!(
+                    "target_closing: responsibility for {} is fenced by operation {}",
+                    fence.worker_id, fence.operation_id
+                ));
             }
-            _ => None,
-        };
-        if let Some(operation) = st.peer_lifecycle_operations.values().find(|operation| {
-            operation.action == PeerLifecycleAction::Update
-                && operation.phase.is_in_flight()
-                && operation.exact_target().worker_id == target
-                && Some(operation.operation_id.as_str()) != current_update_operation_id
-        }) {
-            return Err(format!(
-                "target_updating: responsibility for {} is excluded by operation {}",
-                target, operation.operation_id
-            ));
+            let current_update_operation_id = match event {
+                Event::PeerLifecycleOperationRecorded { operation }
+                    if operation.action == PeerLifecycleAction::Update =>
+                {
+                    Some(operation.operation_id.as_str())
+                }
+                _ => None,
+            };
+            if let Some(operation) = st.peer_lifecycle_operations.values().find(|operation| {
+                operation.action == PeerLifecycleAction::Update
+                    && operation.phase.is_in_flight()
+                    && operation.exact_target().worker_id == target
+                    && Some(operation.operation_id.as_str()) != current_update_operation_id
+            }) {
+                return Err(format!(
+                    "target_updating: responsibility for {} is excluded by operation {}",
+                    target, operation.operation_id
+                ));
+            }
+        }
+
+        match event {
+            Event::ResponsibilityFenceSet { fence } => {
+                fences.insert(fence.operation_id.clone(), fence.clone());
+            }
+            Event::PeerLifecycleOperationRecorded { operation }
+                if operation.action == PeerLifecycleAction::Close =>
+            {
+                match close_fence_for_operation(operation) {
+                    Some(fence) => {
+                        fences.insert(fence.operation_id.clone(), fence);
+                    }
+                    None => {
+                        fences.remove(&operation.operation_id);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1121,6 +1145,25 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                 .get(id)
                 .is_some_and(|existing| subscription_status_is_active(&existing.status));
             if !was_active {
+                return Err(format!(
+                    "target_closing: responsibility for {} is fenced by operation {}",
+                    fence.worker_id, fence.operation_id
+                ));
+            }
+        }
+        for (id, subscription) in &simulated_subscriptions {
+            if subscription.worker_id != fence.worker_id
+                || fence.snapshot.subscription_ids.contains(id)
+            {
+                continue;
+            }
+            let Some(before) = st.notification_subscriptions.get(id) else {
+                continue;
+            };
+            if !subscription_status_is_active(&before.status)
+                && subscription.fired_count > before.fired_count
+                && !batch_retirements.contains(id)
+            {
                 return Err(format!(
                     "target_closing: responsibility for {} is fenced by operation {}",
                     fence.worker_id, fence.operation_id

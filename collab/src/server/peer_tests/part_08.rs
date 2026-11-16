@@ -1692,7 +1692,7 @@ fn daemon_maintenance_replaces_a_stale_default_target_with_current_tmux_route() 
         Ok(serde_json::json!({"text_submitted":true,"enter_submitted":true,"consumed":false}))
     });
     let server = Arc::new(server);
-    assert!(register_public(&server, "peer", "%peer").ok);
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
     {
         let mut state = server.state.lock().unwrap();
         let mut subscription = state.notification_subscriptions["sub-default-direct-message-peer"].clone();
@@ -2040,16 +2040,19 @@ fn qqbot_ceo_leading_address_requires_a_typed_grant_not_the_master() {
     );
     assert!(server.state.lock().unwrap().msgs.is_empty());
 
-    server.commit(&[Event::CeoGrantSet {
-        grant: Some(CeoGrant {
-            workspace: scope,
-            app_scope_id: "tui-default".into(),
-            name: "Alice".into(),
-            granted_by: "user".into(),
-            approval: "approved".into(),
-            granted_ms: 1,
-        }),
-    }]);
+    host_control::HostControl::read_current(&server.host_paths)
+        .unwrap()
+        .commit_checked(&[host_control::HostChange::CeoGrantSet {
+            grant: Some(CeoGrant {
+                workspace: scope,
+                app_scope_id: "tui-default".into(),
+                name: "Alice".into(),
+                granted_by: "user".into(),
+                approval: "approved".into(),
+                granted_ms: 1,
+            }),
+        }])
+        .unwrap();
     let routed = handle_channel_inbound(
         &server,
         "external:qqbot".into(),
@@ -2072,16 +2075,19 @@ fn qqbot_bare_project_default_routes_unaddressed_inbound_to_typed_ceo() {
     routing_seat(&server, "Alice", "ceo-id");
     let scope = routing_project_scope(&server);
     let token = server.state.lock().unwrap().workers["ceo-id"].token.clone();
-    server.commit(&[Event::CeoGrantSet {
-        grant: Some(CeoGrant {
-            workspace: scope,
-            app_scope_id: "tui-default".into(),
-            name: "Alice".into(),
-            granted_by: "user".into(),
-            approval: "approved".into(),
-            granted_ms: 1,
-        }),
-    }]);
+    host_control::HostControl::read_current(&server.host_paths)
+        .unwrap()
+        .commit_checked(&[host_control::HostChange::CeoGrantSet {
+            grant: Some(CeoGrant {
+                workspace: scope,
+                app_scope_id: "tui-default".into(),
+                name: "Alice".into(),
+                granted_by: "user".into(),
+                approval: "approved".into(),
+                granted_ms: 1,
+            }),
+        }])
+        .unwrap();
     let project = routing_project_key(&server);
 
     let switched = handle_default_set(

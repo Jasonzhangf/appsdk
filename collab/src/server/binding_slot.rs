@@ -595,17 +595,28 @@ impl PendingEffect {
         if !cross_scope_sources.is_empty() {
             let mut keys = std::collections::BTreeSet::new();
             for source in cross_scope_sources {
-                if source.key.project_scope != self.project_scope
-                    || source.key.app_scope_id == self.app_scope_id
+                let invalid_scope = if self.is_register() {
+                    // A verified physical anchor can move between projects or
+                    // names in one app. Its exact source must still differ
+                    // from the target slot. Name-only moves remain scoped.
+                    source.key.project_scope == self.project_scope
+                        && source.key.app_scope_id == self.app_scope_id
+                        && source.key.name == self.name
+                } else {
+                    source.key.project_scope != self.project_scope
+                        || source.key.app_scope_id == self.app_scope_id
+                };
+                if invalid_scope
                     || source.generation == 0
                     || source.binding_id.as_str().trim().is_empty()
                     || !keys.insert((
+                        source.key.project_scope.as_str().to_owned(),
                         source.key.app_scope_id.as_str().to_owned(),
                         source.key.name.clone(),
                     ))
                 {
                     return Err(SlotError::Invalid(
-                        "cross-scope sources require exact, distinct other-app currents in the same project"
+                        "cross-scope sources require exact, distinct source slots; name-only moves require other apps in the same project"
                             .into(),
                     ));
                 }
@@ -886,21 +897,7 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
-        self.lookup_scoped(project, app, facts, cwd, false)
-    }
-
-    /// Select the caller's current actor after the daemon has validated an
-    /// explicit human name replacement. A Rex block remains a placement
-    /// candidate. When it points at another name, the session holder is the
-    /// actor and the requested target stays a separate handoff decision.
-    pub(crate) fn lookup_explicit_rex_rebind(
-        &self,
-        project: &ProjectScopeId,
-        app: &AppServerId,
-        facts: &crate::proto::IdentityFacts,
-        cwd: Option<&str>,
-    ) -> Result<Option<&IdentityBindingSlot>, String> {
-        self.lookup_scoped(project, app, facts, cwd, true)
+        self.lookup_scoped(project, app, facts, cwd)
     }
 
     fn lookup_scoped(
@@ -909,7 +906,6 @@ impl BindingControlSet {
         app: &AppServerId,
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
-        allow_explicit_rex_session_override: bool,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
         let dsh = facts.dsh_session_id.as_deref().or_else(|| {
             facts
@@ -979,10 +975,10 @@ impl BindingControlSet {
                 .collect::<Vec<_>>(),
             None => Vec::new(),
         };
-        // A Rex block is the placement anchor. A unique agent session may
-        // move to a new block or cross adaptors. If that block still names a
-        // prior owner, publishing the selected session later replaces only the
-        // block's current owner; the prior identity and its history remain.
+        // A Rex block is placement, not identity authority. A unique current
+        // agent session selects its current name; publication later replaces
+        // the block's prior owner. Without a session match, the block can
+        // still recover its current owner.
         if let Some(rex) = facts.rex.as_ref() {
             let targets = candidates
                 .iter()
@@ -991,34 +987,11 @@ impl BindingControlSet {
                 .collect::<Vec<_>>();
             return match session_matches.as_slice() {
                 [] => unique(targets),
-                [holder] if allow_explicit_rex_session_override => Ok(Some(*holder)),
-                [holder] if targets.is_empty() => Ok(Some(*holder)),
-                [holder] => {
-                    // A unique Rex block is the authoritative placement anchor.
-                    // A unique agent session may disambiguate duplicate block
-                    // currents, but it cannot override a block owned by another
-                    // subject in the same scope.
-                    if targets[0].identity_key != holder.identity_key {
-                        return Err(format!(
-                            "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current Rex block anchor selects {}",
-                            holder.identity_key.name, targets[0].identity_key.name
-                        ));
-                    }
-                    Ok(Some(*holder))
-                }
-                _ => match unique(targets)? {
-                    Some(target)
-                        if session_matches
-                            .iter()
-                            .any(|slot| slot.identity_key == target.identity_key) =>
-                    {
-                        Ok(Some(target))
-                    }
-                    _ => Err(
-                        "IDENTITY_MAP_AMBIGUOUS: multiple active mappings match the current caller"
-                            .into(),
-                    ),
-                },
+                [holder] => Ok(Some(*holder)),
+                _ => Err(
+                    "IDENTITY_MAP_AMBIGUOUS: multiple active mappings match the current caller"
+                        .into(),
+                ),
             };
         }
         if facts.tmux.is_some() {

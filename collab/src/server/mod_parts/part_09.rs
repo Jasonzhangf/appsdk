@@ -2580,7 +2580,10 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     // supervise, without a second state tree. Unknown activity stays unknown
     // and is never reported as idle; projection does not consume messages,
     // claim tasks, or mutate revisions.
-    let manages_project = role == "master" || is_current_ceo_holder(&st, &worker_id);
+    let manages_project = role == "master" || match is_current_ceo_holder(server, &st, &worker_id) {
+        Ok(current) => current,
+        Err(error) => return Resp::err(error),
+    };
     let management_scope: String = if manages_project {
         "project".to_string()
     } else {

@@ -25,7 +25,7 @@ impl ProjectRuntimeManager {
         if approval.trim().is_empty() {
             return Err(Resp::err("CEO_BOOTSTRAP_CANCELLATION_APPROVAL_REQUIRED"));
         }
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         let mut record = state
             .ceo_bootstraps
             .get(&id)
@@ -40,10 +40,10 @@ impl ProjectRuntimeManager {
             record.phase = "cancelled".into();
             record.cancellation_approval = Some(approval);
             record.updated_ms = now_ms();
-            self.host
+            self.host_control
                 .commit_locked_checked(
                     &mut state,
-                    &[Event::CeoBootstrapSet {
+                    &[HostChange::CeoBootstrapSet {
                         record: record.clone(),
                     }],
                 )
@@ -80,7 +80,7 @@ impl ProjectRuntimeManager {
         }
         let project = project.to_string_lossy().into_owned();
         {
-            let state = self.host.state.lock().unwrap();
+            let state = self.host_control.state.lock().unwrap();
             if let Some(record) = state.ceo_bootstraps.get(&operation_id) {
                 if record.project != project
                     || record.approval != approval
@@ -148,7 +148,7 @@ impl ProjectRuntimeManager {
             cancellation_approval: None,
             updated_ms: now_ms(),
         };
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         if state.ceo_bootstraps.contains_key(&operation_id) {
             return Err(Resp::err(
                 "CEO_BOOTSTRAP_OPERATION_CHANGED: read the existing operation; do not relaunch",
@@ -161,10 +161,10 @@ impl ProjectRuntimeManager {
                 "CEO_BOOTSTRAP_ALREADY_PENDING: inspect the existing operation",
             ));
         }
-        self.host
+        self.host_control
             .commit_locked_checked(
                 &mut state,
-                &[Event::CeoBootstrapSet {
+                &[HostChange::CeoBootstrapSet {
                     record: record.clone(),
                 }],
             )
@@ -185,7 +185,7 @@ impl ProjectRuntimeManager {
         if !["launched", "failed", "unknown"].contains(&outcome.as_str()) {
             return Err(Resp::err("CEO_BOOTSTRAP_OUTCOME_INVALID"));
         }
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         let mut record = state
             .ceo_bootstraps
             .get(&id)
@@ -220,10 +220,10 @@ impl ProjectRuntimeManager {
         record.pane_id = pane_id;
         record.error = error;
         record.updated_ms = now_ms();
-        self.host
+        self.host_control
             .commit_locked_checked(
                 &mut state,
-                &[Event::CeoBootstrapSet {
+                &[HostChange::CeoBootstrapSet {
                     record: record.clone(),
                 }],
             )
@@ -243,7 +243,7 @@ impl ProjectRuntimeManager {
         body: String,
     ) -> Result<Resp, Resp> {
         let mut record = self
-            .host
+            .host_control
             .state
             .lock()
             .unwrap()
@@ -312,8 +312,8 @@ impl ProjectRuntimeManager {
         record.phase = "ready".into();
         record.handshake_message_id = Some(mid.clone());
         record.updated_ms = now_ms();
-        self.host
-            .commit_checked(&[Event::CeoBootstrapSet {
+        self.host_control
+            .commit_checked(&[HostChange::CeoBootstrapSet {
                 record: record.clone(),
             }])
             .map_err(|e| {

@@ -196,6 +196,9 @@ impl State {
             return;
         }
         subscription.fired_count = subscription.fired_count.saturating_add(1);
+        if subscription.status == "expired" {
+            return;
+        }
         if is_goal_deadline(subscription) {
             if !subscription.periodic_declared {
                 subscription.status = "consumed".into();
@@ -208,11 +211,8 @@ impl State {
                 }
                 return;
             }
-            // Explicit periodic goal deadline: reuse the finite interval
-            // progression so a new occurrence is armed only while the repeat
-            // or TTL budget remains. Once the budget is exhausted the generic
-            // branch below marks it consumed.
-            let interval = subscription.interval_ms;
+            // Scheduling owns physical time. Consumption only spends the
+            // finite budget; it must never move the daemon's deadline cursor.
             if subscription.fired_count >= subscription.repeat_count {
                 subscription.status = "consumed".into();
                 subscription.status_reason = Some("goal-deadline-periodic-delivered".into());
@@ -224,7 +224,7 @@ impl State {
                 }
                 return;
             }
-            let Some(interval) = interval else {
+            let Some(_) = subscription.interval_ms else {
                 subscription.status = "consumed".into();
                 subscription.status_reason = Some("goal-deadline-periodic-invalid".into());
                 if let Some(consumed_ms) = consumed_ms {
@@ -235,15 +235,6 @@ impl State {
                 }
                 return;
             };
-            let next_trigger = subscription
-                .trigger_ms
-                .map(|trigger| trigger.saturating_add(interval))
-                .unwrap_or_else(|| {
-                    subscription
-                        .created_ms
-                        .saturating_add(interval.saturating_mul(subscription.fired_count as i64))
-                });
-            subscription.trigger_ms = Some(next_trigger);
             subscription.status = "armed".into();
             subscription.status_reason = None;
             if let Some(consumed_ms) = consumed_ms {
@@ -258,6 +249,8 @@ impl State {
         };
         if subscription.fired_count >= total {
             subscription.status = "consumed".into();
+        } else if subscription.event == "deadline" {
+            subscription.status = "armed".into();
         } else if let Some(interval) = subscription.interval_ms {
             let next_trigger = consumed_ms
                 .filter(|_| subscription.event == "master-idle")
@@ -361,6 +354,13 @@ impl State {
 
     pub fn apply_checked(&mut self, ev: &Event) -> Result<(), String> {
         match ev {
+            Event::CrossProjectAddressed {
+                message_id,
+                addresses,
+            } => {
+                self.cross_project_addresses
+                    .insert(message_id.clone(), addresses.clone());
+            }
             Event::MailboxNameAddressed {
                 message_id,
                 address,
@@ -765,18 +765,10 @@ impl State {
                         return false;
                     }
                     // Idle-batch subjects are generated only for the current
-                    // master; they do not need a timer/master-idle binding.
-                    if message.mtype != "notification" {
-                        return true;
-                    }
-                    self.wake_bindings
-                        .get(message_id)
-                        .and_then(|subscription_id| {
-                            self.notification_subscriptions.get(subscription_id)
-                        })
-                        .is_some_and(|subscription| {
-                            subscription_affects_master_wake(self, subscription)
-                        })
+                    // master; typed notification summaries use their member
+                    // relation because the delivery lease is the default inbox.
+                    message.mtype != "notification"
+                        || message_affects_master_wake(self, message_id)
                 });
                 if failed_master_wake {
                     crate::server::notification_state::mark_master_wake_delivery_failed(
@@ -826,7 +818,20 @@ impl State {
                                         )
                                 })
                     });
-                if accepted_goal_deadline_revision {
+                let accepted_summary_revision = self
+                    .deadline_summaries
+                    .get(message_id)
+                    .is_some_and(|members| {
+                        members.iter().any(|(id, due)| {
+                            self.notification_subscriptions.get(id).is_some_and(|sub| {
+                                is_goal_deadline(sub)
+                                    && subscription_affects_master_wake(self, sub)
+                                    && self.master_wake.active_goal_revision
+                                        == u64::try_from(*due).ok()
+                            })
+                        })
+                    });
+                if accepted_goal_deadline_revision || accepted_summary_revision {
                     crate::server::notification_state::clear_delivered_master_goal_due(
                         &mut self.master_wake,
                     );
@@ -946,6 +951,10 @@ impl State {
             } => {
                 self.consume_notification(subscription_id, Some(*consumed_ms));
             }
+            Event::DeadlineSummary { message_id, due } => {
+                self.deadline_summaries
+                    .insert(message_id.clone(), due.clone());
+            }
             Event::WakeBound {
                 message_id,
                 subscription_id,
@@ -968,20 +977,9 @@ impl State {
                     }
                 }
                 if ids.iter().any(|id| {
-                    self.wake_bindings.get(id).is_some_and(|subscription_id| {
-                        self.notification_subscriptions
-                            .get(subscription_id)
-                            .is_some_and(|subscription| {
-                                self.msgs.get(id).is_some_and(|message| {
-                                    message.from == "collab-server"
-                                        && message.to == subscription.worker_id
-                                        && has_current_master_grant(
-                                            self,
-                                            &subscription.worker_id,
-                                            &subscription.target,
-                                        )
-                                })
-                            })
+                    self.msgs.get(id).is_some_and(|message| {
+                        message.from == "collab-server"
+                            && delivered_message_affects_master_wake(self, id)
                     })
                 }) {
                     crate::server::notification_state::mark_master_wake_delivered(
@@ -991,8 +989,17 @@ impl State {
             }
             Event::Acked { ids } => {
                 for id in ids {
+                    let already_read = self.msgs.get(id).is_some_and(|m| m.state == "read");
                     if let Some(m) = self.msgs.get_mut(id) {
                         m.state = "read".into();
+                    }
+                    if let Some(members) = self.deadline_summaries.get(id).cloned() {
+                        if !already_read {
+                            for subscription_id in members.keys() {
+                                self.consume_notification(subscription_id, None);
+                            }
+                        }
+                        continue;
                     }
                     let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
                         continue;
@@ -1505,6 +1512,7 @@ impl State {
         self.msgs.remove(id);
         self.board_patrol_notice_ids.remove(id);
         self.mailbox_name_addresses.remove(id);
+        self.cross_project_addresses.remove(id);
         self.mailbox_handoff_wakes.remove(id);
         self.notification_delivery_failures.remove(id);
         self.notification_delivery_accepted.remove(id);
@@ -1514,6 +1522,7 @@ impl State {
         self.delivery_modes.remove(id);
         self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
+        self.deadline_summaries.remove(id);
         self.channel_envelopes.remove(id);
         self.platform_event_index
             .retain(|_, target| target.local_message_id() != Some(id));

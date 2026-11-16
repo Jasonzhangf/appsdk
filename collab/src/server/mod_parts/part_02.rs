@@ -913,6 +913,50 @@ mod scoped_register_tests {
         (manager, server, root, tmux, prepared)
     }
 
+    fn prepared_synthetic_tmux_registration() -> (
+        Arc<ProjectRuntimeManager>,
+        Arc<Server>,
+        PathBuf,
+        PreparedRegisterEnvelope,
+    ) {
+        let (server, root) = peer_tests::test_server();
+        let server = Arc::new(server);
+        let endpoint = crate::proto::TmuxEndpoint {
+            socket_path: root.join("synthetic-tmux.sock").display().to_string(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: Some("rename-owner-session".into()),
+            codex_thread_id: Some("rename-owner-thread".into()),
+        };
+        let transport = SelectedTransport {
+            kind: TransportKind::Tmux,
+            endpoint: Some(endpoint.socket_path.clone()),
+            namespace: Some(endpoint.tmux_session_id.clone()),
+            session_id: endpoint.codex_session_id.clone(),
+            thread_id: endpoint.codex_thread_id.clone(),
+            tmux_endpoint: Some(endpoint),
+            capabilities: vec!["send_message_to_pane".into()],
+            rex_endpoint: None,
+            self_check: "synthetic tmux endpoint".into(),
+        };
+        let prepared = server
+            .prepare_register_envelope_for_scope(
+                "rename-owner",
+                "rename-owner-token",
+                &transport,
+                GlobalState::canonical_project_scope(&root).unwrap(),
+                root.to_str().unwrap(),
+                AppServerId::new("tui-default").unwrap(),
+                false,
+            )
+            .unwrap();
+        let manager =
+            ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        (manager, server, root, prepared)
+    }
+
     #[test]
     fn raw_registration_waits_for_the_existing_identity_gate() {
         let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
@@ -999,8 +1043,11 @@ mod scoped_register_tests {
     #[test]
     fn foreign_current_agent_does_not_skip_target_credential_before_active_publication() {
         for foreign_app in [false, true] {
-            let (manager, server, root, tmux, prepared) = prepared_tmux_registration();
+            let (manager, server, root, prepared) = prepared_synthetic_tmux_registration();
             let TypedCommand::RegisterWorker { worker, binding, .. } = &prepared.typed.command;
+            let _observation = crate::client::adapters::tmux::TestSessionName::new(
+                &binding.tmux_endpoint.as_ref().unwrap().socket_path, "rename-owner",
+            );
             let mut foreign = binding.clone();
             let foreign_root = if foreign_app { root.clone() } else { root.join("foreign-project") };
             std::fs::create_dir_all(&foreign_root).unwrap();
@@ -1028,7 +1075,12 @@ mod scoped_register_tests {
             ).unwrap();
             test_hooks::fail_next_parent_sync();
             let error = manager.publish_register_control_before_consume(
-                &server, &prepared, None, None, None, None,
+                &server,
+                &prepared,
+                None,
+                Some("rename-owner"),
+                None,
+                None,
             ).unwrap_err();
             assert!(error.starts_with("BINDING_CONTROL_DURABILITY_UNKNOWN:"), "{error}");
             let credential = crate::identity::read_persisted(&server.host_paths, &worker.id).unwrap().unwrap();
@@ -1036,10 +1088,17 @@ mod scoped_register_tests {
             assert_eq!(credential.runtime.as_ref().unwrap().appserver_id, binding.app_scope_id);
             assert!(credential.token == worker.token, "target credential did not retain the prepared token");
             let control = manager.binding_control_store().load().unwrap();
-            assert_eq!(control.slot(&key).unwrap().active_binding().unwrap().binding, foreign);
-            assert_eq!(control.active_values().count(),2);
+            let source = control.slot(&key).unwrap();
+            if foreign_app {
+                assert!(source.active_binding().is_none(),
+                    "the exact foreign-app source current must retire with the replacement");
+                assert_eq!(source.reference_previous().unwrap().binding, foreign);
+                assert_eq!(control.active_values().count(), 1);
+            } else {
+                assert_eq!(source.active_binding().unwrap().binding, foreign);
+                assert_eq!(control.active_values().count(), 2);
+            }
             assert!(server.state.lock().unwrap().workers.is_empty());
-            drop(tmux);
             std::fs::remove_dir_all(root).unwrap();
         }
     }
@@ -1072,19 +1131,43 @@ mod scoped_register_tests {
 
     #[test]
     fn same_runtime_pane_replacement_preserves_an_exact_active_other_principal() {
-        let (manager, server, root, tmux, first) = prepared_tmux_registration();
+        same_pane_registration(false);
+    }
+
+    #[test]
+    fn same_name_pane_takeover_retires_only_the_displaced_route() {
+        same_pane_registration(true);
+    }
+
+    fn same_pane_registration(takeover: bool) {
+        let (manager, server, root, first) = prepared_synthetic_tmux_registration();
         let TypedCommand::RegisterWorker { worker, binding, .. } = &first.typed.command;
+        let _observation = crate::client::adapters::tmux::TestSessionName::new(
+            &binding.tmux_endpoint.as_ref().unwrap().socket_path, "rename-owner",
+        );
         manager.install_runtime(&(
             binding.app_scope_id.as_str().to_owned(),
             binding.project_scope.as_str().to_owned(),
         ), server.clone(), None);
         let mut transport = worker.transport.clone().unwrap();
-        let first_effect = manager.publish_register_control_before_consume(&server, &first, None, None, None, None).unwrap();
+        let first_effect = manager
+            .publish_register_control_before_consume(
+                &server,
+                &first,
+                None,
+                Some("rename-owner"),
+                None,
+                None,
+            )
+            .unwrap();
         server.consume_register(first, None).unwrap();
         manager.consume_register_effect(Some(&first_effect)).unwrap();
         let before = server.state.lock().unwrap().workers["rename-owner"].clone();
         let map = manager.binding_control_store().load().unwrap();
         let binding = map.active_values().next().unwrap().binding.clone();
+        assert_eq!(map.key_for_worker(&binding.project_scope, &binding.app_scope_id,
+            "rename-owner").unwrap().unwrap().name, "Alice");
+        server.commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding: binding.clone() }]).unwrap();
         let native = peer_tests::test_appserver_transport("other-scope-thread");
         assert!(peer_tests::seed_committed_owner(&server, "other-scope-peer", "other-scope-token",
             &native, root.to_str().unwrap(), Some(AppServerId::new("tui-default").unwrap())).ok);
@@ -1098,18 +1181,52 @@ mod scoped_register_tests {
             GlobalState::canonical_project_scope(&root).unwrap(), root.to_str().unwrap(),
             AppServerId::new("tui-default").unwrap(), false,
         ).unwrap();
-        let second_effect = manager.publish_register_control_before_consume(&server, &second, None, None, None, None).unwrap();
+        let intent = name_resolution::NameIntent {
+            requested_name: "Alice".into(), user_authorized: true,
+            moves_existing_names: false, replace_confirmed: true,
+        };
+        let second_effect = manager
+            .publish_register_control_before_consume(
+                &server,
+                &second,
+                None,
+                Some("rename-owner"),
+                None,
+                takeover.then_some(&intent),
+            )
+            .unwrap();
         server.consume_register(second, None).unwrap();
         manager.consume_register_effect(Some(&second_effect)).unwrap();
+        // Register owns bindings and retires the previous delivery route.
+        // Fixed-route publication is a separate owner; model that boundary
+        // explicitly instead of expecting Register to publish a route itself.
+        let incoming = manager.binding_control_store().load().unwrap().active_values()
+            .find(|value| value.binding.agent_id.as_str() == "other-scope-peer")
+            .unwrap().binding.clone();
+        assert!(server.state.lock().unwrap().global
+            .lookup_unique_tmux_pane_route(transport.tmux_endpoint.as_ref().unwrap()).is_none());
+        server.commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding: incoming }]).unwrap();
         let state = server.state.lock().unwrap();
-        assert_eq!(serde_json::to_value(&state.workers["rename-owner"]).unwrap(), serde_json::to_value(before).unwrap());
-        assert_eq!(state.global.lookup_binding(&binding.binding_id), Some(&binding));
+        if takeover {
+            assert!(!state.workers.contains_key("rename-owner"));
+            let mut retired = binding.clone();
+            retired.native_thread_id = None;
+            retired.tmux_endpoint = None;
+            assert_eq!(state.global.lookup_binding(&binding.binding_id), Some(&retired));
+        } else {
+            assert_eq!(serde_json::to_value(&state.workers["rename-owner"]).unwrap(),
+                serde_json::to_value(&before).unwrap());
+            assert_eq!(state.global.lookup_binding(&binding.binding_id), Some(&binding));
+        }
         assert!(state.workers.contains_key("other-scope-peer"));
         assert_eq!(state.global.lookup_unique_tmux_pane_route(transport.tmux_endpoint.as_ref().unwrap())
             .map(|route| route.agent_id.as_str()), Some("other-scope-peer"));
         drop(state);
-        assert!(manager.binding_control_store().load().unwrap().holds_current_binding(&binding));
-        drop(tmux);
+        assert_eq!(manager.binding_control_store().load().unwrap().holds_current_binding(&binding),
+            !takeover);
+        let map = manager.binding_control_store().load().unwrap();
+        assert_eq!(map.key_for_worker(&binding.project_scope, &binding.app_scope_id,
+            "other-scope-peer").unwrap().unwrap().name, if takeover { "Alice" } else { "Bob" });
         std::fs::remove_dir_all(root).unwrap();
     }
 

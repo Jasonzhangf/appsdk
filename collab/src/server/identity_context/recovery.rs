@@ -287,13 +287,9 @@ impl ProjectRuntimeManager {
             crate::client::adapters::tmux::host_endpoints_at(self.host.host_paths.state_root())
                 .map_err(anyhow::Error::msg)?;
         {
-            let state = self.host.state.lock().unwrap();
+            let map = self.binding_control_store().load().map_err(anyhow::Error::msg)?;
             endpoints.extend(
-                state
-                    .global
-                    .current_thread_routes
-                    .values()
-                    .chain(state.global.legacy_thread_routes.values())
+                map.active_values().map(|value| &value.binding)
                     .filter_map(|binding| {
                         binding
                             .tmux_endpoint
@@ -497,7 +493,7 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
     ) -> anyhow::Result<Option<identity::Identity>> {
-        self.current_session_identity_at_cwd(context, facts, None, false)
+        self.current_session_identity_at_cwd(context, facts, None)
     }
 
     fn current_session_identity_at_cwd(
@@ -505,27 +501,17 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
         invocation_cwd: Option<&str>,
-        allow_explicit_rex_rebind: bool,
     ) -> anyhow::Result<Option<identity::Identity>> {
         let control = self
             .binding_control_store()
             .load()
             .map_err(anyhow::Error::msg)?;
-        let lookup = if allow_explicit_rex_rebind {
-            control.lookup_explicit_rex_rebind(
-                &context.project_scope,
-                &context.app_scope_id,
-                facts,
-                invocation_cwd,
-            )
-        } else {
-            control.lookup(
-                &context.project_scope,
-                &context.app_scope_id,
-                facts,
-                invocation_cwd,
-            )
-        };
+        let lookup = control.lookup(
+            &context.project_scope,
+            &context.app_scope_id,
+            facts,
+            invocation_cwd,
+        );
         let Some(slot) = lookup
             .map_err(anyhow::Error::msg)?
         else {
@@ -552,9 +538,9 @@ impl ProjectRuntimeManager {
         Ok(Some(ident))
     }
 
-    pub(super) fn binding_publication_matches(&self, binding: &RuntimeBinding) -> bool {
-        let state = self.host.state.lock().unwrap();
-        state.global.current_thread_routes.values().any(|current| current == binding)
+    pub(super) fn binding_publication_matches(&self, binding: &RuntimeBinding) -> anyhow::Result<bool> {
+        let map = self.binding_control_store().load().map_err(anyhow::Error::msg)?;
+        Ok(map.holds_current_binding(binding))
     }
 
     fn refresh_session_endpoint(
@@ -667,9 +653,7 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-        // The resident runtime can be the host itself. Read publication before
-        // taking its state lock so the shared mutex is never acquired twice.
-        let published = self.binding_publication_matches(saved);
+        let published = self.binding_publication_matches(saved)?;
         let mut state = runtime.state.lock().unwrap();
         let mut worker = state
             .workers
@@ -815,12 +799,16 @@ impl ProjectRuntimeManager {
             anyhow::bail!("BINDING_CONTROL_DURABILITY_UNKNOWN: binding intent published; business effects remain pending");
         }
         drop(state);
-        self.recover_pending_effect_locked(
+        // Complete the effect in the runtime whose binding was checked above.
+        // A notification recovery manager may materialize a different handle;
+        // retry must observe the new transport on this same mailbox owner.
+        self.recover_pending_effect_on_runtime_locked(
             &self
                 .binding_control_store()
                 .load()
                 .map_err(anyhow::Error::msg)?,
             &effect,
+            Some(runtime),
         )
         .map_err(anyhow::Error::msg)?;
         *ident = identity::read_persisted(&self.host.host_paths, &ident.worker_id)?
@@ -850,7 +838,7 @@ impl ProjectRuntimeManager {
         allow_persisted_restore: bool,
         allow_explicit_rex_rebind: bool,
         invocation_cwd: Option<&str>,
-    ) -> anyhow::Result<(Arc<Server>, Resp)> {
+    ) -> anyhow::Result<DispatchResult> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
             || context.runtime_context.is_some()
         {
@@ -878,12 +866,9 @@ impl ProjectRuntimeManager {
             // The endpoint still belongs to the human-selected current. A
             // verified displaced caller registers independently of that owner.
             None
-        } else { self.current_session_identity_at_cwd(
-            &context,
-            &facts,
-            invocation_cwd,
-            allow_explicit_rex_rebind,
-        )? };
+        } else {
+            self.current_session_identity_at_cwd(&context, &facts, invocation_cwd)?
+        };
         if let Some(identity) = session_identity.as_ref() {
             if let Some(candidate) = facts.tmux.as_ref() {
                 let control = self
@@ -928,7 +913,7 @@ impl ProjectRuntimeManager {
                 .map(|field| ((*field).to_owned(), descriptions[*field].clone()))
                 .collect();
             return Ok((
-                self.host.clone(),
+                None,
                 Resp::data(json!({
                     "snapshot": {
                         "registered": false,
@@ -1067,7 +1052,7 @@ impl ProjectRuntimeManager {
                         } else if transport.kind == TransportKind::Tmux
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
                                 == facts.session_id.as_deref()
-                            && self.binding_publication_matches(saved)
+                            && self.binding_publication_matches(saved)?
                         {
                             // Session recovery may lack a live pane. Its exact
                             // published binding still owns the saved transport
@@ -1082,9 +1067,8 @@ impl ProjectRuntimeManager {
                 let binding = ident.runtime.clone().expect("restored runtime");
                 let registered_context =
                     ProjectContext::for_registered_route(&scope.root, &binding)?;
-                let mut published = current
-                    .as_ref()
-                    .is_some_and(|saved| self.binding_publication_matches(saved));
+                let mut published = current.as_ref()
+                    .map(|saved| self.binding_publication_matches(saved)).transpose()?.unwrap_or(false);
                 let anchor_agrees = current.as_ref().is_some_and(|saved| {
                     match (facts.tmux.as_ref(), saved.tmux_endpoint.as_ref()) {
                         (Some(candidate), Some(endpoint)) => {
@@ -1098,17 +1082,14 @@ impl ProjectRuntimeManager {
                     }
                 });
                 if !published && anchor_agrees {
-                    // The current project state still owns this binding but
-                    // the host index lost its publication. Recover the host
-                    // route from this exact durable owner. A conflict on an
-                    // unrelated project must not block this peer's recovery.
+                    // Validate this exact binding against current authority.
+                    // Project state cannot republish a retired identity.
                     if let Some(saved) = current.as_ref() {
                         self.reconcile_binding_publication(saved)
                             .map_err(|error| anyhow::anyhow!(error))?;
                     }
-                    published = current
-                        .as_ref()
-                        .is_some_and(|saved| self.binding_publication_matches(saved));
+                    published = current.as_ref()
+                        .map(|saved| self.binding_publication_matches(saved)).transpose()?.unwrap_or(false);
                 }
                 if published && anchor_agrees {
                     let (runtime, mut snapshot) = self.dispatch_sync(
@@ -1601,8 +1582,15 @@ mod anchor_provenance_tests {
             set_test_cli, set_test_timeout, TEST_FIXTURE_LOCK,
         };
 
+        let _env_guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let _guard = TEST_FIXTURE_LOCK.lock().await;
-        let (server, root) = test_server();
+        let (mut server, root) = test_server();
+        let project = GlobalState::canonical_project_scope(&root).unwrap();
+        server.storage_root = server.host_paths.app_storage_root(
+            project.as_str(), crate::identity::CLI_APP_SERVER_ID,
+        );
+        server.state_path = server.storage_root.join(".agent-collab/server/state.json");
+        current_state::save(&server.state_path, &State::default()).unwrap();
         let fixture_dir = root.join("rex-fixture");
         std::fs::create_dir_all(&fixture_dir).unwrap();
         let fixture = fixture_dir.join("rex-cli");

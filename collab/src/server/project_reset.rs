@@ -14,33 +14,16 @@ pub(super) fn route_is_deinitialized(root: &Path) -> Result<bool, String> {
     }
 }
 
-pub(super) fn retire_stale_project_routes(host: &Server, scope: &str) -> Result<(), String> {
-    let bindings: Vec<RuntimeBinding> = {
-        let state = host.state.lock().unwrap();
-        state
-            .global
-            .current_thread_routes
-            .values()
-            .chain(state.global.legacy_thread_routes.values())
-            .filter(|binding| binding.project_scope.as_str() == scope)
-            .cloned()
-            .collect()
-    };
+pub(super) fn retire_stale_project_routes(paths: &HostPaths, scope: &str) -> Result<(), String> {
+    let store = binding_store::BindingControlStore::new(paths.state_root());
+    let map = store.load()?;
+    let bindings: Vec<_> = map
+        .active_values()
+        .filter(|value| value.binding.project_scope.as_str() == scope)
+        .map(|value| value.binding.clone())
+        .collect();
     for binding in bindings {
-        let owns_binding = host
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
-            .is_some();
-        let events = if owns_binding {
-            pane_reclaim_events("automatic-stale-route-cleanup", &binding)?
-        } else {
-            vec![Event::GlobalCurrentThreadRouteRetired { binding }]
-        };
-        host.commit_checked(&events)
-            .map_err(|e| format!("STALE_ROUTE_CLEANUP_FAILED: {e}"))?;
+        store.retire_binding(&binding)?;
     }
     Ok(())
 }
@@ -398,35 +381,15 @@ pub(super) fn remove_project_tree(path: &Path, preserved: &[PathBuf]) -> Result<
     Ok(())
 }
 
-pub(super) fn finish_reset(host: &Server, route_file: &Path, scope: &str) -> Result<(), String> {
-    let store =
-        crate::server::binding_store::BindingControlStore::new(host.host_paths.state_root());
-    // This also upgrades an interrupted legacy reset before cleanup. The
-    // current map is retired first on normal execution and startup alike.
+pub(super) fn finish_reset(
+    paths: &HostPaths,
+    route_file: &Path,
+    scope: &str,
+    preserved: &[PathBuf],
+) -> Result<(), String> {
+    let store = crate::server::binding_store::BindingControlStore::new(paths.state_root());
+    // The current map is retired first on normal execution and startup alike.
     store.begin_reset(scope)?;
-    if !host
-        .state
-        .lock()
-        .unwrap()
-        .pending_project_resets
-        .contains_key(scope)
-    {
-        let worker_ids = host
-            .state
-            .lock()
-            .unwrap()
-            .workers
-            .values()
-            .filter(|worker| worker.cwd == scope)
-            .map(|worker| worker.id.clone())
-            .collect();
-        host.commit_checked(&[Event::ProjectResetStarted {
-            project_scope: scope.to_owned(),
-            clear_local: host.root == Path::new(scope),
-            worker_ids,
-        }])
-        .map_err(|error| format!("persist reset cleanup: {error}"))?;
-    }
     let project_records = load_host_route_records(route_file)?
         .into_iter()
         .filter(|record| record.project_scope == scope)
@@ -435,38 +398,28 @@ pub(super) fn finish_reset(host: &Server, route_file: &Path, scope: &str) -> Res
     // keeps its worker/token/transport so `dsh_rebind` can re-enroll the
     // receive loop after reset and daemon restart without Register. Other
     // identities in the scope are disposable project state.
-    let retained_dsh_workers = {
-        let state = host.state.lock().unwrap();
-        dsh_workers_for_scope(&state, scope)
-    };
-    let retained_app_scopes: HashSet<String> = {
-        let state = host.state.lock().unwrap();
-        state
-            .global
-            .projects
-            .get(scope)
-            .into_iter()
-            .flat_map(|project| {
-                project
-                    .runtime_bindings
-                    .values()
-                    .filter(|binding| {
-                        retained_dsh_workers.contains(&binding.agent_id.as_str().to_owned())
-                    })
-                    .map(|binding| binding.app_scope_id.as_str().to_owned())
-            })
-            .collect()
-    };
-    remove_host_identities(&host.host_paths, scope, &retained_dsh_workers)?;
-    remove_archived_identities(&host.host_paths, scope)?;
-    let preserved = [
-        host.state_path.clone(),
-        host.host_paths.state_root().to_path_buf(),
-        host.root.join(".agent-collab/server/daemon.lock"),
-    ]
-    .iter()
-    .map(|path| storage_owner_path(path))
-    .collect::<Result<Vec<_>, _>>()?;
+    let map = store.load()?;
+    let retained_dsh: Vec<_> = map
+        .active_values()
+        .filter(|value| {
+            value.binding.project_scope.as_str() == scope
+                && value.transport.kind == TransportKind::Dsh
+        })
+        .collect();
+    let retained_dsh_workers: Vec<String> = retained_dsh
+        .iter()
+        .map(|value| value.binding.agent_id.as_str().to_owned())
+        .collect();
+    let retained_app_scopes: HashSet<String> = retained_dsh
+        .iter()
+        .map(|value| value.binding.app_scope_id.as_str().to_owned())
+        .collect();
+    remove_host_identities(paths, scope, &retained_dsh_workers)?;
+    remove_archived_identities(paths, scope)?;
+    let preserved = preserved
+        .iter()
+        .map(|path| storage_owner_path(path))
+        .collect::<Result<Vec<_>, _>>()?;
     remove_project_tree(&Path::new(scope).join(".agent-collab"), &preserved)?;
     remove_project_tree(&Path::new(scope).join(".agent-collab-v2"), &preserved)?;
     // A retained DSH route must stay replayable after daemon restart:
@@ -483,9 +436,7 @@ pub(super) fn finish_reset(host: &Server, route_file: &Path, scope: &str) -> Res
         // retained DSH app scopes. The DSH route, control slot and identity are
         // host-owned recovery facts kept elsewhere; the retained business
         // business state under central storage must not survive reset.
-        let central = host
-            .host_paths
-            .app_storage_root(scope, &record.app_scope_id);
+        let central = paths.app_storage_root(scope, &record.app_scope_id);
         let central = storage_owner_path(&central)?;
         remove_project_tree(&central, &preserved)?;
     }
@@ -493,10 +444,7 @@ pub(super) fn finish_reset(host: &Server, route_file: &Path, scope: &str) -> Res
     // storage. Retain the active DSH route/control binding; retire every other
     // route for the scope in one shared transaction.
     delete_project_routes_except_dsh(route_file, scope, &retained_app_scopes)?;
-    host.commit_checked(&[Event::ProjectResetCompleted {
-        project_scope: scope.to_owned(),
-    }])
-    .map_err(|e| format!("reset completion durability: {e}"))?;
+    // On an interrupted final publication, startup repeats idempotent cleanup.
     store.complete_reset(scope)?;
     Ok(())
 }

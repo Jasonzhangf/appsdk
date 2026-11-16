@@ -9,6 +9,7 @@ mod ceo_report_patrol;
 pub(crate) mod channel_delivery;
 pub(crate) mod channel_envelope;
 pub(crate) mod conversation_default;
+mod cross_project_receipt;
 pub(crate) mod current_state;
 pub mod federation;
 mod federation_channel;
@@ -18,6 +19,8 @@ mod federation_runtime;
 #[cfg(test)]
 mod federation_semantics_tests;
 pub mod global_state;
+mod host_control;
+mod host_state;
 mod identity_context;
 pub(crate) mod keepalive;
 pub mod mailbox;

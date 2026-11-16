@@ -80,12 +80,21 @@ fn native_thread_route_resolution_rejects_missing_invalid_and_mismatched_project
         AgentId::new("agent-corrupt").unwrap(), RuntimeId::new("runtime-corrupt").unwrap(),
         BindingId::new("binding-corrupt").unwrap(), binding.session_id.clone(), binding.native_thread_id.clone(),
     ).unwrap();
-    server.commit(&[Event::GlobalCurrentThreadRouteSet { binding: corrupt }]);
+    server.commit(&[Event::GlobalCurrentThreadRouteSet { binding: corrupt.clone() }]);
+    // A retired reducer projection cannot override the current identity map.
+    assert_eq!(manager.resolve_route_by_native_thread("session-current", "thread-current").unwrap(), current);
+    assert_eq!(map.load().unwrap(), map_before);
+    let key = map_before.key_for_worker(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())
+        .unwrap().unwrap().clone();
+    let mut value = map_before.slot(&key).unwrap().active_binding().unwrap().clone();
+    value.binding = corrupt;
+    map.commit(binding_store::ControlChange::Commit { key, value, expected_generation: None }).unwrap();
+    let corrupt_map = map.load().unwrap();
     let state_before = std::fs::read(&server.state_path).unwrap();
     let error = manager.resolve_route_by_native_thread("session-current", "thread-current").unwrap_err();
     assert!(error.starts_with("ROUTE_RESOLVE_STALE_INDEX"), "{error}");
     assert!(error.contains("missing runtime binding"), "{error}");
-    assert_eq!(map.load().unwrap(), map_before);
+    assert_eq!(map.load().unwrap(), corrupt_map);
     assert_eq!(std::fs::read(&server.state_path).unwrap(), state_before);
     std::fs::remove_dir_all(root).unwrap();
 }

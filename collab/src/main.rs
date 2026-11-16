@@ -866,7 +866,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
         Cmd::Config => {
             crate::config::ensure_written()?;
-            out(&crate::config::load(&scope::lifecycle_project_root()?)?);
+            out(&crate::config::load_host()?);
             Ok(())
         }
         Cmd::Machine { command } => {
@@ -1017,77 +1017,14 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Serve { service } => {
-            let root = if service {
-                // A login-supervised daemon (launchd RunAtLoad) has no project
-                // cwd, so it resolves its scope from the host state root. Every
-                // case that cannot start must still exit 0, or launchd would
-                // relaunch us in a tight crash-loop:
-                //   * no service record yet: start on the host default root, so
-                //     a clean install autostarts without a manual `collab up`;
-                //   * a record whose project directory is gone (cleaned-up
-                //     worktree): fall back to the host default root, and say so;
-                //   * an unparseable record: report and exit 0.
-                let recorded = match scope::service_scope_root() {
-                    Ok(record) => record,
-                    Err(error) => {
-                        // A malformed record cannot be repaired by relaunching;
-                        // exit 0 so launchd does not spin, and surface the
-                        // reason in the log.
-                        out(&json!({
-                            "ok": false,
-                            "service": "record-invalid",
-                            "reason": format!("{error:#}"),
-                        }));
-                        return Ok(());
-                    }
-                };
-                let root = match recorded {
-                    Some(root) if root.is_dir() => root,
-                    stale => {
-                        let fallback = scope::service_default_root()?;
-                        out(&json!({
-                            "ok": true,
-                            "service": "default-root",
-                            "reason": match &stale {
-                                Some(root) => format!(
-                                    "SERVICE_RECORD_STALE: recorded root {} is gone",
-                                    root.display()
-                                ),
-                                None => {
-                                    "SERVICE_RECORD_MISSING: no project binding recorded"
-                                        .to_string()
-                                }
-                            },
-                            "root": fallback,
-                        }));
-                        fallback
-                    }
-                };
-                let probe = Scope { root: root.clone() };
-                if client::alive(&probe.sock_path()) {
-                    out(&json!({
-                        "ok": true,
-                        "service": "already-running",
-                        "server": probe.sock_path(),
-                    }));
-                    return Ok(());
-                }
-                root
-            } else {
-                scope::lifecycle_project_root()?
-            };
-            let scope = Scope { root };
-            let service_host_paths = scope.host_paths().ok();
+            let host_paths = scope::HostPaths::resolve()?;
             if service {
                 // Only one host daemon may run. When another daemon still owns
                 // the legacy writer fence, starting here would fail and launchd
                 // would restart us in a loop, so report the conflict and exit.
                 // The fix is for the user to stop the running daemon once; the
                 // supervised start then takes over at the next login or load.
-                if service_host_paths
-                    .as_ref()
-                    .is_some_and(server::legacy_host_daemon_present)
-                {
+                if server::legacy_host_daemon_present(&host_paths) {
                     out(&json!({
                         "ok": false,
                         "service": "another-daemon-running",
@@ -1101,34 +1038,31 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 // must not keep ordinary clients locked out until a manual
                 // `collab up`. Only this entry point clears it; ordinary clients
                 // still refuse to talk to a stopped daemon.
-                if let Ok(host_paths) = scope.host_paths() {
-                    if std::fs::remove_file(host_paths.state_root().join("DOWN")).is_ok() {
-                        out(&json!({"ok": true, "service": "down-marker-cleared"}));
-                    }
+                if std::fs::remove_file(host_paths.down_path()).is_ok() {
+                    out(&json!({"ok": true, "service": "down-marker-cleared"}));
+                }
+                if client::alive(&host_paths.socket_path()) {
+                    out(&json!({
+                        "ok": true,
+                        "service": "already-running",
+                        "server": host_paths.socket_path(),
+                    }));
+                    return Ok(());
                 }
             }
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(server::run(scope))
+            rt.block_on(server::run_host(host_paths))
         }
         Cmd::Up => {
             let _terminal = main_maintenance::user_terminal()?;
-            let project_root = scope::lifecycle_project_root()?;
             let host_paths = scope::HostPaths::resolve()?;
-            if !project_root.join(".agent-collab").is_dir() {
-                scope::init(&project_root)?;
-            }
-            let scope = Scope { root: project_root };
             let host_server_dir = host_paths.server_dir();
             std::fs::create_dir_all(&host_server_dir)?;
             std::fs::remove_file(host_server_dir.join("DOWN")).ok();
             let sock = host_paths.socket_path();
-            // A daemon whose process is alive but whose socket does not answer
-            // would otherwise block both the supervised and the detached start
-            // with DAEMON_UNKNOWN. `up` is the user restart entry, so it stops
-            // that verified recorded daemon first and then starts normally.
             let replaced = client::replace_unresponsive_daemon(&sock, &host_paths.pid_path())?;
             let was_running = client::alive(&sock);
-            // Bind the supervised daemon to this project, then let launchd own
+            // Keep the service record host-level, then let launchd own
             // the start. Loading the agent before spawning anything is what
             // makes the supervisor own the daemon: a detached `serve` spawned
             // first would make the supervised child exit as "already-running",
@@ -1136,7 +1070,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             // launchd cannot run the agent (for example a non-macOS host, or an
             // isolated state root) does `up` start a detached daemon, and the
             // result says which happened.
-            let service_record = main_autostart::write_service_record(&scope.root)?;
+            let service_record = main_autostart::ensure_service_record()?;
             let autostart = main_autostart::install_and_reload();
             let started = match &autostart {
                 Ok(path) => supervised_up_started(
@@ -1174,7 +1108,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     "pid": daemon.pid,
                     "signal": daemon.signal,
                 })),
-                "service_record": {"bound": true, "path": service_record},
+                "service_record": {"bound": false, "path": service_record},
                 "autostart": match &autostart {
                     Ok(path) => json!({
                         "installed": true,
@@ -1192,10 +1126,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Down => {
-            let scope = Scope {
-                root: scope::lifecycle_project_root()?,
-            };
-            let sock = scope.host_paths()?.socket_path();
+            let sock = scope::HostPaths::resolve()?.socket_path();
             let configured = config::maintenance_password_opt()?;
             let password = match configured {
                 None => {
@@ -1237,15 +1168,15 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 health::status_check(local)?;
                 return Ok(());
             }
-            let scope = Scope::resolve()?;
             let v: serde_json::Value = if all {
+                let scope = Scope::resolve()?;
                 client::call_with_context(
                     &scope.sock_path(),
                     &Req::StatusAll,
                     Some(cli_project_context(&scope.root)?),
                 )?
             } else {
-                client::call(&scope.sock_path(), &Req::Ping)?
+                client::call(&scope::HostPaths::resolve()?.socket_path(), &Req::Ping)?
             };
             out(&v);
             Ok(())

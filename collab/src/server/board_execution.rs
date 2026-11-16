@@ -1,7 +1,12 @@
 /// Final public work-start gate shared by board acceptance and legal legacy
 /// assignments. No caller may start a peer's work by changing status alone.
-fn board_execution_gate(server: &Server, state: &State, actor: &str, task_id: &str) -> Result<RuntimeBinding, Resp> {
-    work_executor_gate(server,state,task_id,actor)?;
+fn board_execution_gate(
+    server: &Server,
+    state: &State,
+    actor: &str,
+    task_id: &str,
+) -> Result<RuntimeBinding, Resp> {
+    work_executor_gate(server, state, task_id, actor)?;
     board_execution_gate_after_executor(server, state, actor, task_id)
 }
 
@@ -14,7 +19,9 @@ fn board_execution_gate_with_control(
 ) -> Result<RuntimeBinding, Resp> {
     let route = server_route_scope(server, state)
         .map_err(Resp::err)?
-        .ok_or_else(|| Resp::err("BOARD_ROUTE_REQUIRED: public execution requires a unique project route"))?;
+        .ok_or_else(|| {
+            Resp::err("BOARD_ROUTE_REQUIRED: public execution requires a unique project route")
+        })?;
     work_executor_gate_with_control(state, control, &route, task_id, actor)?;
     board_execution_gate_after_executor(server, state, actor, task_id)
 }
@@ -26,30 +33,48 @@ fn board_execution_gate_after_executor(
     task_id: &str,
 ) -> Result<RuntimeBinding, Resp> {
     board_resume_gate(state, actor, task_id)?;
-    let route = server_route_scope(server, state).map_err(Resp::err)?
-        .ok_or_else(|| Resp::err("BOARD_ROUTE_REQUIRED: public execution requires a unique project route"))?;
-    let binding = authoritative_send_binding(state, &route, actor).map_err(Resp::err)?.clone();
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| {
+            Resp::err("BOARD_ROUTE_REQUIRED: public execution requires a unique project route")
+        })?;
+    let binding = authoritative_send_binding(state, &route, actor)
+        .map_err(Resp::err)?
+        .clone();
     Ok(binding)
 }
 
 /// Peers orchestrate multiple goals. Admission checks the task's actual
 /// resource ownership, rather than treating another goal as a busy slot.
-pub(crate) fn board_resume_gate(
-    state: &State,
-    actor: &str,
-    task_id: &str,
-) -> Result<(), Resp> {
-    if state.worktree_bindings.values().any(|resource| resource.task_id == task_id && resource.owner_agent_id != actor) {
-        return Err(Resp::err("BOARD_RESOURCE_OWNER_CONFLICT: assignment resource belongs to another actor"));
+pub(crate) fn board_resume_gate(state: &State, actor: &str, task_id: &str) -> Result<(), Resp> {
+    if state
+        .worktree_bindings
+        .values()
+        .any(|resource| resource.task_id == task_id && resource.owner_agent_id != actor)
+    {
+        return Err(Resp::err(
+            "BOARD_RESOURCE_OWNER_CONFLICT: assignment resource belongs to another actor",
+        ));
     }
-    if state.pending_merges.get(task_id).is_some_and(|request| request.owner != actor) {
-        return Err(Resp::err("BOARD_RESOURCE_OWNER_CONFLICT: pending merge belongs to another actor"));
+    if state
+        .pending_merges
+        .get(task_id)
+        .is_some_and(|request| request.owner != actor)
+    {
+        return Err(Resp::err(
+            "BOARD_RESOURCE_OWNER_CONFLICT: pending merge belongs to another actor",
+        ));
     }
     if let Some(task) = state.tasks.get(task_id) {
-        if state.tasks.values().any(|other| other.id != task_id && task_resource_active(&other.status)
-            && (task.feature_id.is_some() && task.feature_id == other.feature_id
-                || task.worktree_path.is_some() && task.worktree_path == other.worktree_path)) {
-            return Err(Resp::err("TASK_RESOURCE_CONFLICT: another active task owns this feature/worktree"));
+        if state.tasks.values().any(|other| {
+            other.id != task_id
+                && task_resource_active(&other.status)
+                && (task.feature_id.is_some() && task.feature_id == other.feature_id
+                    || task.worktree_path.is_some() && task.worktree_path == other.worktree_path)
+        }) {
+            return Err(Resp::err(
+                "TASK_RESOURCE_CONFLICT: another active task owns this feature/worktree",
+            ));
         }
     }
     Ok(())
@@ -131,11 +156,8 @@ fn current_ticket_stale_binding_error_with_control(
             &loaded
         }
     };
-    let slot = match control.current_for_worker(
-        &route.project_scope_id,
-        &route.app_scope_id,
-        actor,
-    ) {
+    let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
+    {
         Ok(Some(slot)) => slot,
         Ok(None) => return Ok(None),
         Err(error) => return Err(Resp::err(error)),
@@ -149,13 +171,28 @@ fn current_ticket_stale_binding_error_with_control(
     ))
 }
 
-fn board_claim(server: &Server, actor: String, token: String, id: String, expected_revision: u64) -> Resp {
+fn board_claim(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+) -> Resp {
     let mut state = server.state.lock().unwrap();
-    if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-    let mut details = match board_check_revision(&state, &id, expected_revision) { Ok(details) => details, Err(error) => return error };
-    let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
+    if let Err(error) = board_check_actor(&state, &actor, &token) {
+        return error;
+    }
+    let mut details = match board_check_revision(&state, &id, expected_revision) {
+        Ok(details) => details,
+        Err(error) => return error,
+    };
+    let Some(mut task) = state.tasks.get(&id).cloned() else {
+        return Resp::err("task not found");
+    };
     if !details.public_visibility && task.owner != actor {
-        return Resp::err("BOARD_PRIVATE_TASK: private queue work is claimable only by its publisher");
+        return Resp::err(
+            "BOARD_PRIVATE_TASK: private queue work is claimable only by its publisher",
+        );
     }
     let ordinary_pending = task.status == "pending" && task.owner == task.created_by;
     let not_pending_error = Resp::err_data(
@@ -166,19 +203,32 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     let claimable;
     let name_session;
     if ordinary_pending {
-        if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
-        let route = match server_route_scope(server, &state) {
-            Ok(Some(route)) => route,
-            Ok(None) => return Resp::err("BOARD_ROUTE_REQUIRED: public execution requires a unique project route"),
-            Err(error) => return Resp::err(error),
-        };
-        control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-            Ok(control) => control, Err(error) => return Resp::err(error),
-        };
-        if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id) {
+        if let Err(error) = board_unstarted_resources(&state, &task) {
             return error;
         }
-        let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
+        let route = match server_route_scope(server, &state) {
+            Ok(Some(route)) => route,
+            Ok(None) => {
+                return Resp::err(
+                    "BOARD_ROUTE_REQUIRED: public execution requires a unique project route",
+                )
+            }
+            Err(error) => return Resp::err(error),
+        };
+        control =
+            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control,
+                Err(error) => return Resp::err(error),
+            };
+        if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id)
+        {
+            return error;
+        }
+        let slot = match control.current_for_worker(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &actor,
+        ) {
             Ok(slot) => slot,
             Err(error) => return Resp::err(error),
         };
@@ -187,12 +237,17 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
                 return error;
             }
         }
-        name_session = slot.and_then(|slot| slot.active_binding().and_then(|current|
-                current.binding.session_id.as_ref().map(|session| (
-                    slot.identity_key.name.clone(),
-                    session.to_string(),
-                    slot.generation,
-                ))));
+        name_session = slot.and_then(|slot| {
+            slot.active_binding().and_then(|current| {
+                current.binding.session_id.as_ref().map(|session| {
+                    (
+                        slot.identity_key.name.clone(),
+                        session.to_string(),
+                        slot.generation,
+                    )
+                })
+            })
+        });
         // An admitted ticket's pending phase is its queue position. A peer may
         // only advance the phase queued on its own slot; a WaitingAssignment
         // phase has no slot and stays open to any claimer. The current manager
@@ -219,7 +274,8 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             .as_ref()
             .and_then(|(slot_name, _, _)| {
                 queued_phase.as_ref().filter(|phase| {
-                    phase.status == crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
+                    phase.status
+                        == crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
                         || phase.slot_name.as_deref() == Some(slot_name.as_str())
                 })
             })
@@ -251,10 +307,16 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             Ok(None) => return not_pending_error,
             Err(error) => return Resp::err(error),
         };
-        control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-            Ok(control) => control, Err(error) => return Resp::err(error),
-        };
-        let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
+        control =
+            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control,
+                Err(error) => return Resp::err(error),
+            };
+        let slot = match control.current_for_worker(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &actor,
+        ) {
             Ok(Some(slot)) => slot,
             Ok(None) => return not_pending_error,
             Err(error) => return Resp::err(error),
@@ -272,7 +334,6 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             &slot_name,
             session.as_str(),
             &id,
-            &actor,
             binding_generation,
         )
         .or_else(|| {
@@ -281,13 +342,13 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
                 &slot_name,
                 session.as_str(),
                 &id,
-                &actor,
                 binding_generation,
             )
         }) else {
             return not_pending_error;
         };
-        if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id) {
+        if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id)
+        {
             return error;
         }
         if let Err(error) = execution_candidate_gate(&state, &id, &slot_name) {
@@ -302,7 +363,10 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     details.revision += 1;
     let mut events = vec![
         Event::TaskUpdated { task },
-        Event::BoardDetailsChanged { task_id: id.clone(), details },
+        Event::BoardDetailsChanged {
+            task_id: id.clone(),
+            details,
+        },
     ];
     // Advance the admitted execute phase with the same claim. Legacy TaskRec
     // status stays "working" for old entry compatibility; the phase record is
@@ -348,14 +412,27 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         events.push(Event::TicketPhaseRecorded { phase: claimed });
     }
     if let Some((name, session_id, _)) = name_session {
-        events.push(Event::TaskAssignmentUpdated { assignment: name_state::TaskAssignment {
-            task_id: id.clone(), name, session_id,
-            assignment_revision: state.task_assignment(&id).map_or(1, |assignment| assignment.assignment_revision + 1),
-            reflow: None, updated_ms: now_ms(),
-        } });
+        events.push(Event::TaskAssignmentUpdated {
+            assignment: name_state::TaskAssignment {
+                task_id: id.clone(),
+                name,
+                session_id,
+                assignment_revision: state
+                    .task_assignment(&id)
+                    .map_or(1, |assignment| assignment.assignment_revision + 1),
+                reflow: None,
+                updated_ms: now_ms(),
+            },
+        });
     }
-    if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, &control) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    board_task_response(server, &state, &id, &actor)
+    if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, &control) {
+        return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
+    }
+    let mut response = board_task_response(server, &state, &id, &actor);
+    if let Some(object) = response.data.as_object_mut() {
+        object.insert("ticket".into(), ticket_projection(&state, &id));
+    }
+    response
 }
 
 fn board_start(
@@ -367,7 +444,16 @@ fn board_start(
     attempt: u64,
 ) -> Resp {
     let mut state = server.state.lock().unwrap();
-    board_start_locked(server, &mut state, None, actor, token, id, expected_revision, attempt)
+    board_start_locked(
+        server,
+        &mut state,
+        None,
+        actor,
+        token,
+        id,
+        expected_revision,
+        attempt,
+    )
 }
 
 fn board_start_locked(
@@ -387,11 +473,14 @@ fn board_start_locked(
     let control = match control {
         Some(control) => control,
         None => {
-            loaded_control =
-                match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                    Ok(control) => control,
-                    Err(error) => return Resp::err(error),
-                };
+            loaded_control = match binding_store::BindingControlStore::new(
+                server.host_paths.state_root(),
+            )
+            .load()
+            {
+                Ok(control) => control,
+                Err(error) => return Resp::err(error),
+            };
             &loaded_control
         }
     };
@@ -422,17 +511,14 @@ fn board_start_locked(
         Ok(binding) => binding,
         Err(error) => return error,
     };
-    let slot = match control.current_for_worker(
-        &binding.project_scope,
-        &binding.app_scope_id,
-        &actor,
-    ) {
-        Ok(Some(slot)) => slot,
-        Ok(None) => {
-            return Resp::err("TICKET_SLOT_MISSING: current identity has no execution slot")
-        }
-        Err(error) => return Resp::err(error),
-    };
+    let slot =
+        match control.current_for_worker(&binding.project_scope, &binding.app_scope_id, &actor) {
+            Ok(Some(slot)) => slot,
+            Ok(None) => {
+                return Resp::err("TICKET_SLOT_MISSING: current identity has no execution slot")
+            }
+            Err(error) => return Resp::err(error),
+        };
     let Some(current) = slot.active_binding() else {
         return Resp::err("TICKET_SLOT_INACTIVE: current identity binding is not active");
     };
@@ -449,7 +535,9 @@ fn board_start_locked(
             && phase.status == crate::server::ticket_state::TicketPhaseStatus::Claimed
             && phase.slot_name.as_deref() == Some(slot_name.as_str())
     }) else {
-        return Resp::err("TICKET_PHASE_NOT_CLAIMED: no claimed execute phase belongs to this slot");
+        return Resp::err(
+            "TICKET_PHASE_NOT_CLAIMED: no claimed execute phase belongs to this slot",
+        );
     };
     if phase.attempt_generation != attempt {
         return Resp::err_data(
@@ -581,19 +669,16 @@ fn board_ticket_result_event(
             Ok(control) => control,
             Err(error) => return Err(Resp::err(error)),
         };
-    let slot = match control.current_for_worker(
-        &binding.project_scope,
-        &binding.app_scope_id,
-        actor,
-    ) {
-        Ok(Some(slot)) => slot,
-        Ok(None) => {
-            return Err(Resp::err(
-                "TICKET_SLOT_MISSING: current identity has no execution slot",
-            ))
-        }
-        Err(error) => return Err(Resp::err(error)),
-    };
+    let slot =
+        match control.current_for_worker(&binding.project_scope, &binding.app_scope_id, actor) {
+            Ok(Some(slot)) => slot,
+            Ok(None) => {
+                return Err(Resp::err(
+                    "TICKET_SLOT_MISSING: current identity has no execution slot",
+                ))
+            }
+            Err(error) => return Err(Resp::err(error)),
+        };
     let slot_name = slot.identity_key.name.clone();
     if phase.slot_name.as_deref() != Some(slot_name.as_str()) {
         return Err(Resp::err_data(
@@ -632,8 +717,17 @@ fn board_ticket_result_event(
     Ok(Some(Event::TicketPhaseRecorded { phase: completed }))
 }
 
-fn board_decline_assigned(server: &Server, actor: String, token: String, id: String, expected_revision: u64, reason: String) -> Resp {
-    if reason.trim().is_empty() { return Resp::err("decline requires a nonempty reason"); }
+fn board_decline_assigned(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+    reason: String,
+) -> Resp {
+    if reason.trim().is_empty() {
+        return Resp::err("decline requires a nonempty reason");
+    }
     let mut state = server.state.lock().unwrap();
     board_decline_assigned_locked(
         server,
@@ -657,27 +751,54 @@ fn board_decline_assigned_locked(
     expected_revision: u64,
     reason: String,
 ) -> Resp {
-    if reason.trim().is_empty() { return Resp::err("decline requires a nonempty reason"); }
-    if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-    let mut details = match board_check_revision(&state, &id, expected_revision) { Ok(details) => details, Err(error) => return error };
-    let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
+    if reason.trim().is_empty() {
+        return Resp::err("decline requires a nonempty reason");
+    }
+    if let Err(error) = board_check_actor(&state, &actor, &token) {
+        return error;
+    }
+    let mut details = match board_check_revision(&state, &id, expected_revision) {
+        Ok(details) => details,
+        Err(error) => return error,
+    };
+    let Some(mut task) = state.tasks.get(&id).cloned() else {
+        return Resp::err("task not found");
+    };
     if task.status != "assigned" {
         return Resp::err("only the current owner may reject an unstarted legacy assignment");
     }
-    if let Err(error) =
-        task_owner_gate_maybe_with_control(server, state, control, &id, &actor)
-    {
+    if let Err(error) = task_owner_gate_maybe_with_control(server, state, control, &id, &actor) {
         return error;
     }
-    let Some(admission) = state.scheduler_admissions.values().find(|admission| admission.task_id == id && admission.status == "succeeded" && admission.managed_subagent_id.is_none()).cloned() else {
+    let Some(admission) = state
+        .scheduler_admissions
+        .values()
+        .find(|admission| {
+            admission.task_id == id
+                && admission.status == "succeeded"
+                && admission.managed_subagent_id.is_none()
+        })
+        .cloned()
+    else {
         return Resp::err("legacy scheduler assignment provenance is missing");
     };
-    if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
-    task.owner = task.created_by.clone(); task.status = "pending".into(); task.updated_ms = now_ms();
-    details.revision += 1; details.last_response = Some(format!("legacy assignment declined by {actor}: {reason}"));
+    if let Err(error) = board_unstarted_resources(&state, &task) {
+        return error;
+    }
+    task.owner = task.created_by.clone();
+    task.status = "pending".into();
+    task.updated_ms = now_ms();
+    details.revision += 1;
+    details.last_response = Some(format!("legacy assignment declined by {actor}: {reason}"));
     let events = [
-        Event::TaskUpdated { task }, Event::BoardDetailsChanged { task_id: id.clone(), details },
-        Event::Superseded { ids: vec![admission.message_id] },
+        Event::TaskUpdated { task },
+        Event::BoardDetailsChanged {
+            task_id: id.clone(),
+            details,
+        },
+        Event::Superseded {
+            ids: vec![admission.message_id],
+        },
     ];
     let commit = match control {
         Some(control) => server
@@ -689,6 +810,8 @@ fn board_decline_assigned_locked(
             .map(|_| ())
             .map_err(|error| error.to_string()),
     };
-    if let Err(error) = commit { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
+    if let Err(error) = commit {
+        return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
+    }
     board_task_response(server, &state, &id, &actor)
 }

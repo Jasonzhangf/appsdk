@@ -193,7 +193,7 @@
         ] {
             let (selected, response) = manager.dispatch_sync(Some(context), Req::StatusAll);
             assert!(response.ok, "{worker_id} status: {response:?}");
-            assert!(Arc::ptr_eq(&selected, &runtime));
+            assert!(Arc::ptr_eq(selected.as_ref().unwrap(), &runtime));
             assert_eq!(response.data["summary"]["workers"], 1);
             assert_eq!(response.data["workers"][0]["id"], worker_id);
         }
@@ -411,9 +411,13 @@
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(route_keys.len(), 3);
         assert!(
-            !current_state::load(&host_state_path, false).unwrap().global.current_thread_routes.is_empty(),
-            "successful routed registrations must persist host current-thread transitions"
+            current_state::load(&host_state_path, false).unwrap().global.current_thread_routes.is_empty(),
+            "project registration must not project current routes into host state"
         );
+        let current = manager.binding_control_store().load().unwrap();
+        for identity in [&app_a_identity, &app_b_identity, &project_b_identity] {
+            assert!(current.active_values().any(|value| value.binding.binding_id == identity.binding_id));
+        }
         for (runtime, own_worker, other_worker) in [
             (&app_a_runtime, "app-a-worker", "app-b-worker"),
             (&app_b_runtime, "app-b-worker", "project-b-worker"),
@@ -429,7 +433,7 @@
         drop(project_b_runtime);
         drop(manager);
         let replayed_manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
-        assert_eq!(replayed_manager.runtimes().len(), 4);
+        assert_eq!(replayed_manager.runtimes().len(), 3, "only the three project routes are scheduled");
 
         for (context, worker_id, message_id, subscription_id, suffix) in [
             (
@@ -461,7 +465,7 @@
             assert_eq!(status.data["workers"][0]["id"], worker_id);
             assert_eq!(status.data["summary"]["tasks"], 1);
             assert!(Arc::ptr_eq(
-                &selected,
+                selected.as_ref().unwrap(),
                 &replayed_manager.select_runtime(&context).unwrap()
             ));
 
@@ -545,6 +549,7 @@
                  test_candidates_at("thread-a", &project_a)),
         );
         assert!(source_registration.ok, "{source_registration:?}");
+        let source_runtime = source_runtime.expect("source project runtime");
         assert_eq!(
             source_registration.data["transport_selected"]["kind"],
             "tmux"
@@ -568,6 +573,7 @@
                  test_candidates_at("thread-b", &project_b)),
         );
         assert!(target_registration.ok, "{target_registration:?}");
+        let target_runtime = target_runtime.expect("target project runtime");
         assert_eq!(
             target_registration.data["transport_selected"]["kind"],
             "tmux"
@@ -631,7 +637,7 @@
             Some(target_context.clone()),
             cross_project_send(master_a, token_a, "delivered", master_b),
         );
-        assert!(Arc::ptr_eq(&selected, &target_runtime));
+        assert!(Arc::ptr_eq(selected.as_ref().unwrap(), &target_runtime));
         assert!(delivered.ok, "{delivered:?}");
         assert_eq!(delivered.data["durable"], true);
         assert_eq!(delivered.data["cross_project"], true);
@@ -694,20 +700,19 @@
         let ceo = "cross-project-ceo";
         let ceo_token = "token-cross-project-ceo";
         register_native_peer(&source_runtime, &project_a, ceo, ceo_token, "thread-ceo", app_a);
-        commit_current_thread_route_for_runtime(&manager.host, &source_runtime, ceo,
-            &project_a.to_string_lossy(), Some(&AppServerId::new(app_a).unwrap())).unwrap();
+        manager.reconcile_controlled_thread_routes(&manager.binding_control_store().load().unwrap()).unwrap();
         let ceo_map = binding_store::BindingControlStore::new(host_paths.state_root()).load().unwrap();
         let ceo_name = ceo_map.key_for_worker(
             &GlobalState::canonical_project_scope(&project_a).unwrap(),
             &AppServerId::new(app_a).unwrap(), ceo,
         ).unwrap().unwrap().name.clone();
-        manager.host.commit(&[Event::CeoGrantSet {
+        manager.host_control.commit_checked(&[HostChange::CeoGrantSet {
             grant: Some(crate::ceo::CeoGrant {
                 workspace: project_a.display().to_string(), app_scope_id: app_a.into(),
                 name: ceo_name, granted_by: "user".into(), approval: "approved".into(),
                 granted_ms: 1,
             }),
-        }]);
+        }]).unwrap();
         let (_, ceo_send) = manager.dispatch_sync(
             Some(context_with_app(&project_b, app_b)),
             {
@@ -727,8 +732,7 @@
             (&project_b, app_b, &target_runtime, "cross-peer-b", "token-peer-b", "thread-peer-b"),
         ] {
             register_native_peer(runtime, root, peer, token, thread, app);
-            commit_current_thread_route_for_runtime(&manager.host, runtime, peer,
-                &root.to_string_lossy(), Some(&AppServerId::new(app).unwrap())).unwrap();
+            manager.reconcile_controlled_thread_routes(&manager.binding_control_store().load().unwrap()).unwrap();
         }
         // Every registered role combination submits its own credentials.
         let send_as = |caller: &str, token: &str, tag: &str, to: &str| {
@@ -800,22 +804,12 @@
         let sender_token = "token-full-replay-sender";
         let recipient_token = "token-full-replay-recipient";
 
-        let (sender_runtime, sender_registration) = register_host_fixture(&manager,
-            Some(context_with_app(&project_root, app_scope)),
-            Req::register(sender_id.into(),
-                 sender_token.into(),
-                 project_root.display().to_string(),
-                 test_candidates_at("thread-full-replay-sender", &project_root)),
-        );
-        assert!(sender_registration.ok, "{sender_registration:?}");
-        let (recipient_runtime, recipient_registration) = register_host_fixture(&manager,
-            Some(context_with_app(&project_root, app_scope)),
-            Req::register(recipient_id.into(),
-                 recipient_token.into(),
-                 project_root.display().to_string(),
-                 test_candidates_at("thread-full-replay-recipient", &project_root)),
-        );
-        assert!(recipient_registration.ok, "{recipient_registration:?}");
+        let sender_runtime = committed_native_scope_fixture(&manager,
+            &context_with_app(&project_root, app_scope), sender_id, sender_token,
+            "thread-full-replay-sender");
+        let recipient_runtime = committed_native_scope_fixture(&manager,
+            &context_with_app(&project_root, app_scope), recipient_id, recipient_token,
+            "thread-full-replay-recipient");
         assert!(Arc::ptr_eq(&sender_runtime, &recipient_runtime));
         assert!(!Arc::ptr_eq(&sender_runtime, &server));
 
@@ -891,9 +885,13 @@
         let route_file = host_paths.state_root().join("routes.json");
         let routes_before_reload = load_host_route_records(&route_file).unwrap();
         assert!(
-            !current_state::load(&host_state_path, false).unwrap().global.current_thread_routes.is_empty(),
-            "successful routed registrations must persist host current-thread transitions"
+            current_state::load(&host_state_path, false).unwrap().global.current_thread_routes.is_empty(),
+            "project registration must not project current routes into host state"
         );
+        let current = manager.binding_control_store().load().unwrap();
+        for identity in [&sender_identity, &recipient_identity] {
+            assert!(current.active_values().any(|value| value.binding.binding_id == identity.binding_id));
+        }
 
         drop(sender_runtime);
         drop(recipient_runtime);
@@ -902,12 +900,12 @@
         let replayed_runtime = replayed_manager.select_runtime(&sender_context).unwrap();
         assert_eq!(replayed_runtime.storage_root, runtime_storage);
         assert_eq!(replayed_runtime.state_path, runtime_state);
-        assert!(!Arc::ptr_eq(&replayed_runtime, &replayed_manager.host));
+        assert_ne!(replayed_runtime.state_path, replayed_manager.host.legacy_state_path);
 
         let (selected, status) =
             replayed_manager.dispatch_sync(Some(sender_context.clone()), Req::StatusAll);
         assert!(status.ok, "{status:?}");
-        assert!(Arc::ptr_eq(&selected, &replayed_runtime));
+        assert!(Arc::ptr_eq(selected.as_ref().unwrap(), &replayed_runtime));
         assert_eq!(status.data["summary"]["workers"], 2);
         let (_, workers) =
             replayed_manager.dispatch_sync(Some(recipient_context.clone()), Req::Workers);
@@ -1123,7 +1121,7 @@
             assert_eq!(status.data["workers"][0]["id"], worker_id);
             assert_eq!(status.data["summary"]["tasks"], 1);
             assert!(Arc::ptr_eq(
-                &selected,
+                selected.as_ref().unwrap(),
                 &replayed_manager.select_runtime(&context).unwrap()
             ));
         }
@@ -1222,7 +1220,7 @@
 
     #[tokio::test]
     async fn resident_storage_collision_rejects_register_before_route_publish() {
-        let (mut server, host_root, _) = test_server();
+        let (server, host_root, _) = test_server();
         let collision_project = host_root.with_file_name(format!(
             "{}-resident-collision-project",
             host_root.file_name().unwrap().to_string_lossy()
@@ -1234,16 +1232,6 @@
             collision_context.project_scope.as_str(),
             collision_context.app_scope_id.as_str(),
         );
-        let resident_server_dir = resident_storage_root.join(".agent-collab/server");
-        std::fs::create_dir_all(&resident_server_dir).unwrap();
-        let resident_storage_root = resident_storage_root.canonicalize().unwrap();
-        let resident_state_path = resident_server_dir.join("state.json");
-        current_state::save(&resident_state_path, &State::default()).unwrap();
-        {
-            let host = Arc::get_mut(&mut server).unwrap();
-            host.storage_root = resident_storage_root.clone();
-            host.state_path = resident_state_path;
-        }
         let route_file = host_paths.state_root().join("routes.json");
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         binding_store::publish_route_records(&route_file, &[]).unwrap().require_confirmed_route().unwrap();
@@ -1252,14 +1240,8 @@
         // First establish the resident route. Its reducer owns the storage
         // root and the canonical route is durably published.
         let resident_context = context_with_app(&host_root, "resident-app");
-        let (_runtime, resident_response) = register_host_fixture(&manager,
-            Some(resident_context.clone()),
-            Req::register("resident-worker".into(),
-                 "token-resident-worker".into(),
-                 host_root.display().to_string(),
-                 test_candidates("thread-resident-worker")),
-        );
-        assert!(resident_response.ok, "{resident_response:?}");
+        let resident = committed_native_scope_fixture(&manager, &resident_context,
+            "resident-worker", "token-resident-worker", "thread-resident-worker");
         let after_resident = std::fs::read(&route_file).unwrap();
         let resident_records = load_host_route_records(&route_file).unwrap();
         assert_eq!(resident_records.len(), 1);
@@ -1269,24 +1251,36 @@
             host_root.canonicalize().unwrap().to_string_lossy()
         );
 
+        // A real filesystem alias makes two distinct route keys select the
+        // same current storage owner. Simulate an unmaterialized namespace so
+        // the rejection must also precede namespace creation.
+        std::fs::create_dir_all(resident_storage_root.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&resident.storage_root, &resident_storage_root).unwrap();
+        let bytes = std::fs::read(&resident.state_path).unwrap();
+        std::fs::remove_file(&resident.state_path).unwrap();
+        let before_map = manager.binding_control_store().load().unwrap();
+
         // A second project whose storage root equals the resident reducer's
         // root must fail before a route record or second reducer is created.
-        let (_runtime, collision_response) = register_host_fixture(&manager,
+        let (_runtime, collision_response) = manager.dispatch_sync(
             Some(collision_context.clone()),
             Req::register("resident-collision-worker".into(),
                  "token-resident-collision".into(),
                  collision_project.display().to_string(),
-                 test_candidates_at("thread-resident-collision-worker", &collision_project)),
+                 None),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
             collision_response
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("owned by resident host")),
+                .is_some_and(|error| error.contains("already owned by route")),
             "{collision_response:?}"
         );
         assert_eq!(std::fs::read(&route_file).unwrap(), after_resident);
+        assert_eq!(manager.binding_control_store().load().unwrap(), before_map);
+        assert!(!resident.state_path.exists(), "collision must not recreate another owner's state");
+        std::fs::write(&resident.state_path, bytes).unwrap();
         assert!(!manager
             .routes
             .lock()
@@ -1406,7 +1400,7 @@
             .and_then(|route| route.runtime.clone())
             .unwrap();
         assert!(Arc::ptr_eq(&first, &installed));
-        assert_eq!(manager.runtimes().len(), 2);
+        assert_eq!(manager.runtimes().len(), 1, "only the selected project is scheduled");
         assert_eq!(
             first.state_path,
             storage_root
@@ -1418,6 +1412,27 @@
         drop(first);
         drop(second);
         drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_does_not_discover_or_schedule_a_project_from_host_state() {
+        let (host, root, _) = test_server();
+        let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        host.commit_checked(&[Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::with_registered_at(
+                context.project_scope.clone(), context.app_scope_id.clone(), 17,
+            ).unwrap(),
+        }]).unwrap();
+        let before = std::fs::read(&host.state_path).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host.host_paths).unwrap();
+        assert!(manager.routes.lock().unwrap().is_empty(),
+            "host project registrations must not discover routes");
+        assert!(manager.runtimes().is_empty(), "host must not run project timers");
+        assert!(!manager.route_file.exists(), "startup must not reconstruct a self-route");
+        assert_eq!(std::fs::read(&host.state_path).unwrap(), before);
+        drop(manager);
+        drop(host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1487,13 +1502,11 @@
     }
 
     #[test]
-    fn identity_context_rejects_a_foreign_resident_storage_owner_without_corruption() {
+    fn identity_context_root_matching_host_selects_an_independent_project_runtime() {
         let (host, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
-        let owner = context_with_app(&root, "resident-owner-app");
-        manager.append_resident_route_record(&owner).unwrap();
         let facts = crate::proto::IdentityFacts {
             session_id: Some("foreign-resident-session".into()), thread_id: Some("foreign-resident-thread".into()),
             endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()), namespace: Some("codex_tui".into()),
@@ -1510,43 +1523,70 @@
             query: false,
         };
 
-        let (_runtime, response) = manager.dispatch_sync(
-            Some(context_with_app(&root, crate::identity::CLI_APP_SERVER_ID)),
-            Req::IdentityContext {
-                facts,
-                identity_context: Some(request),
-            },
-        );
-        assert!(!response.ok, "{response:?}");
-        assert!(
-            response
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("is already owned by")),
-            "{response:?}"
-        );
+        let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        manager.ensure_identity_context_route(&context, &request).unwrap();
+        let selected = manager.select_runtime(&context).unwrap();
+        assert!(!Arc::ptr_eq(&selected, &host));
+        assert_ne!(selected.state_path, host.state_path);
+        assert_eq!(selected.root, root.canonicalize().unwrap());
+        assert_eq!(selected.storage_root, host_paths.app_storage_root(
+            context.project_scope.as_str(), context.app_scope_id.as_str()).canonicalize().unwrap());
+        let foreign_app = context_with_app(&root, "foreign-owner-app");
+        let error = manager.append_route_record(&foreign_app, &selected.storage_root).unwrap_err();
+        assert!(error.contains("is already owned by"), "{error}");
+        assert!(host.state.lock().unwrap().global.projects.is_empty());
+        let host_context = context_with_app(host_paths.state_root(), "host-is-not-a-project");
+        let forbidden_storage = host_paths.app_storage_root(host_context.project_scope.as_str(), "host-is-not-a-project");
+        let error = manager.reserve_external_route(&host_context, &forbidden_storage).unwrap_err();
+        assert!(error.contains("project root is inside the daemon runtime storage root"), "{error}");
+        assert!(!forbidden_storage.exists(), "reject before initializing a host project namespace");
         let route_file = host_paths.state_root().join("routes.json");
         let records = load_host_route_records(&route_file).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].app_scope_id, "resident-owner-app");
+        assert_eq!(records[0].app_scope_id, crate::identity::CLI_APP_SERVER_ID);
         assert_eq!(
             records[0].storage_root,
-            root.canonicalize().unwrap().to_string_lossy()
+            selected.storage_root.to_string_lossy()
         );
 
-        ProjectRuntimeManager::new(host, &host_paths)
-            .expect("the rejected bootstrap must leave current routes loadable");
+        drop(selected);
         drop(manager);
+        let reopened = ProjectRuntimeManager::new(host, &host_paths)
+            .expect("ordinary project routes remain loadable");
+        assert_ne!(reopened.select_runtime(&context).unwrap().state_path, reopened.host.legacy_state_path);
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn route_publication_gate_serializes_resident_and_external_appends() {
+    fn first_register_at_host_root_keeps_project_and_transport_ownership_separate() {
+        let (host, root, _) = test_server();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host.host_paths).unwrap();
+        let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let (runtime, response) = manager.dispatch_sync(Some(context.clone()), Req::register(
+            "unbound-worker".into(), "unbound-token".into(),
+            root.display().to_string(), None));
+        assert!(!response.ok, "a missing transport must remain an explicit failure: {response:?}");
+        let runtime = runtime.expect("project registration selected its own runtime");
+        assert!(!Arc::ptr_eq(&runtime, &host));
+        assert!(Arc::ptr_eq(&runtime, &manager.select_runtime(&context).unwrap()));
+        assert_ne!(runtime.state_path, host.state_path);
+        assert!(host.state.lock().unwrap().workers.is_empty());
+        assert!(runtime.state.lock().unwrap().workers.is_empty());
+        drop(runtime);
+        drop(manager);
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn route_publication_gate_serializes_same_root_and_external_appends() {
         let (host, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         std::fs::create_dir_all(host_paths.state_root()).unwrap();
         let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
         let resident = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let project_storage = host_paths.app_storage_root(resident.project_scope.as_str(), resident.app_scope_id.as_str());
         let external_root = root.with_file_name(format!(
             "{}-route-publication",
             root.file_name().unwrap().to_string_lossy()
@@ -1560,7 +1600,7 @@
         let resident_manager = manager.clone();
         let resident_done = done_tx.clone();
         let resident_thread = std::thread::spawn(move || {
-            let result = resident_manager.append_resident_route_record(&resident);
+            let result = resident_manager.append_route_record(&resident, &project_storage);
             resident_done.send(("resident", result)).unwrap();
         });
         let external_manager = manager.clone();
@@ -1673,8 +1713,8 @@
         assert_eq!(admitted, 1, "only one route may pass admission at the cap");
         assert_eq!(
             manager.runtimes().len(),
-            2,
-            "the host plus exactly one external reducer"
+            1,
+            "exactly one admitted project reducer; the host is not a project"
         );
 
         drop(manager);
@@ -1685,7 +1725,7 @@
     }
 
     #[tokio::test]
-    async fn empty_registry_admits_only_exact_cli_host_operator_shutdown() {
+    async fn empty_registry_admits_context_free_host_shutdown_only() {
         // Shutdown authorization reads the live `~/.appsdk/config.toml`. Do not
         // override HOME here: that mutates process-wide state and races every
         // parallel test that resolves its own config or state paths. Instead
@@ -1699,14 +1739,14 @@
             .map(|value| crate::proto::MaintenancePassword::new(value.clone()));
 
         let (server, root, state_path) = test_server();
-        let resident_context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let project_context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
         let before_state = std::fs::read(&state_path).unwrap();
 
         std::fs::create_dir_all(server.host_paths.state_root()).unwrap();
 
         let response = dispatch_wire(
             server.clone(),
-            Some(resident_context.clone()),
+            None,
             Req::Shutdown { password: accepted_password.clone() },
         )
         .await;
@@ -1720,43 +1760,18 @@
         }
         assert_eq!(std::fs::read(&state_path).unwrap(), before_state);
 
-        let wrong_root = root.with_file_name(format!(
-            "{}-wrong-root",
-            root.file_name().unwrap().to_string_lossy()
-        ));
-        std::fs::create_dir_all(&wrong_root).unwrap();
-        let wrong_root_error = validate_request_context(
+        let project_context_error = validate_request_context(
             &server,
             &Req::Shutdown { password: accepted_password.clone() },
-            Some(&context_with_app(
-                &wrong_root,
-                crate::identity::CLI_APP_SERVER_ID,
-            )),
+            Some(&project_context),
         )
         .unwrap_err();
-        assert!(wrong_root_error.starts_with("PROJECT_SCOPE_UNKNOWN:"));
-
-        let wrong_app_error = validate_request_context(
-            &server,
-            &Req::Shutdown { password: accepted_password.clone() },
-            Some(&context_with_app(&root, "other-app")),
-        )
-        .unwrap_err();
-        assert!(wrong_app_error.starts_with("PROJECT_SCOPE_UNKNOWN:"));
-
-        if configured.is_some() {
-            // A configured password must not be bypassed by omitting it.
-            let non_operator_error = validate_request_context(
-                &server,
-                &Req::Shutdown { password: None },
-                Some(&resident_context),
-            )
-            .unwrap_err();
-            assert!(non_operator_error.starts_with("MAINTENANCE_AUTHENTICATION_FAILED"));
-        }
+        assert!(
+            project_context_error.starts_with("PROJECT_SCOPE_UNKNOWN:"),
+            "{project_context_error}"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_dir_all(wrong_root).unwrap();
     }
 
     #[tokio::test]

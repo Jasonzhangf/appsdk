@@ -702,7 +702,7 @@ fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
 }
 
 #[test]
-fn ordinary_rex_lookup_rejects_non_rex_session_holder_against_rex_target() {
+fn ordinary_rex_lookup_selects_a_unique_session_holder_for_an_occupied_rex_target() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
@@ -731,14 +731,17 @@ fn ordinary_rex_lookup_rejects_non_rex_session_holder_against_rex_target() {
         ..Default::default()
     };
 
-    let error = control
+    let before = serde_json::to_value(&control).unwrap();
+    let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
-        .unwrap_err();
-    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
+        .unwrap()
+        .expect("the current agent session selects its name before block replacement");
+    assert_eq!(selected.identity_key, alice);
+    assert_eq!(serde_json::to_value(&control).unwrap(), before);
 }
 
 #[test]
-fn current_rex_anchor_disambiguates_a_reused_agent_session() {
+fn current_lookup_keeps_a_reused_agent_session_ambiguous_with_a_matching_rex_target() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
@@ -780,11 +783,12 @@ fn current_rex_anchor_disambiguates_a_reused_agent_session() {
         ..Default::default()
     };
 
-    let selected = control
+    let before = serde_json::to_value(&control).unwrap();
+    let error = control
         .lookup(&bob.project_scope, &bob.app_scope_id, &facts, None)
-        .unwrap()
-        .expect("the exact current Rex block disambiguates duplicate session history");
-    assert_eq!(selected.identity_key, bob);
+        .unwrap_err();
+    assert!(error.starts_with("IDENTITY_MAP_AMBIGUOUS:"), "{error}");
+    assert_eq!(serde_json::to_value(&control).unwrap(), before);
 }
 
 #[test]
@@ -921,7 +925,7 @@ fn current_lookup_uses_unique_session_when_a_rex_block_has_seeded_duplicate_curr
 }
 
 #[test]
-fn current_lookup_rejects_conflicting_unique_session_when_rex_block_is_authoritative() {
+fn ordinary_rex_lookup_selects_a_unique_session_before_occupied_block_publication() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
@@ -957,10 +961,11 @@ fn current_lookup_rejects_conflicting_unique_session_when_rex_block_is_authorita
         ..Default::default()
     };
 
-    let error = control
+    let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
-        .unwrap_err();
-    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
+        .unwrap()
+        .expect("the exact current session selects its name");
+    assert_eq!(selected.identity_key, bob);
     assert_eq!(serde_json::to_value(&control).unwrap(), before);
 }
 
@@ -1303,17 +1308,18 @@ fn rex_lookup_reports_ambiguity_for_multiple_current_slots_on_one_block() {
 fn rex_lookup_uses_the_exact_current_session_when_names_share_one_block() {
     let alice = key("alice");
     let bob = key("bob");
-    let mut control = BindingControlSet::new();
-    control
-        .commit(
-            &alice,
-            rex_value_default(&alice, "alice-agent", "alice"),
-            None,
-        )
-        .unwrap();
     let bob_value = rex_value_default(&bob, "bob-agent", "bob");
     let bob_session = bob_value.binding.session_id.as_ref().unwrap().to_string();
-    control.commit(&bob, bob_value, None).unwrap();
+    let control = BindingControlSet::from_parts(
+        vec![
+            committed_slot(
+                alice.clone(),
+                rex_value_default(&alice, "alice-agent", "alice"),
+            ),
+            committed_slot(bob.clone(), bob_value),
+        ],
+        Vec::new(),
+    );
     let before = serde_json::to_value(&control).unwrap();
     let facts = rex_facts(Some(&bob_session), REX_SERVER, REX_SESSION, REX_BLOCK);
     let found = control
@@ -1325,7 +1331,7 @@ fn rex_lookup_uses_the_exact_current_session_when_names_share_one_block() {
 }
 
 #[test]
-fn rex_lookup_rejects_session_holder_against_current_block_anchor() {
+fn ordinary_rex_publication_replaces_an_occupied_block_owner() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
@@ -1339,55 +1345,55 @@ fn rex_lookup_rejects_session_holder_against_current_block_anchor() {
     control
         .commit(
             &bob,
-            value(&bob, "bob-agent", "bob-runtime", "bob-endpoint"),
+            rex_value_on_server(
+                &bob,
+                "bob-agent",
+                "bob-old",
+                "bob-old-agent-session",
+                OTHER_REX_BLOCK,
+                REX_SERVER,
+            ),
             None,
         )
         .unwrap();
 
-    // The caller's Rex block selects Alice, while the agent session selects Bob.
-    // A normal lookup must reject this cross-subject conflict before publication.
+    // The caller supplies Bob's session with Alice's occupied block. The session
+    // selects Bob; the later publication is the operation that replaces Alice.
     let facts = rex_facts(
-        Some("bob-runtime-session"),
+        Some("bob-old-agent-session"),
         REX_SERVER,
         REX_SESSION,
         REX_BLOCK,
     );
-    let error = control
+    assert!(control.slot(&alice).unwrap().active_binding().is_some());
+    assert!(control.slot(&bob).unwrap().active_binding().is_some());
+    let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
-        .unwrap_err();
-    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
-}
-
-#[test]
-fn rex_lookup_rejects_session_holder_when_the_target_block_belongs_to_another_identity() {
-    let alice = key("alice");
-    let bob = key("bob");
-    let mut control = BindingControlSet::new();
+        .unwrap()
+        .expect("the unique current session selects Bob");
+    assert_eq!(selected.identity_key, bob);
     control
-        .commit(
-            &alice,
-            rex_value_default(&alice, "alice-agent", "alice"),
-            None,
-        )
-        .unwrap();
-    control
-        .commit(
-            &bob,
-            value(&bob, "bob-agent", "bob-runtime", "bob-endpoint"),
-            None,
-        )
+        .commit(&bob, rex_value_default(&bob, "bob-agent", "bob-new"), None)
         .unwrap();
 
-    let facts = rex_facts(
-        Some("bob-runtime-session"),
-        REX_SERVER,
-        REX_SESSION,
-        REX_BLOCK,
+    assert_eq!(
+        control.slot(&alice).unwrap().identity_status(),
+        IdentityStatus::Unregistered
     );
-    let error = control
-        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
-        .unwrap_err();
-    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
+    let bob_current = control
+        .slot(&bob)
+        .unwrap()
+        .active_binding()
+        .expect("Bob remains the current holder");
+    assert_eq!(
+        bob_current
+            .transport
+            .rex_endpoint
+            .as_ref()
+            .unwrap()
+            .block_id,
+        REX_BLOCK
+    );
 }
 
 #[test]

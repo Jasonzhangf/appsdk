@@ -17,23 +17,28 @@ static STALE_IDENTITY_MAINTENANCE_WATERMARKS: OnceLock<Mutex<HashMap<std::path::
 /// batch engages the pause, so parallel timer tests cannot hit it.
 #[cfg(test)]
 pub(super) static TIMER_DUE_COMMIT_PAUSE: std::sync::Mutex<
-    Option<(String, Box<dyn Fn() + Send + Sync>)>,
+    Option<(String, Arc<dyn Fn() + Send + Sync>)>,
 > = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 fn timer_due_commit_pause_hook(due_events: &[Event]) {
-    let hook = TIMER_DUE_COMMIT_PAUSE.lock().unwrap();
-    let Some((subscribe_id, hook)) = hook.as_ref() else {
-        return;
+    let pause_hook = {
+        let hook = TIMER_DUE_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some((subscribe_id, pause_hook)) = hook.as_ref() else {
+            return;
+        };
+        let batch_targets_this_subscription = due_events.iter().any(|event| {
+            matches!(
+                event,
+                Event::WakeBound { subscription_id, .. } if subscription_id == subscribe_id
+            ) || matches!(event, Event::DeadlineSummary { due, .. } if due.contains_key(subscribe_id))
+        });
+        batch_targets_this_subscription.then(|| Arc::clone(pause_hook))
     };
-    let batch_targets_this_subscription = due_events.iter().any(|event| {
-        matches!(
-            event,
-            Event::WakeBound { subscription_id, .. } if subscription_id == subscribe_id
-        )
-    });
-    if batch_targets_this_subscription {
-        hook();
+    if let Some(pause_hook) = pause_hook {
+        pause_hook();
     }
 }
 
@@ -283,6 +288,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     {
         let mut state = server.state.lock().unwrap();
         let mut idle_gate_records = HashMap::new();
+        let mut deadline_batches: std::collections::BTreeMap<String, Vec<(String, Message)>> =
+            std::collections::BTreeMap::new();
         let mut goal_deadline_keys = state
             .wake_bindings
             .iter()
@@ -298,6 +305,24 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 (key.2 <= now).then_some(key)
             })
             .collect::<HashSet<_>>();
+        for (message_id, members) in &state.deadline_summaries {
+            if state
+                .msgs
+                .get(message_id)
+                .is_some_and(|m| matches!(m.state.as_str(), "pending" | "delivered"))
+            {
+                for (id, due) in members {
+                    if let Some(mut key) = state
+                        .notification_subscriptions
+                        .get(id)
+                        .and_then(goal_deadline_key)
+                    {
+                        key.2 = *due;
+                        goal_deadline_keys.insert(key);
+                    }
+                }
+            }
+        }
         let master_holder = match super::current_master_holder(server, &state) {
             Ok(master_holder) => master_holder,
             Err(error) => {
@@ -327,6 +352,36 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 continue;
             }
             let next_trigger = next_subscription_trigger(subscription);
+            let deadline_pending = subscription.event == "deadline"
+                && state.msgs.values().any(|message| {
+                    matches!(message.state.as_str(), "pending" | "delivered")
+                        && (state.wake_bindings.get(&message.id) == Some(&subscription.id)
+                            || state
+                                .deadline_summaries
+                                .get(&message.id)
+                                .is_some_and(|members| members.contains_key(&subscription.id)))
+                });
+            // Fold elapsed periods in the existing scheduler, even while a
+            // previous summary is unread. No receipt or activity clock enters
+            // this calculation. Keep the original phase, not now + interval.
+            if subscription.event == "deadline"
+                && subscription.status == "armed"
+                && server.config.timers.enabled
+                && next_trigger.is_some_and(|trigger| trigger <= now)
+                && (!is_goal_deadline(subscription) || subscription.periodic_declared)
+            {
+                if let Some(interval) = subscription.interval_ms.filter(|interval| *interval > 0) {
+                    let trigger = next_trigger.unwrap();
+                    let periods = now.saturating_sub(trigger) / interval + 1;
+                    let mut advanced = subscription.clone();
+                    advanced.trigger_ms =
+                        Some(trigger.saturating_add(periods.saturating_mul(interval)));
+                    advanced.updated_ms = now;
+                    due_events.push(Event::NotificationSubscribed {
+                        subscription: advanced,
+                    });
+                }
+            }
             let master_idle_gate_open = if subscription.event == "master-idle" {
                 match state.keepalives.get(&subscription.worker_id) {
                     None => false,
@@ -372,6 +427,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 || !master_idle_gate_open
                 || (subscription.event == "master-idle" && master_wake_hold_active)
                 || next_trigger.is_none_or(|trigger| trigger > now)
+                || deadline_pending
                 || state.wake_bindings.iter().any(|(message_id, bound)| {
                     bound == &subscription.id
                         && state
@@ -449,7 +505,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                     record: record.clone(),
                 });
             }
-            due_events.extend([
+            let events = [
                 Event::Sent {
                     msg: Message {
                         id: message_id.clone(),
@@ -472,19 +528,90 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                             format!("DEADLINE_REACHED\n{content}\nCycle {}/{}; interval_ms={:?}; expires_ms={}",
                                 subscription.fired_count + 1, subscription.repeat_count, subscription.interval_ms, subscription.expires_ms)
                         } else {
-                            format!("DEADLINE_REACHED{}", if subscription.fired_count + 1 >= if subscription.interval_ms.is_some() { subscription.repeat_count } else { subscription.trigger_times_ms.len().max(1) as u32 } { if subscription.subject.as_deref().is_some_and(|subject| subject.starts_with("goal:")) { "; LAST_REMINDER=true; renew explicitly with `appsdk goal subscribe` for the owned goal only when continued scheduling is required" } else { "; LAST_REMINDER=true; renew explicitly with `collab notify subscribe --event deadline --subject <subject> --at-ms <future-epoch-ms> --ttl-seconds <bounded>` only when continued scheduling is required" } } else { "" })
+                            format!(
+                                "DEADLINE_REACHED{}",
+                                if subscription.fired_count + 1
+                                    >= if subscription.interval_ms.is_some() {
+                                        subscription.repeat_count
+                                    } else {
+                                        subscription.trigger_times_ms.len().max(1) as u32
+                                    }
+                                {
+                                    if subscription
+                                        .subject
+                                        .as_deref()
+                                        .is_some_and(|subject| subject.starts_with("goal:"))
+                                    {
+                                        "; LAST_REMINDER=true; renew explicitly with `appsdk goal subscribe` for the owned goal only when continued scheduling is required"
+                                    } else {
+                                        "; LAST_REMINDER=true; renew explicitly with `collab notify subscribe --event deadline --subject <subject> --at-ms <future-epoch-ms> --ttl-seconds <bounded>` only when continued scheduling is required"
+                                    }
+                                } else {
+                                    ""
+                                }
+                            )
                         },
                         in_reply_to: None,
                         created_ms: now,
                         state: "pending".into(),
                         wake_attempt_count: 0,
                         last_wake_attempt_ms: 0,
-                retry_attempted: false,
+                        retry_attempted: false,
                     },
                 },
                 Event::WakeBound {
                     message_id: message_id.clone(),
                     subscription_id: subscription.id.clone(),
+                },
+            ];
+            if subscription.event == "deadline" {
+                let Event::Sent { msg } = &events[0] else {
+                    unreachable!()
+                };
+                deadline_batches
+                    .entry(subscription.worker_id.clone())
+                    .or_default()
+                    .push((subscription.id.clone(), msg.clone()));
+            } else {
+                due_events.extend(events);
+            }
+        }
+        for (recipient, items) in deadline_batches {
+            let mut summary = items[0].1.clone();
+            summary.subject = Some("deadline:summary".into());
+            summary.body = format!(
+                "DEADLINE_SUMMARY\n{}",
+                items
+                    .iter()
+                    .map(|(id, message)| {
+                        let sub = &state.notification_subscriptions[id];
+                        format!(
+                            "Subject: {}\n{}",
+                            sub.subject.as_deref().unwrap_or("(no subject)"),
+                            message.body
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            );
+            let message_id = summary.id.clone();
+            due_events.extend([
+                Event::Sent { msg: summary },
+                Event::DeadlineSummary {
+                    message_id: message_id.clone(),
+                    due: items
+                        .into_iter()
+                        .map(|(id, _)| {
+                            let trigger =
+                                next_subscription_trigger(&state.notification_subscriptions[&id])
+                                    .unwrap();
+                            (id, trigger)
+                        })
+                        .collect(),
+                },
+                Event::WakeBound {
+                    message_id,
+                    subscription_id: super::mailbox::default_direct_message_id(&recipient),
                 },
             ]);
         }
@@ -561,7 +688,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 /// The automatic timer candidate domain.
 ///
 /// Ordinary messages (no persisted delivery mode) keep the existing batch
-/// retry contract, and queued tmux delivery keeps its deferred path.
+/// retry contract, and queued tmux delivery keeps its deferred path. Queued
+/// Rex delivery resumes only a proven pre-I/O publication deferral.
 /// `explicit-notification` stays with its explicit retry operator. A real
 /// public `delivery=immediate` record that was never attempted becomes
 /// eligible exactly once, so a restored daemon-owned default lease reaches the
@@ -572,18 +700,38 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
     match state.delivery_modes.get(&message.id).map(String::as_str) {
         None => true,
         Some("queued") => {
-            state
+            let transport = state
                 .workers
                 .get(&message.to)
-                .and_then(super::selected_transport_for_worker)
-                .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
-                && !state
-                    .notification_delivery_accepted
-                    .contains_key(&message.id)
-                && state
-                    .notification_delivery_failures
-                    .get(&message.id)
-                    .is_none_or(|failure| failure.retryable)
+                .and_then(super::selected_transport_for_worker);
+            match transport.map(|transport| transport.kind) {
+                Some(crate::proto::TransportKind::Tmux) => {
+                    !state
+                        .notification_delivery_accepted
+                        .contains_key(&message.id)
+                        && state
+                            .notification_delivery_failures
+                            .get(&message.id)
+                            .is_none_or(|failure| failure.retryable)
+                }
+                Some(crate::proto::TransportKind::Rex) => {
+                    message.wake_attempt_count == 0
+                        && message.last_wake_attempt_ms == 0
+                        && !message.retry_attempted
+                        && !state
+                            .notification_delivery_accepted
+                            .contains_key(&message.id)
+                        && state
+                            .notification_delivery_failures
+                            .get(&message.id)
+                            .is_none_or(|failure| {
+                                failure.operation == "notification.not_attempted"
+                                    && failure.retryable
+                                    && failure.error.starts_with("REX_BINDING_PUBLICATION_BUSY")
+                            })
+                }
+                _ => false,
+            }
         }
         Some("immediate") => {
             super::desktop_connect_retry(state, message)
@@ -597,15 +745,15 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                         .notification_delivery_failures
                         .get(&message.id)
                         .is_none_or(|failure| {
-                            // A max_unacked admission deferral records a retryable
-                            // `notification.not_attempted` failure before any
-                            // adaptor I/O. Its zero attempt facts distinguish it
-                            // from an attempted or uncertain delivery, so the
-                            // existing automatic attempt owner may resume it once
-                            // the safety limit clears.
+                            // Before adaptor I/O, only the retryable admission
+                            // deferrals proven above are safe to resume. Other
+                            // immediate not-attempted facts stay explicit until
+                            // their own owner recovers them.
                             failure.operation == "notification.not_attempted"
                                 && failure.retryable
                                 && message.wake_attempt_count == 0
+                                && (failure.error == "recipient has too many unacked notifications"
+                                    || failure.error.starts_with("REX_BINDING_PUBLICATION_BUSY"))
                         }))
         }
         Some("explicit-notification") => false,

@@ -8,6 +8,7 @@ fn nonresident_child_route_is_committed_to_host_owner() {
         Req::register("child-route-parent".into(), "token-parent".into(), project_root.display().to_string(),
             test_candidates_at("thread-child-route-parent", &project_root)));
     assert!(parent.ok, "{parent:?}");
+    let runtime = runtime.expect("parent project runtime");
     assert!(!Arc::ptr_eq(&runtime, &host));
     let app = AppServerId::new("child-route-app").unwrap();
     let child = seed_committed_registration_fixture(&runtime, "child-route-child".into(), "token-child".into(),

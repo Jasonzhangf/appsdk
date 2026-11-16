@@ -10,8 +10,12 @@ pub(crate) const ORDINARY_NAME_POOL: [&str; 20] = [
 ];
 
 pub(crate) fn display_slot(name: &str) -> Result<Option<u32>, String> {
-    if name == "Jenny" { return Ok(Some(1)); }
-    ORDINARY_NAME_POOL.iter().position(|candidate| *candidate == name)
+    if name == "Jenny" {
+        return Ok(Some(1));
+    }
+    ORDINARY_NAME_POOL
+        .iter()
+        .position(|candidate| *candidate == name)
         .map(|index| Some(index as u32 + 2))
         .or_else(|| peer_registration_number(name).map(|_| None))
         .ok_or_else(|| format!("NAME_INVALID: unknown registered name {name}"))
@@ -82,25 +86,35 @@ pub(crate) fn preserve_source_work_events(
     target_name: &str,
     now: i64,
 ) -> Vec<Event> {
-    let mut tasks: Vec<_> = state.tasks.values()
-        .filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled")
-            && state.task_assignment(&task.id).is_none())
+    let mut tasks: Vec<_> = state
+        .tasks
+        .values()
+        .filter(|task| {
+            !matches!(task.status.as_str(), "closed" | "cancelled")
+                && state.task_assignment(&task.id).is_none()
+        })
         .collect();
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
-    tasks.into_iter().filter_map(|task| {
-        let source = source_names.iter()
-            .filter(|name| name.as_str() != target_name)
-            .filter_map(|name| state.name_occupancy(project_scope, name))
-            .find(|source| source.worker_id == task.owner)?;
-        Some(Event::TaskAssignmentUpdated { assignment: TaskAssignment {
-            task_id: task.id.clone(),
-            name: source.name.clone(),
-            session_id: source.session_id.clone(),
-            assignment_revision: 1,
-            reflow: None,
-            updated_ms: now,
-        } })
-    }).collect()
+    tasks
+        .into_iter()
+        .filter_map(|task| {
+            let source = source_names
+                .iter()
+                .filter(|name| name.as_str() != target_name)
+                .filter_map(|name| state.name_occupancy(project_scope, name))
+                .find(|source| source.worker_id == task.owner)?;
+            Some(Event::TaskAssignmentUpdated {
+                assignment: TaskAssignment {
+                    task_id: task.id.clone(),
+                    name: source.name.clone(),
+                    session_id: source.session_id.clone(),
+                    assignment_revision: 1,
+                    reflow: None,
+                    updated_ms: now,
+                },
+            })
+        })
+        .collect()
 }
 
 /// New registration uses the current map or allocates an available name.
@@ -109,13 +123,23 @@ pub(crate) fn name_for_registration(
     control: &super::binding_slot::BindingControlSet,
     binding: &super::RuntimeBinding,
 ) -> Result<String, String> {
-    if let Some(key) = control.key_for_worker(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())? {
+    if let Some(key) = control.key_for_worker(
+        &binding.project_scope,
+        &binding.app_scope_id,
+        binding.agent_id.as_str(),
+    )? {
         return Ok(key.name.clone());
     }
-    if super::current_master_worker_id(state, Some(&binding.route_scope())).as_deref() == Some(binding.agent_id.as_str()) {
+    if super::current_master_worker_id(state, Some(&binding.route_scope())).as_deref()
+        == Some(binding.agent_id.as_str())
+    {
         return Ok("Jenny".into());
     }
-    control.ordinary_name(&binding.project_scope, &binding.app_scope_id, binding.agent_id.as_str())
+    control.ordinary_name(
+        &binding.project_scope,
+        &binding.app_scope_id,
+        binding.agent_id.as_str(),
+    )
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -222,15 +246,15 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
         });
     }
     let releases_extra_names = state
-            .name_occupancies
-            .get(project_scope)
-            .is_some_and(|names| {
-                names.values().any(|holder| {
-                    holder.worker_id == occupancy.worker_id
-                        && holder.session_id == occupancy.session_id
-                        && holder.name != occupancy.name
-                })
-            });
+        .name_occupancies
+        .get(project_scope)
+        .is_some_and(|names| {
+            names.values().any(|holder| {
+                holder.worker_id == occupancy.worker_id
+                    && holder.session_id == occupancy.session_id
+                    && holder.name != occupancy.name
+            })
+        });
     if previous != Some(occupancy) || !assignments.is_empty() || releases_extra_names {
         events.insert(
             0,
@@ -283,11 +307,15 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
                             && s.subject
                                 .as_deref()
                                 .is_some_and(|subject| subject.starts_with("goal:"))
-                            && matches!(s.status.as_str(), "armed" | "transport-lost" | "consumed");
+                            && matches!(
+                                s.status.as_str(),
+                                "armed" | "transport-lost" | "consumed" | "expired"
+                            );
                         let project_patrol = super::is_exact_project_patrol(s)
                             && matches!(s.status.as_str(), "armed" | "cancelled");
-                        let not_expired =
-                            s.status == "cancelled" || s.expires_ms > occupancy.updated_ms;
+                        let not_expired = s.status == "cancelled"
+                            || matches!(s.status.as_str(), "consumed" | "expired")
+                            || s.expires_ms > occupancy.updated_ms;
                         (goal_deadline || project_patrol) && not_expired
                     })
                     .cloned()

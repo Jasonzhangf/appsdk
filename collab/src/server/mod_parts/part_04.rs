@@ -6,8 +6,7 @@ impl ProjectRuntimeManager {
         let routes = self.routes.lock().unwrap();
         for route in routes.values() {
             if let Some(runtime) = &route.runtime {
-                // Multiple app scopes may intentionally share the resident
-                // reducer.  The scheduler owns a runtime, not a route key;
+                // The scheduler owns a runtime, not a route key;
                 // ticking once per key would duplicate wakeups and could
                 // consume a timer twice in the same interval.
                 if result.iter().any(|existing| Arc::ptr_eq(existing, runtime)) {
@@ -15,12 +14,6 @@ impl ProjectRuntimeManager {
                 }
                 result.push(runtime.clone());
             }
-        }
-        if !result
-            .iter()
-            .any(|runtime| Arc::ptr_eq(runtime, &self.host))
-        {
-            result.push(self.host.clone());
         }
         result
     }
@@ -43,8 +36,8 @@ impl ProjectRuntimeManager {
         let session = crate::identity::SessionId::new(session_id.to_owned())
             .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
         let binding = {
-            let state = self.host.state.lock().unwrap();
-            let mut matches = state.global.current_thread_routes.values().filter(|binding| {
+            let map = self.binding_control_store().load()?;
+            let mut matches = map.active_values().map(|value| &value.binding).filter(|binding| {
                 binding.project_scope == context.project_scope
                     && binding.app_scope_id == context.app_scope_id
                     && binding.session_id.as_ref() == Some(&session)
@@ -118,91 +111,26 @@ impl ProjectRuntimeManager {
             .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
         let native_thread_id = NativeThreadId::new(native_thread_id.to_owned())
             .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
-        // Strict dual-key lookup first; a durable thread-only binding is a
-        // read-only compatibility fallback, never a selector among several
-        // threads.  cwd is execution context and is not part of this decision.
-        let (binding, legacy) = {
-            let state = self.host.state.lock().unwrap();
+        let map = self.binding_control_store().load()?;
+        let mut matches = map.active_values().map(|value| &value.binding).filter(|binding| {
             if let Some(requested) = requested_tmux_endpoint {
-                if let Some(binding) = state.global.lookup_unique_tmux_pane_route(requested).cloned() {
-                    (binding, false)
-                } else if let Some(tombstone) = state.global.lookup_tmux_route_tombstone(requested)
-                {
-                    return Err(format!(
-                        "SESSION_THREAD_BINDING_STALE: tmux endpoint was retired; reboundTo=({}, {}); recovery: re-run the caller with its current pane endpoint; never revive the old route",
-                        tombstone.rebound_to.session_id.as_ref().map(ToString::to_string).unwrap_or_default(),
-                        tombstone.rebound_to.native_thread_id.as_ref().map(ToString::to_string).unwrap_or_default()
-                    ));
-                } else {
-                    return Err(format!(
-                        "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to tmux socket {} session {} pane {}",
-                        requested.socket_path, requested.tmux_session_id, requested.pane_id
-                    ));
-                }
-            } else if let Some(binding) = state
-                .global
-                .lookup_current_thread_route(&session_id, &native_thread_id)
-                .cloned()
-            {
-                (binding, false)
-            } else if !state
-                .global
-                .legacy_thread_route_matches(&native_thread_id)
-                .is_empty()
-            {
-                // A legacy record is only a fallback for a thread with no live
-                // strict owner.  If the thread is already session-bound to
-                // another identity, a request carrying a different session
-                // must not be routed through the older project.
-                if !state
-                    .global
-                    .strict_bindings_for_native_thread(&native_thread_id)
-                    .is_empty()
-                {
-                    return Err(format!(
-                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} already has a session-bound binding, so it is not resolvable under session {session_id}; run collab context with the current runtime facts; preserve the error if the daemon cannot reconcile the binding"
-                    ));
-                }
-                let matches = state.global.legacy_thread_route_matches(&native_thread_id);
-                if matches.len() > 1 {
-                    return Err(format!(
-                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} has {count} legacy thread-only bindings under app scope {app}; run collab context with the current runtime facts; preserve unresolved conflicts for the identity owner",
-                        count = matches.len(),
-                        app = matches[0].app_scope_id.as_str(),
-                    ));
-                }
-                (matches[0].clone(), true)
-            } else if let Some(tombstone) = state
-                .global
-                .lookup_current_thread_route_tombstone(&session_id, &native_thread_id)
-            {
-                return Err(format!(
-                    "SESSION_THREAD_BINDING_STALE: old session/thread address ({session_id}, {native_thread_id}) was retired; reboundTo=({}, {}); recovery: re-run the caller with the current address; never revive the old route",
-                    tombstone
-                        .rebound_to
-                        .session_id
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                    tombstone
-                        .rebound_to
-                        .native_thread_id
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default()
-                ));
+                binding.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                    crate::client::adapters::tmux::same_pane_route(requested, endpoint)
+                })
             } else {
-                return Err(format!(
-                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id} under session {session_id}; {ROUTE_RESOLVE_NOT_FOUND_RECOVERY}"
-                ));
+                binding.session_id.as_ref() == Some(&session_id)
+                    && binding.native_thread_id.as_ref() == Some(&native_thread_id)
             }
-        };
+        });
+        let binding = matches.next().cloned().ok_or_else(|| format!(
+            "ROUTE_RESOLVE_NOT_FOUND: no current identity-map binding for session {session_id} and thread {native_thread_id}; {ROUTE_RESOLVE_NOT_FOUND_RECOVERY}"
+        ))?;
+        if matches.next().is_some() {
+            return Err("ROUTE_RESOLVE_AMBIGUOUS: multiple current identity-map bindings own this address; run collab context with current runtime facts".into());
+        }
         let (mut route, runtime) = self.current_binding_snapshot(&binding)?;
-        // A legacy record has no persisted session; keep the host-provided
-        // session as the live address without writing it back to the record.
         let session_id = match binding.session_id.clone() {
             Some(bound) => Some(bound),
-            None if legacy => Some(session_id),
             None if binding.tmux_endpoint.is_some() => None,
             None => {
                 return Err(format!(
@@ -354,22 +282,6 @@ impl ProjectRuntimeManager {
             .clone()
     }
 
-    fn active_host_route_keys(&self) -> std::collections::BTreeSet<RouteKey> {
-        let state = self.host.state.lock().unwrap();
-        state
-            .global
-            .current_thread_routes
-            .values()
-            .chain(state.global.legacy_thread_routes.values())
-            .map(|binding| {
-                (
-                    binding.app_scope_id.as_str().to_owned(),
-                    binding.project_scope.as_str().to_owned(),
-                )
-            })
-            .collect()
-    }
-
     /// Open and install a pending route exactly once. The double-check after
     /// acquiring the per-route gate is required because Poll and blocking
     /// requests can select the same durable pending route concurrently.
@@ -379,13 +291,7 @@ impl ProjectRuntimeManager {
         requested_root: &Path,
         _requested_storage_root: &Path,
     ) -> Result<Arc<Server>, String> {
-        if self
-            .host
-            .state
-            .lock()
-            .unwrap()
-            .pending_project_resets
-            .contains_key(&key.1)
+        if self.binding_control_store().load()?.pending_resets.contains(&key.1)
         {
             return Err(
                 "RESET_INCOMPLETE: project cleanup must complete before materialization".into(),
@@ -420,11 +326,7 @@ impl ProjectRuntimeManager {
         // keys: two concurrent materializations must not both observe the
         // same count below the cap and then install past it.
         let _admission = self.materialization_gate.lock().unwrap();
-        let materialized_external = self
-            .runtimes()
-            .into_iter()
-            .filter(|runtime| !Arc::ptr_eq(runtime, &self.host))
-            .count();
+        let materialized_external = self.runtimes().len();
         let cap = self
             .materialization_cap
             .load(std::sync::atomic::Ordering::Relaxed);

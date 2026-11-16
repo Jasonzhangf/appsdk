@@ -95,36 +95,22 @@ pub(crate) fn resolve_ceo_holder_from_grant(
     Ok(holder.worker_id.clone())
 }
 
-fn resolve_ceo_holder(
-    state: &crate::server::state::State,
-    control: &binding_slot::BindingControlSet,
-    route: &RouteScope,
-) -> Result<String, String> {
-    let grant = state.ceo_grant.as_ref().ok_or_else(|| {
-        "CHANNEL_CEO_GRANT_MISSING: no typed CEO grant is active; [ceo] does not fall back to the project master"
-            .to_string()
-    })?;
-    resolve_ceo_holder_from_grant(state, control, route, grant)
-}
-
 /// The single case-insensitive stable-address resolver shared by `sendmessage`,
 /// `default` and channel-inbound routing. `ceo` and a bare current project key
 /// both resolve through the typed CEO grant. Unknown non-name text returns
 /// `None` so each caller can apply its own raw-target rule.
 pub(crate) fn resolve_named_target(
     state: &crate::server::state::State,
+    ceo_grant: Option<&crate::ceo::CeoGrant>,
     control: &binding_slot::BindingControlSet,
     route: &RouteScope,
     project_key: &str,
     address: &str,
 ) -> Result<Option<ResolvedNamedTarget>, String> {
     if address.eq_ignore_ascii_case("ceo") || address.eq_ignore_ascii_case(project_key) {
-        let worker_id = resolve_ceo_holder(state, control, route)?;
-        let name = state
-            .ceo_grant
-            .as_ref()
-            .map(|grant| grant.name.clone())
-            .unwrap_or_else(|| "ceo".to_owned());
+        let grant = ceo_grant.ok_or("CHANNEL_CEO_GRANT_MISSING: no typed CEO grant is active; [ceo] does not fall back to the project master")?;
+        let worker_id = resolve_ceo_holder_from_grant(state, control, route, grant)?;
+        let name = grant.name.clone();
         return Ok(Some(ResolvedNamedTarget { worker_id, name }));
     }
     // Project-qualified addresses are structural: split from the right so a
@@ -160,12 +146,13 @@ pub(crate) fn resolve_named_target(
 /// worker. Project scope, name and `ceo` matching are all case-insensitive.
 fn resolve_address(
     state: &crate::server::state::State,
+    ceo_grant: Option<&crate::ceo::CeoGrant>,
     control: &binding_slot::BindingControlSet,
     route: &RouteScope,
     project_key: &str,
     address: &str,
 ) -> Result<String, String> {
-    let worker_id = match resolve_named_target(state, control, route, project_key, address)? {
+    let worker_id = match resolve_named_target(state, ceo_grant, control, route, project_key, address)? {
         Some(target) => target.worker_id,
         None => resolve_name_case_insensitive(control, route, address)?.worker_id,
     };
@@ -338,6 +325,7 @@ pub(crate) fn channel_address_context(
 /// local `project.name`.
 pub(crate) fn local_inbound_worker_for_target(
     state: &crate::server::state::State,
+    ceo_grant: Option<&crate::ceo::CeoGrant>,
     control: &binding_slot::BindingControlSet,
     route: &RouteScope,
     project_key: &str,
@@ -345,7 +333,7 @@ pub(crate) fn local_inbound_worker_for_target(
 ) -> Result<String, String> {
     match target {
         crate::address::ResolvedAddress::LocalLegacy(address) => {
-            resolve_address(state, control, route, project_key, address)
+            resolve_address(state, ceo_grant, control, route, project_key, address)
         }
         crate::address::ResolvedAddress::LocalName(local) => {
             if !local.project.eq_ignore_ascii_case(project_key) {
@@ -401,12 +389,24 @@ pub(crate) fn resolve_channel_inbound_target(
         &context,
     )?;
     let control = binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
-    let to = local_inbound_worker_for_target(state, &control, &route, &project_key, &intent.target)?;
+    let grant = current_host_grant_for_address(server, &project_key, &intent.address)?;
+    let to = local_inbound_worker_for_target(state, grant.as_ref(), &control, &route, &project_key, &intent.target)?;
     Ok(ResolvedInbound {
         to,
         recipient_address: intent.address,
         body: intent.body,
     })
+}
+
+/// Read the actual host owner only for an address that requires CEO authority.
+/// Ordinary stable-name routing remains project-owned.
+fn current_host_grant_for_address(server: &Server, project_key: &str, address: &str) -> Result<Option<crate::ceo::CeoGrant>, String> {
+    if !address.eq_ignore_ascii_case("ceo") && !address.eq_ignore_ascii_case(project_key) {
+        return Ok(None);
+    }
+    let view = host_control::HostControl::read_current(&server.host_paths)?;
+    let grant = view.state.lock().unwrap().ceo_grant.clone();
+    Ok(grant)
 }
 
 #[cfg(test)]

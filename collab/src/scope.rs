@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLAB_STATE_DIR_ENV: &str = "COLLAB_STATE_DIR";
 pub const HOME_ENV: &str = "HOME";
+const SERVICE_RECORD_FILE: &str = "service-record.json";
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -596,15 +597,21 @@ pub fn lifecycle_project_root() -> anyhow::Result<PathBuf> {
     validate_project_root(process_cwd()?)
 }
 
-/// Read the canonical project root bound to the supervised host service.
+fn service_record_path(host_paths: &HostPaths) -> PathBuf {
+    host_paths.state_root().join(SERVICE_RECORD_FILE)
+}
+
+/// Read the legacy project root from a pre-host-boundary service record.
 ///
-/// A login-supervised daemon has no guaranteed project cwd, so `collab serve
-/// --service` resolves the recorded scope root from the host state root
-/// instead of guessing from the environment. Returns `None` when no service
-/// record exists yet (the first `collab up` / `context` creates it).
+/// New host records have a null `service_scope_root`; a value is consumed only
+/// as a one-time migration source for the historical resident project.
 pub fn service_scope_root() -> anyhow::Result<Option<PathBuf>> {
     let host_paths = HostPaths::resolve()?;
-    let record_path = host_paths.state_root().join("service-record.json");
+    read_service_scope_root(&host_paths)
+}
+
+pub(crate) fn read_service_scope_root(host_paths: &HostPaths) -> anyhow::Result<Option<PathBuf>> {
+    let record_path = service_record_path(host_paths);
     let text = match std::fs::read_to_string(&record_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -612,12 +619,29 @@ pub fn service_scope_root() -> anyhow::Result<Option<PathBuf>> {
     };
     #[derive(Deserialize)]
     struct ServiceRecord {
-        service_scope_root: PathBuf,
+        service_scope_root: Option<PathBuf>,
     }
     let record: ServiceRecord = serde_json::from_str(&text).map_err(|error| {
         anyhow::anyhow!("invalid service record {}: {error}", record_path.display())
     })?;
-    Ok(Some(record.service_scope_root))
+    Ok(record.service_scope_root)
+}
+
+pub(crate) fn write_host_service_record(host_paths: &HostPaths) -> anyhow::Result<PathBuf> {
+    let record_path = service_record_path(host_paths);
+    let confirmed = crate::server::current_state::save_bytes(
+        &record_path,
+        &serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 2,
+            "service_scope_root": null,
+        }))?,
+    )?;
+    anyhow::ensure!(
+        confirmed,
+        "HOST_SERVICE_RECORD_DURABILITY_UNKNOWN: {}",
+        record_path.display()
+    );
+    Ok(record_path)
 }
 
 /// Scope root for a supervised daemon that has no recorded project binding.

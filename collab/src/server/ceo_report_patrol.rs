@@ -133,7 +133,7 @@ impl super::ProjectRuntimeManager {
 
     /// Read the host grant, gate and pending facts under one reducer lock.
     fn ceo_notice_snapshot(&self) -> Result<Option<CeoNoticeSnapshot>, String> {
-        let state = self.host.state.lock().unwrap();
+        let state = self.host_control.state.lock().unwrap();
         let Some(grant) = state.ceo_grant.clone() else {
             return Ok(None);
         };
@@ -158,7 +158,7 @@ impl super::ProjectRuntimeManager {
         message_id: &str,
         worker_id: &str,
     ) -> Result<bool, String> {
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         if state.ceo_grant.as_ref() != Some(&snapshot.grant)
             || state.ceo_report_state.notice_gate != snapshot.gate
             || state.ceo_report_state.urgent_generation != snapshot.urgent_generation
@@ -172,8 +172,11 @@ impl super::ProjectRuntimeManager {
             pending_message_id: Some(message_id.to_owned()),
             pending_worker_id: Some(worker_id.to_owned()),
         };
-        self.host
-            .commit_locked_checked(&mut state, &[Event::CeoReportNoticeGateUpdated { gate }])
+        self.host_control
+            .commit_locked_checked(
+                &mut state,
+                &[super::host_control::HostChange::CeoReportNoticeGateUpdated { gate }],
+            )
             .map_err(|error| format!("CEO_REPORT_PATROL_RESERVE_DURABILITY_FAILED: {error}"))?;
         Ok(true)
     }
@@ -182,7 +185,7 @@ impl super::ProjectRuntimeManager {
     /// 15-minute window. The evaluated urgent generation is consumed so a busy
     /// or unknown target is never caught up later for the same signal.
     fn commit_ceo_notice_skip(&self, snapshot: &CeoNoticeSnapshot, now: u64) -> Result<(), String> {
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         if state.ceo_grant.as_ref() != Some(&snapshot.grant)
             || state.ceo_report_state.notice_gate != snapshot.gate
             || state.ceo_report_state.urgent_generation != snapshot.urgent_generation
@@ -195,8 +198,11 @@ impl super::ProjectRuntimeManager {
             pending_message_id: None,
             pending_worker_id: None,
         };
-        self.host
-            .commit_locked_checked(&mut state, &[Event::CeoReportNoticeGateUpdated { gate }])
+        self.host_control
+            .commit_locked_checked(
+                &mut state,
+                &[super::host_control::HostChange::CeoReportNoticeGateUpdated { gate }],
+            )
             .map(|_| ())
             .map_err(|error| format!("CEO_REPORT_PATROL_SKIP_DURABILITY_FAILED: {error}"))
     }
@@ -210,7 +216,7 @@ impl super::ProjectRuntimeManager {
         message_id: &str,
         now: u64,
     ) -> Result<(), String> {
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         if state.ceo_grant.as_ref() != Some(&snapshot.grant)
             || state
                 .ceo_report_state
@@ -227,8 +233,11 @@ impl super::ProjectRuntimeManager {
             pending_message_id: None,
             pending_worker_id: None,
         };
-        self.host
-            .commit_locked_checked(&mut state, &[Event::CeoReportNoticeGateUpdated { gate }])
+        self.host_control
+            .commit_locked_checked(
+                &mut state,
+                &[super::host_control::HostChange::CeoReportNoticeGateUpdated { gate }],
+            )
             .map(|_| ())
             .map_err(|error| format!("CEO_REPORT_PATROL_SKIP_DURABILITY_FAILED: {error}"))
     }
@@ -237,7 +246,7 @@ impl super::ProjectRuntimeManager {
     /// and urgent generation. This is the recovery receipt after the target
     /// mailbox already contains the message.
     fn clear_ceo_notice_reservation(&self, message_id: &str) -> Result<(), String> {
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         if state
             .ceo_report_state
             .notice_gate
@@ -250,8 +259,11 @@ impl super::ProjectRuntimeManager {
         let mut gate = state.ceo_report_state.notice_gate.clone();
         gate.pending_message_id = None;
         gate.pending_worker_id = None;
-        self.host
-            .commit_locked_checked(&mut state, &[Event::CeoReportNoticeGateUpdated { gate }])
+        self.host_control
+            .commit_locked_checked(
+                &mut state,
+                &[super::host_control::HostChange::CeoReportNoticeGateUpdated { gate }],
+            )
             .map(|_| ())
             .map_err(|error| format!("CEO_REPORT_PATROL_CLEAR_DURABILITY_FAILED: {error}"))
     }
@@ -339,7 +351,7 @@ impl super::ProjectRuntimeManager {
         // Re-check the host reservation before touching the target state. The
         // host lock is released before the target lock is acquired.
         let reservation_is_current = {
-            let state = self.host.state.lock().unwrap();
+            let state = self.host_control.state.lock().unwrap();
             state.ceo_grant.as_ref() == Some(&snapshot.grant)
                 && state
                     .ceo_report_state

@@ -43,6 +43,9 @@ pub struct State {
     /// daemon-owned control record; message bodies never carry it.
     pub reply_obligations: HashMap<String, ReplyObligation>,
     pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
+    /// Immutable original addresses for cross-project messages. Current holders
+    /// are resolved only through the host identity map, never from this record.
+    pub(crate) cross_project_addresses: HashMap<String, super::cross_project_receipt::Addresses>,
     pub mailbox_handoff_wakes: HashMap<String, u32>,
     /// Per-external-conversation default delivery target, keyed by
     /// `<channel>:<channel-instance>:<conversation>`. Control state only;
@@ -97,6 +100,9 @@ pub struct State {
     pub delivery_source_threads: HashMap<String, String>,
     pub notification_subscriptions: HashMap<String, NotificationSubscription>,
     pub wake_bindings: HashMap<String, String>,
+    /// Deadline summary membership. The wake binding selects delivery only;
+    /// these members own their independent finite consumption budgets.
+    pub deadline_summaries: HashMap<String, std::collections::BTreeMap<String, i64>>,
     /// Project-mirrored global CEO grant. `CeoGrantSet` is the only writer;
     /// `None` revokes the grant and never touches bootstrap history.
     pub ceo_grant: Option<crate::ceo::CeoGrant>,
@@ -156,6 +162,44 @@ fn subscription_affects_master_wake(
     matches!(subscription.event.as_str(), "deadline" | "master-idle")
         && (state.master_worker_id.as_deref() == Some(subscription.worker_id.as_str())
             || has_current_master_grant(state, &subscription.worker_id, &subscription.target))
+}
+
+fn message_affects_master_wake(state: &State, message_id: &str) -> bool {
+    if let Some(members) = state.deadline_summaries.get(message_id) {
+        return members.keys().any(|subscription_id| {
+            state
+                .notification_subscriptions
+                .get(subscription_id)
+                .is_some_and(|subscription| subscription_affects_master_wake(state, subscription))
+        });
+    }
+    state
+        .wake_bindings
+        .get(message_id)
+        .and_then(|subscription_id| state.notification_subscriptions.get(subscription_id))
+        .is_some_and(|subscription| subscription_affects_master_wake(state, subscription))
+}
+
+fn delivered_message_affects_master_wake(state: &State, message_id: &str) -> bool {
+    if let Some(members) = state.deadline_summaries.get(message_id) {
+        return members.keys().any(|subscription_id| {
+            state
+                .notification_subscriptions
+                .get(subscription_id)
+                .is_some_and(|subscription| subscription_affects_master_wake(state, subscription))
+        });
+    }
+    state
+        .wake_bindings
+        .get(message_id)
+        .and_then(|subscription_id| {
+            let subscription = state.notification_subscriptions.get(subscription_id)?;
+            let message = state.msgs.get(message_id)?;
+            (message.to == subscription.worker_id
+                && has_current_master_grant(state, &subscription.worker_id, &subscription.target))
+            .then_some(subscription)
+        })
+        .is_some()
 }
 
 #[path = "../state_impl.rs"]

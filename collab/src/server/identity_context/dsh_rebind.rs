@@ -65,11 +65,6 @@ impl ProjectRuntimeManager {
             value: crate::server::binding_slot::BindingValue::new(retired, transport),
             expected_generation: None,
         }).map_err(anyhow::Error::msg)?;
-        if !Arc::ptr_eq(runtime, &self.host) {
-            self.host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
-                binding: saved.clone(),
-            }])?;
-        }
         Ok(())
     }
 

@@ -13,7 +13,6 @@ fn inbox_projection(state: &State, inbox: Vec<&Message>) -> Resp {
         .collect();
     Resp::data(json!({"unread": items.len(), "messages": items}))
 }
-
 fn handle_ack_locked(
     server: &Arc<Server>,
     st: &mut State,
@@ -126,7 +125,6 @@ fn handle_ack_locked(
         "not_found": not_found,
     }))
 }
-
 fn dispatch_with_route_context(
     server: &Arc<Server>,
     req: Req,
@@ -915,19 +913,8 @@ fn dispatch_with_route_context_bound(
         Req::ResetBindings { confirm: _ } => Resp::err(
             "binding reset is deprecated; preserve current work/messages and use collab context",
         ),
-        Req::Shutdown { password } => handle_user_shutdown(server, password.as_ref()),
-        Req::Ping => {
-            let st = server.state.lock().unwrap();
-            Resp::data(json!({
-                "workers": st.workers.len(),
-                "messages": st.msgs.len(),
-                "tasks": st.tasks.len(),
-                "now": iso(now_ms()),
-                "protocol_version": crate::proto::IDENTITY_CONTEXT_CWD_PROTOCOL,
-                "daemon_version": env!("COLLAB_VERSION"),
-                "capabilities": [crate::proto::CAPABILITY_READINESS_PROTOCOL],
-            }))
-        }
+        Req::Shutdown { password } => handle_user_shutdown(&server.host_paths, password.as_ref()),
+        Req::Ping => host_readiness(),
         Req::CapabilityReadiness {
             worker_id,
             token,
@@ -1257,8 +1244,13 @@ fn handle_msg_status(
             }
         }
     }
-    let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
     let answered = st.answered(&msg_id);
+    message_status_data(&st, msg, answered)
+}
+
+fn message_status_data(st: &State, msg: Message, answered: bool) -> Resp {
+    let msg_id = msg.id.clone();
+    let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
     let reply_obligation = st.reply_obligations.get(&msg_id).cloned();
     let consumed = st.receive_receipts.values().any(|receipt| {
         receipt.message_ids.iter().any(|received| received == &msg_id)
@@ -1497,6 +1489,7 @@ fn validate_wire_route_principals(
 /// may register its exact canonical root with the resident daemon even when it
 /// is not the daemon's startup project. Operations for that route remain
 /// explicitly not-ready until a current project-state owner is available.
+///
 /// Shutdown is authenticated only when a maintenance password is configured.
 ///
 /// `None` means no password is set, so a shutdown request is accepted without
@@ -1513,9 +1506,12 @@ fn password_allows_shutdown(
     }
 }
 
-fn handle_user_shutdown(server: &Server, password: Option<&crate::proto::MaintenancePassword>) -> Resp {
+fn handle_user_shutdown(
+    host_paths: &HostPaths,
+    password: Option<&crate::proto::MaintenancePassword>,
+) -> Resp {
     match crate::config::maintenance_password_opt() {
-        Ok(expected) => handle_host_shutdown(&server.host_paths, expected.as_deref(), password),
+        Ok(expected) => handle_host_shutdown(host_paths, expected.as_deref(), password),
         Err(_) => Resp::err("MAINTENANCE_AUTHENTICATION_FAILED"),
     }
 }
@@ -1528,7 +1524,7 @@ fn handle_host_shutdown(
     if !password_allows_shutdown(expected_password, password) {
         return Resp::err("MAINTENANCE_AUTHENTICATION_FAILED");
     }
-    if let Err(error) = std::fs::write(host_paths.state_root().join("DOWN"), b"user stopped\n") {
+    if let Err(error) = std::fs::write(host_paths.down_path(), b"user stopped\n") {
         return Resp::err(format!("DAEMON_SHUTDOWN_FAILED: {error}"));
     }
     Resp::data(json!({"authorized": true, "capability": "user-maintenance"}))
@@ -1548,10 +1544,9 @@ pub(crate) fn validate_request_context(
             }
             Err(_) => return Err("MAINTENANCE_AUTHENTICATION_FAILED".into()),
         }
-        return match project_context {
-            Some(context) => validate_host_operator_route(server, context),
-            None => Ok(()),
-        };
+        if project_context.is_none() {
+            return Ok(());
+        }
     }
     let Some(project_context) = project_context else {
         if request_requires_project_context(req) {
@@ -1566,10 +1561,6 @@ pub(crate) fn validate_request_context(
         .validate()
         .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
     let registry = HostRouteRegistry::for_server(server)?;
-    let resident_scope = GlobalState::canonical_project_scope(&server.root)
-        .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
-    let is_resident_project = project_context.canonical_root == resident_scope.as_str()
-        && project_context.project_scope == resident_scope;
     let route_scope = RouteScope {
         app_scope_id: project_context.app_scope_id.clone(),
         project_scope_id: project_context.project_scope.clone(),
@@ -1600,24 +1591,6 @@ pub(crate) fn validate_request_context(
         None => {
             if let Req::Register { cwd, .. } = req {
                 validate_project_registration_cwd(cwd, Path::new(&project_context.canonical_root))?;
-            } else if is_resident_project
-                && (matches!(req, Req::Directory)
-                    || matches!(
-                        req,
-                        Req::Send {
-                            worker_id: None,
-                            token: None,
-                            ..
-                        }
-                    ))
-            {
-                let root = Path::new(&project_context.canonical_root);
-                if !root.join(".agent-collab").is_dir() {
-                    return Err(format!(
-                        "PROJECT_SCOPE_UNKNOWN: project {} is not initialized for Collab",
-                        root.display()
-                    ));
-                }
             } else {
                 return Err(format!(
                     "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",
@@ -1648,34 +1621,6 @@ fn validate_project_registration_cwd(cwd: &str, expected_root: &Path) -> Result<
         ));
     }
     validate_register_cwd(cwd, expected_root)
-}
-
-/// Admit the explicit CLI host operator route independently of project
-/// registration. `collab up` can create a resident daemon before any app
-/// route has registered; the operator still needs a way to stop that daemon.
-/// Keep this path read-only and exact so it cannot become an unknown-route
-/// fallback for project requests or create a peer identity as a side effect.
-fn validate_host_operator_route(
-    server: &Server,
-    project_context: &ProjectContext,
-) -> Result<(), String> {
-    let resident_scope = GlobalState::canonical_project_scope(&server.root)
-        .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
-    if project_context.app_scope_id.as_str() != crate::identity::CLI_APP_SERVER_ID {
-        return Err(format!(
-            "PROJECT_SCOPE_UNKNOWN: host operator route requires app scope {}",
-            crate::identity::CLI_APP_SERVER_ID
-        ));
-    }
-    if project_context.canonical_root != resident_scope.as_str()
-        || project_context.project_scope != resident_scope
-    {
-        return Err(format!(
-            "PROJECT_SCOPE_UNKNOWN: host operator route must target resident project {}",
-            resident_scope.as_str()
-        ));
-    }
-    Ok(())
 }
 
 fn validate_register_cwd(cwd: &str, expected_root: &Path) -> Result<(), String> {
@@ -1725,7 +1670,7 @@ mod password_shutdown_tests {
         host_paths.ensure_root().unwrap();
         let response = handle_host_shutdown(&host_paths, None, None);
         assert!(response.ok, "{response:?}");
-        assert!(host_paths.state_root().join("DOWN").is_file());
+        assert!(host_paths.down_path().is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1744,7 +1689,7 @@ mod password_shutdown_tests {
         let wrong = crate::proto::MaintenancePassword::new("wrong");
         let response = handle_host_shutdown(&host_paths, Some("admin"), Some(&wrong));
         assert!(!response.ok, "{response:?}");
-        assert!(!host_paths.state_root().join("DOWN").exists());
+        assert!(!host_paths.down_path().exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1763,7 +1708,7 @@ mod password_shutdown_tests {
         let right = crate::proto::MaintenancePassword::new("admin");
         let response = handle_host_shutdown(&host_paths, Some("admin"), Some(&right));
         assert!(response.ok, "{response:?}");
-        assert!(host_paths.state_root().join("DOWN").is_file());
+        assert!(host_paths.down_path().is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

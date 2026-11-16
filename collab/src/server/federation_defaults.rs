@@ -27,8 +27,7 @@ pub(super) async fn dispatch(
     manager: Arc<ProjectRuntimeManager>,
     context: Option<ProjectContext>,
     request: Req,
-) -> (Arc<Server>, Resp) {
-    let host = manager.host.clone();
+) -> DispatchResult {
     let (worker_id, token, channel, channel_instance, conversation, target_address) = match &request
     {
         Req::DefaultSet {
@@ -46,11 +45,11 @@ pub(super) async fn dispatch(
             conversation.clone(),
             target_address.clone(),
         ),
-        _ => return (host, Resp::err("FEDERATION_DEFAULT_REQUEST_INVALID")),
+        _ => return (None, Resp::err("FEDERATION_DEFAULT_REQUEST_INVALID")),
     };
     // Keep the exact channel boundaries owned by the existing local setter.
     if let Err(error) = validate_default_scope(&channel, &channel_instance, &conversation) {
-        return (host, Resp::err(error));
+        return (None, Resp::err(error));
     }
     // Keep the generic project-route admission order that `DefaultSet` used
     // before the dedicated entry point: pending scope effects are recovered
@@ -64,8 +63,8 @@ pub(super) async fn dispatch(
         .await
         {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => return (host, Resp::err(error)),
-            Err(error) => return (host, Resp::err(format!("handler join error: {error}"))),
+            Ok(Err(error)) => return (None, Resp::err(error)),
+            Err(error) => return (None, Resp::err(format!("handler join error: {error}"))),
         }
     }
     let resolved = match super::federation_runtime::resolve(
@@ -75,7 +74,7 @@ pub(super) async fn dispatch(
         Ok(resolved) => resolved,
         Err(error) => {
             return (
-                host,
+                None,
                 Resp::err(format!("DEFAULT_TARGET_UNRESOLVED: {error}")),
             );
         }
@@ -86,7 +85,7 @@ pub(super) async fn dispatch(
             .await
         {
             Ok(result) => result,
-            Err(error) => (host, Resp::err(format!("handler join error: {error}"))),
+            Err(error) => (None, Resp::err(format!("handler join error: {error}"))),
         };
     };
     match dispatch_remote(
@@ -104,8 +103,8 @@ pub(super) async fn dispatch(
     )
     .await
     {
-        Ok(result) => result,
-        Err(error) => (host, Resp::err(error)),
+        Ok((runtime, response)) => (Some(runtime), response),
+        Err(error) => (None, Resp::err(error)),
     }
 }
 

@@ -61,6 +61,11 @@ pub(crate) fn save(path: &Path, state: &State) -> Result<bool, MutationError> {
         state,
     })
     .map_err(|error| MutationError::Persistence(error.to_string()))?;
+    save_bytes(path, &body)
+}
+
+/// Shared atomic file publication; the owning store supplies its own schema.
+pub(crate) fn save_bytes(path: &Path, body: &[u8]) -> Result<bool, MutationError> {
     let parent = path
         .parent()
         .ok_or_else(|| MutationError::Persistence("current state has no parent".into()))?;
@@ -73,7 +78,7 @@ pub(crate) fn save(path: &Path, state: &State) -> Result<bool, MutationError> {
             .create_new(true)
             .mode(0o600)
             .open(&temp)?;
-        file.write_all(&body)?;
+        file.write_all(body)?;
         file.sync_all()?;
         std::fs::rename(&temp, path)
     })();

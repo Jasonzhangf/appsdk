@@ -2,11 +2,7 @@ pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(format!(
-                "HOST_ROUTE_READ_FAILED: {error}"
-            ))
-        }
+        Err(error) => return Err(format!("HOST_ROUTE_READ_FAILED: {error}")),
     };
     let records: Vec<HostRouteRecord> = serde_json::from_str(&content)
         .map_err(|error| format!("HOST_ROUTE_DECODE_FAILED: {error}"))?;
@@ -136,14 +132,19 @@ pub(crate) fn purge_expired_storage(server: &Server, now: i64) -> usize {
         return 0;
     }
     let mut candidate = st.clone();
-    for id in &expired { candidate.expire_federated_message(id, now); }
+    for id in &expired {
+        candidate.expire_federated_message(id, now);
+    }
     if let Err(error) = candidate.advance_version() {
         server.report_state_error(&notification_contract::MutationError::InvalidState(error));
         return 0;
     }
     match server.publish_current_state(&mut st, candidate) {
         Ok(_) => expired.len(),
-        Err(error) => { server.report_state_error(&error); 0 }
+        Err(error) => {
+            server.report_state_error(&error);
+            0
+        }
     }
 }
 
@@ -879,20 +880,29 @@ fn attempt_tmux_notification_with_retry(
     if !state.scheduler_message_deliverable(message_id) {
         return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
     }
-    let has_patrol_notice = state.board_patrol_notice_ids.iter()
-        .any(|id| state.msgs.get(id).is_some_and(|message| message.to == recipient));
+    let has_patrol_notice = state.board_patrol_notice_ids.iter().any(|id| {
+        state
+            .msgs
+            .get(id)
+            .is_some_and(|message| message.to == recipient)
+    });
     let patrol_current = if has_patrol_notice {
-        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-            Ok(control) => control, Err(error) => return NotificationAttempt::NotAttempted(error),
-        };
+        let control =
+            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control,
+                Err(error) => return NotificationAttempt::NotAttempted(error),
+            };
         let route = match server_route_scope(server, &state) {
-            Ok(route) => route, Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+            Ok(route) => route,
+            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
         };
         match state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), recipient) {
             Ok(tasks) => tasks.is_some_and(|tasks| !tasks.is_empty()),
             Err(error) => return NotificationAttempt::NotAttempted(error),
         }
-    } else { true };
+    } else {
+        true
+    };
     if state.board_patrol_notice_ids.contains(message_id) && !patrol_current {
         return NotificationAttempt::NotAttempted(
             "board patrol notice no longer has canonical eligible tasks".into(),
@@ -909,15 +919,17 @@ fn attempt_tmux_notification_with_retry(
         } else {
             let route = match server_route_scope(server, &state) {
                 Ok(Some(route)) => route,
-                Ok(None) => {
-                    return NotificationAttempt::Rejected(
-                        "CURRENT_MAP_ROUTE_UNAVAILABLE: typed wake requires a registered project route"
-                            .into(),
-                    )
-                }
+                Ok(None) => return NotificationAttempt::Rejected(
+                    "CURRENT_MAP_ROUTE_UNAVAILABLE: typed wake requires a registered project route"
+                        .into(),
+                ),
                 Err(error) => return NotificationAttempt::Rejected(error.into()),
             };
-            let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            let control = match binding_store::BindingControlStore::new(
+                server.host_paths.state_root(),
+            )
+            .load()
+            {
                 Ok(control) => control,
                 Err(error) => return NotificationAttempt::Rejected(error),
             };
@@ -955,12 +967,7 @@ fn attempt_tmux_notification_with_retry(
                     continue;
                 }
                 match name_mailbox::current_name_allows_message(
-                    &state,
-                    control,
-                    route,
-                    recipient,
-                    binding,
-                    message,
+                    &state, control, route, recipient, binding, message,
                 ) {
                     Ok(true) => {
                         allowed.insert(message.id.clone());
@@ -1011,8 +1018,9 @@ fn attempt_tmux_notification_with_retry(
         && state.msgs.get(message_id).is_some_and(|message| {
             state.message_receivable_by(recipient, message) && message.state == "read"
         })
-        && state.receive_receipts.values().any(|receipt| receipt.worker_id == recipient
-            && receipt.message_ids.iter().any(|id| id == message_id))
+        && state.receive_receipts.values().any(|receipt| {
+            receipt.worker_id == recipient && receipt.message_ids.iter().any(|id| id == message_id)
+        })
     {
         return NotificationAttempt::Consumed;
     }
@@ -1086,7 +1094,13 @@ fn attempt_tmux_notification_with_retry(
     let Some(window_start_ms) = batch.first().map(|candidate| candidate.0) else {
         return NotificationAttempt::NotAttempted("no notification batch is ready".into());
     };
-    let (batch, remaining) = mailbox::select_batch(batch, delay, window_start_ms);
+    let (batch, remaining) = if transport.kind == TransportKind::Rex && delay == 0 {
+        // Rex immediate recovery drains every pending wake already due at
+        // this tick. The first-message window remains for delayed transports.
+        mailbox::select_batch(batch, now.saturating_sub(window_start_ms), window_start_ms)
+    } else {
+        mailbox::select_batch(batch, delay, window_start_ms)
+    };
     let Some(first) = batch.first() else {
         return NotificationAttempt::NotAttempted("notification batch is empty".into());
     };
@@ -1187,17 +1201,18 @@ fn attempt_tmux_notification_with_retry(
     // decorated id reached the gateway as `collab:<digest>:collab-notification-…`,
     // so the peer's ack named a message the mailbox did not have and the
     // receipt was reported `not_found` while the send still looked successful.
+    let adapter_delivery_mode = if queued_tmux {
+        DAEMON_LIVE_CLOSURE_MODE
+    } else {
+        &delivery_mode
+    };
     match deliver(
         transport,
         source_thread_id,
         &text,
         &first.1,
         explicit,
-        if queued_tmux {
-            DAEMON_LIVE_CLOSURE_MODE
-        } else {
-            &delivery_mode
-        },
+        adapter_delivery_mode,
     ) {
         Ok(receipt) => {
             append_log(
@@ -1483,6 +1498,12 @@ fn attempt_notification_detailed_with_mode_at_inner(
         },
     );
     if let NotificationAttempt::NotAttempted(error) = &attempt {
+        if error.starts_with("REX_BINDING_PUBLICATION_BUSY") {
+            // Binding publication is a daemon-internal scheduling deferral
+            // before any adapter I/O. The durable message remains queued and
+            // the timer resumes it; it is not a notification delivery failure.
+            return attempt;
+        }
         let mut state = server.state.lock().unwrap();
         // Never let a later pre-delivery skip overwrite the class of an
         // earlier native attempt. Accepted attempts leave no failure record
@@ -1520,6 +1541,13 @@ fn notification_delivery_delay_ms(
     event: &str,
     config: &crate::config::Notifications,
 ) -> i64 {
+    // The base inbox subscription selects the summary's transport. Its
+    // members are deadlines and retain the configured deadline timing policy.
+    let event = if state.deadline_summaries.contains_key(message_id) {
+        "deadline"
+    } else {
+        event
+    };
     // These native channels own scheduling after acceptance; the daemon must
     // not add a notification aggregation window before it submits their input.
     if state
@@ -1623,18 +1651,20 @@ pub(crate) fn attempt_notification_detailed_with_rex_recovery(
     let Some(context) = context else {
         return attempt;
     };
-    let Ok(manager) = ProjectRuntimeManager::new(server.clone(), &server.host_paths) else {
+    let Ok(control) = host_control::HostControl::read_current(&server.host_paths) else {
+        return attempt;
+    };
+    let Ok(host) = HostServices::for_project(server) else {
+        return attempt;
+    };
+    let Ok(manager) = ProjectRuntimeManager::with_control(host, control) else {
         return attempt;
     };
     let mut response = Resp::err(error.clone());
     response.data["notification_error"] = json!(error);
     response.data["msg_id"] = json!(message_id);
     manager
-        .recover_rex_notification_after_service_change(
-            server,
-            Some(&context),
-            &mut response,
-        )
+        .recover_rex_notification_after_service_change(server, Some(&context), &mut response)
         .unwrap_or(attempt)
 }
 
@@ -1746,12 +1776,43 @@ impl ProjectRuntimeManager {
                 retry_data.remove(key);
             }
         }
-        retry_data["rex_binding_refresh"] =
-            json!("same-server-session-block-service-generation");
+        retry_data["rex_binding_refresh"] = json!("same-server-session-block-service-generation");
         retry_data["rex_binding_retry"] = json!("original-durable-message-once");
         *response = notification_send_response(retry_data, true, notification_method, &retry);
         Some(retry)
     }
+}
+
+/// Rex send admission is durable even when binding publication holds the
+/// shared wake gate. The existing daemon notification owner resumes that
+/// message and coalesces it with later pending wakes for the same recipient.
+pub(crate) fn rex_publication_busy_queued(
+    notification_method: &str,
+    notification: &NotificationAttempt,
+) -> bool {
+    notification_method == "rex"
+        && matches!(
+            notification,
+            NotificationAttempt::NotAttempted(error)
+                if error.starts_with("REX_BINDING_PUBLICATION_BUSY")
+        )
+}
+
+/// Rex send admission ends at the durable mailbox. The existing daemon timer
+/// owns later anchor resolution, batching and adapter submission.
+pub(crate) fn defer_rex_sender_notification(
+    mut data: serde_json::Value,
+    subscription_present: bool,
+    notification_method: &str,
+) -> Option<Resp> {
+    if !subscription_present || notification_method != "rex" {
+        return None;
+    }
+    data["durable"] = json!(true);
+    data["notification"] = json!("queued");
+    data["consumed"] = json!(false);
+    data["repair_required"] = json!(false);
+    Some(Resp::data(data))
 }
 
 fn notification_send_response(
@@ -1781,6 +1842,28 @@ fn notification_send_response(
             data["durable"] = json!(true);
             data["notification"] = json!("queued");
             data["consumed"] = json!(false);
+            Resp::data(data)
+        }
+        NotificationAttempt::NotAttempted(_)
+            if rex_publication_busy_queued(notification_method, notification) =>
+        {
+            // The durable message and retryable not-attempted fact are already
+            // committed. Publication contention only defers the existing
+            // daemon-owned wake owner; it is not a sender repair condition.
+            if let Some(data) = data.as_object_mut() {
+                for key in [
+                    "notification_error",
+                    "failure",
+                    "repair_required",
+                    "escalation",
+                ] {
+                    data.remove(key);
+                }
+            }
+            data["durable"] = json!(true);
+            data["notification"] = json!("queued");
+            data["consumed"] = json!(false);
+            data["repair_required"] = json!(false);
             Resp::data(data)
         }
         NotificationAttempt::Accepted => {
@@ -1851,7 +1934,9 @@ fn refresh_rex_notification_binding(
     let key = control
         .key_for_worker(&context.project_scope, &context.app_scope_id, recipient)?
         .cloned()
-        .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no current binding"))?;
+        .ok_or_else(|| {
+            format!("REX_CURRENT_BINDING_MISSING: {recipient} has no current binding")
+        })?;
     let slot = control
         .slot(&key)
         .ok_or_else(|| "REX_CURRENT_BINDING_MISSING: binding slot disappeared".to_string())?;
@@ -1859,10 +1944,9 @@ fn refresh_rex_notification_binding(
         .active_binding()
         .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding"))?;
     let saved_transport = value.transport.clone();
-    let endpoint = saved_transport
-        .rex_endpoint
-        .as_ref()
-        .ok_or_else(|| format!("REX_CURRENT_BINDING_CHANGED: {recipient} is not currently bound to Rex"))?;
+    let endpoint = saved_transport.rex_endpoint.as_ref().ok_or_else(|| {
+        format!("REX_CURRENT_BINDING_CHANGED: {recipient} is not currently bound to Rex")
+    })?;
     let agent_session_id = saved_transport
         .session_id
         .as_deref()
@@ -1880,10 +1964,9 @@ fn refresh_rex_notification_binding(
             agent_session_id,
         ))
         .map_err(|error| error.to_string())?;
-    let refreshed_endpoint = refreshed
-        .rex_endpoint
-        .as_ref()
-        .ok_or_else(|| "REX_CURRENT_BINDING_CHANGED: refreshed binding has no Rex endpoint".to_string())?;
+    let refreshed_endpoint = refreshed.rex_endpoint.as_ref().ok_or_else(|| {
+        "REX_CURRENT_BINDING_CHANGED: refreshed binding has no Rex endpoint".to_string()
+    })?;
     if refreshed.kind != TransportKind::Rex
         || refreshed_endpoint.server != endpoint.server
         || refreshed_endpoint.session_id != endpoint.session_id
@@ -1895,7 +1978,9 @@ fn refresh_rex_notification_binding(
     }
     let ident = crate::identity::read_persisted(&manager.host.host_paths, recipient)
         .map_err(|error| format!("{error:#}"))?
-        .ok_or_else(|| format!("IDENTITY_CREDENTIAL_MISSING: mapped worker {recipient} is not registered"))?;
+        .ok_or_else(|| {
+            format!("IDENTITY_CREDENTIAL_MISSING: mapped worker {recipient} is not registered")
+        })?;
     let mut identity = ident;
     let scope = crate::scope::Scope {
         root: runtime.root.clone(),
@@ -1965,15 +2050,17 @@ fn attempt_scheduler_notification(
             return Ok(SchedulerNotificationAttempt::Unavailable);
         }
         let claim_ms = now_ms();
-        server.commit_locked(
-            &mut state,
-            &[Event::SchedulerAdmissionStatus {
-                request_id: request_id.into(),
-                status: "notifying".into(),
-                error: None,
-                updated_ms: claim_ms,
-            }],
-        ).map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
+        server
+            .commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: request_id.into(),
+                    status: "notifying".into(),
+                    error: None,
+                    updated_ms: claim_ms,
+                }],
+            )
+            .map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
         claim_ms
     };
     let delivery = {
@@ -2054,19 +2141,24 @@ fn attempt_scheduler_notification(
     if notified.accepted() {
         let mut state = server.state.lock().unwrap();
         if scheduler_notification_claim_is_current(&state, request_id, claim_ms) {
-            server.commit_locked(
-                &mut state,
-                &[Event::SchedulerAdmissionStatus {
-                    request_id: request_id.into(),
-                    status: "succeeded".into(),
-                    error: None,
-                    updated_ms: now_ms(),
-                }],
-            ).map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
+            server
+                .commit_locked(
+                    &mut state,
+                    &[Event::SchedulerAdmissionStatus {
+                        request_id: request_id.into(),
+                        status: "succeeded".into(),
+                        error: None,
+                        updated_ms: now_ms(),
+                    }],
+                )
+                .map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
         }
         Ok(SchedulerNotificationAttempt::Accepted)
     } else {
-        if matches!(notified, NotificationAttempt::Consumed | NotificationAttempt::NotAttempted(_)) {
+        if matches!(
+            notified,
+            NotificationAttempt::Consumed | NotificationAttempt::NotAttempted(_)
+        ) {
             let outcome = finish_scheduler_consumption(server, request_id, message_id, claim_ms)?;
             if outcome != SchedulerNotificationAttempt::Rejected {
                 return Ok(outcome);
@@ -2088,14 +2180,25 @@ fn finish_scheduler_consumption(
         return Ok(SchedulerNotificationAttempt::InFlight);
     }
     let admission = &state.scheduler_admissions[request_id];
-    let consumed = admission.message_id == message_id && state.msgs.get(message_id).is_some_and(|message|
-        message.to == admission.worker_id && matches!(message.state.as_str(), "read" | "delivered"));
+    let consumed = admission.message_id == message_id
+        && state.msgs.get(message_id).is_some_and(|message| {
+            message.to == admission.worker_id
+                && matches!(message.state.as_str(), "read" | "delivered")
+        });
     if !consumed {
         return Ok(SchedulerNotificationAttempt::Rejected);
     }
-    server.commit_locked(&mut state, &[Event::SchedulerAdmissionStatus {
-        request_id: request_id.into(), status: "succeeded".into(), error: None, updated_ms: now_ms(),
-    }]).map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
+    server
+        .commit_locked(
+            &mut state,
+            &[Event::SchedulerAdmissionStatus {
+                request_id: request_id.into(),
+                status: "succeeded".into(),
+                error: None,
+                updated_ms: now_ms(),
+            }],
+        )
+        .map_err(|error| Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}")))?;
     Ok(SchedulerNotificationAttempt::Consumed)
 }
 
@@ -2241,21 +2344,15 @@ mod rex_notification_label_tests {
 
     #[test]
     fn existing_transport_labels_are_unchanged() {
+        assert!(notification_rejected_label("desktop_bridge", "error")
+            .starts_with("DESKTOP_BRIDGE_NOTIFICATION_REJECTED:"));
+        assert!(notification_rejected_label("appserver", "error")
+            .starts_with("APPSERVER_NOTIFICATION_REJECTED:"));
         assert!(
-            notification_rejected_label("desktop_bridge", "error")
-                .starts_with("DESKTOP_BRIDGE_NOTIFICATION_REJECTED:")
+            notification_rejected_label("dsh", "error").starts_with("DSH_NOTIFICATION_REJECTED:")
         );
         assert!(
-            notification_rejected_label("appserver", "error")
-                .starts_with("APPSERVER_NOTIFICATION_REJECTED:")
-        );
-        assert!(
-            notification_rejected_label("dsh", "error")
-                .starts_with("DSH_NOTIFICATION_REJECTED:")
-        );
-        assert!(
-            notification_rejected_label("tmux", "error")
-                .starts_with("TMUX_NOTIFICATION_REJECTED:")
+            notification_rejected_label("tmux", "error").starts_with("TMUX_NOTIFICATION_REJECTED:")
         );
     }
 }

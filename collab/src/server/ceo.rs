@@ -1,6 +1,7 @@
 // Host-wide CEO authority and cross-project coordination. Project reducers
-// retain their task and mailbox ownership; only host.state holds the grant.
+// retain their task and mailbox ownership; host_control holds the grant.
 use crate::ceo::{CeoBootstrapRecord, CeoCommand, CeoGrant};
+use host_control::HostChange;
 
 fn append_ceo_responsibilities(brief: &mut serde_json::Value, rules: &[String]) {
     let Some(current) = brief["responsibilities"].as_array_mut() else {
@@ -27,7 +28,7 @@ fn append_ceo_operation(operations: &mut serde_json::Value, operation: serde_jso
 
 impl ProjectRuntimeManager {
     fn reconcile_ceo_workspace_reset(&self, context: Option<&ProjectContext>) -> Result<(), Resp> {
-        let grant = self.host.state.lock().unwrap().ceo_grant.clone();
+        let grant = self.host_control.state.lock().unwrap().ceo_grant.clone();
         let (Some(grant), Some(context)) = (grant, context) else {
             return Ok(());
         };
@@ -36,10 +37,10 @@ impl ProjectRuntimeManager {
         {
             return Ok(());
         }
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         if state.ceo_grant.as_ref() == Some(&grant) {
-            self.host
-                .commit_locked_checked(&mut state, &[Event::CeoGrantSet { grant: None }])
+            self.host_control
+                .commit_locked_checked(&mut state, &[HostChange::CeoGrantSet { grant: None }])
                 .map_err(|e| Resp::err(e.to_string()))?;
         }
         Ok(())
@@ -169,7 +170,7 @@ impl ProjectRuntimeManager {
     }
 
     fn ceo_grant(&self) -> Result<CeoGrant, Resp> {
-        let state = self.host.state.lock().unwrap();
+        let state = self.host_control.state.lock().unwrap();
         state
             .ceo_grant
             .clone()
@@ -229,7 +230,7 @@ impl ProjectRuntimeManager {
 
     fn ceo_status(&self, context: Option<&ProjectContext>, actor: &str) -> Resp {
         let grant = {
-            let state = self.host.state.lock().unwrap();
+            let state = self.host_control.state.lock().unwrap();
             state.ceo_grant.clone()
         };
         let (holder, authority_error) = match grant.as_ref().map(|grant| self.ceo_holder(grant)) {
@@ -256,7 +257,7 @@ impl ProjectRuntimeManager {
         worker_id: String,
         token: String,
         command: CeoCommand,
-    ) -> (Arc<Server>, Resp) {
+    ) -> DispatchResult {
         let response = if matches!(command, CeoCommand::Status) {
             // Status is public and read-only; an unauthenticated caller never
             // receives an is_current claim based on a supplied worker id.
@@ -270,7 +271,7 @@ impl ProjectRuntimeManager {
             self.execute_ceo(context.as_ref(), worker_id, token, command)
                 .unwrap_or_else(|error| error)
         };
-        (self.host.clone(), response)
+        (None, response)
     }
 
     fn execute_ceo(
@@ -313,8 +314,8 @@ impl ProjectRuntimeManager {
                     approval,
                     granted_ms: now_ms(),
                 };
-                self.host
-                    .commit_checked(&[Event::CeoGrantSet {
+                self.host_control
+                    .commit_checked(&[HostChange::CeoGrantSet {
                         grant: Some(grant.clone()),
                     }])
                     .map_err(|e| Resp::err(format!("CEO_DURABILITY_FAILED: {e}")))?;
@@ -330,8 +331,8 @@ impl ProjectRuntimeManager {
                 if approval.trim().is_empty() {
                     return Err(Resp::err("CEO_APPROVAL_REQUIRED"));
                 }
-                self.host
-                    .commit_checked(&[Event::CeoGrantSet { grant: None }])
+                self.host_control
+                    .commit_checked(&[HostChange::CeoGrantSet { grant: None }])
                     .map_err(|e| Resp::err(format!("CEO_DURABILITY_FAILED: {e}")))?;
                 Ok(self.ceo_status(Some(context), &actor))
             }
@@ -856,16 +857,16 @@ impl ProjectRuntimeManager {
             return Err(Resp::err("CEO_MESSAGE_CONTENT_REQUIRED"));
         }
         let project = source.root.to_string_lossy().into_owned();
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         // Probe the helper dedup on a clone so the response can state truthfully
         // whether this call created a meaningful revision.
         let mut probe = state.ceo_report_state.clone();
         let recorded = probe.record_progress(project.clone(), content.clone(), urgent);
         if recorded {
-            self.host
+            self.host_control
                 .commit_locked_checked(
                     &mut state,
-                    &[Event::CeoProgressRecorded {
+                    &[HostChange::CeoProgressRecorded {
                         project: project.clone(),
                         content,
                         urgent,
@@ -973,16 +974,16 @@ impl ProjectRuntimeManager {
             return Err(Resp::err("CEO_REPORT_BATCH_REQUIRED"));
         }
         let reported_ms = now_ms().max(0) as u64;
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         if !state.ceo_report_state.batches.contains_key(&batch_id) {
             return Err(Resp::err(
                 "CEO_REPORT_BATCH_UNKNOWN: no unacknowledged batch has this id",
             ));
         }
-        self.host
+        self.host_control
             .commit_locked_checked(
                 &mut state,
-                &[Event::CeoReportBatchAcknowledged {
+                &[HostChange::CeoReportBatchAcknowledged {
                     batch_id: batch_id.clone(),
                     reported_ms,
                 }],
@@ -1007,7 +1008,7 @@ impl ProjectRuntimeManager {
             .ceo_report_policy()
             .map_err(|error| Resp::err(format!("CEO_REPORT_POLICY_INVALID: {error}")))?;
         let now = now_ms().max(0) as u64;
-        let mut state = self.host.state.lock().unwrap();
+        let mut state = self.host_control.state.lock().unwrap();
         let last = state.ceo_report_state.last_actual_report_ms();
         let decision = policy.evaluate(now, last, false);
         let pending: Vec<_> = state
@@ -1051,14 +1052,19 @@ impl ProjectRuntimeManager {
             .map_err(|error| Resp::err(format!("CEO_REPORT_BATCH_PREPARE_FAILED: {error}")))?;
         let batch_id = prepared.batch_id;
         if !state.ceo_report_state.batches.contains_key(&batch_id) {
-            self.host
-                .commit_locked_checked(
+            let command = format!("ceo-report-prepare:{batch_id}");
+            self.host_control
+                .commit_command_locked(
                     &mut state,
-                    &[Event::CeoReportBatchPrepared {
+                    &command,
+                    &command,
+                    &[HostChange::CeoReportBatchPrepared {
                         batch_id: batch_id.clone(),
                         coverage: coverage.clone(),
                         urgent,
                     }],
+                    json!({"batch_id": batch_id}),
+                    None,
                 )
                 .map_err(|error| {
                     Resp::err(format!("CEO_REPORT_BATCH_DURABILITY_FAILED: {error}"))
@@ -1184,7 +1190,7 @@ impl ProjectRuntimeManager {
             }
         }
         let operations = self
-            .host
+            .host_control
             .state
             .lock()
             .unwrap()

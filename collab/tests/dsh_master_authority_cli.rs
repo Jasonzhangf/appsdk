@@ -707,6 +707,240 @@ fn assert_ok(reply: &Value) {
     assert_eq!(reply["ok"], true, "unexpected daemon refusal: {reply}");
 }
 
+// This public consumer uses only its own daemon and gateway. It creates no
+// terminal sessions and leaves the existing tmux goal coverage intact.
+#[test]
+fn goal_capacity_public_dispatch_restart_and_invalid_acceptance_are_atomic() {
+    let mut fixture = Fixture::new();
+    fixture.start_daemon();
+    assert_ok(&register(&fixture, "workerA", "tokenA", "agentA"));
+    assert_ok(&register(&fixture, "workerB", "tokenB", "agentB"));
+    let run = |fixture: &Fixture, session: &str, args: &[&str]| -> Value {
+        let output = fixture.dsh_command(args, session);
+        assert!(
+            output.status.success(),
+            "{args:?}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    run(
+        &fixture,
+        "agentA",
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated goal capacity test",
+        ],
+    );
+    let master = run(&fixture, "agentA", &["context"]);
+    let master_name = master["result"]["snapshot"]["name"].as_str().unwrap();
+    let peer = run(&fixture, "agentB", &["context"]);
+    let name = peer["result"]["snapshot"]["name"].as_str().unwrap();
+    for goal in ["capacity-standing", "capacity-extra"] {
+        run(
+            &fixture,
+            "agentA",
+            &[
+                "goal",
+                "reconcile",
+                "--goal-id",
+                goal,
+                "--owner",
+                name,
+                "--desired",
+                "active",
+                "--every-ms",
+                "60000",
+                "--ttl-seconds",
+                "600",
+            ],
+        );
+    }
+    let baseline = run(&fixture, "agentB", &["notify", "status"]);
+    let unrelated = baseline["subscriptions"].as_array().unwrap();
+    assert_eq!(
+        unrelated.iter().filter(|s| s["status"] == "armed").count(),
+        3
+    );
+    let publish = |fixture: &Fixture, id: &str| {
+        run(
+            fixture,
+            "agentA",
+            &[
+                "board",
+                "publish",
+                id,
+                "--title",
+                "Capacity task",
+                "--description",
+                "Keep unrelated work",
+                "--delivery-condition",
+                "Atomic acceptance",
+                "--test-condition",
+                "Durable renewal",
+                "--executor",
+                name,
+            ],
+        )
+    };
+    let published = publish(&fixture, "capacity-task");
+    let revision = published["task"]["revision"].to_string();
+    let dispatched = run(
+        &fixture,
+        "agentA",
+        &[
+            "board",
+            "dispatch",
+            "capacity-task",
+            "--expected-revision",
+            &revision,
+            "--long-horizon-content",
+            "Capacity instructions",
+            "--long-horizon-every-ms",
+            "60000",
+            "--long-horizon-repeat",
+            "4",
+        ],
+    );
+    let accepted = dispatched;
+    assert_eq!(accepted["goal_schedule"]["armed"], true, "{accepted}");
+    let renewal = accepted["goal_schedule"]["subscription"].clone();
+    assert_eq!(renewal["worker_id"], "workerB");
+    assert_eq!(renewal["repeat_count"], 4);
+    assert_eq!(renewal["goal_content"]["source"]["kind"], "board-task");
+    let active = run(&fixture, "agentB", &["notify", "status"]);
+    for subscription in unrelated {
+        assert!(
+            active["subscriptions"]
+                .as_array()
+                .unwrap()
+                .contains(subscription),
+            "unrelated subscription changed: {active}"
+        );
+    }
+    fixture.restart_daemon();
+    let recovered = run(&fixture, "agentB", &["notify", "status"]);
+    assert_eq!(recovered["subscriptions"], active["subscriptions"]);
+    let board = run(&fixture, "agentA", &["board", "show"]);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "capacity-task")
+        .unwrap();
+    assert_eq!(task["owner"], accepted["task"]["owner"]);
+    assert_eq!(task["revision"], accepted["task"]["revision"]);
+
+    // Real owner-scope refusal: the peer cannot change the master's goal.
+    let master_goal = run(
+        &fixture,
+        "agentA",
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "master-only",
+            "--owner",
+            master_name,
+            "--desired",
+            "active",
+            "--every-ms",
+            "60000",
+            "--ttl-seconds",
+            "600",
+        ],
+    );
+    assert_eq!(master_goal["subscription"]["worker_id"], "workerA");
+    let before_auth = run(&fixture, "agentA", &["notify", "status"]);
+    let denied = fixture.dsh_command(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "master-only",
+            "--owner",
+            master_name,
+            "--desired",
+            "ended",
+        ],
+        "agentB",
+    );
+    assert!(!denied.status.success());
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("GOAL_SCHEDULE_OWNER_MISMATCH"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    assert_eq!(
+        run(&fixture, "agentA", &["notify", "status"])["subscriptions"],
+        before_auth["subscriptions"]
+    );
+
+    let invalid = publish(&fixture, "invalid-task");
+    let revision = invalid["task"]["revision"].to_string();
+    let before_tasks = run(&fixture, "agentA", &["board", "show"]);
+    let before_subs = run(&fixture, "agentB", &["notify", "status"]);
+    let refused = fixture.dsh_command(
+        &[
+            "board",
+            "dispatch",
+            "invalid-task",
+            "--expected-revision",
+            &revision,
+            "--long-horizon-content",
+            "Invalid deadline",
+            "--long-horizon-every-ms",
+            "1000",
+            "--long-horizon-repeat",
+            "4",
+            "--long-horizon-ttl-seconds",
+            "1",
+        ],
+        "agentA",
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("goal deadline trigger must be in the future and before expiry"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        run(&fixture, "agentA", &["board", "show"])["tasks"],
+        before_tasks["tasks"]
+    );
+    assert_eq!(
+        run(&fixture, "agentB", &["notify", "status"])["subscriptions"],
+        before_subs["subscriptions"]
+    );
+    run(
+        &fixture,
+        "agentA",
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "task:capacity-task",
+            "--owner",
+            name,
+            "--desired",
+            "ended",
+        ],
+    );
+    let ended = run(&fixture, "agentB", &["notify", "status"]);
+    let ended = ended["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == renewal["id"])
+        .unwrap();
+    assert_eq!(ended["status"], "cancelled");
+    fixture.finish();
+}
+
 #[test]
 fn current_name_address_ignores_stale_business_alias() {
     let mut fixture = Fixture::new();
@@ -1402,7 +1636,6 @@ fn dsh_full_reset_recovers_every_live_peer_after_gateway_republishes_declaration
     );
     fixture.finish();
 }
-
 #[test]
 fn dsh_bootstrap_discovery_rejects_invalid_capabilities_without_registration() {
     use std::os::unix::fs::PermissionsExt;

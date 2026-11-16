@@ -19,6 +19,10 @@ impl GoalScheduleOperation {
     }
 }
 
+#[cfg(test)]
+#[path = "goal_management_no_holder_tests.rs"]
+mod goal_management_no_holder_tests;
+
 struct GoalScheduleChange {
     goal_id: String,
     goal_owner: String,
@@ -43,11 +47,23 @@ fn handle_goal_schedule_for_actor(
     if let Err(error) = verify(&state, actor, token) {
         return error;
     }
-    let target = match goal_schedule_target(server, &state, &change.goal_owner) {
+    let target = match goal_schedule_change_target(server, &state, &change) {
         Ok(target) => target,
         Err(error) => return error,
     };
-    if actor != target {
+    let current_owner =
+        if change.desired == "ended" || change.operation == GoalScheduleOperation::Edit {
+            match server_route_scope(server, &state) {
+                Ok(Some(route)) => state
+                    .name_occupancy(route.project_scope_id.as_str(), &change.goal_owner)
+                    .is_some_and(|owner| owner.worker_id == actor),
+                Ok(None) => return Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"),
+                Err(error) => return Resp::err(error),
+            }
+        } else {
+            true
+        };
+    if actor != target || !current_owner {
         match current_master_holder(server, &state) {
             Ok(Some(master)) if master == actor => {},
             Ok(_) => return Resp::err("GOAL_SCHEDULE_OWNER_MISMATCH: only the owner, project master or current CEO may manage this goal"),
@@ -55,6 +71,61 @@ fn handle_goal_schedule_for_actor(
         }
     }
     commit_goal_schedule(server, &mut state, &target, change)
+}
+
+// Editing or ending an existing schedule is administration, not delivery. Only current
+// business ownership can identify it; a previous binding grants no authority.
+fn goal_schedule_change_target(
+    server: &Server,
+    state: &State,
+    change: &GoalScheduleChange,
+) -> Result<String, Resp> {
+    if change.desired != "ended" && change.operation != GoalScheduleOperation::Edit {
+        return goal_schedule_target(server, state, &change.goal_owner);
+    }
+    if change.goal_owner.trim().is_empty() {
+        return Err(Resp::err("GOAL_SCHEDULE_OWNER_REQUIRED"));
+    }
+    if change.goal_id.trim().is_empty() {
+        return Err(Resp::err("GOAL_SCHEDULE_ID_REQUIRED"));
+    }
+    match goal_schedule_target(server, state, &change.goal_owner) {
+        Ok(target) => return Ok(target),
+        Err(error) if error.error.as_deref() == Some("GOAL_SCHEDULE_TARGET_UNAVAILABLE") => {}
+        Err(error) => return Err(error),
+    }
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
+    let target = if let Some(task_id) = change.goal_id.strip_prefix("task:") {
+        state
+            .task_assignment(task_id)
+            .filter(|assignment| assignment.name == change.goal_owner)
+            .ok_or_else(|| Resp::err("GOAL_SCHEDULE_TASK_OWNER_MISMATCH"))?;
+        state.tasks.get(task_id).map(|task| task.owner.as_str())
+    } else {
+        state
+            .name_occupancy(route.project_scope_id.as_str(), &change.goal_owner)
+            .map(|owner| owner.worker_id.as_str())
+    }
+    .ok_or_else(|| Resp::err("GOAL_SCHEDULE_TARGET_UNAVAILABLE"))?;
+    let subject = format!("goal:{}", change.goal_id);
+    if !state
+        .notification_subscriptions
+        .values()
+        .any(|subscription| {
+            subscription.event == "deadline"
+                && subscription.worker_id == target
+                && (subscription.subject.as_deref() == Some(subject.as_str())
+                    || change
+                        .goal_subject
+                        .as_ref()
+                        .is_some_and(|old| subscription.subject.as_ref() == Some(old)))
+        })
+    {
+        return Err(Resp::err("GOAL_SCHEDULE_NOT_FOUND"));
+    }
+    Ok(target.to_owned())
 }
 
 fn goal_schedule_target(server: &Server, state: &State, name: &str) -> Result<String, Resp> {
@@ -105,7 +176,17 @@ fn commit_goal_schedule(
         if details.long_horizon.is_none() {
             return Resp::err("BOARD_LONG_HORIZON_CONTENT_REQUIRED");
         }
-        let current = task_schedule_target(server, state, task, &details, None);
+        let current =
+            if change.desired == "ended" || change.operation == GoalScheduleOperation::Edit {
+                Ok(Some(task.owner.clone()))
+            } else {
+                resolve_task_schedule_selection(
+                    server,
+                    state,
+                    task_schedule_selection(state, task, &details),
+                    None,
+                )
+            };
         match current {
             Ok(Some(current)) if current == target => {}
             Ok(_) => return Resp::err("GOAL_SCHEDULE_TASK_OWNER_MISMATCH"),
@@ -254,8 +335,20 @@ fn prepare_goal_schedule(
             "GOAL_SCHEDULE_TARGET_NOT_FOUND: edit requires an existing exact goal",
         ));
     }
-    if change.operation == GoalScheduleOperation::Edit && edit_current.is_none() {
-        return terminal_goal_edit_schedule(change, target, &matching[0], now);
+    if change.operation == GoalScheduleOperation::Edit {
+        let no_transport = state
+            .workers
+            .get(target)
+            .and_then(selected_transport_for_worker)
+            .is_none();
+        if edit_current.is_none() || no_transport {
+            return terminal_goal_edit_schedule(
+                change,
+                target,
+                edit_current.unwrap_or(&matching[0]),
+                now,
+            );
+        }
     }
     if change.operation == GoalScheduleOperation::Derived
         && task_id.is_some()
@@ -390,18 +483,6 @@ fn prepare_goal_schedule(
             if content.trim().is_empty() {
                 return Err(Resp::err("GOAL_SCHEDULE_CONTENT_REQUIRED"));
             }
-        }
-        let other_active = state
-            .notification_subscriptions
-            .values()
-            .filter(|subscription| {
-                subscription.worker_id == target
-                    && subscription.status == "armed"
-                    && !matching.iter().any(|old| old.id == subscription.id)
-            })
-            .count();
-        if other_active >= MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER {
-            return Err(Resp::err("maximum 3 active subscriptions per agent"));
         }
         let mut subscription = existing
             .cloned()
@@ -622,11 +703,16 @@ fn task_goal_events(
     // A task-linked schedule whose holder retired keeps waiting when the new
     // committed owner has no live transport yet. The business commit for that
     // task must still succeed.
-    if !state.workers.contains_key(target)
-        && state.notification_subscriptions.values().any(|subscription| {
-            subscription.subject.as_deref() == Some(subject.as_str())
-                && subscription.status == "waiting-owner"
-        })
+    if !ended
+        && operation == GoalScheduleOperation::Derived
+        && !state.workers.contains_key(target)
+        && state
+            .notification_subscriptions
+            .values()
+            .any(|subscription| {
+                subscription.subject.as_deref() == Some(subject.as_str())
+                    && subscription.status == "waiting-owner"
+            })
     {
         return Ok((Vec::new(), serde_json::Value::Null));
     }
@@ -649,7 +735,7 @@ fn task_goal_events(
         .map(|slot| slot.identity_key.name.clone());
     let name = match name {
         Some(name) => name,
-        None if ended => state
+        None if ended || operation == GoalScheduleOperation::Edit => state
             .task_assignment(&task.id)
             .map(|assignment| assignment.name.clone())
             .unwrap_or_default(),
@@ -684,13 +770,22 @@ fn task_goal_receipt(state: &State, task_id: &str) -> serde_json::Value {
     json!({ "armed": subscription.is_some_and(|subscription| subscription.status == "armed"), "subscription": subscription })
 }
 
-fn task_schedule_target(
-    server: &Server,
+#[derive(PartialEq)]
+enum TaskScheduleSelection {
+    Name(String),
+    Worker(String),
+}
+
+fn task_schedule_selection(
     state: &State,
     task: &TaskRec,
-    _details: &crate::board::BoardTaskDetails,
-    control: Option<&binding_slot::BindingControlSet>,
-) -> Result<Option<String>, Resp> {
+    details: &crate::board::BoardTaskDetails,
+) -> Option<TaskScheduleSelection> {
+    if let Some(invite) = &details.invitation {
+        return Some(TaskScheduleSelection::Worker(invite.peer_id.clone()));
+    }
+    // Selection is deliberately detached from current map state. Stable name
+    // and worker references must survive the transition snapshot unchanged.
     if let Some(phase) = state
         .ticket_phases
         .iter()
@@ -709,14 +804,28 @@ fn task_schedule_target(
             return phase
                 .slot_name
                 .as_deref()
-                .map(|name| match control {
-                    Some(control) => goal_schedule_target_with_control(server, state, name, control),
-                    None => goal_schedule_target(server, state, name),
-                })
-                .transpose();
+                .map(|name| TaskScheduleSelection::Name(name.to_owned()));
         }
     }
-    Ok((!matches!(task.status.as_str(), "pending" | "invited")).then(|| task.owner.clone()))
+    (!matches!(task.status.as_str(), "pending" | "invited"))
+        .then(|| TaskScheduleSelection::Worker(task.owner.clone()))
+}
+
+fn resolve_task_schedule_selection(
+    server: &Server,
+    state: &State,
+    selection: Option<TaskScheduleSelection>,
+    control: Option<&binding_slot::BindingControlSet>,
+) -> Result<Option<String>, Resp> {
+    match selection {
+        Some(TaskScheduleSelection::Name(name)) => match control {
+            Some(control) => goal_schedule_target_with_control(server, state, &name, control),
+            None => goal_schedule_target(server, state, &name),
+        }
+        .map(Some),
+        Some(TaskScheduleSelection::Worker(worker)) => Ok(Some(worker)),
+        None => Ok(None),
+    }
 }
 
 /// Extend the existing candidate-state transaction with linked task schedules.
@@ -769,28 +878,95 @@ fn task_goal_transition_events(
         }
         let old_details = before.board_details.get(id);
         let old_task = before.tasks.get(id);
+        let owner_transfer = old_task.is_some_and(|old| old.owner != task.owner);
         let first_invitation_ended = old_task.is_some_and(|task| task.status == "invited")
             && task.status == "pending"
             && details.invitation.is_none();
         let ended =
             first_invitation_ended || matches!(task.status.as_str(), "closed" | "cancelled");
-        let target = if ended {
+        let selection = if ended {
             None
         } else {
-            task_schedule_target(server, after, task, details, control)?
+            task_schedule_selection(after, task, details)
         };
-        let old_target = match (old_task.filter(|_| !ended), old_details) {
-            (Some(task), Some(details)) => task_schedule_target(server, before, task, details, control)?,
+        let old_selection = match (old_task.filter(|_| !ended), old_details) {
+            (Some(task), Some(details)) => task_schedule_selection(before, task, details),
             _ => None,
         };
         let form_changed = old_details.and_then(|details| details.long_horizon.as_ref())
             != details.long_horizon.as_ref();
-        if !ended && !form_changed && old_target == target {
+        if !ended && !form_changed && old_selection == selection && !owner_transfer {
             continue;
         }
+        let old_assignment = old_task.and_then(|_| before.task_assignment(id));
+        let same_name_carrier_continuation = !ended
+            && !form_changed
+            && old_details.is_some_and(|details| details.invitation.is_none())
+            && details.invitation.is_none()
+            && old_task.is_some_and(|old| old.status == task.status)
+            && old_assignment
+                .zip(after.task_assignment(id))
+                .is_some_and(|(old, current)| {
+                    old.name == current.name && old.session_id != current.session_id
+                });
+        if same_name_carrier_continuation {
+            continue;
+        }
+        let explicit_invitation = old_details.is_some_and(|details| details.invitation.is_none())
+            && details.invitation.is_some();
+        if explicit_invitation && !owner_transfer && !form_changed {
+            continue;
+        }
+        let first_invitation_withdrawal = !ended
+            && !form_changed
+            && old_details.is_some_and(|details| details.invitation.is_some())
+            && details.invitation.is_none();
+        let retain_historical_batch = first_invitation_withdrawal
+            && old_details
+                .zip(old_task)
+                .is_some_and(|(old_details, old_task)| {
+                    let mut historical_details = old_details.clone();
+                    historical_details.invitation = None;
+                    task_schedule_selection(before, old_task, &historical_details) == selection
+                });
+        if retain_historical_batch {
+            continue;
+        }
+        // Business updates and ticket recovery do not request a new finite
+        // batch. In particular, recovery can change Name selection to Worker
+        // while the same owner/session remains current. Preserve its ended
+        // schedule instead of making the unrelated commit require renewal.
+        if !ended && !owner_transfer {
+            let subject = format!("goal:task:{id}");
+            let mut matching = after
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| {
+                    subscription.event == "deadline"
+                        && subscription.subject.as_deref() == Some(subject.as_str())
+                })
+                .peekable();
+            let now = now_ms();
+            if matching.peek().is_some()
+                && matching.all(|subscription| {
+                    matches!(
+                        subscription.status.as_str(),
+                        "consumed" | "expired" | "cancelled" | "suppressed"
+                    ) || matches!(subscription.status.as_str(), "armed" | "transport-lost")
+                        && (subscription.expires_ms <= now
+                            || subscription.fired_count >= subscription.repeat_count)
+                })
+            {
+                continue;
+            }
+        }
+        let target = resolve_task_schedule_selection(server, after, selection, control)?;
         if !ended && target.is_none() {
             continue;
         }
+        // Only a committed ownership change is an authorized renewal signal.
+        // A pending invitation and its withdrawal are no-op transitions: they
+        // must neither move nor renew the current owner's schedule.
         let (goal_events, _) = task_goal_events(
             server,
             after,
@@ -816,13 +992,13 @@ impl ProjectRuntimeManager {
         project: Option<&str>,
         app: Option<&str>,
         change: GoalScheduleChange,
-    ) -> (Arc<Server>, Resp) {
+    ) -> DispatchResult {
         let (source, name) = match self.ceo_actor(context, actor, token) {
             Ok(source) => source,
-            Err(error) => return (self.host.clone(), error),
+            Err(error) => return (None, error),
         };
         if let Err(error) = validate_request_context(&source, request, Some(context)) {
-            return (source, Resp::err(error));
+            return (Some(source), Resp::err(error));
         }
         let is_ceo = self.require_ceo(context, &name).is_ok();
         let root = project.unwrap_or(&context.canonical_root);
@@ -830,7 +1006,7 @@ impl ProjectRuntimeManager {
             Ok(root) => root,
             Err(error) => {
                 return (
-                    source,
+                    Some(source),
                     Resp::err(format!("GOAL_SCHEDULE_PROJECT_INVALID: {error}")),
                 )
             }
@@ -839,7 +1015,7 @@ impl ProjectRuntimeManager {
         let same_scope = canonical == source.root && target_app == context.app_scope_id.as_str();
         if !same_scope && !is_ceo {
             return (
-                source,
+                Some(source),
                 Resp::err(
                     "CEO_AUTHORITY_REQUIRED: cross-project goal management requires current CEO",
                 ),
@@ -851,42 +1027,42 @@ impl ProjectRuntimeManager {
         } else {
             let runtimes = match self.ceo_project_runtimes(root, app) {
                 Ok(runtimes) => runtimes,
-                Err(error) => return (source, error),
+                Err(error) => return (Some(source), error),
             };
             let mut matching = Vec::new();
             for runtime in runtimes {
-                let result = goal_schedule_target(
-                    &runtime,
-                    &runtime.state.lock().unwrap(),
-                    &change.goal_owner,
-                );
+                let result =
+                    goal_schedule_change_target(&runtime, &runtime.state.lock().unwrap(), &change);
                 match result {
                     Ok(_) => matching.push(runtime),
                     Err(error)
                         if error.error.as_deref() == Some("GOAL_SCHEDULE_TARGET_UNAVAILABLE") => {}
-                    Err(error) => return (source, error),
+                    Err(error) => return (Some(source), error),
                 }
             }
             if matching.len() > 1 {
                 return (
-                    source,
+                    Some(source),
                     Resp::err("GOAL_SCHEDULE_TARGET_AMBIGUOUS: provide --app"),
                 );
             }
             if matching.is_empty() {
-                return (source, Resp::err("GOAL_SCHEDULE_TARGET_SCOPE_UNAVAILABLE"));
+                return (
+                    Some(source),
+                    Resp::err("GOAL_SCHEDULE_TARGET_SCOPE_UNAVAILABLE"),
+                );
             }
             matching.remove(0)
         };
         let response = if is_ceo {
             let mut state = target.state.lock().unwrap();
-            match goal_schedule_target(&target, &state, &change.goal_owner) {
+            match goal_schedule_change_target(&target, &state, &change) {
                 Ok(worker) => commit_goal_schedule(&target, &mut state, &worker, change),
                 Err(error) => error,
             }
         } else {
             handle_goal_schedule_for_actor(&target, actor, token, change)
         };
-        (target, response)
+        (Some(target), response)
     }
 }

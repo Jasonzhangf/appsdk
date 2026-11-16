@@ -30,6 +30,29 @@ fn direct_subscription(status: &Value, worker_id: &str) -> Value {
         .unwrap_or_else(|| panic!("direct-message subscription not found: {status}"))
 }
 
+fn wait_notification_failure(
+    fixture: &RexLiveFixture,
+    message_id: &str,
+    sender_session_id: &str,
+    expected: &str,
+) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let message = fixture.run_ok(&["msg", message_id], Some(sender_session_id));
+        if message["notification_delivery_failure"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(expected))
+        {
+            return message;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "notification failure {expected} not recorded for {message_id}: {message}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_context_automatically_discovers_current_block() {
@@ -241,38 +264,27 @@ fn rex_public_block_binding_directs_delivery_to_the_current_owner_only() {
         )
         .output()
         .expect("send a durable message to the displaced identity");
-    assert_eq!(
-        old_output.status.code(),
-        Some(1),
-        "the displaced identity has no current Rex delivery target: stdout={} stderr={}",
+    assert!(
+        old_output.status.success(),
+        "Rex send admission must reach the durable mailbox before daemon delivery: stdout={} stderr={}",
         String::from_utf8_lossy(&old_output.stdout),
         String::from_utf8_lossy(&old_output.stderr)
     );
-    let old_stderr = String::from_utf8_lossy(&old_output.stderr);
-    assert!(
-        old_stderr.contains("REX_CURRENT_BINDING_MISSING"),
-        "the notification failure must identify the absent current binding: {old_stderr}"
-    );
-    let old_response = old_stderr
-        .lines()
-        .find_map(|line| line.strip_prefix("collab response: "))
-        .unwrap_or_else(|| panic!("CLI omitted the durable response: {old_stderr}"));
     let old_sent: Value =
-        serde_json::from_str(old_response).expect("decode durable notification failure");
+        serde_json::from_slice(&old_output.stdout).expect("Rex send returns durable JSON");
     assert_eq!(old_sent["durable"], true, "{old_sent}");
-    assert_eq!(
-        old_sent["notification"], "subscribed-not-sent",
-        "{old_sent}"
-    );
-    assert_eq!(
-        old_sent["failure"], "notification_delivery_failed",
-        "{old_sent}"
-    );
+    assert_eq!(old_sent["notification"], "queued", "{old_sent}");
     let old_message_id = old_sent["msg_id"]
         .as_str()
         .or_else(|| old_sent["message_id"].as_str())
         .unwrap_or_else(|| panic!("old-owner send has no durable message id: {old_sent}"))
         .to_owned();
+    wait_notification_failure(
+        &fixture,
+        &old_message_id,
+        &sender.agent_session_id,
+        "REX_CURRENT_BINDING_MISSING",
+    );
 
     let new_body = "new owner body must reach the current block";
     let new_sent = fixture.run_ok(

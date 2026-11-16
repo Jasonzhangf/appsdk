@@ -44,18 +44,17 @@ pub(super) async fn channel_dispatch(
     manager: Arc<ProjectRuntimeManager>,
     context: Option<ProjectContext>,
     request: Req,
-) -> (Arc<Server>, Resp) {
-    let host = manager.host.clone();
+) -> DispatchResult {
     channel_dispatch_inner(manager, context, request)
         .await
-        .unwrap_or_else(|error| (host, Resp::err(error)))
+        .unwrap_or_else(|error| (None, Resp::err(error)))
 }
 
 async fn channel_dispatch_inner(
     manager: Arc<ProjectRuntimeManager>,
     context: Option<ProjectContext>,
     request: Req,
-) -> Result<(Arc<Server>, Resp), String> {
+) -> Result<DispatchResult, String> {
     let context = context.ok_or("PROJECT_CONTEXT_REQUIRED")?;
     let prepare_manager = manager.clone();
     let prepare_context = context.clone();
@@ -111,7 +110,7 @@ async fn channel_dispatch_inner(
         match duplicate {
             channel_envelope::PlatformEventTarget::LocalMessage(id) => {
                 return Ok((
-                    server,
+                    Some(server),
                     Resp::data(json!({"msg_id": id, "deduplicated": true})),
                 ));
             }
@@ -131,7 +130,7 @@ async fn channel_dispatch_inner(
                     .clone()
                     .ok_or("FEDERATION_NOT_CONFIGURED")?;
                 let response = submit_record(manager, server.clone(), configuration, record).await;
-                return Ok((server, response));
+                return Ok((Some(server), response));
             }
         }
     }
@@ -193,14 +192,13 @@ pub(super) async fn dispatch(
     manager: Arc<ProjectRuntimeManager>,
     context: Option<ProjectContext>,
     request: Req,
-) -> (Arc<Server>, Resp) {
-    let host = manager.host.clone();
+) -> DispatchResult {
     let result = match request {
         request @ Req::AddressSend { .. } => send(manager, context, request).await,
         Req::FederationDirectory { machine, project } => {
             directory(manager.clone(), machine, project)
                 .await
-                .map(|response| (manager.host.clone(), response))
+                .map(|response| (None, response))
         }
         Req::MessageRefStatus {
             worker_id,
@@ -210,7 +208,7 @@ pub(super) async fn dispatch(
         } => status(manager, context, worker_id, token, command, reference).await,
         _ => Err("FEDERATION_REQUEST_INVALID".into()),
     };
-    result.unwrap_or_else(|error| (host, Resp::err(error)))
+    result.unwrap_or_else(|error| (None, Resp::err(error)))
 }
 
 struct LocalActor {
@@ -362,7 +360,7 @@ fn local_send(
     context: ProjectContext,
     request: Req,
     resolved: ResolvedAddress,
-) -> Result<(Arc<Server>, Resp), String> {
+) -> Result<DispatchResult, String> {
     let Req::AddressSend {
         worker_id,
         token,
@@ -430,7 +428,7 @@ fn local_send(
             if !reference.machine.eq_ignore_ascii_case(local) {
                 return Err("FEDERATION_REPLY_TARGET_MISMATCH".into());
             }
-            Some(reference.msg_id.to_string())
+            Some(super::cross_project_receipt::encoded(&reference))
         }
         None => None,
     };
@@ -471,7 +469,10 @@ fn local_send(
             mtype,
             subject: Some(subject),
             body,
-            in_reply_to,
+            in_reply_to: in_reply_to.map(|reply| match crate::proto::parse_collab_ref(&reply) {
+                Ok(MessageReference::Message(reference)) => reference.msg_id.to_string(),
+                _ => reply,
+            }),
             delivery,
             reply_policy,
             target_session,
@@ -483,7 +484,7 @@ async fn send(
     manager: Arc<ProjectRuntimeManager>,
     context: Option<ProjectContext>,
     request: Req,
-) -> Result<(Arc<Server>, Resp), String> {
+) -> Result<DispatchResult, String> {
     let context = context.ok_or("PROJECT_CONTEXT_REQUIRED")?;
     let Req::AddressSend {
         worker_id,
@@ -523,6 +524,7 @@ async fn send(
     let mut original_origin = None;
     let mut channel = None;
     let mut expected_reply = None;
+    let mut local_reply = false;
     if let Some(reference) = in_reply_to.as_ref() {
         let state = actor.server.state.lock().unwrap();
         if let Some(meta) = state.federation.message_for_reference(reference) {
@@ -549,6 +551,14 @@ async fn send(
             expected_reply = Some(record.target.clone());
             original_origin = Some(record.origin.clone());
             channel = record.channel.clone();
+        } else if reference
+            .machine
+            .eq_ignore_ascii_case(&actor.principal.address.machine)
+        {
+            // Ordinary local cross-project mail has no federation ledger.
+            // Its owner validates the reference and both exact participants
+            // under the same ordered locks as the reverse mailbox commit.
+            local_reply = true;
         } else {
             return Err("FEDERATION_REPLY_REFERENCE_UNKNOWN".into());
         }
@@ -570,6 +580,9 @@ async fn send(
         let resolved = blocking(move || resolve(&route_manager, &input)).await?;
         match resolved {
             ResolvedAddress::Remote { machine, target } => {
+                if local_reply {
+                    return Err("FEDERATION_REPLY_TARGET_MISMATCH: local mail requires its original local sender".into());
+                }
                 FederationEndpoint::Named(QualifiedNameAddress {
                     machine,
                     local: target,
@@ -621,7 +634,7 @@ async fn send(
     .map_err(|error| error.to_string())?;
     let server = actor.server;
     let response = submit_record(manager, server.clone(), configuration, candidate).await;
-    Ok((server, response))
+    Ok((Some(server), response))
 }
 
 pub(super) async fn submit_record(
@@ -952,13 +965,58 @@ async fn status(
     token: String,
     command: Option<CommandEnvelope>,
     reference: MessageReference,
-) -> Result<(Arc<Server>, Resp), String> {
+) -> Result<DispatchResult, String> {
     let context = context.ok_or("PROJECT_CONTEXT_REQUIRED")?;
     let auth_manager = manager.clone();
+    let caller_app = context.app_scope_id.clone();
+    let caller_runtime = context.runtime_context.clone();
+    let caller_worker = worker.clone();
     let actor = blocking(move || {
         authenticate_actor(&auth_manager, &context, &worker, &token, command.as_ref())
     })
     .await?;
+    let local_machine = manager
+        .host
+        .config
+        .federation
+        .as_ref()
+        .map(|config| config.machine.as_str())
+        .unwrap_or("local");
+    if let MessageReference::Message(reference) = &reference {
+        if reference.machine.eq_ignore_ascii_case(local_machine) {
+            if !message_id_is_path_safe(reference.msg_id.as_str()) {
+                return Err("MESSAGE_ID_INVALID: unsafe message ID".into());
+            }
+            let owner =
+                runtime_for_reference(&manager, &reference.project_scope, &reference.app_scope_id)?;
+            let ordinary = {
+                let state = owner.state.lock().unwrap();
+                state.federation.message_for_reference(reference).is_none()
+                    && (read_message_status_target(&owner, &state, reference.msg_id.as_str())
+                        .map_err(|error| format!("MESSAGE_LOOKUP_FAILED: {error}"))?
+                        .is_some()
+                        || manager.host.config.federation.is_none())
+            };
+            if ordinary {
+                let manager = manager.clone();
+                let caller = actor.server.clone();
+                let reference = reference.clone();
+                let response = blocking(move || {
+                    Ok(super::cross_project_receipt::status(
+                        &manager,
+                        &caller,
+                        &caller_app,
+                        caller_runtime.as_ref(),
+                        &caller_worker,
+                        &owner,
+                        &reference,
+                    ))
+                })
+                .await?;
+                return Ok((Some(actor.server), response));
+            }
+        }
+    }
     let configuration = manager
         .host
         .config
@@ -985,7 +1043,7 @@ async fn status(
                     ))
                 })
                 .await?;
-                return Ok((actor.server, public_response(response)));
+                return Ok((Some(actor.server), public_response(response)));
             }
             (
                 reference.machine.clone(),
@@ -999,7 +1057,7 @@ async fn status(
             let state = actor.server.state.lock().unwrap();
             if let Some(meta) = state.federation.message_for_origin(&origin) {
                 return Ok((
-                    actor.server.clone(),
+                    Some(actor.server.clone()),
                     public_response(super::federation_receipt_response(
                         &state,
                         &meta.reference,
@@ -1058,7 +1116,7 @@ async fn status(
         .await?;
     }
     Ok((
-        actor.server,
+        Some(actor.server),
         with_transport_error(public_response(response.response), response.cleanup_error),
     ))
 }

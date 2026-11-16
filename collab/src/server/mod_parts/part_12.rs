@@ -1,3 +1,13 @@
+fn host_readiness() -> Resp {
+    Resp::data(json!({
+        "host_ready": true,
+        "now": iso(now_ms()),
+        "protocol_version": crate::proto::IDENTITY_CONTEXT_CWD_PROTOCOL,
+        "daemon_version": env!("COLLAB_VERSION"),
+        "capabilities": [crate::proto::CAPABILITY_READINESS_PROTOCOL],
+    }))
+}
+
 fn parse_wire_request(line: &str) -> Result<(Option<ProjectContext>, Req), String> {
     match serde_json::from_str::<RequestEnvelope>(line) {
         Ok(mut envelope) => {
@@ -33,6 +43,7 @@ fn parse_wire_request(line: &str) -> Result<(Option<ProjectContext>, Req), Strin
     }
 }
 
+#[cfg(test)]
 async fn dispatch_wire(
     server: Arc<Server>,
     project_context: Option<ProjectContext>,
@@ -109,13 +120,13 @@ async fn dispatch_wire_routed(
     project_context: Option<ProjectContext>,
     req: Req,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> (Arc<Server>, Resp) {
+) -> DispatchResult {
     let is_reply = matches!(&req, Req::Send { in_reply_to: Some(_), .. }
         | Req::AddressSend { in_reply_to: Some(_), .. });
     let local_machine = manager.host.config.federation.as_ref()
         .map(|configuration| configuration.machine.clone()).unwrap_or_else(|| "local".into());
     let (server, mut response) = match req {
-        Req::DirectoryAll => (manager.host.clone(), manager.directory_all()),
+        Req::DirectoryAll => (None, manager.directory_all()),
         req @ Req::DefaultSet { .. } => {
             federation_defaults::dispatch(manager, project_context, req).await
         }
@@ -135,11 +146,11 @@ async fn dispatch_wire_routed(
             .unwrap_or_else(|error| {
                 Resp::err(format!("RESET_INCOMPLETE: handler failed: {error}"))
             });
-            (manager.host.clone(), response)
+            (None, response)
         }
         Req::Shutdown { password } => {
-            let response = handle_user_shutdown(&manager.host, password.as_ref());
-            (manager.host.clone(), response)
+            let response = handle_user_shutdown(&manager.host.host_paths, password.as_ref());
+            (None, response)
         }
         Req::RouteResolve { tmux_endpoint } => {
             let response = match manager.resolve_route_by_tmux_endpoint(&tmux_endpoint) {
@@ -151,7 +162,7 @@ async fn dispatch_wire_routed(
                 },
                 Err(error) => Resp::err(error),
             };
-            (manager.host.clone(), response)
+            (None, response)
         }
         Req::RouteResolveNative {
             session_id,
@@ -179,7 +190,7 @@ async fn dispatch_wire_routed(
                 },
                 Err(error) => Resp::err(error),
             };
-            (manager.host.clone(), response)
+            (None, response)
         }
         Req::Poll {
             worker_id,
@@ -189,7 +200,7 @@ async fn dispatch_wire_routed(
         } => {
             let Some(context) = project_context else {
                 return (
-                    manager.host.clone(),
+                    None,
                     Resp::err(
                         "PROJECT_CONTEXT_REQUIRED: canonical project root and scope are required",
                     ),
@@ -203,13 +214,13 @@ async fn dispatch_wire_routed(
             };
             let server = match manager.select_runtime(&context) {
                 Ok(server) => server,
-                Err(error) => return (manager.host.clone(), Resp::err(error)),
+                Err(error) => return (None, Resp::err(error)),
             };
             if let Err(error) = manager.recover_pending_effects_for_scope(&context) {
-                return (server, Resp::err(error));
+                return (Some(server), Resp::err(error));
             }
             if let Err(error) = validate_request_context(&server, &poll_req, Some(&context)) {
-                return (server, Resp::err(error));
+                return (Some(server), Resp::err(error));
             }
             let admission = {
                 let check = server.state.lock().unwrap();
@@ -240,7 +251,7 @@ async fn dispatch_wire_routed(
                     }
                 }
             };
-            (server, response)
+            (Some(server), response)
         }
         req => {
             let gate_effects = mutation_blocked_during_project_reset(&req)
@@ -251,7 +262,7 @@ async fn dispatch_wire_routed(
                     if gate_effects {
                         if let Some(context) = project_context.as_ref() {
                             if let Err(error) = manager.recover_pending_effects_for_scope(context) {
-                                return (manager.host.clone(), Resp::err(error));
+                                return (None, Resp::err(error));
                             }
                         }
                     }
@@ -262,7 +273,7 @@ async fn dispatch_wire_routed(
             match result {
                 Ok(result) => result,
                 Err(error) => (
-                    manager.host.clone(),
+                    None,
                     Resp::err(format!("handler join error: {error}")),
                 ),
             }
@@ -270,7 +281,7 @@ async fn dispatch_wire_routed(
     };
     let local_receipt = response.data.get("reference").and_then(|reference| reference.get("machine"))
         .and_then(serde_json::Value::as_str).is_none_or(|machine| machine.eq_ignore_ascii_case(&local_machine));
-    if is_reply && response.ok && local_receipt {
+    if let Some(server) = server.as_ref().filter(|_| is_reply && response.ok && local_receipt) {
         let message_id = response.data.get("msg_id").and_then(serde_json::Value::as_str).map(str::to_owned);
         if let Some(message_id) = message_id {
             let has_channel_route = server.state.lock().unwrap().channel_reply_routes.contains_key(&message_id);
@@ -289,6 +300,7 @@ async fn dispatch_wire_routed(
     (server, response)
 }
 
+#[cfg(test)]
 async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, mut writer) = stream.into_split();
@@ -835,9 +847,9 @@ fn remove_listener_socket(sock_path: &Path, captured: &std::fs::Metadata) -> any
     Ok(())
 }
 
-pub async fn run(scope: Scope) -> anyhow::Result<()> {
-    let host_paths = scope.host_paths()?;
-    run_with_host_paths(scope, host_paths).await
+/// Start the host-level daemon without choosing a project from cwd or HOME.
+pub async fn run_host(host_paths: HostPaths) -> anyhow::Result<()> {
+    run_with_mode(None, host_paths).await
 }
 
 async fn run_timer_scheduler<T, R, F>(
@@ -872,11 +884,13 @@ async fn run_timer_scheduler<T, R, F>(
     }
 }
 
+#[cfg(test)]
 async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Result<()> {
+    run_with_mode(Some(scope), host_paths).await
+}
+
+async fn run_with_mode(scope: Option<Scope>, host_paths: HostPaths) -> anyhow::Result<()> {
     raise_open_file_limit();
-    let scope = Scope {
-        root: std::fs::canonicalize(&scope.root)?,
-    };
     host_paths.ensure_root()?;
     let sock_path = host_paths.socket_path();
     // The host lock is the daemon writer admission gate.
@@ -884,66 +898,45 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     lifecycle_test_barrier("owner-admitted-before-publication")?;
     write_daemon_lock_owner(admission.admission())?;
 
-    let project_scope = GlobalState::canonical_project_scope(&scope.root)
-        .map_err(|error| anyhow::anyhow!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
-    let resident_key = (
-        crate::identity::CLI_APP_SERVER_ID.to_owned(),
-        project_scope.as_str().to_owned(),
-    );
     let route_file = host_paths.state_root().join("routes.json");
-    let runtime_storage_root = select_central_runtime_storage(&host_paths, &route_file, &resident_key, None)
-        .map_err(anyhow::Error::msg)?;
-    let project_server_dir = runtime_storage_root.join(".agent-collab").join("server");
-
     prepare_socket_path(&sock_path)?;
 
-    let state_path = project_server_dir.join("state.json");
-    let state = current_state::load(&state_path, false).map_err(anyhow::Error::msg)?;
+    match scope {
+        Some(scope) => {
+            let scope = Scope {
+                root: std::fs::canonicalize(&scope.root)?,
+            };
+            let project_scope = GlobalState::canonical_project_scope(&scope.root)
+                .map_err(|error| anyhow::anyhow!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
+            let resident_key = (
+                crate::identity::CLI_APP_SERVER_ID.to_owned(),
+                project_scope.as_str().to_owned(),
+            );
+            select_central_runtime_storage(&host_paths, &route_file, &resident_key, None)
+                .map_err(anyhow::Error::msg)?;
+        }
+        None => {}
+    };
 
 
     append_log(&host_paths.log_path(), "server starting");
 
-    let server = Arc::new(Server {
-        config: crate::config::load(&scope.root)?,
-        root: scope.root.clone(),
-        storage_root: runtime_storage_root,
-        state_path,
+    let host = HostServices {
+        config: crate::config::load_host()?,
+        legacy_state_path: host_state::host_state_path(&host_paths),
         host_paths: host_paths.clone(),
         register_gate: Arc::new(Mutex::new(())),
-        state: Mutex::new(state),
         appserver_candidate_check: default_appserver_candidate_check(),
         appserver_notification_sink: default_appserver_notification_sink(),
         appserver_thread_status: default_appserver_thread_status(),
         appserver_thread_archive: default_appserver_thread_archive(),
         #[cfg(not(test))]
         tmux_notification_sink: default_tmux_notification_sink(),
-        rex_monitor: Default::default(),
-        mailbox_notify: Notify::new(),
-    });
-    server.invalidate_restored_agent_observations().map_err(anyhow::Error::msg)?;
-    restore_registered_peer_default_leases(&server);
-    reconcile_master_goal_due(&server);
-    server
-        .rex_monitor
-        .install_runtime_handle(tokio::runtime::Handle::current());
-    // The monitor creates each Rex events task through `Handle::block_on`,
-    // matching the timer path, so the initial reconcile must also run off the
-    // async worker thread.
-    let initial_monitor = Arc::clone(&server);
-    if let Err(error) = tokio::task::spawn_blocking(move || {
-        crate::server::rex_monitor::reconcile(&initial_monitor, now_ms());
-    })
-    .await
-    {
-        append_log(
-            &host_paths.log_path(),
-            &format!("REX_MONITOR_RECONCILE_FAILED: {error}"),
-        );
-    }
-    purge_expired_storage(&server, now_ms());
-    let runtime_manager = ProjectRuntimeManager::new(server.clone(), &host_paths)
+        runtime_handle: Some(tokio::runtime::Handle::current()),
+    };
+    let runtime_manager = ProjectRuntimeManager::open(host)
     .map_err(|error| anyhow::anyhow!(error))?;
-    let federation_ingress = match server.config.federation.clone() {
+    let federation_ingress = match runtime_manager.host.config.federation.clone() {
         Some(configuration) => Some(federation_listener::Ingress::open(
             host_paths.state_root().join("federation").join("rpc.sock"), configuration,
         ).map_err(anyhow::Error::msg)?),

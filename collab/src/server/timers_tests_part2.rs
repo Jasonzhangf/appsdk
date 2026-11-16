@@ -333,13 +333,13 @@ use super::*;
         tick_with_idle(&server, &|_| false);
         let state = server.state.lock().unwrap();
         assert_eq!(
-            state
-                .wake_bindings
-                .values()
-                .filter(|bound| *bound == &subscription_id)
-                .count(),
+            subscription_messages(&state, &subscription_id).len(),
             1
         );
+        assert!(state
+            .deadline_summaries
+            .values()
+            .any(|members| members.contains_key(&subscription_id)));
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }
@@ -448,10 +448,10 @@ use super::*;
             .state
             .lock()
             .unwrap()
-            .wake_bindings
+            .deadline_summaries
             .iter()
-            .find_map(|(message_id, bound)| {
-                (bound == &subscription_id).then_some(message_id.clone())
+            .find_map(|(message_id, members)| {
+                members.contains_key(&subscription_id).then_some(message_id.clone())
             })
             .expect("goal deadline message");
         server.commit(&[Event::NotificationConsumed {
@@ -521,10 +521,10 @@ use super::*;
             let ids: Vec<String> = {
                 let state = server.state.lock().unwrap();
                 state
-                    .wake_bindings
+                    .deadline_summaries
                     .iter()
-                    .filter(|(message_id, bound)| {
-                        *bound == &subscription_id
+                    .filter(|(message_id, members)| {
+                        members.contains_key(&subscription_id)
                             && state.msgs.get(*message_id).is_some_and(|message| {
                                 message.state != "read" && message.state != "superseded"
                             })
@@ -603,14 +603,20 @@ use super::*;
         tick_with_idle(&server, &|_| false);
         tick_with_idle(&server, &|_| false);
         let state = server.state.lock().unwrap();
-        assert_eq!(
-            state
-                .msgs
-                .values()
-                .filter(|message| message.subject.as_deref() == Some("deadline:goal:revision-7"))
-                .count(),
-            1
-        );
+        let summaries: Vec<_> = state
+            .deadline_summaries
+            .iter()
+            .filter(|(_, members)| {
+                ["sub-goal-duplicate-a", "sub-goal-duplicate-b"]
+                    .iter()
+                    .any(|subscription_id| members.contains_key(*subscription_id))
+            })
+            .collect();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].1.len(), 1);
+        assert!(state.msgs[summaries[0].0]
+            .body
+            .contains("Subject: goal:revision-7"));
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }
@@ -647,7 +653,8 @@ use super::*;
             delivered[0].1.len() < 1024,
             "deadline wake preview must stay bounded and lightweight"
         );
-        assert!(delivered[0].1.contains("deadline:goal:idle-master"));
+        assert!(delivered[0].1.contains("DEADLINE_SUMMARY"));
+        assert!(delivered[0].1.contains("goal:idle-master"));
         assert!(
             !delivered[0].1.contains("subject="),
             "deadline wake must not repeat the envelope subject: {}",
@@ -660,9 +667,9 @@ use super::*;
         drop(delivered);
         let state = server.state.lock().unwrap();
         assert!(state
-            .wake_bindings
+            .deadline_summaries
             .values()
-            .any(|bound| bound == &subscription_id));
+            .any(|members| members.contains_key(&subscription_id)));
         // The adaptor accepted this one-shot goal deadline, so the latch is
         // cleared while the revision stays recorded for same-revision dedup.
         assert!(!state.master_wake.goal_due);
@@ -2198,9 +2205,12 @@ use super::*;
             std::sync::Condvar::new(),
         ));
         let hook_pause = Arc::clone(&pause);
-        *super::TIMER_DUE_COMMIT_PAUSE.lock().unwrap() = Some((
+        let mut hook = super::TIMER_DUE_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *hook = Some((
             subscription_id.to_owned(),
-            Box::new(move || {
+            Arc::new(move || {
                 let (lock, cv) = &*hook_pause;
                 let mut state = lock.lock().unwrap();
                 state.entered = true;
@@ -2217,6 +2227,20 @@ use super::*;
             }),
         ));
         pause
+    }
+
+    fn clear_due_batch_pause() {
+        *super::TIMER_DUE_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    struct DueBatchPauseGuard;
+
+    impl Drop for DueBatchPauseGuard {
+        fn drop(&mut self) {
+            clear_due_batch_pause();
+        }
     }
 
     fn wait_for_due_batch_pause(
@@ -2253,9 +2277,12 @@ use super::*;
         mut reconcile: impl FnMut(),
     ) {
         let pause = install_due_batch_pause(subscription_id);
+        let _pause_guard = DueBatchPauseGuard;
         let tick_server = Arc::clone(server);
         let tick = std::thread::spawn(move || {
-            tick_with_idle_at(&tick_server, now, &|_| false);
+            // Exercise the due-batch owner without unrelated native tmux
+            // observation from the broader maintenance tick.
+            super::tick_with_deadline_wake_at(&tick_server, now);
         });
         wait_for_due_batch_pause(&pause);
         let commit_serialized = server.state.try_lock().is_err();
@@ -2264,7 +2291,6 @@ use super::*;
         }
         release_due_batch_pause(&pause);
         tick.join().expect("timer tick must finish");
-        *super::TIMER_DUE_COMMIT_PAUSE.lock().unwrap() = None;
         if commit_serialized {
             reconcile();
         }

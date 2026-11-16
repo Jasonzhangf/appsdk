@@ -86,6 +86,78 @@ fn fixture() -> (
 }
 
 #[test]
+fn reset_identity_map_failure_keeps_business_and_control_unchanged() {
+    let (server, root, manager, context) = fixture();
+    populate(&server, "reset-master", "preserved");
+    let before = std::fs::read(&server.state_path).unwrap();
+    let control_path = server.host_paths.state_root().join("identity-map.json");
+    std::fs::remove_file(&control_path).unwrap();
+    std::fs::create_dir(&control_path).unwrap();
+    let result = manager.reset_project(&context, "reset-master", "reset-token");
+    assert!(!result.ok);
+    assert!(result.error.unwrap().contains("IDENTITY_MAP_READ_FAILED"));
+    assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .tasks
+        .contains_key("task-preserved"));
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .msgs
+        .contains_key("message-preserved"));
+    assert!(manager.binding_control_store().load().is_err());
+    assert!(!server
+        .host_paths
+        .state_root()
+        .join("host-control.json")
+        .exists());
+    assert!(manager
+        .host_control
+        .state
+        .lock()
+        .unwrap()
+        .pending_project_resets
+        .is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_intent_is_durable_only_in_identity_map_before_cleanup() {
+    let (server, root, manager, context) = fixture();
+    let identity_root = server.host_paths.state_root().join("identities");
+    std::fs::write(&identity_root, "not a directory").unwrap();
+    let result = manager.reset_project(&context, "reset-master", "reset-token");
+    assert!(!result.ok, "cleanup injection must fail");
+    assert!(!server
+        .host_paths
+        .state_root()
+        .join("host-control.json")
+        .exists());
+    assert!(manager
+        .binding_control_store()
+        .load()
+        .unwrap()
+        .pending_resets
+        .iter()
+        .any(|scope| scope == context.project_scope.as_str()));
+    let selection = manager.select_runtime(&context).err().unwrap();
+    assert!(selection.contains("RESET_INCOMPLETE"), "{selection}");
+    let materialization = manager
+        .ensure_runtime(&ProjectRuntimeManager::route_key(&context), &root, &root)
+        .err()
+        .unwrap();
+    assert!(
+        materialization.contains("RESET_INCOMPLETE"),
+        "{materialization}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn online_reset_live_manager_succeeds() {
     let (server, root, manager, context) = fixture();
     populate(&server, "reset-master", "A");
@@ -240,7 +312,17 @@ fn online_reset_preserves_other_project_and_releases_all_app_scopes() {
         .global
         .projects
         .contains_key(other_context.project_scope.as_str()));
-    assert!(replayed.pending_project_resets.is_empty());
+    assert!(
+        replayed.admission_frozen(),
+        "retired project runtime must stay frozen"
+    );
+    assert!(manager
+        .host_control
+        .state
+        .lock()
+        .unwrap()
+        .pending_project_resets
+        .is_empty());
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(other_root).unwrap();
 }
@@ -384,12 +466,13 @@ fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
     let result = manager.reset_project(&context, "reset-master", "reset-token");
     assert!(!result.ok);
     assert!(result.error.unwrap().contains("RESET_INCOMPLETE"));
-    assert!(server
-        .state
-        .lock()
+    assert!(manager
+        .binding_control_store()
+        .load()
         .unwrap()
-        .pending_project_resets
-        .contains_key(context.project_scope.as_str()));
+        .pending_resets
+        .iter()
+        .any(|scope| scope == context.project_scope.as_str()));
     let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(replayed.workers.is_empty());
     assert!(replayed
@@ -397,11 +480,11 @@ fn interrupted_reset_retains_central_cleanup_targets_until_startup_retry() {
         .contains_key(context.project_scope.as_str()));
     std::fs::remove_file(identity_root).unwrap();
     let recovered = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
-    assert!(server
-        .state
-        .lock()
+    assert!(recovered
+        .binding_control_store()
+        .load()
         .unwrap()
-        .pending_project_resets
+        .pending_resets
         .is_empty());
     assert!(!recovered.has_project_route(context.project_scope.as_str()));
     assert!(
@@ -575,7 +658,7 @@ fn resident_route_recovery_and_other_project_reset_have_one_lock_order() {
     recovery.join().unwrap();
     assert!(!publication_held_before_materialization,
         "reset must acquire materialization before route publication, like resident context recovery");
-    assert!(manager.host.state.lock().is_ok());
+    assert!(manager.host_control.state.lock().is_ok());
     assert!(manager.dispatch_sync(None, Req::Ping).1.ok);
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(other_root).unwrap();
@@ -745,8 +828,8 @@ fn online_reset_external_project_drops_runtime_and_its_current_state() {
 }
 
 #[test]
-fn stale_superseded_route_is_retired_without_touching_live_unknown_route() {
-    let (host, root, manager, _) = fixture();
+fn stale_superseded_route_is_rejected_without_touching_live_unknown_route() {
+    let (host, root, manager, host_context) = fixture();
     let (other, other_root, _other_manager, other_context) = fixture();
     let original = other
         .state
@@ -772,34 +855,42 @@ fn stale_superseded_route_is_retired_without_touching_live_unknown_route() {
         binding: original.clone(),
     }])
     .unwrap();
+    let store = manager.binding_control_store();
+    let mut transport = peer_tests::test_appserver_transport("other-thread");
+    transport.session_id = Some("other-session".into());
+    store
+        .commit(binding_store::ControlChange::Commit {
+            key: binding_slot::IdentityBindingKey::new(
+                original.project_scope.clone(),
+                original.app_scope_id.clone(),
+                "Jenny",
+            ),
+            value: binding_slot::BindingValue::new(original.clone(), transport),
+            expected_generation: None,
+        })
+        .unwrap();
     manager.install_runtime(
         &ProjectRuntimeManager::route_key(&other_context),
         other.clone(),
         None,
     );
-    let mut retired = original.clone();
-    retired.native_thread_id = None;
-    retired.tmux_endpoint = None;
-    other
-        .commit_checked(&[Event::GlobalRuntimeBound { binding: retired }])
-        .unwrap();
+    assert!(manager
+        .resolve_route_by_native_session(&other_context, "other-session")
+        .is_ok());
+    store.retire_binding(&original).unwrap();
+    let before = std::fs::read(&host.state_path).unwrap();
     manager.prune_stale_routes().unwrap();
-    let state = host.state.lock().unwrap();
-    assert!(!state
-        .global
-        .current_thread_routes
-        .values()
-        .any(|b| b.project_scope == other_context.project_scope));
-    assert!(state
-        .global
-        .current_thread_routes
-        .values()
-        .any(|b| b.project_scope.as_str() == manager.host_root.to_string_lossy()));
-    drop(state);
-    host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
-        binding: original.clone(),
-    }])
-    .unwrap();
+    assert!(manager
+        .resolve_route_by_native_session(&other_context, "other-session")
+        .is_err());
+    assert!(manager
+        .resolve_route_by_native_session(&host_context, "reset-session")
+        .is_ok());
+    assert_eq!(
+        std::fs::read(&host.state_path).unwrap(),
+        before,
+        "retired identity must be rejected without rewriting an unused legacy index"
+    );
     other
         .commit_checked(&[Event::ProjectResetStarted {
             project_scope: other_context.project_scope.as_str().into(),
@@ -808,12 +899,12 @@ fn stale_superseded_route_is_retired_without_touching_live_unknown_route() {
         }])
         .unwrap();
     manager.prune_stale_routes().unwrap();
-    let replayed = current_state::load(&host.state_path, false).unwrap();
-    assert!(!replayed
-        .global
-        .current_thread_routes
-        .values()
-        .any(|b| b.project_scope == other_context.project_scope));
+    assert!(manager
+        .resolve_route_by_native_session(&other_context, "other-session")
+        .is_err());
+    assert!(manager
+        .resolve_route_by_native_session(&host_context, "reset-session")
+        .is_ok());
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(other_root).unwrap();
 }

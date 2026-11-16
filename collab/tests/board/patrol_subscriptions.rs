@@ -17,6 +17,20 @@ fn input_has_message(input: &Value, id: &str) -> bool {
 }
 
 // Observe native submission before recv can consume the durable inbox.
+fn deadline_message<'a>(current: &'a Value, subscription: &str) -> Option<&'a str> {
+    current["wake_bindings"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(id, bound)| {
+            *bound == subscription
+                || current["deadline_summaries"][*id]
+                    .get(subscription)
+                    .is_some()
+        })
+        .map(|(id, _)| id.as_str())
+}
+
 fn native_deadline(
     f: &AppFixture,
     thread: &str,
@@ -26,13 +40,7 @@ fn native_deadline(
     let until = Instant::now() + timeout;
     while Instant::now() < until {
         let current = f.current_state();
-        if let Some(id) = current["wake_bindings"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .find(|(_, bound)| *bound == subscription)
-            .map(|(id, _)| id.as_str())
-        {
+        if let Some(id) = deadline_message(&current, subscription) {
             let accepted = !current["notification_delivery_accepted"][id].is_null()
                 && current["notification_delivery_evidence"][id].is_object();
             let inputs = f.state.lock().unwrap();
@@ -48,8 +56,14 @@ fn native_deadline(
         }
         thread::sleep(Duration::from_millis(50));
     }
+    let current = f.current_state();
+    let id = deadline_message(&current, subscription).unwrap_or("missing");
     Err(format!(
-        "native deadline missing: {subscription} -> {thread}"
+        "native deadline missing: {subscription} -> {thread}; message={id}; accepted={}; evidence={}; failure={}; native_inputs={:?}",
+        current["notification_delivery_accepted"][id],
+        current["notification_delivery_evidence"][id],
+        current["notification_delivery_failures"][id],
+        f.state.lock().unwrap().get(thread).map(|s| &s.inputs)
     ))
 }
 
@@ -414,7 +428,8 @@ fn rejected_native_deadline_does_not_pass_observation() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|m| m["subject"] == "deadline:goal:reject"),
+            .any(|m| m["subject"] == "deadline:summary"
+                && m["body"].as_str().unwrap().contains("Subject: goal:reject")),
         "durable consumption alone would pass: {received}"
     );
 }
@@ -951,8 +966,13 @@ fn peer_goal_deadline_is_delivered_consumed_and_cancelled_without_master_proxy()
         .as_array()
         .unwrap()
         .iter()
-        .find(|m| m["subject"] == "deadline:goal:peer-owned")
+        .find(|m| m["id"] == native_id)
         .expect("peer must receive its own goal deadline");
+    assert_eq!(message["subject"], "deadline:summary");
+    assert!(message["body"]
+        .as_str()
+        .unwrap()
+        .contains("Subject: goal:peer-owned"));
     assert_eq!(message["to"], peer_id);
     assert_eq!(message["id"], native_id);
     let deadline_body = message["body"].as_str().expect("deadline body");
@@ -1205,14 +1225,12 @@ fn accepted_master_goal_deadline_clears_goal_due_before_recv() {
     let until = Instant::now() + Duration::from_secs(10);
     let later_message = loop {
         let current = fixture.current_state();
-        let bound = current["wake_bindings"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .find(|(_, subscription)| *subscription == later_sub)
-            .map(|(id, _)| id.as_str());
+        let bound = deadline_message(&current, later_sub);
         if let Some(message_id) = bound {
-            if !current["notification_delivery_failures"][message_id].is_null() {
+            if current["notification_delivery_failures"][message_id].is_object()
+                && current["notification_delivery_failures"][message_id]["operation"]
+                    != "notification.not_attempted"
+            {
                 break message_id.to_owned();
             }
         }

@@ -5,6 +5,19 @@ It does not assert that a candidate is installed, activated or accepted live.
 Execution results belong in the task run. Graph validation proves topology and
 operator bindings; it does not prove runtime behavior.
 
+Host startup reads fixed routes and the current identity map. It does not import
+project `State.global`, discover routes from resident project state or create an
+empty CEO control file. The three `host_state::tests::approved_host_ablation_`
+gates and public lifecycle startup cases cover that boundary. Actual CEO changes
+persist through `HostControl`; its typed grant and opaque command receipts remain
+authoritative on reopen. `host_control::tests` covers grant revocation, replay,
+corruption and interrupted reset-intent handoff. Ongoing reset intents and
+selection/materialization admission use `BindingControlStore` alone.
+`host_dispatch_cross_project_mail_stays_in_selected_runtime` covers authenticated
+CEO creation/revocation, opposing public sends, linked replies, scoped master
+reset and restart without deleting newly created data. Legacy project authority
+and mixed receipts are preserved at their old paths, without inferred migration.
+
 The old CLI `migrate`, MCP `collab_migrate` and Migration/RemoveWorker wire
 variants are absent. `removed_migration_surface` checks real CLI/MCP rejection
 without state creation; the Req decoder's removed-maintenance test pairs unknown
@@ -111,6 +124,7 @@ and unified result; it does not add an automatic retry loop or product timeout.
 
 | Behavior | Current gates | Required boundary |
 |---|---|---|
+| Foreign physical-anchor replacement | `foreign_anchor_public_contract::foreign_physical_anchor_public_transfer_preserves_state_and_fences_old_carrier`; `foreign_physical_anchor_transfer_is_independent_of_daemon_and_project_cwd`; `foreign_physical_anchor_missing_session_is_non_mutating` | Public daemon requests probe and observe a new test-owned tmux socket/session. Successful registration publishes one physical current owner and releases the exact former source generation in the same map candidate. Persist the new session/thread/route; deny the former carrier; permit new-owner lookup and task operations. Preserve source-name task/mail data in its own project/app. Missing session and an actually missing pane refuse without partial identity/route/business effects. Ordinary recovery keeps the replacement name and binding. These are isolated adaptor/protocol consumers, not real LLM or installed/live acceptance. |
 | Global CEO and approved master bootstrap | `ceo_public_contract`; CEO state/report/idle tests | Explicit typed global grant, exact source and scope, current target and a real registered-master handshake. Bootstrap follows the approved stable session/pane, even if registration changes its physical label. |
 | Peer lifecycle and self removal | `peer_lifecycle_cli`; `peer_lifecycle_missing_close_cli`; `self_close_cross_project_cli`; `lifecycle_boundary_cli`; `human_retirement_` public controls; `physical-frontend-qa/report.md` | Missing exact pane permits self-close retirement. Present or unknown panes do not. Self removal preserves host process, outstanding task/message data and foreign identity; another project's later Context does not inherit retired anchors. The real TUI self-close preserved the old host and label while a new Bob ordinary Context regained the logical name. Explicit `retire_name` is a separate human-authorized release, including the approved E3 Jenny case; pane absence does not authorize it. |
 | Scoped project reset | `lifecycle_boundary_cli`; `server::project_reset::tests` | Authorize without recovery side effects. Delete only the requested project's current map/state/routes/assets. Failed cleanup remains explicit and pending; other projects and the global daemon remain. |

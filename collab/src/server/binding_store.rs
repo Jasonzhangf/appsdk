@@ -280,6 +280,7 @@ impl BindingControlStore {
     /// file that is already visible.
     pub(crate) fn commit(&self, mut change: ControlChange) -> Result<StoreCommit, String> {
         let mut control = self.load()?;
+        let original = control.clone();
         // Every publication retains the touched current's admission boundary,
         // including rematerialization and pending-effect retries.
         let target_value = match &mut change {
@@ -294,7 +295,6 @@ impl BindingControlStore {
                 value.preserve_rex_fence(current);
             }
         }
-        let mut effect_changed = false;
         let touched_project_names = change.touched_project_names();
         let outcome = match change {
             ControlChange::Commit {
@@ -331,7 +331,7 @@ impl BindingControlStore {
                             self.path.display()
                         )
                     })?;
-                effect_changed = control.set_effect(effect).map_err(|error| {
+                control.set_effect(effect).map_err(|error| {
                     format!(
                         "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
                         self.path.display()
@@ -349,7 +349,7 @@ impl BindingControlStore {
                 let outcome = control
                     .unregister(&key, None)
                     .map_err(|error| error.to_string())?;
-                effect_changed = control
+                control
                     .set_effect(effect)
                     .map_err(|error| error.to_string())?;
                 StoreChangeOutcome::Slot(outcome)
@@ -416,27 +416,25 @@ impl BindingControlStore {
                             self.path.display()
                         )
                     })?;
-                effect_changed = control.set_effect(effect).map_err(|error| {
+                control.set_effect(effect).map_err(|error| {
                     format!(
                         "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
                         self.path.display()
                     )
                 })?;
-                effect_changed |= control
+                control
                     .release_cross_scope_sources(&cross_scope_sources)
                     .map_err(|error| {
                         format!(
                             "BINDING_CONTROL_COMMIT_REJECTED: {}: {error}",
                             self.path.display()
                         )
-                    })?
-                    > 0;
+                    })?;
                 if let Some((key, value, effect)) = companion {
-                    let changed = control
+                    control
                         .commit(&key, value, None)
                         .map_err(|error| error.to_string())?;
-                    effect_changed |= matches!(changed, CommitOutcome::Committed { .. });
-                    effect_changed |= control
+                    control
                         .set_effect(effect)
                         .map_err(|error| error.to_string())?;
                 }
@@ -475,7 +473,7 @@ impl BindingControlStore {
                     )
                 })?;
         }
-        let durability = if effect_changed {
+        let durability = if control != original {
             self.save(&control)?
         } else {
             match outcome {

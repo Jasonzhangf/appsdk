@@ -28,14 +28,15 @@ impl ProjectRuntimeManager {
                 && transport.thread_id.as_deref() == Some(thread)) {
             return Ok(false);
         }
-        let host = self.host.state.lock().unwrap();
-        Ok(host.global.current_thread_routes.values().any(|binding|
+        let map = self.binding_control_store().load().map_err(anyhow::Error::msg)?;
+        let current = map.active_values().map(|value| &value.binding).any(|binding|
             binding.project_scope == context.project_scope && binding.app_scope_id == context.app_scope_id
                 && binding.agent_id.as_str() == ident.worker_id
                 && binding.session_id.as_ref().map(identity::SessionId::as_str) == Some(session)
                 && binding.native_thread_id.as_ref().map(identity::NativeThreadId::as_str) == Some(thread)
                 && ident.runtime.as_ref().is_some_and(|runtime|
-                    runtime.binding_id == binding.binding_id)))
+                    runtime.binding_id == binding.binding_id));
+        Ok(current)
     }
     /// Reconcile one Desktop bridge binding to its real, host-verified
     /// published endpoint. Discovery is scoped to the committed project scope

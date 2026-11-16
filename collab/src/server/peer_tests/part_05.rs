@@ -317,7 +317,7 @@ fn cross_project_send_queues_to_a_live_tmux_master_without_route_projection() {
 }
 
 #[test]
-fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
+fn cross_project_send_durably_accepts_a_missing_tmux_endpoint() {
     let (server, root) = test_server();
     register(&server, "target-master", "%target-master");
     promote_master(&server, "target-master", "user approved target-master");
@@ -338,24 +338,27 @@ fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
         );
     }
 
-    let denied = super::handle_cross_project_send(
+    let accepted = super::handle_cross_project_send(
         &server,
         "appsdk-master",
         "/tmp/appsdk".into(),
         Some("thread-appsdk-master".into()),
         "target-master",
         "feature",
-        "must reject a dead address",
+        "must remain durable without a live wake endpoint",
         None,
     );
-    assert!(!denied.ok);
-    assert!(
-        denied
-            .error
-            .unwrap_or_default()
-            .contains("reachable target binding"),
-        "the reject must name the dead address, not master authority"
-    );
+    assert!(accepted.ok, "{accepted:?}");
+    assert_eq!(accepted.data["durable"], true, "{accepted:?}");
+    assert_eq!(accepted.data["consumed"], false, "{accepted:?}");
+    let msg_id = accepted.data["msg_id"]
+        .as_str()
+        .expect("durable message id");
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[msg_id].to, "target-master");
+    assert_eq!(state.msgs[msg_id].from, "appsdk-master@/tmp/appsdk");
+    assert_eq!(state.msgs[msg_id].state, "pending");
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -389,7 +392,7 @@ fn init_registration_result_exposes_persisted_runtime_identity() {
 
 /// Register the same peer's next agent session/thread in its existing pane.
 fn recover_worker_on_new_thread(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
-    register_public(server, id, thread_id)
+    register_committed_appserver(server, id, thread_id)
 }
 
 fn registered_binding(server: &Server, id: &str) -> crate::server::global_state::RuntimeBinding {
@@ -406,11 +409,33 @@ fn registered_binding(server: &Server, id: &str) -> crate::server::global_state:
         .unwrap_or_else(|| panic!("{id} has no runtime binding"))
 }
 
+fn registered_name_and_session(server: &Server, id: &str) -> (String, String) {
+    let binding = registered_binding(server, id);
+    let control =
+        binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .unwrap();
+    let slot = control
+        .current_for_worker(&binding.project_scope, &binding.app_scope_id, id)
+        .unwrap()
+        .expect("registered fixture has a current name");
+    let session_id = slot
+        .active_binding()
+        .unwrap()
+        .binding
+        .session_id
+        .as_ref()
+        .expect("registered fixture has a session")
+        .to_string();
+    (slot.identity_key.name.clone(), session_id)
+}
+
 #[test]
 fn wire_master_recovery_preserves_current_grant_and_approval() {
     let (mut server, root) = test_server();
     let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "recover-master", "thread-recover-master-old");
+    let registered =
+        register_committed_appserver(&server, "recover-master", "thread-recover-master-old");
     assert!(registered.ok, "{registered:?}");
     promote_master(&server, "recover-master", "user approved recover-master");
 
@@ -423,8 +448,7 @@ fn wire_master_recovery_preserves_current_grant_and_approval() {
         .lookup_master_grant_for(&previous.route_scope(), &previous.binding_id)
         .unwrap()
         .clone();
-    assert!(matches!(crate::client::adapters::tmux::probe(previous.tmux_endpoint.as_ref().unwrap()),
-        Ok(crate::client::adapters::tmux::PanePresence::Present)));
+    assert_eq!(previous.tmux_endpoint, None);
     let recovered =
         recover_worker_on_new_thread(&mut server, "recover-master", "thread-recover-master-new");
     assert!(recovered.ok, "{recovered:?}");
@@ -469,9 +493,10 @@ fn wire_master_recovery_preserves_current_grant_and_approval() {
 fn wire_peer_recover_does_not_revoke_unrelated_master() {
     let (mut server, root) = test_server();
     let mut server = Arc::new(server);
-    let master = register_appserver(&mut server, "recover-keep-master", "thread-keep-master");
+    let master =
+        register_committed_appserver(&server, "recover-keep-master", "thread-keep-master");
     assert!(master.ok, "{master:?}");
-    let peer = recover_worker_on_new_thread(&mut server, "recover-plain-peer", "thread-plain-peer");
+    let peer = register_committed_appserver(&server, "recover-plain-peer", "thread-plain-peer");
     assert!(peer.ok, "{peer:?}");
     promote_master(
         &server,
@@ -522,7 +547,8 @@ fn wire_peer_recover_does_not_revoke_unrelated_master() {
 fn recovered_master_keeps_goal_deadline_scheduling() {
     let (mut server, root) = test_server();
     let mut server = Arc::new(server);
-    let registered = register_appserver(&mut server, "recover-deadline", "thread-deadline-old");
+    let registered =
+        register_committed_appserver(&server, "recover-deadline", "thread-deadline-old");
     assert!(registered.ok, "{registered:?}");
     promote_master(
         &server,
@@ -539,7 +565,8 @@ fn recovered_master_keeps_goal_deadline_scheduling() {
     assert_eq!(current.binding_id, previous.binding_id);
     assert_eq!(current.session_id.as_ref().unwrap().as_str(), "session-thread-deadline-new");
     assert_eq!(current.native_thread_id.as_ref().unwrap().as_str(), "thread-deadline-new");
-    assert_eq!(current.tmux_endpoint.as_ref().unwrap().pane_id, previous.tmux_endpoint.as_ref().unwrap().pane_id);
+    assert_eq!(current.tmux_endpoint, None);
+    assert_eq!(previous.tmux_endpoint, None);
     let trigger = now_ms() + 60_000;
     let scheduled = handle_notification_subscribe(
         &server,
@@ -574,11 +601,11 @@ fn first_and_later_registration_are_equal_peers() {
     let (server, root) = test_server();
     let server = Arc::new(server);
     assert_eq!(
-        register_public(&server, "peer-a", "%peer-a").data["identity_kind"],
+        register_committed_appserver(&server, "peer-a", "peer-a").data["identity_kind"],
         "peer"
     );
     assert_eq!(
-        register_public(&server, "peer-b", "%peer-b").data["identity_kind"],
+        register_committed_appserver(&server, "peer-b", "peer-b").data["identity_kind"],
         "peer"
     );
     let state = server.state.lock().unwrap();
@@ -592,8 +619,8 @@ fn first_and_later_registration_are_equal_peers() {
 fn registration_creates_one_finite_default_direct_message_subscription() {
     let (server, root) = test_server();
     let server = Arc::new(server);
-    assert!(register_public(&server, "peer", "%peer").ok);
-    assert!(register_public(&server, "peer", "%peer").ok);
+    assert!(register_committed_appserver(&server, "peer", "peer").ok);
+    assert!(register_committed_appserver(&server, "peer", "peer").ok);
     let state = server.state.lock().unwrap();
     let subscriptions: Vec<_> = state
         .notification_subscriptions
@@ -618,8 +645,8 @@ fn registration_creates_one_finite_default_direct_message_subscription() {
 fn daemon_maintenance_replaces_a_persisted_appserver_default_wake_lease() {
     let (mut server, root) = test_server();
     let mut server = Arc::new(server);
-    assert!(register_public(&server, "sender", "thread-sender").ok);
-    assert!(register_public(&server, "recipient", "thread-recipient").ok);
+    assert!(register_synthetic_peer(&server, "sender", "thread-sender").ok);
+    assert!(register_synthetic_peer(&server, "recipient", "thread-recipient").ok);
     {
         let mut state = server.state.lock().unwrap();
         server
@@ -731,7 +758,7 @@ fn explicit_cancelled_default_lease_is_repaired_by_registration() {
 #[test]
 fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules() {
     let (server, root) = test_server();
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
 
     server.commit(&[Event::NotificationSuppressed {
         subscription_id: "sub-default-direct-message-peer".into(),
@@ -757,14 +784,15 @@ fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules
             "a reason-less legacy cancellation must be recoverable: {events:?}"
         );
     }
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    let (goal_owner, session_id) = registered_name_and_session(&server, "peer");
     let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
     server.commit(&[Event::NameResolutionCommitted {
         project_scope: project_scope.as_str().to_owned(),
         occupancy: crate::server::name_state::NameOccupancy {
-            name: "peer".into(),
+            name: goal_owner.clone(),
             worker_id: "peer".into(),
-            session_id: "session-peer".into(),
+            session_id,
             occupancy_revision: 1,
             updated_ms: now_ms(),
             pane_anchor: None,
@@ -777,7 +805,7 @@ fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules
         "peer".into(),
         "token-peer".into(),
         "finished-goal".into(),
-        "Alice".into(),
+        goal_owner,
         "ended".into(),
         None,
         None,
@@ -1339,14 +1367,15 @@ fn recovered_immediate_direct_message_reaches_automatic_attempt_once() {
 #[test]
 fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
     let (server, root) = test_server();
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    let (goal_owner, session_id) = registered_name_and_session(&server, "peer");
     let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
     server.commit(&[Event::NameResolutionCommitted {
         project_scope: project_scope.as_str().to_owned(),
         occupancy: crate::server::name_state::NameOccupancy {
-            name: "peer".into(),
+            name: goal_owner.clone(),
             worker_id: "peer".into(),
-            session_id: "session-peer".into(),
+            session_id,
             occupancy_revision: 1,
             updated_ms: now_ms(),
             pane_anchor: None,
@@ -1384,7 +1413,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
         "peer".into(),
         "token-peer".into(),
         "different-id".into(),
-        "Alice".into(),
+        goal_owner.clone(),
         "ended".into(),
         None,
         None,
@@ -1401,7 +1430,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
         "peer".into(),
         "token-peer".into(),
         "different-id".into(),
-        "Alice".into(),
+        goal_owner,
         "ended".into(),
         None,
         None,

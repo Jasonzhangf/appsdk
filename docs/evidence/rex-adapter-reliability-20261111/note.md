@@ -259,3 +259,18 @@
 - 审查输出：`docs/evidence/rex-adapter-reliability-20261111/milestone-review-20261113-final3-stdout.jsonl`。
 - 最终候选正式构建 `scripts/build-collab.sh` 通过，产物版本 `collab_build_version=0.2.0498`。
 - 真实 Rex 公开契约 `rex_public_contract`（`--ignored`）通过：4 passed，0 failed。
+
+## 合并与运行时交付核对（2026-11-14 PT）
+
+目的：确认用户要求的 main 合并结果，并保留剩余 runtime 的真实边界。
+
+- PR 164 已合并，远端 main 为 `443914d9`，main CI run `43594197714` 成功。
+- 交回证据位于 `/Volumes/Intel/playground/appsdk/.worker-runs/rex-recovery-observation-20261113/`。
+- 旧 release build 包含两项未提交 manager 改动，不能作为纯 main 的安装候选。
+- 当前注册树达到上限，且没有发现已正式释放的构建载体。Jenny 负责选定已释放载体；
+  已通过 `m1794665527791-692` 交回明确决定请求。Jenny 已收到 Rex 输入，消费未确认。
+- 旧 `rex-parity` 树的三项未提交改动和 PR 树上的 manager 改动均保留，未重置或清理。
+- Kate 的构建路径消息已读并回复；回复保留 durable `m1794665528106-693`，
+  Rex 因 `REX_BLOCK_OWNER_AMBIGUOUS` 拒绝通知。此项仅影响该回执的自动通知。
+- 下一步由 master 释放现有构建载体后生成纯 main release；全局安装和 daemon 激活
+  仍须遵守本轮安装批准与用户激活边界。

@@ -6,7 +6,7 @@
   "nodes": [
     {
       "id":"解析当前目标归属","operator":"appsdk.collab_goal.resolve_owner","operator_version":"1",
-      "description":"认证当前调用者并解析目标项目、稳定名字与当前绑定。本人管理自己，项目master管理本项目peer，跨项目管理须当前typed CEO grant。拒绝未授权或无当前绑定的目标，不以pane可达性推导身份。",
+      "description":"认证当前调用者并解析目标项目与稳定名字。Explicit创建、续订和派发要求当前绑定及真实transport。Edit和结束既有计划按当前名字归属或精确任务assignment及已提交owner确定归属，不要求目标在线，不从previous绑定恢复权限；历史独立goal无名字证据时明确不可用。本人管理自己，项目master管理本项目peer，跨项目管理须当前typed CEO grant。不以pane可达性推导身份。",
       "inputs":["goal_request"],"output":{"id":"goal_scope","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
@@ -18,13 +18,13 @@
     },
     {
       "id":"执行本人目标转换","operator":"appsdk.collab_goal.apply_transition","operator_version":"1",
-      "description":"校验目标范围、任务版本、完整长程内容与明确周期。读取不写记录。重试、内容修改和同名换载体保留订阅ID、已消费次数和有效期。取消和关闭只结束该goal的有限计划，终态不被普通恢复复活。拒绝在提交前返回同一结果出口。",
+      "description":"校验目标范围、任务版本、完整长程内容与明确周期。按goal精确选择。读取不写记录。Edit只修改既有批次元数据，保留ID、状态、已消费次数和未编辑的物理时钟字段；waiting-owner和终态不重启。Explicit独立授权续订才创建新批次。Derived身份恢复与任务更新遇到结束批次为no-op，不阻断pending effect提交。取消和关闭只结束该goal的有限计划。拒绝在提交前返回同一结果出口。",
       "inputs":["owned_goal"],"output":{"id":"goal_transition_request","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
     {
       "id":"收敛本人目标调度","operator":"appsdk.collab_goal.reconcile_schedule","operator_version":"1",
-      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。派发把邀请或执行归属、任务单内容和目标订阅事件在同一事务提交，容量或保存失败不留下部分派发。重复收敛保留进度。任务结束抑制该订阅尚未接受的pending wake，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
+      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。合法目标周期订阅的显式续订保留已消费终态并新建一个armed批次，无关armed订阅数量不阻断续订。派发把邀请或执行归属、任务单内容和目标订阅事件在同一事务提交，schedule、目标或保存失败不留下部分派发。重复收敛保留进度。同owner的普通任务更新与pending effect中的ticket恢复遇到已结束批次时，自动派生调度为no-op；保留终态、次数与原记录，提交业务效果并允许显式续订，不以续订要求阻断收发消息或任务操作。任务结束抑制该订阅尚未接受的pending wake，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
       "inputs":["goal_transition_request"],"output":{"id":"goal_transition_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },

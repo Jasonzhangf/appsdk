@@ -355,7 +355,7 @@ use super::*;
                     .push(none_state.notification_subscriptions["sub-periodic-none"].trigger_ms);
             }
         }
-        assert_eq!(none_cursor, vec![Some(3_000), Some(4_000)]);
+        assert_eq!(none_cursor, vec![None, None], "consumption does not create a schedule cursor");
 
         let mut seeded_state = State::default();
         seeded_state.apply(&Event::NotificationSubscribed {
@@ -369,7 +369,7 @@ use super::*;
             });
             assert_eq!(
                 seeded_state.notification_subscriptions["sub-periodic-seeded"].trigger_ms,
-                Some(2_000 + count as i64 * 1_000)
+                Some(2_000)
             );
         }
 
@@ -469,7 +469,7 @@ use super::*;
 
         let subscription = &state.notification_subscriptions[subscription_id];
         assert_eq!(subscription.fired_count, 1);
-        assert_eq!(subscription.trigger_ms, Some(3_000));
+        assert_eq!(subscription.trigger_ms, None, "ACK cannot move physical time");
         assert_eq!(subscription.status, "armed");
 
         // A duplicate ACK sees the same read occurrence and cannot advance the
@@ -479,12 +479,12 @@ use super::*;
         });
         let subscription = &state.notification_subscriptions[subscription_id];
         assert_eq!(subscription.fired_count, 1);
-        assert_eq!(subscription.trigger_ms, Some(3_000));
+        assert_eq!(subscription.trigger_ms, None);
 
         let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         let replayed_subscription = &replayed.notification_subscriptions[subscription_id];
         assert_eq!(replayed_subscription.fired_count, 1);
-        assert_eq!(replayed_subscription.trigger_ms, Some(3_000));
+        assert_eq!(replayed_subscription.trigger_ms, None);
         assert_eq!(replayed.msgs[message_id].state, "read");
     }
 
@@ -551,7 +551,7 @@ use super::*;
         );
         assert_eq!(
             state.notification_subscriptions[subscription_id].trigger_ms,
-            Some(3_000)
+            Some(2_000)
         );
 
         state.apply(&Event::Acked {
@@ -563,7 +563,7 @@ use super::*;
         );
         assert_eq!(
             state.notification_subscriptions[subscription_id].trigger_ms,
-            Some(3_000)
+            Some(2_000)
         );
     }
 

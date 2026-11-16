@@ -172,8 +172,7 @@ fn committed_native_scope_fixture(
     manager.reserve_external_route(context, &storage).unwrap();
     let runtime = manager.select_runtime(context).unwrap();
     register_native_peer(&runtime, root, worker, token, thread, context.app_scope_id.as_str());
-    commit_current_thread_route_for_runtime(&manager.host, &runtime, worker,
-        &context.canonical_root, Some(&context.app_scope_id)).unwrap();
+    manager.reconcile_controlled_thread_routes(&manager.binding_control_store().load().unwrap()).unwrap();
     assert!(Arc::ptr_eq(&runtime, &manager.select_runtime(context).unwrap()));
     runtime
 }
@@ -934,23 +933,24 @@ fn registration_reuses_the_registered_tmux_pane_identity() {
     let (server, root, _) = test_server();
     let app_scope = AppServerId::new("app-a").unwrap();
     let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
-    let (_, first) = register_host_fixture(&manager,
+    let (project_runtime, first) = register_host_fixture(&manager,
         Some(context_with_app(&root, app_scope.as_str())),
         Req::register("worker-1".into(), "token-1".into(), root.display().to_string(),
             test_candidates_at("thread-1", &root)),
     );
     assert!(first.ok, "{first:?}");
+    let project_runtime = project_runtime.expect("registration selects its project runtime");
 
     let (runtime, _) = crate::identity::registration_from_receipt(&first.data,"worker-1",&root).unwrap();
     let (_, second) = register_host_fixture(
         &manager,
         Some(context_with_runtime(&root, app_scope.as_str(), &runtime)),
         Req::register("worker-1".into(), "token-1".into(), root.display().to_string(),
-            test_candidates_for_registered(&server, &root, "worker-1", "app-a")),
+            test_candidates_for_registered(&project_runtime, &root, "worker-1", "app-a")),
     );
     assert!(second.ok, "{second:?}");
     assert_eq!(second.data["transport_selected"]["kind"], "tmux");
-    let worker = server.state.lock().unwrap().workers["worker-1"].clone();
+    let worker = project_runtime.state.lock().unwrap().workers["worker-1"].clone();
     assert_eq!(
         worker.transport.as_ref().map(|transport| &transport.kind),
         Some(&TransportKind::Tmux)

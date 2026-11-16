@@ -1264,7 +1264,15 @@ fn handle_msg_status(
         receipt.message_ids.iter().any(|received| received == &msg_id)
     });
     let target_session = st.target_sessions.get(&msg_id).cloned();
-    let delivery_failure = st.notification_delivery_failures.get(&msg_id).cloned();
+    let delivery_failure = st
+        .notification_delivery_failures
+        .get(&msg_id)
+        .filter(|failure| {
+            !(failure.operation == "notification.not_attempted"
+                && failure.retryable
+                && failure.error.starts_with("REX_BINDING_PUBLICATION_BUSY"))
+        })
+        .cloned();
     let mut data = json!({
         "id": msg.id, "from": msg.from, "to": msg.to, "type": msg.mtype,
         "subject": msg.subject, "body": msg.body,

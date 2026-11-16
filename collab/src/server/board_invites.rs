@@ -37,6 +37,17 @@ impl BoardManagerOutcome {
         match self {
             Self::Reply(response) => response,
             Self::Notify(notification) => {
+                if notification.message_id.starts_with("board-invite-")
+                    && notification.method == "rex"
+                    && notification.subscription.is_some()
+                {
+                    return notification_send_response(
+                        notification.data,
+                        true,
+                        notification.method,
+                        &NotificationAttempt::Deferred,
+                    );
+                }
                 let attempt = match &notification.subscription {
                     Some(subscription) => attempt_notification_detailed_with_at(
                         server,
@@ -393,6 +404,9 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
     };
     let data = json!({ "task": task, "msg_id": prepared.message_id, "consumed": false, "goal_schedule": task_goal_receipt(&state, &id) });
     drop(state);
+    if prepared.method == "rex" && prepared.subscription.is_some() {
+        return notification_send_response(data, true, prepared.method, &NotificationAttempt::Deferred);
+    }
     let attempt = match &prepared.subscription {
         Some(subscription) => attempt_notification_detailed_with_at(server, &prepared.message_id, &subscription.id, now_ms()),
         None => NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into()),

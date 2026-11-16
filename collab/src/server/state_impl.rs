@@ -799,6 +799,15 @@ impl State {
                 accepted_ms,
                 evidence,
             } => {
+                if self
+                    .notification_delivery_failures
+                    .get(message_id)
+                    .is_some_and(|failure| {
+                        failure.operation == "notification.not_attempted" && failure.retryable
+                    })
+                {
+                    self.notification_delivery_failures.remove(message_id);
+                }
                 self.notification_delivery_accepted
                     .insert(message_id.clone(), *accepted_ms);
                 if let Some(evidence) = evidence {

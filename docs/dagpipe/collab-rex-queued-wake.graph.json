@@ -1,0 +1,58 @@
+{
+  "id": "appsdk-collab-rex-queued-wake",
+  "version": "0.1.0",
+  "description": "Daemon 的一次 Rex 队列唤醒。邀请和消息先持久化，发送回执与定时投递是不同入口；本图从定时检查开始。原生提交与正式 recv 消费分别由 Rex adaptor 和 notification-consumption 图处理。",
+  "inputs": [{"id": "timer_wake_scan", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "选择待投递消息",
+      "operator": "appsdk.collab_rex_queue.select",
+      "operator_version": "1",
+      "description": "选择 pending、有效订阅且从未进行原生尝试的 Rex 消息。已接受和不确定结果不重放；投递前可重试的未尝试结果允许后续再检查。",
+      "inputs": ["timer_wake_scan"],
+      "output": {"id": "wake_candidates", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "选择当前端点并预留尝试",
+      "operator": "appsdk.collab_rex_queue.reserve",
+      "operator_version": "1",
+      "description": "由当前 binding 找到端点，序列化投递并在原生 I/O 前持久记录 WakeAttempted；绑定不可用或内部竞争时保留未尝试状态，等待后续检查。",
+      "inputs": ["wake_candidates"],
+      "output": {"id": "wake_attempt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "提交原生输入并记录结果",
+      "operator": "appsdk.collab_rex_queue.submit",
+      "operator_version": "1",
+      "description": "预留成功时调用 Rex adaptor 写入和提交，记录实际接受或失败；结果不确定时不重复写入。尚未预留的消息保留实际原因。",
+      "inputs": ["wake_attempt"],
+      "output": {"id": "wake_submission", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出本次投递结果",
+      "operator": "appsdk.collab_rex_queue.result",
+      "operator_version": "1",
+      "description": "区分仍排队、原生已接受、失败和结果不确定；原生接受不等于目标 recv 消费。",
+      "inputs": ["wake_submission"],
+      "output": {"id": "wake_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "选择待投递消息", "to": "选择当前端点并预留尝试", "arc_id": "wake_candidates"},
+    {"from": "选择当前端点并预留尝试", "to": "提交原生输入并记录结果", "arc_id": "wake_attempt"},
+    {"from": "提交原生输入并记录结果", "to": "输出本次投递结果", "arc_id": "wake_submission"}
+  ],
+  "outputs": ["wake_result"]
+}

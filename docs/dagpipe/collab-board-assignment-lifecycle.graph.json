@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-board-assignment-lifecycle",
   "version": "0.2.0",
-  "description": "一次 board assignment mutation 的 SESE。同名自动 session 换绑保留状态。显式 invite/respond 让 pending 任务经 invited 接受后进入 working，不以 owner 等于 publisher 为条件；pending/invited 均先检查没有执行资源和生命周期证据。已经开始的任务交接保留状态、证据、资源及 merge/cleanup 义务。拒绝或撤回首次邀请保持原 owner 并回到 pending；closed/cancelled、过期 revision、错误回应者和旧 binding 明确拒绝，不部分转移。名字无可用工作者时保留工作归属并投影空执行者，由原 owner 回流原因，不自动选择 Jenny。",
+  "description": "一次 board assignment mutation 的 SESE。邀请提交后返回持久化回执；独立的 daemon 投递对象流见 collab-rex-queued-wake.graph.json，正式消费见 collab-notification-consumption.graph.json。同名自动 session 换绑保留状态。显式 invite/respond 让 pending 任务经 invited 接受后进入 working，不以 owner 等于 publisher 为条件；pending/invited 均先检查没有执行资源和生命周期证据。已经开始的任务交接保留状态、证据、资源及 merge/cleanup 义务。拒绝或撤回首次邀请保持原 owner 并回到 pending；closed/cancelled、过期 revision、错误回应者和旧 binding 明确拒绝，不部分转移。名字无可用工作者时保留工作归属并投影空执行者，由原 owner 回流原因，不自动选择 Jenny。",
   "inputs": [{"id": "assignment_mutation_request", "schema": "Object"}],
   "nodes": [
     {
@@ -41,7 +41,7 @@
       "id": "原子提交归属并保留任务义务",
       "operator": "appsdk.collab_assignment.commit",
       "operator_version": "1",
-      "description": "在 TaskRec/board mutation owner 内按 revision 原子提交。assignment_revision表示归属及执行载体提交代际，纯reflow发送与投递进度保持该代际。自动邀请严格引用源assignment代际及调度轮次，真实归属变化仍拒绝旧邀请。pending 邀请变 invited，pending/invited 的合法接受变 working；首次拒绝/撤回回 pending 且不转移 owner。已开始任务的显式交接及同名自动换绑保留状态、证据、资源、pending merge 和 cleanup obligation。保留 task ID 与 publisher；不替代 review/merge/close。closed/cancelled 明确拒绝。",
+      "description": "在 TaskRec/board mutation owner 内按 revision 原子提交。Rex 邀请持久入队后由 daemon 串行调度唤醒，内部等待不返回 busy；已接受或结果不确定的投递不得盲目重放。assignment_revision表示归属及执行载体提交代际，纯reflow发送与投递进度保持该代际。自动邀请严格引用源assignment代际及调度轮次，真实归属变化仍拒绝旧邀请。pending 邀请变 invited，pending/invited 的合法接受变 working；首次拒绝/撤回回 pending 且不转移 owner。已开始任务的显式交接及同名自动换绑保留状态、证据、资源、pending merge 和 cleanup obligation。保留 task ID 与 publisher；不替代 review/merge/close。closed/cancelled 明确拒绝。",
       "inputs": ["authorized_assignment"],
       "output": {"id": "assignment_commit", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

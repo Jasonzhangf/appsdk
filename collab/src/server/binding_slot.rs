@@ -991,21 +991,25 @@ impl BindingControlSet {
                 .collect::<Vec<_>>();
             return match session_matches.as_slice() {
                 [] => unique(targets),
-                [holder] if allow_explicit_rex_session_override => Ok(Some(*holder)),
-                [holder] if targets.is_empty() => Ok(Some(*holder)),
-                [holder] => {
-                    // A unique Rex block is the authoritative placement anchor.
-                    // A unique agent session may disambiguate duplicate block
-                    // currents, but it cannot override a block owned by another
-                    // subject in the same scope.
-                    if targets[0].identity_key != holder.identity_key {
-                        return Err(format!(
-                            "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current Rex block anchor selects {}",
-                            holder.identity_key.name, targets[0].identity_key.name
-                        ));
-                    }
+                [holder] if allow_explicit_rex_session_override || targets.is_empty() => {
                     Ok(Some(*holder))
                 }
+                [holder]
+                    if holder
+                        .active_binding()
+                        .is_some_and(|value| {
+                            value.transport.kind == crate::proto::TransportKind::Rex
+                        }) =>
+                {
+                    // A current Rex holder may publish onto an occupied block.
+                    // The control commit replaces only that block's current
+                    // owner; the displaced identity and its work remain.
+                    Ok(Some(*holder))
+                }
+                [holder] => Err(format!(
+                    "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current Rex block anchor selects {}",
+                    holder.identity_key.name, targets[0].identity_key.name
+                )),
                 _ => match unique(targets)? {
                     Some(target)
                         if session_matches

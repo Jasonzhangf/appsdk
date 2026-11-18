@@ -2746,6 +2746,9 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                 let (_, endpoint_live) = worker_identity_and_endpoint(server, &peer);
                 (presence, endpoint_live)
             } else {
+                // A retained worker without a current mapping is diagnostic
+                // history. Its old transport must not project current presence
+                // or reachability into the active collaboration view.
                 (IdentityPresence::Unknown, None)
             };
             endpoint_live_by_worker.insert(peer.id.clone(), peer_endpoint_live);

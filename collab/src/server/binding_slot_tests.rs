@@ -921,7 +921,7 @@ fn current_lookup_uses_unique_session_when_a_rex_block_has_seeded_duplicate_curr
 }
 
 #[test]
-fn current_lookup_rejects_conflicting_unique_session_when_rex_block_is_authoritative() {
+fn current_lookup_allows_a_rex_session_holder_to_replace_an_occupied_block() {
     let alice = key("alice");
     let bob = key("bob");
     let mut control = BindingControlSet::new();
@@ -945,7 +945,6 @@ fn current_lookup_rejects_conflicting_unique_session_when_rex_block_is_authorita
             None,
         )
         .unwrap();
-    let before = serde_json::to_value(&control).unwrap();
     let facts = IdentityFacts {
         session_id: Some("bob-session".into()),
         rex: Some(RexCandidate {
@@ -957,11 +956,11 @@ fn current_lookup_rejects_conflicting_unique_session_when_rex_block_is_authorita
         ..Default::default()
     };
 
-    let error = control
+    let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
-        .unwrap_err();
-    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
-    assert_eq!(serde_json::to_value(&control).unwrap(), before);
+        .unwrap()
+        .expect("the current Rex session holder may replace the occupied block");
+    assert_eq!(selected.identity_key, bob);
 }
 
 #[test]

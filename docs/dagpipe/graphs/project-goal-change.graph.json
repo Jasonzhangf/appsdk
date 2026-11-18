@@ -1,0 +1,84 @@
+{
+  "id": "appsdk-project-goal-change",
+  "version": "1",
+  "description": "一次正式项目 goal 创建或替代请求。请求携带真实目标内容、当前需求总版本、会话授权和结构化范围；registry.rs 在项目事务锁内核对基准并原子写入 .appsdk/goal.json。任一拒绝、冲突或失败均不得继续写入，且不触发 long-horizon subscription。",
+  "inputs": [
+    {"id": "project_goal_change_request", "schema": "Object"}
+  ],
+  "nodes": [
+    {
+      "id": "receive_goal_change",
+      "operator": "appsdk.project_goal.receive_change",
+      "operator_version": "1",
+      "description": "接收公开 CLI 变更请求并保留原始输入语义。",
+      "inputs": ["project_goal_change_request"],
+      "output": {"id": "goal_request_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "check_project_scope",
+      "operator": "appsdk.project_goal.check_scope",
+      "operator_version": "1",
+      "description": "核对项目身份、授权结构和目标范围；非法请求直接形成拒绝结果。",
+      "inputs": ["goal_request_outcome"],
+      "output": {"id": "scope_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "check_requirements_and_base",
+      "operator": "appsdk.project_goal.check_base",
+      "operator_version": "1",
+      "description": "在项目事务锁内读取需求总版本和旧 goal 原值，核对 create/replace 条件与修订基准。",
+      "inputs": ["scope_outcome"],
+      "output": {"id": "base_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "build_goal_revision",
+      "operator": "appsdk.project_goal.build_revision",
+      "operator_version": "1",
+      "description": "验证真实目标内容和确认状态，形成当前 goal、需求绑定及扁平替代历史。",
+      "inputs": ["base_outcome"],
+      "output": {"id": "revision_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_or_preserve",
+      "operator": "appsdk.project_goal.commit",
+      "operator_version": "1",
+      "description": "只对合格候选执行一次原子写；拒绝、冲突和失败保留旧 goal 与项目数据。",
+      "inputs": ["revision_outcome"],
+      "output": {"id": "commit_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_change_result",
+      "operator": "appsdk.project_goal.publish_result",
+      "operator_version": "1",
+      "description": "输出 applied、rejected、conflict、failed、cancelled 或 unknown 的统一结果。",
+      "inputs": ["commit_outcome"],
+      "output": {"id": "project_goal_change_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "receive_goal_change", "to": "check_project_scope", "arc_id": "goal_request_outcome"},
+    {"from": "check_project_scope", "to": "check_requirements_and_base", "arc_id": "scope_outcome"},
+    {"from": "check_requirements_and_base", "to": "build_goal_revision", "arc_id": "base_outcome"},
+    {"from": "build_goal_revision", "to": "commit_or_preserve", "arc_id": "revision_outcome"},
+    {"from": "commit_or_preserve", "to": "publish_change_result", "arc_id": "commit_outcome"}
+  ],
+  "outputs": ["project_goal_change_result"]
+}

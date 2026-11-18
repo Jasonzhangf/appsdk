@@ -1,5 +1,489 @@
 use super::*;
 
+pub(super) fn project_goal_apply(root: &Path, input_path: &str, format_json: bool) {
+    assert_project_root_safe(root);
+    let input_file = producer_input_path(root, input_path);
+    let request: Value = serde_json::from_str(
+        &fs::read_to_string(input_file).unwrap_or_else(|_| fail("GOAL_APPLY_INPUT_READ_FAILED")),
+    )
+    .unwrap_or_else(|_| fail("GOAL_APPLY_INPUT_INVALID"));
+    if !request.is_object() {
+        fail("GOAL_APPLY_INPUT_INVALID");
+    }
+
+    let project = read_project(root);
+    let project_id = project
+        .get("project_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail("GOAL_APPLY_PROJECT_ID_INVALID"));
+    validate_goal_apply_request(&request, project_id);
+    validate_goal_apply_scope(&request, &project);
+
+    let operation = request
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("GOAL_APPLY_OPERATION_INVALID"));
+    let requested_requirements_version = request
+        .get("requirements_version")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| fail("GOAL_APPLY_REQUIREMENTS_VERSION_INVALID"));
+    let _lock = reset_transaction_acquire_lock(root).unwrap_or_else(|error| fail(error));
+
+    let current_requirements_version = match requirements::read_requirements_if_present(root) {
+        Some(ledger) => ledger
+            .get("version")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| fail("REQUIREMENTS_INVALID")),
+        None => 0,
+    };
+    if requested_requirements_version != current_requirements_version {
+        if current_requirements_version == 0 && requested_requirements_version != 0 {
+            fail("REQUIREMENTS_MISSING");
+        }
+        fail("REQUIREMENTS_VERSION_STALE");
+    }
+
+    let goal_path = root.join(".appsdk/goal.json");
+    assert_no_symlink_components(root, &goal_path, "goal");
+    let previous = read_goal_for_apply(root);
+    let current_revision = previous.as_ref().map(goal_revision).unwrap_or(0);
+    let base_revision = request.get("base_goal_revision").and_then(|value| {
+        if value.is_null() {
+            None
+        } else {
+            value.as_u64()
+        }
+    });
+    match operation {
+        "create" => {
+            if previous.is_some() {
+                fail("GOAL_APPLY_ALREADY_EXISTS");
+            }
+            if request.get("base_goal_revision").is_some()
+                && !request["base_goal_revision"].is_null()
+            {
+                fail("GOAL_APPLY_BASE_INVALID");
+            }
+        }
+        "replace" => {
+            if previous.is_none() {
+                fail("GOAL_APPLY_CURRENT_MISSING");
+            }
+            if base_revision != Some(current_revision) {
+                fail("GOAL_APPLY_BASE_CONFLICT");
+            }
+        }
+        _ => fail("GOAL_APPLY_OPERATION_INVALID"),
+    }
+
+    let mut next_goal = request
+        .get("goal")
+        .cloned()
+        .unwrap_or_else(|| fail("GOAL_APPLY_GOAL_MISSING"));
+    validate_goal_apply_content(&next_goal);
+    let next_revision = if previous.is_some() {
+        current_revision.saturating_add(1)
+    } else {
+        1
+    };
+    let history = previous
+        .as_ref()
+        .map(|old| {
+            let mut entries = old
+                .get("replacement_history")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut preserved = old.clone();
+            if let Some(object) = preserved.as_object_mut() {
+                object.remove("replacement_history");
+            }
+            entries.push(serde_json::json!({
+                "goal": preserved,
+                "superseded_by_revision": next_revision,
+                "status": "superseded"
+            }));
+            Value::Array(entries)
+        })
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let object = next_goal
+        .as_object_mut()
+        .unwrap_or_else(|| fail("GOAL_APPLY_GOAL_INVALID"));
+    object.insert("project_id".into(), Value::String(project_id.to_owned()));
+    object.insert(
+        "requirements_version".into(),
+        Value::from(requested_requirements_version),
+    );
+    object.insert("goal_revision".into(), Value::from(next_revision));
+    object.insert("replacement_history".into(), history);
+    atomic_write_json(&goal_path, &next_goal, "GOAL_APPLY_WRITE_FAILED");
+
+    let result = serde_json::json!({
+        "ok": true,
+        "operation": operation,
+        "project_id": project_id,
+        "goal_id": next_goal.get("goal_id"),
+        "goal_revision": next_revision,
+        "requirements_version": requested_requirements_version,
+        "path": ".appsdk/goal.json",
+        "admitted": false,
+        "subscription_changed": false
+    });
+    if format_json {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        println!(
+            "Project goal applied: {} revision {}",
+            next_goal["goal_id"].as_str().unwrap_or(""),
+            next_revision
+        );
+    }
+}
+
+fn validate_goal_apply_request(request: &Value, project_id: &str) {
+    let object = request
+        .as_object()
+        .unwrap_or_else(|| fail("GOAL_APPLY_INPUT_INVALID"));
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "operation"
+                | "project_id"
+                | "base_goal_revision"
+                | "requirements_version"
+                | "authorization"
+                | "goal"
+        ) {
+            fail(format!("GOAL_APPLY_UNKNOWN_FIELD:{key}"));
+        }
+    }
+    if request.get("project_id").and_then(Value::as_str) != Some(project_id) {
+        fail("GOAL_APPLY_PROJECT_MISMATCH");
+    }
+    if !matches!(
+        request.get("operation").and_then(Value::as_str),
+        Some("create" | "replace")
+    ) {
+        fail("GOAL_APPLY_OPERATION_INVALID");
+    }
+    if request
+        .get("requirements_version")
+        .and_then(Value::as_u64)
+        .is_none()
+    {
+        fail("GOAL_APPLY_REQUIREMENTS_VERSION_INVALID");
+    }
+    if request.get("base_goal_revision").is_none()
+        || (!request["base_goal_revision"].is_null()
+            && request["base_goal_revision"].as_u64().is_none())
+    {
+        fail("GOAL_APPLY_BASE_INVALID");
+    }
+    if !authorization_valid_for_goal_apply(request.get("authorization")) {
+        fail("GOAL_APPLY_AUTHORIZATION_INVALID");
+    }
+    if !request.get("goal").is_some_and(Value::is_object) {
+        fail("GOAL_APPLY_GOAL_INVALID");
+    }
+}
+
+fn authorization_valid_for_goal_apply(authorization: Option<&Value>) -> bool {
+    authorization
+        .and_then(Value::as_object)
+        .map(|object| {
+            object.len() == 4
+                && object.get("role").and_then(Value::as_str) == Some("user")
+                && object
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                && object
+                    .get("original_text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+        })
+        .unwrap_or(false)
+}
+
+fn validate_goal_apply_scope(request: &Value, project: &Value) {
+    let authorized_scope = request
+        .pointer("/authorization/scope")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_INVALID"));
+    if authorized_scope.len() != 2 {
+        fail("GOAL_APPLY_SCOPE_INVALID");
+    }
+    let authorized_allowed = authorized_scope
+        .get("allowed_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_INVALID"));
+    let authorized_forbidden = authorized_scope
+        .get("forbidden_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_INVALID"));
+    for value in authorized_allowed.iter().chain(authorized_forbidden) {
+        validate_goal_scope_path(value);
+    }
+
+    let scope = request
+        .pointer("/goal/scope")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_INVALID"));
+    for key in scope.keys() {
+        if !matches!(
+            key.as_str(),
+            "feature_id" | "module_id" | "resource_ids" | "allowed_paths" | "forbidden_paths"
+        ) {
+            fail(format!("GOAL_APPLY_SCOPE_UNKNOWN_FIELD:{key}"));
+        }
+    }
+    let allowed_paths = scope
+        .get("allowed_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_INVALID"));
+    let forbidden_paths = scope
+        .get("forbidden_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_INVALID"));
+    for value in allowed_paths.iter().chain(forbidden_paths) {
+        validate_goal_scope_path(value);
+    }
+
+    for value in allowed_paths {
+        let path = value.as_str().unwrap();
+        if authorized_forbidden
+            .iter()
+            .any(|item| path_is_covered_by(path, item.as_str().unwrap()))
+            || !authorized_allowed
+                .iter()
+                .any(|item| path_is_covered_by(path, item.as_str().unwrap()))
+        {
+            fail("GOAL_APPLY_SCOPE_OUT_OF_AUTHORIZATION");
+        }
+    }
+    for value in forbidden_paths {
+        let path = value.as_str().unwrap();
+        let covered = authorized_allowed
+            .iter()
+            .chain(authorized_forbidden)
+            .any(|item| path_is_covered_by(path, item.as_str().unwrap()));
+        if !covered {
+            fail("GOAL_APPLY_SCOPE_OUT_OF_AUTHORIZATION");
+        }
+    }
+
+    if let Some(module_id) = scope
+        .get("module_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        let exists = project
+            .get("modules")
+            .and_then(Value::as_array)
+            .is_some_and(|modules| {
+                modules.iter().any(|module| {
+                    module.get("module_id").and_then(Value::as_str) == Some(module_id)
+                })
+            });
+        if !exists {
+            fail("GOAL_APPLY_SCOPE_MODULE_UNKNOWN");
+        }
+    }
+    if let Some(resource_ids) = scope.get("resource_ids").and_then(Value::as_array) {
+        for resource_id in resource_ids {
+            let id = resource_id
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_RESOURCE_UNKNOWN"));
+            let exists = project
+                .get("modules")
+                .and_then(Value::as_array)
+                .is_some_and(|modules| {
+                    modules.iter().any(|module| {
+                        module
+                            .get("resource_ids")
+                            .and_then(Value::as_array)
+                            .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
+                    })
+                });
+            if !exists {
+                fail("GOAL_APPLY_SCOPE_RESOURCE_UNKNOWN");
+            }
+        }
+    } else if scope.contains_key("resource_ids") {
+        fail("GOAL_APPLY_SCOPE_INVALID");
+    }
+}
+
+fn validate_goal_scope_path(value: &Value) {
+    let path = value
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail("GOAL_APPLY_SCOPE_PATH_INVALID"));
+    if path.starts_with('/')
+        || path.contains('\\')
+        || path.contains("//")
+        || path.ends_with('/')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        fail("GOAL_APPLY_SCOPE_PATH_INVALID");
+    }
+    for (index, part) in path.split('/').enumerate() {
+        if part.contains('*')
+            && !(part == "**" || (part == "*" && index + 1 == path.split('/').count()))
+        {
+            fail("GOAL_APPLY_SCOPE_PATTERN_INVALID");
+        }
+    }
+    if path.matches("**").count() > 1 || path.contains("***") {
+        fail("GOAL_APPLY_SCOPE_PATTERN_INVALID");
+    }
+}
+
+fn path_is_covered_by(path: &str, allowed: &str) -> bool {
+    if allowed == "**" {
+        return true;
+    }
+    if let Some(prefix) = allowed.strip_suffix("/**") {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    allowed == path
+}
+
+fn validate_goal_apply_content(goal: &Value) {
+    let object = goal
+        .as_object()
+        .unwrap_or_else(|| fail("GOAL_APPLY_GOAL_INVALID"));
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "goal_id"
+                | "issue_id"
+                | "raw_request"
+                | "understood_objective"
+                | "acceptance_criteria"
+                | "non_goals"
+                | "assumptions"
+                | "ambiguities"
+                | "questions"
+                | "scope"
+                | "risk_decisions"
+                | "status"
+                | "confirmed_by"
+                | "confirmed_at"
+                | "created_at"
+        ) {
+            fail(format!("GOAL_APPLY_GOAL_UNKNOWN_FIELD:{key}"));
+        }
+    }
+    for forbidden in [
+        "requirements_version",
+        "project_id",
+        "goal_revision",
+        "replacement_history",
+    ] {
+        if object.contains_key(forbidden) {
+            fail(format!("GOAL_APPLY_SERVER_FIELD:{forbidden}"));
+        }
+    }
+    let status = goal
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("GOAL_APPLY_STATUS_INVALID"));
+    if status == "admitted" {
+        fail("GOAL_APPLY_ADMITTED_FORBIDDEN");
+    }
+    if !matches!(status, "clarification_pending" | "confirmed") {
+        fail("GOAL_APPLY_STATUS_INVALID");
+    }
+    validate_goal_contract(goal, false);
+    if goal
+        .get("goal_id")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+        || goal
+            .get("raw_request")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        || goal
+            .get("understood_objective")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        || goal
+            .get("created_at")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        fail("GOAL_APPLY_GOAL_INVALID");
+    }
+    let acceptance = goal
+        .get("acceptance_criteria")
+        .and_then(Value::as_array)
+        .filter(|items| {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.as_str().is_some_and(|value| !value.trim().is_empty()))
+        })
+        .is_some();
+    if !acceptance {
+        fail("GOAL_APPLY_ACCEPTANCE_INVALID");
+    }
+    for key in ["non_goals", "assumptions", "ambiguities", "questions"] {
+        if goal.get(key).and_then(Value::as_array).is_none() {
+            let field = key.to_uppercase();
+            fail(format!("GOAL_APPLY_{field}_INVALID"));
+        }
+    }
+    if status == "confirmed" {
+        let questions_open = goal["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|question| question.get("status").and_then(Value::as_str) == Some("open"));
+        if questions_open {
+            fail("GOAL_APPLY_OPEN_QUESTIONS");
+        }
+        if goal
+            .get("confirmed_by")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+            || goal
+                .get("confirmed_at")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            fail("GOAL_APPLY_CONFIRMATION_INVALID");
+        }
+    }
+}
+
+fn read_goal_for_apply(root: &Path) -> Option<Value> {
+    let file = root.join(".appsdk/goal.json");
+    let metadata = match fs::symlink_metadata(&file) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(_) => fail("GOAL_APPLY_CURRENT_UNAVAILABLE"),
+    };
+    if metadata.file_type().is_symlink() {
+        fail("GOVERNANCE_PATH_SYMLINK:goal");
+    }
+    let text = fs::read_to_string(file).unwrap_or_else(|_| fail("GOAL_APPLY_CURRENT_UNAVAILABLE"));
+    let goal: Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| fail("GOAL_APPLY_CURRENT_INVALID"));
+    validate_goal_contract(&goal, false);
+    Some(goal)
+}
+
+fn goal_revision(goal: &Value) -> u64 {
+    goal.get("goal_revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 pub(super) fn assert_governance_maps(root: &Path) {
     try_assert_governance_maps(root).unwrap_or_else(|error| fail(error))
 }

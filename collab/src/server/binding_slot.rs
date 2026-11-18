@@ -1007,8 +1007,8 @@ impl BindingControlSet {
             };
         }
         if facts.tmux.is_some() {
-            if let Some(candidate) = facts.tmux.as_ref() {
-                let found = unique(
+            let endpoint_match = if let Some(candidate) = facts.tmux.as_ref() {
+                unique(
                     candidates
                         .iter()
                         .filter(|(_, value)| {
@@ -1021,22 +1021,36 @@ impl BindingControlSet {
                         })
                         .map(|(slot, _)| *slot)
                         .collect(),
-                )?;
-                if found.is_some() {
-                    return Ok(found);
-                }
-            }
-            if let Some(name) = facts.tmux_session_name.as_ref() {
-                let found = unique(
+                )?
+            } else {
+                None
+            };
+            let name_match = if let Some(name) = facts.tmux_session_name.as_ref() {
+                unique(
                     candidates
                         .iter()
                         .filter(|(_, value)| value.physical_name.as_ref() == Some(name))
                         .map(|(slot, _)| *slot)
                         .collect(),
-                )?;
-                if found.is_some() {
-                    return Ok(found);
+                )?
+            } else {
+                None
+            };
+            let session_match = unique(session_matches.clone())?;
+            if let (Some(anchor), Some(session)) = (endpoint_match.or(name_match), session_match) {
+                if anchor.identity_key != session.identity_key {
+                    return Err(format!(
+                        "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current runtime anchor selects {}",
+                        session.identity_key.name, anchor.identity_key.name
+                    ));
                 }
+                return Ok(Some(anchor));
+            }
+            if let Some(anchor) = endpoint_match.or(name_match) {
+                return Ok(Some(anchor));
+            }
+            if let Some(session) = session_match {
+                return Ok(Some(session));
             }
         }
         if let Some(session) = dsh.or(facts.session_id.as_deref()) {

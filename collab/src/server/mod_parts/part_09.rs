@@ -2740,14 +2740,29 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     let peers: Vec<_> = peer_snapshots
         .into_iter()
         .map(|(peer, peer_role, display_name, open_task_ids, resource_task_ids, subscription_ids)| {
-            let peer_presence = worker_presence(server, &peer);
-            let (_, peer_endpoint_live) = worker_identity_and_endpoint(server, &peer);
+            let mapped = peer_role.is_some();
+            let (peer_presence, peer_endpoint_live) = if mapped {
+                let presence = worker_presence(server, &peer);
+                let (_, endpoint_live) = worker_identity_and_endpoint(server, &peer);
+                (presence, endpoint_live)
+            } else {
+                // A retained worker without a current mapping is diagnostic
+                // history. Its old transport must not project current presence
+                // or reachability into the active collaboration view.
+                (IdentityPresence::Unknown, None)
+            };
             endpoint_live_by_worker.insert(peer.id.clone(), peer_endpoint_live);
-            let activity_str = peer_activities
-                .get(&peer.id)
-                .cloned()
-                .unwrap_or_else(|| "unknown".into());
-            let availability = if matches!(activity_str.as_str(), "busy" | "waiting_user" | "error") {
+            let activity_str = if mapped {
+                peer_activities
+                    .get(&peer.id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".into())
+            } else {
+                "unknown".into()
+            };
+            let availability = if !mapped {
+                "unknown"
+            } else if matches!(activity_str.as_str(), "busy" | "waiting_user" | "error") {
                 "busy"
             } else if activity_str == "idle" {
                 "idle"

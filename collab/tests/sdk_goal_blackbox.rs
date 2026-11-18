@@ -32,6 +32,17 @@ fn evidence_dir() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("sdk-goal-blackbox")
 }
 
+fn crud_evidence_dir() -> PathBuf {
+    let run_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "sdk-goal-crud-blackbox-{}-{run_id}",
+        std::process::id()
+    ))
+}
+
 fn write_bytes(evidence: &Path, name: &str, bytes: &[u8]) {
     fs::write(evidence.join(name), bytes).expect("write evidence file");
 }
@@ -151,6 +162,24 @@ fn find_subscription<'a>(status: &'a Value, subscription_id: &str) -> &'a Value 
         .iter()
         .find(|subscription| subscription["id"].as_str() == Some(subscription_id))
         .expect("subscription stays observable")
+}
+
+fn goal_record_file(root: &Path, owner: &str, goal_id: &str) -> PathBuf {
+    let owner_component = owner
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let goal_component = goal_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    root.join(".appsdk-control")
+        .join("goals")
+        .join(owner_component)
+        .join("records")
+        .join(format!("{goal_component}.json"))
 }
 
 #[test]
@@ -450,6 +479,370 @@ fn sdk_goal_subscribe_consumes_a_real_deadline_and_cancel_stops_it() {
             goal_file.display(),
             consumed.len(),
             final_occurrence["fired_count"],
+        )
+        .as_bytes(),
+    );
+}
+
+#[test]
+fn sdk_goal_crud_isolated_to_selected_goal_on_real_daemon() {
+    let (fixture, pane) = single_pane_fixture("sdk-goal-crud-blackbox");
+    let evidence = crud_evidence_dir();
+    fs::create_dir_all(&evidence).expect("create evidence dir");
+    let registered = fixture.registered_context(&pane, true);
+    write_json(&evidence, "registered-context.json", &registered);
+    let owner = registered["name"]
+        .as_str()
+        .expect("context receipt names the stable owner")
+        .to_owned();
+    let subscribe_goal = |name: &str, body: &str, repeat: &str| {
+        let path = fixture.root.join(name);
+        fs::write(&path, body).expect("write isolated goal");
+        let receipt = run_appsdk_ok(
+            &fixture,
+            &pane,
+            &[
+                "goal",
+                "subscribe",
+                "--goal",
+                path.to_str().unwrap(),
+                "--interval",
+                "120s",
+                "--repeat",
+                repeat,
+                "--json",
+            ],
+            &evidence,
+            &format!("subscribe-{}", name.trim_end_matches(".md")),
+        );
+        write_json(
+            &evidence,
+            &format!("subscribe-{}.json", name.trim_end_matches(".md")),
+            &receipt,
+        );
+        assert_eq!(receipt["active"], true, "{receipt}");
+        assert_eq!(receipt["remote_state"], "armed", "{receipt}");
+        assert_eq!(receipt["every_ms"], 120_000, "{receipt}");
+        let goal_id = receipt["goal_id"]
+            .as_str()
+            .expect("subscribe receipt names exact goal")
+            .to_owned();
+        let subscription_id = receipt["subscription_id"]
+            .as_str()
+            .expect("subscribe receipt names exact subscription")
+            .to_owned();
+        (goal_id, subscription_id)
+    };
+
+    let (goal_a, subscription_a) = subscribe_goal("goal-a.md", "# Goal A\n\nDeliver A.\n", "5");
+    let (goal_b, subscription_b) = subscribe_goal("goal-b.md", "# Goal B\n\nDeliver B.\n", "6");
+
+    // Registration owns one direct-message lease. The daemon permits three
+    // active subscriptions per agent, so retire the first goal before arming
+    // the third while retaining all three goal records for CRUD isolation.
+    let cancelled_for_capacity = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "cancel", "--goal-id", &goal_a, "--json"],
+        &evidence,
+        "cancel-goal-a-capacity",
+    );
+    write_json(
+        &evidence,
+        "cancel-goal-a-capacity.json",
+        &cancelled_for_capacity,
+    );
+    assert_eq!(cancelled_for_capacity["cancel_receipt"]["goal_id"], goal_a);
+    assert_eq!(cancelled_for_capacity["subscription_id"], subscription_a);
+    assert_eq!(cancelled_for_capacity["status"], "cancelled");
+
+    let (goal_c, subscription_c) = subscribe_goal("goal-c.md", "# Goal C\n\nDeliver C.\n", "7");
+    let goal_ids = vec![goal_a, goal_b, goal_c];
+    let subscription_ids = vec![subscription_a, subscription_b, subscription_c];
+    assert_eq!(
+        goal_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    assert_eq!(
+        subscription_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+
+    let record_paths = goal_ids
+        .iter()
+        .map(|goal_id| goal_record_file(&fixture.root, &owner, goal_id))
+        .collect::<Vec<_>>();
+    let bytes_before_read = record_paths
+        .iter()
+        .map(|path| fs::read(path).expect("read retained goal record"))
+        .collect::<Vec<_>>();
+    let listed = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "list", "--json"],
+        &evidence,
+        "list-before-edit",
+    );
+    write_json(&evidence, "list-before-edit.json", &listed);
+    assert_eq!(listed["count"], 3, "{listed}");
+    for goal_id in &goal_ids {
+        assert!(
+            listed["goals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|goal| goal["goal_id"].as_str() == Some(goal_id.as_str())),
+            "list must retain {goal_id}: {listed}"
+        );
+    }
+    for (path, before) in record_paths.iter().zip(&bytes_before_read) {
+        assert_eq!(fs::read(path).unwrap(), *before, "list must be read-only");
+    }
+    for (index, goal_id) in goal_ids.iter().enumerate() {
+        let status = run_appsdk_ok(
+            &fixture,
+            &pane,
+            &["goal", "status", "--goal-id", goal_id, "--json"],
+            &evidence,
+            &format!("status-{}", index + 1),
+        );
+        write_json(&evidence, &format!("status-{}.json", index + 1), &status);
+        assert_eq!(
+            status["goal_id"].as_str(),
+            Some(goal_id.as_str()),
+            "{status}"
+        );
+        assert_eq!(
+            status["subscription_id"].as_str(),
+            Some(subscription_ids[index].as_str()),
+            "{status}"
+        );
+        assert_eq!(status["active"], index == 1 || index == 2, "{status}");
+        for (path, before) in record_paths.iter().zip(&bytes_before_read) {
+            assert_eq!(
+                fs::read(path).unwrap(),
+                *before,
+                "status must not mutate any retained record"
+            );
+        }
+    }
+    let ambiguous = run_appsdk(&fixture, &pane, &["goal", "status", "--json"]);
+    write_bytes(&evidence, "status-ambiguous.stdout", &ambiguous.stdout);
+    write_bytes(&evidence, "status-ambiguous.stderr", &ambiguous.stderr);
+    assert_eq!(ambiguous.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("GOAL_RECORD_SELECTOR_REQUIRED"),
+        "{}",
+        String::from_utf8_lossy(&ambiguous.stderr)
+    );
+    let missing = run_appsdk(
+        &fixture,
+        &pane,
+        &[
+            "goal",
+            "edit",
+            "--goal-id",
+            "sha256:missing-real-blackbox",
+            "--repeat",
+            "4",
+            "--json",
+        ],
+    );
+    write_bytes(&evidence, "edit-missing.stdout", &missing.stdout);
+    write_bytes(&evidence, "edit-missing.stderr", &missing.stderr);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("GOAL_RECORD_NOT_FOUND"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+
+    let initial_remote = fixture.run_ok(&["notify", "status"], Some(&pane));
+    write_json(&evidence, "notify-status-initial.json", &initial_remote);
+    let initial_remote_subscriptions = subscription_ids
+        .iter()
+        .map(|id| find_subscription(&initial_remote, id).clone())
+        .collect::<Vec<_>>();
+    assert_eq!(initial_remote_subscriptions[0]["status"], "cancelled");
+    assert_eq!(initial_remote_subscriptions[1]["status"], "armed");
+    assert_eq!(initial_remote_subscriptions[2]["status"], "armed");
+
+    let edited = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &[
+            "goal",
+            "edit",
+            "--goal-id",
+            &goal_ids[1],
+            "--interval",
+            "180s",
+            "--repeat",
+            "8",
+            "--json",
+        ],
+        &evidence,
+        "edit-goal-b",
+    );
+    write_json(&evidence, "edit-goal-b.json", &edited);
+    assert_eq!(
+        edited["goal_id"].as_str(),
+        Some(goal_ids[1].as_str()),
+        "{edited}"
+    );
+    assert_eq!(
+        edited["subscription_id"].as_str(),
+        Some(subscription_ids[1].as_str()),
+        "{edited}"
+    );
+    assert_eq!(edited["record"]["interval"], "180s", "{edited}");
+    assert_eq!(edited["record"]["repeat_count"], 8, "{edited}");
+    assert_eq!(fs::read(&record_paths[0]).unwrap(), bytes_before_read[0]);
+    assert_eq!(fs::read(&record_paths[2]).unwrap(), bytes_before_read[2]);
+    let after_edit = fixture.run_ok(&["notify", "status"], Some(&pane));
+    write_json(&evidence, "notify-status-after-edit.json", &after_edit);
+    assert_eq!(
+        find_subscription(&after_edit, &subscription_ids[1])["interval_ms"],
+        180_000
+    );
+    assert_eq!(
+        find_subscription(&after_edit, &subscription_ids[1])["repeat_count"],
+        8
+    );
+    assert_eq!(
+        find_subscription(&after_edit, &subscription_ids[0]),
+        &initial_remote_subscriptions[0]
+    );
+    assert_eq!(
+        find_subscription(&after_edit, &subscription_ids[2]),
+        &initial_remote_subscriptions[2]
+    );
+    let bytes_after_edit = record_paths
+        .iter()
+        .map(|path| fs::read(path).expect("read retained goal record after edit"))
+        .collect::<Vec<_>>();
+
+    let updated = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &[
+            "goal",
+            "update",
+            "--goal-id",
+            &goal_ids[2],
+            "--interval",
+            "240s",
+            "--repeat",
+            "9",
+            "--json",
+        ],
+        &evidence,
+        "update-goal-c",
+    );
+    write_json(&evidence, "update-goal-c.json", &updated);
+    assert_eq!(
+        updated["goal_id"].as_str(),
+        Some(goal_ids[2].as_str()),
+        "{updated}"
+    );
+    assert_eq!(
+        updated["subscription_id"].as_str(),
+        Some(subscription_ids[2].as_str()),
+        "{updated}"
+    );
+    assert_eq!(updated["record"]["interval"], "240s", "{updated}");
+    assert_eq!(updated["record"]["repeat_count"], 9, "{updated}");
+    assert_eq!(fs::read(&record_paths[0]).unwrap(), bytes_after_edit[0]);
+    assert_eq!(fs::read(&record_paths[1]).unwrap(), bytes_after_edit[1]);
+    let after_update = fixture.run_ok(&["notify", "status"], Some(&pane));
+    write_json(&evidence, "notify-status-after-update.json", &after_update);
+    assert_eq!(
+        find_subscription(&after_update, &subscription_ids[0]),
+        &initial_remote_subscriptions[0]
+    );
+    assert_eq!(
+        find_subscription(&after_update, &subscription_ids[1])["interval_ms"],
+        180_000
+    );
+    assert_eq!(
+        find_subscription(&after_update, &subscription_ids[1])["repeat_count"],
+        8
+    );
+    assert_eq!(
+        find_subscription(&after_update, &subscription_ids[2])["interval_ms"],
+        240_000
+    );
+    assert_eq!(
+        find_subscription(&after_update, &subscription_ids[2])["repeat_count"],
+        9
+    );
+
+    let cancelled = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "cancel", "--goal-id", &goal_ids[2], "--json"],
+        &evidence,
+        "cancel-goal-c",
+    );
+    write_json(&evidence, "cancel-goal-c.json", &cancelled);
+    assert_eq!(
+        cancelled["cancel_receipt"]["goal_id"].as_str(),
+        Some(goal_ids[2].as_str()),
+        "{cancelled}"
+    );
+    assert_eq!(
+        cancelled["subscription_id"].as_str(),
+        Some(subscription_ids[2].as_str()),
+        "{cancelled}"
+    );
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+    let after_cancel = fixture.run_ok(&["notify", "status"], Some(&pane));
+    write_json(&evidence, "notify-status-after-cancel.json", &after_cancel);
+    assert_eq!(
+        find_subscription(&after_cancel, &subscription_ids[2])["status"],
+        "cancelled"
+    );
+    assert_eq!(
+        find_subscription(&after_cancel, &subscription_ids[0]),
+        find_subscription(&after_update, &subscription_ids[0])
+    );
+    assert_eq!(
+        find_subscription(&after_cancel, &subscription_ids[1]),
+        find_subscription(&after_update, &subscription_ids[1])
+    );
+    let final_list = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "list", "--json"],
+        &evidence,
+        "list-after-cancel",
+    );
+    write_json(&evidence, "list-after-cancel.json", &final_list);
+    assert_eq!(final_list["count"], 3, "{final_list}");
+    for goal_id in &goal_ids {
+        assert!(
+            final_list["goals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|goal| goal["goal_id"].as_str() == Some(goal_id.as_str())),
+            "cancel must retain observable record {goal_id}: {final_list}"
+        );
+    }
+
+    write_bytes(
+        &evidence,
+        "crud-facts.txt",
+        format!(
+            "Real daemon goal CRUD acceptance\nowner={owner}\ngoal_ids={}\nsubscription_ids={}\nintervals=120s,180s,240s\ncommands=subscribe x3,cancel goal-a for capacity,list,status --goal-id x3,edit goal-b,update goal-c,cancel goal-c\nambiguous_status=GOAL_RECORD_SELECTOR_REQUIRED\nmissing_edit=GOAL_RECORD_NOT_FOUND\n",
+            goal_ids.join(","),
+            subscription_ids.join(","),
         )
         .as_bytes(),
     );

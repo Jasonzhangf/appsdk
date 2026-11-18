@@ -1019,6 +1019,7 @@ fn build_candidate(
     } else {
         if candidate
             .get("rule_control")
+            .or(incoming_rule_control.as_ref())
             .is_some_and(|control| !control.is_null())
         {
             return Err(MemoryError::new(
@@ -1027,8 +1028,9 @@ fn build_candidate(
                 "remove rule_control or mark the entry as rule",
             ));
         }
+        // An explicit `fact` is a classification and stays stored. Only an
+        // unclassified record keeps no entry_kind.
         let candidate = candidate.as_object_mut().unwrap();
-        candidate.remove("entry_kind");
         candidate.remove("rule_control");
     }
 

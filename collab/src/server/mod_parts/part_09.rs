@@ -2758,16 +2758,18 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                     .cloned()
                     .unwrap_or_else(|| "unknown".into())
             } else {
-                "unknown".into()
+                String::from("unknown")
             };
-            let availability = if !mapped {
-                "unknown"
-            } else if matches!(activity_str.as_str(), "busy" | "waiting_user" | "error") {
-                "busy"
-            } else if activity_str == "idle" {
-                "idle"
-            } else if peer_endpoint_live == Some(false) {
-                "offline"
+            let availability = if mapped {
+                if matches!(activity_str.as_str(), "busy" | "waiting_user" | "error") {
+                    "busy"
+                } else if activity_str == "idle" {
+                    "idle"
+                } else if peer_endpoint_live == Some(false) {
+                    "offline"
+                } else {
+                    "unknown"
+                }
             } else {
                 "unknown"
             };

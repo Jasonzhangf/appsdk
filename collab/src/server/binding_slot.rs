@@ -886,7 +886,7 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
-        self.lookup_scoped(project, app, facts, cwd)
+        self.lookup_scoped(project, app, facts, cwd, false)
     }
 
     /// Select the caller's current actor after the daemon has validated an
@@ -900,7 +900,7 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
-        self.lookup_scoped(project, app, facts, cwd)
+        self.lookup_scoped(project, app, facts, cwd, true)
     }
 
     fn lookup_scoped(
@@ -909,6 +909,7 @@ impl BindingControlSet {
         app: &AppServerId,
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
+        allow_explicit_rex_session_override: bool,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
         let dsh = facts.dsh_session_id.as_deref().or_else(|| {
             facts
@@ -990,7 +991,21 @@ impl BindingControlSet {
                 .collect::<Vec<_>>();
             return match session_matches.as_slice() {
                 [] => unique(targets),
-                [holder] => Ok(Some(*holder)),
+                [holder] if allow_explicit_rex_session_override => Ok(Some(*holder)),
+                [holder] if targets.is_empty() => Ok(Some(*holder)),
+                [holder] => {
+                    // A unique Rex block is the authoritative placement anchor.
+                    // A unique agent session may disambiguate duplicate block
+                    // currents, but it cannot override a block owned by another
+                    // subject in the same scope.
+                    if targets[0].identity_key != holder.identity_key {
+                        return Err(format!(
+                            "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current Rex block anchor selects {}",
+                            holder.identity_key.name, targets[0].identity_key.name
+                        ));
+                    }
+                    Ok(Some(*holder))
+                }
                 _ => match unique(targets)? {
                     Some(target)
                         if session_matches

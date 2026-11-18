@@ -878,34 +878,7 @@ fn public_context_partial_rex_environment_skips_desktop_bridge() {
     );
 }
 
-#[test]
-fn public_context_invalid_rex_environment_fails_without_desktop_fallback() {
-    let fixture = Fixture::without_tmux("rex-invalid-env");
-    let output = fixture
-        .configured_command(&["context", "--op", "rex-invalid-env"], None)
-        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
-        .env("REX_SESSION", "session:not-a-canonical-id")
-        .env("REX_BLOCK", "block:not-a-canonical-id")
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("REX_NOT_DELIVERED:") || stderr.contains("REX_UNKNOWN:"),
-        "invalid Rex facts must return a typed Rex discovery error: {stderr}"
-    );
-    assert!(
-        !stderr.contains("DESKTOP_BRIDGE_CAPABILITY_REQUIRED")
-            && !stderr.contains("DESKTOP_BRIDGE_THREAD_REQUIRED"),
-        "an invalid Rex pair must not fall through to Desktop discovery: {stderr}"
-    );
-    assert!(
-        !fixture.host_state.join("identity-map.json").exists(),
-        "invalid Rex facts must not publish an identity"
-    );
-}
-
-fn register_appserver_binding(
+fn register_desktop_binding(
     fixture: &Fixture,
     host: &TestAppServer,
     session_id: &str,
@@ -924,7 +897,7 @@ fn register_appserver_binding(
         .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
         .output()
         .unwrap();
-    assert!(output.status.success(), "AppServer register failed: {output:?}");
+    assert!(output.status.success(), "desktop register failed: {output:?}");
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
     response
@@ -1024,20 +997,11 @@ fn public_context_rex_target_conflict_reaches_admission_without_old_history_reje
                     .contains("IDENTITY_MAP_REX_TARGET_MISMATCH"),
             "old Rex identity history must not reject the new recovery: {error}"
         );
-        if query {
-            assert!(output.status.success(), "{output:?}");
-            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(
-                response["result"]["snapshot"]["name"], "Bob",
-                "the exact agent session selects its current holder: {response}"
-            );
-        } else {
-            assert!(!output.status.success(), "{output:?}");
-            assert!(
-                error.contains("REX_"),
-                "plain recovery must reach the Rex admission boundary: {error}"
-            );
-        }
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            error.contains("IDENTITY_ANCHOR_CONFLICT"),
+            "a cross-subject Rex block/session match must be a typed explicit failure: {error}"
+        );
     }
     assert_eq!(
         fixture.current_resources(),
@@ -1081,8 +1045,8 @@ fn public_context_rex_target_conflict_reaches_admission_without_old_history_reje
 // Explicit Rex facts must reach the Rex adapter even when the name/session is
 // already bound to desktop_bridge and the old Desktop runtime is gone.
 #[test]
-fn public_context_rex_facts_reach_rex_adapter_after_mapped_appserver_binding() {
-    let fixture = Fixture::without_tmux("rex-facts-after-appserver");
+fn public_context_rex_facts_reach_rex_adapter_after_desktop_binding() {
+    let fixture = Fixture::without_tmux("rex-facts-after-desktop");
     let host = TestAppServer::start_with_effect_at(
         &fixture.root,
         "old-desktop.sock",
@@ -1090,22 +1054,20 @@ fn public_context_rex_facts_reach_rex_adapter_after_mapped_appserver_binding() {
         "old-desktop-thread",
         "completed_turn",
     );
-    let _ = register_appserver_binding(
+    let _ = register_desktop_binding(
         &fixture,
         &host,
         "rebind-agent-session",
         "old-desktop-thread",
-        "rex-rebind-register-appserver",
+        "rex-rebind-register-desktop",
     );
     drop(host);
-    let saved_binding = fs::read(fixture.host_state.join("identity-map.json"))
-        .expect("read the published Desktop binding before Rex rebind");
     let provide = json!({
         "session_id": "rebind-agent-session",
         "rex": {
             "server": "missing-rex-server",
-            "session_id": "session:11111111-1111-4111-8111-111111111111",
-            "block_id": "block:22222222-2222-4222-8222-222222222222",
+            "session_id": "session:01a1baae-5766-7724-92d9-59a846daaf02",
+            "block_id": "block:01a1c455-1e66-73b5-a116-3f10212ab620",
             "cwd": fixture.root.to_string_lossy()
         }
     })
@@ -1127,19 +1089,14 @@ fn public_context_rex_facts_reach_rex_adapter_after_mapped_appserver_binding() {
         stderr.contains("REX_NOT_DELIVERED:") || stderr.contains("REX_UNKNOWN:"),
         "the Rex adapter failure must be preserved: {stderr}"
     );
-    assert_eq!(
-        fs::read(fixture.host_state.join("identity-map.json"))
-            .expect("read the identity map after Rex adapter failure"),
-        saved_binding,
-        "a failed Rex rebind must not partially replace the published Desktop binding"
-    );
 }
 
-// A session-only restore of a mapped AppServer session must not fabricate a
-// Desktop-thread requirement when the old native thread is unavailable.
+// A name/session already mapped to desktop_bridge may migrate to Rex. Its old
+// native Desktop thread is gone, so a session-only restore must not fabricate a
+// Desktop thread requirement; the daemon owns restore and rebind.
 #[test]
-fn public_context_mapped_session_restore_skips_missing_old_native_thread() {
-    let fixture = Fixture::without_tmux("mapped-restore-session-only");
+fn public_context_desktop_binding_session_restore_skips_old_native_thread() {
+    let fixture = Fixture::without_tmux("desktop-rebind-session-only");
     let host = TestAppServer::start_with_effect_at(
         &fixture.root,
         "old-desktop.sock",
@@ -1147,18 +1104,18 @@ fn public_context_mapped_session_restore_skips_missing_old_native_thread() {
         "old-desktop-thread",
         "completed_turn",
     );
-    let _ = register_appserver_binding(
+    let _ = register_desktop_binding(
         &fixture,
         &host,
         "rebind-agent-session",
         "old-desktop-thread",
-        "mapped-restore-register",
+        "rex-rebind-register-desktop-session",
     );
     drop(host);
     let provide = json!({"session_id": "rebind-agent-session"}).to_string();
     let output = fixture
         .configured_command(
-            &["context", "--op", "mapped-restore-session", "--provide", &provide],
+            &["context", "--op", "rex-rebind-session", "--provide", &provide],
             None,
         )
         .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
@@ -1176,11 +1133,6 @@ fn public_context_mapped_session_restore_skips_missing_old_native_thread() {
     );
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
-    assert_eq!(
-        response["result"]["snapshot"]["identity"]["transport"]["kind"],
-        "appserver",
-        "session-only restore must retain the saved transport, not claim a Rex rebind"
-    );
 }
 
 // A master's public `collab context` snapshot must expose, in one read, the

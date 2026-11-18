@@ -1,6 +1,6 @@
 use super::super::name_state::NameOccupancy;
 use super::super::state::{Event, Message, ReplyObligation, State, WorkerRec};
-use super::{build_obligation, resolve_scope, stable_name, validate_reply};
+use super::{build_obligation, recipient_matches, resolve_scope, stable_name, validate_reply};
 use crate::proto::ReplyPolicy;
 
 fn obligation(
@@ -50,6 +50,33 @@ fn message(id: &str, from: &str, to: &str) -> Message {
         last_wake_attempt_ms: 0,
         retry_attempted: false,
     }
+}
+
+fn registered_peer_control(
+    thread: &str,
+) -> (
+    crate::server::Server,
+    std::path::PathBuf,
+    crate::server::binding_slot::BindingControlSet,
+    crate::scope::ProjectScopeId,
+    crate::identity::AppServerId,
+) {
+    let (server, root) = crate::server::peer_tests::test_server();
+    let registered = crate::server::peer_tests::register_synthetic_peer(&server, "peer", thread);
+    assert!(registered.ok, "{registered:?}");
+    let control =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .unwrap();
+    let (project, app) = {
+        let binding = &control
+            .active_values()
+            .find(|value| value.binding.agent_id.as_str() == "peer")
+            .unwrap()
+            .binding;
+        (binding.project_scope.clone(), binding.app_scope_id.clone())
+    };
+    (server, root, control, project, app)
 }
 
 #[test]
@@ -197,9 +224,8 @@ fn project_reset_clears_only_its_own_scope() {
 
 #[test]
 fn linked_reply_must_come_from_recipient_to_sender() {
-    let control = crate::server::binding_slot::BindingControlSet::default();
-    let app = crate::identity::AppServerId::new("appserver-cli").unwrap();
-    let pending = obligation("m1", "proj", "requester", "peer", None);
+    let (server, root, control, project, app) = registered_peer_control("reply-owner");
+    let pending = obligation("m1", project.as_str(), "requester", "peer", None);
 
     // Right recipient, right target.
     assert!(validate_reply(&control, &app, &pending, "peer", "requester").is_ok());
@@ -207,6 +233,61 @@ fn linked_reply_must_come_from_recipient_to_sender() {
     assert!(validate_reply(&control, &app, &pending, "other", "requester").is_err());
     // The recipient cannot answer a different target.
     assert!(validate_reply(&control, &app, &pending, "peer", "other").is_err());
+
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recipient_matcher_is_project_scoped_and_propagates_ambiguous_current_map() {
+    let (server, root, control, project, app) = registered_peer_control("reply-owner");
+    let mut pending = obligation("m1", project.as_str(), "requester", "old", Some("Alice"));
+
+    assert!(recipient_matches(&control, &app, &pending, "peer").unwrap());
+    pending.project = "/tmp/other-project".into();
+    assert!(
+        !recipient_matches(&control, &app, &pending, "peer").unwrap(),
+        "same name in another project must not authorize the recipient"
+    );
+    pending.project = project.as_str().to_owned();
+
+    let slot = control.slots().next().unwrap().clone();
+    let ambiguous =
+        crate::server::binding_slot::BindingControlSet::from_slots(vec![slot.clone(), slot]);
+    let error = recipient_matches(&ambiguous, &app, &pending, "peer").unwrap_err();
+    assert!(error.contains("IDENTITY_MAP_AMBIGUOUS"), "{error}");
+    let direct = obligation("m2", project.as_str(), "requester", "peer", None);
+    let error = recipient_matches(&ambiguous, &app, &direct, "peer").unwrap_err();
+    assert!(error.contains("IDENTITY_MAP_AMBIGUOUS"), "{error}");
+
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recorded_recipient_requires_current_binding_in_matching_project_and_app() {
+    let (server, root, control, project, app) = registered_peer_control("reply-owner");
+    let other_app = crate::identity::AppServerId::new("other-app").unwrap();
+    let pending = obligation("m1", project.as_str(), "requester", "peer", None);
+
+    assert!(
+        recipient_matches(&control, &app, &pending, "peer").unwrap(),
+        "the recorded recipient is current in the matching project and app"
+    );
+    assert!(
+        !recipient_matches(&control, &other_app, &pending, "peer").unwrap(),
+        "the recorded worker ID alone must not authorize another app scope"
+    );
+    assert!(validate_reply(&control, &app, &pending, "peer", "requester").is_ok());
+    let cross_app_reply =
+        validate_reply(&control, &other_app, &pending, "peer", "requester").unwrap_err();
+    assert!(
+        cross_app_reply.contains("REPLY_OBLIGATION_MISMATCH"),
+        "{cross_app_reply}"
+    );
+
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

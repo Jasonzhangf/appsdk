@@ -163,7 +163,16 @@ pub(crate) fn project_master_wake_idle_capacity(
     accumulator
 }
 
+fn prune_master_wake_idle_capacity(server: &Server) {
+    let mut state = server.state.lock().unwrap();
+    let accumulator = project_master_wake_idle_capacity(server, &state);
+    if accumulator != state.master_wake {
+        server.commit_locked_reporting(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
+    }
+}
+
 fn handle_master_status(server: &Server) -> Resp {
+    prune_master_wake_idle_capacity(server);
     // The typed grant is the only authority source. A route, reducer or scope
     // failure is an explicit error; a transport observation is reported
     // separately and never removes the holder. The endpoint probe must run
@@ -364,15 +373,7 @@ pub(crate) fn handle_channel_inbound(
     body: String,
     envelope: crate::server::channel_envelope::ChannelEnvelope,
 ) -> Resp {
-    handle_channel_inbound_impl(
-        server,
-        None,
-        from,
-        to,
-        subject,
-        body,
-        envelope,
-    )
+    handle_channel_inbound_impl(server, None, from, to, subject, body, envelope)
 }
 
 pub(crate) fn handle_channel_inbound_with_rex_recovery(
@@ -383,15 +384,7 @@ pub(crate) fn handle_channel_inbound_with_rex_recovery(
     body: String,
     envelope: crate::server::channel_envelope::ChannelEnvelope,
 ) -> Resp {
-    handle_channel_inbound_impl(
-        server,
-        Some(server),
-        from,
-        to,
-        subject,
-        body,
-        envelope,
-    )
+    handle_channel_inbound_impl(server, Some(server), from, to, subject, body, envelope)
 }
 
 fn handle_channel_inbound_impl(
@@ -644,12 +637,7 @@ fn channel_inbound_finish(
             &subscription.id,
             now_ms(),
         ),
-        None => attempt_notification_detailed_with_at(
-            server,
-            &msg_id,
-            &subscription.id,
-            now_ms(),
-        ),
+        None => attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms()),
     };
     let method = {
         let st = server.state.lock().unwrap();
@@ -2572,27 +2560,22 @@ fn task_update_locked(
             decision_reason,
         );
     }
-    if task.owner != worker_id {
-        // A task whose owner name/binding is unavailable projects an empty
-        // owner and `needs_reassignment` on the board. The current project
-        // master owns that repair path so the task cannot stay stuck without a
-        // legal owner or wait state.
-        let master_repair = task_owner_unavailable(server, st, &task)
-            && board_check_master_locked(server, st, &worker_id).is_ok();
-        if !master_repair {
-            if let Err(error) =
-                task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
-            {
-                return error;
-            }
+    let is_master = board_check_master_locked(server, st, &worker_id).is_ok();
+    if task.owner != worker_id && !is_master {
+        return Resp::err("only the task owner may update its lifecycle");
+    }
+    if task.owner == worker_id {
+        if let Err(error) =
+            task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+        {
+            return error;
         }
-    } else if let Err(error) =
-        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
-    {
-        return error;
     }
     let original_status = task.status.clone();
-    if status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed")) {
+    let owner_is_actor = task.owner == worker_id;
+    if owner_is_actor
+        && status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed"))
+    {
         let result = match control {
             Some(control) => server_route_scope(server, st)
                 .map_err(Resp::err)

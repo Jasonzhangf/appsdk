@@ -552,7 +552,16 @@ fn worker_status_summary_with_maps(
         )
     };
 
+    let displaced_holder = control.slots().any(|slot| {
+        slot.identity_status() == crate::server::binding_slot::IdentityStatus::Unregistered
+            && slot.active_binding().is_none()
+            && slot
+                .reference_previous()
+                .is_some_and(|previous| previous.binding.agent_id.as_str() == w.id)
+    });
     let Some(role_brief) = role_brief else {
+        let display_name = if displaced_holder { w.id.clone() } else { display_name };
+        let status = if displaced_holder { "unknown" } else { "identity-mismatch" };
         return Ok(json!({
             "id": w.id,
             "display_name": display_name,
@@ -560,7 +569,7 @@ fn worker_status_summary_with_maps(
             "role": null,
             "role_brief": null,
             "transport": null,
-            "status": "identity-mismatch",
+            "status": status,
             "presence": "unknown",
             "endpoint_live": null,
             "identity_valid": false,

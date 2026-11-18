@@ -222,15 +222,15 @@ pub(crate) fn build_name_resolution_events_with_rename_from(
         });
     }
     let releases_extra_names = state
-        .name_occupancies
-        .get(project_scope)
-        .is_some_and(|names| {
-            names.values().any(|holder| {
-                holder.worker_id == occupancy.worker_id
-                    && holder.session_id == occupancy.session_id
-                    && holder.name != occupancy.name
-            })
-        });
+            .name_occupancies
+            .get(project_scope)
+            .is_some_and(|names| {
+                names.values().any(|holder| {
+                    holder.worker_id == occupancy.worker_id
+                        && holder.session_id == occupancy.session_id
+                        && holder.name != occupancy.name
+                })
+            });
     if previous != Some(occupancy) || !assignments.is_empty() || releases_extra_names {
         events.insert(
             0,

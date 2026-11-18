@@ -94,12 +94,12 @@ fn rex_server(target: &MonitorTarget) -> (Arc<Server>, PathBuf) {
         storage_root: root.clone(),
         state_path,
         host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(State::default()),
         appserver_candidate_check: Arc::new(|_| unreachable!()),
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| unreachable!()),
         appserver_thread_status: Arc::new(|_, _| unreachable!()),
         appserver_thread_archive: Arc::new(|_, _| unreachable!()),
-        register_gate: Arc::new(Mutex::new(())),
         rex_monitor: Default::default(),
         mailbox_notify: tokio::sync::Notify::new(),
     });

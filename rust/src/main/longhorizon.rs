@@ -99,40 +99,178 @@ pub(super) fn goal_record_subscription_id(record: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(super) fn goal_record_read(scope: &GoalScope) -> Result<Option<Value>, String> {
-    if let Some(record) = read_goal_file(&scope.control_dir().join("long-task-goal.json"))? {
-        if record["owner"].as_str() != Some(scope.owner.as_str()) {
-            return Err("GOAL_RECORD_OWNER_MISMATCH".into());
-        }
-        return Ok(Some(record));
+fn goal_record_component(goal_id: &str) -> String {
+    goal_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn goal_record_path(scope: &GoalScope, goal_id: &str) -> PathBuf {
+    scope
+        .control_dir()
+        .join("records")
+        .join(format!("{}.json", goal_record_component(goal_id)))
+}
+
+fn goal_path_identity(scope: &GoalScope, goal_path: &str) -> String {
+    let path = Path::new(goal_path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        scope.project.join(path)
+    };
+    path.canonicalize()
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn goal_record_from_file(file: &Path, owner: &str) -> Result<Option<Value>, String> {
+    let Some(mut record) = read_goal_file(file)? else {
+        return Ok(None);
+    };
+    if record["owner"].as_str() != Some(owner) {
+        return Err(format!("GOAL_RECORD_OWNER_MISMATCH:{}", file.display()));
     }
-    // Legacy data is optional compatibility input, not the current owner's
-    // namespace. Preserve and report unusable legacy data without blocking a
-    // separately authenticated owner's explicitly requested goal.
-    for root in [&scope.invocation_root, &scope.project] {
-        let mut record = match read_goal_file(&root.join(".appsdk-control/long-task-goal.json")) {
+    if record["goal_id"]
+        .as_str()
+        .is_none_or(|goal_id| goal_id.trim().is_empty())
+    {
+        return Err(format!(
+            "GOAL_RECORD_INVALID: goal_id is missing in {}",
+            file.display()
+        ));
+    }
+    if record
+        .get("record_source")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        record["record_source"] = Value::String("owner-scoped".into());
+    }
+    Ok(Some(record))
+}
+
+pub(super) fn goal_records_read(scope: &GoalScope) -> Result<Vec<Value>, String> {
+    let records_dir = scope.control_dir().join("records");
+    let mut records = std::collections::BTreeMap::new();
+    match fs::read_dir(&records_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|error| format!("GOAL_RECORD_READ_FAILED:{error}"))?;
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Some(record) = goal_record_from_file(&path, &scope.owner)? {
+                    records.insert(record["goal_id"].as_str().unwrap().to_owned(), record);
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "GOAL_RECORD_READ_FAILED:{}:{}",
+                records_dir.display(),
+                error
+            ));
+        }
+    }
+
+    // The previous owner-scoped singleton and project singleton are read-only
+    // compatibility inputs. Current per-goal files win by stable goal ID.
+    let mut legacy_paths = vec![scope.control_dir().join("long-task-goal.json")];
+    legacy_paths.push(
+        scope
+            .invocation_root
+            .join(".appsdk-control/long-task-goal.json"),
+    );
+    legacy_paths.push(scope.project.join(".appsdk-control/long-task-goal.json"));
+    legacy_paths.sort();
+    legacy_paths.dedup();
+    for path in legacy_paths {
+        let mut record = match read_goal_file(&path) {
             Ok(Some(record)) => record,
             Ok(None) => continue,
-            Err(error) => {
-                eprintln!("GOAL_LEGACY_RECORD_NOT_IMPORTED:{error}");
-                continue;
-            }
+            // Legacy singletons have no reliable owner when their JSON is
+            // corrupt. Keep the current per-goal record strict, but do not let
+            // an unowned legacy file block another owner's independent goal.
+            Err(error) if error.starts_with("GOAL_RECORD_JSON_INVALID:") => continue,
+            Err(error) => return Err(error),
         };
-        let Some(owner) = record["owner"]
+        let owner = record["owner"]
             .as_str()
-            .filter(|owner| !owner.trim().is_empty())
+            .filter(|owner| !owner.trim().is_empty());
+        if owner != Some(scope.owner.as_str()) && owner != Some(scope.worker_id.as_str()) {
+            continue;
+        }
+        let Some(goal_id) = record["goal_id"]
+            .as_str()
+            .filter(|goal_id| !goal_id.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                record["goal_path"]
+                    .as_str()
+                    .filter(|goal_path| !goal_path.trim().is_empty())
+                    .map(|goal_path| sha256(&goal_path_identity(scope, goal_path)))
+            })
         else {
-            eprintln!("GOAL_LEGACY_RECORD_NOT_IMPORTED: legacy record has no owner");
             continue;
         };
-        if owner != scope.owner && owner != scope.worker_id {
+        record["goal_id"] = Value::String(goal_id.clone());
+        if records.contains_key(&goal_id) {
             continue;
         }
         record["owner"] = Value::String(scope.owner.clone());
         record["record_source"] = Value::String("legacy-read-only".into());
+        records.insert(goal_id, record);
+    }
+    Ok(records.into_values().collect())
+}
+
+pub(super) fn goal_record_read_selected(
+    scope: &GoalScope,
+    goal_id: &str,
+) -> Result<Option<Value>, String> {
+    let path = goal_record_path(scope, goal_id);
+    if let Some(record) = goal_record_from_file(&path, &scope.owner)? {
         return Ok(Some(record));
     }
-    Ok(None)
+    Ok(goal_records_read(scope)?
+        .into_iter()
+        .find(|record| record["goal_id"].as_str() == Some(goal_id)))
+}
+
+pub(super) fn goal_record_select(
+    scope: &GoalScope,
+    goal_id: Option<&str>,
+) -> Result<Option<Value>, String> {
+    if let Some(goal_id) = goal_id {
+        return goal_record_read_selected(scope, goal_id)?
+            .map(Some)
+            .ok_or_else(|| format!("GOAL_RECORD_NOT_FOUND:{goal_id}"));
+    }
+    let records = goal_records_read(scope)?;
+    match records.as_slice() {
+        [] => Ok(None),
+        [record] => Ok(Some(record.clone())),
+        _ => {
+            let ids = records
+                .iter()
+                .filter_map(|record| record["goal_id"].as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            Err(format!(
+                "GOAL_RECORD_SELECTOR_REQUIRED: multiple goals are retained; use --goal-id ({ids})"
+            ))
+        }
+    }
+}
+
+pub(super) fn goal_record_read(scope: &GoalScope) -> Result<Option<Value>, String> {
+    goal_record_select(scope, None)
 }
 
 pub(super) fn goal_record_write(scope: &GoalScope, record: &Value) -> Result<(), String> {
@@ -143,15 +281,22 @@ pub(super) fn goal_record_write(scope: &GoalScope, record: &Value) -> Result<(),
     record["record_source"] = Value::String("owner-scoped".into());
     record["project_scope"] = serde_json::json!(scope.project);
     record["session_id"] = serde_json::json!(scope.session_id);
-    let control_dir = scope.control_dir();
-    fs::create_dir_all(&control_dir)
+    let goal_id = record["goal_id"]
+        .as_str()
+        .filter(|goal_id| !goal_id.trim().is_empty())
+        .ok_or_else(|| "GOAL_RECORD_INVALID: goal_id is missing".to_string())?;
+    let file = goal_record_path(scope, goal_id);
+    let records_dir = file
+        .parent()
+        .ok_or_else(|| "GOAL_RECORD_PATH_INVALID".to_string())?;
+    fs::create_dir_all(records_dir)
         .map_err(|error| format!("GOAL_CONTROL_DIR_CREATE_FAILED:{}", error))?;
-    let file = control_dir.join("long-task-goal.json");
     let content = serde_json::to_string_pretty(&record)
         .map_err(|error| format!("GOAL_RECORD_SERIALIZE_FAILED:{}", error))?
         + "\n";
-    let staging = control_dir.join(format!(
-        "long-task-goal.json.staging.{}.{}",
+    let staging = records_dir.join(format!(
+        "{}.json.staging.{}.{}",
+        goal_record_component(goal_id),
         std::process::id(),
         goal_now_ms()
     ));
@@ -532,6 +677,62 @@ pub(super) fn goal_reconcile_active(
     Ok((response, subscription_id))
 }
 
+pub(super) fn goal_reconcile_edit(
+    root: &Path,
+    goal_id: &str,
+    goal_owner: &str,
+    ttl_seconds: Option<u64>,
+    interval_ms: Option<i64>,
+    repeat_count: Option<u32>,
+    content: Option<&str>,
+) -> Result<Value, String> {
+    let mut command = Command::new("collab");
+    command.args([
+        "goal",
+        "reconcile",
+        "--goal-id",
+        goal_id,
+        "--owner",
+        goal_owner,
+        "--desired",
+        "active",
+        "--operation",
+        "edit",
+    ]);
+    if let Some(ttl_seconds) = ttl_seconds {
+        command.args(["--ttl-seconds", &ttl_seconds.to_string()]);
+    }
+    if let Some(interval_ms) = interval_ms {
+        command.args(["--every-ms", &interval_ms.to_string()]);
+    }
+    if let Some(repeat_count) = repeat_count {
+        command.args(["--repeat", &repeat_count.to_string()]);
+    }
+    if let Some(content) = content {
+        command.args(["--content", content]);
+    }
+    command.current_dir(root);
+    let out = run_goal_collab_command(command, GOAL_COLLAB_WRITE_TIMEOUT).map_err(|error| {
+        if error == "GOAL_COLLAB_COMMAND_TIMEOUT" {
+            error
+        } else {
+            format!("GOAL_RECONCILE_EDIT_COLLAB_FAILED:{}", error)
+        }
+    })?;
+    if !out.status.success() {
+        return Err(format!(
+            "GOAL_RECONCILE_EDIT_COLLAB_FAILED:exit={}{}",
+            out.status.code().unwrap_or(1),
+            if out.stderr.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", String::from_utf8_lossy(&out.stderr).trim())
+            }
+        ));
+    }
+    parse_goal_reconcile_response(&out.stdout, goal_id, "active")
+}
+
 pub(super) fn goal_reconcile_ended(
     root: &Path,
     goal_id: &str,
@@ -766,7 +967,7 @@ pub(super) fn project_patrol_cadence_gap(interval_ms: Option<i64>) -> Option<&'s
     (interval_ms == Some(PROJECT_PATROL_COMPAT_EVERY_MS)).then_some("PATROL_CADENCE_RUNTIME_GAP")
 }
 
-fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, String> {
+pub(super) fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, String> {
     let mut command = Command::new("collab");
     command.args(["notify", "status"]).current_dir(root);
     let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)

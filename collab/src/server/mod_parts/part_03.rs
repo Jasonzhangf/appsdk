@@ -5,18 +5,23 @@ fn validate_transport_candidates(
     candidates: &TransportCandidates,
     registration_cwd: &str,
 ) -> Result<SelectedTransport, String> {
-    validate_transport_candidates_for_session(server, candidates, registration_cwd, None)
+    validate_transport_candidates_for_session(
+        &server.root,
+        candidates,
+        registration_cwd,
+        None,
+    )
 }
 
 fn validate_transport_candidates_for_session(
-    server: &Server,
+    expected_project_root: &Path,
     candidates: &TransportCandidates,
     registration_cwd: &str,
     agent_session: Option<&str>,
 ) -> Result<SelectedTransport, String> {
     let requested_root = std::fs::canonicalize(registration_cwd)
         .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
-    let candidate_root = std::fs::canonicalize(&server.root)
+    let candidate_root = std::fs::canonicalize(expected_project_root)
         .map_err(|error| format!("RUNTIME_BINDING_REJECTED: project root: {error}"))?;
     if candidate_root != requested_root {
         return Err(format!(

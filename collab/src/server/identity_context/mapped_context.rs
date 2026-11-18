@@ -809,9 +809,13 @@ impl ProjectRuntimeManager {
             Some(RoleAction::ClearMaster) => current_master_grant(&state, Some(&route)).is_none(),
             None => true,
         };
-        let user_approved_master = role.as_ref().is_some_and(|role|
-            matches!(role.action, RoleAction::SetMaster)
-                && matches!(role.authorization, RoleAuthorization::User { .. }));
+        if matches!(
+            role.as_ref().map(|role| &role.action),
+            Some(RoleAction::SetMaster)
+        ) && !settled
+        {
+            super::tm_layout::require_master_position(&value)?;
+        }
         if source.name == target
             && original == &value
             && settled

@@ -400,7 +400,7 @@ impl ProjectRuntimeManager {
             ..Default::default()
         };
         let transport = validate_transport_candidates_for_session(
-            &self.host,
+            Path::new(&context.canonical_root),
             &candidates,
             &context.canonical_root,
             facts.session_id.as_deref(),
@@ -884,6 +884,32 @@ impl ProjectRuntimeManager {
             invocation_cwd,
             allow_explicit_rex_rebind,
         )? };
+        if let Some(identity) = session_identity.as_ref() {
+            if let Some(candidate) = facts.tmux.as_ref() {
+                let control = self
+                    .binding_control_store()
+                    .load()
+                    .map_err(anyhow::Error::msg)?;
+                let claimed_by_other_subject = control.slots().any(|slot| {
+                    slot.identity_key.project_scope == context.project_scope
+                        && slot.identity_key.app_scope_id == context.app_scope_id
+                        && slot.active_binding().is_some_and(|value| {
+                            value.binding.agent_id.as_str() != identity.worker_id.as_str()
+                                && value.transport.kind == crate::proto::TransportKind::Tmux
+                                && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                                    saved.socket_path == candidate.endpoint.socket_path
+                                        && saved.tmux_session_id
+                                            == candidate.endpoint.tmux_session_id
+                                })
+                        })
+                });
+                if claimed_by_other_subject {
+                    anyhow::bail!(
+                        "IDENTITY_ANCHOR_CONFLICT: the observed tmux placement belongs to another registered subject"
+                    );
+                }
+            }
+        }
         let required =
             if session_identity.is_some() || self.has_current_desktop_binding(&context, &facts)? {
                 Vec::new()
@@ -992,7 +1018,7 @@ impl ProjectRuntimeManager {
                                 .map(|recovery| recovery.transport.clone())
                                 .unwrap_or(
                                     validate_transport_candidates_for_session(
-                                        &runtime,
+                                        &runtime.root,
                                         &candidates,
                                         &context.canonical_root,
                                         facts.session_id.as_deref(),
@@ -1396,6 +1422,47 @@ mod anchor_provenance_tests {
         assert!(verify_local_rex_socket(&regular_uri).unwrap_err().to_string().contains("not a unix socket"));
         drop(listener);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rex_recovery_preflight_uses_invocation_project_root() {
+        let (server, resident_root) = test_server();
+        let invocation_root = resident_root.with_file_name(format!(
+            "{}-invocation",
+            resident_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(invocation_root.join(".agent-collab")).unwrap();
+        let manager = recovery_manager(Arc::new(server));
+        let context = recovery_context(&invocation_root);
+        let facts = IdentityFacts {
+            rex: Some(crate::proto::RexCandidate {
+                server: "unix:///tmp/rex-preflight-not-contacted.sock".into(),
+                session_id: "session:invalid".into(),
+                block_id: "block:invalid".into(),
+                cwd: invocation_root.display().to_string(),
+            }),
+            session_id: Some("agent-session-cross-project".into()),
+            ..IdentityFacts::default()
+        };
+        let error = match manager.observe_rex_recovery(
+            &context,
+            &facts,
+            Some(invocation_root.to_str().unwrap()),
+        ) {
+            Ok(_) => panic!("the invalid Rex target must fail after project-root admission"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !error.contains("registration cwd")
+                && !error.contains("does not match project root"),
+            "the resident root must not participate in invocation-root admission: {error}"
+        );
+        assert!(
+            error.contains("REX_"),
+            "admission must continue to Rex target validation: {error}"
+        );
+        std::fs::remove_dir_all(invocation_root).unwrap();
+        std::fs::remove_dir_all(resident_root).unwrap();
     }
 
     fn recovery_manager(server: Arc<Server>) -> Arc<ProjectRuntimeManager> {

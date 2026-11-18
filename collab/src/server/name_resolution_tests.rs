@@ -12,10 +12,7 @@ fn generated_peer_names_do_not_invent_an_unlinked_position() {
     assert_eq!(display_slot("peer-1").unwrap(), None);
     assert_eq!(display_slot("peer-42").unwrap(), None);
     for invalid in ["Peer1", "peer-0", "peer-01", "peer-", "peer-one"] {
-        assert!(
-            display_slot(invalid).is_err(),
-            "{invalid} must not be canonical"
-        );
+        assert!(display_slot(invalid).is_err(), "{invalid} must not be canonical");
     }
 }
 

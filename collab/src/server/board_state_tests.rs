@@ -310,6 +310,252 @@ fn current_state_preserves_public_history_and_exact_revision() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn name_handoff_goal_fixture(
+    status: &str,
+    expires_ms: i64,
+) -> (Server, std::path::PathBuf, String, String, String, i64) {
+    use crate::server::state::{GoalScheduleBinding, GoalScheduleContent};
+
+    let (server, root, route) = board_name_fixture();
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let source = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "current")
+        .unwrap()
+        .unwrap();
+    let value = control
+        .slot(source)
+        .unwrap()
+        .active_binding()
+        .unwrap()
+        .clone();
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: binding_slot::IdentityBindingKey::new(
+                route.project_scope_id.clone(),
+                route.app_scope_id.clone(),
+                "Alice",
+            ),
+            value,
+            source_names: vec![source.name.clone()],
+            expected_generation: None,
+        })
+        .unwrap();
+    let project = crate::server::GlobalState::canonical_project_scope(&root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    let batch_id = "sub-task-batch".to_string();
+    let message_id = "msg-task-handoff".to_string();
+    let created_ms = now_ms() - 60_000;
+    let mut state = server.state.lock().unwrap();
+    let mut details = state.board_details["named-work"].clone();
+    details.long_horizon = Some(crate::board::LongHorizonTaskSpec {
+        content: "complete named work".into(),
+        interval_ms: 60_000,
+        repeat_count: 2,
+        ttl_seconds: 600,
+    });
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: "named-work".into(),
+            details,
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: batch_id.clone(),
+                worker_id: "old".into(),
+                event: "deadline".into(),
+                subject: Some("goal:task:named-work".into()),
+                target: "old".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(created_ms + 30_000),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(60_000),
+                repeat_count: 2,
+                fired_count: 2,
+                expires_ms,
+                status: status.into(),
+                created_ms,
+                updated_ms: created_ms,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+                periodic_declared: true,
+                goal_content: Some(GoalScheduleBinding {
+                    source: Some(GoalScheduleContent::BoardTask {
+                        task_id: "named-work".into(),
+                    }),
+                    ttl_seconds: 600,
+                }),
+            },
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::Sent {
+            msg: crate::server::state::Message {
+                id: message_id.clone(),
+                from: "sender".into(),
+                to: "old".into(),
+                mtype: "notify".into(),
+                subject: Some("unread work".into()),
+                body: "continue named work".into(),
+                in_reply_to: None,
+                created_ms,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::MailboxNameAddressed {
+            message_id: message_id.clone(),
+            address: crate::server::name_mailbox::MailboxNameAddress {
+                project_scope: project.clone(),
+                name: "Alice".into(),
+            },
+        })
+        .unwrap();
+    drop(state);
+    (server, root, project, batch_id, message_id, created_ms)
+}
+
+#[test]
+fn ended_task_goal_batch_handoff_commits_without_renewal_red() {
+    let (server, root, project, batch_id, message_id, created_ms) =
+        name_handoff_goal_fixture("consumed", now_ms() + 600_000);
+    let previous = name_state::NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "old".into(),
+        session_id: "session-old".into(),
+        occupancy_revision: 1,
+        updated_ms: created_ms,
+        pane_anchor: None,
+    };
+    let current = name_state::NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "current".into(),
+        session_id: "session-current".into(),
+        occupancy_revision: 2,
+        updated_ms: now_ms(),
+        pane_anchor: None,
+    };
+    let mut state = server.state.lock().unwrap();
+    let before = state.notification_subscriptions[&batch_id].clone();
+    let events = name_resolution::build_name_resolution_events_with_rename_from(
+        &state,
+        &project,
+        &current,
+        &[],
+        Some(&previous),
+    );
+    server
+        .commit_locked_checked(&mut state, &events)
+        .expect("legal same-name handoff must preserve the ended batch");
+    let preserved = &state.notification_subscriptions[&batch_id];
+    assert_eq!(preserved.worker_id, "current");
+    assert_eq!(preserved.status, before.status);
+    assert_eq!(preserved.fired_count, before.fired_count);
+    assert_eq!(preserved.trigger_ms, before.trigger_ms);
+    assert_eq!(preserved.expires_ms, before.expires_ms);
+    assert_eq!(
+        state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| subscription.subject.as_deref() == Some("goal:task:named-work"))
+            .count(),
+        1
+    );
+    assert_eq!(state.tasks["named-work"].owner, "current");
+    assert_eq!(state.tasks["named-work"].status, "working");
+    assert_eq!(state.msgs[&message_id].to, "current");
+    assert_eq!(state.msgs[&message_id].state, "pending");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn armed_task_goal_batch_moves_with_name_handoff_without_renewal() {
+    let (server, root, project, batch_id, message_id, created_ms) =
+        name_handoff_goal_fixture("armed", now_ms() + 600_000);
+    let previous = name_state::NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "old".into(),
+        session_id: "session-old".into(),
+        occupancy_revision: 1,
+        updated_ms: created_ms,
+        pane_anchor: None,
+    };
+    let current = name_state::NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "current".into(),
+        session_id: "session-current".into(),
+        occupancy_revision: 2,
+        updated_ms: now_ms(),
+        pane_anchor: None,
+    };
+    let mut state = server.state.lock().unwrap();
+    let before = state.notification_subscriptions[&batch_id].clone();
+    let events = name_resolution::build_name_resolution_events_with_rename_from(
+        &state,
+        &project,
+        &current,
+        &[],
+        Some(&previous),
+    );
+    server.commit_locked_checked(&mut state, &events).unwrap();
+    let preserved = &state.notification_subscriptions[&batch_id];
+    assert_eq!(preserved.worker_id, "current");
+    assert_eq!(preserved.status, "armed");
+    assert_eq!(preserved.fired_count, before.fired_count);
+    assert_eq!(preserved.trigger_ms, before.trigger_ms);
+    assert_eq!(preserved.expires_ms, before.expires_ms);
+    assert_eq!(state.tasks["named-work"].owner, "current");
+    assert_eq!(state.msgs[&message_id].to, "current");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn same_carrier_name_resolution_is_a_noop_for_an_ended_task_batch() {
+    let (server, root, project, batch_id, _message_id, created_ms) =
+        name_handoff_goal_fixture("consumed", now_ms() + 600_000);
+    let current = name_state::NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "old".into(),
+        session_id: "session-old".into(),
+        occupancy_revision: 1,
+        updated_ms: created_ms,
+        pane_anchor: None,
+    };
+    let state = server.state.lock().unwrap();
+    let events = name_resolution::build_name_resolution_events_with_rename_from(
+        &state,
+        &project,
+        &current,
+        &[],
+        Some(&current),
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::TaskUpdated { task } if task.id == "named-work"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::BoardDetailsChanged { task_id, .. } if task_id == "named-work"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::NotificationSubscribed { subscription } if subscription.id == batch_id
+    )));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn unknown_actor_is_not_public_after_current_state_round_trip() {
     let mut state = State::default();

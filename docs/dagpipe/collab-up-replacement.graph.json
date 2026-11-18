@@ -1,0 +1,82 @@
+{
+  "id": "appsdk-collab-up-replacement",
+  "version": "1.0.0",
+  "description": "一次用户发起的 collab up 维护请求。写者按 daemon.owner.lock → daemon.lock 顺序取得独占 admission，并在完整 v3 owner proof 与 server.pid 发布前保持 publication；replacement 读者持共享 publication 锁核实同一 generation，并在每次保留实例信号 syscall 期间继续持锁。owner 变化、实例消失、平台能力缺失、权限拒绝、启动失败与取消均沿同一出口返回真实结果，不转用 numeric PID 信号。拒绝后不进入启动。",
+  "inputs": [{"id": "up_request", "schema": "Object"}],
+  "nodes": [
+    {
+      "id": "核实维护入口与服务状态",
+      "operator": "appsdk.collab_up.classify_service",
+      "operator_version": "1",
+      "description": "保留用户终端准入，并按现有 readiness 分类 healthy、missing、starting、unresponsive 与 unknown。只有 unknown 且 host writer lock held 的路径继续替换；其他路径沿用现有启动或 no-op 结果。owner: main.rs::Cmd::Up 与 client.rs 现有 readiness 分类。",
+      "inputs": ["up_request"],
+      "output": {"id": "service_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "固定可验证进程实例",
+      "operator": "appsdk.collab_up.retain_instance",
+      "operator_version": "1",
+      "description": "先取得稳定 daemon.owner.lock 的共享 flock，再核实 daemon.lock admission 为 held，读取 server.pid 与完整 v3 owner proof；generation、PID、start identity 和平台 proof 必须一致，且目标必须是保留实例。缺少 publication lock、legacy/v2/partial/malformed proof 或 lock 未持有均拒绝。Linux 使用一个 pidfd；macOS 使用 daemon 发布的完整 audit token。初始证明完成后释放 publication。owner: client.rs 与 host_runtime.rs。",
+      "inputs": ["service_state"],
+      "output": {"id": "retained_instance", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "终止同一实例并确认释放",
+      "operator": "appsdk.collab_up.terminate_instance",
+      "operator_version": "1",
+      "description": "每次信号前取得共享 publication flock，在持锁期间重核 held admission、generation、PID、start identity 与平台 proof，并只向原始保留 pidfd/audit token 执行信号 syscall。publication guard 覆盖校验至 syscall，然后在有界终止等待前释放。SIGKILL 复用同一保留目标；目标消失、代际变化、锁冲突、能力缺失或投递失败立即拒绝并报告已发生效果，不用 numeric PID。owner: client.rs::replace_unresponsive_daemon。",
+      "inputs": ["retained_instance"],
+      "output": {"id": "termination_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "沿正式入口恢复服务",
+      "operator": "appsdk.collab_up.start_service",
+      "operator_version": "1",
+      "description": "仅成功 no-op 或已确认旧实例释放后，才继续现有 supervised 或 detached 正式启动路径。替换拒绝、实例消失或信号失败不进入启动。owner: main.rs::Cmd::Up 与 main_autostart/client startup。",
+      "inputs": ["termination_result"],
+      "output": {"id": "start_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "核实服务就绪",
+      "operator": "appsdk.collab_up.verify_ready",
+      "operator_version": "1",
+      "description": "沿现有 readiness/Ping owner 确认当前服务可应答。旧实例存活、信号已交付或启动命令已执行均不构成 ready。owner: client.rs readiness probe 与 wait_for_daemon。",
+      "inputs": ["start_result"],
+      "output": {"id": "readiness_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "交回真实维护结果",
+      "operator": "appsdk.collab_up.emit_result",
+      "operator_version": "1",
+      "description": "成功、拒绝、失败与取消汇入同一出口。成功必须保留健康服务或完成 verified replacement 后的当前 Ping；拒绝保留实际 effect 边界；取消释放本地保留目标但不撤销已交付信号。owner: main.rs::Cmd::Up。",
+      "inputs": ["readiness_result"],
+      "output": {"id": "up_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "核实维护入口与服务状态", "to": "固定可验证进程实例", "arc_id": "service_state"},
+    {"from": "固定可验证进程实例", "to": "终止同一实例并确认释放", "arc_id": "retained_instance"},
+    {"from": "终止同一实例并确认释放", "to": "沿正式入口恢复服务", "arc_id": "termination_result"},
+    {"from": "沿正式入口恢复服务", "to": "核实服务就绪", "arc_id": "start_result"},
+    {"from": "核实服务就绪", "to": "交回真实维护结果", "arc_id": "readiness_result"}
+  ],
+  "outputs": ["up_result"]
+}

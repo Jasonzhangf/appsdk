@@ -813,7 +813,7 @@ fn handle_goal_schedule_reconcile_with_period(
     handle_goal_schedule_for_actor(server, &worker_id, &token, GoalScheduleChange {
         goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, reason,
         interval_ms, repeat_count, content: None,
-        renew_ended: true,
+        operation: GoalScheduleOperation::Explicit,
     })
 }
 
@@ -1283,7 +1283,12 @@ fn handle_register_with_app_scope_inner_bound(
     let candidates = candidates.unwrap_or_default();
     let agent_session = outer_binding.and_then(RegisterOuterBinding::identity_facts)
         .and_then(|facts| facts.session_id.as_deref());
-    let selected = match validate_transport_candidates_for_session(server, &candidates, &cwd, agent_session) {
+    let selected = match validate_transport_candidates_for_session(
+        &server.root,
+        &candidates,
+        &cwd,
+        agent_session,
+    ) {
         Ok(selected) => selected,
         Err(error) => return Resp::err(error),
     };

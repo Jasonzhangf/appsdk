@@ -439,11 +439,18 @@ fn dispatch_with_route_context_bound(
             repeat_count,
             goal_subject,
             reason,
-        } => handle_goal_schedule_for_actor(server, &worker_id, &token, GoalScheduleChange {
-            goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, reason, interval_ms,
-            repeat_count, content: content.map(|content| GoalScheduleContent::Inline { content }),
-            renew_ended: true,
-        }),
+            operation,
+        } => {
+            let operation = match GoalScheduleOperation::from_request(operation) {
+                Ok(operation) => operation,
+                Err(error) => return error,
+            };
+            handle_goal_schedule_for_actor(server, &worker_id, &token, GoalScheduleChange {
+                goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, reason, interval_ms,
+                repeat_count, content: content.map(|content| GoalScheduleContent::Inline { content }),
+                operation,
+            })
+        }
         Req::Poll { .. } => {
             Resp::err("Poll is only handled by the async daemon connection path; use collab recv")
         }
@@ -1217,9 +1224,37 @@ fn handle_msg_status(
     };
     if let Some(caller) = caller {
         if msg.from != caller.id && msg.to != caller.id {
-            return Resp::err(format!(
-                "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id}; next: query only messages sent by or addressed to this caller"
-            ));
+            let context = project_context.expect("caller exists only with wire project context");
+            let obligation_match = match st.reply_obligations.get(&msg_id) {
+                Some(obligation)
+                    if obligation.message_id == msg_id
+                        && obligation.project == context.project_scope.as_str() =>
+                {
+                    let control = match binding_store::BindingControlStore::new(
+                        server.host_paths.state_root(),
+                    )
+                    .load()
+                    {
+                        Ok(control) => control,
+                        Err(error) => return Resp::err(error),
+                    };
+                    match reply_obligation::recipient_matches(
+                        &control,
+                        &context.app_scope_id,
+                        obligation,
+                        &caller.id,
+                    ) {
+                        Ok(is_recipient) => is_recipient,
+                        Err(error) => return Resp::err(error),
+                    }
+                }
+                _ => false,
+            };
+            if !obligation_match {
+                return Resp::err(format!(
+                    "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id} and is not the current recipient of its open reply obligation; next: query only messages sent by or addressed to this caller or required by this caller's open reply obligations"
+                ));
+            }
         }
     }
     let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
@@ -1337,9 +1372,8 @@ fn validate_wire_route_principals(
     }
 
     // Worker status is a read-only identity query. A registered worker whose
-    // active mapping belongs to another project route, or whose persistent row
-    // remains after displacement, stays inspectable. The response owns the
-    // unknown projection and never admits mutation from the old caller.
+    // active mapping belongs to another project route remains inspectable,
+    // while the response marks route_match=false and never admits mutation.
     if let Req::WorkerStatus {
         worker_id: Some(worker_id),
     } = req

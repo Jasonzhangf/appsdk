@@ -13,6 +13,326 @@
 
 pub(crate) const AGY_SESSION_ID_ENV: &str = "ANTIGRAVITY_CONVERSATION_ID";
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
+
+pub(crate) struct PublicationGuard {
+    file: std::fs::File,
+}
+
+impl PublicationGuard {
+    pub(crate) fn acquire(
+        path: &std::path::Path,
+        exclusive: bool,
+        create: bool,
+    ) -> anyhow::Result<Self> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        if create {
+            options.create(true);
+        }
+        let file = options.open(path).map_err(|error| {
+            anyhow::Error::new(error).context(format!(
+                "DAEMON_OWNER_PUBLICATION_REFUSED: cannot open {}",
+                path.display()
+            ))
+        })?;
+        use std::os::fd::AsRawFd;
+        let mode = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            let detail = if error.raw_os_error() == Some(libc::EAGAIN) {
+                "is busy"
+            } else {
+                "could not be acquired"
+            };
+            return Err(anyhow::Error::new(error).context(format!(
+                "DAEMON_OWNER_PUBLICATION_REFUSED: {} lock {} {detail}",
+                if exclusive { "exclusive" } else { "shared" },
+                path.display()
+            )));
+        }
+        Ok(Self { file })
+    }
+
+    #[cfg(test)]
+    fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.file.as_raw_fd()
+    }
+}
+
+/// A retained process instance selected for daemon replacement. Holding this
+/// target does not authorize signalling; it prevents a later PID/owner reuse
+/// from becoming the signal target.
+#[derive(Debug)]
+pub(crate) enum RetainedProcessInstance {
+    #[cfg(target_os = "linux")]
+    Linux(OwnedFd),
+    #[cfg(target_os = "macos")]
+    MacOS(MacAuditToken),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessSignalOutcome {
+    Delivered,
+    InstanceGone,
+    Unavailable(String),
+    Failed(String),
+}
+
+fn process_signal_error(error: libc::c_int, operation: &str) -> ProcessSignalOutcome {
+    match error {
+        libc::ESRCH => ProcessSignalOutcome::InstanceGone,
+        libc::ENOSYS => ProcessSignalOutcome::Unavailable(format!(
+            "{operation} is unavailable: {}",
+            std::io::Error::from_raw_os_error(error)
+        )),
+        libc::EPERM | libc::EACCES => ProcessSignalOutcome::Failed(format!(
+            "{operation} permission denied: {}",
+            std::io::Error::from_raw_os_error(error)
+        )),
+        _ => ProcessSignalOutcome::Failed(format!(
+            "{operation} failed: {}",
+            std::io::Error::from_raw_os_error(error)
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub(crate) struct MacAuditToken {
+    val: [u32; 8],
+}
+
+#[cfg(target_os = "macos")]
+impl MacAuditToken {
+    fn parse(value: &str) -> Option<Self> {
+        let words = value
+            .split_whitespace()
+            .map(|word| word.parse::<u32>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        <[u32; 8]>::try_from(words.as_slice())
+            .ok()
+            .map(|val| Self { val })
+    }
+
+    fn serialize(&self) -> String {
+        self.val
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// The daemon publishes the complete audit token. The client keeps the parsed
+/// token as the immutable proof of one process instance.
+#[cfg(target_os = "macos")]
+pub(crate) fn own_audit_token_words() -> Result<MacAuditToken, String> {
+    let mut token = MacAuditToken { val: [0; 8] };
+    let mut count = 8;
+    let result = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            TASK_AUDIT_TOKEN,
+            token.val.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    if result != 0 || count != 8 {
+        return Err(format!(
+            "self audit token unavailable: task_info returned {result}, word count {count}"
+        ));
+    }
+    Ok(token)
+}
+
+/// Linux pidfds continue to identify the selected process after exit and are
+/// not retargeted by numeric PID reuse.
+#[cfg(target_os = "linux")]
+pub(crate) fn retained_process_instance(pid: u32) -> Result<RetainedProcessInstance, String> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| "PID is out of range".to_owned())?;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(format!("pidfd_open failed: {error}"));
+    }
+    // SAFETY: a successful pidfd_open syscall returns a newly owned descriptor.
+    Ok(RetainedProcessInstance::Linux(unsafe {
+        OwnedFd::from_raw_fd(fd as libc::c_int)
+    }))
+}
+
+/// macOS process-instance proof is immutable and is published by the daemon
+/// that owns the writer lock. A token is not acquired from another process.
+#[cfg(target_os = "macos")]
+pub(crate) fn retained_process_instance(
+    token: &str,
+    expected_pid: u32,
+) -> Result<RetainedProcessInstance, String> {
+    let token =
+        MacAuditToken::parse(token).ok_or_else(|| "malformed daemon audit token".to_owned())?;
+    let token_pid = audit_token_pid(&token).map_err(|error| error.to_owned())?;
+    let expected_pid = libc::pid_t::try_from(expected_pid)
+        .map_err(|_| "recorded daemon PID is out of range".to_owned())?;
+    if token_pid != expected_pid {
+        return Err(format!(
+            "daemon audit token names PID {token_pid}, not recorded daemon PID {expected_pid}"
+        ));
+    }
+    Ok(RetainedProcessInstance::MacOS(token))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn retained_process_instance(_pid: u32) -> Result<RetainedProcessInstance, String> {
+    Err("retained process instances are unsupported on this platform".into())
+}
+
+pub(crate) fn retained_process_instance_is_alive(
+    target: &RetainedProcessInstance,
+) -> Result<bool, String> {
+    match target {
+        #[cfg(target_os = "linux")]
+        RetainedProcessInstance::Linux(fd) => {
+            use std::os::fd::AsRawFd;
+            let mut pollfd = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
+            if result < 0 {
+                return Err(format!(
+                    "poll on retained pidfd failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if pollfd.revents & libc::POLLNVAL != 0 {
+                return Err("retained pidfd is invalid".into());
+            }
+            Ok(pollfd.revents & (libc::POLLIN | libc::POLLHUP) == 0)
+        }
+        #[cfg(target_os = "macos")]
+        RetainedProcessInstance::MacOS(_) => Ok(true),
+    }
+}
+
+/// The daemon obtains only its own task's kernel audit token.
+#[cfg(target_os = "macos")]
+pub(crate) fn own_audit_token() -> Result<String, String> {
+    Ok(own_audit_token_words()?.serialize())
+}
+
+pub(crate) fn signal_retained_process_instance(
+    target: &RetainedProcessInstance,
+    signal: libc::c_int,
+) -> ProcessSignalOutcome {
+    match target {
+        #[cfg(target_os = "linux")]
+        RetainedProcessInstance::Linux(fd) => {
+            use std::os::fd::AsRawFd;
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    signal,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    0,
+                )
+            };
+            if result == 0 {
+                return ProcessSignalOutcome::Delivered;
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(error) => process_signal_error(error, "pidfd_send_signal"),
+                None => ProcessSignalOutcome::Failed(format!(
+                    "pidfd_send_signal failed without errno: {error}"
+                )),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        RetainedProcessInstance::MacOS(token) => {
+            let Ok(signal_with_token) = proc_signal_with_audittoken() else {
+                return ProcessSignalOutcome::Unavailable(
+                    "proc_signal_with_audittoken is unavailable".into(),
+                );
+            };
+            // The SDK takes a mutable pointer although the token is read-only.
+            // Pass a private copy so the retained proof is not aliased mutably.
+            let mut signal_token = *token;
+            // SAFETY: `signal_token` is a valid complete audit token for this call.
+            let result = unsafe { signal_with_token(&mut signal_token, signal) };
+            if result == 0 {
+                return ProcessSignalOutcome::Delivered;
+            }
+            process_signal_error(result, "proc_signal_with_audittoken")
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+const TASK_AUDIT_TOKEN: libc::task_flavor_t = 15;
+
+#[cfg(target_os = "macos")]
+type ProcSignalWithAuditToken =
+    unsafe extern "C" fn(*mut MacAuditToken, libc::c_int) -> libc::c_int;
+
+#[cfg(target_os = "macos")]
+type AuditTokenToPid = unsafe extern "C" fn(MacAuditToken) -> libc::pid_t;
+
+#[cfg(target_os = "macos")]
+fn proc_signal_with_audittoken() -> Result<ProcSignalWithAuditToken, String> {
+    // Resolve once so an absent optional interface reports refusal rather
+    // than preventing normal startup or replacement classification.
+    static SIGNAL: std::sync::OnceLock<Result<usize, String>> = std::sync::OnceLock::new();
+    let address = match SIGNAL.get_or_init(|| {
+        let pointer = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                b"proc_signal_with_audittoken\0".as_ptr().cast(),
+            )
+        };
+        if pointer.is_null() {
+            Err("proc_signal_with_audittoken is unavailable".into())
+        } else {
+            Ok(pointer as usize)
+        }
+    }) {
+        Ok(address) => *address,
+        Err(error) => return Err(error.clone()),
+    };
+    // SAFETY: the SDK declares this exact libproc signature.
+    Ok(unsafe { std::mem::transmute::<usize, ProcSignalWithAuditToken>(address) })
+}
+
+#[cfg(target_os = "macos")]
+fn audit_token_pid(token: &MacAuditToken) -> Result<libc::pid_t, String> {
+    static TO_PID: std::sync::OnceLock<Result<usize, String>> = std::sync::OnceLock::new();
+    let address = match TO_PID.get_or_init(|| {
+        let pointer =
+            unsafe { libc::dlsym(libc::RTLD_DEFAULT, b"audit_token_to_pid\0".as_ptr().cast()) };
+        if pointer.is_null() {
+            Err("audit_token_to_pid is unavailable".into())
+        } else {
+            Ok(pointer as usize)
+        }
+    }) {
+        Ok(address) => *address,
+        Err(error) => return Err(error.clone()),
+    };
+    let function: AuditTokenToPid =
+        // SAFETY: the SDK declares this exact libbsm signature.
+        unsafe { std::mem::transmute::<usize, AuditTokenToPid>(address) };
+    Ok(unsafe { function(*token) })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct HostRuntimeFacts {
     pub(crate) agy_session_id: Option<String>,
@@ -444,6 +764,9 @@ fn profile_argument(args: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    static PUBLICATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn pure_classifier_identifies_nearest_agent() {
         assert_eq!(
@@ -541,6 +864,287 @@ mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_signal_errors_are_explicit_refusals_without_fallback() {
+        assert_eq!(
+            process_signal_error(libc::ESRCH, "retained signal"),
+            ProcessSignalOutcome::InstanceGone
+        );
+        assert!(matches!(
+            process_signal_error(libc::ENOSYS, "retained signal"),
+            ProcessSignalOutcome::Unavailable(_)
+        ));
+        assert!(matches!(
+            process_signal_error(libc::EPERM, "retained signal"),
+            ProcessSignalOutcome::Failed(_)
+        ));
+        assert!(matches!(
+            process_signal_error(libc::EACCES, "retained signal"),
+            ProcessSignalOutcome::Failed(_)
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn publication_lock_enforces_reader_writer_exclusion_and_cloexec() {
+        use std::os::fd::AsRawFd;
+
+        let _test_guard = PUBLICATION_TEST_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "collab-publication-lock-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("daemon.owner.lock");
+
+        let first_reader = PublicationGuard::acquire(&path, false, true).unwrap();
+        let second_reader = PublicationGuard::acquire(&path, false, false).unwrap();
+        assert!(
+            PublicationGuard::acquire(&path, true, false).is_err(),
+            "an exclusive writer must not pass active readers"
+        );
+        drop(first_reader);
+        drop(second_reader);
+
+        let writer = PublicationGuard::acquire(&path, true, false).unwrap();
+        assert!(
+            PublicationGuard::acquire(&path, false, false).is_err(),
+            "a shared reader must not pass an active writer"
+        );
+        let descriptor_flags = unsafe { libc::fcntl(writer.raw_fd(), libc::F_GETFD) };
+        assert!(descriptor_flags >= 0);
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+        drop(writer);
+
+        PublicationGuard::acquire(&path, false, false)
+            .expect("dropping a guard must release its flock");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn publication_lock_is_not_inherited_after_exec() {
+        const PROBE_ENV: &str = "COLLAB_PUBLICATION_LOCK_EXEC_PROBE";
+        if let Some(path) = std::env::var_os(PROBE_ENV) {
+            use std::io::BufRead;
+
+            let mut command = String::new();
+            std::io::stdin().lock().read_line(&mut command).unwrap();
+            assert_eq!(command.trim(), "try-lock");
+            PublicationGuard::acquire(std::path::Path::new(&path), true, false)
+                .expect("exec child must not retain the parent's publication lock");
+            return;
+        }
+
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+
+        let _test_guard = PUBLICATION_TEST_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "collab-publication-exec-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("daemon.owner.lock");
+        let reader = PublicationGuard::acquire(&path, false, true).unwrap();
+        let descriptor_flags = unsafe { libc::fcntl(reader.raw_fd(), libc::F_GETFD) };
+        assert!(descriptor_flags >= 0);
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_runtime::tests::publication_lock_is_not_inherited_after_exec",
+                "--nocapture",
+            ])
+            .env(PROBE_ENV, &path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn publication-lock exec probe");
+        drop(reader);
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"try-lock\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "exec child must acquire exclusive publication after parent drop: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn publication_reader_refuses_missing_protocol_file_without_creating_it() {
+        let _test_guard = PUBLICATION_TEST_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "collab-publication-missing-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("daemon.owner.lock");
+        let error = match PublicationGuard::acquire(&path, false, false) {
+            Ok(_) => panic!("missing publication protocol file must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("DAEMON_OWNER_PUBLICATION_REFUSED"),
+            "publication refusal marker must remain visible: {error:#}"
+        );
+        assert_eq!(
+            error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error),
+            Some(libc::ENOENT),
+            "the OS acquisition error must remain in the error chain"
+        );
+        assert!(
+            !path.exists(),
+            "a replacement reader must not create the lock"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_retained_pidfd_never_retargets_an_owned_successor() {
+        let mut first = OwnedChild(
+            std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn the first Linux retained-instance fixture"),
+        );
+        let first_pid = first.0.id();
+        let target =
+            retained_process_instance(first_pid).expect("retain the first Linux process instance");
+        assert!(retained_process_instance_is_alive(&target).unwrap());
+
+        first.0.kill().expect("terminate the first fixture");
+        first.0.wait().expect("reap the first fixture");
+        assert!(!retained_process_instance_is_alive(&target).unwrap());
+
+        let mut successor = OwnedChild(
+            std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn the successor Linux fixture"),
+        );
+        assert_eq!(
+            signal_retained_process_instance(&target, libc::SIGTERM),
+            ProcessSignalOutcome::InstanceGone
+        );
+        assert_eq!(
+            signal_retained_process_instance(&target, libc::SIGKILL),
+            ProcessSignalOutcome::InstanceGone
+        );
+        assert_eq!(
+            first_pid,
+            first.0.id(),
+            "the retained target must remain bound to the original fixture PID"
+        );
+        assert!(
+            successor.0.try_wait().unwrap().is_none(),
+            "a retained pidfd must not signal the owned successor"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_audit_token_helper_process() {
+        if std::env::var_os("COLLAB_MACOS_AUDIT_TOKEN_HELPER").is_none() {
+            return;
+        }
+        use std::io::Write;
+
+        let token = own_audit_token_words().expect("helper must obtain its own audit token");
+        println!("COLLAB_AUDIT_TOKEN {}", token.serialize());
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_stale_generation_is_refused_and_valid_token_signals_owned_fixture() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::ExitStatusExt;
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_runtime::tests::macos_audit_token_helper_process",
+                "--nocapture",
+            ])
+            .env("COLLAB_MACOS_AUDIT_TOKEN_HELPER", "1")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the owned macOS token helper");
+        let mut child = OwnedChild(child);
+        let pid = child.0.id();
+        let stdout = child.0.stdout.take().expect("capture helper stdout");
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                if let Some(token) = line.trim().strip_prefix("COLLAB_AUDIT_TOKEN ") {
+                    let _ = sender.send(token.to_owned());
+                    return;
+                }
+                line.clear();
+            }
+        });
+        let text = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("owned fixture must publish its audit token");
+        let token = MacAuditToken::parse(&text).expect("published token must parse");
+        assert_eq!(
+            audit_token_pid(&token).expect("the helper PID must match the token"),
+            pid as libc::pid_t
+        );
+
+        // audit_token_t word 7 carries pidversion, the process-generation proof.
+        let mut stale = token;
+        stale.val[7] = stale.val[7].wrapping_add(1);
+        assert_ne!(stale, token, "the stale-generation fixture must differ");
+        let stale_target = RetainedProcessInstance::MacOS(stale);
+        assert_eq!(
+            signal_retained_process_instance(&stale_target, libc::SIGTERM),
+            ProcessSignalOutcome::InstanceGone
+        );
+        assert_eq!(
+            signal_retained_process_instance(&stale_target, libc::SIGKILL),
+            ProcessSignalOutcome::InstanceGone
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "a stale audit-token generation must not signal the owned fixture"
+        );
+
+        let target = retained_process_instance(&text, pid).expect("retain the owned fixture");
+        assert_eq!(
+            signal_retained_process_instance(&target, libc::SIGTERM),
+            ProcessSignalOutcome::Delivered
+        );
+        assert_eq!(
+            child.0.wait().expect("reap the signalled helper").signal(),
+            Some(libc::SIGTERM),
+            "the valid token must deliver a normal termination signal"
+        );
     }
 
     #[cfg(target_os = "linux")]

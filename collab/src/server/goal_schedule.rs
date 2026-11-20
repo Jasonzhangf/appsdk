@@ -283,10 +283,7 @@ fn prepare_goal_schedule(
             .workers
             .get(target)
             .ok_or_else(|| Resp::err("goal schedule target is not registered"))?;
-        let transport = selected_transport_for_worker(worker)
-            .ok_or_else(|| Resp::err("registered worker has no server-selected transport"))?;
-        let address = notification_target(&transport)
-            .ok_or_else(|| Resp::err("selected transport has no route address"))?;
+        let (method, address) = notification_route_projection(worker);
         let periodic_request = change.interval_ms.is_some()
             || change.trigger_ms.is_none()
                 && matching
@@ -410,8 +407,8 @@ fn prepare_goal_schedule(
                 worker_id: target.into(),
                 event: "deadline".into(),
                 subject: Some(subject.clone()),
-                target: address.to_string(),
-                method: transport.kind.as_str().into(),
+                target: address.clone(),
+                method: method.clone(),
                 trigger_ms: Some(trigger),
                 trigger_times_ms: Vec::new(),
                 interval_ms: interval,
@@ -427,15 +424,12 @@ fn prepare_goal_schedule(
                 periodic_declared: interval.is_some(),
                 goal_content: None,
             });
-        if subscription.worker_id != target
-            || subscription.target != address
-            || subscription.method != transport.kind.as_str()
-        {
-            superseded.extend(pending_messages_for_subscription(state, &subscription.id));
+        if subscription.worker_id != target {
+            superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
         }
         subscription.worker_id = target.into();
-        subscription.target = address.to_string();
-        subscription.method = transport.kind.as_str().into();
+        subscription.target = address;
+        subscription.method = method;
         subscription.subject = Some(subject);
         subscription.trigger_ms = Some(trigger);
         subscription.expires_ms = expiry;
@@ -449,7 +443,7 @@ fn prepare_goal_schedule(
         }
         .into();
         if subscription.status != "armed" {
-            superseded.extend(pending_messages_for_subscription(state, &subscription.id));
+            superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
         }
         subscription.status_reason = None;
         subscription.goal_content = Some(GoalScheduleBinding {
@@ -488,7 +482,7 @@ fn prepare_goal_schedule(
                 updated_ms: now,
             });
         }
-        superseded.extend(pending_messages_for_subscription(state, &old.id));
+        superseded.extend(retractable_messages_for_subscription(state, &old.id));
     }
     superseded.sort();
     superseded.dedup();

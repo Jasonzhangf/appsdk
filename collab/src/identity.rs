@@ -705,7 +705,7 @@ pub(crate) fn persist_current_binding_at(
     scope: &Scope,
     ident: &mut Identity,
     runtime: RuntimeIdentity,
-    transport: SelectedTransport,
+    transport: impl Into<Option<SelectedTransport>>,
 ) -> anyhow::Result<()> {
     let mut updated = ident.clone();
     updated.project_scope = Some(
@@ -714,7 +714,7 @@ pub(crate) fn persist_current_binding_at(
             .project_scope_id,
     );
     updated.runtime = Some(runtime);
-    updated.transport = Some(transport);
+    updated.transport = transport.into();
     write_identity(&identity_path_at(host_paths, &updated.worker_id)?, &updated)?;
     *ident = updated;
     Ok(())
@@ -825,7 +825,7 @@ pub(crate) fn registered_from_map(
         session_id: value.binding.session_id.clone(),
         native_thread_id: value.binding.native_thread_id.clone(),
     });
-    ident.transport = Some(value.transport.clone());
+    ident.transport = value.transport.clone();
     Ok(Some(ident))
 }
 

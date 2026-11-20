@@ -94,7 +94,8 @@ impl IdentityBindingKey {
 #[serde(deny_unknown_fields)]
 pub(crate) struct BindingValue {
     pub(crate) binding: RuntimeBinding,
-    pub(crate) transport: SelectedTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transport: Option<SelectedTransport>,
     pub(crate) tab_id: LogicalTab,
     pub(crate) host: BindingHost,
     pub(crate) invocation_cwd: String,
@@ -337,7 +338,7 @@ impl BindingValue {
         Self {
             invocation_cwd: binding.project_scope.as_str().to_owned(),
             binding,
-            transport,
+            transport: Some(transport),
             tab_id,
             host: BindingHost {
                 agent_kind: None,
@@ -357,9 +358,19 @@ impl BindingValue {
             current.rex_execution_fence.as_ref(),
         );
         if self.rex_execution.is_none()
-            && self.transport.kind == crate::proto::TransportKind::Rex
+            && self
+                .transport
+                .as_ref()
+                .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Rex)
             && self.binding == current.binding
-            && self.transport.rex_endpoint == current.transport.rex_endpoint
+            && self
+                .transport
+                .as_ref()
+                .and_then(|transport| transport.rex_endpoint.as_ref())
+                == current
+                    .transport
+                    .as_ref()
+                    .and_then(|transport| transport.rex_endpoint.as_ref())
         {
             self.rex_execution = current.rex_execution.clone();
         }
@@ -411,9 +422,10 @@ impl BindingValue {
             ));
         }
         if let Some(execution) = self.rex_execution.as_ref() {
-            if self.transport.kind != crate::proto::TransportKind::Rex
-                || self.transport.rex_endpoint.is_none()
-            {
+            if self.transport.as_ref().is_none_or(|transport| {
+                transport.kind != crate::proto::TransportKind::Rex
+                    || transport.rex_endpoint.is_none()
+            }) {
                 return Err(SlotError::Invariant(
                     "Rex execution association requires the Rex transport".into(),
                 ));
@@ -436,13 +448,14 @@ impl BindingValue {
 
     fn validate_for_publication(&self) -> Result<(), SlotError> {
         self.validate()?;
-        if self.transport.kind == crate::proto::TransportKind::Rex
-            && self.transport.rex_endpoint.as_ref().is_none_or(|endpoint| {
-                endpoint.server.trim().is_empty()
-                    || endpoint.session_id.trim().is_empty()
-                    || endpoint.block_id.trim().is_empty()
-            })
-        {
+        if self.transport.as_ref().is_some_and(|transport| {
+            transport.kind == crate::proto::TransportKind::Rex
+                && transport.rex_endpoint.as_ref().is_none_or(|endpoint| {
+                    endpoint.server.trim().is_empty()
+                        || endpoint.session_id.trim().is_empty()
+                        || endpoint.block_id.trim().is_empty()
+                })
+        }) {
             return Err(SlotError::Invalid(
                 "Rex binding requires a complete server, session and block".into(),
             ));
@@ -451,9 +464,10 @@ impl BindingValue {
     }
 
     fn rex_block_key(&self) -> Option<(&str, &str)> {
-        (self.transport.kind == crate::proto::TransportKind::Rex)
-            .then(|| self.transport.rex_endpoint.as_ref())
-            .flatten()
+        self.transport
+            .as_ref()
+            .filter(|transport| transport.kind == crate::proto::TransportKind::Rex)
+            .and_then(|transport| transport.rex_endpoint.as_ref())
             .map(|endpoint| (endpoint.server.as_str(), endpoint.block_id.as_str()))
     }
 
@@ -475,13 +489,19 @@ impl BindingValue {
             && self.binding.session_id == other.binding.session_id
             && self.binding.native_thread_id == other.binding.native_thread_id
             && self.binding.tmux_endpoint == other.binding.tmux_endpoint
-            && self.transport.kind == other.transport.kind
-            && self.transport.endpoint == other.transport.endpoint
-            && self.transport.namespace == other.transport.namespace
-            && self.transport.session_id == other.transport.session_id
-            && self.transport.thread_id == other.transport.thread_id
-            && self.transport.tmux_endpoint == other.transport.tmux_endpoint
-            && self.transport.rex_endpoint == other.transport.rex_endpoint
+            && match (&self.transport, &other.transport) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.kind == b.kind
+                        && a.endpoint == b.endpoint
+                        && a.namespace == b.namespace
+                        && a.session_id == b.session_id
+                        && a.thread_id == b.thread_id
+                        && a.tmux_endpoint == b.tmux_endpoint
+                        && a.rex_endpoint == b.rex_endpoint
+                }
+                _ => false,
+            }
             && self.tab_id == other.tab_id
             && self.host == other.host
             && self.invocation_cwd == other.invocation_cwd
@@ -508,6 +528,11 @@ pub(crate) struct IdentityBindingSlot {
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
     pub(crate) previous: Option<BindingValue>,
+    // The 0527 writer stored detached facts here. Neither field selects a caller or route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained: Option<BindingValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained_previous: Option<BindingValue>,
 }
 
 /// Bounded handoff intent persisted with the control set. It records only the
@@ -683,6 +708,8 @@ impl IdentityBindingSlot {
             generation: 0,
             current: None,
             previous: None,
+            retained: None,
+            retained_previous: None,
         }
     }
 
@@ -752,6 +779,9 @@ impl IdentityBindingSlot {
             self.previous = None;
         }
         self.current = Some(value);
+        if let Some(detached) = self.retained.take() {
+            self.retained_previous = Some(detached);
+        }
         self.identity_status = IdentityStatus::Active;
         self.generation = next;
         Ok(CommitOutcome::Committed { generation: next })
@@ -795,6 +825,25 @@ impl IdentityBindingSlot {
         }
         if let Some(previous) = self.previous.as_ref() {
             previous.validate()?;
+        }
+        if self.retained.is_some() && self.current.is_some() {
+            return Err(SlotError::Invariant(
+                "a retained current cannot coexist with a current binding".into(),
+            ));
+        }
+        for facts in self.retained.iter().chain(&self.retained_previous) {
+            if facts.transport.is_some()
+                || facts.binding.tmux_endpoint.is_some()
+                || facts.layout_binding_id.is_some()
+                || facts.rex_execution.is_some()
+                || facts.rex_execution_fence.is_some()
+                || !facts.scope_matches(&self.identity_key)
+            {
+                return Err(SlotError::Invariant(
+                    "retained facts must be endpointless and match their slot scope".into(),
+                ));
+            }
+            facts.validate()?;
         }
         if let (Some(current), Some(previous)) = (self.current.as_ref(), self.previous.as_ref()) {
             if current.same_fact(previous) {
@@ -856,16 +905,16 @@ pub(crate) struct BindingControlSet {
 /// claim, and the agent session is a mutable carrier that may change inside the
 /// same block.
 fn rex_target_matches(value: &BindingValue, candidate: &crate::proto::RexCandidate) -> bool {
-    value.transport.kind == crate::proto::TransportKind::Rex
-        && value
-            .transport
-            .rex_endpoint
-            .as_ref()
-            .is_some_and(|endpoint| {
-                endpoint.server == candidate.server
-                    && endpoint.session_id == candidate.session_id
-                    && endpoint.block_id == candidate.block_id
-            })
+    value
+        .transport
+        .as_ref()
+        .filter(|transport| transport.kind == crate::proto::TransportKind::Rex)
+        .and_then(|transport| transport.rex_endpoint.as_ref())
+        .is_some_and(|endpoint| {
+            endpoint.server == candidate.server
+                && endpoint.session_id == candidate.session_id
+                && endpoint.block_id == candidate.block_id
+        })
 }
 
 impl BindingControlSet {
@@ -939,11 +988,18 @@ impl BindingControlSet {
             .iter()
             .copied()
             .filter(|(_, value)| {
-                (dsh.is_none() || value.transport.kind == crate::proto::TransportKind::Dsh)
+                (dsh.is_none()
+                    || value.transport.as_ref().is_some_and(|transport| {
+                        transport.kind == crate::proto::TransportKind::Dsh
+                    }))
                     && (facts.rex.is_none()
-                        || value.transport.kind == crate::proto::TransportKind::Rex)
+                        || value.transport.as_ref().is_some_and(|transport| {
+                            transport.kind == crate::proto::TransportKind::Rex
+                        }))
                     && (facts.tmux.is_none()
-                        || value.transport.kind == crate::proto::TransportKind::Tmux)
+                        || value.transport.as_ref().is_some_and(|transport| {
+                            transport.kind == crate::proto::TransportKind::Tmux
+                        }))
                     && facts.agent_kind.as_ref().is_none_or(|kind| {
                         value
                             .host
@@ -998,7 +1054,7 @@ impl BindingControlSet {
                     if holder
                         .active_binding()
                         .is_some_and(|value| {
-                            value.transport.kind == crate::proto::TransportKind::Rex
+                            value.transport.as_ref().is_some_and(|transport| transport.kind == crate::proto::TransportKind::Rex)
                         }) =>
                 {
                     // A current Rex holder may publish onto an occupied block.
@@ -1031,12 +1087,11 @@ impl BindingControlSet {
                     candidates
                         .iter()
                         .filter(|(_, value)| {
-                            value.transport.kind == crate::proto::TransportKind::Tmux
-                                && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
-                                    saved.socket_path == candidate.endpoint.socket_path
-                                        && saved.tmux_session_id
-                                            == candidate.endpoint.tmux_session_id
-                                })
+                            value.transport.as_ref().is_some_and(|transport| {
+                                transport.kind == crate::proto::TransportKind::Tmux
+                            }) && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
+                                crate::client::adapters::tmux::same_session(saved, &candidate.endpoint)
+                            })
                         })
                         .map(|(slot, _)| *slot)
                         .collect(),
@@ -1044,19 +1099,8 @@ impl BindingControlSet {
             } else {
                 None
             };
-            let name_match = if let Some(name) = facts.tmux_session_name.as_ref() {
-                unique(
-                    candidates
-                        .iter()
-                        .filter(|(_, value)| value.physical_name.as_ref() == Some(name))
-                        .map(|(slot, _)| *slot)
-                        .collect(),
-                )?
-            } else {
-                None
-            };
             let session_match = unique(session_matches.clone())?;
-            if let (Some(anchor), Some(session)) = (endpoint_match.or(name_match), session_match) {
+            if let (Some(anchor), Some(session)) = (endpoint_match, session_match) {
                 if anchor.identity_key != session.identity_key {
                     return Err(format!(
                         "IDENTITY_ANCHOR_CONFLICT: agent session selects {}, but the current runtime anchor selects {}",
@@ -1065,7 +1109,7 @@ impl BindingControlSet {
                 }
                 return Ok(Some(anchor));
             }
-            if let Some(anchor) = endpoint_match.or(name_match) {
+            if let Some(anchor) = endpoint_match {
                 return Ok(Some(anchor));
             }
             if let Some(session) = session_match {
@@ -1690,9 +1734,12 @@ impl BindingControlSet {
             if !in_scope {
                 return true;
             }
-            let is_dsh = slot
-                .active_binding()
-                .is_some_and(|value| value.transport.kind == crate::proto::TransportKind::Dsh);
+            let is_dsh = slot.active_binding().is_some_and(|value| {
+                value
+                    .transport
+                    .as_ref()
+                    .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Dsh)
+            });
             // Keep the active DSH slot as the retained host-owned gateway
             // binding. A retired or non-DSH slot in this scope is disposable.
             is_dsh

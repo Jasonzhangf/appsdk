@@ -739,6 +739,7 @@ impl State {
                         message.wake_attempt_count = message.wake_attempt_count.saturating_add(1);
                         message.last_wake_attempt_ms = *attempted_ms;
                         message.retry_attempted |= *retry;
+                        self.notification_delivery_failures.remove(id);
                     }
                 }
             }
@@ -754,6 +755,7 @@ impl State {
                 error,
                 failed_ms,
                 retryable,
+                resume_on_reconnect,
             } => {
                 let failed_master_wake = self.msgs.get(message_id).is_some_and(|message| {
                     if message.from != "collab-server"
@@ -791,6 +793,7 @@ impl State {
                         error: error.clone(),
                         failed_ms: *failed_ms,
                         retryable: *retryable,
+                        resume_on_reconnect: *resume_on_reconnect,
                     },
                 );
             }
@@ -978,7 +981,6 @@ impl State {
                                         && has_current_master_grant(
                                             self,
                                             &subscription.worker_id,
-                                            &subscription.target,
                                         )
                                 })
                             })

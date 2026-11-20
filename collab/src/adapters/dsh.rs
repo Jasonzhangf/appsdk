@@ -701,8 +701,8 @@ pub fn wake_message_id(msg_id: &str) -> Result<String, ControlError> {
 
 /// Delivers one wake to a single agent through `enqueue`.
 ///
-/// The reply is a local admission receipt only: a `messageId` means the gateway
-/// accepted the message into its durable queue. It never means the agent ran.
+/// The canonical gateway acknowledges a wake for the exact target and message.
+/// The Poll loop owns receipt and consumption after this acknowledgement.
 pub fn notify(
     endpoint: &str,
     runtime_id: &str,
@@ -745,15 +745,21 @@ pub fn notify_with_message_id(
             "messageId": message_id,
         }),
     )?;
-    let message_id = result
-        .get("messageId")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| ControlError::Unusable {
-            detail: "enqueue reply carries no messageId".into(),
-        })?;
+    if result["messageId"].as_str() != Some(message_id)
+        || result["runtimeId"].as_str() != Some(runtime_id)
+        || result["agentId"].as_str() != Some(agent_id)
+        || result["status"] != "wake-signalled"
+        || result["inboundOwner"] != "poll"
+    {
+        return Err(ControlError::Unusable {
+            detail: "enqueue receipt does not match the submitted wake and canonical Poll target".into(),
+        });
+    }
     Ok(serde_json::json!({
         "transport": "dsh",
         "message_id": message_id,
+        "stage": "wake-signalled",
+        "inbound_owner": "poll",
         "queued": true,
         "consumed": false
     }))

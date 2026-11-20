@@ -972,15 +972,15 @@ fn refresh_board_fixture(server: &Server, route: &RouteScope, worker: &str, sess
         .unwrap()
         .transport
         .clone();
-    transport.session_id = Some(session.into());
-    if let Some(endpoint) = transport.tmux_endpoint.as_mut() {
+    transport.as_mut().unwrap().session_id = Some(session.into());
+    if let Some(endpoint) = transport.as_mut().unwrap().tmux_endpoint.as_mut() {
         endpoint.codex_session_id = Some(session.into());
     }
     let response = crate::server::peer_tests::seed_committed_owner(
         server,
         worker,
         &format!("token-{worker}"),
-        &transport,
+        transport.as_ref().unwrap(),
         &server.root.to_string_lossy(),
         Some(route.app_scope_id.clone()),
     );

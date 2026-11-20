@@ -57,10 +57,13 @@ impl std::error::Error for HealthError {}
 
 pub(crate) fn status_check(local_only: bool) -> anyhow::Result<()> {
     let deadline = Instant::now() + CHECK_DEADLINE;
-    let scope = Scope::resolve()?;
     local_pair_check(&deadline)?;
 
+    let host_paths = HostPaths::resolve()?;
     if local_only {
+        crate::server::binding_store::BindingControlStore::new(host_paths.state_root())
+            .load()
+            .map_err(anyhow::Error::msg)?;
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -77,7 +80,6 @@ pub(crate) fn status_check(local_only: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let host_paths = HostPaths::resolve()?;
     let socket = host_paths.sock_path();
     let ping = ping_with_deadline(&socket, &deadline)?;
     let daemon_version = ping.get("daemon_version").and_then(Value::as_str);
@@ -129,6 +131,7 @@ pub(crate) fn status_check(local_only: bool) -> anyhow::Result<()> {
                     }),
                 );
             }
+            let scope = Scope::resolve()?;
             let caller = retained_caller(&host_paths, &scope, &deadline)?;
             let Some(identity) = caller else {
                 return pending(

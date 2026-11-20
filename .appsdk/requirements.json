@@ -566,9 +566,36 @@
         "version": 8
       },
       "version": 21
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "tmux sessions必须有pane id才具有可观测性，所以没有iterm2 pane id意味着这个tmux session不是attached,起码不是iterm2 attached,我们视为离线\n所以tmux下我们根据iterm2获得pane id下绑定的tmux sessionid作为投递端点，并且需要这个tmux session注册后改名，如果有同名的，我们daemon默认处理方式是：失去pane id的tmux session视为离线，随时可以被顶替，被顶替后失去name,只有编号，不进入可投递端点\n理论上一个tmux session在获得pane id后才能改名和获取name,承载逻辑身份\n改绑定就直接改tmux sessionid和角色名\n那开始推进分层实施",
+          "role": "user",
+          "source": "Jason, current Codex conversation, tmux registration and rebinding corrections followed by implementation instruction"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-tmux-current-pane-binding-20261119",
+        "requirement_id": "req-collab-tmux-current-pane-binding",
+        "text": "tmux 首次注册或接续到新 session 时必须由 daemon 验证当前官方 iTerm2 pane ID、对应 client TTY 及该 client 实际 attach 的 tmux server/session ID。只有验证通过才可获得项目内 Collab 名字、发布当前绑定及改角色显示名。投递仅面向该当前关系确认的 tmux session 和其实际投递 pane。未登记且缺 pane 的 session 只有原生编号，不获名、不改名、不进路由。已绑定 session 缺当前有效 iTerm2 pane 时为离线，消息待投递，名字与业务归属保留。合法同名注册遇到这个离线旧本体时默认可立即顶替，不等自动任务重派期限。在线旧本体须按既有授权接替。换绑直接更新当前名字记录中的 tmux session ID，旧本体随同提交失去逻辑名字、权限与投递路由，此后重新 attach 也不恢复原路由。旧 tmux session 保留原生编号及进程，按其编号改为数字显示名；新 session 按其编号应用该名字对应的角色显示名并核实读回。改名中断按真实阶段幂等接续。已有角色、订阅、任务、目标和未消费消息继续归稳定的逻辑名字。只依据当前记录和当前宿主事实，不用旧历史选择或阻挡。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "tmux sessions必须有pane id才具有可观测性，所以没有iterm2 pane id意味着这个tmux session不是attached,起码不是iterm2 attached,我们视为离线\n所以tmux下我们根据iterm2获得pane id下绑定的tmux sessionid作为投递端点，并且需要这个tmux session注册后改名，如果有同名的，我们daemon默认处理方式是：失去pane id的tmux session视为离线，随时可以被顶替，被顶替后失去name,只有编号，不进入可投递端点\n理论上一个tmux session在获得pane id后才能改名和获取name,承载逻辑身份\n改绑定就直接改tmux sessionid和角色名\n那开始推进分层实施",
+          "role": "user",
+          "source": "Jason, current Codex conversation, tmux registration and rebinding corrections followed by implementation instruction"
+        },
+        "requirement_id": "req-collab-tmux-current-pane-binding",
+        "status": "active",
+        "text": "tmux 首次注册或接续到新 session 时必须由 daemon 验证当前官方 iTerm2 pane ID、对应 client TTY 及该 client 实际 attach 的 tmux server/session ID。只有验证通过才可获得项目内 Collab 名字、发布当前绑定及改角色显示名。投递仅面向该当前关系确认的 tmux session 和其实际投递 pane。未登记且缺 pane 的 session 只有原生编号，不获名、不改名、不进路由。已绑定 session 缺当前有效 iTerm2 pane 时为离线，消息待投递，名字与业务归属保留。合法同名注册遇到这个离线旧本体时默认可立即顶替，不等自动任务重派期限。在线旧本体须按既有授权接替。换绑直接更新当前名字记录中的 tmux session ID，旧本体随同提交失去逻辑名字、权限与投递路由，此后重新 attach 也不恢复原路由。旧 tmux session 保留原生编号及进程，按其编号改为数字显示名；新 session 按其编号应用该名字对应的角色显示名并核实读回。改名中断按真实阶段幂等接续。已有角色、订阅、任务、目标和未消费消息继续归稳定的逻辑名字。只依据当前记录和当前宿主事实，不用旧历史选择或阻挡。",
+        "version": 1
+      },
+      "version": 22
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 21
+  "version": 22
 }

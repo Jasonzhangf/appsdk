@@ -293,7 +293,6 @@ impl ProjectRuntimeManager {
                     .global
                     .current_thread_routes
                     .values()
-                    .chain(state.global.legacy_thread_routes.values())
                     .filter_map(|binding| {
                         binding
                             .tmux_endpoint
@@ -304,15 +303,18 @@ impl ProjectRuntimeManager {
         }
         endpoints.sort();
         endpoints.dedup();
-        // tmux placement is optional, but a live pane without its fixed session
-        // name is a missing name fact. Fail closed instead of guessing from the
-        // agent session or caller-controlled environment.
-        let observed = crate::client::adapters::tmux::observe_caller(
+        // A pane hint directs observation; the daemon still verifies ancestry.
+        // Preserve observation failures on that path instead of asking the
+        // caller for unrelated AppServer facts.
+        let observed = match crate::client::adapters::tmux::observe_caller(
             endpoints,
             caller_pid,
             facts.pane_hint.as_deref(),
-        )
-        .unwrap_or_else(|_error| None);
+        ) {
+            Ok(observed) => observed,
+            Err(error) if facts.pane_hint.is_some() => return Err(anyhow::Error::msg(error)),
+            Err(_) => None,
+        };
         // Current ancestry supersedes every caller-supplied or historical
         // placement address. No observation means no tmux selection.
         let observed_pane = observed
@@ -537,7 +539,7 @@ impl ProjectRuntimeManager {
         if facts
             .dsh
             .as_ref()
-            .is_some_and(|candidate| !identity::dsh_transport_matches(candidate, &value.transport))
+            .is_some_and(|candidate| value.transport.as_ref().is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport)))
         {
             anyhow::bail!("IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the current mapped binding");
         }
@@ -548,7 +550,7 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| {
                 anyhow::anyhow!("IDENTITY_CREDENTIAL_MISSING: mapped worker is not registered")
             })?;
-        ident.transport = Some(value.transport.clone());
+        ident.transport = value.transport.clone();
         Ok(Some(ident))
     }
 
@@ -784,33 +786,24 @@ impl ProjectRuntimeManager {
         } else if let Some(baseline) = expected_baseline {
             if next.binding_id == baseline.current.binding.binding_id
                 && next.session_id == baseline.current.binding.session_id
-                && transport.rex_endpoint == baseline.current.transport.rex_endpoint
+                && transport.rex_endpoint.as_ref() == baseline.current.transport.as_ref().and_then(|transport| transport.rex_endpoint.as_ref())
             {
                 value.rex_execution = baseline.current.rex_execution.clone();
             }
         }
-        let rename = crate::server::identity_context::rename_prepared_anchor(
+        crate::server::identity_context::verify_tmux_replacement(
+            control.slot(&key).and_then(|slot| slot.active_binding()),
             &value,
-            &value.invocation_cwd, &key.name,
-            current_master_worker_id(&state, Some(&saved.route_scope())).as_deref() == Some(ident.worker_id.as_str()),
+            false,
         ).map_err(anyhow::Error::msg)?;
-        let committed = match self.commit_control_change_locked(
+        let committed = self.commit_control_change_locked(
             crate::server::binding_store::ControlChange::CommitWithEffect {
                 key: key.clone(),
                 value,
                 expected_generation: Some(expected_generation),
                 effect: effect.clone(),
             },
-        ) {
-            Ok(committed) => committed,
-            Err(error) => {
-                let error = match rename.rollback() {
-                    Ok(_) => error,
-                    Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
-                };
-                return Err(anyhow::Error::msg(error));
-            }
-        };
+        ).map_err(anyhow::Error::msg)?;
         if committed.durability == crate::server::binding_store::Durability::Unknown {
             anyhow::bail!("BINDING_CONTROL_DURABILITY_UNKNOWN: binding intent published; business effects remain pending");
         }
@@ -895,7 +888,7 @@ impl ProjectRuntimeManager {
                         && slot.identity_key.app_scope_id == context.app_scope_id
                         && slot.active_binding().is_some_and(|value| {
                             value.binding.agent_id.as_str() != identity.worker_id.as_str()
-                                && value.transport.kind == crate::proto::TransportKind::Tmux
+                                && value.transport.as_ref().is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
                                 && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
                                     saved.socket_path == candidate.endpoint.socket_path
                                         && saved.tmux_session_id
@@ -1955,17 +1948,17 @@ mod anchor_provenance_tests {
             .active_binding()
             .unwrap();
         assert_eq!(returned.binding.session_id.as_ref().unwrap().as_str(), "session-s1");
-        assert_eq!(returned.transport.kind, TransportKind::Rex);
+        assert_eq!(returned.transport.as_ref().unwrap().kind, TransportKind::Rex);
         assert_eq!(
-            returned.transport.rex_endpoint,
-            target_previous.transport.rex_endpoint
+            returned.transport.as_ref().unwrap().rex_endpoint,
+            target_previous.transport.as_ref().unwrap().rex_endpoint
         );
         assert_eq!(
             control
                 .active_values()
                 .filter(|value| {
-                    value.transport.kind == TransportKind::Rex
-                        && value.transport.rex_endpoint == returned.transport.rex_endpoint
+                    value.transport.as_ref().is_some_and(|transport| transport.kind == TransportKind::Rex
+                        && transport.rex_endpoint == returned.transport.as_ref().unwrap().rex_endpoint)
                 })
                 .count(),
             1,

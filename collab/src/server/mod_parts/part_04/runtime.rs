@@ -717,7 +717,7 @@ impl ProjectRuntimeManager {
                 .and_then(|slot| slot.active_binding())
                 .ok_or_else(|| Resp::err("TASK_CURRENT_BINDING_REQUIRED: actor has no current stable name"))?;
             let transport_matches = worker.transport.as_ref().is_some_and(|transport| {
-                same_selected_endpoint(&current.transport, transport)
+                current.transport.as_ref().is_some_and(|current| same_selected_endpoint(current, transport))
             });
             if current.binding != binding || !transport_matches {
                 return Err(Resp::err(

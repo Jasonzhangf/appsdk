@@ -631,10 +631,11 @@ fn lifecycle_surfaces(fixture: &Fixture, identity: &Value) -> (Vec<u8>, Value, V
     let mut state = fixture.current_state();
     // The independent name monitor records live observations while Read runs.
     // Keep every identity, task, message, receipt and ownership record in the
-    // purity comparison; only its observations and commit counters vary.
+    // purity comparison; its observations, keepalive clock and commit counters vary.
     let fields = state.as_object_mut().unwrap();
     fields.remove("agent_activity");
     fields.remove("agent_presence");
+    fields.remove("keepalives");
     fields.remove("revision");
     fields.remove("sequence");
     let global = state["global"].as_object_mut().unwrap();
@@ -889,17 +890,13 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
         .remove(child_id);
     fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     fixture.restart_daemon();
-    assert!(
-        wait_until(Duration::from_secs(5), || {
-            fixture.current_state()["notification_subscriptions"]
-                .as_object()
-                .unwrap()
-                .values()
-                .filter(|subscription| subscription["worker_id"] == child_id)
-                .all(|subscription| subscription["status"] == "transport-lost")
-        }),
-        "missing worker's independent transport observation did not settle"
-    );
+    let current = fixture.current_state();
+    assert!(current["notification_subscriptions"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|subscription| subscription["worker_id"] == child_id
+            && subscription["status"] == "armed"));
     let before = lifecycle_surfaces(&fixture, &parent);
     let read = lifecycle_read(&fixture, &parent, Some(child_id));
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");

@@ -344,7 +344,7 @@ fn tmux_value_on_socket(
         codex_thread_id: None,
     };
     value.binding.tmux_endpoint = Some(endpoint.clone());
-    value.transport = SelectedTransport {
+    value.transport = Some(SelectedTransport {
         kind: TransportKind::Tmux,
         endpoint: Some(socket.into()),
         namespace: Some(session.into()),
@@ -358,7 +358,7 @@ fn tmux_value_on_socket(
         rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into()],
         self_check: "ok".into(),
-    };
+    });
     value
 }
 
@@ -664,6 +664,8 @@ fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
     let mut endpoint_move = current.clone();
     endpoint_move
         .transport
+        .as_mut()
+        .unwrap()
         .rex_endpoint
         .as_mut()
         .unwrap()
@@ -1058,7 +1060,7 @@ fn current_lookup_does_not_match_same_tmux_session_id_on_a_different_socket() {
 }
 
 #[test]
-fn current_lookup_keeps_same_tmux_session_id_on_the_same_socket() {
+fn current_lookup_keeps_only_the_same_tmux_server_instance_and_session() {
     let alice = key("alice");
     let mut control = BindingControlSet::new();
     control
@@ -1075,7 +1077,7 @@ fn current_lookup_keeps_same_tmux_session_id_on_the_same_socket() {
             None,
         )
         .unwrap();
-    let facts = IdentityFacts {
+    let mut facts = IdentityFacts {
         tmux: Some(crate::proto::TmuxCandidate {
             endpoint: crate::proto::TmuxEndpoint {
                 socket_path: "/tmp/tmux-a.sock".into(),
@@ -1091,10 +1093,17 @@ fn current_lookup_keeps_same_tmux_session_id_on_the_same_socket() {
         ..Default::default()
     };
 
+    assert!(control
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .unwrap()
+        .is_none());
+    let saved = control.slot(&alice).unwrap().active_binding().unwrap();
+    facts.tmux.as_mut().unwrap().endpoint.server_pid =
+        saved.binding.tmux_endpoint.as_ref().unwrap().server_pid;
     let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
         .unwrap()
-        .expect("the same socket and tmux session preserve the identity anchor");
+        .expect("the same live tmux server and session preserve the identity anchor");
     assert_eq!(selected.identity_key, alice);
 }
 
@@ -1432,8 +1441,8 @@ fn repeated_binding_fact_does_not_roll_or_advance_generation() {
     .unwrap();
 
     let mut repeated = value(&key, "alice", "runtime-a", "endpoint-a");
-    repeated.transport.capabilities = vec!["changed".to_owned()];
-    repeated.transport.self_check = "changed self check".to_owned();
+    repeated.transport.as_mut().unwrap().capabilities = vec!["changed".to_owned()];
+    repeated.transport.as_mut().unwrap().self_check = "changed self check".to_owned();
 
     assert_eq!(
         slot.commit(&key, repeated, Some(1)).unwrap(),
@@ -1929,6 +1938,8 @@ fn rex_block_commit_retires_the_previous_current_and_persists_cleanup() {
             .reference_previous()
             .unwrap()
             .transport
+            .as_ref()
+            .unwrap()
             .rex_endpoint
             .as_ref()
             .unwrap()
@@ -1937,12 +1948,14 @@ fn rex_block_commit_retires_the_previous_current_and_persists_cleanup() {
     );
     assert_eq!(
         set.active_values()
-            .filter(|value| value.transport.kind == TransportKind::Rex
-                && value
-                    .transport
-                    .rex_endpoint
-                    .as_ref()
-                    .is_some_and(|endpoint| endpoint.block_id == "block-b"))
+            .filter(|value| value
+                .transport
+                .as_ref()
+                .is_some_and(|transport| transport.kind == TransportKind::Rex
+                    && transport
+                        .rex_endpoint
+                        .as_ref()
+                        .is_some_and(|endpoint| endpoint.block_id == "block-b")))
             .count(),
         1
     );
@@ -2036,6 +2049,8 @@ fn rex_publication_rejects_an_incomplete_current_without_mutation() {
     let mut incomplete = rex_value(&alice, "alice", "runtime-a", "alice-session", "block-a");
     incomplete
         .transport
+        .as_mut()
+        .unwrap()
         .rex_endpoint
         .as_mut()
         .unwrap()

@@ -22,6 +22,20 @@ fn run_in_pane_at(
     cwd: &Path,
     args: &[&str],
 ) -> Value {
+    let (status, stdout, stderr) = capture_in_pane_at(fixture, pane, label, tmux_value, cwd, args);
+    assert_eq!(status, 0, "{label} CLI failed: {stderr}");
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("{label} emitted invalid JSON: {error}: {stderr}"))
+}
+
+fn capture_in_pane_at(
+    fixture: &Fixture,
+    pane: &Pane,
+    label: &str,
+    tmux_value: &str,
+    cwd: &Path,
+    args: &[&str],
+) -> (i32, String, String) {
     let script_path = fixture.root.join(format!("{label}.sh"));
     let result_path = fixture.root.join(format!("{label}.json"));
     let error_path = fixture.root.join(format!("{label}.error"));
@@ -38,8 +52,10 @@ fn run_in_pane_at(
          export HOME={home} COLLAB_STATE_DIR={state} CODEX_HOME={home} CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex TUI'\n\
          export TMUX={tmux_value} TMUX_PANE={pane_id}\n\
          export CODEX_SESSION_ID={session_id}\n\
-         {binary} {command} >{result} 2>{error}\n\
-         printf done >{done}\n\
+         status=0\n\
+         {binary} {command} >{result} 2>{error} || status=$?\n\
+         printf '%d\\n' \"$status\" >{done}.tmp\n\
+         mv {done}.tmp {done}\n\
          sleep 600\n",
         root = shell_quote(&cwd.to_string_lossy()),
         state = shell_quote(&fixture.host_state.to_string_lossy()),
@@ -73,7 +89,11 @@ fn run_in_pane_at(
         std::fs::read_to_string(&error_path).unwrap_or_default(),
         std::fs::read_to_string(&result_path).unwrap_or_default()
     );
-    serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap()
+    (
+        std::fs::read_to_string(done_path).unwrap().trim().parse().unwrap(),
+        std::fs::read_to_string(result_path).unwrap(),
+        std::fs::read_to_string(error_path).unwrap(),
+    )
 }
 
 fn context_snapshot(value: &Value) -> &Value {
@@ -125,6 +145,47 @@ fn persisted_identity(fixture: &Fixture, worker_id: &str) -> Value {
         .join(worker_id)
         .join("identity.json");
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn context_reports_the_missing_tmux_endpoint_and_registers_after_declaration() {
+    let (fixture, pane) = single_pane_fixture("missing-host-endpoint");
+    let capability = fixture.host_state.join("tmux-endpoints.json");
+    let saved_capability = std::fs::read(&capability).unwrap();
+    std::fs::remove_file(&capability).unwrap();
+    let identity_map = fixture.host_state.join("identity-map.json");
+    let before = std::fs::read(&identity_map).ok();
+
+    let (status, stdout, stderr) = capture_in_pane_at(
+        &fixture,
+        &pane,
+        "context-without-host-endpoint",
+        "invalid",
+        &fixture.root,
+        &["context"],
+    );
+    assert_ne!(status, 0);
+    assert_eq!(std::fs::read(&identity_map).ok(), before);
+    let outcome = serde_json::from_str::<Value>(&stdout).ok();
+    assert!(
+        stderr.contains("TMUX_OBSERVATION_CAPABILITY_MISSING"),
+        "unexpected outcome={:?}, required_fields={:?}, stderr={stderr}",
+        outcome.as_ref().and_then(|value| value.pointer("/result/outcome")),
+        outcome.as_ref().and_then(|value| value.pointer("/result/requires/fields"))
+    );
+
+    std::fs::write(&capability, saved_capability).unwrap();
+    let registered = run_in_pane_with_tmux(
+        &fixture,
+        &pane,
+        "context-with-host-endpoint",
+        "invalid",
+        &["context"],
+    );
+    assert_eq!(registered["ok"], true, "{registered}");
+    let snapshot = context_snapshot(&registered);
+    assert_eq!(snapshot["identity"]["transport"]["kind"], "tmux", "{registered}");
+    assert_eq!(snapshot["session_id"], pane.session_anchor, "{registered}");
 }
 
 #[test]

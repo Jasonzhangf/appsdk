@@ -7,6 +7,26 @@ use std::os::unix::net::UnixListener;
 use support::*;
 
 #[test]
+fn local_upgrade_check_rejects_an_unreadable_identity_map_before_publication() {
+    let _test = test_guard();
+    let root = temp_root("local-map-compatibility");
+    let project = create_project(&root);
+    let state = root.join("host-state");
+    std::fs::create_dir_all(&state).unwrap();
+    let cli = copy_pair(&root);
+    let map = state.join("identity-map.json");
+    // An unsupported schema is well-formed JSON but cannot start this daemon.
+    let contents = br#"{"schema_version":2,"slots":[],"effects":[]}"#;
+    std::fs::write(&map, contents).unwrap();
+    let output = run_check(&cli, &project, &state, true);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("IDENTITY_MAP_VERSION_UNSUPPORTED"));
+    assert_eq!(std::fs::read(&map).unwrap(), contents);
+    assert!(!state.join("server.sock").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn status_check_is_a_public_read_only_entry() {
     let _test = test_guard();
     let root = temp_root("public-entry");

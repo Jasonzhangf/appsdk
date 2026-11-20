@@ -653,6 +653,19 @@ pub(crate) fn notification_target(
     }
 }
 
+// Preserve the existing status fields even when the registered owner
+// currently has no delivery address.
+fn notification_route_projection(worker: &WorkerRec) -> (String, String) {
+    selected_transport_for_worker(worker)
+        .and_then(|transport| {
+            Some((
+                transport.kind.as_str().to_owned(),
+                notification_target(&transport)?.into_owned(),
+            ))
+        })
+        .unwrap_or_default()
+}
+
 fn subscription_matches_transport(
     subscription: &NotificationSubscription,
     transport: &SelectedTransport,
@@ -662,22 +675,15 @@ fn subscription_matches_transport(
             .is_some_and(|target| subscription.target == target.as_ref())
 }
 
-pub(crate) fn subscription_matches_transport_by_worker(
-    server: &Server,
-    subscription_id: &str,
-    worker_id: &str,
+fn subscription_can_use_current_transport(
+    subscription: &NotificationSubscription,
     transport: &SelectedTransport,
 ) -> bool {
-    let state = server.state.lock().unwrap();
-    let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
-        return false;
-    };
-    subscription.worker_id == worker_id
-        && subscription_matches_transport(subscription, transport)
-        && state
-            .workers
-            .get(worker_id)
-            .is_some_and(|worker| selected_transport_for_worker(worker).as_ref() == Some(transport))
+    // Only the daemon-managed direct message lease has a transport-specific
+    // admission contract. Business subscriptions use the current holder's
+    // authorized transport even when their compatibility fields are stale.
+    subscription.id != default_direct_message_id(&subscription.worker_id)
+        || subscription_matches_transport(subscription, transport)
 }
 
 fn attempt_tmux_notification_with_at(
@@ -700,13 +706,6 @@ fn attempt_tmux_notification_with_at(
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
-    let allow_retry = {
-        let state = server.state.lock().unwrap();
-        state
-            .msgs
-            .get(message_id)
-            .is_some_and(|message| desktop_connect_retry(&state, message))
-    };
     attempt_tmux_notification_with_retry(
         server,
         message_id,
@@ -717,7 +716,7 @@ fn attempt_tmux_notification_with_at(
         delay,
         explicit,
         now,
-        allow_retry,
+        false,
         explicit_retry,
         deliver,
     )
@@ -740,26 +739,23 @@ fn transport_log_label(transport: &SelectedTransport) -> &'static str {
     }
 }
 
-/// Only a failed Desktop connect proves that no request byte was submitted.
-/// A prior acceptance or any later write/read uncertainty is never replayable.
-fn desktop_connect_retry(state: &State, message: &crate::server::state::Message) -> bool {
+/// Reconnect retries require proof from the most recent attempt.
+fn notification_reconnect_pending(state: &State, message: &crate::server::state::Message) -> bool {
     message.state == "pending"
         && !state
             .notification_delivery_accepted
             .contains_key(&message.id)
         && state
-            .workers
-            .get(&message.to)
-            .and_then(selected_transport_for_worker)
-            .is_some_and(|transport| transport.kind == TransportKind::DesktopBridge)
-        && state
             .notification_delivery_failures
             .get(&message.id)
             .is_some_and(|failure| {
                 failure.retryable
-                    && failure
-                        .error
-                        .starts_with(crate::client::adapters::desktop_bridge::NOT_SUBMITTED_PREFIX)
+                    && failure.failed_ms == message.last_wake_attempt_ms
+                    && failure.resume_on_reconnect.unwrap_or_else(|| {
+                        crate::client::adapters::AdapterError::notification_waits_for_reconnect(
+                            &failure.error,
+                        )
+                    })
             })
 }
 
@@ -811,11 +807,8 @@ fn select_current_rex_delivery_binding(
         ));
     }
     let mut owners = control.active_values().filter(|value| {
-        value.transport.kind == TransportKind::Rex
-            && value
-                .transport
-                .rex_endpoint
-                .as_ref()
+        value.transport.as_ref().filter(|transport| transport.kind == TransportKind::Rex)
+                .and_then(|transport| transport.rex_endpoint.as_ref())
                 .is_some_and(|candidate| {
                     candidate.server == endpoint.server && candidate.block_id == endpoint.block_id
                 })
@@ -823,7 +816,7 @@ fn select_current_rex_delivery_binding(
     let unique_owner = owners.next().is_some_and(|owner| {
         owner.binding.agent_id.as_str() == recipient
             && owner.binding == selected.binding
-            && owner.transport == selected.transport
+            && owner.transport.as_ref() == Some(&selected.transport)
     });
     if !unique_owner || owners.next().is_some() {
         return Err(format!(
@@ -844,7 +837,7 @@ fn attempt_tmux_notification_with_retry(
     delay: i64,
     explicit: bool,
     now: i64,
-    allow_retry: bool,
+    scheduler_retry: bool,
     retry: bool,
     deliver: &dyn Fn(
         &SelectedTransport,
@@ -855,13 +848,21 @@ fn attempt_tmux_notification_with_retry(
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
+    if transport.kind == TransportKind::Tmux
+        && transport.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+            crate::client::adapters::tmux::iterm2_panes_for_endpoint(endpoint)
+                .is_ok_and(|panes| panes.is_empty())
+        })
+    {
+        return NotificationAttempt::Deferred(None);
+    }
     let _register_guard = if transport.kind == TransportKind::Rex {
         match server.register_gate.try_lock() {
             Ok(guard) => Some(guard),
             Err(std::sync::TryLockError::WouldBlock) => {
-                return NotificationAttempt::NotAttempted(
+                return NotificationAttempt::Deferred(Some(
                     "REX_BINDING_PUBLICATION_BUSY: retry after current binding publication".into(),
-                );
+                ));
             }
             Err(std::sync::TryLockError::Poisoned(error)) => {
                 return NotificationAttempt::Rejected(format!(
@@ -876,6 +877,12 @@ fn attempt_tmux_notification_with_retry(
     let Some(seed_id) = state.msgs.get(message_id).map(|message| message.id.clone()) else {
         return NotificationAttempt::NotAttempted("durable message not found".into());
     };
+    let seed = &state.msgs[message_id];
+    let allow_retry = notification_reconnect_pending(&state, seed)
+        || (scheduler_retry && explicit_retry_refusal(&state, message_id).is_none());
+    if state.workers.get(recipient).and_then(selected_transport_for_worker).as_ref() != Some(transport) {
+        return NotificationAttempt::Deferred(None);
+    }
     if !state.scheduler_message_deliverable(message_id) {
         return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
     }
@@ -997,7 +1004,7 @@ fn attempt_tmux_notification_with_retry(
         return NotificationAttempt::NotAttempted("notification subscription not found".into());
     };
     if subscription.worker_id != recipient
-        || !subscription_matches_transport(subscription, transport)
+        || !subscription_can_use_current_transport(subscription, transport)
     {
         return NotificationAttempt::NotAttempted(
             format!(
@@ -1065,7 +1072,7 @@ fn attempt_tmux_notification_with_retry(
                         || message.wake_attempt_count < MAX_WAKE_ATTEMPTS
                 })
                 && sub.worker_id == recipient
-                && subscription_matches_transport(sub, transport)
+                && subscription_can_use_current_transport(sub, transport)
                 && sub.status == "armed"
                 && sub.expires_ms > now)
                 .then(|| {
@@ -1113,14 +1120,14 @@ fn attempt_tmux_notification_with_retry(
                     &server.config.notifications,
                 ) == delay
                 && sub.worker_id == recipient
-                && subscription_matches_transport(sub, transport))
+                && subscription_can_use_current_transport(sub, transport))
             .then_some(message.last_wake_attempt_ms)
         })
         .max()
         .unwrap_or(0);
     if now.saturating_sub(window_start_ms) < delay || now.saturating_sub(last_attempt) < delay {
         if queued_tmux {
-            return NotificationAttempt::Deferred;
+            return NotificationAttempt::Deferred(None);
         }
         return NotificationAttempt::NotAttempted(
             "notification delivery window has not elapsed".into(),
@@ -1147,16 +1154,25 @@ fn attempt_tmux_notification_with_retry(
             };
             let control =
                 binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
-            Ok(control
-                .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)?
-                .and_then(notification_contract::SelectedDeliveryBinding::from_slot)
-                .filter(|binding| binding.transport == *transport))
+            let slot = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)?;
+            if slot.and_then(|slot| slot.active_binding())
+                .is_some_and(|current| current.transport.as_ref() != Some(transport))
+            {
+                return Err("IDENTITY_TRANSPORT_CHANGED: current identity no longer owns the selected delivery transport".into());
+            }
+            Ok(slot
+                .and_then(notification_contract::SelectedDeliveryBinding::from_slot))
         })();
         match selected {
             Ok(binding) => binding,
             Err(error) => return NotificationAttempt::Rejected(error),
         }
     };
+    if retry {
+        if let Some(reason) = explicit_retry_refusal(&state, message_id) {
+            return NotificationAttempt::NotAttempted(reason.into());
+        }
+    }
     let mut attempt_events = vec![Event::WakeAttempted {
         ids: batch.iter().map(|message| message.1.clone()).collect(),
         attempted_ms: now,
@@ -1173,7 +1189,27 @@ fn attempt_tmux_notification_with_retry(
     if let Err(error) = server.commit_locked_checked(&mut state, &attempt_events) {
         return NotificationAttempt::Rejected(error.to_string());
     }
+    let reservations = batch.iter().map(|entry| {
+        (entry, state.msgs[&entry.1].wake_attempt_count)
+    }).collect::<Vec<_>>();
     drop(state);
+
+    let current_attempt_members = |state: &State| {
+        let still_selected =
+            state.workers.get(recipient).and_then(selected_transport_for_worker).as_ref() == Some(transport);
+        reservations.iter().filter_map(|(entry, attempt_count)| {
+            (still_selected
+                && state.wake_bindings.get(&entry.1) == Some(&entry.2)
+                && state.notification_delivery_bindings.get(&entry.1) == selected_binding.as_ref()
+                && state.msgs.get(&entry.1).is_some_and(|message| {
+                    message.to == recipient
+                        && message.last_wake_attempt_ms == now
+                        && message.wake_attempt_count == *attempt_count
+                        && !state.handoff_wake_pending(message)
+                }))
+                .then_some(*entry)
+        }).collect::<Vec<_>>()
+    };
 
     let text = truncate_notification(compose_notification(
         &first.1,
@@ -1213,17 +1249,8 @@ fn attempt_tmux_notification_with_retry(
             // only to messages whose current wake is still this delivery's;
             // a late acceptance must never overwrite the current holder's
             // evidence or failure.
-            let owned = batch
-                .iter()
-                .filter(|entry| {
-                    state.wake_bindings.get(&entry.1) == Some(&entry.2)
-                        && state
-                            .msgs
-                            .get(&entry.1)
-                            .is_some_and(|message| message.to == recipient)
-                })
-                .collect::<Vec<_>>();
-            server.commit_locked_reporting(
+            let owned = current_attempt_members(&state);
+            if let Err(error) = server.commit_locked_checked(
                 &mut state,
                 &owned
                     .iter()
@@ -1233,7 +1260,10 @@ fn attempt_tmux_notification_with_retry(
                         evidence: Some(receipt.clone()),
                     })
                     .collect::<Vec<_>>(),
-            );
+            ) {
+                server.report_state_error(&error);
+                return NotificationAttempt::ReceiptUnconfirmed(error.to_string());
+            }
             if owned.len() < batch.len() {
                 append_log(
                     &server.log_path(),
@@ -1259,23 +1289,13 @@ fn attempt_tmux_notification_with_retry(
             // Same attribution gate as the accepted path: a failure observed
             // after the message moved to another holder belongs to this
             // superseded delivery, not to the current holder's wake.
-            let failed_ids = batch
-                .iter()
-                .filter(|entry| {
-                    state.wake_bindings.get(&entry.1) == Some(&entry.2)
-                        && state
-                            .msgs
-                            .get(&entry.1)
-                            .is_some_and(|message| message.to == recipient)
-                })
-                .map(|message| message.1.clone())
-                .collect::<Vec<_>>();
+            let failed = current_attempt_members(&state);
             server.commit_locked_reporting(
                 &mut state,
-                &failed_ids
+                &failed
                     .into_iter()
-                    .map(|message_id| Event::NotificationDeliveryFailed {
-                        message_id,
+                    .map(|message| Event::NotificationDeliveryFailed {
+                        message_id: message.1.clone(),
                         operation: if explicit {
                             "notification.emitted".into()
                         } else {
@@ -1283,6 +1303,9 @@ fn attempt_tmux_notification_with_retry(
                         },
                         error: error.clone(),
                         failed_ms: now,
+                        resume_on_reconnect: Some(
+                            crate::client::adapters::AdapterError::notification_waits_for_reconnect(&error),
+                        ),
                         retryable: matches!(
                             crate::client::adapters::AdapterError::notification_class_from_display(
                                 &error
@@ -1382,9 +1405,9 @@ fn attempt_notification_detailed_with_mode_at_inner(
             .get(&recipient)
             .and_then(selected_transport_for_worker);
         let Some(transport) = worker_transport else {
-            return NotificationAttempt::NotAttempted(
+            return NotificationAttempt::Deferred(Some(
                 "registered worker has no server-selected transport".into(),
-            );
+            ));
         };
         if let Some(required_session) = state.target_sessions.get(message_id) {
             if transport.session_id.as_deref() != Some(required_session.as_str()) {
@@ -1399,6 +1422,7 @@ fn attempt_notification_detailed_with_mode_at_inner(
                         error: error.clone(),
                         failed_ms: now,
                         retryable: false,
+                        resume_on_reconnect: Some(false),
                     }],
                 );
                 return NotificationAttempt::NotAttempted(error);
@@ -1443,6 +1467,7 @@ fn attempt_notification_detailed_with_mode_at_inner(
                             error: error.clone().into(),
                             failed_ms: now,
                             retryable: true,
+                            resume_on_reconnect: Some(false),
                         },
                     ],
                 );
@@ -1494,7 +1519,10 @@ fn attempt_notification_detailed_with_mode_at_inner(
                 .msgs
                 .get(message_id)
                 .is_some_and(|message| !state.handoff_wake_pending(message));
-        if !current_wake_accepted
+        let unreserved = state.msgs.get(message_id).is_some_and(|message| {
+            message.wake_attempt_count == 0 || state.handoff_wake_pending(message)
+        });
+        if unreserved && !current_wake_accepted
             && !state
                 .notification_delivery_failures
                 .contains_key(message_id)
@@ -1507,6 +1535,7 @@ fn attempt_notification_detailed_with_mode_at_inner(
                     error: error.clone(),
                     failed_ms: now,
                     retryable: true,
+                    resume_on_reconnect: Some(false),
                 }],
             );
         }
@@ -1579,7 +1608,13 @@ fn explicit_retry_refusal(state: &State, message_id: &str) -> Option<&'static st
         return Some("original native attempt was accepted");
     }
     match state.notification_delivery_failures.get(message_id) {
-        Some(failure) if failure.retryable => None,
+        Some(failure)
+            if failure.retryable
+                && (message.wake_attempt_count == 0
+                    || failure.failed_ms == message.last_wake_attempt_ms) =>
+        {
+            None
+        }
         Some(_) => Some("original attempt is not known to be undelivered"),
         None => Some("original attempt has no durable delivery failure"),
     }
@@ -1777,10 +1812,13 @@ fn notification_send_response(
             data["repair_required"] = json!(false);
             Resp::data(data)
         }
-        NotificationAttempt::Deferred => {
+        NotificationAttempt::Deferred(reason) => {
             data["durable"] = json!(true);
             data["notification"] = json!("queued");
             data["consumed"] = json!(false);
+            if let Some(reason) = reason {
+                data["notification_error"] = json!(reason);
+            }
             Resp::data(data)
         }
         NotificationAttempt::Accepted => {
@@ -1797,8 +1835,21 @@ fn notification_send_response(
             data["consumed"] = json!(false);
             Resp::data(data)
         }
+        NotificationAttempt::ReceiptUnconfirmed(error) => {
+            data["durable"] = json!(true);
+            data["notification"] = json!("submitted-receipt-unconfirmed");
+            data["notification_error"] = json!(error);
+            data["consumed"] = json!(false);
+            Resp::data(data)
+        }
         NotificationAttempt::Rejected(error) => {
             data["durable"] = json!(true);
+            if error.starts_with(crate::client::adapters::tmux::DELIVERY_NOT_ATTACHED) {
+                data["notification"] = json!("queued");
+                data["notification_error"] = json!(error);
+                data["consumed"] = json!(false);
+                return Resp::data(data);
+            }
             data["notification"] = json!("subscribed-not-sent");
             data["notification_error"] = json!(error);
             data["failure"] = json!("notification_delivery_failed");
@@ -1858,7 +1909,7 @@ fn refresh_rex_notification_binding(
     let value = slot
         .active_binding()
         .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding"))?;
-    let saved_transport = value.transport.clone();
+    let saved_transport = value.transport.clone().ok_or_else(|| format!("REX_CURRENT_BINDING_CHANGED: {recipient} has no current transport"))?;
     let endpoint = saved_transport
         .rex_endpoint
         .as_ref()
@@ -1979,11 +2030,6 @@ fn attempt_scheduler_notification(
     let delivery = {
         let state = server.state.lock().unwrap();
         state.msgs.get(message_id).and_then(|seed| {
-            // A scheduler recovery may re-knock once after a known-undelivered
-            // attempt. An accepted or unknown native outcome has no retryable
-            // durable failure, so it must stop instead of resending blindly.
-            let allow_retry = seed.wake_attempt_count >= MAX_WAKE_ATTEMPTS
-                && explicit_retry_refusal(&state, message_id).is_none();
             let recipient = seed.to.clone();
             let subscription = state.notification_subscriptions.get(subscription_id)?;
             if subscription.worker_id != recipient {
@@ -1999,7 +2045,7 @@ fn attempt_scheduler_notification(
                 .workers
                 .get(&recipient)
                 .and_then(selected_transport_for_worker)?;
-            if !subscription_matches_transport(subscription, &transport) {
+            if !subscription_can_use_current_transport(subscription, &transport) {
                 return None;
             }
             let source_thread_id = state
@@ -2019,11 +2065,10 @@ fn attempt_scheduler_notification(
                 source_thread_id,
                 delay,
                 is_explicit_notification(&state, seed),
-                allow_retry,
             ))
         })
     };
-    let Some((recipient, transport, source_thread_id, delay, explicit, allow_retry)) = delivery
+    let Some((recipient, transport, source_thread_id, delay, explicit)) = delivery
     else {
         clear_scheduler_notification_claim(server, request_id, claim_ms);
         return Ok(SchedulerNotificationAttempt::Rejected);
@@ -2038,7 +2083,7 @@ fn attempt_scheduler_notification(
         delay,
         explicit,
         now_ms(),
-        allow_retry,
+        true,
         false,
         &|transport, source_thread_id, text, message_id, explicit, mode| {
             (notification_sink(server))(
@@ -2176,7 +2221,7 @@ pub(crate) fn attempt_notification_with_default(
         else {
             return false;
         };
-        if !subscription_matches_transport(subscription, &transport) {
+        if !subscription_can_use_current_transport(subscription, &transport) {
             return false;
         }
         let source_thread_id = state

@@ -26,6 +26,13 @@ fn project_tmux_name(cwd: &Path, pane_order: u32, name: &str) -> String {
     )
 }
 
+fn unpositioned_tmux_name(snapshot: &Value, name: &str) -> String {
+    let session = snapshot["identity"]["transport"]["tmux_endpoint"]["tmux_session_id"]
+        .as_str()
+        .expect("current tmux session ID");
+    format!("{}_{name}", session.trim_start_matches('$'))
+}
+
 fn bind_fixed_test_position(
     fixture: &Fixture,
     pane: &Pane,
@@ -764,14 +771,10 @@ fn generated_peer_first_context_keeps_identity_when_manifest_match_is_ambiguous(
         .as_str()
         .expect("first context returns the generated peer identity")
         .to_owned();
-    assert!(
-        snapshot["layout"]["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("TM_LAYOUT_AMBIGUOUS")),
-        "the public layout result keeps the specific ambiguity error: {}",
-        snapshot["layout"]
-    );
-    assert_eq!(tmux_session_name(&fixture, &peer_pane), physical_label);
+    assert_eq!(snapshot["layout"]["status"], "unlinked", "{snapshot}");
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
+    let expected_label = unpositioned_tmux_name(snapshot, "peer-1");
+    assert_eq!(tmux_session_name(&fixture, &peer_pane), expected_label);
 
     let current_context = fixture.run_ok(&["context"], Some(&peer_pane));
     assert_eq!(current_context["result"]["snapshot"]["name"], "peer-1");
@@ -789,7 +792,7 @@ fn generated_peer_first_context_keeps_identity_when_manifest_match_is_ambiguous(
         }),
         "the first peer identity is the active current map entry: {after}"
     );
-    assert_eq!(tmux_session_name(&fixture, &peer_pane), physical_label);
+    assert_eq!(tmux_session_name(&fixture, &peer_pane), expected_label);
 
     fixture.run_ok(
         &[
@@ -882,13 +885,12 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
 
     for (index, (name, pane)) in ordinary_names.iter().zip(&panes).enumerate() {
         let operation_id = format!("generated-peer-pool-{index}");
-        let original_physical = tmux_session_name(&fixture, pane);
         let registered =
             registered_context_in(&fixture, &fixture.root, &operation_id, pane);
         assert_eq!(registered["result"]["snapshot"]["name"], *name);
         assert_eq!(
             tmux_session_name(&fixture, pane),
-            original_physical
+            unpositioned_tmux_name(&registered["result"]["snapshot"], name)
         );
     }
 
@@ -901,10 +903,11 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         &peer_pane,
     );
     assert_eq!(peer["result"]["snapshot"]["name"], "peer-1");
+    let role_label = unpositioned_tmux_name(&peer["result"]["snapshot"], "peer-1");
     assert_eq!(
         tmux_session_name(&fixture, &peer_pane),
-        unbound_physical,
-        "an unlinked generated peer must not invent a physical position"
+        role_label,
+        "an unlinked generated peer uses its session ID and role"
     );
     let map_path = fixture.host_state.join("identity-map.json");
     let map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
@@ -929,7 +932,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         "tab_id":"project_alpha",
         "pane_order":"22",
         "cwd":fixture.root,
-        "tmux_session":unbound_physical
+        "tmux_session":role_label
     }]))
     .unwrap();
     fs::write(&manifest_path, &manifest).unwrap();
@@ -1006,7 +1009,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
     );
     assert_eq!(
         tmux_session_name(&fixture, &peer_pane),
-        "stale-layout-peer"
+        role_label
     );
 
     let peer_worker = peer["result"]["snapshot"]["identity"]["worker_id"]
@@ -1019,14 +1022,14 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
             "tab_id":"project_alpha",
             "pane_order":"22",
             "cwd":fixture.root,
-            "tmux_session":"stale-layout-peer"
+            "tmux_session":role_label
         },
         {
             "binding_id":"tm_ambiguous_23",
             "tab_id":"project_beta",
             "pane_order":"23",
             "cwd":fixture.root,
-            "tmux_session":"stale-layout-peer"
+            "tmux_session":role_label
         }
     ]))
     .unwrap();
@@ -1051,8 +1054,8 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
     );
     assert_eq!(
         tmux_session_name(&fixture, &peer_pane),
-        "stale-layout-peer",
-        "ambiguous layout must not guess a physical label"
+        role_label,
+        "ambiguous layout keeps the name based on the current session ID"
     );
     let map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
     let peer_slot = map["slots"]
@@ -1093,7 +1096,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         "tab_id":"project_alpha",
         "pane_order":"22",
         "cwd":fixture.root,
-        "tmux_session":"stale-layout-peer"
+        "tmux_session":role_label
     }]))
     .unwrap();
     fs::write(&manifest_path, &current_manifest).unwrap();
@@ -2102,7 +2105,7 @@ fn public_context_rename_failure_reports_physical_error_and_keeps_current_identi
 }
 
 #[test]
-fn public_context_refresh_rename_failure_preserves_the_current_binding() {
+fn public_context_replaces_the_physical_session_for_the_same_agent() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, first) = Fixture::isolated("session-refresh-name-conflict");
     let tab_id = fixture.root.file_name().unwrap().to_str().unwrap();
@@ -2114,19 +2117,14 @@ fn public_context_refresh_rename_failure_preserves_the_current_binding() {
     let mut moved = second_pane(&fixture, "refresh-conflict-incoming", first.server_pid);
     moved.session_anchor = first.session_anchor.clone();
     fixture.start_pane_runner_on_socket(&fixture.tmux_socket, &moved.pane_id, "sleep 600");
-    let previous = tmux_session_name(&fixture, &moved);
     bind_fixed_test_position(&fixture, &moved, "refresh-conflict-position-eight", tab_id, 8);
-    let output = run_context_cli(&fixture, Some(&moved), Some("refresh-conflict-current"),
-        None, None, None, None, None, false);
-    assert!(
-        text(&output).contains(&format!("TMUX_SESSION_RENAME_FAILED: duplicate session: {occupied}")),
-        "{}",
-        text(&output)
-    );
-    assert_eq!(tmux_session_name(&fixture, &first), occupied);
-    assert_eq!(tmux_session_name(&fixture, &moved), previous);
+    let refreshed = success_payload(&run_context_cli(&fixture, Some(&moved),
+        Some("refresh-conflict-current"), None, None, None, None, None, false));
+    assert_eq!(refreshed["result"]["outcome"], "completed");
+    assert!(tmux_session_name(&fixture, &first).bytes().all(|byte| byte.is_ascii_digit()));
+    assert_eq!(tmux_session_name(&fixture, &moved), occupied);
     let query = fixture.context_query("refresh-conflict-readback", Some(&moved));
-    assert_eq!(query["result"]["outcome"], "incomplete", "{query}");
+    assert_eq!(query["result"]["outcome"], "completed", "{query}");
     assert_eq!(query["result"]["snapshot"]["identity"]["worker_id"], worker, "{query}");
     let current = current_map_holder(&fixture, "Alice");
     assert_eq!(current["binding"]["agent_id"], worker, "{current}");
@@ -2390,7 +2388,12 @@ fn persisted_context_uses_daemon_observation_without_adjacent_admission() {
         assert_eq!(state["global"]["projects"][canonical_root(&fixture)]["master_grants"], original_grants);
         assert_eq!(subscription_routes(&state), original_subscriptions);
         let map: Value = serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap()).unwrap();
-        assert!(map["slots"].as_array().unwrap().contains(&original_slot));
+        let current_slot = map["slots"].as_array().unwrap().iter().find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["identity_key"] == original_slot["identity_key"]
+        }).expect("the same logical name remains current");
+        assert_eq!(current_slot["current"]["binding"], original_slot["current"]["binding"]);
+        assert_eq!(current_slot["current"]["transport"], original_slot["current"]["transport"]);
         assert_eq!(master_status(&fixture, &pane), master);
     }
 }
@@ -3682,7 +3685,11 @@ fn cross_subject_anchor_match_is_rejected_before_publication() {
         }
         let mut changed = Vec::new();
         changed_paths(&before, &after, "", &mut changed);
-        panic!(
+        // The fixture's autonomous keepalive can tick during the command.
+        // All identity, route and business resource changes still fail this check.
+        changed.retain(|path| !path.contains("/state/keepalives/"));
+        assert!(
+            changed.is_empty(),
             "a rejected cross-subject anchor must not mutate resources: {}",
             changed.join(", ")
         );
@@ -4401,7 +4408,7 @@ fn e1_layout_prepare_retired_bob(
 
     let closed = fixture.run_ok(&["worker", "close", "--self"], Some(bob));
     assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
-    (bob_worker, historical)
+    (bob_worker, tmux_session_name(fixture, bob))
 }
 
 fn e1_layout_send_and_receive(
@@ -4473,8 +4480,8 @@ fn e1_layout_ordinary_bob_reuse_after_self_close_keeps_old_host() {
     );
     assert_eq!(
         tmux_session_name(&fixture, &new_pane),
-        "e1-layout-ordinary-reuse-new",
-        "without a manifest the new carrier keeps its current label"
+        unpositioned_tmux_name(snapshot, "Bob"),
+        "without a manifest the new carrier gets its session ID and role"
     );
 
     e1_layout_send_and_receive(
@@ -5024,7 +5031,7 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
             "--app-scope",
             "appserver-cli",
             "--approve-grant",
-            r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture cross-app source takeover"}"#,
+            r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture cross-app source takeover","replace_confirmed":true}"#,
         ],
         Some(&other_pane),
     );

@@ -267,7 +267,13 @@ fn finish_task_review_notification(
     ) {
         NotificationAttempt::Accepted
         | NotificationAttempt::Consumed
-        | NotificationAttempt::Deferred => None,
+        | NotificationAttempt::Deferred(_) => None,
+        NotificationAttempt::ReceiptUnconfirmed(error) => {
+            response.data["durable"] = json!(true);
+            response.data["notification"] = json!("submitted-receipt-unconfirmed");
+            response.data["notification_error"] = json!(error);
+            return response;
+        }
         NotificationAttempt::Rejected(error) | NotificationAttempt::NotAttempted(error) => {
             Some(error)
         }

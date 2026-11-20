@@ -15,7 +15,7 @@
       "After a real master registers, receives its approved project authority and completes the bootstrap handshake, send the pending task or collaboration request. Keep each master's existing task, executor and reviewer constraints."
     ],
     "next_action": "Inspect project progress, act on actionable master replies and append authorized next tasks. Merge substantive project changes under the hourly and quiet-hours policy, and confirm a user report only after actual host-visible output. Report missing-master startup requirements to the user and request explicit approval before creating a session; keep independent authorized work moving.",
-    "completion_action": "Collect actual master delivery reports, state remaining decisions and close your own coordination duties. Preserve project ownership and user-managed daemon and tmux server lifecycles."
+    "completion_action": "Collect actual master delivery reports, state remaining decisions and close your own coordination duties. Preserve project ownership and the tmux server lifecycle."
   },
   "identity_templates": {
     "master": {

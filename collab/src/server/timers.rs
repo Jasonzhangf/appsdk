@@ -145,38 +145,15 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     let mut lifecycle_events = Vec::new();
     {
         let mut state = server.state.lock().unwrap();
-        // Derive and commit loss from the same current state. A placement
-        // rebind between two snapshots must not disable its new subscription.
-        let lost_sub_ids: HashSet<_> = state
-            .notification_subscriptions
-            .values()
-            .filter(|subscription| subscription.status == "armed" && subscription.expires_ms > now)
-            .filter(|subscription| {
-                state
-                    .workers
-                    .get(&subscription.worker_id)
-                    .and_then(super::selected_transport_for_worker)
-                    .is_none_or(|transport| {
-                        !super::subscription_matches_transport(subscription, &transport)
-                    })
-            })
-            .map(|subscription| subscription.id.clone())
-            .collect();
+        // Scheduling and mailbox admission do not depend on whether the
+        // current carrier can wake. The delivery attempt owns availability.
         for subscription in state.notification_subscriptions.values() {
-            if subscription.status == "armed" {
-                if subscription.expires_ms <= now {
-                    lifecycle_events.push(Event::NotificationStatus {
-                        subscription_id: subscription.id.clone(),
-                        status: "expired".into(),
-                        updated_ms: now,
-                    });
-                } else if lost_sub_ids.contains(&subscription.id) {
-                    lifecycle_events.push(Event::NotificationStatus {
-                        subscription_id: subscription.id.clone(),
-                        status: "transport-lost".into(),
-                        updated_ms: now,
-                    });
-                }
+            if subscription.status == "armed" && subscription.expires_ms <= now {
+                lifecycle_events.push(Event::NotificationStatus {
+                    subscription_id: subscription.id.clone(),
+                    status: "expired".into(),
+                    updated_ms: now,
+                });
             }
         }
         // Project wait escalation uses master authority; owned goal deadlines
@@ -189,7 +166,6 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             if subscription.status != "armed"
                 || !is_goal_deadline(subscription)
                 || subscription.expires_ms <= now
-                || lost_sub_ids.contains(&subscription.id)
             {
                 continue;
             }
@@ -530,7 +506,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 }
                 (message.state == "pending"
                     && (message.wake_attempt_count < MAX_WAKE_ATTEMPTS
-                        || super::desktop_connect_retry(&state, message))
+                        || super::notification_reconnect_pending(&state, message))
                     && automatic_delivery_candidate(&state, message)
                     && super::mailbox::automatic_retry_eligible(
                         message,
@@ -566,8 +542,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 /// public `delivery=immediate` record that was never attempted becomes
 /// eligible exactly once, so a restored daemon-owned default lease reaches the
 /// existing attempt owner. Any accepted, failed, or retried immediate outcome
-/// stays out of the timer path. A Desktop connect refused before any byte was
-/// written is the sole attempted immediate outcome that may resume safely.
+/// stays out of the timer path unless the adapter confirmed a reconnectable
+/// failure before submission.
 fn automatic_delivery_candidate(state: &super::state::State, message: &Message) -> bool {
     match state.delivery_modes.get(&message.id).map(String::as_str) {
         None => true,
@@ -586,7 +562,7 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                     .is_none_or(|failure| failure.retryable)
         }
         Some("immediate") => {
-            super::desktop_connect_retry(state, message)
+            super::notification_reconnect_pending(state, message)
                 || (message.wake_attempt_count == 0
                     && message.last_wake_attempt_ms == 0
                     && !message.retry_attempted

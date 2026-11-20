@@ -160,6 +160,13 @@ const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 11] = [
 
 /// Classify a sink error by the exact AdapterError display contract.
 impl AdapterError {
+    /// These adapters can prove that their physical endpoint became unavailable
+    /// before input was submitted. The same durable wake can wait for recovery.
+    pub fn notification_waits_for_reconnect(error: &str) -> bool {
+        error.starts_with(desktop_bridge::NOT_SUBMITTED_PREFIX)
+            || error.starts_with(tmux::DELIVERY_NOT_ATTACHED)
+    }
+
     pub fn notification_class_from_display(error: &str) -> NotificationDeliveryClass {
         if error
             .starts_with("explicit App Server notification requires the sender native thread id")

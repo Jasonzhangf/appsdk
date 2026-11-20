@@ -576,17 +576,16 @@ pub(crate) fn selected_transport_endpoint_live(
             .as_deref()
             .and_then(|thread| (server.appserver_thread_status)(transport, thread).ok())
             .map(|_| true),
-        TransportKind::Tmux => match transport
-            .tmux_endpoint
-            .as_ref()
-            .map(crate::client::adapters::tmux::probe)
-        {
-            Some(Ok(crate::client::adapters::tmux::PanePresence::Present)) => Some(true),
-            Some(Ok(crate::client::adapters::tmux::PanePresence::Missing)) => Some(false),
-            Some(Ok(crate::client::adapters::tmux::PanePresence::Unknown))
-            | Some(Err(_))
-            | None => None,
-        },
+        TransportKind::Tmux => transport.tmux_endpoint.as_ref().and_then(|endpoint| {
+            use crate::client::adapters::tmux::{iterm2_panes_for_endpoint, probe, PanePresence};
+            match probe(endpoint) {
+                Ok(PanePresence::Present) => Some(
+                    iterm2_panes_for_endpoint(endpoint).is_ok_and(|panes| !panes.is_empty())
+                ),
+                Ok(PanePresence::Missing) => Some(false),
+                Ok(PanePresence::Unknown) | Err(_) => None,
+            }
+        }),
         TransportKind::AppServer => transport
             .thread_id
             .as_deref()
@@ -637,18 +636,7 @@ pub(crate) fn worker_identity_and_endpoint(
         TransportKind::Tmux => {
             let identity_valid =
                 worker_identity_presence(server, worker) == IdentityPresence::Present;
-            let endpoint_live = match transport
-                .tmux_endpoint
-                .as_ref()
-                .map(crate::client::adapters::tmux::probe)
-            {
-                Some(Ok(crate::client::adapters::tmux::PanePresence::Present)) => Some(true),
-                Some(Ok(crate::client::adapters::tmux::PanePresence::Missing)) => Some(false),
-                Some(Ok(crate::client::adapters::tmux::PanePresence::Unknown))
-                | Some(Err(_))
-                | None => None,
-            };
-            (identity_valid, endpoint_live)
+            (identity_valid, selected_transport_endpoint_live(server, &transport))
         }
         TransportKind::AppServer | TransportKind::Dsh => {
             let identity_valid = if transport.kind == TransportKind::AppServer {
@@ -1819,7 +1807,7 @@ fn worker_status_capture(
     let active = slot
         .active_binding()
         .ok_or_else(|| "WORKER_STATUS_CAPTURE_NAME_NOT_CURRENT".to_owned())?;
-    if active.binding != binding || !same_selected_endpoint(&active.transport, &selected_transport) {
+    if active.binding != binding || active.transport.as_ref().is_none_or(|transport| !same_selected_endpoint(transport, &selected_transport)) {
         return Err("WORKER_STATUS_CAPTURE_TARGET_CHANGED".into());
     }
     let agent_session_id = worker_status_agent_session_id(&selected_transport)
@@ -2209,7 +2197,7 @@ fn handle_worker_status_judgment(
         || slot.generation != capture.binding_generation
         || slot.active_binding().is_none_or(|active| {
             active.binding != capture.binding
-                || !same_selected_endpoint(&active.transport, &capture.selected_transport)
+                || active.transport.as_ref().is_none_or(|transport| !same_selected_endpoint(transport, &capture.selected_transport))
         })
     {
         return worker_status_judgment_receipt(

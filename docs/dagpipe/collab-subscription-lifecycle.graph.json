@@ -1,4 +1,5 @@
 {
+  "business_schedule_liveness_gate": "已武装的期限订阅按自身期限、次数与业务权限处理。当前 transport 缺失或换绑不能生成 transport-lost 或屏蔽应有的到期记录。到期通知持久入库，再由独立投递尝试根据当前承载推进。",
   "id": "appsdk-collab-subscription-lifecycle",
   "version": "0.9.0",
   "description": "一次订阅生命周期转换的SESE。本人、项目master和当前typed CEO按授权范围管理目标长程计划，目标稳定名字保持owner。master派单提供完整内容和明确周期并原子开启目标订阅。新周期长程计划默认100次，显式次数有效，TTL与次数任一耗尽即结束；旧单次记录和通用通知缺省值保持。默认direct-message由daemon维护。board巡检、standing project patrol及idle提醒沿节点中现有范围、取消和提醒时序，不因本次代设长程订阅变更。重试与换载体保留进度，终态不自动复活，失败输出明确结果。",
@@ -6,9 +7,9 @@
   "nodes": [
     {
       "id": "读取持久订阅与目标",
-      "operator": "appsdk.collab_subscription.select_transport",
+      "operator": "appsdk.collab_subscription.read_owner",
       "operator_version": "1",
-      "description": "读取 authenticated owner 的已提交 binding、稳定 owner、当前载体、subscription ID、事件类别、subject、schedule、TTL、fired count、当前生命周期状态、取消原因与恢复条件和既有投递位置。读取 board 巡检的 task scope 与每个 scope 的取消状态。对 master project-patrol，同时读取当前 master grant、项目 scope、精确订阅、项目任务的未关闭状态与等待记录，以及项目进度上报 revision；只认既有进度记录，不从自由文本原因断言已上报。不得重新注册身份或按 transport 猜测，不得从 task 状态或 tmux 界面推断宿主活动。",
+      "description": "读取已认证的稳定 owner、subscription ID、事件类别、subject、schedule、TTL、fired count、生命周期状态、取消原因和恢复条件。读取 board 巡检的 task scope。对 master project-patrol，同时读取当前 master grant、项目 scope、精确订阅、项目任务的未关闭状态与等待记录，以及持久项目进度上报 revision。创建、编辑、续订和结束只取决于当前业务授权与生命周期。宿主地址可为空，由投递尝试解析，地址变化保留待投 occurrence。",
       "inputs": ["subscription_transition_request"],
       "output": {"id": "subscription_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

@@ -173,9 +173,10 @@ fn handle_notification_subscribe(
     let now = now_ms();
     let expires_ms = now.saturating_add((ttl_seconds as i64).saturating_mul(1000));
     let mut state = server.state.lock().unwrap();
-    if let Err(error) = verify(&state, &worker_id, &token) {
-        return error;
-    }
+    let worker = match verify(&state, &worker_id, &token) {
+        Ok(worker) => worker,
+        Err(error) => return error,
+    };
     if event == "deadline" && is_managed_subagent(&state, &worker_id) {
         return Resp::err("managed subworkers cannot create independent deadline schedules");
     }
@@ -192,16 +193,7 @@ fn handle_notification_subscribe(
             return Resp::err("master-idle subscription requires the current registered master");
         }
     }
-    let Some(worker) = state.workers.get(&worker_id).cloned() else {
-        return Resp::err("notification subscription requires a registered worker");
-    };
-    let Some(transport) = selected_transport_for_worker(&worker) else {
-        return Resp::err("registered worker has no server-selected transport");
-    };
-    let Some(thread_id) = notification_target(&transport) else {
-        return Resp::err("selected transport has no route address");
-    };
-    let target = thread_id.into_owned();
+    let (method, target) = notification_route_projection(&worker);
     if goal_deadline {
         let requested_key = trigger_ms
             .or_else(|| trigger_times_ms.first().copied())
@@ -221,8 +213,8 @@ fn handle_notification_subscribe(
             .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
             .cloned()
         {
-            if existing.method != transport.kind.as_str() || existing.target != target {
-                existing.method = transport.kind.as_str().into();
+            if existing.method != method || existing.target != target {
+                existing.method = method;
                 existing.target = target.clone();
                 existing.updated_ms = now;
                 if let Err(error) = server.commit_locked(
@@ -253,7 +245,7 @@ fn handle_notification_subscribe(
         if let Some(mut existing) = existing {
             let was_cancelled = existing.status == "cancelled";
             let transport_changed =
-                existing.method != transport.kind.as_str() || existing.target != target;
+                existing.method != method || existing.target != target;
             if was_cancelled {
                 existing.status = "armed".into();
                 existing.status_reason = None;
@@ -269,7 +261,7 @@ fn handle_notification_subscribe(
                 );
             }
             if was_cancelled || transport_changed {
-                existing.method = transport.kind.as_str().into();
+                existing.method = method;
                 existing.target = target;
                 existing.updated_ms = now;
                 if let Err(error) = server.commit_locked(
@@ -360,7 +352,7 @@ fn handle_notification_subscribe(
         event,
         subject,
         target,
-        method: transport.kind.as_str().into(),
+        method,
         trigger_ms,
         trigger_times_ms,
         interval_ms,
@@ -828,6 +820,20 @@ fn pending_messages_for_subscription(state: &State, subscription_id: &str) -> Ve
                     .get(message_id)
                     .is_some_and(|message| message.state == "pending"))
             .then_some(message_id.clone())
+        })
+        .collect()
+}
+
+fn retractable_messages_for_subscription(state: &State, subscription_id: &str) -> Vec<String> {
+    pending_messages_for_subscription(state, subscription_id)
+        .into_iter()
+        .filter(|id| {
+            let message = &state.msgs[id];
+            !state.notification_delivery_accepted.contains_key(id)
+                && (message.wake_attempt_count == 0
+                    || state.notification_delivery_failures.get(id).is_some_and(|failure| {
+                        failure.retryable && failure.failed_ms == message.last_wake_attempt_ms
+                    }))
         })
         .collect()
 }

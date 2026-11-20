@@ -30,7 +30,7 @@
     },
     {
       "id":"输出目标状态与回执","operator":"appsdk.collab_goal.emit_result","operator_version":"1",
-      "description":"返回目标owner、当前载体、任务与真实订阅回执，区分持久提交、armed、投递与消费。到期消息包含任务单的完整长程内容与当前接单状态，真实消费后推进次数。只读状态不触发写入。派发必须有目标订阅回执，错误或等待不冒充armed。",
+      "description":"返回目标owner、当前载体、任务与真实订阅回执，区分持久提交、armed、投递与消费。到期消息包含任务单的完整长程内容与当前接单状态，真实消费后推进次数。只读状态不触发写入。SDK读取本人确定的deadline订阅并投影有效周期、次数与TTL，远端已提交而本地未写入时也使用当前订阅真源。派发必须有目标订阅回执，错误或等待不冒充armed。",
       "inputs":["goal_transition_result"],"output":{"id":"goal_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     }

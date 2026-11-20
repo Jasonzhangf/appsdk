@@ -587,6 +587,20 @@ fn worker_status_summary_with_maps(
         }));
     };
 
+    // Current control owns delivery facts; the worker cache cannot restore a
+    // channel which the retained identity no longer has.
+    let mut current_worker = w.clone();
+    let route = {
+        let state = server.state.lock().unwrap();
+        server_route_scope(server, &state)?
+    };
+    if let Some(route) = route.as_ref() {
+        if let Some(current) = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &w.id)?
+            .and_then(|slot| slot.active_binding()) {
+            current_worker.transport = current.transport.clone();
+        }
+    }
+    let w = &current_worker;
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
@@ -610,7 +624,16 @@ fn worker_status_summary_with_maps(
     let status = if !identity_valid {
         "identity-mismatch"
     } else if endpoint_live == Some(false) {
-        "lost"
+        if w.transport.as_ref().and_then(|transport| transport.tmux_endpoint.as_ref()).is_some_and(|endpoint| {
+            matches!(
+                crate::client::adapters::tmux::probe(endpoint),
+                Ok(crate::client::adapters::tmux::PanePresence::Present)
+            )
+        }) {
+            "offline"
+        } else {
+            "lost"
+        }
     } else if agent_state == "unknown" {
         "unknown"
     } else if suspected_offline {
@@ -679,9 +702,9 @@ fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet)
         control.current_for_worker(&route.project_scope_id, &route.app_scope_id, binding.agent_id.as_str())?;
         let display_name = slot.identity_key.name.clone();
         let address = project_key.as_ref().map(|project| format!("{project}.{display_name}"));
-        let transport = Some(crate::proto::DirectoryTransport {
-            kind: current.transport.kind.as_str().to_owned(),
-            namespace: current.transport.namespace.clone(),
+        let transport = current.transport.as_ref().map(|transport| crate::proto::DirectoryTransport {
+            kind: transport.kind.as_str().to_owned(),
+            namespace: transport.namespace.clone(),
         });
         targets.push(crate::proto::DirectoryTarget {
             worker_id: binding.agent_id.as_str().to_owned(),
@@ -694,7 +717,7 @@ fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet)
             project: project_key.clone(),
             address,
             project_root: Some(server.root.to_string_lossy().into_owned()),
-            channel_type: Some(current.transport.kind.as_str().to_owned()),
+            channel_type: current.transport.as_ref().map(|transport| transport.kind.as_str().to_owned()),
             deliverable: Some("unknown".to_owned()),
             machine: None,
             qualified_address: None,
@@ -734,7 +757,7 @@ fn cross_route_worker_status(
         return Ok(None);
     }
 
-    let endpoint_live = selected_transport_endpoint_live(server, &current.transport);
+    let endpoint_live = current.transport.as_ref().and_then(|transport| selected_transport_endpoint_live(server, transport));
     let status = if endpoint_live == Some(false) {
         "lost"
     } else {
@@ -790,14 +813,14 @@ fn cross_route_worker_status(
         "display_name": slot.identity_key.name,
         "work_roles": work_roles,
         "role": role,
-        "transport": {
-            "kind": current.transport.kind.as_str(),
-            "endpoint": current.transport.endpoint,
-            "namespace": current.transport.namespace,
-            "session_id": current.transport.session_id,
-            "thread_id": current.transport.thread_id,
-            "self_check": current.transport.self_check,
-        },
+        "transport": current.transport.as_ref().map(|transport| json!({
+            "kind": transport.kind.as_str(),
+            "endpoint": transport.endpoint,
+            "namespace": transport.namespace,
+            "session_id": transport.session_id,
+            "thread_id": transport.thread_id,
+            "self_check": transport.self_check,
+        })),
         "status": status,
         "presence": presence,
         "endpoint_live": endpoint_live,

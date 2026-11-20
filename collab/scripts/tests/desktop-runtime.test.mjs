@@ -10,12 +10,17 @@ const script=process.env.COLLAB_TEST_DESKTOP_WRAPPER??fileURLToPath(new URL('../
 const frame=v=>{const b=Buffer.from(JSON.stringify(v)),h=Buffer.alloc(4);h.writeUInt32LE(b.length);return Buffer.concat([h,b]);};
 function capabilityPath(state,cwd,session,thread){let p=path.join(state,'runtime','desktop','capabilities','v1');for(const [label,value] of [['cwd',cwd],['session',session],['thread',thread]])p=path.join(p,label,...Buffer.from(value).toString('hex').match(/.{1,120}/g));return path.join(p,'current.json');}
 function decode(s,fn){let b=Buffer.alloc(0);s.on('data',c=>{b=Buffer.concat([b,c]);while(b.length>=4&&b.length>=4+b.readUInt32LE(0)){const n=b.readUInt32LE(0);fn(JSON.parse(b.subarray(4,4+n)));b=b.subarray(4+n);}});}
-async function fixture(t){
+async function fixture(t,{closeHandshake=false}={}){
   const root=await fs.mkdtemp('/tmp/cdr-'),state=path.join(root,'state'),calls=[],streams=new Set();
   await fs.mkdir(state,{mode:0o700});
   const server=net.createServer(s=>{streams.add(s);s.on('close',()=>streams.delete(s));decode(s,r=>{
     calls.push(r);
-    if(r.method==='tools/list'){s.write(frame({id:r.id,result:{tools:['read_thread','send_message_to_thread'].map(name=>({name,namespace:'codex_app'}))}}));return;}
+    if(!Number.isSafeInteger(r.id)){s.destroy();return;}
+    if(r.method==='tools/list'){
+      if(closeHandshake)s.destroy();
+      else s.write(frame({id:r.id,result:{tools:['read_thread','send_message_to_thread'].map(name=>({name,namespace:'codex_app'}))}}));
+      return;
+    }
     const p=r.params;
     if(p.tool==='read_thread')s.write(frame({id:r.id,result:{success:p.arguments.threadId!=='unknown',contentItems:[{type:'inputText',text:JSON.stringify({schemaVersion:1,thread:{id:p.arguments.threadId,cwd:root,status:{type:'idle'}},turns:[{id:'observed-turn',status:'completed'}]})}]}}));
     else if(p.arguments.prompt==='disconnect')s.destroy();
@@ -29,6 +34,15 @@ async function fixture(t){
   t.after(async()=>{for(const s of streams)s.destroy();await new Promise(r=>server.close(r));await fs.rm(root,{recursive:true,force:true});});
   return {root,state,calls,env,admit,request,stopService,streams};
 }
+
+test('host close during handshake is returned to the registering caller before capability publication',async t=>{
+  const f=await fixture(t,{closeHandshake:true});
+  await assert.rejects(f.admit('session','thread'),/DESKTOP_BRIDGE_HANDSHAKE_FAILED:.*host closed/);
+  assert.equal(f.calls.filter(call=>call.method==='tools/list').length,1);
+  const runtime=path.join(f.state,'runtime','desktop');
+  await assert.rejects(fs.stat(path.join(runtime,'services')),{code:'ENOENT'});
+  await assert.rejects(fs.stat(capabilityPath(f.state,f.root,'session','thread')),{code:'ENOENT'});
+});
 
 async function removeEnrollment(state,session,thread){
   async function walk(dir){

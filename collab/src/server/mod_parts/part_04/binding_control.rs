@@ -66,7 +66,7 @@ impl ProjectRuntimeManager {
             let worker_matches = state
                 .workers
                 .get(worker)
-                .is_some_and(|worker| worker.transport.as_ref() == Some(&value.transport));
+                .is_some_and(|worker| worker.transport.as_ref() == value.transport.as_ref());
             let route_matches = state
                 .global
                 .lookup_binding_for(&value.binding.route_scope(), &value.binding.binding_id)
@@ -89,7 +89,7 @@ impl ProjectRuntimeManager {
             return Err("IDENTITY_CREDENTIAL_INVALID: exact mapped principal or token differs".into());
         }
         let prepared = runtime.prepare_register_envelope_for_current(
-            worker, &credential.token, &value.transport, value.binding.project_scope.clone(),
+            worker, &credential.token, value.transport.as_ref(), value.binding.project_scope.clone(),
             &runtime.root.to_string_lossy(), value.binding.app_scope_id.clone(),
             false, Some(&value.binding), pending.filter(|effect|
                 effect.is_register())
@@ -376,7 +376,7 @@ impl ProjectRuntimeManager {
         control
             .active_values()
             .filter(|value| {
-                &value.transport.kind == kind
+                value.transport.as_ref().is_some_and(|transport| &transport.kind == kind)
                     && value.binding.native_thread_id.is_some()
                     && Path::new(value.binding.project_scope.as_str()) == runtime.root
             })
@@ -841,6 +841,11 @@ impl ProjectRuntimeManager {
             name.clone(),
         );
         let mut value = crate::server::binding_slot::BindingValue::new(binding.clone(), transport);
+        crate::server::identity_context::verify_tmux_replacement(
+            control.slot(&key).and_then(|slot| slot.active_binding()),
+            &value,
+            name_intent.is_some_and(|intent| intent.user_authorized && intent.replace_confirmed),
+        )?;
         if let Some(facts) = facts {
             value.host.agent_kind = facts.agent_kind.clone();
             value.host.profile = facts.profile.clone();
@@ -874,6 +879,9 @@ impl ProjectRuntimeManager {
         let route = binding.route_scope();
         let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref()
             == Some(binding.agent_id.as_str());
+        if name == "Jenny" && !is_current_master {
+            crate::server::tm_layout::require_master_position(&value)?;
+        }
         let new_principal = !state.workers.contains_key(&worker.id)
             && !control.active_values().any(|current| current.binding.same_principal(binding));
         drop(state_guard);
@@ -886,20 +894,9 @@ impl ProjectRuntimeManager {
                     runtime_id:binding.runtime_id.clone(), appserver_id:binding.app_scope_id.clone(),
                     binding_id:binding.binding_id.clone(), session_id:binding.session_id.clone(),
                     native_thread_id:binding.native_thread_id.clone() },
-                value.transport.clone(),
+                value.transport.clone().ok_or("REGISTER_TRANSPORT_MISSING: new principal requires a selected transport")?,
             ).map_err(|error| format!("{error:#}"))?)
         } else { None };
-        let rename = match crate::server::identity_context::rename_prepared_anchor(
-            &value,
-            &value.invocation_cwd, &name,
-            is_current_master,
-        ) {
-            Ok(rename) => rename,
-            Err(error) => return Err(match staged.map(|staged| staged.rollback()).transpose() {
-                Ok(_) => error,
-                Err(rollback) => format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"),
-            }),
-        };
         let change = match effect {
             Some(effect) if moves_existing_names => {
                 crate::server::binding_store::ControlChange::MoveNameWithEffect {
@@ -926,9 +923,7 @@ impl ProjectRuntimeManager {
         let committed = match self.commit_control_change_locked(change) {
             Ok(committed) => committed,
             Err(mut error) => {
-                let rename = rename.rollback();
                 let credential = staged.map(|staged| staged.rollback()).transpose();
-                if let Err(rollback) = rename { error = format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"); }
                 if let Err(rollback) = credential { error = format!("{error}; CREDENTIAL_ROLLBACK_FAILED: {rollback:#}"); }
                 return Err(error);
             }
@@ -1030,7 +1025,12 @@ impl ProjectRuntimeManager {
                     &self.host.log_path(),
                     &format!("PENDING_EFFECT_SCOPE_BLOCKED: {error}"),
                 );
-                if first_error.is_none() {
+                // The physical rename runs after the current name, mailbox
+                // and route commits. Keep it pending for Context without
+                // blocking the project's business requests.
+                if first_error.is_none()
+                    && !error.starts_with(crate::server::identity_context::PHYSICAL_ANCHOR_PENDING)
+                {
                     first_error = Some(error);
                 }
             }
@@ -1434,7 +1434,7 @@ impl ProjectRuntimeManager {
                 )?;
             if current != value.binding
                 || state.workers[&effect.target_worker_id].transport.as_ref()
-                    != Some(&value.transport)
+                    != value.transport.as_ref()
             {
                 if current != value.binding
                     && (!current.same_principal(&value.binding)
@@ -1445,7 +1445,7 @@ impl ProjectRuntimeManager {
                     return Err("PENDING_EFFECT_BINDING_CONFLICT: exact prior mapping differs from the registered binding".into());
                 }
                 let mut worker = state.workers[&effect.target_worker_id].clone();
-                worker.transport = Some(value.transport.clone());
+                worker.transport = value.transport.clone();
                 let mut events = vec![
                     Event::GlobalRuntimeBound {
                         binding: value.binding.clone(),
@@ -1599,7 +1599,7 @@ impl ProjectRuntimeManager {
                 &state,
             )
             .ok_or("PENDING_EFFECT_CREDENTIAL_MISSING")?;
-        identity.transport = Some(value.transport.clone());
+        identity.transport = value.transport.clone();
         drop(state);
         crate::identity::persist_current_binding_at(
             &self.host.host_paths,
@@ -1658,6 +1658,35 @@ impl ProjectRuntimeManager {
                 self.host
                     .commit_checked(&publications)
                     .map_err(|error| format!("PENDING_EFFECT_ROUTE_FAILED: {error}"))?;
+            }
+            if let Some(endpoint) = value.binding.tmux_endpoint.as_ref() {
+                use crate::client::adapters::tmux;
+                if let Some(displaced) = slot.reference_previous().filter(|previous| {
+                    Some(previous.binding.agent_id.as_str()) == effect.previous_worker_id.as_deref()
+                        && previous.binding.session_id.as_ref().map(|id| id.as_str())
+                            == effect.previous_session_id.as_deref()
+                }).and_then(|previous| previous.binding.tmux_endpoint.as_ref()) {
+                    if !tmux::same_session(displaced, endpoint)
+                        && !control.active_values().any(|current| {
+                            current.binding.tmux_endpoint.as_ref()
+                                .is_some_and(|active| tmux::same_session(active, displaced))
+                        })
+                    {
+                        tmux::rename_displaced_session(displaced)
+                            .map_err(|error| format!("{}{error}", crate::server::identity_context::PHYSICAL_ANCHOR_PENDING))?;
+                    }
+                }
+                let is_current_master = {
+                    let state = runtime.state.lock().unwrap();
+                    current_master_worker_id(&state, Some(&route_scope)).as_deref()
+                        == Some(effect.target_worker_id.as_str())
+                };
+                let renamed = crate::server::identity_context::rename_prepared_anchor(
+                    value, &value.invocation_cwd, &effect.name, is_current_master,
+                ).map_err(|error| format!("{}{error}", crate::server::identity_context::PHYSICAL_ANCHOR_PENDING))?;
+                if let crate::server::identity_context::PhysicalAnchorOutcome::Incomplete { error, .. } = renamed {
+                    return Err(format!("{}{error}", crate::server::identity_context::PHYSICAL_ANCHOR_PENDING));
+                }
             }
         }
         let committed = self.commit_control_change_locked(
@@ -1781,7 +1810,8 @@ impl ProjectRuntimeManager {
     ) -> Result<(), String> {
         let mut bindings = Vec::new();
         for value in controlled.active_values() {
-            if value.binding.tmux_endpoint.is_none() && value.binding.native_thread_id.is_none() {
+            if value.transport.is_none()
+                || (value.binding.tmux_endpoint.is_none() && value.binding.native_thread_id.is_none()) {
                 append_log(
                     &self.host.log_path(),
                     &format!(

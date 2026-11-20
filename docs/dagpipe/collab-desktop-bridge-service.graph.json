@@ -1,6 +1,7 @@
 {
   "id": "appsdk-collab-desktop-bridge-service",
   "version": "1.4.1",
+  "startup_gate": "复用宿主原生工具客户端的数字请求 ID。真实宿主 tools/list 失败时，启动者经子进程启动回执收到具体阶段错误。本次不得发布 runtime 或会话能力声明。共享服务成功后不依赖启动者的 IPC。",
   "description": "一次 Desktop runtime 共享 bridge 从启动到退出的 SESE 合同。入口是当前 host pipe 的共享服务确保请求，覆盖 MCP wrapper 与 CLI 自动触发，不只是 MCP start。共享服务按宿主 app-tools pipe 唯一定位，生命周期跟随宿主连接，不随 MCP session stdin 退出。MCP wrapper 与 CLI 自动确保同一服务；公开 context 通过受限 admit 登记当前 session/thread/cwd，无需 agent 先调 MCP。native read_thread 核对真实 thread/canonical cwd 后才发布能力和持久绑定。控制资源为 user-owned 私有 typed 文件：enrollment 按 session/thread 跨 host pipe 共享并兼容旧 per-pipe 记录；服务 ready 后原子发布含 endpoint/namespace/publisher 的 typed runtime descriptor，供未继承 host pipe/Node 路径的 daemon 精确请求 admission。自动恢复不覆盖仍存活的竞争发布者，多个活跃发布者同时匹配同一 scope 按歧义失败。退出只撤销本实例 socket、owner 文件及 publisher id 仍属于本实例的 descriptor，不删除后继发布者资源。服务使用明确标为 collab-service-correlate 的调用关联 ID，不将关联 ID 声称为 agent 执行回合或授权凭据；宿主原生校验与拒绝保持。服务只开放 admit/probe/send，不开放通用 tools/call。内部循环不画回边，不拥有全局 daemon、Desktop 或 tmux 生命周期。",
   "inputs": [{"id":"desktop_bridge_ensure_request","schema":"Object"}],
   "nodes": [

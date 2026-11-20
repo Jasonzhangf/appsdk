@@ -1382,7 +1382,8 @@ pub(super) fn maintain_definitive_missing(server: &Server, _now: i64) -> serde_j
             }
         };
         let operation_id = &record.operation_id;
-        let close = match settle_maintenance_close(server, &record, candidate.snapshot_captured_ms) {
+        let close = match settle_maintenance_close(server, &record, candidate.snapshot_captured_ms)
+        {
             Ok(close) => close,
             Err(error) => {
                 unknown.push(json!({

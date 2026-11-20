@@ -10,6 +10,22 @@ During an active turn, verify the queued notification reaches a subsequent
 turn exactly once. From the receiver, confirm that `collab recv` returns the
 same ID. As a control, write plain text without Enter and check that it stays
 in the composer until a single Enter starts the turn.
+
+The opt-in macOS test below holds an isolated public Close at the AppServer
+archive boundary. This keeps the shared binding publication lock busy while
+ordinary `collab send` accepts the message. After Close resumes, the daemon
+must deliver the original ID to one real Codex TUI turn. Bare `collab recv`
+must return the original body once. The test creates its own Rex server,
+loopback model fixture, and Collab state.
+
+```sh
+COLLAB_REX_ACCEPTANCE_CLI=/absolute/path/to/rex \
+COLLAB_REX_ACCEPTANCE_CODEX=/absolute/path/to/codex \
+cargo test --manifest-path collab/Cargo.toml --locked \
+  --test context_operation_public_contract \
+  public_close_publication_busy_defers_the_original_rex_message -- --ignored
+```
+
 Execution results belong in the task run. Graph validation proves topology and
 operator bindings; it does not prove runtime behavior.
 

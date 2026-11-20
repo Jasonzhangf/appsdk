@@ -13,6 +13,79 @@ fn identity_map_reset_intent_finishes_before_startup_restoration() {
     assert!(!restored["slots"].as_array().unwrap().iter().any(|slot| slot["identity_key"]["project_scope"] == scope));
 }
 
+#[test]
+#[ignore = "requires the native Rex and Codex CLIs"]
+fn public_close_publication_busy_defers_the_original_rex_message() {
+    let (fixture, _master_host, child_host, master, child) =
+        lifecycle_native_pair_fixture("rex-close-gate", "archive_hold_readback");
+    let child_id = child["worker_id"].as_str().unwrap();
+    let target = lifecycle_read(&fixture, &master, Some(child_id))["result"]["target"].clone();
+    assert!(target.is_object(), "Close needs the real child binding");
+
+    let gate = fixture.root.join("publication-gate");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/tests/rex-publication-acceptance.py");
+    let rex = std::env::var_os("COLLAB_REX_ACCEPTANCE_CLI").expect("official Rex CLI path");
+    let codex = std::env::var_os("COLLAB_REX_ACCEPTANCE_CODEX").expect("Codex CLI path");
+    let mut native = Command::new("/usr/bin/python3")
+        .arg(script)
+        .arg(&fixture.binary)
+        .args([rex, codex])
+        .arg(fs::canonicalize(&fixture.root).unwrap())
+        .arg(&fixture.host_state)
+        .arg(&gate)
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(75);
+    while !gate.with_extension("begin").exists() {
+        if let Some(status) = native.try_wait().unwrap() {
+            panic!("Rex driver exited before requesting the publication gate: {status}");
+        }
+        if std::time::Instant::now() >= deadline {
+            native.kill().unwrap();
+            native.wait().unwrap();
+            panic!("Rex driver did not request the publication gate");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let closed = std::thread::scope(|scope| {
+        let close = scope.spawn(|| {
+            lifecycle_close(
+                &fixture,
+                &master,
+                "rex-publication-close",
+                "rex-publication-capability",
+                &target,
+                "hold isolated publication gate",
+            )
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while child_host.archive_request_count() == 0
+            && !close.is_finished()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if child_host.archive_request_count() == 1 {
+            fs::write(gate.with_extension("held"), b"").unwrap();
+            while !gate.with_extension("release").exists()
+                && !close.is_finished()
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        child_host.release_archive();
+        child_host.release_readback();
+        close.join().unwrap()
+    });
+    println!("coordinating Close outcome: {:?}", closed["result"]["outcome"]);
+    assert!(native.wait().unwrap().success(), "Rex publication retry acceptance failed");
+    assert_eq!(closed["result"]["outcome"], "complete", "{closed}");
+}
+
 // Public CLI/wire consumer: a human replacement without an old Rex
 // association creates a durable boundary. The displaced caller later takes
 // a usable ordinary name while Jenny retains role, work and pending mail.

@@ -110,8 +110,17 @@ test('public CLI restores current state and rejects corrupt current state withou
   t.after(async()=>{if(daemon.exitCode===null){daemon.kill('SIGTERM');await new Promise(r=>daemon.once('exit',r));}});
   const end=Date.now()+10000;while(Date.now()<end){try{await fs.stat(path.join(f.state,'server.sock'));break;}catch{}if(daemon.exitCode!==null)throw Error('fixture daemon failed: '+daemonLog);await new Promise(r=>setTimeout(r,30));}
   async function cli(session,thread,withoutNode=false){return await new Promise((resolve,reject)=>{const currentEnv={...env,CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread};if(withoutNode)delete currentEnv.CODEX_MCP_NODE_PATH;const child=spawn(binary,['context'],{cwd:f.root,env:currentEnv,stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);child.on('exit',code=>code===0?resolve(out):reject(Error(out+err)));});}
+  const canonical=await fs.realpath(f.root);
+  await assert.rejects(cli('fresh-a','thread-a'),/DESKTOP_BRIDGE_CAPABILITY_REQUIRED/);
+  assert.equal(f.calls.length,0,'CLI must not open a new native connection');
+  await assert.rejects(fs.stat(path.join(f.state,'runtime','desktop','services')),{code:'ENOENT'});
+  await assert.rejects(fs.stat(path.join(f.state,'identity-map.json')),{code:'ENOENT'});
+  await f.admit('publisher','thread-publisher');
+  await assert.rejects(fs.stat(capabilityPath(f.state,canonical,'fresh-a','thread-a')),{code:'ENOENT'});
   const a=await cli('fresh-a','thread-a'),b=await cli('fresh-b','thread-b',true);
   assert.match(a,/committed|completed/);assert.match(b,/committed|completed/);
+  await assert.rejects(cli('rejected','unknown'),/DESKTOP_BRIDGE_(ADMISSION_FAILED|NATIVE_REJECTED)/);
+  await assert.rejects(fs.stat(capabilityPath(f.state,canonical,'rejected','unknown')),{code:'ENOENT'});
   assert.equal(await fs.readFile(legacy,'utf8'),'incompatible-retired-version\n');
   const x=await f.admit('fresh-a','thread-a'),y=await f.admit('fresh-b','thread-b');assert.equal(x.endpoint,y.endpoint);
   assert.equal((await f.request(y,{id:'after-cli',op:'send',session_id:'fresh-b',thread_id:'thread-b',text:'from CLI registration'})).ok,true);
@@ -119,8 +128,9 @@ test('public CLI restores current state and rejects corrupt current state withou
   await stopDaemon();startDaemon();
   const restartEnd=Date.now()+5000;while(Date.now()<restartEnd){try{await fs.stat(path.join(f.state,'server.sock'));break;}catch{}await new Promise(r=>setTimeout(r,30));}
   const restored=await cli('fresh-a','thread-a');assert.match(restored,/completed/);
+  assert.equal(JSON.parse(restored).result.snapshot.identity.worker_id,JSON.parse(a).result.snapshot.identity.worker_id);
   await stopDaemon();
-  const canonical=await fs.realpath(f.root),routes=JSON.parse(await fs.readFile(path.join(f.state,'routes.json'),'utf8'));
+  const routes=JSON.parse(await fs.readFile(path.join(f.state,'routes.json'),'utf8'));
   const matched=routes.filter(route=>route.project_scope===canonical&&route.app_scope_id==='appserver-cli');
   assert.equal(matched.length,1);
   const central=path.join(matched[0].storage_root,'.agent-collab','server','state.json');
@@ -166,7 +176,7 @@ test('daemon admits a legacy Desktop binding through a live publisher without ho
   const binary=process.env.COLLAB_TEST_BINARY;
   if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
   const f=await fixture(t),home=path.join(f.root,'home');await fs.mkdir(home);await fs.mkdir(path.join(f.root,'.agent-collab'));
-  const baseEnv={...f.env,HOME:home,CODEX_HOME:home,COLLAB_DESKTOP_BRIDGE_SCRIPT:script};
+  const baseEnv={...f.env,HOME:home,CODEX_HOME:home};
   const daemonEnv={...baseEnv,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex TUI'};
   delete daemonEnv.CODEX_APP_TOOLS_PIPE_PATH;delete daemonEnv.CODEX_MCP_NODE_PATH;
   let daemon,daemonLog='';
@@ -176,6 +186,7 @@ test('daemon admits a legacy Desktop binding through a live publisher without ho
   const socket=path.join(f.state,'server.sock');
   const started=Date.now()+10000;while(Date.now()<started){try{await fs.stat(socket);break;}catch{}if(daemon.exitCode!==null)throw Error('fixture daemon failed: '+daemonLog);await new Promise(r=>setTimeout(r,30));}
   async function cli(session,thread,environment){return await new Promise((resolve,reject)=>{const child=spawn(binary,['context'],{cwd:f.root,env:{...environment,CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread},stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);child.on('exit',code=>code===0?resolve(out):reject(Error(out+err)));});}
+  await f.admit('publisher','thread-publisher');
   assert.match(await cli('legacy-a','thread-a',baseEnv),/committed|completed/);
   const cwd=await fs.realpath(f.root),current=capabilityPath(f.state,cwd,'legacy-a','thread-a');
   const published=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
@@ -205,7 +216,7 @@ test('daemon reports unsafe, malformed and stale publisher descriptors explicitl
   const binary=process.env.COLLAB_TEST_BINARY;
   if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
   const f=await fixture(t),home=path.join(f.root,'home');await fs.mkdir(home);await fs.mkdir(path.join(f.root,'.agent-collab'));
-  const baseEnv={...f.env,HOME:home,CODEX_HOME:home,COLLAB_DESKTOP_BRIDGE_SCRIPT:script};
+  const baseEnv={...f.env,HOME:home,CODEX_HOME:home};
   const daemonEnv={...baseEnv,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex TUI'};
   delete daemonEnv.CODEX_APP_TOOLS_PIPE_PATH;delete daemonEnv.CODEX_MCP_NODE_PATH;
   let daemon,daemonLog='';
@@ -215,6 +226,7 @@ test('daemon reports unsafe, malformed and stale publisher descriptors explicitl
   const socket=path.join(f.state,'server.sock');
   const started=Date.now()+10000;while(Date.now()<started){try{await fs.stat(socket);break;}catch{}if(daemon.exitCode!==null)throw Error('fixture daemon failed: '+daemonLog);await new Promise(r=>setTimeout(r,30));}
   async function cli(session,thread,environment){return await new Promise((resolve,reject)=>{const child=spawn(binary,['context'],{cwd:f.root,env:{...environment,CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread},stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);child.on('exit',code=>code===0?resolve(out):reject(Error(out+err)));});}
+  await f.admit('publisher','thread-publisher');
   assert.match(await cli('legacy-a','thread-a',baseEnv),/committed|completed/);
   const cwd=await fs.realpath(f.root),current=capabilityPath(f.state,cwd,'legacy-a','thread-a');
   const published=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;
@@ -254,7 +266,7 @@ test('daemon does not treat a dead same-endpoint declaration as live',async t=>{
   const binary=process.env.COLLAB_TEST_BINARY;
   if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
   const f=await fixture(t),home=path.join(f.root,'home');await fs.mkdir(home);await fs.mkdir(path.join(f.root,'.agent-collab'));
-  const baseEnv={...f.env,HOME:home,CODEX_HOME:home,COLLAB_DESKTOP_BRIDGE_SCRIPT:script};
+  const baseEnv={...f.env,HOME:home,CODEX_HOME:home};
   const daemonEnv={...baseEnv,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex TUI'};
   delete daemonEnv.CODEX_APP_TOOLS_PIPE_PATH;delete daemonEnv.CODEX_MCP_NODE_PATH;
   let daemon,daemonLog='';
@@ -264,6 +276,7 @@ test('daemon does not treat a dead same-endpoint declaration as live',async t=>{
   const socket=path.join(f.state,'server.sock');
   const started=Date.now()+10000;while(Date.now()<started){try{await fs.stat(socket);break;}catch{}if(daemon.exitCode!==null)throw Error('fixture daemon failed: '+daemonLog);await new Promise(r=>setTimeout(r,30));}
   async function cli(session,thread,environment){return await new Promise((resolve,reject)=>{const child=spawn(binary,['context'],{cwd:f.root,env:{...environment,CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread},stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);child.on('exit',code=>code===0?resolve(out):reject(Error(out+err)));});}
+  await f.admit('publisher','thread-publisher');
   assert.match(await cli('legacy-a','thread-a',baseEnv),/committed|completed/);
   const cwd=await fs.realpath(f.root),current=capabilityPath(f.state,cwd,'legacy-a','thread-a');
   const published=JSON.parse(await fs.readFile(current,'utf8')).desktop_bridge;

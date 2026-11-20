@@ -78,9 +78,11 @@ Desktop 环境标记可能被 tmux 子进程继承。声明读取失败时，CLI
 observer 核对真实当前 pane；证实存在时让 daemon 继续原有 tmux 优先 admission。
 不凭 `TMUX_PANE` 字符串认定在场，也不让未选用 Desktop 字段挡住可用 pane。
 
-首次启动而没有真实 executor enrollment 的 bridge 不能发布这份能力。CLI 不从
-session/thread 环境变量编造 turn。该场景返回明确的 Desktop 能力缺失；已登记的
-当前能力发现与全新聊天的无人介入首次绑定分别验收。
+公开 Context 收集当前 session、thread 和 cwd，定位已运行的 Desktop 受管发布者，
+请求受限 admission。发布者通过原生接口核实 thread 和 cwd 后发布能力。
+daemon 再验证候选，交现有身份 owner 提交，最后返回 Context 结果。当前发布者缺失
+时返回 `DESKTOP_BRIDGE_CAPABILITY_REQUIRED`。核验被拒时保留原生原因。失败沿同一
+出口返回，跳过后续身份提交。已登记的能力恢复与新聊天首次绑定分别验收。
 
 ## 一次消息投递
 
@@ -123,8 +125,8 @@ env_vars = ["CODEX_APP_TOOLS_PIPE_PATH", "CODEX_MCP_NODE_PATH", "CODEX_SESSION_I
 MCP `collab_context` 可从该次 executor metadata 注入新 bridge；普通 CLI 自动读取
 该 bridge 当前发布的受限能力，详见[CLI 用法](../../collab/skills/collab/references/migration-daemon.md#desktop-cli-registration-and-messaging)。
 Desktop 身份锚点始终是 agent sessionID，thread 和 socket 不选择身份。
-CLI 不拥有 Desktop MCP 的启动，也不会为 CLI 调用另起后台 bridge。bridge 服务
-必须先具备真实 enrollment；无此能力的首次绑定不因发现逻辑而自动成立。
+Desktop 启动受管 bridge。已运行的 bridge 可以为新聊天核实并登记当前 scope，
+CLI 直接走同一登记入口。
 
 先保留旧候选在 Desktop candidate 上失败的公开入口红测，再验证新分支。
 组合验收必须从正式 `context` 和 `collab sendmessage` 进入，取得 durable msg ID、

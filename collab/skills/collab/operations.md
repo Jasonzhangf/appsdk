@@ -2159,7 +2159,7 @@ action=restore_master），或由已授权 master 委托。CLI 识别当前宿�
 | --- | --- | --- | --- |
 | DSH | 当前 gateway session（`DSH_SESSION_ID`） | CLI 用本次 gateway session 查已有身份。首次建立通信时从 gateway 获取该 session 的控制能力；gateway 负责 Poll/Ack | 不从日志或 plist 猜 ID，不混报 Codex 或 tmux 字段 |
 | Codex TUI / CLI | 当前 agent session；用该 TUI 的已选适配器定位投递 | 原生 AppServer 提供 `session_id`、`thread_id`、`endpoint`、`namespace`。选用 tmux 时，daemon 从实时 iTerm2 pane 与 client TTY 核实所连 session。新旧角色显示名由 daemon 按原生 ID 执行并读回。 | 不用 tmux 的 `$N` 或内部 `%pane` 冒充 agent session 或 iTerm2 pane，不借用其他进程的 endpoint |
-| Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
+| Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 接入 Desktop 已启动的受管 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
 | Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 在当前 block 运行 `collab context`。该命令通过 Rex 原生接口取得本次 server、Rex session 和 block ID，并使用当前项目目录 | 不把 Rex session 当作 agent session，不混入 AppServer thread/endpoint/namespace |
 
 返回 `missing_facts` 时，`result.requires.fields` 列出缺项，`sources` 给出来源。
@@ -2175,6 +2175,8 @@ action=restore_master），或由已授权 master 委托。CLI 识别当前宿�
 把旧会话改回数字名。当前同名端点仍在线时，按回执取得本次明确接替确认后再换绑。
 如果收到 `DESKTOP_BRIDGE_HANDSHAKE_FAILED`，保留阶段和宿主错误，交由 Desktop
 宿主维护者处理。宿主恢复后，在原会话重跑 `collab context`。MCP wrapper 会重新握手。
+如果收到 `DESKTOP_BRIDGE_CAPABILITY_REQUIRED`，由 Desktop 集成维护者核实并恢复受管
+bridge。恢复后在原会话重跑 `collab context`。
 如果 Rex 中收到 `REX_EXECUTION_CALLER_MISMATCH`，保留原错误并检查当前 Codex
 的执行归属。共享 AppServer 的 PID 可能与前台 TUI 不同。新建独立 Rex TUI 时可用
 `codex --no-daemon`，再从该会话执行 `collab context`。

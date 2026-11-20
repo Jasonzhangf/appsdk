@@ -36,7 +36,9 @@ pub struct DeclarationMissing;
 
 impl std::fmt::Display for DeclarationMissing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("DESKTOP_BRIDGE_CAPABILITY_REQUIRED: no current enrolled bridge declaration")
+        f.write_str(
+            "DESKTOP_BRIDGE_CAPABILITY_REQUIRED: no current Desktop bridge capability; have the Desktop integration owner restore the managed bridge, then retry collab context",
+        )
     }
 }
 
@@ -362,36 +364,7 @@ pub fn discover(
         .ok_or_else(|| anyhow::anyhow!("DESKTOP_BRIDGE_SCOPE_INVALID: cwd is not UTF-8"))?;
     if let Ok(pipe) = std::env::var("CODEX_APP_TOOLS_PIPE_PATH") {
         if !admit_running_runtime(state_root, &pipe, cwd_text, session, thread)? {
-            // Native host access stays in its signed Node bridge. The CLI only
-            // asks that runtime service to admit this exact current scope.
-            let node = std::env::var_os("CODEX_MCP_NODE_PATH").ok_or_else(|| {
-                anyhow::anyhow!("DESKTOP_BRIDGE_HOST_REQUIRED: CODEX_MCP_NODE_PATH is missing")
-            })?;
-            let script = match std::env::var_os("COLLAB_DESKTOP_BRIDGE_SCRIPT") {
-                Some(script) => PathBuf::from(script),
-                None => std::env::current_exe()?
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("DESKTOP_BRIDGE_INSTALLATION_INVALID"))?
-                    .join("collab-desktop-mcp.mjs"),
-            };
-            let output = std::process::Command::new(node)
-                .arg(script)
-                .arg("--admit")
-                .arg(
-                    serde_json::json!({
-                        "session_id": session, "thread_id": thread, "cwd": cwd_text
-                    })
-                    .to_string(),
-                )
-                .env("COLLAB_STATE_DIR", state_root)
-                .output()
-                .map_err(|error| anyhow::anyhow!("DESKTOP_BRIDGE_UNAVAILABLE: {error}"))?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "DESKTOP_BRIDGE_ADMISSION_FAILED: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
+            return Err(DeclarationMissing.into());
         }
         return read_current(state_root, cwd_text, session, thread);
     }

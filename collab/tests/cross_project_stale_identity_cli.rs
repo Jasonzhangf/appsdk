@@ -620,9 +620,12 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         ],
         false,
     );
-    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
+    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
+    let invitation_subscription = &dispatched["goal_schedule"]["subscription"];
+    assert_eq!(invitation_subscription["worker_id"], peer_id);
+    assert_eq!(dispatched["task"]["owner"], published["task"]["owner"]);
     let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
-    let dispatched = run_ok_at(
+    let accepted = run_ok_at(
         &fixture,
         &root,
         &peer_pane,
@@ -636,8 +639,9 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         ],
         false,
     );
-    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
-    let subscription = dispatched["goal_schedule"]["subscription"].clone();
+    assert_eq!(accepted["goal_schedule"]["armed"], true, "{accepted}");
+    let subscription = &accepted["goal_schedule"]["subscription"];
+    assert_eq!(subscription["id"], invitation_subscription["id"]);
     assert_eq!(subscription["worker_id"], peer_id);
     assert_eq!(subscription["repeat_count"], 100);
     assert_eq!(subscription["goal_content"]["source"]["kind"], "board-task");
@@ -919,7 +923,7 @@ fn delegated_goal_ceo_updates_foreign_peer_and_other_peers_are_refused() {
 }
 
 #[test]
-fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is_enforced() {
+fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_enforced() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, master_pane) = Fixture::isolated("goal-capacity");
     let root = fixture.root.canonicalize().unwrap();
@@ -955,7 +959,7 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         "--ttl-seconds",
         "300",
     ];
-    let standing = run_ok_at(&fixture, &root, &master_pane, &base, false);
+    run_ok_at(&fixture, &root, &master_pane, &base, false);
     run_ok_at(
         &fixture,
         &root,
@@ -1013,51 +1017,23 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         false,
     );
     let revision = published["task"]["revision"].as_u64().unwrap().to_string();
-    let dispatched = run_ok_at(
-        &fixture,
-        &root,
-        &master_pane,
-        &[
-            "board",
-            "dispatch",
-            "capacity-task",
-            "--expected-revision",
-            &revision,
-            "--long-horizon-content",
-            "Capacity task full instructions",
-            "--long-horizon-every-ms",
-            "60000",
-            "--long-horizon-repeat",
-            "4",
-        ],
-        false,
-    );
-    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
-    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
-    let failed = command_at(
-        &fixture,
-        &root,
-        &peer_pane,
-        &[
-            "board",
-            "respond",
-            "capacity-task",
-            "--accept",
-            "--expected-revision",
-            &revision,
-        ],
-        false,
-    )
-    .output()
-    .unwrap();
+    let dispatch = [
+        "board",
+        "dispatch",
+        "capacity-task",
+        "--expected-revision",
+        &revision,
+        "--long-horizon-content",
+        "Capacity task full instructions",
+        "--long-horizon-every-ms",
+        "60000",
+        "--long-horizon-repeat",
+        "4",
+    ];
+    let failed = run_error_at(&fixture, &root, &master_pane, &dispatch, false);
     assert!(
-        !failed.status.success(),
-        "capacity-full acceptance must fail"
-    );
-    assert!(
-        String::from_utf8_lossy(&failed.stderr).contains("maximum 3 active subscriptions"),
-        "{}",
-        String::from_utf8_lossy(&failed.stderr)
+        failed.contains("maximum 3 active subscriptions"),
+        "{failed}"
     );
     let board = run_ok_at(&fixture, &root, &master_pane, &["board", "show"], false);
     let task = board["tasks"]
@@ -1066,16 +1042,17 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         .iter()
         .find(|task| task["id"] == "capacity-task")
         .unwrap();
-    assert_eq!(task["revision"], dispatched["task"]["revision"]);
-    assert_eq!(task["owner"], dispatched["task"]["owner"]);
-    assert_eq!(task["invited_peer"], dispatched["task"]["invited_peer"]);
-    assert_eq!(task["long_horizon"], dispatched["task"]["long_horizon"]);
+    for field in ["revision", "owner", "invited_peer", "long_horizon"] {
+        assert_eq!(task[field], published["task"][field], "{field}: {task}");
+    }
     let status = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
-    assert!(status["subscriptions"]
-        .as_array()
+    assert_eq!(status["subscriptions"], full["subscriptions"]);
+    let current = fixture.current_state_for(&root, "appserver-cli");
+    assert!(!current["msgs"]
+        .as_object()
         .unwrap()
-        .iter()
-        .any(|sub| sub["id"] == standing["subscription"]["id"] && sub["status"] == "armed"));
+        .values()
+        .any(|message| message["subject"] == "task-invitation:capacity-task"));
     run_ok_at(
         &fixture,
         &root,
@@ -1092,7 +1069,10 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         ],
         false,
     );
-    let dispatched = run_ok_at(
+    let dispatched = run_ok_at(&fixture, &root, &master_pane, &dispatch, false);
+    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
+    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    let accepted = run_ok_at(
         &fixture,
         &root,
         &peer_pane,
@@ -1106,9 +1086,10 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         ],
         false,
     );
+    assert_eq!(accepted["goal_schedule"]["subscription"]["repeat_count"], 4);
     assert_eq!(
-        dispatched["goal_schedule"]["subscription"]["repeat_count"],
-        4
+        accepted["goal_schedule"]["subscription"]["id"],
+        dispatched["goal_schedule"]["subscription"]["id"]
     );
     run_ok_at(
         &fixture,
@@ -1131,7 +1112,7 @@ fn delegated_goal_capacity_failure_keeps_acceptance_unmodified_and_peer_scope_is
         .as_array()
         .unwrap()
         .iter()
-        .find(|sub| sub["id"] == dispatched["goal_schedule"]["subscription"]["id"])
+        .find(|sub| sub["id"] == accepted["goal_schedule"]["subscription"]["id"])
         .unwrap();
     assert_eq!(subscription["status"], "cancelled");
 }

@@ -24,13 +24,13 @@
     },
     {
       "id":"收敛本人目标调度","operator":"appsdk.collab_goal.reconcile_schedule","operator_version":"1",
-      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。派发把邀请或执行归属、任务单内容和目标订阅事件在同一事务提交，容量或保存失败不留下部分派发。重复收敛保留进度。任务结束抑制该订阅尚未接受的pending wake，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
+      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。派发把邀请或执行归属、任务单内容和目标订阅事件在同一事务提交，容量或保存失败不留下部分派发。首次邀请的目标订阅面向被派发的稳定名字，执行归属在接单前仍属原持有者。接单沿用同一有效订阅及进度。首次拒绝或撤回结束该轮订阅，下一次明确派发可开启新一轮。已开始工作的转派在接单前保留原目标订阅，接受后保持进度并更新目标。任务结束抑制该订阅尚未接受的pending wake，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
       "inputs":["goal_transition_request"],"output":{"id":"goal_transition_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
     {
       "id":"输出目标状态与回执","operator":"appsdk.collab_goal.emit_result","operator_version":"1",
-      "description":"返回目标owner、当前载体、任务与真实订阅回执，区分持久提交、armed、投递与消费。到期消息包含任务单的完整长程内容与当前接单状态，真实消费后推进次数。只读状态不触发写入。派发必须有目标订阅回执，错误或等待不冒充armed。",
+      "description":"返回目标owner、当前载体、任务与真实订阅回执，区分持久提交、armed、投递与消费。到期消息包含任务单的完整长程内容与当前接单状态，真实消费后推进次数。只读状态不触发写入。SDK读取本人确定的deadline订阅并投影有效周期、次数与TTL，远端已提交而本地未写入时也使用当前订阅真源。派发必须有目标订阅回执，错误或等待不冒充armed。",
       "inputs":["goal_transition_result"],"output":{"id":"goal_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     }

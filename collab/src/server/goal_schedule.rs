@@ -609,8 +609,9 @@ fn task_goal_events(
         .notification_subscriptions
         .values()
         .find(|subscription| subscription.subject.as_deref() == Some(subject.as_str()));
-    // The committed task owner is the only implicit target. A pending
-    // invitation is not ownership and must not move the schedule.
+    // The caller supplies a derived target for a first invitation or a
+    // committed assignment. The existing subscription supplies its own
+    // target when an invitation is withdrawn or the task ends.
     let target = selected
         .or_else(|| existing.map(|subscription| subscription.worker_id.as_str()))
         .or_else(|| {
@@ -643,10 +644,22 @@ fn task_goal_events(
             &loaded
         }
     };
-    let name = control
+    let slot = control
         .current_for_worker(&route.project_scope_id, &route.app_scope_id, target)
-        .map_err(Resp::err)?
-        .map(|slot| slot.identity_key.name.clone());
+        .map_err(Resp::err)?;
+    if task.status == "invited" && !ended {
+        let binding = authoritative_send_binding(state, &route, target).map_err(Resp::err)?;
+        if !details.invitation.as_ref().is_some_and(|invitation| {
+            invitation.peer_id == target
+                && invitation.binding_id == binding.binding_id.as_str()
+                && slot
+                    .and_then(|slot| slot.active_binding())
+                    .is_some_and(|current| &current.binding == binding)
+        }) {
+            return Err(Resp::err("BOARD_STALE_BINDING: goal target is not the current invited peer"));
+        }
+    }
+    let name = slot.map(|slot| slot.identity_key.name.clone());
     let name = match name {
         Some(name) => name,
         None if ended => state
@@ -688,9 +701,12 @@ fn task_schedule_target(
     server: &Server,
     state: &State,
     task: &TaskRec,
-    _details: &crate::board::BoardTaskDetails,
+    details: &crate::board::BoardTaskDetails,
     control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<Option<String>, Resp> {
+    if task.status == "invited" {
+        return Ok(details.invitation.as_ref().map(|invitation| invitation.peer_id.clone()));
+    }
     if let Some(phase) = state
         .ticket_phases
         .iter()
@@ -785,7 +801,13 @@ fn task_goal_transition_events(
         };
         let form_changed = old_details.and_then(|details| details.long_horizon.as_ref())
             != details.long_horizon.as_ref();
-        if !ended && !form_changed && old_target == target {
+        let first_dispatch = task.status == "invited"
+            && details.invitation.as_ref().is_some_and(|invitation| {
+                old_details
+                    .and_then(|details| details.invitation.as_ref())
+                    .is_none_or(|old| old.message_id != invitation.message_id)
+            });
+        if !ended && !first_dispatch && !form_changed && old_target == target {
             continue;
         }
         if !ended && target.is_none() {
@@ -798,7 +820,11 @@ fn task_goal_transition_events(
             details,
             target.as_deref(),
             ended,
-            GoalScheduleOperation::Derived,
+            if first_dispatch {
+                GoalScheduleOperation::Explicit
+            } else {
+                GoalScheduleOperation::Derived
+            },
             control,
         )?;
         events.extend(goal_events);

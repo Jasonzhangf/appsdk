@@ -1382,38 +1382,22 @@ pub(super) fn maintain_definitive_missing(server: &Server, _now: i64) -> serde_j
             }
         };
         let operation_id = &record.operation_id;
-        let close = retire_control_plane_target(
-            server,
-            &record.actor_id,
-            record.exact_target(),
-            operation_id,
-            record
-                .responsibility_snapshot
-                .as_ref()
-                .expect("maintenance Close has a snapshot"),
-            PeerLifecycleStage::Missing,
-            None,
-            candidate.snapshot_captured_ms,
-            IdentityCleanup::Preserve,
-        );
-        let phase = close_phase(&close);
-        let terminal = advance_record_with_close(&record, phase.clone(), None, Some(close.clone()));
-        if let Err(error) = commit_record(server, &terminal) {
-            // The durable HostDispatched admission and its fence remain, so
-            // the unresolved operation survives to a later maintenance round.
-            unknown.push(json!({
-                "worker_id": candidate.target.worker_id,
-                "binding_id": candidate.target.binding_id,
-                "operation_id": operation_id,
-                "reason": {
-                    "kind": "terminal_record_durability_failed",
-                    "detail": error,
-                },
-                "close": close,
-            }));
-            continue;
-        }
-        if phase == PeerLifecyclePhase::Complete {
+        let close = match settle_maintenance_close(server, &record, candidate.snapshot_captured_ms) {
+            Ok(close) => close,
+            Err(error) => {
+                unknown.push(json!({
+                    "worker_id": candidate.target.worker_id,
+                    "binding_id": candidate.target.binding_id,
+                    "operation_id": operation_id,
+                    "reason": {
+                        "kind": "retirement_commit_failed",
+                        "detail": error,
+                    },
+                }));
+                continue;
+            }
+        };
+        if close_phase(&close) == PeerLifecyclePhase::Complete {
             retired.push(json!({
                 "worker_id": candidate.target.worker_id,
                 "binding_id": candidate.target.binding_id,
@@ -1439,6 +1423,64 @@ pub(super) fn maintain_definitive_missing(server: &Server, _now: i64) -> serde_j
         "retained": retained,
         "unknown": unknown,
     })
+}
+
+fn settle_maintenance_close(
+    server: &Server,
+    record: &state::PeerLifecycleOperationRecord,
+    snapshot_captured_ms: Option<i64>,
+) -> Result<PeerLifecycleClose, String> {
+    let target = record.exact_target();
+    let snapshot = record
+        .responsibility_snapshot
+        .as_ref()
+        .ok_or("maintenance Close has no responsibility snapshot")?;
+    let mut state = server.state.lock().unwrap();
+    let retirement = exact_binding_retirement_events(
+        &state,
+        target,
+        &record.actor_id,
+        &record.operation_id,
+        snapshot,
+        snapshot_captured_ms,
+        false,
+        false,
+        false,
+    )
+    .map_err(|error| match error {
+        RetireTargetError::Changed => "PEER_LIFECYCLE_TARGET_CHANGED",
+        RetireTargetError::BindingMissing => "PEER_LIFECYCLE_BINDING_MISSING",
+    })?;
+    let mut candidate = server
+        .checked_candidate_with_goal(&state, &retirement.events, None)
+        .map_err(|error| error.to_string())?;
+    let mut close = close_readback("cleanup-open");
+    close.runtime_archive.state = PeerLifecycleStage::Missing;
+    if read_control_retirement(
+        &candidate,
+        target,
+        &retirement.binding,
+        &retirement.subscription_ids,
+        false,
+        &mut close,
+    ) {
+        close.close_outcome = "complete".into();
+    }
+    let phase = close_phase(&close);
+    let terminal = Event::PeerLifecycleOperationRecorded {
+        operation: advance_record_with_close(record, phase.clone(), None, Some(close.clone())),
+    };
+    if phase == PeerLifecyclePhase::Complete {
+        // A returning Context can only observe retirement together with its
+        // completed receipt and the release of this exact operation's fence.
+        candidate.apply_checked(&terminal)?;
+        server
+            .publish_current_state(&mut state, candidate)
+            .map_err(|error| error.to_string())?;
+    } else {
+        server.try_commit_locked(&mut state, &[terminal])?;
+    }
+    Ok(close)
 }
 
 fn self_removal_failure(error: impl Into<String>, outcome: PeerLifecycleOutcome) -> Resp {
@@ -1510,7 +1552,6 @@ pub(super) fn unregister_self(
         PeerLifecycleStage::NotApplicable,
         None,
         snapshot_captured_ms,
-        IdentityCleanup::Unregister,
     );
     let phase = close_phase(&close);
     let error = (phase != PeerLifecyclePhase::Complete).then(|| {
@@ -1551,14 +1592,7 @@ fn retire_control_plane(
         runtime_archive,
         runtime_archive_detail,
         snapshot_captured_ms,
-        IdentityCleanup::Unregister,
     )
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum IdentityCleanup {
-    Preserve,
-    Unregister,
 }
 
 pub(super) enum RetireTargetError {
@@ -1747,7 +1781,6 @@ fn retire_control_plane_target(
     runtime_archive: PeerLifecycleStage,
     runtime_archive_detail: Option<String>,
     snapshot_captured_ms: Option<i64>,
-    identity_cleanup: IdentityCleanup,
 ) -> PeerLifecycleClose {
     let mut close = close_readback("cleanup-open");
     close.runtime_archive.state = runtime_archive.clone();
@@ -1779,7 +1812,7 @@ fn retire_control_plane_target(
             operation_id,
             snapshot,
             snapshot_captured_ms,
-            identity_cleanup == IdentityCleanup::Unregister,
+            true,
             self_unregister,
             self_unregister,
         ) {
@@ -1801,13 +1834,9 @@ fn retire_control_plane_target(
             }
         }
     };
-    let retirement = match identity_cleanup {
-        IdentityCleanup::Preserve => Ok(()),
-        IdentityCleanup::Unregister => {
-            crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
-                .retire_binding(&route_binding)
-        }
-    };
+    let retirement =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .retire_binding(&route_binding);
     if let Err(error) = retirement.and_then(|()| server.try_commit(&events)) {
         close.worker_retirement.state = PeerLifecycleStage::Unknown;
         close.binding_retirement.state = PeerLifecycleStage::Unknown;
@@ -1817,6 +1846,46 @@ fn retire_control_plane_target(
         return close;
     }
     let state = server.state.lock().unwrap();
+    let control_complete = read_control_retirement(
+        &state,
+        target,
+        &route_binding,
+        &subscription_ids,
+        self_unregister,
+        &mut close,
+    );
+    let host_complete = matches!(
+        close.runtime_archive.state,
+        PeerLifecycleStage::Verified | PeerLifecycleStage::Missing
+    ) || (self_unregister
+        && close.runtime_archive.state == PeerLifecycleStage::NotApplicable);
+    let identity_retirement = if self_unregister && control_complete && host_complete {
+        crate::identity::clear_persisted_identity(&server.host_paths, actor_id)
+    } else {
+        Ok(())
+    };
+    close.close_outcome = if control_complete && host_complete {
+        match identity_retirement {
+            Ok(()) => "complete".into(),
+            Err(error) => format!("cleanup-open: {error}"),
+        }
+    } else {
+        "cleanup-open".into()
+    };
+    if let Some(detail) = runtime_archive_detail {
+        close.close_outcome = format!("{}: {detail}", close.close_outcome);
+    }
+    close
+}
+
+fn read_control_retirement(
+    state: &State,
+    target: &PeerLifecycleTarget,
+    route_binding: &RuntimeBinding,
+    subscription_ids: &[String],
+    self_unregister: bool,
+    close: &mut PeerLifecycleClose,
+) -> bool {
     close.worker_retirement.state = if state.worker_closures.contains_key(&target.worker_id)
         && !state.workers.contains_key(&target.worker_id)
     {
@@ -1878,7 +1947,7 @@ fn retire_control_plane_target(
             .global
             .lookup_master_grant_for(&route_scope, &target.binding_id)
             .is_none();
-    let control_complete = matches!(close.worker_retirement.state, PeerLifecycleStage::Verified)
+    matches!(close.worker_retirement.state, PeerLifecycleStage::Verified)
         && matches!(close.binding_retirement.state, PeerLifecycleStage::Verified)
         && matches!(
             close.route_retirement.state,
@@ -1888,29 +1957,7 @@ fn retire_control_plane_target(
             close.subscription_retirement.state,
             PeerLifecycleStage::Verified | PeerLifecycleStage::NotApplicable
         )
-        && self_master_retired;
-    let host_complete = matches!(
-        close.runtime_archive.state,
-        PeerLifecycleStage::Verified | PeerLifecycleStage::Missing
-    ) || (self_unregister
-        && close.runtime_archive.state == PeerLifecycleStage::NotApplicable);
-    let identity_retirement = if self_unregister && control_complete && host_complete {
-        crate::identity::clear_persisted_identity(&server.host_paths, actor_id)
-    } else {
-        Ok(())
-    };
-    close.close_outcome = if control_complete && host_complete {
-        match identity_retirement {
-            Ok(()) => "complete".into(),
-            Err(error) => format!("cleanup-open: {error}"),
-        }
-    } else {
-        "cleanup-open".into()
-    };
-    if let Some(detail) = runtime_archive_detail {
-        close.close_outcome = format!("{}: {detail}", close.close_outcome);
-    }
-    close
+        && self_master_retired
 }
 
 include!("peer_lifecycle/handlers.rs");

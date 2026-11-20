@@ -662,6 +662,7 @@ fn definitive_missing_appserver_worker_retires_without_self_removal() {
     let reception_before =
         serde_json::to_value(&server.state.lock().unwrap().notification_subscriptions[&default_id])
             .unwrap();
+    let revision_before = server.state.lock().unwrap().revision;
 
     let summary = maintain_definitive_missing(&server, 1_234);
 
@@ -677,6 +678,11 @@ fn definitive_missing_appserver_worker_retires_without_self_removal() {
     assert_eq!(retired["close"]["runtime_archive"]["state"], "missing");
     let operation_id = retired["operation_id"].as_str().unwrap();
     let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.revision,
+        revision_before + 3,
+        "after intent and dispatch, retirement and fence release publish together"
+    );
     let operation = &state.peer_lifecycle_operations[operation_id];
     assert_eq!(operation.action, PeerLifecycleAction::Close);
     assert_eq!(operation.phase, PeerLifecyclePhase::Complete);

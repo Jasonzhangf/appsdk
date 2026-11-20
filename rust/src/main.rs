@@ -1119,6 +1119,7 @@ fn main() {
                     first.as_str(),
                     "subscribe"
                         | "register"
+                        | "apply"
                         | "list"
                         | "status"
                         | "cancel"

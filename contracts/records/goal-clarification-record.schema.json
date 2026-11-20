@@ -5,7 +5,21 @@
   "required": ["goal_id", "raw_request", "understood_objective", "acceptance_criteria", "non_goals", "assumptions", "ambiguities", "questions", "status", "created_at"],
   "properties": {
     "goal_id": {"type": "string"},
+    "project_id": {"type": "string"},
     "requirements_version": {"type": "integer", "minimum": 0},
+    "goal_revision": {"type": "integer", "minimum": 1},
+    "replacement_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["goal", "superseded_by_revision", "status"],
+        "properties": {
+          "goal": {"$ref": "#"},
+          "superseded_by_revision": {"type": "integer", "minimum": 1},
+          "status": {"const": "superseded"}
+        }
+      }
+    },
     "issue_id": {"type": ["string", "null"]},
     "raw_request": {"type": "string", "minLength": 1},
     "understood_objective": {"type": "string", "minLength": 1},

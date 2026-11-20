@@ -8,6 +8,11 @@
     {"from":"parsed","to":"clarification_pending","requirements":["ambiguities_or_questions"]},
     {"from":"parsed","to":"confirmed","requirements":["no_open_questions","acceptance_criteria","non_goals"]},
     {"from":"clarification_pending","to":"confirmed","requirements":["all_questions_answered","acceptance_criteria","scope"]},
-    {"from":"confirmed","to":"admitted","requirements":["claim","owner","required_gates"]}
+    {"from":"confirmed","to":"admitted","requirements":["claim","owner","required_gates"]},
+    {"from":"received","to":"superseded","requirements":["formal_replace","new_current_goal","history_wrapper"]},
+    {"from":"parsed","to":"superseded","requirements":["formal_replace","new_current_goal","history_wrapper"]},
+    {"from":"clarification_pending","to":"superseded","requirements":["formal_replace","new_current_goal","history_wrapper"]},
+    {"from":"confirmed","to":"superseded","requirements":["formal_replace","new_current_goal","history_wrapper"]},
+    {"from":"admitted","to":"superseded","requirements":["formal_replace","new_current_goal","history_wrapper"]}
   ]
 }

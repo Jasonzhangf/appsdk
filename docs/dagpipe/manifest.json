@@ -156,6 +156,10 @@
       "path": "docs/dagpipe/user-requirement-consumption.graph.json"
     },
     {
+      "id": "appsdk-project-goal-change",
+      "path": "docs/dagpipe/graphs/project-goal-change.graph.json"
+    },
+    {
       "id": "collab-send-message",
       "path": "docs/dagpipe/collab-send-message.graph.json"
     },

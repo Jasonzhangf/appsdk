@@ -1346,30 +1346,13 @@ fn explicit_peer_notification_accepts_arbitrary_durable_body() {
 fn send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    let mut transport = test_appserver_transport("thread-recipient");
+    let socket = root.join("recipient.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    transport.endpoint = Some(format!("unix://{}", socket.display()));
+    register_appserver_peer(&server, "recipient", &transport);
+    drop(listener);
     server.appserver_notification_sink = default_appserver_notification_sink();
-    let sub_id = "sub-default-direct-message-recipient".to_owned();
-    assert!(server.state.lock().unwrap().notification_subscriptions.contains_key(&sub_id));
-    let mut state = server.state.lock().unwrap();
-    let worker = state.workers.get_mut("recipient").unwrap();
-    let Some(transport) = worker.transport.as_mut() else {
-        panic!("registered recipient should keep its transport record");
-    };
-    if let Some(endpoint) = transport.tmux_endpoint.as_mut() {
-        endpoint.socket_path = "/tmp/collab-missing-transport-socket.sock".into();
-        endpoint.pane_id = "%does-not-exist".into();
-    } else {
-        transport.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
-            socket_path: "/tmp/collab-missing-transport-socket.sock".into(),
-            server_pid: 1,
-            tmux_session_id: "$missing".into(),
-            pane_id: "%does-not-exist".into(),
-            pane_pid: 1,
-            codex_session_id: None,
-            codex_thread_id: None,
-        });
-    }
-    drop(state);
 
     let response = handle_send_with_task(
         &server,
@@ -1728,15 +1711,19 @@ fn daemon_maintenance_replaces_a_stale_default_target_with_current_tmux_route() 
 fn explicit_send_repairs_stale_default_direct_message_before_wake() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
-    server
-        .state
-        .lock()
-        .unwrap()
-        .workers
-        .get_mut("recipient")
-        .unwrap()
-        .transport = Some(test_appserver_transport("mismatched-thread-recipient"));
+    register_appserver_peer(
+        &server,
+        "recipient",
+        &test_appserver_transport("thread-current-recipient"),
+    );
+    let lease_id = "sub-default-direct-message-recipient";
+    {
+        let mut state = server.state.lock().unwrap();
+        let mut subscription = state.notification_subscriptions[lease_id].clone();
+        subscription.method = "tmux".into();
+        subscription.target = "thread-stale-recipient".into();
+        server.commit_locked_checked(&mut state, &[Event::NotificationSubscribed { subscription }]).unwrap();
+    }
 
     let response = handle_send(
         &server,
@@ -1754,20 +1741,20 @@ fn explicit_send_repairs_stale_default_direct_message_before_wake() {
     {
         let state = server.state.lock().unwrap();
         assert_eq!(
-            state.notification_subscriptions["sub-default-direct-message-recipient"].target,
-            "mismatched-thread-recipient"
+            state.notification_subscriptions[lease_id].target,
+            "thread-current-recipient"
         );
         assert_eq!(
-            state.notification_subscriptions["sub-default-direct-message-recipient"].status,
+            state.notification_subscriptions[lease_id].status,
             "armed"
         );
         assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
     }
     assert_eq!(
         current_state::load(&server.state_path, false).unwrap()
-            .notification_subscriptions["sub-default-direct-message-recipient"]
+            .notification_subscriptions[lease_id]
             .target,
-        "mismatched-thread-recipient"
+        "thread-current-recipient"
     );
     std::fs::remove_dir_all(root).ok();
 }

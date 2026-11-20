@@ -1012,6 +1012,22 @@ pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     register_tmux(server, id, fixture_peer_endpoint(server, thread_id))
 }
 
+fn register_appserver_peer(server: &Server, id: &str, transport: &SelectedTransport) {
+    let app = AppServerId::new("tui-default").unwrap();
+    let cwd = server.root.display().to_string();
+    let response = seed_committed_owner(
+        server,
+        id,
+        &format!("token-{id}"),
+        transport,
+        &cwd,
+        Some(app.clone()),
+    );
+    assert!(response.ok, "{response:?}");
+    commit_current_thread_route_for_runtime(server, server, id, &cwd, Some(&app)).unwrap();
+    restore_registered_peer_default_leases(server);
+}
+
 /// Seed a committed peer without starting a tmux server. Role projection and
 /// scheduling contracts do not need a live pane.
 pub(crate) fn register_synthetic_peer(server: &Server, id: &str, thread_id: &str) -> Resp {

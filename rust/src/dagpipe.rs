@@ -332,7 +332,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 48] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 49] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -503,6 +503,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 48] {
             include_str!("../../docs/dagpipe/user-requirement-consumption.graph.json"),
         ),
         (
+            "docs/dagpipe/graphs/project-goal-change.graph.json",
+            include_str!("../../docs/dagpipe/graphs/project-goal-change.graph.json"),
+        ),
+        (
             "docs/dagpipe/sdk-resource-refresh.graph.json",
             include_str!("../../docs/dagpipe/sdk-resource-refresh.graph.json"),
         ),
@@ -531,7 +535,7 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 48] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 45] {
+fn design_graph_ids() -> [&'static str; 46] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -576,12 +580,13 @@ fn design_graph_ids() -> [&'static str; 45] {
         "appsdk-collab-dispatch-gap-reminder-migration",
         "appsdk-user-requirement-change",
         "appsdk-user-requirement-consumption",
+        "appsdk-project-goal-change",
         "appsdk-sdk-resource-refresh",
         "collab-ceo-coordination",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 269] {
+fn design_graph_operator_names() -> [&'static str; 275] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -842,6 +847,12 @@ fn design_graph_operator_names() -> [&'static str; 269] {
         "appsdk.requirements.publish_outcome",
         "appsdk.requirements.submit_authorization",
         "appsdk.requirements.verify_effective",
+        "appsdk.project_goal.receive_change",
+        "appsdk.project_goal.check_scope",
+        "appsdk.project_goal.check_base",
+        "appsdk.project_goal.build_revision",
+        "appsdk.project_goal.commit",
+        "appsdk.project_goal.publish_result",
         "appsdk.sdk_pin.authenticate_historical_record",
         "appsdk.sdk_pin.authenticate_request",
         "appsdk.sdk_pin.materialize_current_step",

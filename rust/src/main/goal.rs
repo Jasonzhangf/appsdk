@@ -522,10 +522,30 @@ where
     I: Iterator<Item = String>,
 {
     let sub = args.next().unwrap_or_else(|| {
-        fail("USAGE: appsdk goal <subscribe|list|status|cancel|edit|update|prompt> [options]")
+        fail("USAGE: appsdk goal <apply|subscribe|list|status|cancel|edit|update|prompt> [options]")
     });
 
     match sub.as_str() {
+        "apply" => {
+            let mut input_path: Option<String> = None;
+            let mut format_json = false;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--input" => {
+                        input_path = Some(
+                            args.next()
+                                .unwrap_or_else(|| fail("GOAL_APPLY_INPUT_MISSING")),
+                        );
+                    }
+                    "--json" => format_json = true,
+                    other => fail(format!("UNKNOWN_GOAL_APPLY_OPTION:{other}")),
+                }
+            }
+            let input_path = input_path.unwrap_or_else(|| {
+                fail("USAGE: appsdk goal apply [project] --input <request.json> [--json]")
+            });
+            registry::project_goal_apply(root, &input_path, format_json);
+        }
         "subscribe" | "register" => {
             let mut goal_file: Option<String> = None;
             let mut interval_str = "10m".to_string();

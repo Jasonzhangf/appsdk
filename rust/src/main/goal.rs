@@ -1264,6 +1264,7 @@ where
                             record["desired"] = Value::String("recovery_required".into());
                             record["observed"] = Value::String(remote_status);
                             record["active"] = Value::Bool(false);
+                            record["collab_subscribed"] = Value::Bool(false);
                             record["error"] = Value::String(error.clone());
                             record["recovery"] = Value::String(
                                 "Rerun appsdk goal subscribe --goal <path.md> to rearm a fresh one-shot deadline; no automatic renewal is attempted".into(),

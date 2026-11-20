@@ -410,6 +410,31 @@ esac
     );
     assert_eq!(fs::read(&record_path).unwrap(), before_expired_status);
 
+    let mut one_shot: Value = serde_json::from_slice(&before_expired_status).unwrap();
+    one_shot["periodic_declared"] = Value::Bool(false);
+    let before_one_shot = serde_json::to_vec(&one_shot).unwrap();
+    fs::write(&record_path, &before_one_shot).unwrap();
+    let one_shot_status = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("STATUS_EXPIRED", "1")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(one_shot_status.status.success());
+    let one_shot_status: Value = serde_json::from_slice(&one_shot_status.stdout).unwrap();
+    assert_eq!(one_shot_status["active"], false);
+    assert_eq!(one_shot_status["collab_subscribed"], false);
+    assert_eq!(one_shot_status["observed"], "expired");
+    assert_eq!(one_shot_status["record"]["remote_state"], "expired");
+    assert!(one_shot_status["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:expired"));
+    assert_eq!(fs::read(&record_path).unwrap(), before_one_shot);
+    fs::write(&record_path, &before_expired_status).unwrap();
+
     let rearmed = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
         .current_dir(&root)

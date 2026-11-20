@@ -150,8 +150,7 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
             )
         };
         assert_eq!(
-            first["goal_schedule"]["subscription"]["worker_id"],
-            alice["identity"]["worker_id"],
+            first["goal_schedule"]["subscription"]["worker_id"], alice["identity"]["worker_id"],
             "{first}"
         );
         fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
@@ -196,7 +195,10 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
             after_capacity_error["board_details"]["pinned"],
             before_capacity_error["board_details"]["pinned"]
         );
-        assert_eq!(after_capacity_error["tasks"]["pinned"], before_capacity_error["tasks"]["pinned"]);
+        assert_eq!(
+            after_capacity_error["tasks"]["pinned"],
+            before_capacity_error["tasks"]["pinned"]
+        );
         assert!(f7_goal_subscriptions(&after_capacity_error, "pinned").is_empty());
         assert!(f7_messages(&after_capacity_error, "task-invitation:pinned").is_empty());
         // Release schedule capacity without changing the first task's
@@ -715,8 +717,7 @@ fn f7_execution_admission_dispatch_uses_disjoint_executor() {
     assert_eq!(accepted["task"]["reviewer_name"], "Alice", "{accepted}");
     assert_eq!(accepted["goal_schedule"]["armed"], true, "{accepted}");
     assert_eq!(
-        accepted["goal_schedule"]["subscription"],
-        dispatched["goal_schedule"]["subscription"],
+        accepted["goal_schedule"]["subscription"], dispatched["goal_schedule"]["subscription"],
         "acceptance keeps the subscription committed at dispatch"
     );
     assert_eq!(
@@ -1214,7 +1215,10 @@ fn f7_execution_admission_decline_stays_available() {
     assert_eq!(declined["task"]["reviewer_name"], "Alice");
     assert_eq!(declined["goal_schedule"]["armed"], false, "{declined}");
     assert_eq!(&declined["goal_schedule"]["subscription"]["id"], first_id);
-    assert_eq!(declined["goal_schedule"]["subscription"]["status"], "cancelled");
+    assert_eq!(
+        declined["goal_schedule"]["subscription"]["status"],
+        "cancelled"
+    );
 
     let reinvited = fixture.run_public(
         &[
@@ -1248,7 +1252,9 @@ fn f7_execution_admission_decline_stays_available() {
     let state = fixture.current_state();
     let subscriptions = f7_goal_subscriptions(&state, "f7-decline");
     assert_eq!(subscriptions.len(), 2);
-    assert!(subscriptions.iter().all(|subscription| subscription["status"] == "cancelled"));
+    assert!(subscriptions
+        .iter()
+        .all(|subscription| subscription["status"] == "cancelled"));
 }
 
 fn rejected(fixture: &AppFixture, args: &[&str], thread: &str) -> String {

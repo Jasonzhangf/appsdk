@@ -752,7 +752,8 @@ pub fn notify_with_message_id(
         || result["inboundOwner"] != "poll"
     {
         return Err(ControlError::Unusable {
-            detail: "enqueue receipt does not match the submitted wake and canonical Poll target".into(),
+            detail: "enqueue receipt does not match the submitted wake and canonical Poll target"
+                .into(),
         });
     }
     Ok(serde_json::json!({

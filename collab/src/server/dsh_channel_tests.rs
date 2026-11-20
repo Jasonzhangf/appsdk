@@ -840,22 +840,36 @@ fn dsh_wake_mode_refuses_a_mode_outside_the_domain() {
 #[test]
 fn a_mismatched_dsh_wake_receipt_does_not_prove_non_submission() {
     let gateway = Gateway::start("wrong-wake-id", |request| {
-        Some(serde_json::json!({
-            "ok": true,
-            "result": {
-                "messageId": "different-message",
-                "runtimeId": request["params"]["runtimeId"],
-                "agentId": request["params"]["agentId"],
-                "status": "wake-signalled",
-                "inboundOwner": "poll"
-            }
-        }).to_string())
+        Some(
+            serde_json::json!({
+                "ok": true,
+                "result": {
+                    "messageId": "different-message",
+                    "runtimeId": request["params"]["runtimeId"],
+                    "agentId": request["params"]["agentId"],
+                    "status": "wake-signalled",
+                    "inboundOwner": "poll"
+                }
+            })
+            .to_string(),
+        )
     });
     let result = crate::client::adapters::dsh::notify(
-        &gateway.endpoint(), "rt-1", "ses-1", "followup", "sender", "wake",
+        &gateway.endpoint(),
+        "rt-1",
+        "ses-1",
+        "followup",
+        "sender",
+        "wake",
         "m1759420000000-1",
     );
-    assert!(matches!(result, Err(crate::client::adapters::dsh::ControlError::Unusable { .. })), "{result:?}");
+    assert!(
+        matches!(
+            result,
+            Err(crate::client::adapters::dsh::ControlError::Unusable { .. })
+        ),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -1274,8 +1288,7 @@ fn subscribe_and_send(server: &Server) -> Resp {
 fn a_dsh_peer_registers_and_is_woken_through_the_real_send_entry() {
     let root = scratch("e2e-wake");
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let (server, gateway_a, gateway_b) =
-        dsh_peers(&root, wake_reply, Arc::clone(&seen));
+    let (server, gateway_a, gateway_b) = dsh_peers(&root, wake_reply, Arc::clone(&seen));
 
     let sent = subscribe_and_send(&server);
     assert!(sent.ok, "send failed: {sent:?}");
@@ -1314,8 +1327,7 @@ fn a_dsh_peer_registers_and_is_woken_through_the_real_send_entry() {
 fn a_dsh_wake_receipt_carries_the_gateway_message_id() {
     let root = scratch("e2e-receipt");
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let (server, gateway_a, gateway_b) =
-        dsh_peers(&root, wake_reply, Arc::clone(&seen));
+    let (server, gateway_a, gateway_b) = dsh_peers(&root, wake_reply, Arc::clone(&seen));
 
     let sent = subscribe_and_send(&server);
     assert!(sent.ok, "send failed: {sent:?}");
@@ -1449,8 +1461,7 @@ fn a_dsh_wake_names_the_real_mailbox_id_so_a_peer_ack_can_match_it() {
     // receipt, so the mailbox stayed `delivered` forever.
     let root = scratch("wake-mailbox-id");
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let (server, gateway_a, gateway_b) =
-        dsh_peers(&root, wake_reply, Arc::clone(&seen));
+    let (server, gateway_a, gateway_b) = dsh_peers(&root, wake_reply, Arc::clone(&seen));
 
     let sent = subscribe_and_send(&server);
     assert!(sent.ok, "send failed: {sent:?}");

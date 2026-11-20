@@ -43,9 +43,10 @@ fn public_close_publication_busy_defers_the_original_rex_message() {
             panic!("Rex driver exited before requesting the publication gate: {status}");
         }
         if std::time::Instant::now() >= deadline {
-            native.kill().unwrap();
-            native.wait().unwrap();
-            panic!("Rex driver did not request the publication gate");
+            // The driver has bounded waits and owns the Rex server. Let it
+            // exit through its cleanup path.
+            let status = native.wait().unwrap();
+            panic!("Rex driver did not request the publication gate in time: {status}");
         }
         std::thread::sleep(Duration::from_millis(20));
     }

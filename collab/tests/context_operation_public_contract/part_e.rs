@@ -45,8 +45,19 @@ fn read_effect_snapshot(fixture: &Fixture) -> Value {
 
 #[test]
 fn unmapped_worker_status_reads_preserve_retained_records_without_side_effects() {
+    let mut fixture = Fixture::without_tmux("unmapped-worker-status-read");
+    let config = fixture.root.join("home/.appsdk");
+    fs::create_dir_all(&config).unwrap();
+    // A timer can independently wake the retained registration notice after
+    // the handoff. Keep it outside the read-only assertion window.
+    fs::write(
+        config.join("config.toml"),
+        "[timers]\ntick_interval_ms=60000\n",
+    )
+    .unwrap();
+    fixture.restart_daemon();
     let (fixture, old_host, next_host, old, next) =
-        lifecycle_native_pair_fixture("unmapped-worker-status-read", "ack_only");
+        seed_lifecycle_native_pair(fixture, "ack_only");
     let old_worker = old["worker_id"].as_str().unwrap().to_owned();
     let next_worker = next["worker_id"].as_str().unwrap().to_owned();
     let child_socket = next_host
@@ -108,6 +119,11 @@ fn unmapped_worker_status_reads_preserve_retained_records_without_side_effects()
         "R6 must leave the displaced worker without a current mapping: {map}"
     );
     let effects_before = read_effect_snapshot(&fixture);
+    assert!(effects_before["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|message| message["subject"] == "peer-registered" && message["state"] == "pending"));
 
     // Read admission must not authorize the displaced holder's active calls.
     for request in [

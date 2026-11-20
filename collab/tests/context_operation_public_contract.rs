@@ -693,7 +693,13 @@ fn lifecycle_native_pair_fixture(
     label: &str,
     child_effect: &str,
 ) -> (Fixture, TestAppServer, TestAppServer, Value, Value) {
-    let fixture = Fixture::without_tmux(label);
+    seed_lifecycle_native_pair(Fixture::without_tmux(label), child_effect)
+}
+
+fn seed_lifecycle_native_pair(
+    fixture: Fixture,
+    child_effect: &str,
+) -> (Fixture, TestAppServer, TestAppServer, Value, Value) {
     let master_host = TestAppServer::start_with_effect_at(
         &fixture.root,
         "lifecycle-master.sock",

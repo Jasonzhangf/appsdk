@@ -194,7 +194,9 @@ impl Gateway {
                         json!({"ok":true,"result":{
                             "messageId":request["params"]["messageId"],
                             "runtimeId":runtime_id,
-                            "agentId":agent_id
+                            "agentId":agent_id,
+                            "status":"wake-signalled",
+                            "inboundOwner":"poll"
                         }})
                     }
                 } else {

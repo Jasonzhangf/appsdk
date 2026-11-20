@@ -44,7 +44,7 @@
     },
     {
       "id": "分类接受拒绝或未知结果",
-      "description": "接受、明确拒绝、不可达、超时和畸形回复分别分类；unknown 保留原绑定并显式失败，不自动重发，也不把 malformed/timeout 改称 missing。",
+      "description": "只有返回相同 messageId、runtimeId、agentId 且明确 wake-signalled / poll 的回执证明本次唤醒被接受。明确拒绝、不可达、超时和畸形回复分别分类。错 ID、错目标或不符阶段的回包发生在提交之后，结果为 unknown，保留原绑定且不自动重发。",
       "operator": "appsdk.collab_dsh_delivery.classify",
       "operator_version": "1",
       "inputs": ["gateway_enqueue_outcome"],

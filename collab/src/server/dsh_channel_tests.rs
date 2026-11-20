@@ -838,18 +838,47 @@ fn dsh_wake_mode_refuses_a_mode_outside_the_domain() {
 }
 
 #[test]
+fn a_mismatched_dsh_wake_receipt_does_not_prove_non_submission() {
+    let gateway = Gateway::start("wrong-wake-id", |request| {
+        Some(
+            serde_json::json!({
+                "ok": true,
+                "result": {
+                    "messageId": "different-message",
+                    "runtimeId": request["params"]["runtimeId"],
+                    "agentId": request["params"]["agentId"],
+                    "status": "wake-signalled",
+                    "inboundOwner": "poll"
+                }
+            })
+            .to_string(),
+        )
+    });
+    let result = crate::client::adapters::dsh::notify(
+        &gateway.endpoint(),
+        "rt-1",
+        "ses-1",
+        "followup",
+        "sender",
+        "wake",
+        "m1759420000000-1",
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::client::adapters::dsh::ControlError::Unusable { .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let observer = Arc::clone(&seen);
     let gateway = Gateway::start("enqueue", move |request| {
         observer.lock().unwrap().push(request.clone());
-        Some(
-            serde_json::json!({
-                "ok": true,
-                "result": {"messageId": "msg-1", "runtimeId": "rt-1", "agentId": "ses-1"}
-            })
-            .to_string(),
-        )
+        wake_reply(&request)
     });
     let receipt = crate::client::adapters::dsh::notify(
         &gateway.endpoint(),
@@ -863,7 +892,8 @@ fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
     .expect("enqueue must be admitted");
 
     assert_eq!(receipt["transport"], "dsh");
-    assert_eq!(receipt["message_id"], "msg-1");
+    assert_eq!(receipt["stage"], "wake-signalled");
+    assert_eq!(receipt["inbound_owner"], "poll");
     assert_eq!(receipt["consumed"], false);
     let requests = seen.lock().unwrap().clone();
     assert_eq!(requests[0]["method"], "enqueue");
@@ -877,6 +907,7 @@ fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
     let message_id = requests[0]["params"]["messageId"]
         .as_str()
         .expect("enqueue must carry a messageId");
+    assert_eq!(receipt["message_id"], message_id);
     assert!(
         message_id.starts_with("collab:"),
         "messageId must be namespaced: {message_id}"
@@ -913,7 +944,7 @@ fn a_replayed_dsh_wake_reuses_the_same_gateway_message_id() {
     let observer = Arc::clone(&seen);
     let gateway = Gateway::start("replay", move |request| {
         observer.lock().unwrap().push(request.clone());
-        wake_reply("msg-replay")
+        wake_reply(&request)
     });
     let mut message_id = |msg_id: &str| {
         crate::client::adapters::dsh::notify(
@@ -1043,13 +1074,7 @@ fn a_dsh_control_socket_is_only_ever_asked_for_read_only_or_enqueue_work() {
             .unwrap_or_default()
             .to_owned();
         observer.lock().unwrap().push(method);
-        Some(
-            serde_json::json!({
-                "ok": true,
-                "result": {"messageId": "msg-1", "runtimeId": "rt-1", "agentId": "ses-1"}
-            })
-            .to_string(),
-        )
+        wake_reply(&request)
     });
     let _ = crate::client::adapters::dsh::notify(
         &gateway.endpoint(),
@@ -1068,7 +1093,7 @@ fn a_dsh_wake_never_reaches_the_tmux_sink() {
     // The pre-existing sink was `if kind != AppServer`, which sent a new kind
     // into the tmux sink and failed with "Collab notifications require tmux".
     let root = scratch("sink-route");
-    let gateway = Gateway::start("sink-route", |_| wake_reply("msg-9"));
+    let gateway = Gateway::start("sink-route", |request| wake_reply(&request));
     let transport = dsh_transport(&gateway.socket);
     let receipt = (default_appserver_notification_sink())(
         &transport,
@@ -1098,7 +1123,7 @@ fn a_dsh_wake_forwards_the_sink_mode_it_was_given() {
                 .unwrap_or_default()
                 .to_owned(),
         );
-        wake_reply("msg-1")
+        wake_reply(&request)
     });
     let transport = dsh_transport(&gateway.socket);
     let receipt = (default_appserver_notification_sink())(
@@ -1209,10 +1234,10 @@ fn register_dsh(
 /// Every control request either gateway receives is recorded in `seen`.
 fn dsh_peers(
     root: &Path,
-    b_enqueue: impl Fn() -> Option<String> + Send + 'static,
+    b_enqueue: impl Fn(&serde_json::Value) -> Option<String> + Send + 'static,
     seen: Arc<Mutex<Vec<serde_json::Value>>>,
 ) -> (Arc<Server>, Gateway, Gateway) {
-    let gateway_a = registration_gateway("peers-a", root, Some(Arc::clone(&seen)), || None);
+    let gateway_a = registration_gateway("peers-a", root, Some(Arc::clone(&seen)), |_| None);
     let gateway_b = registration_gateway("peers-b", root, Some(Arc::clone(&seen)), b_enqueue);
     let mut server = test_server(root);
     {
@@ -1263,8 +1288,7 @@ fn subscribe_and_send(server: &Server) -> Resp {
 fn a_dsh_peer_registers_and_is_woken_through_the_real_send_entry() {
     let root = scratch("e2e-wake");
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let (server, gateway_a, gateway_b) =
-        dsh_peers(&root, || wake_reply("msg-42"), Arc::clone(&seen));
+    let (server, gateway_a, gateway_b) = dsh_peers(&root, wake_reply, Arc::clone(&seen));
 
     let sent = subscribe_and_send(&server);
     assert!(sent.ok, "send failed: {sent:?}");
@@ -1303,8 +1327,7 @@ fn a_dsh_peer_registers_and_is_woken_through_the_real_send_entry() {
 fn a_dsh_wake_receipt_carries_the_gateway_message_id() {
     let root = scratch("e2e-receipt");
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let (server, gateway_a, gateway_b) =
-        dsh_peers(&root, || wake_reply("msg-77"), Arc::clone(&seen));
+    let (server, gateway_a, gateway_b) = dsh_peers(&root, wake_reply, Arc::clone(&seen));
 
     let sent = subscribe_and_send(&server);
     assert!(sent.ok, "send failed: {sent:?}");
@@ -1327,7 +1350,7 @@ fn a_refused_dsh_wake_is_labelled_as_a_dsh_rejection() {
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let (server, gateway_a, gateway_b) = dsh_peers(
         &root,
-        || {
+        |_| {
             Some(
                 serde_json::json!({
                     "ok": false,
@@ -1360,7 +1383,7 @@ fn a_dsh_master_reconnect_is_not_fenced_as_a_foreign_promotion() {
     // the token, persisted identity, scope and runtime key prove the same
     // principal, and transport reachability never gates the reissued grant.
     let root = scratch("dsh-master-reconnect");
-    let gateway = registration_gateway("dsh-master-reconnect", &root, None, || None);
+    let gateway = registration_gateway("dsh-master-reconnect", &root, None, |_| None);
     let server = test_server(&root);
     let registered = register_dsh(&server, "dsh-master", &gateway.socket, "rt-1", "ses-1");
     assert!(registered.ok, "{registered:?}");
@@ -1390,7 +1413,7 @@ fn a_dsh_rebind_is_refused_without_pointing_at_a_tmux_pane() {
     // still happen - collab does not own a dsh agent's lifecycle - but it must
     // name the real owner.
     let root = scratch("dsh-rebind-wording");
-    let gateway = registration_gateway("dsh-rebind-wording", &root, None, || None);
+    let gateway = registration_gateway("dsh-rebind-wording", &root, None, |_| None);
     let server = test_server(&root);
     let registered = register_dsh(&server, "dsh-rebind", &gateway.socket, "rt-1", "ses-1");
     assert!(registered.ok, "{registered:?}");
@@ -1438,8 +1461,7 @@ fn a_dsh_wake_names_the_real_mailbox_id_so_a_peer_ack_can_match_it() {
     // receipt, so the mailbox stayed `delivered` forever.
     let root = scratch("wake-mailbox-id");
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let (server, gateway_a, gateway_b) =
-        dsh_peers(&root, || wake_reply("msg-ack"), Arc::clone(&seen));
+    let (server, gateway_a, gateway_b) = dsh_peers(&root, wake_reply, Arc::clone(&seen));
 
     let sent = subscribe_and_send(&server);
     assert!(sent.ok, "send failed: {sent:?}");
@@ -1494,9 +1516,7 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
     let first_seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let second_seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let gateway_for = |name: &str, observer: Arc<Mutex<Vec<serde_json::Value>>>| {
-        registration_gateway(name, &root, Some(observer), || {
-            wake_reply("msg-address-change")
-        })
+        registration_gateway(name, &root, Some(observer), wake_reply)
     };
     let old_gateway = gateway_for("addr-old", Arc::clone(&first_seen));
     let new_gateway = gateway_for("addr-new", Arc::clone(&second_seen));
@@ -1555,7 +1575,7 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
         .active_values()
         .find(|value| value.binding.agent_id.as_str() == "dsh-moved")
         .unwrap();
-    assert_eq!(&mapped.transport, current);
+    assert_eq!(mapped.transport, *current);
 
     // The live effect: a wake now reaches the new socket and not the dead one.
     let subscription = handle_notification_subscribe(

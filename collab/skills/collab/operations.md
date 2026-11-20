@@ -400,12 +400,10 @@ context. An explicit current Desktop bridge capability is a transport update,
 not an error-driven fallback. Once a native binding is selected, tmux is never
 a message, wake, presence, or status fallback. Its
 observed tmux endpoint is delivery placement only. cwd selects the project,
-and the stable name owns the work. The reported agent sessionID is the current
-execution carrier; tmux session `$N`, pane, socket and server PID locate
-transport only, while the TUI's fixed tmux session name (the role name set at
-first successful registration) is its identity anchor. Same-name session
-changes update all unclosed board assignments. Pane history and old native
-addresses do not select or protect identity.
+and the stable Collab name owns the work. The current agent sessionID identifies
+the executor. For tmux attachment, naming and takeover, follow
+[the host registration procedure](#宿主注册所需信息). Same-name session changes
+update all unclosed board assignments.
 Desktop agents use the same CLI entry as other hosts: `collab context`,
 `collab sendmessage` and `collab recv`. Calling an MCP tool is not an identity
 or messaging prerequisite. Desktop's identity anchor is the current agent
@@ -858,15 +856,12 @@ replace it directly. Do not require target snapshots, old credentials, digests,
 grant generations or a second identity approval. Omitted approval leaves peer
 restoration successful and the incumbent unchanged.
 
-Tmux (TUI) uses the fixed tmux session name as its identity anchor. The first
-successful registration renames the current tmux session to the role name and
-reads it back; later bindings and recovery continue by that fixed name. Pane,
-tmux session `$N`, pane PID, socket, server PID, native thread, activity and
-capture locate delivery and observation only and do not select the identity.
-Rename failure aborts the identity commit; persistence failure rolls back the
-previous session name. Desktop binds by agent sessionID and DSH by gateway
-sessionID; neither renames tmux. Endpoint status and message delivery remain
-separate from identity restoration.
+For tmux, the daemon verifies the current iTerm2 attachment, binds the tmux
+session ID to the Collab name and reads back the physical rename. Follow
+[the host registration procedure](#宿主注册所需信息) for missing attachment,
+takeover and rename outcomes. Desktop uses the agent sessionID and DSH uses the
+gateway sessionID. Endpoint status and message delivery remain separate from
+identity restoration.
 
 The CLI reads `DSH_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID` and
 current pane facts. A unique saved DSH identity restores from its current
@@ -1451,9 +1446,8 @@ scheduling-turn counter or automatic rearm.
 Legacy managed records do not receive child-targeted liveness work or new
 assignments. Their historical `subagent-status` facts remain diagnostic input.
 Codex thread history is read only from the owning AppServer when supported and
-is never fabricated. A tmux pane locates delivery and observation only; it is
-not an identity anchor, task owner, or snapshot receipt. The TUI identity
-anchor is the fixed tmux session name, not the pane or session `$N`.
+is never fabricated. For tmux, the current iTerm2 pane locates the attached
+session. The project's stable Collab name owns tasks and subscriptions.
 
 ## 全局 CEO 与项目 master
 
@@ -2173,6 +2167,7 @@ action=restore_master），或由已授权 master 委托。CLI 识别当前宿�
 新 session 先保持原生编号。已有逻辑名字保留离线状态，待 daemon 找到可投递承载。
 新 session 完成接入后，离线同名会话可被接替。daemon 按精确 session ID 更新当前绑定，
 把旧会话改回数字名。当前同名端点仍在线时，按回执取得本次明确接替确认后再换绑。
+物理改名失败时，读取回执中的 `physical_anchor` 结果。已提交的逻辑身份继续有效。
 如果收到 `DESKTOP_BRIDGE_HANDSHAKE_FAILED`，保留阶段和宿主错误，交由 Desktop
 宿主维护者处理。宿主恢复后，在原会话重跑 `collab context`。MCP wrapper 会重新握手。
 如果收到 `DESKTOP_BRIDGE_CAPABILITY_REQUIRED`，由 Desktop 集成维护者核实并恢复受管

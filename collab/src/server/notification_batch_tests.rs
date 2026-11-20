@@ -1163,18 +1163,56 @@ fn rex_current_owner_busy_publication_queues_the_same_message() {
     assert!(response.ok, "{response:?}");
     assert_eq!(response.data["durable"], true);
     assert_eq!(response.data["notification"], "queued");
-    assert!(response.data["notification_error"].as_str().unwrap()
-        .contains("REX_BINDING_PUBLICATION_BUSY"));
+    assert!(
+        response.data["notification_error"]
+            .as_str()
+            .unwrap()
+            .contains("REX_BINDING_PUBLICATION_BUSY")
+    );
+    assert_eq!(response.data["consumed"], false);
     let id = response.data["msg_id"].as_str().unwrap();
-    assert_eq!(server.state.lock().unwrap().msgs[id].wake_attempt_count, 0);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.delivery_modes[id], "immediate");
+        assert_eq!(state.msgs[id].state, "pending");
+        assert_eq!(state.msgs[id].wake_attempt_count, 0);
+        assert!(!state.notification_delivery_accepted.contains_key(id));
+        assert!(!state.notification_delivery_failures.contains_key(id));
+        assert!(!state.notification_delivery_bindings.contains_key(id));
+    }
+    let before = dispatch(&server, Req::MsgStatus { msg_id: id.into() });
+    assert!(before.ok, "{before:?}");
+    assert_eq!(before.data["state"], "pending");
+    assert_eq!(before.data["consumed_by_recv"], false);
     assert!(sink_calls.lock().unwrap().is_empty());
     drop(_register_guard);
     drop(_wire_guard);
     timers::tick_with_idle_at(&server, now_ms() + 1, &|_| true);
-    let state = server.state.lock().unwrap();
-    assert!(state.notification_delivery_accepted.contains_key(id));
-    assert_eq!(state.msgs[id].wake_attempt_count, 1);
-    drop(state);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state.notification_delivery_accepted.contains_key(id));
+        assert_eq!(state.msgs[id].state, "pending");
+        assert_eq!(state.msgs[id].wake_attempt_count, 1);
+        assert_eq!(state.delivery_modes[id], "immediate");
+    }
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
+    let accepted = dispatch(&server, Req::MsgStatus { msg_id: id.into() });
+    assert!(accepted.ok, "{accepted:?}");
+    assert_eq!(accepted.data["state"], "pending");
+    assert_eq!(accepted.data["consumed_by_recv"], false);
+
+    timers::tick_with_idle_at(&server, now_ms() + 2, &|_| true);
+    assert_eq!(
+        sink_calls.lock().unwrap().len(),
+        1,
+        "accepted original attempt must not be submitted again"
+    );
+
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.delivery_modes[id], "immediate");
+        assert_eq!(state.msgs[id].wake_attempt_count, 1);
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -883,6 +883,22 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     fixture.stop_daemon();
     let path = fixture.project_state();
     let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let subscriptions = |state: &Value| {
+        state["notification_subscriptions"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, subscription)| subscription["worker_id"] == child_id)
+            .map(|(id, subscription)| (id.clone(), subscription.clone()))
+            .collect::<serde_json::Map<_, _>>()
+    };
+    let before_restart = subscriptions(&file["state"]);
+    assert!(!before_restart.is_empty());
+    assert!(
+        before_restart
+            .values()
+            .all(|subscription| subscription["status"] == "armed")
+    );
     file["state"]["worker_closures"][child_id] = json!({
         "worker_id":child_id, "closed_by":parent["worker_id"], "reason":"record-only fixture", "at_ms":1
     });
@@ -896,13 +912,7 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
         .remove(child_id);
     fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     fixture.restart_daemon();
-    let current = fixture.current_state();
-    assert!(current["notification_subscriptions"]
-        .as_object()
-        .unwrap()
-        .values()
-        .any(|subscription| subscription["worker_id"] == child_id
-            && subscription["status"] == "armed"));
+    assert_eq!(subscriptions(&fixture.current_state()), before_restart);
     let before = lifecycle_surfaces(&fixture, &parent);
     let read = lifecycle_read(&fixture, &parent, Some(child_id));
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");

@@ -718,6 +718,7 @@ fn attempt_tmux_notification_with_at(
         now,
         false,
         explicit_retry,
+        false,
         deliver,
     )
 }
@@ -737,6 +738,21 @@ fn transport_log_label(transport: &SelectedTransport) -> &'static str {
         TransportKind::Dsh => "DSH",
         TransportKind::Rex => "REX",
     }
+}
+
+/// An automatic continuation needs a virgin message or proof of non-submission.
+fn can_resume_notification(state: &State, message: &Message) -> bool {
+    notification_reconnect_pending(state, message)
+        || (message.wake_attempt_count == 0
+            && message.last_wake_attempt_ms == 0
+            && !message.retry_attempted
+            && !state.notification_delivery_accepted.contains_key(&message.id)
+            && state
+                .notification_delivery_failures
+                .get(&message.id)
+                .is_none_or(|failure| {
+                    failure.operation == "notification.not_attempted" && failure.retryable
+                }))
 }
 
 /// Reconnect retries require proof from the most recent attempt.
@@ -839,6 +855,7 @@ fn attempt_tmux_notification_with_retry(
     now: i64,
     scheduler_retry: bool,
     retry: bool,
+    board_invitation_only: bool,
     deliver: &dyn Fn(
         &SelectedTransport,
         Option<&str>,
@@ -878,6 +895,21 @@ fn attempt_tmux_notification_with_retry(
         return NotificationAttempt::NotAttempted("durable message not found".into());
     };
     let seed = &state.msgs[message_id];
+    let board_invitation = if board_invitation_only {
+        let invitation = current_board_invitation_for_message(&state, seed).filter(|_| {
+            seed.state == "pending"
+                && state.wake_bindings.get(message_id).map(String::as_str) == Some(subscription_id)
+                && can_resume_notification(&state, seed)
+        });
+        let Some(invitation) = invitation else {
+            return NotificationAttempt::NotAttempted(
+                "board invitation no longer qualifies for automatic delivery".into(),
+            );
+        };
+        Some(invitation)
+    } else {
+        None
+    };
     let allow_retry = notification_reconnect_pending(&state, seed)
         || (scheduler_retry && explicit_retry_refusal(&state, message_id).is_none());
     if state.workers.get(recipient).and_then(selected_transport_for_worker).as_ref() != Some(transport) {
@@ -1032,6 +1064,9 @@ fn attempt_tmux_notification_with_retry(
         .msgs
         .values()
         .filter_map(|message| {
+            if board_invitation.is_some() && message.id != seed_id {
+                return None;
+            }
             let binding = state.wake_bindings.get(&message.id)?;
             let sub = state.notification_subscriptions.get(binding)?;
             let message_explicit = is_explicit_notification(&state, message);
@@ -1168,6 +1203,15 @@ fn attempt_tmux_notification_with_retry(
             Err(error) => return NotificationAttempt::Rejected(error),
         }
     };
+    if board_invitation.is_some_and(|invitation| {
+        selected_binding
+            .as_ref()
+            .is_none_or(|selected| selected.binding.binding_id.as_str() != invitation.binding_id)
+    }) {
+        return NotificationAttempt::NotAttempted(
+            "board invitation no longer targets the current binding".into(),
+        );
+    }
     if retry {
         if let Some(reason) = explicit_retry_refusal(&state, message_id) {
             return NotificationAttempt::NotAttempted(reason.into());
@@ -1362,6 +1406,7 @@ fn attempt_notification_detailed_with_mode_at(
         subscription_id,
         now,
         explicit_retry,
+        false,
     )
 }
 
@@ -1371,6 +1416,7 @@ fn attempt_notification_detailed_with_mode_at_inner(
     subscription_id: &str,
     now: i64,
     explicit_retry: bool,
+    board_invitation_only: bool,
 ) -> NotificationAttempt {
     if !server.config.notifications.enabled {
         return NotificationAttempt::NotAttempted("notifications are disabled".into());
@@ -1485,7 +1531,7 @@ fn attempt_notification_detailed_with_mode_at_inner(
             binding_subscription_id,
         )
     };
-    let attempt = attempt_tmux_notification_with_at(
+    let attempt = attempt_tmux_notification_with_retry(
         server,
         message_id,
         &binding_subscription_id,
@@ -1495,7 +1541,9 @@ fn attempt_notification_detailed_with_mode_at_inner(
         delay,
         explicit,
         now,
+        false,
         explicit_retry,
+        board_invitation_only,
         &|transport, source_thread_id, text, message_id, explicit, mode| {
             (notification_sink(server))(
                 transport,
@@ -1633,12 +1681,23 @@ pub(crate) fn attempt_notification_detailed_with_rex_recovery(
     subscription_id: &str,
     now: i64,
 ) -> NotificationAttempt {
+    attempt_background_notification(server, message_id, subscription_id, now, false)
+}
+
+fn attempt_background_notification(
+    server: &Arc<Server>,
+    message_id: &str,
+    subscription_id: &str,
+    now: i64,
+    board_invitation_only: bool,
+) -> NotificationAttempt {
     let attempt = attempt_notification_detailed_with_mode_at_inner(
         server,
         message_id,
         subscription_id,
         now,
         false,
+        board_invitation_only,
     );
     let NotificationAttempt::Rejected(error) = &attempt else {
         return attempt;
@@ -1669,6 +1728,7 @@ pub(crate) fn attempt_notification_detailed_with_rex_recovery(
             server,
             Some(&context),
             &mut response,
+            board_invitation_only,
         )
         .unwrap_or(attempt)
 }
@@ -1684,6 +1744,7 @@ impl ProjectRuntimeManager {
         runtime: &Server,
         project_context: Option<&ProjectContext>,
         response: &mut Resp,
+        board_invitation_only: bool,
     ) -> Option<NotificationAttempt> {
         if response.ok {
             return None;
@@ -1765,6 +1826,7 @@ impl ProjectRuntimeManager {
             &subscription_id,
             now_ms(),
             true,
+            board_invitation_only,
         );
         let notification_method = {
             let state = runtime.state.lock().unwrap();
@@ -2084,6 +2146,7 @@ fn attempt_scheduler_notification(
         explicit,
         now_ms(),
         true,
+        false,
         false,
         &|transport, source_thread_id, text, message_id, explicit, mode| {
             (notification_sink(server))(

@@ -41,7 +41,7 @@
       "id": "原子提交归属并保留任务义务",
       "operator": "appsdk.collab_assignment.commit",
       "operator_version": "1",
-      "description": "在 TaskRec/board mutation owner 内按 revision 原子提交。assignment_revision表示归属及执行载体提交代际，纯reflow发送与投递进度保持该代际。自动邀请严格引用源assignment代际及调度轮次，真实归属变化仍拒绝旧邀请。pending 邀请变 invited，pending/invited 的合法接受变 working；首次拒绝/撤回回 pending 且不转移 owner。已开始任务的显式交接及同名自动换绑保留状态、证据、资源、pending merge 和 cleanup obligation。保留 task ID 与 publisher；不替代 review/merge/close。closed/cancelled 明确拒绝。",
+      "description": "在 TaskRec/board mutation owner 内按 revision 原子提交。邀请关系、邮件、投递模式和可用的订阅绑定同次提交。原生调用前暂缓时保留原消息 ID，后续 timer 复用通知尝试入口。assignment_revision表示归属及执行载体提交代际，纯reflow发送与投递进度保持该代际。自动邀请严格引用源assignment代际及调度轮次，真实归属变化仍拒绝旧邀请。pending 邀请变 invited，pending/invited 的合法接受变 working；首次拒绝/撤回回 pending 且不转移 owner。已开始任务的显式交接及同名自动换绑保留状态、证据、资源、pending merge 和 cleanup obligation。保留 task ID 与 publisher；不替代 review/merge/close。closed/cancelled 明确拒绝。",
       "inputs": ["authorized_assignment"],
       "output": {"id": "assignment_commit", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

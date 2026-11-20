@@ -478,7 +478,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
         }
     }
 
-    let candidates: Vec<(String, String)> = {
+    let candidates: Vec<_> = {
         let state = server.state.lock().unwrap();
         state
             .wake_bindings
@@ -502,7 +502,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                     return (subscription.worker_id == message.to
                         && subscription.status == "armed"
                         && subscription.expires_ms > now)
-                        .then(|| (message_id.clone(), subscription_id.clone()));
+                        .then(|| (message_id.clone(), subscription_id.clone(), false));
                 }
                 (message.state == "pending"
                     && (message.wake_attempt_count < MAX_WAKE_ATTEMPTS
@@ -520,16 +520,26 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                     )
                     && subscription.status == "armed"
                     && subscription.expires_ms > now)
-                    .then(|| (message_id.clone(), subscription_id.clone()))
+                    .then(|| {
+                        let board_invitation_only =
+                            state.delivery_modes.get(message_id).map(String::as_str)
+                                == Some("explicit-notification");
+                        (
+                            message_id.clone(),
+                            subscription_id.clone(),
+                            board_invitation_only,
+                        )
+                    })
             })
             .collect()
     };
-    for (message_id, subscription_id) in candidates {
-        let _ = super::attempt_notification_detailed_with_rex_recovery(
+    for (message_id, subscription_id, board_invitation_only) in candidates {
+        let _ = super::attempt_background_notification(
             server,
             &message_id,
             &subscription_id,
             now,
+            board_invitation_only,
         );
     }
 }
@@ -538,12 +548,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 ///
 /// Ordinary messages (no persisted delivery mode) keep the existing batch
 /// retry contract, and queued tmux delivery keeps its deferred path.
-/// `explicit-notification` stays with its explicit retry operator. A real
-/// public `delivery=immediate` record that was never attempted becomes
-/// eligible exactly once, so a restored daemon-owned default lease reaches the
-/// existing attempt owner. Any accepted, failed, or retried immediate outcome
-/// stays out of the timer path unless the adapter confirmed a reconnectable
-/// failure before submission.
+/// Board invitations may continue after pre-I/O deferral. Other explicit
+/// notifications stay with their explicit retry operator.
 fn automatic_delivery_candidate(state: &super::state::State, message: &Message) -> bool {
     match state.delivery_modes.get(&message.id).map(String::as_str) {
         None => true,
@@ -561,30 +567,11 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                     .get(&message.id)
                     .is_none_or(|failure| failure.retryable)
         }
-        Some("immediate") => {
-            super::notification_reconnect_pending(state, message)
-                || (message.wake_attempt_count == 0
-                    && message.last_wake_attempt_ms == 0
-                    && !message.retry_attempted
-                    && !state
-                        .notification_delivery_accepted
-                        .contains_key(&message.id)
-                    && state
-                        .notification_delivery_failures
-                        .get(&message.id)
-                        .is_none_or(|failure| {
-                            // A max_unacked admission deferral records a retryable
-                            // `notification.not_attempted` failure before any
-                            // adaptor I/O. Its zero attempt facts distinguish it
-                            // from an attempted or uncertain delivery, so the
-                            // existing automatic attempt owner may resume it once
-                            // the safety limit clears.
-                            failure.operation == "notification.not_attempted"
-                                && failure.retryable
-                                && message.wake_attempt_count == 0
-                        }))
+        Some("immediate") => super::can_resume_notification(state, message),
+        Some("explicit-notification") => {
+            super::current_board_invitation_for_message(state, message).is_some()
+                && super::can_resume_notification(state, message)
         }
-        Some("explicit-notification") => false,
         // Internal daemon markers predate the explicit delivery domain and
         // keep their pre-existing automatic path unchanged.
         Some(_) => true,

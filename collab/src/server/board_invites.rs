@@ -1,3 +1,19 @@
+fn current_board_invitation_for_message<'a>(
+    state: &'a State,
+    message: &Message,
+) -> Option<&'a crate::board::BoardInvitation> {
+    state.board_details.iter().find_map(|(task_id, details)| {
+        let invitation = details.invitation.as_ref()?;
+        (invitation.message_id == message.id
+            && invitation.peer_id == message.to
+            && state
+                .tasks
+                .get(task_id)
+                .is_some_and(|task| !matches!(task.status.as_str(), "closed" | "cancelled")))
+        .then_some(invitation)
+    })
+}
+
 fn board_unstarted_resources(state: &State, task: &TaskRec) -> Result<(), Resp> {
     if task.worktree_path.is_some() || task.branch.is_some() || task.base_commit.is_some()
         || state.worktree_bindings.values().any(|binding| binding.task_id == task.id)

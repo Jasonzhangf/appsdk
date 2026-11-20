@@ -645,7 +645,7 @@ fn a_reserved_attempt_cannot_reuse_the_previous_attempts_retry_proof() {
     assert!(!notification_reconnect_pending(&reloaded, &reloaded.msgs["notice"]));
     let stale_retry = attempt_tmux_notification_with_retry(
         &server, "notice", &subscription, "recipient", &transport, None, 0, true,
-        now + 2, true, true, &|_, _, _, _, _, _| Ok(json!({"replayed": true})),
+        now + 2, true, true, false, &|_, _, _, _, _, _| Ok(json!({"replayed": true})),
     );
     assert!(matches!(stale_retry, NotificationAttempt::NotAttempted(_)), "{stale_retry:?}");
     std::fs::remove_dir_all(root).unwrap();
@@ -1174,6 +1174,83 @@ fn rex_current_owner_busy_publication_queues_the_same_message() {
     let state = server.state.lock().unwrap();
     assert!(state.notification_delivery_accepted.contains_key(id));
     assert_eq!(state.msgs[id].wake_attempt_count, 1);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let transport = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+    let subscription = register_rex_worker(&server, "a", &transport);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &transport)]);
+    let sink_calls = install_capture_sink(&mut server);
+    let now = now_ms();
+
+    let invitation = "current-invitation";
+    let stale = "old-binding-invitation";
+    let ordinary = "unrelated-explicit";
+    let unconfirmed = "unconfirmed-invitation";
+    for id in [invitation, stale, ordinary, unconfirmed] {
+        queue_message(&server, "a", &subscription, id, now);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: id.into(),
+            mode: "explicit-notification".into(),
+            source_thread_id: None,
+        }]);
+    }
+    for (task_id, message_id, binding_id) in [
+        ("current-task", invitation, "binding-Alice"),
+        ("stale-task", stale, "previous-binding"),
+        ("unconfirmed-task", unconfirmed, "binding-Alice"),
+    ] {
+        let mut details = crate::board::BoardTaskDetails::legacy(task_id, true);
+        details.invitation = Some(crate::board::BoardInvitation {
+            peer_id: "a".into(),
+            binding_id: binding_id.into(),
+            message_id: message_id.into(),
+            created_ms: now,
+            original_status: Some("pending".into()),
+            original_owner: Some("sender".into()),
+            automatic_source: None,
+        });
+        server.commit(&[
+            Event::TaskCreated {
+                task: serde_json::from_value(serde_json::json!({
+                    "id": task_id, "owner": "sender", "created_by": "sender",
+                    "status": "invited", "created_ms": now, "updated_ms": now,
+                }))
+                .unwrap(),
+            },
+            Event::BoardDetailsChanged {
+                task_id: task_id.into(),
+                details,
+            },
+        ]);
+    }
+    server.commit(&[Event::WakeAttempted {
+        ids: vec![unconfirmed.into()],
+        attempted_ms: now,
+        retry: false,
+    }]);
+    let gate = server.register_gate.lock().unwrap();
+    let deferred = attempt_notification_detailed_with_at(&server, invitation, &subscription, now);
+    assert!(matches!(deferred, NotificationAttempt::Deferred(_)));
+    assert!(sink_calls.lock().unwrap().is_empty());
+    drop(gate);
+
+    timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    timers::tick_with_idle_at(&server, now + 2, &|_| true);
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
+    let state = server.state.lock().unwrap();
+    assert!(state.notification_delivery_accepted.contains_key(invitation));
+    assert_eq!(state.msgs[invitation].wake_attempt_count, 1);
+    assert_eq!(state.msgs[ordinary].wake_attempt_count, 0);
+    assert_eq!(state.msgs[stale].wake_attempt_count, 0);
+    assert_eq!(state.msgs[unconfirmed].wake_attempt_count, 1);
+    assert!(!state.notification_delivery_accepted.contains_key(unconfirmed));
+    assert_eq!(state.tasks["current-task"].status, "invited");
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

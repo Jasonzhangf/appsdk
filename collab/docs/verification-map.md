@@ -17,6 +17,9 @@ ordinary `collab send` accepts the message. After Close resumes, the daemon
 must deliver the original ID to one real Codex TUI turn. Bare `collab recv`
 must return the original body once. The test creates its own Rex server,
 loopback model fixture, and Collab state.
+The driver queries that server after destroying the exact session and waits
+for the private server process to exit. Both readbacks belong in the test
+receipt. A teardown failure fails the test and identifies the resource.
 
 ```sh
 COLLAB_REX_ACCEPTANCE_CLI=/absolute/path/to/rex \

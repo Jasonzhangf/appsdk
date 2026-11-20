@@ -4,6 +4,7 @@ import http.server
 import json
 import pathlib
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -192,16 +193,31 @@ trust_level = "trusted"
     finally:
         gate.with_suffix(".release").touch()
         try:
-            if session:
+            if session and server.poll() is None:
                 rex_call("api", "call", "-s", session, "session.destroy", "-",
                          payload={"session_id": session})
+                inventory = json.loads(rex_call("ls", "--json"))
+                assert all(entry["session_id"] != session for entry in inventory["sessions"]), (
+                    f"isolated Rex session still present: {session}"
+                )
+                print(json.dumps({"cleanup": "rex-session-absent", "session_id": session}), flush=True)
         finally:
             if server.poll() is None:
                 server.terminate()
-                server.wait(timeout=10)
+                try:
+                    server.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=5)
+            print(json.dumps({"cleanup": "rex-server-exited", "pid": server.pid}), flush=True)
+
+
+def cancel_test(signum, _frame):
+    raise SystemExit(128 + signum)
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, cancel_test)
     cli, rex_cli, codex_cli, project_dir, state_dir, gate_path = sys.argv[1:]
     with tempfile.TemporaryDirectory(prefix="collab-rex-publication-", dir="/private/tmp") as work:
         with http.server.ThreadingHTTPServer(("127.0.0.1", 0), LocalModel) as model:

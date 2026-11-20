@@ -411,6 +411,36 @@ fn goal_print_patrol_status(record: &Value) {
     }
 }
 
+fn project_goal_schedule(record: &mut Value, subscription: &Value) {
+    if subscription["event"] != "deadline" {
+        return;
+    }
+    if let Some(interval_ms) = subscription["interval_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+    {
+        let retained_interval = record["interval"]
+            .as_str()
+            .and_then(|value| parse_duration_to_ms(value).ok());
+        if retained_interval != Some(interval_ms) {
+            let label = if interval_ms % 1000 == 0 {
+                format!("{}s", interval_ms / 1000)
+            } else {
+                format!("{interval_ms}ms")
+            };
+            record["interval"] = Value::String(label);
+        }
+        record["every_ms"] = Value::Number(interval_ms.into());
+        record["rearm_interval_ms"] = Value::Number(interval_ms.into());
+    }
+    if let Some(repeat) = subscription["repeat_count"].as_u64() {
+        record["repeat_count"] = Value::Number(repeat.into());
+    }
+    if let Some(ttl) = subscription["goal_content"]["ttl_seconds"].as_u64() {
+        record["ttl_seconds"] = Value::Number(ttl.into());
+    }
+}
+
 fn goal_record_observation(
     root: &Path,
     scope: &GoalScope,
@@ -464,6 +494,7 @@ fn goal_record_observation(
         observed["error"] = Value::String(error.clone());
         return (observed, Some(error));
     };
+    project_goal_schedule(&mut observed, &remote_record);
     observed["collab_subscription"] = remote_record;
     observed["remote_state"] = Value::String(remote_status.clone());
     observed["observed"] = Value::String(remote_status.clone());
@@ -1019,12 +1050,16 @@ where
                 goal_record_apply_patrol(&mut record, &patrol);
             }
             if let Err(error) = goal_record_write(&scope, &record) {
-                record["active"] = Value::Bool(false);
-                record["observed"] = Value::String("unknown".into());
+                record["local_persistence_error"] = Value::String(error.clone());
+                let error = if collab_subscribed {
+                    record["recovery"] = Value::String(
+                        "Restore local storage and run appsdk goal status to reconcile the retained subscription.".into(),
+                    );
+                    format!("GOAL_SUBSCRIBE_REMOTE_APPLIED_LOCAL_PERSISTENCE_FAILED:{error}")
+                } else {
+                    error
+                };
                 record["error"] = Value::String(error.clone());
-                record["recovery"] = Value::String(
-                    "retain the returned subscription_id and cancel it after restoring local storage".into(),
-                );
                 drop(_goal_lock);
                 goal_fail(format_json, &error, Some(&record));
             }
@@ -1199,6 +1234,7 @@ where
                     by_id.unwrap_or_else(|| Err("GOAL_STATUS_SUBSCRIPTION_ID_MISSING".into()));
                 match by_id {
                     Ok((remote_status, remote_record)) => {
+                        project_goal_schedule(&mut record, &remote_record);
                         record["remote_state"] = Value::String(remote_status.clone());
                         record["collab_subscription"] = remote_record;
                         if remote_status == "armed" {
@@ -1228,6 +1264,7 @@ where
                             record["desired"] = Value::String("recovery_required".into());
                             record["observed"] = Value::String(remote_status);
                             record["active"] = Value::Bool(false);
+                            record["collab_subscribed"] = Value::Bool(false);
                             record["error"] = Value::String(error.clone());
                             record["recovery"] = Value::String(
                                 "Rerun appsdk goal subscribe --goal <path.md> to rearm a fresh one-shot deadline; no automatic renewal is attempted".into(),
@@ -1254,6 +1291,7 @@ where
                             ))) => {
                                 let retained_subject =
                                     record["subject"].as_str().map(str::to_owned);
+                                project_goal_schedule(&mut record, &remote_record);
                                 record["subscription_id"] = Value::String(resolved_id);
                                 record["remote_state"] = Value::String(remote_status);
                                 record["desired"] = Value::String("subscribed".into());

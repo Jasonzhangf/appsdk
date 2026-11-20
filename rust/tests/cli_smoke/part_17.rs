@@ -410,6 +410,31 @@ esac
     );
     assert_eq!(fs::read(&record_path).unwrap(), before_expired_status);
 
+    let mut one_shot: Value = serde_json::from_slice(&before_expired_status).unwrap();
+    one_shot["periodic_declared"] = Value::Bool(false);
+    let before_one_shot = serde_json::to_vec(&one_shot).unwrap();
+    fs::write(&record_path, &before_one_shot).unwrap();
+    let one_shot_status = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("STATUS_EXPIRED", "1")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(one_shot_status.status.success());
+    let one_shot_status: Value = serde_json::from_slice(&one_shot_status.stdout).unwrap();
+    assert_eq!(one_shot_status["active"], false);
+    assert_eq!(one_shot_status["collab_subscribed"], false);
+    assert_eq!(one_shot_status["observed"], "expired");
+    assert_eq!(one_shot_status["record"]["remote_state"], "expired");
+    assert!(one_shot_status["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:expired"));
+    assert_eq!(fs::read(&record_path).unwrap(), before_one_shot);
+    fs::write(&record_path, &before_expired_status).unwrap();
+
     let rearmed = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
         .current_dir(&root)
@@ -678,10 +703,17 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
         .unwrap();
     assert_eq!(result.status.code(), Some(1));
     let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(payload["active"], false);
+    assert_eq!(payload["active"], true);
     assert_eq!(payload["desired"], "subscribed");
-    assert_eq!(payload["observed"], "unknown");
+    assert_eq!(payload["observed"], "subscribed");
+    assert_eq!(payload["remote_state"], "armed");
+    assert_eq!(payload["collab_subscribed"], true);
+    assert_eq!(payload["collab_subscription"]["subscription"]["id"], "orphan");
     assert!(payload["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_SUBSCRIBE_REMOTE_APPLIED_LOCAL_PERSISTENCE_FAILED"));
+    assert!(payload["local_persistence_error"]
         .as_str()
         .unwrap()
         .contains("GOAL_RECORD_WRITE_FAILED"));
@@ -730,7 +762,8 @@ case "$1 $2" in
     printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-edit\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:$goal_id\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\",\"interval_ms\":${every:-300000},\"repeat_count\":${repeat:-100},\"ttl_seconds\":${ttl:-604800}}}"
     ;;
   "notify status")
-    printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-edit\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:${EDITED_GOAL_ID}\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\"}]}"
+    test -f .remote-edit-accepted
+    printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-edit\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:${EDITED_GOAL_ID}\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\",\"interval_ms\":180000,\"repeat_count\":4,\"goal_content\":{\"ttl_seconds\":604800}}]}"
     ;;
   *) exit 64 ;;
 esac
@@ -805,6 +838,22 @@ esac
         .contains("remote edit is applied while the local projection failed"));
     assert_eq!(fs::read(&record_path).unwrap(), before);
     assert!(root.join(".remote-edit-accepted").is_file());
+
+    let status = Command::new(binary())
+        .args(["goal", "status", "--goal-id", &goal_id, "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("EDITED_GOAL_ID", &goal_id)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["subscription_id"], "sub-edit");
+    assert_eq!(status["record"]["repeat_count"], 4);
+    assert_eq!(status["record"]["every_ms"], 180_000);
+    assert_eq!(status["record"]["ttl_seconds"], 604_800);
+    assert_eq!(fs::read(&record_path).unwrap(), before);
 
     let retried = edit();
     assert!(

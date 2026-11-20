@@ -218,7 +218,7 @@ impl Server {
         reuse_existing: bool,
     ) -> Result<PreparedRegisterEnvelope, String> {
         self.prepare_register_envelope_for_current(
-            worker_id, token, transport, project_scope, worker_cwd, app_scope,
+            worker_id, token, Some(transport), project_scope, worker_cwd, app_scope,
             reuse_existing, None, None,
         )
     }
@@ -227,7 +227,7 @@ impl Server {
         &self,
         worker_id: &str,
         token: &str,
-        transport: &SelectedTransport,
+        transport: Option<&SelectedTransport>,
         project_scope: ProjectScopeId,
         worker_cwd: &str,
         app_scope: AppServerId,
@@ -235,6 +235,9 @@ impl Server {
         current: Option<&RuntimeBinding>,
         pending_operation: Option<&str>,
     ) -> Result<PreparedRegisterEnvelope, String> {
+        if current.is_none() && transport.is_none() {
+            return Err("new registration requires a selected transport".into());
+        }
         let binding_text = sanitize_identifier(&format!("binding-{worker_id}"));
         let binding_id = current.map(|binding| binding.binding_id.clone())
             .map(Ok).unwrap_or_else(|| BindingId::new(binding_text.clone()))
@@ -270,6 +273,7 @@ impl Server {
                     ));
                     }
                     None => {
+                        let transport = transport.expect("new registration requires transport");
                         let runtime_text =
                             match (
                                 transport.session_id.as_deref(),
@@ -345,35 +349,38 @@ impl Server {
         };
         let agent_id = AgentId::new(worker_id.to_string()).map_err(|error| error.to_string())?;
         let runtime_id = RuntimeId::new(runtime_text).map_err(|error| error.to_string())?;
-        let native_thread_id = transport
-            .thread_id
-            .as_ref()
-            .map(|value| NativeThreadId::new(value.clone()))
-            .transpose()
+        let binding = if let Some(current) = current {
+            current.clone()
+        } else {
+            let transport = transport.expect("new registration requires transport");
+            let native_thread_id = transport
+                .thread_id
+                .as_ref()
+                .map(|value| NativeThreadId::new(value.clone()))
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            let session_id = transport
+                .session_id
+                .as_ref()
+                .map(|value| crate::identity::SessionId::new(value.clone()))
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            if transport.kind != TransportKind::Tmux && session_id.is_none() {
+                return Err("App Server registration requires session_id".into());
+            }
+            let mut binding = RuntimeBinding::new_with_session(
+                project_scope.clone(),
+                app_scope,
+                agent_id,
+                runtime_id,
+                binding_id.clone(),
+                session_id,
+                native_thread_id,
+            )
             .map_err(|error| error.to_string())?;
-        let session_id = transport
-            .session_id
-            .as_ref()
-            .map(|value| crate::identity::SessionId::new(value.clone()))
-            .transpose()
-            .map_err(|error| error.to_string())?;
-        if transport.kind != TransportKind::Tmux && session_id.is_none() {
-            return Err("App Server registration requires session_id".into());
-        }
-        let mut binding = RuntimeBinding::new_with_session(
-            project_scope.clone(),
-            app_scope,
-            agent_id,
-            runtime_id,
-            binding_id.clone(),
-            session_id,
-            native_thread_id,
-        )
-        .map_err(|error| error.to_string())?;
-        binding.tmux_endpoint = transport.tmux_endpoint.clone();
-        if let Some(current) = current {
-            binding = current.clone();
-        }
+            binding.tmux_endpoint = transport.tmux_endpoint.clone();
+            binding
+        };
         binding.validate().map_err(|error| error.to_string())?;
         let attempt_suffix = prior_attempt
             .then(|| format!("-retry-{snapshot_revision}"))
@@ -415,7 +422,7 @@ impl Server {
             token: token.to_string(),
             cwd: worker_cwd.to_string(),
             registered_ms,
-            transport: Some(transport.clone()),
+            transport: transport.cloned(),
         };
         Ok(PreparedRegisterEnvelope {
             nested_command_id,

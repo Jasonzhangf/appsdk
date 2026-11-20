@@ -64,6 +64,61 @@ fn missing_file_loads_an_empty_set() {
 }
 
 #[test]
+fn legacy_retained_slot_round_trips_without_becoming_a_current_binding() {
+    let root = temp_root("retained-wire-slot");
+    let store = BindingControlStore::new(&root);
+    let key = key();
+    let mut set = BindingControlSet::new();
+    set.commit(&key, value(&key, "actor", "first"), Some(0))
+        .unwrap();
+    set.commit(&key, value(&key, "actor", "second"), Some(1))
+        .unwrap();
+    store.save(&set).unwrap();
+    let path = root.join("identity-map.json");
+    let mut map: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let slot = &mut map["slots"][0];
+    let mut detached = slot["current"].take();
+    let old_transport = detached
+        .as_object_mut()
+        .unwrap()
+        .remove("transport")
+        .unwrap();
+    slot["identity_status"] = "unregistered".into();
+    slot["retained"] = detached.clone();
+    let transportful_previous = slot["previous"].clone();
+    std::fs::write(&path, serde_json::to_vec(&map).unwrap()).unwrap();
+
+    let loaded = store.load().unwrap();
+    let slot = loaded.slot(&key).unwrap();
+    assert!(slot.active_binding().is_none());
+    assert!(super::notification_contract::SelectedDeliveryBinding::from_slot(slot).is_none());
+    store.save(&loaded).unwrap();
+    let round_trip: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(round_trip, map);
+
+    store
+        .commit(ControlChange::Commit {
+            key: key.clone(),
+            value: value(&key, "actor", "third"),
+            expected_generation: Some(2),
+        })
+        .unwrap();
+    let updated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(updated["slots"][0]["retained_previous"], detached);
+    assert_eq!(updated["slots"][0]["previous"], transportful_previous);
+    assert!(updated["slots"][0].get("retained").is_none());
+
+    let mut bad = map;
+    bad["slots"][0]["retained"]["transport"] = old_transport;
+    std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+    assert!(store.load().is_err());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn rex_human_fence_survives_restart_rebuild_and_effect_clear() {
     use super::binding_slot::RexExecutionFence;
     let root = temp_root("human-fence");
@@ -1126,8 +1181,8 @@ fn project_reset_preserves_current_dsh_binding() {
     let store = BindingControlStore::new(&root);
     let dsh = key_in("/tmp/collab-binding-reset-dsh", "Alice");
     let mut binding = value(&dsh, "dsh-worker", "dsh-runtime");
-    binding.transport.kind = TransportKind::Dsh;
-    binding.transport.endpoint = Some("http://127.0.0.1:12700".into());
+    binding.transport.as_mut().unwrap().kind = TransportKind::Dsh;
+    binding.transport.as_mut().unwrap().endpoint = Some("http://127.0.0.1:12700".into());
     let mut set = BindingControlSet::new();
     set.commit(&dsh, binding.clone(), Some(0)).unwrap();
     store.save(&set).unwrap();
@@ -1204,7 +1259,7 @@ fn project_reset_delete_project_routes_keeps_only_retained_dsh_app_scope() {
         "Bob",
     );
     let mut dsh_value = value(&dsh, "dsh-worker", "dsh-runtime");
-    dsh_value.transport.kind = TransportKind::Dsh;
+    dsh_value.transport.as_mut().unwrap().kind = TransportKind::Dsh;
     let mut set = BindingControlSet::new();
     set.commit(&dsh, dsh_value, Some(0)).unwrap();
     set.commit(

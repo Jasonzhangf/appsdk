@@ -150,6 +150,26 @@ fn local_check_rejects_malformed_frame() {
 }
 
 #[test]
+fn local_check_rejects_corrupt_identity_map() {
+    let _test = test_guard();
+    let root = temp_root("local-corrupt-map");
+    let project_root = create_project(&root);
+    let state_root = root.join("host-state");
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::fs::write(state_root.join("identity-map.json"), b"{broken-map").unwrap();
+    let cli = copy_pair(&root);
+
+    let output = run_check(&cli, &project_root, &state_root, true);
+    assert_ne!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(
+        text(&output).contains("IDENTITY_MAP_DECODE_FAILED"),
+        "{}",
+        text(&output)
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn full_check_rejects_wrong_daemon_version() {
     let _test = test_guard();
     let root = temp_root("daemon-version");
@@ -281,7 +301,9 @@ printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"
     listener.set_nonblocking(true).unwrap();
     let state_before = snapshot(&state_root);
     let responder = std::thread::spawn(move || {
-        let mut stream = connect(&listener, LISTENER_ACCEPT_TIMEOUT);
+        // This clock starts before the CLI launches. The CLI still enforces
+        // its own health deadline after launch, including the delayed MCP.
+        let mut stream = connect(&listener, std::time::Duration::from_secs(15));
         assert_eq!(request(&mut stream)["op"], "Ping");
         std::io::Write::write_all(&mut stream, b"not json\n").unwrap();
     });

@@ -65,9 +65,14 @@ impl ProjectRuntimeManager {
     ) -> Result<Option<serde_json::Value>, String> {
         if !manual && !query { return Ok(None); }
         let control = self.binding_control_store().load()?;
-        let binding = control.current_for_worker(&context.project_scope, &context.app_scope_id, worker_id)?
-            .and_then(SelectedDeliveryBinding::from_slot)
+        let slot = control.current_for_worker(&context.project_scope, &context.app_scope_id, worker_id)?
             .ok_or_else(|| "IDENTITY_MAP_NOT_FOUND: communication caller has no current binding".to_owned())?;
+        let Some(binding) = SelectedDeliveryBinding::from_slot(slot) else {
+            if query {
+                return Ok(None);
+            }
+            return Err("IDENTITY_TRANSPORT_MISSING: communication caller retains identity without a current transport".into());
+        };
         let (exchange, latest, worker) = {
             let state = runtime.state.lock().unwrap();
             let exchange = state.msgs.values().filter(|message|

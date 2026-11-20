@@ -344,7 +344,7 @@ fn tmux_value_on_socket(
         codex_thread_id: None,
     };
     value.binding.tmux_endpoint = Some(endpoint.clone());
-    value.transport = SelectedTransport {
+    value.transport = Some(SelectedTransport {
         kind: TransportKind::Tmux,
         endpoint: Some(socket.into()),
         namespace: Some(session.into()),
@@ -358,7 +358,7 @@ fn tmux_value_on_socket(
         rex_endpoint: None,
         capabilities: vec!["send_message_to_pane".into()],
         self_check: "ok".into(),
-    };
+    });
     value
 }
 
@@ -664,6 +664,8 @@ fn rex_human_fence_survives_endpoint_adaptor_and_source_target_moves() {
     let mut endpoint_move = current.clone();
     endpoint_move
         .transport
+        .as_mut()
+        .unwrap()
         .rex_endpoint
         .as_mut()
         .unwrap()
@@ -1432,8 +1434,8 @@ fn repeated_binding_fact_does_not_roll_or_advance_generation() {
     .unwrap();
 
     let mut repeated = value(&key, "alice", "runtime-a", "endpoint-a");
-    repeated.transport.capabilities = vec!["changed".to_owned()];
-    repeated.transport.self_check = "changed self check".to_owned();
+    repeated.transport.as_mut().unwrap().capabilities = vec!["changed".to_owned()];
+    repeated.transport.as_mut().unwrap().self_check = "changed self check".to_owned();
 
     assert_eq!(
         slot.commit(&key, repeated, Some(1)).unwrap(),
@@ -1929,6 +1931,8 @@ fn rex_block_commit_retires_the_previous_current_and_persists_cleanup() {
             .reference_previous()
             .unwrap()
             .transport
+            .as_ref()
+            .unwrap()
             .rex_endpoint
             .as_ref()
             .unwrap()
@@ -1937,12 +1941,13 @@ fn rex_block_commit_retires_the_previous_current_and_persists_cleanup() {
     );
     assert_eq!(
         set.active_values()
-            .filter(|value| value.transport.kind == TransportKind::Rex
-                && value
-                    .transport
-                    .rex_endpoint
-                    .as_ref()
-                    .is_some_and(|endpoint| endpoint.block_id == "block-b"))
+            .filter(|value| value.transport.as_ref().is_some_and(|transport| {
+                transport.kind == TransportKind::Rex
+                    && transport
+                        .rex_endpoint
+                        .as_ref()
+                        .is_some_and(|endpoint| endpoint.block_id == "block-b")
+            }))
             .count(),
         1
     );
@@ -2036,6 +2041,8 @@ fn rex_publication_rejects_an_incomplete_current_without_mutation() {
     let mut incomplete = rex_value(&alice, "alice", "runtime-a", "alice-session", "block-a");
     incomplete
         .transport
+        .as_mut()
+        .unwrap()
         .rex_endpoint
         .as_mut()
         .unwrap()

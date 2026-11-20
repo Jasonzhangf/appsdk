@@ -138,17 +138,22 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
                 "3600000",
             ],
         );
-        if owned {
+        let first = if owned {
             fixture.run_public(
                 &["board", "claim", "first", "--expected-revision", "1"],
                 THREAD_B,
-            );
+            )
         } else {
             fixture.run_public(
                 &["board", "dispatch", "first", "--expected-revision", "1"],
                 THREAD_A,
-            );
-        }
+            )
+        };
+        assert_eq!(
+            first["goal_schedule"]["subscription"]["worker_id"],
+            alice["identity"]["worker_id"],
+            "{first}"
+        );
         fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
         publish(
             &fixture,
@@ -170,23 +175,6 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
             preferred["task"]["invited_peer"],
             alice["identity"]["worker_id"]
         );
-        // An unaccepted invitation has no task schedule owner. Only an
-        // accepted task needs its finite goal slot released here.
-        if owned {
-            fixture.run_public(
-                &[
-                    "goal",
-                    "reconcile",
-                    "--goal-id",
-                    "task:first",
-                    "--owner",
-                    "Alice",
-                    "--desired",
-                    "ended",
-                ],
-                THREAD_A,
-            );
-        }
         publish(
             &fixture,
             "pinned",
@@ -199,10 +187,34 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
                 "3600000",
             ],
         );
-        let pinned = fixture.run_public(
-            &["board", "dispatch", "pinned", "--expected-revision", "1"],
+        let dispatch_pinned = ["board", "dispatch", "pinned", "--expected-revision", "1"];
+        let before_capacity_error = fixture.current_state();
+        let error = rejected(&fixture, &dispatch_pinned, THREAD_A);
+        assert!(error.contains("maximum 3 active subscriptions"), "{error}");
+        let after_capacity_error = fixture.current_state();
+        assert_eq!(
+            after_capacity_error["board_details"]["pinned"],
+            before_capacity_error["board_details"]["pinned"]
+        );
+        assert_eq!(after_capacity_error["tasks"]["pinned"], before_capacity_error["tasks"]["pinned"]);
+        assert!(f7_goal_subscriptions(&after_capacity_error, "pinned").is_empty());
+        assert!(f7_messages(&after_capacity_error, "task-invitation:pinned").is_empty());
+        // Release schedule capacity without changing the first task's
+        // assignment or invitation, which is the selection control here.
+        fixture.run_public(
+            &[
+                "goal",
+                "reconcile",
+                "--goal-id",
+                "task:first",
+                "--owner",
+                "Alice",
+                "--desired",
+                "ended",
+            ],
             THREAD_A,
         );
+        let pinned = fixture.run_public(&dispatch_pinned, THREAD_A);
         assert_eq!(
             pinned["task"]["invited_peer"],
             alice["identity"]["worker_id"]
@@ -675,9 +687,9 @@ fn f7_execution_admission_dispatch_uses_disjoint_executor() {
     );
     assert_eq!(dispatched["task"]["reviewer_name"], "Alice", "{dispatched}");
     assert_eq!(dispatched["task"]["status"], "invited", "{dispatched}");
-    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
-    assert!(
-        dispatched["goal_schedule"]["subscription"].is_null(),
+    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
+    assert_eq!(
+        dispatched["goal_schedule"]["subscription"]["worker_id"], bob_worker,
         "{dispatched}"
     );
 
@@ -702,6 +714,11 @@ fn f7_execution_admission_dispatch_uses_disjoint_executor() {
     assert!(accepted["task"]["invited_peer"].is_null(), "{accepted}");
     assert_eq!(accepted["task"]["reviewer_name"], "Alice", "{accepted}");
     assert_eq!(accepted["goal_schedule"]["armed"], true, "{accepted}");
+    assert_eq!(
+        accepted["goal_schedule"]["subscription"],
+        dispatched["goal_schedule"]["subscription"],
+        "acceptance keeps the subscription committed at dispatch"
+    );
     assert_eq!(
         accepted["goal_schedule"]["subscription"]["worker_id"], bob_worker,
         "{accepted}"
@@ -1165,7 +1182,7 @@ fn f7_execution_admission_decline_stays_available() {
         "f7-decline",
         &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
     );
-    fixture.run_public(
+    let invited = fixture.run_public(
         &[
             "board",
             "invite",
@@ -1177,6 +1194,8 @@ fn f7_execution_admission_decline_stays_available() {
         ],
         THREAD_A,
     );
+    assert_eq!(invited["goal_schedule"]["armed"], true, "{invited}");
+    let first_id = &invited["goal_schedule"]["subscription"]["id"];
     let declined = fixture.run_public(
         &[
             "board",
@@ -1193,6 +1212,43 @@ fn f7_execution_admission_decline_stays_available() {
     assert_eq!(declined["task"]["status"], "pending");
     assert_eq!(declined["task"]["executor_name"], "Bob");
     assert_eq!(declined["task"]["reviewer_name"], "Alice");
+    assert_eq!(declined["goal_schedule"]["armed"], false, "{declined}");
+    assert_eq!(&declined["goal_schedule"]["subscription"]["id"], first_id);
+    assert_eq!(declined["goal_schedule"]["subscription"]["status"], "cancelled");
+
+    let reinvited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "f7-decline",
+            "--to",
+            "Bob",
+            "--expected-revision",
+            "3",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(reinvited["task"]["status"], "invited");
+    assert_eq!(reinvited["goal_schedule"]["armed"], true, "{reinvited}");
+    assert_ne!(&reinvited["goal_schedule"]["subscription"]["id"], first_id);
+
+    let withdrawn = fixture.run_public(
+        &[
+            "board",
+            "withdraw",
+            "f7-decline",
+            "--expected-revision",
+            "4",
+            "--reason",
+            "fixture withdraws the renewed invitation",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(withdrawn["task"]["status"], "pending");
+    let state = fixture.current_state();
+    let subscriptions = f7_goal_subscriptions(&state, "f7-decline");
+    assert_eq!(subscriptions.len(), 2);
+    assert!(subscriptions.iter().all(|subscription| subscription["status"] == "cancelled"));
 }
 
 fn rejected(fixture: &AppFixture, args: &[&str], thread: &str) -> String {

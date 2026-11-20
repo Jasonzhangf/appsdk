@@ -2174,7 +2174,10 @@ action=restore_master），或由已授权 master 委托。CLI 识别当前宿�
 新 session 完成接入后，离线同名会话可被接替。daemon 按精确 session ID 更新当前绑定，
 把旧会话改回数字名。当前同名端点仍在线时，按回执取得本次明确接替确认后再换绑。
 如果收到 `DESKTOP_BRIDGE_HANDSHAKE_FAILED`，保留阶段和宿主错误，交由 Desktop
-宿主维护者处理。握手通过后在原会话重跑 `collab context`。
+宿主维护者处理。宿主恢复后，在原会话重跑 `collab context`。MCP wrapper 会重新握手。
+如果 Rex 中收到 `REX_EXECUTION_CALLER_MISMATCH`，保留原错误并检查当前 Codex
+的执行归属。共享 AppServer 的 PID 可能与前台 TUI 不同。新建独立 Rex TUI 时可用
+`codex --no-daemon`，再从该会话执行 `collab context`。
 
 DSH 在 tmux 中运行时仍使用 gateway session 识别当前执行者。pane 只定位观测。
 普通身份恢复读取持久身份与绑定，

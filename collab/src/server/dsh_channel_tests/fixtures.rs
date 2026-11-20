@@ -156,7 +156,7 @@ fn registration_gateway<W>(
     wake: W,
 ) -> Gateway
 where
-    W: Fn() -> Option<String> + Send + 'static,
+    W: Fn(&serde_json::Value) -> Option<String> + Send + 'static,
 {
     let root = root.to_path_buf();
     let registrations: Arc<Mutex<HashMap<String, (String, String, String)>>> =
@@ -189,7 +189,7 @@ where
                         .to_string(),
                     )
                 } else {
-                    wake()
+                    wake(&request)
                 }
             }
             "agent-reply" => {
@@ -234,11 +234,17 @@ where
     })
 }
 
-fn wake_reply(message_id: &str) -> Option<String> {
+fn wake_reply(request: &serde_json::Value) -> Option<String> {
     Some(
         serde_json::json!({
             "ok": true,
-            "result": {"messageId": message_id, "runtimeId": "rt-1", "agentId": "ses-1"}
+            "result": {
+                "messageId": request["params"]["messageId"],
+                "runtimeId": request["params"]["runtimeId"],
+                "agentId": request["params"]["agentId"],
+                "status": "wake-signalled",
+                "inboundOwner": "poll"
+            }
         })
         .to_string(),
     )

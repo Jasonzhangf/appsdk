@@ -463,18 +463,18 @@ fn dispatch_gap_reminder_ignores_non_execute_undispatched_phase() {
 fn dispatch_gap_reminder_ignores_cancelled_ticket_with_undispatched_execute_phase() {
     let mut fixture = AppFixture::new();
     let facts = setup_master_and_peer(&mut fixture);
-    seed_peer_activity(
+    // No peer matches the requested role at publish. The native thread stays
+    // present, so this fixture exercises dispatch eligibility without retirement.
+    publish_waiting_assignment_ticket(
         &mut fixture,
-        &facts.project,
-        &facts.peer,
-        &facts.peer_session,
-        "offline",
-        "idle",
+        "cancelled-gap",
+        THREAD_B,
+        &["--prefer-role", "designer"],
     );
-    publish_waiting_assignment_ticket(&mut fixture, "cancelled-gap", THREAD_B, &[]);
     fixture.update_current_state(|state| {
         state["tasks"]["cancelled-gap"]["status"] = json!("cancelled");
     });
+    fixture.run_public(&["context", "--work-roles", "designer"], THREAD_A);
     seed_peer_activity(
         &mut fixture,
         &facts.project,

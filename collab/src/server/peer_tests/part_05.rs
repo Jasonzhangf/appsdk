@@ -1675,7 +1675,7 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
     );
     assert!(
         responsibilities.iter().any(|line| line.as_str().is_some_and(|text|
-            text.contains("must not stop to report to the master and wait for a dispatch"))),
+            text.contains("hand back the result, acceptance evidence and any remaining obligations once"))),
         "the common handoff duty remains in responsibilities: {brief}"
     );
     let operations = peer.data["operations"].as_array().expect("operations");
@@ -1706,11 +1706,9 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
     let master_completion = master.data["role_brief"]["completion_action"]
         .as_str()
         .expect("master completion");
-    let master_completion_lower = master_completion.to_ascii_lowercase();
     assert!(
-        master_completion_lower.contains("never to itself")
-            || master_completion_lower.contains("idle request to yourself"),
-        "master completion keeps the no-self-idle rule: {master_completion}"
+        master_completion.contains("to the user or an explicitly assigned upstream owner"),
+        "master completion identifies its upstream recipient: {master_completion}"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

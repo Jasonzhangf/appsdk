@@ -63,8 +63,7 @@ fn initial_tmux_registers_once_without_participant_return() {
             .filter_map(Value::as_str)
             .any(|rule| {
                 rule.contains("no authorized next action remains")
-                    && rule
-                        .contains("must not stop to report to the master and wait for a dispatch")
+                    && rule.contains("resume authorized work")
                     && rule.contains("Close unused owned patrol tasks and timed subscriptions")
                     && rule.contains("keep direct-message reception")
             })

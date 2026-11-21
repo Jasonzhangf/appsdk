@@ -71,6 +71,24 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         let workflow = &snapshot["role_brief"]["workflow_template"];
         let brief = &snapshot["role_brief"];
         let responsibilities = brief["responsibilities"].as_array().unwrap();
+        let handoff_rules: Vec<_> = responsibilities
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|rule| rule.contains("dispatch one complete board contract"))
+            .collect();
+        assert_eq!(handoff_rules.len(), 1, "{label}: {handoff_rules:?}");
+        assert!(handoff_rules[0]
+            .contains("Skip manual ACKs, progress reports, status chasing, idle requests"));
+        assert!(handoff_rules[0].contains("an evidenced blocker requiring action"));
+        assert!(handoff_rules[0].contains("once to the configured receiver"));
+        let role_text = brief.to_string();
+        for retired_rule in [
+            "report routinely",
+            "explicit idle approval",
+            "to the current master for the record",
+        ] {
+            assert!(!role_text.contains(retired_rule), "{label}: {retired_rule}");
+        }
         for route in [
             "Make ordinary technical decisions autonomously",
             "factual questions to the owning peer",

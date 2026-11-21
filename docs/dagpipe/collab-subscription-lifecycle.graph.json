@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-subscription-lifecycle",
   "version": "0.9.0",
-  "delivery_boundary": "没有当前可投递承载时保留 armed、订阅 ID、进度和 TTL。是否有当前承载只影响投递尝试。历史 transport-lost 仍沿原精确恢复路径处理。",
+  "delivery_boundary": "认证后的逻辑主体可在没有当前可投递承载时创建、读取和管理订阅。承载投影可为空。承载缺失和单独变更都保留 armed、订阅 ID、进度、TTL 及待投递 occurrence。历史 transport-lost 仍沿原精确恢复路径处理。",
   "description": "一次订阅生命周期转换的SESE。本人、项目master和当前typed CEO按授权范围管理目标长程计划，目标稳定名字保持owner。master派单提供完整内容和明确周期并原子开启目标订阅。新周期长程计划默认100次，显式次数有效，TTL与次数任一耗尽即结束；旧单次记录和通用通知缺省值保持。默认direct-message由daemon维护。board巡检、standing project patrol及idle提醒沿节点中现有范围、取消和提醒时序，不因本次代设长程订阅变更。重试与换载体保留进度，终态不自动复活，失败输出明确结果。",
   "inputs": [{"id": "subscription_transition_request", "schema": "Object"}],
   "nodes": [
@@ -9,7 +9,7 @@
       "id": "读取持久订阅与目标",
       "operator": "appsdk.collab_subscription.select_transport",
       "operator_version": "1",
-      "description": "读取 authenticated owner 的已提交 binding、稳定 owner、当前载体、subscription ID、事件类别、subject、schedule、TTL、fired count、当前生命周期状态、取消原因与恢复条件和既有投递位置。读取 board 巡检的 task scope 与每个 scope 的取消状态。对 master project-patrol，同时读取当前 master grant、项目 scope、精确订阅、项目任务的未关闭状态与等待记录，以及项目进度上报 revision；只认既有进度记录，不从自由文本原因断言已上报。不得重新注册身份或按 transport 猜测，不得从 task 状态或 tmux 界面推断宿主活动。",
+      "description": "读取已认证的当前逻辑主体、subscription ID、事件、subject、schedule、TTL、fired count、状态、取消原因和恢复条件。当前投递投影存在时读取，用于实际投递。读取 board 巡检的 task scope 与每个 scope 的取消状态。对 master project-patrol，同时读取当前 master grant、项目 scope、精确订阅、项目任务的未关闭状态与等待记录，以及项目进度上报 revision；只认既有进度记录，不从自由文本原因断言已上报。不得重新注册身份或按 transport 猜测，不得从 task 状态或 tmux 界面推断宿主活动。",
       "inputs": ["subscription_transition_request"],
       "output": {"id": "subscription_scope", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

@@ -79,7 +79,9 @@ fn goal_schedule_target_with_control(
         .and_then(|slot| slot.active_binding())
         .ok_or_else(|| Resp::err("GOAL_SCHEDULE_TARGET_UNAVAILABLE"))?;
     let target = slot.binding.agent_id.as_str();
-    authoritative_send_binding(state, &route, target).map_err(Resp::err)?;
+    if !state.workers.contains_key(target) {
+        return Err(Resp::err("GOAL_SCHEDULE_TARGET_UNAVAILABLE"));
+    }
     Ok(target.to_owned())
 }
 
@@ -283,10 +285,7 @@ fn prepare_goal_schedule(
             .workers
             .get(target)
             .ok_or_else(|| Resp::err("goal schedule target is not registered"))?;
-        let transport = selected_transport_for_worker(worker)
-            .ok_or_else(|| Resp::err("registered worker has no server-selected transport"))?;
-        let address = notification_target(&transport)
-            .ok_or_else(|| Resp::err("selected transport has no route address"))?;
+        let projection = notification_route_projection(worker);
         let periodic_request = change.interval_ms.is_some()
             || change.trigger_ms.is_none()
                 && matching
@@ -410,8 +409,8 @@ fn prepare_goal_schedule(
                 worker_id: target.into(),
                 event: "deadline".into(),
                 subject: Some(subject.clone()),
-                target: address.to_string(),
-                method: transport.kind.as_str().into(),
+                target: String::new(),
+                method: String::new(),
                 trigger_ms: Some(trigger),
                 trigger_times_ms: Vec::new(),
                 interval_ms: interval,
@@ -427,15 +426,14 @@ fn prepare_goal_schedule(
                 periodic_declared: interval.is_some(),
                 goal_content: None,
             });
-        if subscription.worker_id != target
-            || subscription.target != address
-            || subscription.method != transport.kind.as_str()
-        {
+        if subscription.worker_id != target {
             superseded.extend(pending_messages_for_subscription(state, &subscription.id));
         }
         subscription.worker_id = target.into();
-        subscription.target = address.to_string();
-        subscription.method = transport.kind.as_str().into();
+        if let Some((method, address)) = projection {
+            subscription.method = method;
+            subscription.target = address;
+        }
         subscription.subject = Some(subject);
         subscription.trigger_ms = Some(trigger);
         subscription.expires_ms = expiry;

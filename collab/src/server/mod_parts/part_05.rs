@@ -619,6 +619,12 @@ pub(crate) fn selected_transport_for_worker(worker: &WorkerRec) -> Option<Select
     worker.transport.clone()
 }
 
+fn notification_route_projection(worker: &WorkerRec) -> Option<(String, String)> {
+    let transport = worker.transport.as_ref()?;
+    let target = notification_target(transport)?.into_owned();
+    Some((transport.kind.as_str().to_owned(), target))
+}
+
 pub(crate) fn notification_target(
     transport: &SelectedTransport,
 ) -> Option<std::borrow::Cow<'_, str>> {

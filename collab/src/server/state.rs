@@ -327,6 +327,8 @@ pub struct NotificationDeliveryFailure {
     pub failed_ms: i64,
     #[serde(default)]
     pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_on_reconnect: Option<bool>,
 }
 
 /// Durable identity of one committed receive batch. The receive identity is
@@ -1547,6 +1549,8 @@ pub enum Event {
         failed_ms: i64,
         #[serde(default)]
         retryable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_on_reconnect: Option<bool>,
     },
     /// The native transport accepted the notification for this message. A
     /// later explicit recovery must refuse to resend it even though the

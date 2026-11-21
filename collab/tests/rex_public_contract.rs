@@ -32,6 +32,118 @@ fn direct_subscription(status: &Value, worker_id: &str) -> Value {
 
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
+fn rex_peers_can_exchange_mail_after_loading_a_detached_name() {
+    let mut fixture = RexLiveFixture::new("detached-name");
+    let detached = fixture.create_receiver_session("detached");
+    let sender = fixture.create_receiver_session("sender");
+    fixture.wait_receiver_ready(&detached, Duration::from_secs(20));
+    fixture.wait_receiver_ready(&sender, Duration::from_secs(20));
+    fixture.start_daemon();
+    let detached_id = worker_id(snapshot(&fixture.context_provide(&detached)));
+    let sender_id = worker_id(snapshot(&fixture.context_provide(&sender)));
+    fixture.stop_daemon();
+
+    // Reproduce the persisted shape written when a Rex name loses its attachment.
+    let path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let detached_slot = map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| slot["current"]["binding"]["agent_id"] == detached_id)
+        .unwrap();
+    let current = detached_slot["current"].as_object_mut().unwrap();
+    assert!(current.remove("transport").is_some());
+    current.remove("rex_execution");
+    current.remove("rex_execution_fence");
+    let expected_slot = detached_slot.clone();
+    // The 0527 writer also emitted an active sender with detached previous facts.
+    let sender_row = map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| slot["current"]["binding"]["agent_id"] == sender_id)
+        .unwrap();
+    let mut history = sender_row["current"].clone();
+    let fields = history.as_object_mut().unwrap();
+    fields.remove("transport");
+    fields.remove("rex_execution");
+    fields.remove("rex_execution_fence");
+    sender_row["retained_previous"] = history.clone();
+    fs::write(&path, serde_json::to_vec(&map).unwrap()).unwrap();
+
+    fixture.start_daemon();
+    let receiver = fixture.create_receiver_session("receiver");
+    fixture.wait_receiver_ready(&receiver, Duration::from_secs(20));
+    let receiver_id = worker_id(snapshot(&fixture.context_provide(&receiver)));
+    let updated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(updated["slots"]
+        .as_array()
+        .unwrap()
+        .contains(&expected_slot));
+    let sender_row = updated["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["current"]["binding"]["agent_id"] == sender_id)
+        .unwrap();
+    assert_eq!(sender_row["retained_previous"], history);
+    let directory = fixture.run_ok(&["directory"], None);
+    let retained = directory["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["worker_id"] == detached_id)
+        .expect("the detached name remains registered");
+    assert!(retained["transport"].is_null());
+    assert!(retained["channel_type"].is_null());
+
+    let body = "Collab receipt after reading a detached name";
+    let sent = fixture.run_ok(
+        &[
+            "send",
+            "--to",
+            &receiver_id,
+            "--subject",
+            "startup recovery",
+            body,
+        ],
+        Some(&sender.agent_session_id),
+    );
+    let id = sent["msg_id"]
+        .as_str()
+        .or(sent["message_id"].as_str())
+        .expect("send returned a message ID");
+    assert_eq!(sent["durable"], true);
+    fixture.wait_receiver_document(&receiver, Duration::from_secs(30), |value| {
+        value["kind"] == "test_receiver_raw_input"
+            && value["received"]
+                .as_str()
+                .is_some_and(|text| text.contains(id) && text.contains(body))
+    });
+    let received = fixture.run_ok(
+        &["recv", "--timeout", "0"],
+        Some(&receiver.agent_session_id),
+    );
+    let message = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == id)
+        .expect("recv returned the sent message");
+    assert_eq!(message["from"], sender_id);
+    assert_eq!(message["body"], body);
+    let receipt = fixture.run_ok(&["msg", id], Some(&sender.agent_session_id));
+    assert_eq!(receipt["consumed_by_recv"], true);
+    fixture.evidence(
+        "mail_consumed_after_detached_name_restart",
+        json!({"message_id": id}),
+    );
+    assert!(fixture.finish().is_empty());
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_context_automatically_discovers_current_block() {
     let mut fixture = RexLiveFixture::new("auto-context");
     let agent = fixture.create_receiver_session("auto-context");

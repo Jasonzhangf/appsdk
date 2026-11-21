@@ -275,7 +275,7 @@ master 与 peer 收到具体执行请求，在接受邀请或开始执行前，�
 
 | 当前请求 | 直接执行的命令 | 到此为止的条件 |
 |---|---|---|
-| 用户要求注册/恢复，或当前身份确实缺失 | `collab context` | 读取 registered、identity、work_roles、role_brief、operations、next_actions。已有当前有效回执就复用；仅按返回的缺失事实通过 `context --provide '<真实事实JSON>'` 补充，不猜宿主事实。 |
+| 用户要求注册/恢复，或当前身份确实缺失 | `collab context` | 读取 registered、identity、work_roles、role_brief、operations、next_actions。缺宿主事实时将回执交给对应来源的维护者，恢复后从原会话重跑。 |
 | 设置或修改自己的工作角色 | `collab context --work-roles '<完整角色集合，逗号分隔>'` | 检查 work_roles_update 回执；保留仍需的原角色。成功即完成角色设置，不继续创建任务或设置执行者。 |
 | 撤销自己的全部工作角色 | `collab context --work-roles ''` | 仅在用户明确要求清空时执行，不用作排障试探。 |
 | 当前 master 按用户指令给别人设置角色 | `collab context --for-name '<稳定名字>' --work-roles '<完整角色集合>'` | `--for-name` 是设置目标名字的专长，不是切换调用者身份。 |
@@ -333,9 +333,9 @@ master 代写来绕过当前身份失败。只读一次 `collab --version` 可�
 归属”。名字是 TUI、Codex Desktop 和 DSH 唯一的工作归属、身份、投递和任务锚点：
 第一次绑定分配固定名字；后续绑定与恢复可显式继承已有名字；新注册为新会话新增
 名字；旧名字在旧持有者离线或获得用户授权时可顶替。TUI 首次绑定把 tmux session
-改名为 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>` 并读回确认；只有
-固定位置 1 可升为 Jenny。正常改名由 Collab 负责，布局由共享 manifest 负责。
-改名失败不提交身份，持久化失败回滚原名。Codex
+改名为 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>` 并读回确认。没有
+唯一固定位置时使用 `<tmux session 编号>_<Collab名字>`；固定布局内只有位置 1 可升为
+Jenny。Collab 先提交当前绑定，再完成改名。改名失败时保留绑定并返回待完成的效果。Codex
 Desktop 的 agent sessionID 和 DSH 的 gateway sessionID 只是传输载体，不执行 tmux
 改名。tmux session `$N`、pane、socket 和 server PID 仅供探测与投递定位，不是
 身份键、名字占用键或任务 owner。身份只读取当前 identity map。旧版本的数据通过
@@ -361,6 +361,11 @@ master 与 peer 均可管理本人的 longhorizon goal。项目master派单时�
 [恢复操作](references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理)。
 
 Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
+
+在 macOS 上，`DAEMON_UNAVAILABLE` 时先查 `launchctl print "gui/$(id -u)/com.appsdk.collab"`。
+若尚未激活或 job 反复退出，把当前状态和 stderr 的首个错误交给用户维护者。
+服务恢复后，用 `collab status` 核对 `host_ready`、`daemon_version`，再用
+`collab directory` 核对项目目录，最后回到原 agent 会话执行 `collab context`。
 
 Collab/AppSDK 与 tmux 使用独立生命周期。Collab 安装、重启、注册、身份恢复、
 巡检或 daemon 不可达，都不得触发 tmux server 的重启或停止，也不得关闭、
@@ -394,12 +399,10 @@ context. An explicit current Desktop bridge capability is a transport update,
 not an error-driven fallback. Once a native binding is selected, tmux is never
 a message, wake, presence, or status fallback. Its
 observed tmux endpoint is delivery placement only. cwd selects the project,
-and the stable name owns the work. The reported agent sessionID is the current
-execution carrier; tmux session `$N`, pane, socket and server PID locate
-transport only, while the TUI's fixed tmux session name (the role name set at
-first successful registration) is its identity anchor. Same-name session
-changes update all unclosed board assignments. Pane history and old native
-addresses do not select or protect identity.
+and the stable Collab name owns the work. The current agent sessionID identifies
+the executor. For tmux attachment, naming and takeover, follow
+[the host registration procedure](#宿主注册所需信息). Same-name session changes
+update all unclosed board assignments.
 Desktop agents use the same CLI entry as other hosts: `collab context`,
 `collab sendmessage` and `collab recv`. Calling an MCP tool is not an identity
 or messaging prerequisite. Desktop's identity anchor is the current agent
@@ -853,15 +856,12 @@ replace it directly. Do not require target snapshots, old credentials, digests,
 grant generations or a second identity approval. Omitted approval leaves peer
 restoration successful and the incumbent unchanged.
 
-Tmux (TUI) uses the fixed tmux session name as its identity anchor. The first
-successful registration renames the current tmux session to the role name and
-reads it back; later bindings and recovery continue by that fixed name. Pane,
-tmux session `$N`, pane PID, socket, server PID, native thread, activity and
-capture locate delivery and observation only and do not select the identity.
-Rename failure aborts the identity commit; persistence failure rolls back the
-previous session name. Desktop binds by agent sessionID and DSH by gateway
-sessionID; neither renames tmux. Endpoint status and message delivery remain
-separate from identity restoration.
+For tmux, the daemon verifies the current iTerm2 attachment, binds the tmux
+session ID to the Collab name and reads back the physical rename. Follow
+[the host registration procedure](#宿主注册所需信息) for missing attachment,
+takeover and rename outcomes. Desktop uses the agent sessionID and DSH uses the
+gateway sessionID. Endpoint status and message delivery remain separate from
+identity restoration.
 
 The CLI reads `DSH_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID` and
 current pane facts. A unique saved DSH identity restores from its current
@@ -917,8 +917,9 @@ ledger when the caller has a unique binding.
 
 If `collab context` fails explicitly, preserve the original error and affected
 scope. Do not retry automatically, edit route/identity files, copy tokens,
-start another daemon, or invent a fallback. Daemon lifecycle is outside the
-agent interface. Ordinary identity recovery uses `collab context` only.
+start another daemon, or invent a fallback. For an unavailable service, use the
+[read-only diagnostics and owner handoff](#全局-daemon-与默认身份恢复).
+Ordinary identity recovery uses `collab context` only.
 
 Master authority is separate from identity. The authority owner is the current
 typed grant in the exact project and app scope, with only two states: empty (no
@@ -1445,9 +1446,8 @@ scheduling-turn counter or automatic rearm.
 Legacy managed records do not receive child-targeted liveness work or new
 assignments. Their historical `subagent-status` facts remain diagnostic input.
 Codex thread history is read only from the owning AppServer when supported and
-is never fabricated. A tmux pane locates delivery and observation only; it is
-not an identity anchor, task owner, or snapshot receipt. The TUI identity
-anchor is the fixed tmux session name, not the pane or session `$N`.
+is never fabricated. For tmux, the current iTerm2 pane locates the attached
+session. The project's stable Collab name owns tasks and subscriptions.
 
 ## 全局 CEO 与项目 master
 
@@ -2056,7 +2056,8 @@ created, updated, or closed until its verified terminal receipt says so.
 Read-only operator diagnostics remain available for human audit: `collab who`,
 `collab status --all`, `collab worker status`, `collab
 route resolve`, and `collab master status`. They are not agent identity
-recovery steps. User daemon maintenance is outside the agent interface.
+recovery steps. For an unavailable service, follow the
+[read-only diagnostics and owner handoff](#全局-daemon-与默认身份恢复).
 `collab init` is not an agent bootstrap and not a second identity algorithm: it
 drives the same daemon identity gate as `collab context`, and it remains the
 documented entry for existing AppSDK init consumers. Historical pane claims
@@ -2087,9 +2088,9 @@ Endpoint liveness remains separate from durable identity validity.
 
 Missing facts are the terminal of this invocation: `registered=false`,
 `identity=null`, and `requires_identity_update` gives exact `required_fields`,
-`reason`, `action`, and `exact_error`. The agent uses one
-`collab context --provide` for this invocation's requested current facts; native
-facts are required on every new context call, even after registration. Initial
+`reason`, `action`, and `exact_error`. Give that receipt to the owner of the
+missing capability. Rerun `collab context` in the same host when it is ready.
+Native facts are collected on every new context call, even after registration. Initial
 registration does not wait for challenge. Root failures and explicit
 conflicts preserve the original error and do not masquerade as a successful
 snapshot:
@@ -2138,32 +2139,49 @@ changes, or clears master authority; init is not an implicit authority reset.
 Agents do not run a separate identity, route or archive probe, or a manual
 subscription, as part of bootstrap.
 
-## 三种宿主的注册方式与锚点（DSH / Codex TUI / Codex Desktop）
+<a id="三种宿主的注册方式与锚点dsh--codex-tui--codex-desktop"></a>
 
-注册入口对三种宿主相同：`collab context`。宿主只决定锚点与要报告的事实，
+## 宿主注册所需信息
+
+在目标项目和当前 agent 会话中执行 `collab context`。宿主决定要报告的事实，
 不决定角色：任何宿主注册后默认是 peer；成为 master 只能由用户明确授权
 （`collab master promote --approval '…'` 或 `collab context --approve-grant`
-action=restore_master），或由已授权 master 委托。注册前先确认自己运行在哪种
-宿主，再报告该宿主的真实事实，不要伪造或复用旧值。
+action=restore_master），或由已授权 master 委托。CLI 识别当前宿主，读取它提供的
+本次事实并提交给 daemon。daemon 按当前绑定和实时端点证据裁决。
 
 | 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
 | --- | --- | --- | --- |
-| DSH | gateway session（`DSH_SESSION_ID`）+ communication API（gateway 控制 socket 与 runtime id） | 普通 `collab context` 由 CLI 读取 gateway 发布的控制能力并查询该真实 session 的当前事实；已有注册沿已提交 route 恢复。`--provide` 仅用于显式提供真实 DSH 能力 | 不手工猜测或从日志、plist 找 ids；不填 Codex thread/namespace；不与 appserver/tmux 候选混报；不用 tmux pane 当锚点 |
-| Codex TUI / CLI | AppServer session + thread，或首次注册后固定的 tmux session 名字（角色注册名，不是 `$N`/pane） | `session_id`、`thread_id`、`endpoint`、`namespace`；CLI 自动读 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、`TMUX_PANE` | 不假设自己一定有 tmux pane；不把 `$N`/pane 当身份键；不填 pane 冒充 Codex 会话；不借用其他进程的 AppServer endpoint |
+| DSH | 当前 gateway session（`DSH_SESSION_ID`） | CLI 用本次 gateway session 查已有身份。首次建立通信时从 gateway 获取该 session 的控制能力；gateway 负责 Poll/Ack | 不从日志或 plist 猜 ID，不混报 Codex 或 tmux 字段 |
+| Codex TUI / CLI | 当前 agent session；用该 TUI 的已选适配器定位投递 | 原生 AppServer 提供 `session_id`、`thread_id`、`endpoint`、`namespace`。选用 tmux 时，daemon 从实时 iTerm2 pane 与 client TTY 核实所连 session。新旧角色显示名由 daemon 按原生 ID 执行并读回。 | 不用 tmux 的 `$N` 或内部 `%pane` 冒充 agent session 或 iTerm2 pane，不借用其他进程的 endpoint |
 | Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
+| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 在当前 block 运行 `collab context`。该命令通过 Rex 原生接口取得本次 server、Rex session 和 block ID，并使用当前项目目录 | 不把 Rex session 当作 agent session，不混入 AppServer thread/endpoint/namespace |
 
-锚点归属规则：一个宿主只有一个锚点；DSH 的锚点是 gateway session 加 gateway
-控制面标识，不是 tmux pane，即使该 DSH 会话在 tmux 里启动，pane 也只定位
-观测、不承载身份。普通身份恢复只读持久身份与绑定，不重新 Register、不回环、
+返回 `missing_facts` 时，`result.requires.fields` 列出缺项，`sources` 给出来源。
+普通注册把缺项交给当前宿主的维护者。`--provide` 用于依现有能力合同的非标准集成诊断。
+
+返回 `registered: true` 后核对名字。需要验证消息时，核对接收方的正式
+`recv` 回执；DSH 查 gateway Poll/Ack。服务不可达时先检查服务启动结果。
+如果返回 `TMUX_OBSERVATION_CAPABILITY_MISSING`，当前缺的是 daemon 的 tmux
+机器端点声明。宿主维护者处理此项；当前会话在声明就绪后重跑 `collab context`。
+如果返回 `TMUX_ITERM2_PANE_REQUIRED`，当前 session 尚无已核实的 iTerm2 接入。
+`TMUX_ITERM2_OBSERVATION_UNSUPPORTED` 表示当前平台无法验证 iTerm2 接入。tmux 承载的注册与投递要求运行在能取得该证据的 macOS 宿主。
+新 session 先保持原生编号。已有逻辑名字保留离线状态，待 daemon 找到可投递承载。
+新 session 完成接入后，离线同名会话可被接替。daemon 按精确 session ID 更新当前绑定，
+把旧会话改回数字名。当前同名端点仍在线时，按回执取得本次明确接替确认后再换绑。
+物理改名失败时，读取回执中的 `physical_anchor` 结果。已提交的逻辑身份继续有效。
+如果 Rex 中收到 `REX_EXECUTION_CALLER_MISMATCH`，保留原错误并检查当前 Codex
+的执行归属。共享 AppServer 的 PID 可能与前台 TUI 不同。新建独立 Rex TUI 时可用
+`codex --no-daemon`，再从该会话执行 `collab context`。
+
+DSH 在 tmux 中运行时仍使用 gateway session 识别当前执行者。pane 只定位观测。
+普通身份恢复读取持久身份与绑定，
 不要求通信可达。显式 `--recover-communication` 先按当前精确绑定的真实投递与接收
 证据分类：健康返回 `not_needed`，未知返回 `unknown`，只有明确不通才通过普通 Send
 向自己发一条 `communication-recovery`。独立接收方实际 recv（DSH 走 canonical Poll）
 并发送关联的普通认证 reply 后，query 才能投影 `recovered`。仅 adaptor 接受仍为
 `pending`；query 不收件、不回信、不重发，重复手动调用复用当前 pending 交换。
 回复本身的普通通知不触发再回复。通信失败不撤销身份、角色或当前任务归属。
-这条通信恢复路径不是身份恢复前提。同一 session 出现在多个 API 上时，daemon 用 session
-加 communication API 联合判定；仅 session 相同会显式冲突失败，不会静默覆盖
-已有身份、角色或工作。DSH 首次注册只需普通 `collab context`，CLI 自动查询真实
+身份恢复后可单独检查通信。DSH 首次注册先运行 `collab context`，CLI 自动查询真实
 gateway 能力。缺控制声明属于 gateway 集成缺口，应保留明确错误，不让 agent
 查文件、猜 ids 或手工补值；显式 `--provide` 仍须来自真实能力。详见 AppServer runtime
 registration 与 DSH 段的验证规则。

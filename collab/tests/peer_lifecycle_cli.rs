@@ -150,11 +150,7 @@ fn worker_snapshot_public_cli_returns_bounded_tmux_buffer_without_a_write() {
         .expect("peer pane id is utf8")
         .trim()
         .to_owned();
-    fixture
-        .owned_sessions
-        .lock()
-        .unwrap()
-        .push("snapshot-peer".into());
+    fixture.track_tmux_session(&peer_pane_id);
     let peer = Pane {
         server_pid: master.server_pid,
         pane_id: peer_pane_id.clone(),
@@ -287,11 +283,7 @@ fn top_level_snapshot_reads_a_peer_buffer_for_a_non_master_caller() {
         .expect("peer pane id is utf8")
         .trim()
         .to_owned();
-    fixture
-        .owned_sessions
-        .lock()
-        .unwrap()
-        .push("snapshot-peer".into());
+    fixture.track_tmux_session(&peer_pane_id);
     let peer = Pane {
         server_pid: master.server_pid,
         pane_id: peer_pane_id.clone(),

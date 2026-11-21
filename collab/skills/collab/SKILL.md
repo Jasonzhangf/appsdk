@@ -23,13 +23,32 @@ sessionID 承载当前执行。普通名字池用完后分配未占用的 `peer-
 已有合法角色随名字恢复。新 master 授权需要本次人类明确指令，名字统一为 Jenny。
 接替时任务和消息跟目标名字走，源名字工作保留。被替换的旧会话再次真实 context 时再普通注册。
 选择 tmux
-适配器的 TUI 使用固定 session 名字 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
-`appsdk_1_Jenny`；只有固定位置 1 可升 Jenny。布局读取共享 manifest，正常改名由
-Collab 负责。Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录名。
+适配器的 TUI 在固定布局使用 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
+`appsdk_1_Jenny`，该布局中只有位置 1 可升 Jenny。没有唯一固定布局时使用
+`<tmux session 编号>_<Collab名字>`。布局读取共享 manifest，正常改名由 Collab 负责。
+Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录名。
 身份、角色和任务变化保留该 Rex session 名。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
 恢复链已删除。tmux `$N`、pane、thread 和 socket 仅定位通信。不得猜身份、
 复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。
+
+### 首次注册与缺项提示
+
+在要加入的项目目录、当前 agent 自己的会话中运行 `collab context`。
+CLI 从当前宿主收集事实。看到 `missing_facts` 时，保留回执的
+`result.requires.fields` 和 `result.requires.sources`，由所列来源的维护者补齐能力。
+普通注册继续使用同一条命令。成功时核对返回的
+`registered: true` 和自己的名字。各宿主的字段和取值入口见[注册手册](operations.md#宿主注册所需信息)。
+
+若返回 `DAEMON_UNAVAILABLE`，按[正式服务恢复步骤](operations.md#全局-daemon-与默认身份恢复)
+检查启动状态与首个错误。
+`TMUX_OBSERVATION_CAPABILITY_MISSING` 表示 daemon 缺少可核实的 tmux 机器端点。
+把原错误交给宿主维护者。端点就绪后，从同一会话重跑 `collab context`。
+`TMUX_ITERM2_PANE_REQUIRED` 表示新 tmux 会话缺当前 iTerm2 接入。先将该 session
+接入 iTerm2，再运行 `collab context`。daemon 核实 pane 所连的 session ID。
+已登记会话断开 iTerm2 时，名字和业务保留，消息在 daemon 排队。
+`IDENTITY_MAP_DECODE_FAILED` 表示当前程序读不懂已保存的身份表；
+补注册字段无法修复它。保留身份表，交由维护者恢复兼容运行版后再试。
 
 ## 关闭门禁：未验证不得关闭
 
@@ -89,9 +108,9 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 同操作修改意图会返回 conflict。不确定结果不能换操作号盲发。
 显式恢复操作号当前用于远端发送。
 
-Rex 注册通过 `collab context --op '<operation>' --provide '<真实 facts JSON>'`。
-facts 的 `session_id` 是 agent 会话。`rex` 对象提供实际 `server`、完整
-`session_id`、`block_id` 和 `cwd`。终端地址与 agent 会话分别绑定。
+在当前 Rex block 运行 `collab context`。命令从当前宿主获取 agent 会话，并从 Rex
+原生接口获取 server、Rex session ID、block ID 和当前项目。返回缺项时，把原回执交给
+对应来源的维护者。
 Rex 的 working、blocked/question 和断连事件投影到 activity。
 输入 ACK、Enter 接受和 activity 都不能代替正式 `collab recv` 消费。
 服务 instance 变化后刷新绑定，再继续输入。
@@ -327,7 +346,7 @@ v2 实验状态。
 | 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[当前身份与用户维护边界](references/migration-daemon.md) |
 | CEO、跨项目 master 操作 | [CEO](operations.md#全局-ceo-与项目-master)、[跨项目通信](operations.md#cross-project-master-communication) |
 | board idle 巡检、取消与 CEO 回报 | [board idle 巡检](references/board-idle-patrol.md) |
-| 宿主注册、AppServer 或 thread 路由 | [宿主注册](operations.md#三种宿主的注册方式与锚点dsh--codex-tui--codex-desktop)、[AppServer](operations.md#appserver-runtime-registration) |
+| 宿主注册、AppServer 或 thread 路由 | [宿主注册](operations.md#宿主注册所需信息)、[AppServer](operations.md#appserver-runtime-registration) |
 | 安装及受影响 runtime 验收 | [构建安装](operations.md#current-version-baseline)、[验证细节](references/verification.md) |
 | 通知、订阅、路径问题 | [通知](references/notifications.md)、[状态路径](references/state-paths.md) |
 

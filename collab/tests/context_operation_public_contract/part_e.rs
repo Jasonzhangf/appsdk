@@ -218,6 +218,11 @@ fn unmapped_worker_status_reads_preserve_retained_records_without_side_effects()
         "R6 must leave the displaced worker without a current mapping: {map}"
     );
     let effects_before = read_effect_snapshot(&fixture);
+    assert!(effects_before["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|message| message["subject"] == "peer-registered" && message["state"] == "pending"));
 
     // Read admission must not authorize the displaced holder's active calls.
     for request in [

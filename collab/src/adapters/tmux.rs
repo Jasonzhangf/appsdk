@@ -6,8 +6,10 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 mod codex_presence;
+mod iterm2;
 
 pub use codex_presence::{AgentActivity, AgentObservation, AgentPresence};
+pub(crate) use iterm2::panes_for_endpoint as iterm2_panes_for_endpoint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanePresence {
@@ -19,6 +21,7 @@ pub enum PanePresence {
 static LAST_PANE_OUTPUT: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
 const MAX_PANE_OBSERVATIONS: usize = 256;
 pub const ENDPOINT_CAPABILITY_FILE: &str = "tmux-endpoints.json";
+pub const DELIVERY_NOT_ATTACHED: &str = "ADAPTER_ROUTE_UNAVAILABLE: TMUX_ITERM2_PANE_REQUIRED:";
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,73 +196,12 @@ pub fn pane_hint_from_env() -> Option<String> {
         .filter(|value| validate_pane_id(value).is_ok())
 }
 
-/// Read-only endpoints persisted in identity receipts. This keeps legacy
-/// callers free of socket environment injection while still using only
-/// host-owned capability records.
-pub fn persisted_identity_endpoints(state_root: &Path) -> Result<Vec<String>, String> {
-    let root = state_root.join("identities");
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(format!(
-                "TMUX_OBSERVATION_CAPABILITY_INVALID: read {}: {error}",
-                root.display()
-            ));
-        }
-    };
-    let mut endpoints = BTreeSet::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "TMUX_OBSERVATION_CAPABILITY_INVALID: read {}: {error}",
-                root.display()
-            )
-        })?;
-        if !entry
-            .file_type()
-            .map_err(|error| format!("TMUX_OBSERVATION_CAPABILITY_INVALID: {error}"))?
-            .is_dir()
-        {
-            continue;
-        }
-        let bytes = match std::fs::read(entry.path().join("identity.json")) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "TMUX_OBSERVATION_CAPABILITY_INVALID: read identity receipt: {error}"
-                ));
-            }
-        };
-        let receipt: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-            format!("TMUX_OBSERVATION_CAPABILITY_INVALID: parse identity receipt: {error}")
-        })?;
-        if receipt["transport"]["kind"].as_str() != Some("tmux") {
-            continue;
-        }
-        if let Some(socket) = receipt["transport"]["tmux_endpoint"]["socket_path"].as_str() {
-            validate_socket_path(socket)?;
-            endpoints.insert(socket.to_owned());
-        }
-    }
-    Ok(endpoints.into_iter().collect())
-}
-
-pub fn known_endpoints_at(state_root: &Path) -> Result<Vec<String>, String> {
-    let mut endpoints = host_endpoints_at(state_root)?;
-    endpoints.extend(persisted_identity_endpoints(state_root)?);
-    endpoints.sort();
-    endpoints.dedup();
-    Ok(endpoints)
-}
-
 pub fn observe_caller_at(
     state_root: &Path,
     caller_pid: u32,
     pane_hint: Option<&str>,
 ) -> Result<Option<TmuxEndpoint>, String> {
-    observe_caller(known_endpoints_at(state_root)?, caller_pid, pane_hint)
+    observe_caller(host_endpoints_at(state_root)?, caller_pid, pane_hint)
 }
 
 /// Compatibility wrapper for callers that still request the current tmux
@@ -699,7 +641,8 @@ pub fn require_live_session_name(endpoint: &TmuxEndpoint) -> Result<String, Stri
 pub fn rename_session(endpoint: &TmuxEndpoint, target: &str) -> Result<(), String> {
     validate_endpoint(endpoint)?;
     validate_session_name(target)?;
-    let previous = observe_session_name(endpoint)?;
+    let previous = session_name_if_live(endpoint)?
+        .ok_or("TMUX_SESSION_RENAME_FAILED: expected server/session is no longer present")?;
     if previous == target {
         return Ok(());
     }
@@ -732,6 +675,33 @@ pub fn rename_session(endpoint: &TmuxEndpoint, target: &str) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+pub(crate) fn rename_displaced_session(endpoint: &TmuxEndpoint) -> Result<(), String> {
+    let Some(current) = session_name_if_live(endpoint)? else {
+        return Ok(());
+    };
+    if current.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(());
+    }
+    let output = tmux_command(
+        &endpoint.socket_path,
+        &["list-sessions", "-F", "#{session_name}"],
+    )
+    .map_err(|error| format!("TMUX_SESSION_NAME_QUERY_FAILED: {error}"))?;
+    let inventory = String::from_utf8(output.stdout)
+        .map_err(|error| format!("TMUX_SESSION_NAME_QUERY_FAILED: {error}"))?;
+    let names = inventory.lines().collect::<BTreeSet<_>>();
+    let native_number = &endpoint.tmux_session_id[1..];
+    let target = if names.contains(native_number) {
+        (0..=names.len())
+            .map(|number| number.to_string())
+            .find(|name| !names.contains(name.as_str()))
+            .expect("at least one unused number")
+    } else {
+        native_number.to_owned()
+    };
+    rename_session(endpoint, &target)
 }
 
 fn restore_session_name(endpoint: &TmuxEndpoint, previous: &str) -> Result<(), String> {
@@ -1101,7 +1071,20 @@ pub fn view(endpoint: &TmuxEndpoint) -> Result<serde_json::Value, String> {
         endpoint.socket_path, endpoint.tmux_session_id, endpoint.pane_id
     );
     let (changed, pane_observation) = record_observation(key, digest)?;
-    Ok(view_projection(observation, changed, pane_observation))
+    let mut view = view_projection(observation, changed, pane_observation);
+    view["iterm2_attachment"] = match iterm2_panes_for_endpoint(endpoint) {
+        Ok(pane_ids) if pane_ids.is_empty() => serde_json::json!({"status":"detached"}),
+        Ok(pane_ids) => {
+            let pane_id = if pane_ids.len() == 1 {
+                pane_ids.first()
+            } else {
+                None
+            };
+            serde_json::json!({"status":"attached","pane_id":pane_id,"pane_ids":pane_ids})
+        }
+        Err(error) => serde_json::json!({"status":"unavailable","error":error}),
+    };
+    Ok(view)
 }
 
 fn view_projection(
@@ -1334,6 +1317,12 @@ pub fn same_owned_pane(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
     left.server_pid == right.server_pid && same_pane_route(left, right)
 }
 
+pub(crate) fn same_session(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
+    left.socket_path == right.socket_path
+        && left.server_pid == right.server_pid
+        && left.tmux_session_id == right.tmux_session_id
+}
+
 /// The persisted pane address: socket path plus pane id. Runtime observations
 /// such as server/session/pane pids and native thread ids do not redefine it.
 /// Ownership additionally requires the server instance in `same_owned_pane`.
@@ -1342,7 +1331,11 @@ pub fn same_pane_route(left: &TmuxEndpoint, right: &TmuxEndpoint) -> bool {
 }
 
 fn tmux_command(socket: &str, args: &[&str]) -> Result<std::process::Output, String> {
-    let output = Command::new("tmux")
+    #[cfg(test)]
+    let binary = tests::test_tmux_binary();
+    #[cfg(not(test))]
+    let binary = "tmux";
+    let output = Command::new(binary)
         .arg("-S")
         .arg(socket)
         .args(args)
@@ -1803,9 +1796,17 @@ int main(int argc, char **argv) {
         }
     }
 
+    thread_local! {
+        static TEST_TMUX_BINARY: RefCell<PathBuf> = RefCell::new(PathBuf::from("tmux"));
+    }
+
+    pub(super) fn test_tmux_binary() -> PathBuf {
+        TEST_TMUX_BINARY.with_borrow(Clone::clone)
+    }
+
     pub(crate) struct TmuxFailureWrapper {
         root: PathBuf,
-        original_path: Option<std::ffi::OsString>,
+        previous_binary: PathBuf,
     }
 
     impl TmuxFailureWrapper {
@@ -1838,25 +1839,17 @@ int main(int argc, char **argv) {
             use std::os::unix::fs::PermissionsExt;
             permissions.set_mode(0o755);
             std::fs::set_permissions(&wrapper, permissions).unwrap();
-            let original_path = std::env::var_os("PATH");
-            let mut paths = vec![root.clone()];
-            if let Some(original) = &original_path {
-                paths.extend(std::env::split_paths(original));
-            }
-            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+            let previous_binary = TEST_TMUX_BINARY.replace(wrapper);
             Self {
                 root,
-                original_path,
+                previous_binary,
             }
         }
     }
 
     impl Drop for TmuxFailureWrapper {
         fn drop(&mut self) {
-            match self.original_path.take() {
-                Some(path) => std::env::set_var("PATH", path),
-                None => std::env::remove_var("PATH"),
-            }
+            TEST_TMUX_BINARY.replace(std::mem::take(&mut self.previous_binary));
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
@@ -2824,6 +2817,10 @@ int main(int argc, char **argv) {
         let _wrapper = TmuxFailureWrapper::fail_command("capture-pane");
         let error = snapshot(&endpoint, 40).unwrap_err();
         assert!(error.starts_with("TMUX_CAPTURE_FAILED: forced capture-pane failure"));
+        std::thread::spawn(move || snapshot(&endpoint, 1))
+            .join()
+            .unwrap()
+            .expect("a concurrent observer must still reach its real tmux command");
     }
 
     #[test]

@@ -479,5 +479,4 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
     );
 
     kill_owned_session(&fixture, &live_pane);
-    std::fs::remove_dir_all(&fixture.root).ok();
 }

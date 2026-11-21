@@ -315,7 +315,6 @@ impl ProjectRuntimeManager {
                     .global
                     .current_thread_routes
                     .values()
-                    .chain(state.global.legacy_thread_routes.values())
                     .filter_map(|binding| {
                         binding
                             .tmux_endpoint
@@ -326,15 +325,18 @@ impl ProjectRuntimeManager {
         }
         endpoints.sort();
         endpoints.dedup();
-        // tmux placement is optional, but a live pane without its fixed session
-        // name is a missing name fact. Fail closed instead of guessing from the
-        // agent session or caller-controlled environment.
-        let observed = crate::client::adapters::tmux::observe_caller(
+        // A pane hint directs observation; the daemon still verifies ancestry.
+        // Preserve observation failures on that path instead of asking the
+        // caller for unrelated AppServer facts.
+        let observed = match crate::client::adapters::tmux::observe_caller(
             endpoints,
             caller_pid,
             facts.pane_hint.as_deref(),
-        )
-        .unwrap_or_else(|_error| None);
+        ) {
+            Ok(observed) => observed,
+            Err(error) if facts.pane_hint.is_some() => return Err(anyhow::Error::msg(error)),
+            Err(_) => None,
+        };
         // Current ancestry supersedes every caller-supplied or historical
         // placement address. No observation means no tmux selection.
         let observed_pane = observed
@@ -822,28 +824,19 @@ impl ProjectRuntimeManager {
                 value.rex_execution = baseline.current.rex_execution.clone();
             }
         }
-        let rename = crate::server::identity_context::rename_prepared_anchor(
+        crate::server::identity_context::verify_tmux_replacement(
+            control.slot(&key).and_then(|slot| slot.active_binding()),
             &value,
-            &value.invocation_cwd, &key.name,
-            current_master_worker_id(&state, Some(&saved.route_scope())).as_deref() == Some(ident.worker_id.as_str()),
+            false,
         ).map_err(anyhow::Error::msg)?;
-        let committed = match self.commit_control_change_locked(
+        let committed = self.commit_control_change_locked(
             crate::server::binding_store::ControlChange::CommitWithEffect {
                 key: key.clone(),
                 value,
                 expected_generation: Some(expected_generation),
                 effect: effect.clone(),
             },
-        ) {
-            Ok(committed) => committed,
-            Err(error) => {
-                let error = match rename.rollback() {
-                    Ok(_) => error,
-                    Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
-                };
-                return Err(anyhow::Error::msg(error));
-            }
-        };
+        ).map_err(anyhow::Error::msg)?;
         if committed.durability == crate::server::binding_store::Durability::Unknown {
             anyhow::bail!("BINDING_CONTROL_DURABILITY_UNKNOWN: binding intent published; business effects remain pending");
         }

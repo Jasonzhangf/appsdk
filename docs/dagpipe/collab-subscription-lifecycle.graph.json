@@ -1,4 +1,5 @@
 {
+  "business_schedule_liveness_gate": "已武装的期限订阅按自身期限、次数与业务权限处理。当前 transport 缺失或换绑不能生成 transport-lost 或屏蔽应有的到期记录。到期通知持久入库，再由独立投递尝试根据当前承载推进。",
   "id": "appsdk-collab-subscription-lifecycle",
   "version": "0.9.0",
   "delivery_boundary": "认证后的逻辑主体可在没有当前可投递承载时创建、读取和管理订阅。承载投影可为空。承载缺失和单独变更都保留 armed、订阅 ID、进度、TTL 及待投递 occurrence。历史 transport-lost 仍沿原精确恢复路径处理。",

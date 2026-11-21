@@ -580,6 +580,177 @@ fn run_late_old_acceptance_interleaving(new_wake_fails: bool) {
 }
 
 #[test]
+fn late_acceptance_cannot_replace_evidence_from_a_newer_attempt() {
+    let (server, root) = test_server();
+    let subscription = register_and_subscribe(&server, "recipient");
+    let now = now_ms();
+    queue_message(&server, "recipient", &subscription, "notice", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "notice".into(),
+        mode: "explicit-notification".into(),
+        source_thread_id: None,
+    }]);
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    let attempt = attempt_tmux_notification_with_at(
+        &server,
+        "notice",
+        &subscription,
+        "recipient",
+        &transport,
+        None,
+        0,
+        true,
+        now,
+        false,
+        &|_, _, _, _, _, _| {
+            server.commit(&[
+                Event::WakeAttempted {
+                    ids: vec!["notice".into()],
+                    attempted_ms: now + 1,
+                    retry: false,
+                },
+                Event::NotificationDeliveryAccepted {
+                    message_id: "notice".into(),
+                    accepted_ms: now + 2,
+                    evidence: Some(json!({"receipt": "new"})),
+                },
+            ]);
+            Ok(json!({"receipt": "old"}))
+        },
+    );
+    assert!(attempt.accepted(), "{attempt:?}");
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.notification_delivery_evidence["notice"],
+        json!({"receipt": "new"})
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_reserved_attempt_cannot_reuse_the_previous_attempts_retry_proof() {
+    let (server, root) = test_server();
+    let subscription = register_and_subscribe(&server, "recipient");
+    let now = now_ms();
+    queue_message(&server, "recipient", &subscription, "notice", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "notice".into(),
+        mode: "explicit-notification".into(),
+        source_thread_id: None,
+    }]);
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    let refused = attempt_tmux_notification_with_at(
+        &server,
+        "notice",
+        &subscription,
+        "recipient",
+        &transport,
+        None,
+        0,
+        true,
+        now,
+        false,
+        &|_, _, _, _, _, _| Err("ADAPTER_ROUTE_UNAVAILABLE: disconnected".into()),
+    );
+    assert!(
+        matches!(refused, NotificationAttempt::Rejected(_)),
+        "{refused:?}"
+    );
+    assert!(explicit_retry_refusal(&server.state.lock().unwrap(), "notice").is_none());
+
+    // This is the persisted state while a subsequent native attempt is in
+    // flight, or after restart if that attempt never published its outcome.
+    server.commit(&[Event::WakeAttempted {
+        ids: vec!["notice".into()],
+        attempted_ms: now + 1,
+        retry: false,
+    }]);
+    let reloaded = current_state::load(&server.state_path, false).unwrap();
+    assert!(explicit_retry_refusal(&reloaded, "notice").is_some());
+    assert!(!notification_reconnect_pending(
+        &reloaded,
+        &reloaded.msgs["notice"]
+    ));
+    let stale_retry = attempt_tmux_notification_with_retry(
+        &server,
+        "notice",
+        &subscription,
+        "recipient",
+        &transport,
+        None,
+        0,
+        true,
+        now + 2,
+        true,
+        true,
+        false,
+        &|_, _, _, _, _, _| Ok(json!({"replayed": true})),
+    );
+    assert!(
+        matches!(stale_retry, NotificationAttempt::NotAttempted(_)),
+        "{stale_retry:?}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn accepted_native_delivery_reports_an_unconfirmed_receipt_if_save_fails() {
+    let (server, root) = test_server();
+    let subscription = register_and_subscribe(&server, "recipient");
+    let now = now_ms();
+    queue_message(&server, "recipient", &subscription, "notice", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "notice".into(),
+        mode: "explicit-notification".into(),
+        source_thread_id: None,
+    }]);
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    let attempt = attempt_tmux_notification_with_at(
+        &server,
+        "notice",
+        &subscription,
+        "recipient",
+        &transport,
+        None,
+        0,
+        true,
+        now,
+        false,
+        &|_, _, _, _, _, _| {
+            let reserved_state = server.state_path.with_extension("reserved");
+            std::fs::rename(&server.state_path, &reserved_state).unwrap();
+            std::fs::create_dir(&server.state_path).unwrap();
+            Ok(json!({"accepted": true}))
+        },
+    );
+    let response =
+        notification_send_response(json!({"msg_id": "notice"}), true, "appserver", &attempt);
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.data["notification"],
+        "submitted-receipt-unconfirmed"
+    );
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["consumed"], false);
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["notice"].wake_attempt_count, 1);
+    assert!(!state.notification_delivery_accepted.contains_key("notice"));
+    assert!(explicit_retry_refusal(&state, "notice").is_some());
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn name_handoff_late_old_acceptance_does_not_overwrite_new_delivery() {
     run_late_old_acceptance_interleaving(false);
 }
@@ -676,7 +847,7 @@ fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
         let state = server.state.lock().unwrap();
         for id in ["batch-a", "batch-b"] {
             assert_eq!(state.msgs[id].wake_attempt_count, 1);
-            assert!(desktop_connect_retry(&state, &state.msgs[id]));
+            assert!(notification_reconnect_pending(&state, &state.msgs[id]));
         }
     }
     Arc::get_mut(&mut server)
@@ -691,7 +862,7 @@ fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
     let state = server.state.lock().unwrap();
     for id in ["batch-a", "batch-b"] {
         assert_eq!(state.msgs[id].wake_attempt_count, 2);
-        assert!(!desktop_connect_retry(&state, &state.msgs[id]));
+        assert!(!notification_reconnect_pending(&state, &state.msgs[id]));
         assert!(state.notification_delivery_accepted.contains_key(id));
     }
     drop(state);
@@ -912,6 +1083,68 @@ fn rex_current_owner_unique_binding_delivers_and_records_selection() {
 }
 
 #[test]
+fn retained_identity_without_transport_never_delivers_to_cached_holder() {
+    for kind in [TransportKind::Rex, TransportKind::AppServer] {
+        let (mut server, root) = test_server();
+        let route = seed_rex_route(&server);
+        let mut old = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+        old.kind = kind;
+        if old.kind == TransportKind::AppServer {
+            old.endpoint = Some("/tmp/unused-forward-appserver.sock".into());
+            old.namespace = Some("test".into());
+            old.thread_id = Some("thread-a".into());
+            old.rex_endpoint = None;
+        }
+        let subscription = register_rex_worker(&server, "a", &old);
+        {
+            let mut state = server.state.lock().unwrap();
+            state
+                .notification_subscriptions
+                .get_mut(&subscription)
+                .unwrap()
+                .method = notification_transport_method(&old).into();
+        }
+        seed_current_rex_bindings(&server, &route, &[("Alice", "a", &old)]);
+        let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+        let control = store.load().unwrap();
+        let slot = control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, "a")
+            .unwrap()
+            .unwrap();
+        let mut retained = slot.active_binding().unwrap().clone();
+        retained.transport = None;
+        store
+            .commit(binding_store::ControlChange::Commit {
+                key: slot.identity_key.clone(),
+                value: retained,
+                expected_generation: Some(slot.generation),
+            })
+            .unwrap();
+        let calls = install_capture_sink(&mut server);
+        let response = send_notify(&server, "sender", "a");
+        assert!(calls.lock().unwrap().is_empty(), "{response:?}");
+        let state = server.state.lock().unwrap();
+        let message_id = response.data["msg_id"].as_str().unwrap();
+        assert_eq!(state.msgs[message_id].state, "pending");
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key(message_id));
+        drop(state);
+        let control = store.load().unwrap();
+        let slot = control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, "a")
+            .unwrap()
+            .unwrap();
+        assert!(slot.active_binding().unwrap().transport.is_none());
+        assert_eq!(
+            slot.reference_previous().unwrap().transport.as_ref(),
+            Some(&old)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn rex_current_owner_same_block_on_separate_servers_remains_independent() {
     let (mut server, root) = test_server();
     let route = seed_rex_route(&server);
@@ -978,7 +1211,7 @@ fn rex_current_owner_refusal_preserves_entire_durable_batch() {
 }
 
 #[test]
-fn rex_current_owner_busy_publication_is_not_attempted() {
+fn rex_current_owner_busy_publication_queues_the_same_message() {
     let (mut server, root) = test_server();
     let route = seed_rex_route(&server);
     let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
@@ -991,8 +1224,138 @@ fn rex_current_owner_busy_publication_is_not_attempted() {
     let _register_guard = server.register_gate.lock().unwrap();
     let response = send_notify(&server, "sender", "a");
 
-    assert_rex_refusal_with_state(&response, "REX_BINDING_PUBLICATION_BUSY", &server);
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["notification"], "queued");
+    assert!(response.data["notification_error"]
+        .as_str()
+        .unwrap()
+        .contains("REX_BINDING_PUBLICATION_BUSY"));
+    assert_eq!(response.data["consumed"], false);
+    let id = response.data["msg_id"].as_str().unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.delivery_modes[id], "immediate");
+        assert_eq!(state.msgs[id].state, "pending");
+        assert_eq!(state.msgs[id].wake_attempt_count, 0);
+        assert!(!state.notification_delivery_accepted.contains_key(id));
+        assert!(!state.notification_delivery_failures.contains_key(id));
+        assert!(!state.notification_delivery_bindings.contains_key(id));
+    }
+    let before = dispatch(&server, Req::MsgStatus { msg_id: id.into() });
+    assert!(before.ok, "{before:?}");
+    assert_eq!(before.data["state"], "pending");
+    assert_eq!(before.data["consumed_by_recv"], false);
     assert!(sink_calls.lock().unwrap().is_empty());
+    drop(_register_guard);
+    drop(_wire_guard);
+    timers::tick_with_idle_at(&server, now_ms() + 1, &|_| true);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state.notification_delivery_accepted.contains_key(id));
+        assert_eq!(state.msgs[id].state, "pending");
+        assert_eq!(state.msgs[id].wake_attempt_count, 1);
+        assert_eq!(state.delivery_modes[id], "immediate");
+    }
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
+    let accepted = dispatch(&server, Req::MsgStatus { msg_id: id.into() });
+    assert!(accepted.ok, "{accepted:?}");
+    assert_eq!(accepted.data["state"], "pending");
+    assert_eq!(accepted.data["consumed_by_recv"], false);
+
+    timers::tick_with_idle_at(&server, now_ms() + 2, &|_| true);
+    assert_eq!(
+        sink_calls.lock().unwrap().len(),
+        1,
+        "accepted original attempt must not be submitted again"
+    );
+
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.delivery_modes[id], "immediate");
+        assert_eq!(state.msgs[id].wake_attempt_count, 1);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let transport = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+    let subscription = register_rex_worker(&server, "a", &transport);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &transport)]);
+    let sink_calls = install_capture_sink(&mut server);
+    let now = now_ms();
+
+    let invitation = "current-invitation";
+    let stale = "old-binding-invitation";
+    let ordinary = "unrelated-explicit";
+    let unconfirmed = "unconfirmed-invitation";
+    for id in [invitation, stale, ordinary, unconfirmed] {
+        queue_message(&server, "a", &subscription, id, now);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: id.into(),
+            mode: "explicit-notification".into(),
+            source_thread_id: None,
+        }]);
+    }
+    for (task_id, message_id, binding_id) in [
+        ("current-task", invitation, "binding-Alice"),
+        ("stale-task", stale, "previous-binding"),
+        ("unconfirmed-task", unconfirmed, "binding-Alice"),
+    ] {
+        let mut details = crate::board::BoardTaskDetails::legacy(task_id, true);
+        details.invitation = Some(crate::board::BoardInvitation {
+            peer_id: "a".into(),
+            binding_id: binding_id.into(),
+            message_id: message_id.into(),
+            created_ms: now,
+            original_status: Some("pending".into()),
+            original_owner: Some("sender".into()),
+            automatic_source: None,
+        });
+        server.commit(&[
+            Event::TaskCreated {
+                task: serde_json::from_value(serde_json::json!({
+                    "id": task_id, "owner": "sender", "created_by": "sender",
+                    "status": "invited", "created_ms": now, "updated_ms": now,
+                }))
+                .unwrap(),
+            },
+            Event::BoardDetailsChanged {
+                task_id: task_id.into(),
+                details,
+            },
+        ]);
+    }
+    server.commit(&[Event::WakeAttempted {
+        ids: vec![unconfirmed.into()],
+        attempted_ms: now,
+        retry: false,
+    }]);
+    let gate = server.register_gate.lock().unwrap();
+    let deferred = attempt_notification_detailed_with_at(&server, invitation, &subscription, now);
+    assert!(matches!(deferred, NotificationAttempt::Deferred(_)));
+    assert!(sink_calls.lock().unwrap().is_empty());
+    drop(gate);
+
+    timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    timers::tick_with_idle_at(&server, now + 2, &|_| true);
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
+    let state = server.state.lock().unwrap();
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key(invitation));
+    assert_eq!(state.msgs[invitation].wake_attempt_count, 1);
+    assert_eq!(state.msgs[ordinary].wake_attempt_count, 0);
+    assert_eq!(state.msgs[stale].wake_attempt_count, 0);
+    assert_eq!(state.msgs[unconfirmed].wake_attempt_count, 1);
+    assert!(!state
+        .notification_delivery_accepted
+        .contains_key(unconfirmed));
+    assert_eq!(state.tasks["current-task"].status, "invited");
+    drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2072,7 +2435,7 @@ fn queued_tmux_wake_drains_through_the_existing_timer_without_consumption() {
     let attempt =
         attempt_notification_detailed_with_at(&server, "deferred-tmux", &subscription_id, now);
     assert!(
-        matches!(attempt, NotificationAttempt::Deferred),
+        matches!(attempt, NotificationAttempt::Deferred(_)),
         "{attempt:?}"
     );
     let response =

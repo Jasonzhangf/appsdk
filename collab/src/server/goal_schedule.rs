@@ -427,10 +427,11 @@ fn prepare_goal_schedule(
                 goal_content: None,
             });
         if subscription.worker_id != target {
-            superseded.extend(pending_messages_for_subscription(state, &subscription.id));
+            superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
         }
         subscription.worker_id = target.into();
-        if let Some((method, address)) = projection {
+        if !projection.0.is_empty() || !projection.1.is_empty() {
+            let (method, address) = projection;
             subscription.method = method;
             subscription.target = address;
         }
@@ -447,7 +448,7 @@ fn prepare_goal_schedule(
         }
         .into();
         if subscription.status != "armed" {
-            superseded.extend(pending_messages_for_subscription(state, &subscription.id));
+            superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
         }
         subscription.status_reason = None;
         subscription.goal_content = Some(GoalScheduleBinding {
@@ -486,7 +487,7 @@ fn prepare_goal_schedule(
                 updated_ms: now,
             });
         }
-        superseded.extend(pending_messages_for_subscription(state, &old.id));
+        superseded.extend(retractable_messages_for_subscription(state, &old.id));
     }
     superseded.sort();
     superseded.dedup();

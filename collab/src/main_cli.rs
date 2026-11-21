@@ -810,6 +810,7 @@ pub(crate) enum Cmd {
             conflicts_with = "workflow_template"
         )]
         reset_workflow_template: bool,
+        /// Identify this context operation when correlating a result or making a query.
         #[arg(long = "op")]
         operation_id: Option<String>,
         #[arg(long)]
@@ -820,6 +821,7 @@ pub(crate) enum Cmd {
         approve_identity: Option<String>,
         #[arg(long = "approve-grant")]
         approve_grant: Option<String>,
+        /// Supply current host facts as JSON. On missing_facts see result.requires.fields and sources.
         #[arg(long)]
         provide: Option<String>,
         #[arg(long)]

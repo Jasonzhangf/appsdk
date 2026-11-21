@@ -73,6 +73,7 @@ fn dropping_a_message_retires_its_notification_delivery_evidence() {
             error: "TMUX_ENTER_SUBMIT_FAILED".into(),
             failed_ms: 10,
             retryable: false,
+            resume_on_reconnect: None,
         },
     );
     state
@@ -104,6 +105,7 @@ fn notification_delivery_failure_survives_current_state() {
         error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
         failed_ms: 42,
         retryable: true,
+        resume_on_reconnect: Some(true),
     };
     state.apply(&event);
     assert_eq!(
@@ -114,6 +116,7 @@ fn notification_delivery_failure_survives_current_state() {
             error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
             failed_ms: 42,
             retryable: true,
+            resume_on_reconnect: Some(true),
         }
     );
 
@@ -223,6 +226,7 @@ fn failed_master_wake_current_state_keeps_zero_generation() {
         error: "ADAPTER_ROUTE_UNAVAILABLE: failed".into(),
         failed_ms: 12,
         retryable: true,
+        resume_on_reconnect: None,
     });
     assert_eq!(state.master_wake.generation, 0);
     assert_eq!(state.master_wake.delivery_state, "delivery_failed");
@@ -318,6 +322,7 @@ fn resource_release_failure_does_not_poison_master_wake_delivery_state() {
         error: "ADAPTER_UNKNOWN: native frame exceeds maximum size".into(),
         failed_ms: 12,
         retryable: false,
+        resume_on_reconnect: None,
     });
 
     assert_eq!(state.master_wake.delivery_state, "pending");
@@ -380,6 +385,7 @@ fn worker_deadline_failure_does_not_poison_master_wake_delivery_state() {
         error: "ADAPTER_UNKNOWN: native frame exceeds maximum size".into(),
         failed_ms: 12,
         retryable: false,
+        resume_on_reconnect: None,
     });
 
     assert_eq!(state.master_wake.delivery_state, initial_delivery_state);

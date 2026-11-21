@@ -1,14 +1,4 @@
-pub(crate) struct TmuxAnchorRename {
-    caller: crate::proto::TmuxEndpoint,
-    caller_previous: String,
-    target: String,
-}
-
-impl TmuxAnchorRename {
-    pub(crate) fn rollback(&self) -> Result<(), String> {
-        crate::client::adapters::tmux::rename_session(&self.caller, &self.caller_previous)
-    }
-}
+pub(crate) const PHYSICAL_ANCHOR_PENDING: &str = "CONTROL_COMMITTED_PHYSICAL_ANCHOR_PENDING: ";
 
 /// Optional physical effect result for one prepared anchor.
 ///
@@ -21,8 +11,8 @@ pub(crate) enum PhysicalAnchorOutcome {
     Consistent { target: String },
     /// No reliable target exists, so no physical effect was required.
     NotRequested,
-    /// The anchor was renamed; the guard can roll the effect back.
-    Applied(TmuxAnchorRename),
+    /// The new physical name was applied and read back.
+    Applied { target: String },
     /// A reliable target exists but the actual rename/readback failed.
     Incomplete {
         target: String,
@@ -32,13 +22,6 @@ pub(crate) enum PhysicalAnchorOutcome {
 }
 
 impl PhysicalAnchorOutcome {
-    pub(crate) fn rollback(&self) -> Result<(), String> {
-        match self {
-            Self::Applied(rename) => rename.rollback(),
-            Self::Consistent { .. } | Self::NotRequested | Self::Incomplete { .. } => Ok(()),
-        }
-    }
-
     /// Observed physical readback for the operation outcome. `observed` is the
     /// caller's current physical label when known; it is never invented.
     pub(crate) fn readback(&self, observed: Option<String>) -> serde_json::Value {
@@ -51,8 +34,8 @@ impl PhysicalAnchorOutcome {
                 "status": "not_requested", "target": null, "observed": observed,
                 "error": null, "renamed": false
             }),
-            Self::Applied(rename) => json!({
-                "status": "complete", "target": rename.target, "observed": rename.target,
+            Self::Applied { target } => json!({
+                "status": "complete", "target": target, "observed": target,
                 "error": null, "renamed": true
             }),
             Self::Incomplete {
@@ -81,9 +64,10 @@ pub(crate) fn rename_prepared_anchor(
     let Some(caller) = value.binding.tmux_endpoint.as_ref() else {
         return Ok(PhysicalAnchorOutcome::NotRequested);
     };
-    let Some(target_name) = super::tm_layout::physical_name(value, cwd, target)? else {
+    if tmux::iterm2_panes_for_endpoint(caller)?.is_empty() {
         return Ok(PhysicalAnchorOutcome::NotRequested);
-    };
+    }
+    let target_name = tmux_role_label(value, caller, cwd, target)?;
     let previous = match tmux::require_live_session_name(caller) {
         Ok(previous) => previous,
         Err(error) => {
@@ -104,10 +88,17 @@ pub(crate) fn rename_prepared_anchor(
             error,
         });
     }
-    Ok(PhysicalAnchorOutcome::Applied(TmuxAnchorRename {
-        caller: caller.clone(),
-        caller_previous: previous,
-        target: target_name,
+    Ok(PhysicalAnchorOutcome::Applied { target: target_name })
+}
+
+fn tmux_role_label(
+    value: &super::binding_slot::BindingValue,
+    endpoint: &crate::proto::TmuxEndpoint,
+    cwd: &str,
+    name: &str,
+) -> Result<String, String> {
+    Ok(super::tm_layout::physical_name(value, cwd, name)?.unwrap_or_else(|| {
+        format!("{}_{name}", endpoint.tmux_session_id.trim_start_matches('$'))
     }))
 }
 
@@ -115,13 +106,12 @@ pub(crate) fn physical_anchor_projection(
     value: &super::binding_slot::BindingValue,
     name: &str,
 ) -> serde_json::Value {
-    let target = match super::tm_layout::physical_name(value, &value.invocation_cwd, name) {
-        Ok(Some(target)) => target,
-        Ok(None) => return json!({"status":"not_requested","target":null,"observed":value.physical_name,"error":null}),
-        Err(error) => return json!({"status":"incomplete","target":null,"observed":null,"error":error}),
-    };
     let Some(endpoint) = value.binding.tmux_endpoint.as_ref() else {
         return json!({"status":"not_requested","target":null,"observed":null,"error":null});
+    };
+    let target = match tmux_role_label(value, endpoint, &value.invocation_cwd, name) {
+        Ok(target) => target,
+        Err(error) => return json!({"status":"incomplete","target":null,"observed":null,"error":error}),
     };
     match crate::client::adapters::tmux::require_live_session_name(endpoint) {
         Ok(observed) if observed == target => json!({"status":"complete","target":target,"observed":observed,"error":null}),
@@ -129,4 +119,32 @@ pub(crate) fn physical_anchor_projection(
             "error":format!("TMUX_SESSION_NAME_MISMATCH: expected {target}, observed {observed}")}),
         Err(error) => json!({"status":"incomplete","target":target,"observed":null,"error":error}),
     }
+}
+
+pub(crate) fn verify_tmux_replacement(
+    previous: Option<&super::binding_slot::BindingValue>,
+    candidate: &super::binding_slot::BindingValue,
+    explicitly_confirmed: bool,
+) -> Result<(), String> {
+    use crate::client::adapters::tmux;
+    let same_agent = previous
+        .is_some_and(|previous| previous.binding.agent_id == candidate.binding.agent_id);
+    let Some(candidate) = candidate.transport.as_ref()
+        .filter(|transport| transport.kind == crate::proto::TransportKind::Tmux)
+        .and_then(|transport| transport.tmux_endpoint.as_ref()) else {
+        return Ok(());
+    };
+    let previous = previous.and_then(|value| value.binding.tmux_endpoint.as_ref());
+    if previous.is_some_and(|previous| tmux::same_session(previous, candidate)) {
+        return Ok(());
+    }
+    if tmux::iterm2_panes_for_endpoint(candidate)?.is_empty() {
+        return Err("TMUX_ITERM2_PANE_REQUIRED: the new tmux session must already be attached in iTerm2".into());
+    }
+    if let Some(previous) = previous {
+        if !same_agent && !explicitly_confirmed && !tmux::iterm2_panes_for_endpoint(previous)?.is_empty() {
+            return Err("TMUX_NAME_ONLINE_CONFLICT: the current tmux session is attached in iTerm2; explicit takeover is required".into());
+        }
+    }
+    Ok(())
 }

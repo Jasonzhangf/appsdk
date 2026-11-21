@@ -345,6 +345,124 @@ use super::*;
     }
 
     #[test]
+    fn goal_deadline_stays_armed_and_enters_the_mailbox_without_a_transport() {
+        let (server, root) = test_server();
+        register(&server, "owner");
+        let subscription_id = subscribe(
+            &server, "owner", "deadline", Some("goal:detached"), Some(now_ms() - 1),
+        );
+        server.state.lock().unwrap().workers.get_mut("owner").unwrap().transport = None;
+
+        tick_with_idle(&server, &|_| false);
+        tick_with_idle(&server, &|_| false);
+
+        let state = server.state.lock().unwrap();
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(subscription.fired_count, 0);
+        let messages = subscription_messages(&state, &subscription_id);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].to, "owner");
+        assert_eq!(messages[0].state, "pending");
+        assert_eq!(messages[0].wake_attempt_count, 0);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn due_occurrence_delivers_to_current_transport_with_no_saved_address() {
+        let (server, root) = test_server();
+        register(&server, "owner");
+        let now = now_ms();
+        let subscription_id = subscribe(
+            &server, "owner", "deadline", Some("projection-free"), Some(now - 1),
+        );
+        {
+            let mut state = server.state.lock().unwrap();
+            let subscription = state.notification_subscriptions.get_mut(&subscription_id).unwrap();
+            subscription.target.clear();
+            subscription.method.clear();
+        }
+        tick_with_idle_at(&server, now, &|_| true);
+        let state = server.state.lock().unwrap();
+        let messages = subscription_messages(&state, &subscription_id);
+        assert_eq!(messages.len(), 1);
+        assert!(state.notification_delivery_accepted.contains_key(&messages[0].id));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deadline_subscription_can_be_created_without_a_delivery_route() {
+        let (server, root) = test_server();
+        register(&server, "owner");
+        server.state.lock().unwrap().workers.get_mut("owner").unwrap().transport = None;
+        let now = now_ms();
+        let response = super::super::handle_notification_subscribe(
+            &server, "owner".into(), "token-owner".into(), "deadline".into(),
+            Some("offline-deadline".into()), Some(now + 1000), Vec::new(),
+            None, 1, 60,
+        );
+        assert!(response.ok, "{response:?}");
+        let subscription = &response.data["subscription"];
+        assert_eq!(subscription["status"], "armed");
+        assert_eq!(subscription["target"], "");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn goal_schedule_can_be_created_without_a_delivery_route() {
+        let (server, root) = test_server();
+        register_master(&server);
+        server.state.lock().unwrap().workers.get_mut("master").unwrap().transport = None;
+        let now = now_ms();
+        let response = super::super::handle_goal_schedule_reconcile(
+            &server, "master".into(), "token-master".into(), "offline-goal".into(),
+            "Jenny".into(), "active".into(), Some(now + 1000), Some(60), None, None,
+        );
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data["subscription"]["status"], "armed");
+        tick_with_idle_at(&server, now + 1000, &|_| false);
+        let state = server.state.lock().unwrap();
+        assert!(state.msgs.values().any(|message| {
+            message.subject.as_deref() == Some("deadline:goal:offline-goal")
+                && message.state == "pending"
+                && message.wake_attempt_count == 0
+        }));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ending_goal_preserves_an_accepted_unread_occurrence() {
+        let (server, root) = test_server();
+        register_master(&server);
+        let now = now_ms();
+        let subscription = subscribe(
+            &server, "master", "deadline", Some("goal:accepted"), Some(now - 1),
+        );
+        let message = bind_message_with_type(
+            &server, "master", &subscription, "accepted-occurrence", "notification",
+        );
+        server.commit(&[Event::NotificationDeliveryAccepted {
+            message_id: message.clone(),
+            accepted_ms: now,
+            evidence: None,
+        }]);
+        let ended = super::super::handle_goal_schedule_reconcile(
+            &server, "master".into(), "token-master".into(), "accepted".into(),
+            "Jenny".into(), "ended".into(), None, None, None, None,
+        );
+        assert!(ended.ok, "{ended:?}");
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.notification_subscriptions[&subscription].status, "cancelled");
+        assert_eq!(state.msgs[&message].state, "pending");
+        assert!(state.notification_delivery_accepted.contains_key(&message));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn goal_deadline_consumes_one_occurrence_even_when_legacy_record_is_recurring() {
         let (server, root) = test_server();
         register_master(&server);
@@ -2273,7 +2391,9 @@ use super::*;
     #[test]
     fn goal_reconcile_ended_receipt_survives_concurrent_timer_due_batch() {
         let _race = DUE_BATCH_RACE_LOCK.lock().unwrap();
-        let (server, root) = test_server();
+        let (mut server, root) = test_server();
+        // Race cancellation against mailbox admission, before native submission.
+        Arc::get_mut(&mut server).unwrap().config.notifications.enabled = false;
         register_master(&server);
         let now = now_ms();
         let (target, method) = subscription_target(&server, "master");
@@ -2371,7 +2491,8 @@ use super::*;
     #[test]
     fn goal_reconcile_rearm_receipt_survives_concurrent_timer_due_batch() {
         let _race = DUE_BATCH_RACE_LOCK.lock().unwrap();
-        let (server, root) = test_server();
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server).unwrap().config.notifications.enabled = false;
         register_master(&server);
         let now = now_ms();
         let (target, method) = subscription_target(&server, "master");

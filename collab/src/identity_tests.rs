@@ -236,11 +236,10 @@ fn registered_rex_caller_cannot_borrow_a_successor_session_from_the_same_block()
         }),
         ..Default::default()
     };
-    assert!(registered_from_map(&paths, &scope, &facts)
-        .unwrap()
-        .is_some());
+    let current = require_registered_from_map(&paths, &scope, &facts).unwrap();
+    assert_eq!(current.worker_id, identity.worker_id);
     facts.session_id = Some("displaced-agent-session".into());
-    let stale = registered_from_map(&paths, &scope, &facts);
+    let stale = require_registered_from_map(&paths, &scope, &facts);
     assert!(
         stale.is_err(),
         "ordinary commands must not acquire the successor's current identity from its block"
@@ -248,7 +247,7 @@ fn registered_rex_caller_cannot_borrow_a_successor_session_from_the_same_block()
     assert!(stale
         .unwrap_err()
         .to_string()
-        .contains("IDENTITY_SESSION_NOT_CURRENT"));
+        .contains("BOARD_IDENTITY_REQUIRED"));
     std::fs::remove_dir_all(root).unwrap();
 }
 

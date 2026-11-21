@@ -883,17 +883,7 @@ impl ProjectRuntimeManager {
             intent.as_ref().is_some_and(|intent| intent.user_authorized && intent.replace_confirmed),
         )?;
         if intent.as_ref().is_some_and(|intent| intent.user_authorized) {
-            if let Some(previous) = previous {
-                value.replace_rex_holder(previous)?;
-            }
-            for source in &cross_scope_sources {
-                if let Some(current) = map.slot(&source.key).and_then(|slot| slot.active_binding()) {
-                    value.preserve_rex_fence(current);
-                    if source.key.name.eq_ignore_ascii_case(&target) {
-                        value.replace_rex_holder(current)?;
-                    }
-                }
-            }
+            value.fence_rex_name_replacement(&map, &key, &cross_scope_sources)?;
         }
         let mut local_source_names: Vec<_> = map
             .slots()

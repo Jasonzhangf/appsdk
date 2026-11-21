@@ -147,9 +147,7 @@ fn registered_project_identity_with_provide(
 ) -> anyhow::Result<Identity> {
     let paths = scope::HostPaths::resolve()?;
     let facts = collect_identity_facts(provide)?;
-    identity::registered_from_map(&paths, scope, &facts)?.ok_or_else(|| {
-        anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current caller has no active identity mapping")
-    })
+    identity::require_registered_from_map(&paths, scope, &facts)
 }
 
 fn require_cli_mailbox_consumer(identity: &Identity) -> anyhow::Result<()> {

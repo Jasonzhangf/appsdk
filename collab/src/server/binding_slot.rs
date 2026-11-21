@@ -423,6 +423,26 @@ impl BindingValue {
         Ok(())
     }
 
+    pub(crate) fn fence_rex_name_replacement(
+        &mut self,
+        control: &BindingControlSet,
+        target: &IdentityBindingKey,
+        cross_scope_sources: &[CrossScopeSourceRef],
+    ) -> Result<(), String> {
+        if let Some(current) = control.slot(target).and_then(|slot| slot.active_binding()) {
+            self.replace_rex_holder(current)?;
+        }
+        for source in cross_scope_sources {
+            if let Some(current) = control.slot(&source.key).and_then(|slot| slot.active_binding()) {
+                self.preserve_rex_fence(current);
+                if source.key.name.eq_ignore_ascii_case(&target.name) {
+                    self.replace_rex_holder(current)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), SlotError> {
         if self
             .rex_execution_fence

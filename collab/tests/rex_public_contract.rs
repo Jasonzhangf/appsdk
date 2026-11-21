@@ -32,6 +32,96 @@ fn direct_subscription(status: &Value, worker_id: &str) -> Value {
 
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
+fn rex_board_invitation_is_queued_and_consumed_through_public_cli() {
+    let mut fixture = RexLiveFixture::new("board-queue");
+    let sender = fixture.create_receiver_session("board-sender");
+    let receiver = fixture.create_receiver_session("board-receiver");
+    fixture.wait_receiver_ready(&sender, Duration::from_secs(20));
+    fixture.wait_receiver_ready(&receiver, Duration::from_secs(20));
+    fixture.start_daemon();
+    fixture.context_provide(&sender);
+    let receiver_context = fixture.context_provide(&receiver);
+    let receiver_id = worker_id(snapshot(&receiver_context));
+    fixture.run_ok(
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "isolated board queue fixture",
+        ],
+        Some(&sender.agent_session_id),
+    );
+    let published = fixture.run_ok(
+        &[
+            "board",
+            "publish",
+            "rex-queue-fixture",
+            "--title",
+            "queue fixture",
+            "--description",
+            "test daemon invitation delivery",
+            "--delivery-condition",
+            "receipt",
+            "--test-condition",
+            "public receive",
+            "--long-horizon-content",
+            "verify queue",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        Some(&sender.agent_session_id),
+    );
+    let revision = published["task"]["revision"].to_string();
+    let invited = fixture.run_ok(
+        &[
+            "board",
+            "invite",
+            "rex-queue-fixture",
+            "--to",
+            &receiver_id,
+            "--expected-revision",
+            &revision,
+        ],
+        Some(&sender.agent_session_id),
+    );
+    assert_eq!(invited["durable"], true, "{invited}");
+    assert_eq!(invited["notification"], "queued", "{invited}");
+    assert_eq!(invited["consumed"], false, "{invited}");
+    let id = invited["msg_id"]
+        .as_str()
+        .expect("durable invitation ID")
+        .to_owned();
+    fixture.wait_receiver_document(&receiver, Duration::from_secs(30), |value| {
+        value["kind"] == "test_receiver_raw_input"
+            && value["received"]
+                .as_str()
+                .is_some_and(|text| text.contains(&id))
+    });
+    let pending = fixture.run_ok(&["msg", &id], Some(&sender.agent_session_id));
+    assert_eq!(pending["consumed_by_recv"], false, "{pending}");
+    let received = fixture.run_ok(
+        &["recv", "--timeout", "0"],
+        Some(&receiver.agent_session_id),
+    );
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == id),
+        "{received}"
+    );
+    let receipt = fixture.run_ok(&["msg", &id], Some(&sender.agent_session_id));
+    assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+    fixture.evidence(
+        "board_invitation_queue",
+        json!({"invited": invited, "receipt": receipt}),
+    );
+    assert!(fixture.finish().is_empty());
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_context_automatically_discovers_current_block() {
     let mut fixture = RexLiveFixture::new("auto-context");
     let agent = fixture.create_receiver_session("auto-context");

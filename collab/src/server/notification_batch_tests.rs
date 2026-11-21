@@ -978,6 +978,257 @@ fn rex_current_owner_refusal_preserves_entire_durable_batch() {
 }
 
 #[test]
+fn rex_new_board_invitation_does_not_repeat_an_accepted_invitation() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+    let subscription = register_rex_worker(&server, "a", &current);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
+    persist_rex_worker_binding(&server, &route, "a", &current);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let observed = calls.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, text, message_id, _, _| {
+        observed.lock().unwrap().push(text.to_owned());
+        Ok(json!({"accepted": true, "messageId": message_id}))
+    });
+    let now = now_ms();
+    for (offset, id) in [(0, "board-invite-first-2"), (1, "board-invite-next-2")] {
+        queue_message(&server, "a", &subscription, id, now + offset);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: id.into(),
+            mode: "explicit-notification".into(),
+            source_thread_id: None,
+        }]);
+        timers::tick_with_idle_at(&server, now + offset + 1, &|_| true);
+    }
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[1].contains("board-invite-next-2"), "{}", calls[1]);
+    assert!(!calls[1].contains("board-invite-first-2"), "{}", calls[1]);
+    drop(calls);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_board_invitation_recovers_after_block_rebinding() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let current = rex_transport("agent-a", "rex-server", "rex-session", "shared-block");
+    let old = rex_transport("agent-b", "rex-server", "rex-session", "shared-block");
+    let subscription = register_rex_worker(&server, "a", &current);
+    seed_duplicate_current_rex_bindings(
+        &server,
+        &route,
+        &[("Alice", "a", &current), ("Bob", "b", &old)],
+    );
+    let sink_calls = install_capture_sink(&mut server);
+    let id = "board-invite-rebinding-2";
+    let now = now_ms();
+    queue_message(&server, "a", &subscription, id, now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: id.into(),
+        mode: "explicit-notification".into(),
+        source_thread_id: None,
+    }]);
+    timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert!(sink_calls.lock().unwrap().is_empty());
+    assert!(
+        server.state.lock().unwrap().notification_delivery_failures[id]
+            .error
+            .starts_with("REX_BLOCK_OWNER_AMBIGUOUS")
+    );
+    let store =
+        crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let mut control = store.load().unwrap();
+    let key = crate::server::binding_slot::IdentityBindingKey::new(
+        route.project_scope_id.clone(),
+        route.app_scope_id.clone(),
+        "Alice".to_string(),
+    );
+    control
+        .commit(
+            &key,
+            rex_binding_value(&route, "Alice", "a", current.clone()),
+            None,
+        )
+        .unwrap();
+    store.save(&control).unwrap();
+    persist_rex_worker_binding(&server, &route, "a", &current);
+    timers::tick_with_idle_at(&server, now + 2, &|_| true);
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
+    assert!(!server
+        .state
+        .lock()
+        .unwrap()
+        .notification_delivery_failures
+        .contains_key(id));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_board_invitation_recovers_after_binding_becomes_available() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+    let subscription = register_rex_worker(&server, "a", &current);
+    let sink_calls = install_capture_sink(&mut server);
+    let id = "board-invite-binding-recovery-2";
+    let now = now_ms();
+    queue_message(&server, "a", &subscription, id, now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: id.into(),
+        mode: "explicit-notification".into(),
+        source_thread_id: None,
+    }]);
+    timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert!(sink_calls.lock().unwrap().is_empty());
+    assert!(
+        server.state.lock().unwrap().notification_delivery_failures[id]
+            .error
+            .starts_with("REX_CURRENT_BINDING_MISSING")
+    );
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
+    persist_rex_worker_binding(&server, &route, "a", &current);
+    timers::tick_with_idle_at(&server, now + 2, &|_| true);
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
+    assert!(!server
+        .state
+        .lock()
+        .unwrap()
+        .notification_delivery_failures
+        .contains_key(id));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_queued_message_with_reserved_attempt_is_not_replayed() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+    let subscription = register_rex_worker(&server, "a", &current);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
+    persist_rex_worker_binding(&server, &route, "a", &current);
+    let sink_calls = install_capture_sink(&mut server);
+    let id = "queued-rex-reserved";
+    let now = now_ms();
+    queue_message(&server, "a", &subscription, id, now);
+    server.commit(&[
+        Event::DeliveryMode {
+            msg_id: id.into(),
+            mode: "queued".into(),
+            source_thread_id: None,
+        },
+        Event::WakeAttempted {
+            ids: vec![id.into()],
+            attempted_ms: now,
+            retry: false,
+        },
+    ]);
+    timers::tick_with_idle_at(&server, now + 3_000, &|_| true);
+    assert!(sink_calls.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_queued_message_reaches_native_sink_in_submission_mode() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+    let subscription = register_rex_worker(&server, "a", &current);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
+    persist_rex_worker_binding(&server, &route, "a", &current);
+    let modes = Arc::new(Mutex::new(Vec::new()));
+    let observed = modes.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _, mode| {
+        observed.lock().unwrap().push(mode.to_owned());
+        Ok(json!({"accepted": true, "messageId": message_id}))
+    });
+    let id = "queued-rex-test";
+    let now = now_ms();
+    queue_message(&server, "a", &subscription, id, now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: id.into(),
+        mode: "queued".into(),
+        source_thread_id: None,
+    }]);
+    timers::tick_with_idle_at(&server, now + 1, &|_| true);
+    assert_eq!(*modes.lock().unwrap(), vec!["immediate"]);
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .notification_delivery_accepted
+        .contains_key(id));
+    timers::tick_with_idle_at(&server, now + 3_000, &|_| true);
+    assert_eq!(modes.lock().unwrap().len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_board_invitation_waits_for_publication_and_recovers_old_busy() {
+    for had_prior_busy in [false, true] {
+        let (mut server, root) = test_server();
+        let route = seed_rex_route(&server);
+        let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
+        let subscription = register_rex_worker(&server, "a", &current);
+        seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
+        persist_rex_worker_binding(&server, &route, "a", &current);
+        let sink_calls = install_capture_sink(&mut server);
+        let id = "board-invite-test-2";
+        let second_id = "board-invite-other-2";
+        let now = now_ms();
+        queue_message(&server, "a", &subscription, id, now);
+        queue_message(&server, "a", &subscription, second_id, now);
+        server.commit(&[
+            Event::DeliveryMode {
+                msg_id: id.into(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            },
+            Event::DeliveryMode {
+                msg_id: second_id.into(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            },
+        ]);
+        if had_prior_busy {
+            server.commit(&[Event::NotificationDeliveryFailed {
+                message_id: id.into(),
+                operation: "notification.not_attempted".into(),
+                error: "REX_BINDING_PUBLICATION_BUSY: retry after current binding publication"
+                    .into(),
+                failed_ms: now,
+                retryable: true,
+            }]);
+            let status = handle_msg_status(&server, id.into(), None);
+            assert!(status.data["notification_delivery_failure"].is_null());
+            assert_eq!(status.data["consumed_by_recv"], false);
+        }
+        let guard = server.register_gate.lock().unwrap();
+        timers::tick_with_idle_at(&server, now + 1, &|_| true);
+        assert!(sink_calls.lock().unwrap().is_empty());
+        drop(guard);
+        timers::tick_with_idle_at(&server, now + 2, &|_| true);
+        assert_eq!(sink_calls.lock().unwrap().len(), 1);
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.msgs[id].state, "pending");
+            assert_eq!(state.msgs[second_id].state, "pending");
+            assert!(state.notification_delivery_accepted.contains_key(id));
+            assert!(state.notification_delivery_accepted.contains_key(second_id));
+            assert!(!state.notification_delivery_failures.contains_key(id));
+        }
+        timers::tick_with_idle_at(&server, now + 3_000, &|_| true);
+        assert_eq!(sink_calls.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn rex_current_owner_busy_publication_is_not_attempted() {
     let (mut server, root) = test_server();
     let route = seed_rex_route(&server);
@@ -991,8 +1242,20 @@ fn rex_current_owner_busy_publication_is_not_attempted() {
     let _register_guard = server.register_gate.lock().unwrap();
     let response = send_notify(&server, "sender", "a");
 
-    assert_rex_refusal_with_state(&response, "REX_BINDING_PUBLICATION_BUSY", &server);
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["notification"], "queued");
+    assert_eq!(response.data["consumed"], false);
+    assert!(response.data["notification_error"].is_null());
     assert!(sink_calls.lock().unwrap().is_empty());
+    let id = response.data["msg_id"].as_str().unwrap().to_owned();
+    drop(_register_guard);
+    drop(_wire_guard);
+    timers::tick_with_idle_at(&server, now_ms() + 1, &|_| true);
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
+    assert_eq!(server.state.lock().unwrap().msgs[&id].state, "pending");
+    timers::tick_with_idle_at(&server, now_ms() + 3_000, &|_| true);
+    assert_eq!(sink_calls.lock().unwrap().len(), 1);
     std::fs::remove_dir_all(root).unwrap();
 }
 

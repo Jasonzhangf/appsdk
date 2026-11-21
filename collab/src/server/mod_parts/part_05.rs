@@ -1195,6 +1195,8 @@ fn attempt_tmux_notification_with_retry(
         explicit,
         if queued_tmux {
             DAEMON_LIVE_CLOSURE_MODE
+        } else if transport.kind == TransportKind::Rex && delivery_mode == "queued" {
+            "immediate"
         } else {
             &delivery_mode
         },
@@ -1810,6 +1812,13 @@ fn notification_send_response(
             )
         }
         NotificationAttempt::NotAttempted(error) => {
+            if notification_method == "rex" && error.starts_with("REX_BINDING_PUBLICATION_BUSY") {
+                data["durable"] = json!(true);
+                data["notification"] = json!("queued");
+                data["consumed"] = json!(false);
+                data["repair_required"] = json!(false);
+                return Resp::data(data);
+            }
             data["durable"] = json!(true);
             data["notification"] = json!("subscribed-not-sent");
             data["notification_error"] = json!(error);

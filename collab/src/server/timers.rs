@@ -538,7 +538,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 ///
 /// Ordinary messages (no persisted delivery mode) keep the existing batch
 /// retry contract, and queued tmux delivery keeps its deferred path.
-/// `explicit-notification` stays with its explicit retry operator. A real
+/// Rex board invitations and retryable pre-I/O deferrals are resumed by the
+/// daemon; other `explicit-notification` records keep their existing path. A real
 /// public `delivery=immediate` record that was never attempted becomes
 /// eligible exactly once, so a restored daemon-owned default lease reaches the
 /// existing attempt owner. Any accepted, failed, or retried immediate outcome
@@ -548,18 +549,37 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
     match state.delivery_modes.get(&message.id).map(String::as_str) {
         None => true,
         Some("queued") => {
-            state
+            let transport = state
                 .workers
                 .get(&message.to)
-                .and_then(super::selected_transport_for_worker)
-                .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
-                && !state
-                    .notification_delivery_accepted
-                    .contains_key(&message.id)
-                && state
-                    .notification_delivery_failures
-                    .get(&message.id)
-                    .is_none_or(|failure| failure.retryable)
+                .and_then(super::selected_transport_for_worker);
+            match transport.map(|transport| transport.kind) {
+                Some(crate::proto::TransportKind::Tmux) => {
+                    !state
+                        .notification_delivery_accepted
+                        .contains_key(&message.id)
+                        && state
+                            .notification_delivery_failures
+                            .get(&message.id)
+                            .is_none_or(|failure| failure.retryable)
+                }
+                Some(crate::proto::TransportKind::Rex) => {
+                    message.wake_attempt_count == 0
+                        && message.last_wake_attempt_ms == 0
+                        && !message.retry_attempted
+                        && !state
+                            .notification_delivery_accepted
+                            .contains_key(&message.id)
+                        && state
+                            .notification_delivery_failures
+                            .get(&message.id)
+                            .is_none_or(|failure| {
+                                failure.operation == "notification.not_attempted"
+                                    && failure.retryable
+                            })
+                }
+                _ => false,
+            }
         }
         Some("immediate") => {
             super::desktop_connect_retry(state, message)
@@ -584,7 +604,28 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                                 && message.wake_attempt_count == 0
                         }))
         }
-        Some("explicit-notification") => false,
+        Some("explicit-notification") => {
+            state
+                .workers
+                .get(&message.to)
+                .and_then(super::selected_transport_for_worker)
+                .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Rex)
+                && message.wake_attempt_count == 0
+                && message.last_wake_attempt_ms == 0
+                && !message.retry_attempted
+                && !state
+                    .notification_delivery_accepted
+                    .contains_key(&message.id)
+                && state
+                    .notification_delivery_failures
+                    .get(&message.id)
+                    .map_or_else(
+                        || message.id.starts_with("board-invite-"),
+                        |failure| {
+                            failure.operation == "notification.not_attempted" && failure.retryable
+                        },
+                    )
+        }
         // Internal daemon markers predate the explicit delivery domain and
         // keep their pre-existing automatic path unchanged.
         Some(_) => true,

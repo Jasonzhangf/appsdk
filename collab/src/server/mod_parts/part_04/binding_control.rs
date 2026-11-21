@@ -5,9 +5,19 @@ impl ProjectRuntimeManager {
         facts: &crate::proto::IdentityFacts,
         invocation_cwd: Option<&str>,
         allow_explicit_rex_rebind: bool,
+        verified_rex: Option<&crate::proto::SelectedTransport>,
     ) -> Result<(), String> {
         let control = self.binding_control_store().load()?;
-        let lookup = if allow_explicit_rex_rebind {
+        let lookup = if let Some(verified) = verified_rex {
+            control.lookup_verified_rex(
+                &context.project_scope,
+                &context.app_scope_id,
+                facts,
+                invocation_cwd,
+                verified,
+                allow_explicit_rex_rebind,
+            )
+        } else if allow_explicit_rex_rebind {
             control.lookup_explicit_rex_rebind(
                 &context.project_scope,
                 &context.app_scope_id,
@@ -26,7 +36,16 @@ impl ProjectRuntimeManager {
         let runtime = self.select_runtime(context)?;
         let _register = self.register_gate.lock().unwrap();
         let control = self.binding_control_store().load()?;
-        let lookup = if allow_explicit_rex_rebind {
+        let lookup = if let Some(verified) = verified_rex {
+            control.lookup_verified_rex(
+                &context.project_scope,
+                &context.app_scope_id,
+                facts,
+                invocation_cwd,
+                verified,
+                allow_explicit_rex_rebind,
+            )
+        } else if allow_explicit_rex_rebind {
             control.lookup_explicit_rex_rebind(
                 &context.project_scope,
                 &context.app_scope_id,
@@ -882,6 +901,16 @@ impl ProjectRuntimeManager {
             value.invocation_cwd = anchor.cwd.clone();
         }
         Self::prepare_control_value(&control, &key, &mut value)?;
+        let expected_generation = if moves_existing_names {
+            let sources = effect
+                .as_ref()
+                .map(|effect| effect.cross_scope_sources())
+                .unwrap_or_default();
+            value.fence_rex_name_replacement(&control, &key, sources)?;
+            control.slot(&key).map(|slot| slot.generation())
+        } else {
+            None
+        };
         let route = binding.route_scope();
         let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref()
             == Some(binding.agent_id.as_str());
@@ -912,7 +941,7 @@ impl ProjectRuntimeManager {
                     target: key,
                     value,
                     source_names: Vec::new(),
-                    expected_generation: None,
+                    expected_generation,
                     effect,
                     companion: None,
                 }

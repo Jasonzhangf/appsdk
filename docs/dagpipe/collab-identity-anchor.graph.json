@@ -1,4 +1,8 @@
 {
+  "rex_current_endpoint": {
+    "只查询统一映射并分类动作": "保留当前 agent session 优先级。来自 daemon 的已核实物理端点按 server、instance、Rex session、block 匹配；端点代际不作为逻辑名字。",
+    "提交唯一映射与有界交接意图": "同一完整物理端点的竞争 current 随新发布原子退役。无关 instance、session 或 block 及其待办保留。原主体已核实的服务代际漂移沿原 slot 刷新。"
+  },
   "id":"appsdk-collab-identity-anchor",
   "version":"1.0.8",
   "tmux_current_pane_binding_gates": {

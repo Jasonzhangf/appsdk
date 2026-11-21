@@ -213,6 +213,74 @@ fn rex_public_context_automatically_discovers_current_block() {
 
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
+fn rex_public_context_replaces_a_stale_persisted_instance_with_verified_service_facts() {
+    let mut fixture = RexLiveFixture::new("stale-instance");
+    let agent = fixture.create_receiver_session("stale-instance");
+    fixture.wait_receiver_ready(&agent, Duration::from_secs(20));
+    fixture.start_daemon();
+
+    let initial = fixture.context_provide(&agent);
+    assert_eq!(initial["result"]["outcome"], "completed", "{initial}");
+    let initial_snapshot = snapshot(&initial);
+    let initial_endpoint = &initial_snapshot["identity"]["transport"]["rex_endpoint"];
+    let current_instance = initial_endpoint["instance_id"]
+        .as_str()
+        .expect("initial verified Rex transport has an instance id")
+        .to_owned();
+    assert_eq!(initial_endpoint["server"], fixture.rex_server, "{initial}");
+    assert_eq!(initial_endpoint["session_id"], agent.session_id, "{initial}");
+    assert_eq!(initial_endpoint["block_id"], agent.block_id, "{initial}");
+
+    fixture.stop_daemon();
+    let stale_instance = format!("persisted-stale-{}", fixture.unique_token());
+    let old_instance = fixture.replace_current_rex_instance(&agent, &stale_instance);
+    assert_eq!(old_instance, current_instance);
+    let persisted = fixture.identity_map();
+    let persisted_endpoint = persisted["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["current"]["binding"]["session_id"] == agent.agent_session_id)
+        .unwrap()["current"]["transport"]["rex_endpoint"]
+        .clone();
+    assert_eq!(persisted_endpoint["instance_id"], stale_instance);
+
+    fixture.start_daemon();
+    let restored = fixture.context_provide(&agent);
+    assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
+    let restored_endpoint = &snapshot(&restored)["identity"]["transport"]["rex_endpoint"];
+    assert_eq!(restored_endpoint["server"], fixture.rex_server, "{restored}");
+    assert_eq!(restored_endpoint["session_id"], agent.session_id, "{restored}");
+    assert_eq!(restored_endpoint["block_id"], agent.block_id, "{restored}");
+    assert_ne!(
+        restored_endpoint["instance_id"], stale_instance,
+        "context must publish the current verified service generation"
+    );
+    assert_eq!(
+        restored_endpoint["instance_id"], current_instance,
+        "the selected Rex service must report its current instance id"
+    );
+    fixture.evidence(
+        "stale_persisted_instance_rebound",
+        json!({
+            "persisted_instance": stale_instance,
+            "verified_instance": restored_endpoint["instance_id"],
+            "server": restored_endpoint["server"],
+            "rex_session": restored_endpoint["session_id"],
+            "block": restored_endpoint["block_id"],
+        }),
+    );
+
+    let errors = fixture.finish();
+    assert!(
+        errors.is_empty(),
+        "owned Rex session cleanup failed: {errors:?}"
+    );
+    eprintln!("Rex live evidence: {}", fixture.evidence_path.display());
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_block_binding_replaces_current_owner_and_keeps_blocks_independent() {
     let mut fixture = RexLiveFixture::new("block-binding");
     let alice = fixture.create_receiver_session("binding-alice");
@@ -600,6 +668,9 @@ fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
     assert_eq!(lease["status"], "armed");
     let expected_target = json!([
         fixture.rex_server.as_str(),
+        receiver_transport["rex_endpoint"]["instance_id"]
+            .as_str()
+            .expect("verified Rex transport has an instance id"),
         receiver.session_id.as_str(),
         receiver.block_id.as_str(),
     ])

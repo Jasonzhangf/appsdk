@@ -765,6 +765,17 @@ pub(crate) fn new_registration_identity(
     draft_identity_with_id(scope, &format!("collab-{}", hex(16)))
 }
 
+/// Ordinary commands require an active identity before acting.
+pub(crate) fn require_registered_from_map(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    facts: &crate::proto::IdentityFacts,
+) -> anyhow::Result<Identity> {
+    registered_from_map(host_paths, scope, facts)?.ok_or_else(|| {
+        anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: current caller has no active identity mapping")
+    })
+}
+
 /// Exact credential read after the sole map has selected a principal.
 pub(crate) fn registered_from_map(
     host_paths: &HostPaths,

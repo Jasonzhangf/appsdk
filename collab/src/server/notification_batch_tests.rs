@@ -1070,7 +1070,7 @@ fn rex_notification_target_is_the_full_service_scoped_terminal_address() {
     };
     assert_eq!(
         notification_target(&rex).unwrap().as_ref(),
-        r#"["macstudio","rex-session","rex-block"]"#
+        r#"["macstudio","instance-7","rex-session","rex-block"]"#
     );
     let mut subscription = owned_subscription("worker", "rex-lease", "armed");
     subscription.method = "rex".into();
@@ -1141,6 +1141,33 @@ fn rex_current_owner_duplicate_block_current_is_not_attempted() {
 
     assert_rex_refusal_with_state(&response, "REX_BLOCK_OWNER_AMBIGUOUS", &server);
     assert!(sink_calls.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_current_owner_same_locator_different_physical_endpoints_are_not_ambiguous() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let first = rex_transport("agent-a", "rex-server", "rex-session-a", "shared-block");
+    let mut second = rex_transport("agent-b", "rex-server", "rex-session-b", "shared-block");
+    second
+        .rex_endpoint
+        .as_mut()
+        .unwrap()
+        .instance_id = "instance-b".into();
+    register_rex_worker(&server, "a", &first);
+    register_rex_worker(&server, "b", &second);
+    seed_current_rex_bindings(
+        &server,
+        &route,
+        &[("Alice", "a", &first), ("Bob", "b", &second)],
+    );
+    let sink_calls = install_capture_sink(&mut server);
+
+    let response = send_notify(&server, "sender", "a");
+
+    assert!(response.ok, "{response:?}");
+    assert_eq!(sink_calls.lock().unwrap().as_slice(), &[first]);
     std::fs::remove_dir_all(root).unwrap();
 }
 

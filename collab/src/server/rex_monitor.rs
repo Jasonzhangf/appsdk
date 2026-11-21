@@ -480,6 +480,7 @@ fn current_target(state: &super::state::State, worker_id: &str) -> Option<Monito
         return None;
     }
     let endpoint = transport.rex_endpoint.clone()?;
+    crate::server::binding_slot::rex_physical_endpoint(&endpoint)?;
     let agent_session_id = transport
         .session_id
         .as_deref()

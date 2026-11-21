@@ -63,7 +63,11 @@ fn rex_identity_presence(_server: &Server, state: &State, worker: &WorkerRec) ->
     let Some(transport) = worker.transport.as_ref() else {
         return IdentityPresence::Missing;
     };
-    let has_endpoint = transport.rex_endpoint.is_some();
+    let has_endpoint = transport
+        .rex_endpoint
+        .as_ref()
+        .and_then(crate::server::binding_slot::rex_physical_endpoint)
+        .is_some();
     let has_session = transport
         .session_id
         .as_deref()
@@ -372,12 +376,15 @@ pub(crate) fn maintenance_presence(
 /// generation, malformed and unknown failures stay Unknown so the persistent
 /// identity and business duties are preserved.
 fn rex_maintenance_presence(transport: &SelectedTransport) -> IdentityPresence {
-    let Some(endpoint) = transport.rex_endpoint.as_ref() else {
-        return IdentityPresence::Missing;
+    let Some(endpoint) = transport
+        .rex_endpoint
+        .as_ref()
+        .filter(|endpoint| {
+            crate::server::binding_slot::rex_physical_endpoint(endpoint).is_some()
+        })
+    else {
+        return IdentityPresence::Unknown;
     };
-    if endpoint.session_id.trim().is_empty() {
-        return IdentityPresence::Missing;
-    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -654,7 +661,11 @@ pub(crate) fn worker_identity_and_endpoint(
             (identity_valid, endpoint_live)
         }
         TransportKind::Rex => {
-            let identity_valid = transport.rex_endpoint.is_some()
+            let identity_valid = transport
+                .rex_endpoint
+                .as_ref()
+                .and_then(crate::server::binding_slot::rex_physical_endpoint)
+                .is_some()
                 && transport
                     .session_id
                     .as_deref()
@@ -763,10 +774,16 @@ fn transport_agent_view(
         };
     }
     if transport.kind == TransportKind::Rex {
-        return match transport.rex_endpoint.as_ref() {
+        return match transport
+            .rex_endpoint
+            .as_ref()
+            .filter(|endpoint| {
+                crate::server::binding_slot::rex_physical_endpoint(endpoint).is_some()
+            })
+        {
             None => (
-                IdentityPresence::Missing,
-                serde_json::json!({"transport": "rex", "error": "REX_ENDPOINT_MISSING"}),
+                IdentityPresence::Unknown,
+                serde_json::json!({"transport": "rex", "error": "REX_ENDPOINT_INCOMPLETE"}),
                 serde_json::Value::Null,
             ),
             Some(_) => match worker_agent_view(server, worker) {
@@ -1748,8 +1765,13 @@ fn rex_worker_status_view(
     let state = server.state.lock().unwrap();
     let valid = rex_identity_presence(server, &state, worker) == IdentityPresence::Present;
     let current_execution = worker.transport.as_ref().is_some_and(|transport| {
+        let endpoint_key = transport
+            .rex_endpoint
+            .as_ref()
+            .and_then(crate::server::binding_slot::rex_physical_endpoint);
         state.rex_executions.get(&worker.id).is_some_and(|execution| {
-            transport.rex_endpoint.as_ref() == Some(&execution.endpoint)
+            crate::server::binding_slot::rex_physical_endpoint(&execution.endpoint)
+                .is_some_and(|candidate| Some(candidate) == endpoint_key)
                 && transport.session_id.as_deref() == Some(execution.agent_session_id.as_str())
         })
     });
@@ -1824,6 +1846,15 @@ fn worker_status_capture(
         .transport
         .clone()
         .ok_or_else(|| format!("worker {target_id} has no registered transport"))?;
+    if selected_transport.kind == crate::proto::TransportKind::Rex
+        && selected_transport
+            .rex_endpoint
+            .as_ref()
+            .and_then(crate::server::binding_slot::rex_physical_endpoint)
+            .is_none()
+    {
+        return Err("WORKER_STATUS_CAPTURE_REX_ENDPOINT_INCOMPLETE".into());
+    }
     let binding = current_worker_binding(
         state,
         &route.project_scope_id,
@@ -2738,6 +2769,71 @@ mod worker_status_judgment_tests {
             name_state::AgentActivity::Busy
         );
         drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_status_capture_rejects_an_incomplete_rex_endpoint() {
+        let (server, root) = peer_tests::test_server();
+        let transport = crate::proto::SelectedTransport {
+            kind: crate::proto::TransportKind::Rex,
+            endpoint: None,
+            namespace: None,
+            session_id: Some("agent-session-rex-incomplete".into()),
+            thread_id: None,
+            tmux_endpoint: None,
+            rex_endpoint: Some(crate::proto::RexEndpoint {
+                server: "unix:///tmp/rex-incomplete.sock".into(),
+                session_id: "rex-session".into(),
+                block_id: "rex-block".into(),
+                host_id: None,
+                instance_id: "rex-instance".into(),
+                cwd: root.display().to_string(),
+            }),
+            capabilities: vec!["snapshot".into()],
+            self_check: "complete Rex registration fixture".into(),
+        };
+        assert!(
+            peer_tests::seed_committed_owner(
+                &server,
+                "rex-incomplete",
+                "token-rex-incomplete",
+                &transport,
+                &root.display().to_string(),
+                None,
+            )
+            .ok
+        );
+        let worker = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .workers
+                .get_mut("rex-incomplete")
+                .unwrap()
+                .transport
+                .as_mut()
+                .unwrap()
+                .rex_endpoint
+                .as_mut()
+                .unwrap()
+                .instance_id
+                .clear();
+            state.workers["rex-incomplete"].clone()
+        };
+        assert_eq!(worker_identity_and_endpoint(&server, &worker), (false, None));
+        assert_eq!(
+            transport_agent_view(&server, &worker).0,
+            super::IdentityPresence::Unknown
+        );
+        let control = BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .expect("load current binding control");
+        let error = {
+            let state = server.state.lock().unwrap();
+            worker_status_capture(&server, &control, &state, "rex-incomplete", 4_243)
+                .expect_err("incomplete Rex endpoint must not enter status capture")
+        };
+        assert_eq!(error, "WORKER_STATUS_CAPTURE_REX_ENDPOINT_INCOMPLETE");
         std::fs::remove_dir_all(root).unwrap();
     }
 

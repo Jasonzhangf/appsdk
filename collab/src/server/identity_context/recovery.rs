@@ -399,26 +399,6 @@ impl ProjectRuntimeManager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("REX_EXECUTION_OBSERVATION_REQUIRED"))?
             .clone();
-        let control = self
-            .binding_control_store()
-            .load()
-            .map_err(anyhow::Error::msg)?;
-        let baseline = control
-            .lookup(
-                &context.project_scope,
-                &context.app_scope_id,
-                facts,
-                invocation_cwd,
-            )
-            .map_err(anyhow::Error::msg)?
-            .map(|slot| RexRecoveryBaseline {
-                key: slot.identity_key.clone(),
-                generation: slot.generation(),
-                current: slot
-                    .active_binding()
-                    .expect("lookup returns active current")
-                    .clone(),
-            });
         let candidates = TransportCandidates {
             rex: Some(candidate.clone()),
             ..Default::default()
@@ -434,6 +414,28 @@ impl ProjectRuntimeManager {
             .rex_endpoint
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("REX_ENDPOINT_REJECTED: selected transport lost its endpoint"))?;
+        let control = self
+            .binding_control_store()
+            .load()
+            .map_err(anyhow::Error::msg)?;
+        let baseline = control
+            .lookup_verified_rex(
+                &context.project_scope,
+                &context.app_scope_id,
+                facts,
+                invocation_cwd,
+                &transport,
+                false,
+            )
+            .map_err(anyhow::Error::msg)?
+            .map(|slot| RexRecoveryBaseline {
+                key: slot.identity_key.clone(),
+                generation: slot.generation(),
+                current: slot
+                    .active_binding()
+                    .expect("lookup returns active current")
+                    .clone(),
+            });
         verify_local_rex_socket(&endpoint.server)?;
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             anyhow::anyhow!("REX_EXECUTION_UNVERIFIED: daemon runtime is unavailable")
@@ -521,7 +523,26 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
     ) -> anyhow::Result<Option<identity::Identity>> {
-        self.current_session_identity_at_cwd(context, facts, None, false)
+        self.current_session_identity_at_cwd(context, facts, None, false, None)
+    }
+
+    fn verified_rex_transport_for_context(
+        &self,
+        context: &ProjectContext,
+        facts: &IdentityFacts,
+    ) -> Option<crate::proto::SelectedTransport> {
+        let candidate = facts.rex.as_ref()?.clone();
+        let candidates = TransportCandidates {
+            rex: Some(candidate),
+            ..Default::default()
+        };
+        validate_transport_candidates_for_session(
+            Path::new(&context.canonical_root),
+            &candidates,
+            &context.canonical_root,
+            facts.session_id.as_deref(),
+        )
+        .ok()
     }
 
     fn current_session_identity_at_cwd(
@@ -530,12 +551,22 @@ impl ProjectRuntimeManager {
         facts: &IdentityFacts,
         invocation_cwd: Option<&str>,
         allow_explicit_rex_rebind: bool,
+        verified_rex: Option<&crate::proto::SelectedTransport>,
     ) -> anyhow::Result<Option<identity::Identity>> {
         let control = self
             .binding_control_store()
             .load()
             .map_err(anyhow::Error::msg)?;
-        let lookup = if allow_explicit_rex_rebind {
+        let lookup = if let Some(verified) = verified_rex {
+            control.lookup_verified_rex(
+                &context.project_scope,
+                &context.app_scope_id,
+                facts,
+                invocation_cwd,
+                verified,
+                allow_explicit_rex_rebind,
+            )
+        } else if allow_explicit_rex_rebind {
             control.lookup_explicit_rex_rebind(
                 &context.project_scope,
                 &context.app_scope_id,
@@ -909,6 +940,7 @@ impl ProjectRuntimeManager {
             &facts,
             invocation_cwd,
             allow_explicit_rex_rebind,
+            rex_recovery.as_ref().map(|recovery| &recovery.transport),
         )? };
         if let Some(identity) = session_identity.as_ref() {
             if let Some(candidate) = facts.tmux.as_ref() {
@@ -1074,18 +1106,17 @@ impl ProjectRuntimeManager {
                                 allow_explicit_rex_rebind,
                             )?;
                             let candidates = TransportCandidates { rex: Some(candidate.clone()), ..Default::default() };
-                            transport = rex_recovery
-                                .as_ref()
-                                .map(|recovery| recovery.transport.clone())
-                                .unwrap_or(
-                                    validate_transport_candidates_for_session(
-                                        &runtime.root,
-                                        &candidates,
-                                        &context.canonical_root,
-                                        facts.session_id.as_deref(),
-                                    )
-                                    .map_err(anyhow::Error::msg)?,
-                                );
+                            transport = if let Some(recovery) = rex_recovery.as_ref() {
+                                recovery.transport.clone()
+                            } else {
+                                validate_transport_candidates_for_session(
+                                    &runtime.root,
+                                    &candidates,
+                                    &context.canonical_root,
+                                    facts.session_id.as_deref(),
+                                )
+                                .map_err(anyhow::Error::msg)?
+                            };
                             current = Some(self.refresh_session_transport(
                                 &runtime,
                                 saved,

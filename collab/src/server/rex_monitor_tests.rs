@@ -598,6 +598,31 @@ fn late_old_binding_is_not_equal() {
 }
 
 #[test]
+fn incomplete_rex_endpoint_is_not_a_monitor_target() {
+    let target = target();
+    let (server, root) = rex_server(&target);
+    {
+        let mut state = server.state.lock().unwrap();
+        state
+            .workers
+            .get_mut("worker")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .rex_endpoint
+            .as_mut()
+            .unwrap()
+            .instance_id = String::new();
+    }
+    assert!(
+        current_target(&server.state.lock().unwrap(), "worker").is_none(),
+        "a legacy incomplete Rex row must not start physical observation"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn stream_disconnect_projects_unknown_and_cancel_does_not() {
     let disconnected = RexEventBatch {
         events: Vec::new(),

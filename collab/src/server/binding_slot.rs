@@ -1093,8 +1093,10 @@ impl BindingControlSet {
                             value.transport.as_ref().is_some_and(|transport| {
                                 transport.kind == crate::proto::TransportKind::Tmux
                             }) && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
-                                saved.socket_path == candidate.endpoint.socket_path
-                                    && saved.tmux_session_id == candidate.endpoint.tmux_session_id
+                                crate::client::adapters::tmux::same_session(
+                                    saved,
+                                    &candidate.endpoint,
+                                )
                             })
                         })
                         .map(|(slot, _)| *slot)

@@ -631,10 +631,11 @@ fn lifecycle_surfaces(fixture: &Fixture, identity: &Value) -> (Vec<u8>, Value, V
     let mut state = fixture.current_state();
     // The independent name monitor records live observations while Read runs.
     // Keep every identity, task, message, receipt and ownership record in the
-    // purity comparison; only its observations and commit counters vary.
+    // purity comparison; its observations, keepalive clock and commit counters vary.
     let fields = state.as_object_mut().unwrap();
     fields.remove("agent_activity");
     fields.remove("agent_presence");
+    fields.remove("keepalives");
     fields.remove("revision");
     fields.remove("sequence");
     let global = state["global"].as_object_mut().unwrap();
@@ -705,7 +706,6 @@ fn defer_background_timer(fixture: &mut Fixture) {
     .unwrap();
     fixture.restart_daemon();
 }
-
 fn seed_lifecycle_native_pair(
     fixture: Fixture,
     child_effect: &str,

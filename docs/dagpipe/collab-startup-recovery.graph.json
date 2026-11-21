@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-startup-recovery",
   "version": "1.0.1",
-  "description": "单次daemon启动只从identity-map.json的active current与有界effects恢复身份。routes只定位存储和通信，reducer、archive及operation历史不能补选绑定。缺表为空且不隐式导入；坏表为核心读取错误。局部宿主/项目错误隔离到所属scope，保留名字、未读消息、未关闭任务及有效订阅。listener就绪不证明消息消费；不操作tmux生命周期。",
+  "description": "单次daemon启动只从identity-map.json的active current与有界effects恢复身份。current或previous缺transport或为null不阻断整表读取。0527持久化的retained和retained_previous只保留同一slot的无渠道历史事实，unregistered继续保持注销。未知渠道、坏JSON、schema及不变量错误仍严格失败。无渠道current保留身份与工作，不从previous、route或worker缓存补造渠道，不发布旧地址，不宣称通信ready；相关待办保留并显式报告。无关合法scope继续恢复。routes只定位存储和通信，reducer、archive及operation历史不能补选绑定。缺表为空且不隐式导入；坏表为核心读取错误。局部宿主/项目错误隔离到所属scope，保留名字、未读消息、未关闭任务及有效订阅。listener就绪不证明消息消费；不操作tmux生命周期。",
   "inputs": [{"id": "startup_request", "schema": "Object"}],
   "nodes": [
     {"id":"读取持久状态", "operator":"appsdk.collab_startup.read_state", "operator_version":"1", "description":"读取当前控制资源和候选存储位置，选择自有socket。身份只读identity-map；同一严格reader接受合法current/previous缺transport字段或null及0527 retained形状，并校验全部slot不变量。未知channel、错误类型、坏JSON或非法retained结构是核心读取错误，不得过滤或当作空表。此阶段不创建或加载项目业务namespace。所有journal实现、读写、重放、压缩、修复及维护引用删除。", "inputs":["startup_request"], "output":{"id":"host_state", "schema":"Object"}, "input_selector":{"include":[],"exclude":[],"predicate":null}, "output_selector":{"include":[],"exclude":[],"predicate":null}, "iterator":"Whole"},

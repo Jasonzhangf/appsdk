@@ -2,6 +2,33 @@
 
 This file maps current behavior to its source and isolated public consumers.
 It does not assert that a candidate is installed, activated or accepted live.
+
+For a reported missing Enter on Rex, use an isolated real Codex TUI. Send a
+synthetic message through the candidate CLI and record its message ID. At an
+idle prompt, verify that the TUI starts exactly one turn containing that ID.
+During an active turn, verify the queued notification reaches a subsequent
+turn exactly once. From the receiver, confirm that `collab recv` returns the
+same ID. As a control, write plain text without Enter and check that it stays
+in the composer until a single Enter starts the turn.
+
+The opt-in macOS test below holds an isolated public Close at the AppServer
+archive boundary. This keeps the shared binding publication lock busy while
+ordinary `collab send` accepts the message. After Close resumes, the daemon
+must deliver the original ID to one real Codex TUI turn. Bare `collab recv`
+must return the original body once. The test creates its own Rex server,
+loopback model fixture, and Collab state.
+The driver queries that server after destroying the exact session and waits
+for the private server process to exit. Both readbacks belong in the test
+receipt. A teardown failure fails the test and identifies the resource.
+
+```sh
+COLLAB_REX_ACCEPTANCE_CLI=/absolute/path/to/rex \
+COLLAB_REX_ACCEPTANCE_CODEX=/absolute/path/to/codex \
+cargo test --manifest-path collab/Cargo.toml --locked \
+  --test context_operation_public_contract \
+  public_close_publication_busy_defers_the_original_rex_message -- --ignored
+```
+
 Execution results belong in the task run. Graph validation proves topology and
 operator bindings; it does not prove runtime behavior.
 
@@ -26,6 +53,7 @@ identity. Opaque legacy files are not replayed.
 |---|---|---|
 | Register, recover, rename, rebind and change role through the current map | `context_operation_public_contract`; AppServer `name_confirmed_takeover`; `server::binding_store_tests`; scoped Register controls | Existing typed business validation precedes credential, rename and active publication. The existing identity gate serializes raw Register through finalization. Confirm the exact new credential before active publication. Active current with an exact valid credential reconstructs an established principal's missing business worker through the shared Register transaction without new onboarding. An initial pending Register completes its original first business transaction once. Query remains pure. Missing facts and genuine file errors remain explicit. |
 | Fixed TUI placement and physical name | `context_operation_public_contract` first/nonfirst/duplicate project-layout controls; `register_reply_public_contract`; `tmux_master_authority_cli`; `current_placement` | Project records own fixed placement; overview entries are display references. Persisted project IDs survive mutable names; overview IDs resolve only to a unique current-project record. Duplicate project associations remain explicit errors. Use fixed `tab_id`/`pane_order`; Jenny/master uses project slot 1. Neither tmux `$N`, agent sessionID nor display suffix determines position. |
+| Native iTerm2 attachment and tmux replacement | `python3 collab/scripts/tests/tmux-iterm2-context.py <collab-binary>` from the repo root, with the official iTerm2 Python module and a regular Collab build | The fixture uses a private tmux server and creates its own clients in a running iTerm2. It verifies detached admission refusal, offline name retention, online refusal and confirmed takeover. The old session keeps a numeric label. The active carrier receives the original mail and keeps the original deadline subscription. Reattaching the former host leaves its retired route unavailable. |
 | Publish identity before optional physical rename | Context first-register/refresh rename-conflict controls; scoped-register tests; `physical-frontend-qa/report.md` | An unpublished required-position failure preserves map, credentials, business state and both physical names. Published durability-unknown retains published facts. A published identity remains usable when optional physical display is incomplete; the result exposes incomplete plus the physical error, and bounded name effects preserve primary-before-outgoing ordering. No published identity is rolled back merely because rename failed. |
 | Codex Desktop registration and continuation | `desktop_bridge_public_contract`; `desktop-runtime.test.mjs`; `desktop-bridge.test.mjs` | Use the real native thread/session and Desktop transport. No tmux facts are required. Publisher admission verifies the exact native target. |
 | DSH registration and continuation | `dsh_master_authority_cli`, including absent/returning-binding Context; `server::dsh_channel_tests` | Use the real gateway session and enrolled DSH binding. Scope missing-worker materialization under the identity gate, release before DSH convergence, and reacquire with current state for Context completion. DSH mutation owners acquire their own gate. UUID adoption alone does not prove communication. Gateway polling remains the DSH consumption path. |
@@ -92,6 +120,19 @@ The initiating process does not consume, acknowledge or reply on its behalf.
 `desktop_manual_recovery_*` uses the Desktop native bridge with no tmux.
 `dsh_manual_recovery_*` uses actual enrolled gateway enqueue and a separate
 authenticated canonical Poll/reply; CLI `recv` remains forbidden for DSH.
+
+For real DSH runtime acceptance, build the DSH gateway checkout with the
+authenticated `MsgStatus` change from [gateway PR #9](https://github.com/Jasonzhangf/dsh-gateway/pull/9), then run:
+
+```sh
+env -i PATH="$PATH" HOME=/tmp node collab/scripts/tests/dsh-native-acceptance.mjs \
+  /absolute/path/to/collab /absolute/path/to/dsh-gateway /absolute/path/to/dsh
+```
+
+The test requires Node.js 22 and an installed DSH launcher. It uses private
+Collab and gateway processes, two real SDK sessions and a loopback model. The
+same message ID must appear in the sender receipt, the autonomous receiver
+turn, the durable gateway Ack and the sender's consumed status.
 
 The selected binding of the message's latest actual delivery attempt is stored
 in `notification_delivery_bindings` and removed with that message. It is not an

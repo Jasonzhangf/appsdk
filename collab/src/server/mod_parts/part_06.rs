@@ -173,9 +173,10 @@ fn handle_notification_subscribe(
     let now = now_ms();
     let expires_ms = now.saturating_add((ttl_seconds as i64).saturating_mul(1000));
     let mut state = server.state.lock().unwrap();
-    if let Err(error) = verify(&state, &worker_id, &token) {
-        return error;
-    }
+    let worker = match verify(&state, &worker_id, &token) {
+        Ok(worker) => worker,
+        Err(error) => return error,
+    };
     if event == "deadline" && is_managed_subagent(&state, &worker_id) {
         return Resp::err("managed subworkers cannot create independent deadline schedules");
     }
@@ -215,11 +216,11 @@ fn handle_notification_subscribe(
             .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
             .cloned()
         {
-            if let Some((method, target)) = projection.as_ref().filter(|(method, target)| {
-                method != &existing.method || target != &existing.target
-            }) {
-                existing.method.clone_from(method);
-                existing.target.clone_from(target);
+            if (!projection.0.is_empty() || !projection.1.is_empty())
+                && (projection.0 != existing.method || projection.1 != existing.target)
+            {
+                existing.method.clone_from(&projection.0);
+                existing.target.clone_from(&projection.1);
                 existing.updated_ms = now;
                 if let Err(error) = server.commit_locked(
                     &mut state,
@@ -248,9 +249,8 @@ fn handle_notification_subscribe(
             exact_project_patrol(&state.notification_subscriptions, &worker_id, now).cloned();
         if let Some(mut existing) = existing {
             let was_cancelled = existing.status == "cancelled";
-            let route_change = projection.as_ref().filter(|(method, target)| {
-                method != &existing.method || target != &existing.target
-            });
+            let route_change = (!projection.0.is_empty() || !projection.1.is_empty())
+                && (projection.0 != existing.method || projection.1 != existing.target);
             if was_cancelled {
                 existing.status = "armed".into();
                 existing.status_reason = None;
@@ -265,10 +265,10 @@ fn handle_notification_subscribe(
                     (ttl_seconds as i64).saturating_mul(1000),
                 );
             }
-            if was_cancelled || route_change.is_some() {
-                if let Some((method, target)) = route_change {
-                    existing.method.clone_from(method);
-                    existing.target.clone_from(target);
+            if was_cancelled || route_change {
+                if route_change {
+                    existing.method.clone_from(&projection.0);
+                    existing.target.clone_from(&projection.1);
                 }
                 existing.updated_ms = now;
                 if let Err(error) = server.commit_locked(
@@ -285,7 +285,7 @@ fn handle_notification_subscribe(
                 "one_shot": false,
                 "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
                 "deduplicated": !was_cancelled,
-                "changed": was_cancelled || route_change.is_some(),
+                "changed": was_cancelled || route_change,
                 "status": if was_cancelled { "rearmed" } else { "armed" },
             }));
         }
@@ -353,7 +353,7 @@ fn handle_notification_subscribe(
         }
     }
     let id = format!("sub-{}", gen_msg_id());
-    let (method, target) = projection.unwrap_or_default();
+    let (method, target) = projection;
     let subscription = NotificationSubscription {
         id: id.clone(),
         worker_id,
@@ -828,6 +828,20 @@ fn pending_messages_for_subscription(state: &State, subscription_id: &str) -> Ve
                     .get(message_id)
                     .is_some_and(|message| message.state == "pending"))
             .then_some(message_id.clone())
+        })
+        .collect()
+}
+
+fn retractable_messages_for_subscription(state: &State, subscription_id: &str) -> Vec<String> {
+    pending_messages_for_subscription(state, subscription_id)
+        .into_iter()
+        .filter(|id| {
+            let message = &state.msgs[id];
+            !state.notification_delivery_accepted.contains_key(id)
+                && (message.wake_attempt_count == 0
+                    || state.notification_delivery_failures.get(id).is_some_and(|failure| {
+                        failure.retryable && failure.failed_ms == message.last_wake_attempt_ms
+                    }))
         })
         .collect()
 }

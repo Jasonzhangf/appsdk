@@ -64,58 +64,187 @@ fn missing_file_loads_an_empty_set() {
 }
 
 #[test]
-fn legacy_retained_slot_round_trips_without_becoming_a_current_binding() {
-    let root = temp_root("retained-wire-slot");
+fn missing_transport_retains_current_previous_and_unrelated_write() {
+    let root = temp_root("missing-transport");
     let store = BindingControlStore::new(&root);
-    let key = key();
-    let mut set = BindingControlSet::new();
-    set.commit(&key, value(&key, "actor", "first"), Some(0))
+    let alice = key();
+    let bob = key_in(alice.project_scope.as_str(), "Bob");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(&alice, value(&alice, "alice", "alice"), Some(0))
         .unwrap();
-    set.commit(&key, value(&key, "actor", "second"), Some(1))
+    control
+        .commit(&bob, value(&bob, "bob-old", "bob-old"), Some(0))
+        .unwrap();
+    control
+        .commit(&bob, value(&bob, "bob", "bob"), Some(1))
+        .unwrap();
+    store.save(&control).unwrap();
+    let path = root.join("identity-map.json");
+    let mut file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let row = file["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row["identity_key"]["name"] == "Bob")
+        .unwrap();
+    row["current"].as_object_mut().unwrap().remove("transport");
+    row["previous"].as_object_mut().unwrap().remove("transport");
+    let expected_bob = row.clone();
+    let bytes = serde_json::to_vec(&file).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bytes,
+        "read must not rewrite retained identities"
+    );
+    let bob_slot = loaded.slot(&bob).unwrap();
+    assert!(bob_slot.active_binding().unwrap().transport.is_none());
+    assert!(bob_slot.reference_previous().unwrap().transport.is_none());
+    let facts = crate::proto::IdentityFacts {
+        session_id: Some("bob-session".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        loaded
+            .lookup(&bob.project_scope, &bob.app_scope_id, &facts, None)
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        bob
+    );
+    assert!(super::notification_contract::SelectedDeliveryBinding::from_slot(bob_slot).is_none());
+    store
+        .commit(ControlChange::Commit {
+            key: alice.clone(),
+            value: value(&alice, "alice", "alice-next"),
+            expected_generation: Some(1),
+        })
+        .unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        written["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["identity_key"]["name"] == "Bob")
+            .unwrap(),
+        &expected_bob
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retained_slots_from_0527_round_trip_without_reactivating_old_bindings() {
+    let root = temp_root("retained-wire-slots");
+    let store = BindingControlStore::new(&root);
+    let alice = key();
+    let bob = key_in(alice.project_scope.as_str(), "Bob");
+    let mut set = BindingControlSet::new();
+    set.commit(&alice, value(&alice, "alice", "first"), Some(0))
+        .unwrap();
+    set.commit(&bob, value(&bob, "former", "first"), Some(0))
+        .unwrap();
+    set.commit(&bob, value(&bob, "bob", "second"), Some(1))
         .unwrap();
     store.save(&set).unwrap();
     let path = root.join("identity-map.json");
-    let mut map: serde_json::Value =
+    let mut file: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let slot = &mut map["slots"][0];
-    let mut detached = slot["current"].take();
-    let old_transport = detached
-        .as_object_mut()
-        .unwrap()
-        .remove("transport")
-        .unwrap();
-    slot["identity_status"] = "unregistered".into();
-    slot["retained"] = detached.clone();
-    let transportful_previous = slot["previous"].clone();
-    std::fs::write(&path, serde_json::to_vec(&map).unwrap()).unwrap();
-
+    for row in file["slots"].as_array_mut().unwrap() {
+        let mut facts = row["current"].clone();
+        facts.as_object_mut().unwrap().remove("transport");
+        if row["identity_key"]["name"] == "Bob" {
+            row["current"] = serde_json::Value::Null;
+            row["identity_status"] = "unregistered".into();
+            row["retained"] = facts;
+        } else {
+            row["retained_previous"] = facts;
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     let loaded = store.load().unwrap();
-    let slot = loaded.slot(&key).unwrap();
-    assert!(slot.active_binding().is_none());
-    assert!(super::notification_contract::SelectedDeliveryBinding::from_slot(slot).is_none());
+    let old = loaded.slot(&bob).unwrap();
+    assert!(old.active_binding().is_none());
+    assert!(super::notification_contract::SelectedDeliveryBinding::from_slot(old).is_none());
     store.save(&loaded).unwrap();
-    let round_trip: serde_json::Value =
+    let written: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(round_trip, map);
+    assert_eq!(written, file);
 
+    let original = file["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["identity_key"]["name"] == "Bob")
+        .unwrap();
     store
         .commit(ControlChange::Commit {
-            key: key.clone(),
-            value: value(&key, "actor", "third"),
+            key: bob.clone(),
+            value: value(&bob, "new-bob", "third"),
             expected_generation: Some(2),
         })
         .unwrap();
     let updated: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(updated["slots"][0]["retained_previous"], detached);
-    assert_eq!(updated["slots"][0]["previous"], transportful_previous);
-    assert!(updated["slots"][0].get("retained").is_none());
+    let updated_bob = updated["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["identity_key"]["name"] == "Bob")
+        .unwrap();
+    assert_eq!(updated_bob["retained_previous"], original["retained"]);
+    assert_eq!(updated_bob["previous"], original["previous"]);
+    assert!(updated_bob.get("retained").is_none());
+    assert!(store
+        .load()
+        .unwrap()
+        .slot(&bob)
+        .unwrap()
+        .active_binding()
+        .is_some());
 
-    let mut bad = map;
-    bad["slots"][0]["retained"]["transport"] = old_transport;
+    let mut bad = file.clone();
+    let row = bad["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row["identity_key"]["name"] == "Bob")
+        .unwrap();
+    row["retained"]["transport"] = row["previous"]["transport"].clone();
     std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
     assert!(store.load().is_err());
-    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rex_execution_without_transport_still_fails_the_control_invariant() {
+    let root = temp_root("missing-rex-transport");
+    let store = BindingControlStore::new(&root);
+    let key = key();
+    let mut retained = value(&key, "actor", "runtime");
+    retained.transport = None;
+    retained.rex_execution = Some(super::binding_slot::VerifiedRexExecutionAssociation {
+        owner_pid: 42,
+        owner_name: "codex".into(),
+        process_start_id: "12:999999".into(),
+    });
+    let error = store
+        .commit(ControlChange::Commit {
+            key,
+            value: retained,
+            expected_generation: Some(0),
+        })
+        .unwrap_err();
+    assert!(
+        error.contains("Rex execution association requires the Rex transport"),
+        "{error}"
+    );
+    assert!(!root.join("identity-map.json").exists());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

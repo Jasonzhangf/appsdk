@@ -2249,6 +2249,7 @@ mod tests {
             error: "ADAPTER_UNKNOWN".into(),
             failed_ms: now + 2,
             retryable: true,
+            resume_on_reconnect: None,
         }]);
         assert_eq!(
             server.state.lock().unwrap().master_wake.delivery_state,

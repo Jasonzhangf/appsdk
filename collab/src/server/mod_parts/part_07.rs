@@ -576,17 +576,16 @@ pub(crate) fn selected_transport_endpoint_live(
             .as_deref()
             .and_then(|thread| (server.appserver_thread_status)(transport, thread).ok())
             .map(|_| true),
-        TransportKind::Tmux => match transport
-            .tmux_endpoint
-            .as_ref()
-            .map(crate::client::adapters::tmux::probe)
-        {
-            Some(Ok(crate::client::adapters::tmux::PanePresence::Present)) => Some(true),
-            Some(Ok(crate::client::adapters::tmux::PanePresence::Missing)) => Some(false),
-            Some(Ok(crate::client::adapters::tmux::PanePresence::Unknown))
-            | Some(Err(_))
-            | None => None,
-        },
+        TransportKind::Tmux => transport.tmux_endpoint.as_ref().and_then(|endpoint| {
+            use crate::client::adapters::tmux::{iterm2_panes_for_endpoint, probe, PanePresence};
+            match probe(endpoint) {
+                Ok(PanePresence::Present) => iterm2_panes_for_endpoint(endpoint)
+                    .ok()
+                    .map(|panes| !panes.is_empty()),
+                Ok(PanePresence::Missing) => Some(false),
+                Ok(PanePresence::Unknown) | Err(_) => None,
+            }
+        }),
         TransportKind::AppServer => transport
             .thread_id
             .as_deref()
@@ -637,18 +636,7 @@ pub(crate) fn worker_identity_and_endpoint(
         TransportKind::Tmux => {
             let identity_valid =
                 worker_identity_presence(server, worker) == IdentityPresence::Present;
-            let endpoint_live = match transport
-                .tmux_endpoint
-                .as_ref()
-                .map(crate::client::adapters::tmux::probe)
-            {
-                Some(Ok(crate::client::adapters::tmux::PanePresence::Present)) => Some(true),
-                Some(Ok(crate::client::adapters::tmux::PanePresence::Missing)) => Some(false),
-                Some(Ok(crate::client::adapters::tmux::PanePresence::Unknown))
-                | Some(Err(_))
-                | None => None,
-            };
-            (identity_valid, endpoint_live)
+            (identity_valid, selected_transport_endpoint_live(server, &transport))
         }
         TransportKind::AppServer | TransportKind::Dsh => {
             let identity_valid = if transport.kind == TransportKind::AppServer {

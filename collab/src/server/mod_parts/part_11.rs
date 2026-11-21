@@ -96,7 +96,10 @@ fn handle_ack_locked(
         events.push(Event::Sent { msg: m });
     }
     if !acked.is_empty() {
-        events.push(Event::Acked { ids: acked.clone() });
+        events.push(Event::Acked {
+            ids: acked.clone(),
+            consumed_ms: Some(now_ms()),
+        });
     }
 
     // An explicit or bulk ACK from an authenticated worker proves
@@ -514,7 +517,10 @@ fn dispatch_with_route_context_bound(
                 events.push(Event::Sent { msg: m });
             }
             if !acked.is_empty() {
-                events.push(Event::Acked { ids: acked.clone() });
+                events.push(Event::Acked {
+                    ids: acked.clone(),
+                    consumed_ms: Some(now_ms()),
+                });
             }
 
             // An explicit or bulk ACK from an authenticated worker proves

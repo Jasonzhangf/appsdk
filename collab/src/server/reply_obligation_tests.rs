@@ -111,6 +111,7 @@ fn set_remind_clear_round_trip_and_view_fields() {
     });
     state.apply(&Event::Acked {
         ids: vec!["m1".into()],
+        consumed_ms: None,
     });
     assert_eq!(state.pending_reply_obligations("peer").len(), 1);
 

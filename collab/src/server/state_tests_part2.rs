@@ -307,6 +307,7 @@ use super::*;
 
         state.apply(&Event::Acked {
             ids: vec![message_id.into()],
+            consumed_ms: None,
         });
         assert_eq!(
             state.notification_subscriptions[subscription_id].status,
@@ -473,9 +474,12 @@ use super::*;
         state.apply(&Event::Delivered {
             ids: vec![message_id.into()],
         });
-        state.apply(&Event::Acked {
-            ids: vec![message_id.into()],
-        });
+        let legacy_ack: Event = serde_json::from_value(serde_json::json!({
+            "ev": "Acked",
+            "ids": [message_id],
+        }))
+        .unwrap();
+        state.apply(&legacy_ack);
 
         let subscription = &state.notification_subscriptions[subscription_id];
         assert_eq!(subscription.fired_count, 1);
@@ -486,6 +490,7 @@ use super::*;
         // durable cursor a second time.
         state.apply(&Event::Acked {
             ids: vec![message_id.into()],
+            consumed_ms: None,
         });
         let subscription = &state.notification_subscriptions[subscription_id];
         assert_eq!(subscription.fired_count, 1);
@@ -566,6 +571,7 @@ use super::*;
 
         state.apply(&Event::Acked {
             ids: vec![message_id.into()],
+            consumed_ms: None,
         });
         assert_eq!(
             state.notification_subscriptions[subscription_id].fired_count,
@@ -631,6 +637,7 @@ use super::*;
         });
         state.apply(&Event::Acked {
             ids: vec![message_id.into()],
+            consumed_ms: None,
         });
 
         let subscription = &state.notification_subscriptions[subscription_id];

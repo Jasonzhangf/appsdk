@@ -212,6 +212,16 @@ impl State {
             // progression so a new occurrence is armed only while the repeat
             // or TTL budget remains. Once the budget is exhausted the generic
             // branch below marks it consumed.
+            if periodic_goal_is_expired(subscription, consumed_ms) {
+                subscription.status = "expired".into();
+                if let Some(consumed_ms) = consumed_ms {
+                    subscription.updated_ms = consumed_ms;
+                }
+                if clears_master_goal_due {
+                    crate::server::notification_state::clear_master_goal_due(&mut self.master_wake);
+                }
+                return;
+            }
             let interval = subscription.interval_ms;
             if subscription.fired_count >= subscription.repeat_count {
                 subscription.status = "consumed".into();
@@ -235,7 +245,7 @@ impl State {
                 }
                 return;
             };
-            let next_trigger = subscription
+            let nominal_next_trigger = subscription
                 .trigger_ms
                 .map(|trigger| trigger.saturating_add(interval))
                 .unwrap_or_else(|| {
@@ -243,7 +253,11 @@ impl State {
                         .created_ms
                         .saturating_add(interval.saturating_mul(subscription.fired_count as i64))
                 });
-            subscription.trigger_ms = Some(next_trigger);
+            subscription.trigger_ms = Some(
+                consumed_ms
+                    .filter(|time| *time >= nominal_next_trigger)
+                    .map_or(nominal_next_trigger, |time| time.saturating_add(interval)),
+            );
             subscription.status = "armed".into();
             subscription.status_reason = None;
             if let Some(consumed_ms) = consumed_ms {
@@ -960,7 +974,10 @@ impl State {
                 self.receive_receipts
                     .insert(receipt.receive_id.clone(), receipt.clone());
                 self.apply_checked(&Event::Delivered { ids: ids.clone() })?;
-                self.apply_checked(&Event::Acked { ids: ids.clone() })?;
+                self.apply_checked(&Event::Acked {
+                    ids: ids.clone(),
+                    consumed_ms: Some(receipt.received_ms),
+                })?;
             }
             Event::Delivered { ids } => {
                 for id in ids {
@@ -991,7 +1008,7 @@ impl State {
                     );
                 }
             }
-            Event::Acked { ids } => {
+            Event::Acked { ids, consumed_ms } => {
                 for id in ids {
                     if let Some(m) = self.msgs.get_mut(id) {
                         m.state = "read".into();
@@ -1026,16 +1043,10 @@ impl State {
                     // occurrences with the cursor so timer delivery, which
                     // already records NotificationConsumed, remains idempotent.
                     if read_count > fired_count {
-                        let consumed_ms = if subscription.event == "master-idle" {
-                            self.msgs.get(id).and_then(|message| {
-                                [message.last_wake_attempt_ms, message.created_ms]
-                                    .into_iter()
-                                    .find(|timestamp| *timestamp > 0)
-                            })
-                        } else {
-                            None
-                        };
-                        self.consume_notification(&subscription_id, consumed_ms);
+                        let read_time = subscription_read_time(
+                            subscription, self.msgs.get(id), *consumed_ms,
+                        );
+                        self.consume_notification(&subscription_id, read_time);
                     }
                 }
             }

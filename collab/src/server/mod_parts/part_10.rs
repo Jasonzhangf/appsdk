@@ -168,7 +168,10 @@ fn poll_messages_with_state(
         });
     } else {
         events.push(Event::Delivered { ids: ids.clone() });
-        events.push(Event::Acked { ids: ids.clone() });
+        events.push(Event::Acked {
+            ids: ids.clone(),
+            consumed_ms: Some(received_ms),
+        });
     }
     if let Some(record) = st.keepalives.get(worker_id).cloned() {
         if record.unacked > 0 || record.last_notice_id.is_some() || record.suspected_offline {

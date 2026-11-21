@@ -564,7 +564,9 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                     && super::can_resume_notification(state, message)
             })
         }
-        Some("immediate") => super::can_resume_notification(state, message),
+        Some("immediate" | super::mailbox::REGISTRATION_NOTIFICATION_MODE) => {
+            super::can_resume_notification(state, message)
+        }
         Some("explicit-notification") => {
             super::current_board_invitation_for_message(state, message).is_some()
                 && super::can_resume_notification(state, message)

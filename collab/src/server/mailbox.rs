@@ -137,11 +137,13 @@ pub fn notification_text(message: &Message) -> Option<String> {
     ))
 }
 
+pub(super) const REGISTRATION_NOTIFICATION_MODE: &str = "registration-notification";
+
 pub fn is_explicit_delivery_mode(state: &State, message: &Message) -> bool {
     state.delivery_modes.get(&message.id).is_some_and(|mode| {
         matches!(
             mode.as_str(),
-            "explicit-notification" | "immediate" | "queued"
+            "explicit-notification" | "immediate" | "queued" | REGISTRATION_NOTIFICATION_MODE
         )
     })
 }

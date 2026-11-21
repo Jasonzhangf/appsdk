@@ -741,7 +741,6 @@ impl Server {
                 now_ms(),
             ));
         }
-        let mut notices = Vec::new();
         if first_business && !candidate.workers.contains_key(&worker.id) {
             let control = binding_store::BindingControlStore::new(self.host_paths.state_root()).load()
                 .map_err(notification_contract::MutationError::InvalidCommand)?;
@@ -759,10 +758,13 @@ impl Server {
                     if control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &master)
                         .map_err(notification_contract::MutationError::InvalidCommand)?.is_some()
                     {
-                        notices = relationship_notice_events(&candidate, &control, &route, &master,
+                        // Registration can hold the publication gate. Commit the
+                        // notice now and let the timer attempt it after publication.
+                        let notices = relationship_notice_events(&candidate, &control, &route, &master,
+                            mailbox::REGISTRATION_NOTIFICATION_MODE,
                             "peer-registered", format!("{} 已注册为当前peer。读取 collab context / collab board show 查看当前成员及可分配工作；此通知不自动派单。", current.identity_key.name))
                             .map_err(notification_contract::MutationError::InvalidCommand)?;
-                        events.extend(notices.clone());
+                        events.extend(notices);
                     }
                 }
             }
@@ -780,10 +782,6 @@ impl Server {
             outcome,
             typed.envelope.expected_revision,
         )?;
-        drop(st);
-        if !committed.replayed {
-            deliver_relationship_notices(self, &notices);
-        }
         Ok(state::TypedOutcome {
             receipt: global_state::CommandReceipt {
                 command_id: typed.envelope.command_id.clone(),

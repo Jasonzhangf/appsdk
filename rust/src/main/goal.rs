@@ -441,6 +441,48 @@ fn project_goal_schedule(record: &mut Value, subscription: &Value) {
     }
 }
 
+fn goal_edit_reconciliation_matches(
+    scope: &GoalScope,
+    record: &Value,
+    subscription: &Value,
+) -> bool {
+    let (Some(goal_id), Some(subscription_id)) = (
+        record["goal_id"].as_str(),
+        goal_record_subscription_id(record),
+    ) else {
+        return false;
+    };
+    let observed_id = subscription["id"]
+        .as_str()
+        .or_else(|| subscription["subscription_id"].as_str());
+    if observed_id != Some(subscription_id.as_str())
+        || subscription["worker_id"] != scope.worker_id.as_str()
+        || goal_check_subscription_owner(scope, subscription).is_err()
+        || subscription["event"] != "deadline"
+        || subscription["subject"] != format!("goal:{goal_id}")
+    {
+        return false;
+    }
+    let edit = &record["edit_reconciliation"];
+    // The subscription projection can confirm timing but does not prove
+    // that a new goal document was applied.
+    if edit["content_pending"] == Value::Bool(true) {
+        return false;
+    }
+    let Some(requested) = edit["requested"].as_object() else {
+        return false;
+    };
+    if requested.is_empty() {
+        return false;
+    }
+    requested.iter().all(|(field, value)| match field.as_str() {
+        "interval_ms" => subscription["interval_ms"] == *value,
+        "repeat_count" => subscription["repeat_count"] == *value,
+        "ttl_seconds" => subscription["goal_content"]["ttl_seconds"] == *value,
+        _ => false,
+    })
+}
+
 fn goal_record_observation(
     root: &Path,
     scope: &GoalScope,
@@ -501,9 +543,24 @@ fn goal_record_observation(
     observed["active"] = Value::Bool(remote_status == "armed");
     observed["collab_subscribed"] = Value::Bool(remote_status == "armed");
     if remote_status == "armed" {
-        observed["desired"] = Value::String("subscribed".into());
-        observed["error"] = Value::Null;
-        (observed, None)
+        if observed["edit_reconciliation"]["status"].as_str() == Some("pending")
+            && goal_edit_reconciliation_matches(scope, record, &observed["collab_subscription"])
+        {
+            if let Some(record_object) = observed.as_object_mut() {
+                record_object.remove("edit_reconciliation");
+            }
+        }
+        if observed.get("edit_reconciliation").is_some() {
+            let error =
+                "GOAL_EDIT_RECONCILIATION_PENDING: remote schedule does not confirm the requested edit";
+            observed["desired"] = Value::String("recovery_required".into());
+            observed["error"] = Value::String(error.into());
+            (observed, Some(error.into()))
+        } else {
+            observed["desired"] = Value::String("subscribed".into());
+            observed["error"] = Value::Null;
+            (observed, None)
+        }
     } else {
         let error = if record["periodic_declared"].as_bool() == Some(true)
             && matches!(remote_status.as_str(), "consumed" | "expired")
@@ -1234,15 +1291,33 @@ where
                     by_id.unwrap_or_else(|| Err("GOAL_STATUS_SUBSCRIPTION_ID_MISSING".into()));
                 match by_id {
                     Ok((remote_status, remote_record)) => {
+                        let edit_confirmed = record["edit_reconciliation"]["status"].as_str()
+                            == Some("pending")
+                            && goal_edit_reconciliation_matches(&scope, &record, &remote_record);
                         project_goal_schedule(&mut record, &remote_record);
                         record["remote_state"] = Value::String(remote_status.clone());
                         record["collab_subscription"] = remote_record;
                         if remote_status == "armed" {
-                            record["desired"] = Value::String("subscribed".into());
-                            record["observed"] = Value::String("subscribed".into());
-                            record["active"] = Value::Bool(true);
-                            record["collab_subscribed"] = Value::Bool(true);
-                            record["error"] = Value::Null;
+                            if edit_confirmed {
+                                if let Some(record_object) = record.as_object_mut() {
+                                    record_object.remove("edit_reconciliation");
+                                }
+                            }
+                            if record.get("edit_reconciliation").is_some() {
+                                let error = "GOAL_EDIT_RECONCILIATION_PENDING: remote schedule does not confirm the requested edit";
+                                record["desired"] = Value::String("recovery_required".into());
+                                record["observed"] = Value::String("armed".into());
+                                record["active"] = Value::Bool(true);
+                                record["collab_subscribed"] = Value::Bool(true);
+                                record["error"] = Value::String(error.into());
+                                reconcile_error = Some(error.into());
+                            } else {
+                                record["desired"] = Value::String("subscribed".into());
+                                record["observed"] = Value::String("subscribed".into());
+                                record["active"] = Value::Bool(true);
+                                record["collab_subscribed"] = Value::Bool(true);
+                                record["error"] = Value::Null;
+                            }
                         } else if record["periodic_declared"].as_bool() == Some(true)
                             && matches!(remote_status.as_str(), "consumed" | "expired")
                         {
@@ -1517,6 +1592,42 @@ where
                 Ok(receipt) => receipt,
                 Err(error) => {
                     let mut retained = record.clone();
+                    if matches!(
+                        error.as_str(),
+                        "GOAL_COLLAB_COMMAND_TIMEOUT"
+                            | "GOAL_RECONCILE_EDIT_COLLAB_FAILED:GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT"
+                            | "GOAL_RECONCILE_EDIT_COLLAB_FAILED:exit=124"
+                    ) {
+                        let mut requested = serde_json::json!({});
+                        if let Some(interval_ms) = interval_ms {
+                            requested["interval_ms"] = Value::Number(interval_ms.into());
+                        }
+                        if let Some(repeat_count) = repeat_count {
+                            requested["repeat_count"] = Value::Number(repeat_count.into());
+                        }
+                        if let Some(ttl_seconds) = ttl_seconds {
+                            requested["ttl_seconds"] = Value::Number(ttl_seconds.into());
+                        }
+                        retained["edit_reconciliation"] = serde_json::json!({
+                            "status": "pending",
+                            "requested": requested,
+                            "content_pending": content.is_some(),
+                        });
+                        goal_mark_recovery_required(
+                            &mut retained,
+                            "GOAL_EDIT_RESPONSE_UNKNOWN: remote result was not received; reconcile with goal status before retrying".into(),
+                        );
+                        if let Err(write_error) = goal_record_write(&scope, &retained) {
+                            drop(_goal_lock);
+                            goal_fail(format_json, &write_error, Some(&retained));
+                        }
+                        drop(_goal_lock);
+                        goal_fail(
+                            format_json,
+                            retained["error"].as_str().unwrap(),
+                            Some(&retained),
+                        );
+                    }
                     retained["error"] = Value::String(error.clone());
                     drop(_goal_lock);
                     goal_fail(format_json, &error, Some(&retained));
@@ -1524,6 +1635,9 @@ where
             };
             let remote_status = receipt["status"].as_str().unwrap_or("unknown").to_owned();
             let mut updated = record.clone();
+            if let Some(updated_object) = updated.as_object_mut() {
+                updated_object.remove("edit_reconciliation");
+            }
             updated["collab_subscription"] = receipt["subscription"].clone();
             updated["subscription_id"] = receipt["subscription"]["id"].clone();
             updated["remote_state"] = Value::String(remote_status.clone());

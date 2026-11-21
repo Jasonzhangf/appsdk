@@ -872,6 +872,384 @@ esac
 }
 
 #[test]
+fn goal_edit_response_loss_keeps_pending_reconciliation_until_status_confirms_remote() {
+    let root = temp_root("goal-edit-response-loss");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "goal reconcile")
+    goal_id=
+    owner=
+    operation=
+    every=
+    repeat=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --owner) owner="$2"; shift ;;
+        --operation) operation="$2"; shift ;;
+        --every-ms) every="$2"; shift ;;
+        --repeat) repeat="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ "$operation" = "edit" ] && [ ! -f .edit-response-lost ]; then
+      /usr/bin/touch .edit-response-lost
+      # The remote edit is committed before its response is lost.
+      exit 124
+    fi
+    printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-edit-loss\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:$goal_id\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\",\"interval_ms\":${every:-300000},\"repeat_count\":${repeat:-100},\"ttl_seconds\":604800,\"periodic_declared\":true}}"
+    ;;
+  "notify status")
+    if [ -f .edit-response-lost ]; then
+      every=180000
+      event=deadline
+      subject=goal:REPLACE_GOAL_ID
+      worker='"worker_id":"master-peer",'
+      [ ! -f .edit-status-mismatch ] || every=240000
+      [ ! -f .edit-wrong-event ] || event=direct-message
+      [ ! -f .edit-wrong-subject ] || subject=goal:another-goal
+      [ ! -f .edit-missing-worker ] || worker=
+      printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-edit-loss\",\"status\":\"armed\",\"event\":\"$event\",\"subject\":\"$subject\",$worker\"interval_ms\":$every,\"repeat_count\":4,\"goal_content\":{\"ttl_seconds\":604800},\"periodic_declared\":true}]}"
+    else
+      printf '%s\n' '{"subscriptions":[]}'
+    fi
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    install_goal_test_context(&fake_collab, &root);
+    let run = |args: &[&str]| {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+
+    let subscribed = run(&["goal", "subscribe", "--goal", "long-task.md", "--json"]);
+    assert!(
+        subscribed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&subscribed.stderr)
+    );
+    let subscribed: Value = serde_json::from_slice(&subscribed.stdout).unwrap();
+    let goal_id = subscribed["goal_id"].as_str().unwrap().to_owned();
+    let record_path = goal_test_record_path(&root);
+
+    let delegate = fake_collab.with_extension("delegate");
+    let script = fs::read_to_string(&delegate).unwrap();
+    fs::write(&delegate, script.replace("REPLACE_GOAL_ID", &goal_id)).unwrap();
+
+    let failed = run(&[
+        "goal",
+        "edit",
+        "--goal-id",
+        &goal_id,
+        "--interval",
+        "3m",
+        "--repeat",
+        "4",
+        "--json",
+    ]);
+    assert_eq!(failed.status.code(), Some(1));
+    let failed: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["desired"], "recovery_required");
+    assert_eq!(failed["observed"], "unknown");
+    assert_eq!(failed["active"], false);
+    assert_eq!(failed["subscription_id"], "sub-edit-loss");
+    assert_eq!(failed["edit_reconciliation"]["status"], "pending");
+    assert_eq!(failed["edit_reconciliation"]["requested"]["interval_ms"], 180_000);
+    assert_eq!(failed["edit_reconciliation"]["requested"]["repeat_count"], 4);
+    assert_eq!(
+        failed["error"],
+        "GOAL_EDIT_RESPONSE_UNKNOWN: remote result was not received; reconcile with goal status before retrying"
+    );
+
+    let pending_bytes = fs::read(&record_path).unwrap();
+    let status = run(&["goal", "status", "--goal-id", &goal_id, "--json"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["active"], true);
+    assert_eq!(status["record"]["subscription_id"], "sub-edit-loss");
+    assert_eq!(status["record"]["interval"], "180s");
+    assert_eq!(status["record"]["repeat_count"], 4);
+    assert!(status["record"]["error"].is_null());
+    assert!(status["record"].get("edit_reconciliation").is_none());
+    assert_eq!(
+        fs::read(&record_path).unwrap(),
+        pending_bytes,
+        "read-only status must not rewrite the pending local record"
+    );
+
+    fs::write(root.join(".edit-status-mismatch"), "").unwrap();
+    let mismatched = run(&["goal", "status", "--goal-id", &goal_id, "--json"]);
+    assert!(
+        mismatched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mismatched.stderr)
+    );
+    let mismatched: Value = serde_json::from_slice(&mismatched.stdout).unwrap();
+    assert_eq!(mismatched["active"], true);
+    assert_eq!(mismatched["desired"], "recovery_required");
+    assert_eq!(mismatched["observed"], "armed");
+    assert_eq!(mismatched["record"]["interval"], "240s");
+    assert_eq!(mismatched["record"]["edit_reconciliation"]["status"], "pending");
+    let mismatched_list = run(&["goal", "list", "--json"]);
+    assert!(
+        mismatched_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mismatched_list.stderr)
+    );
+    let mismatched_list: Value = serde_json::from_slice(&mismatched_list.stdout).unwrap();
+    assert_eq!(mismatched_list["goals"][0]["desired"], "recovery_required");
+    assert_eq!(
+        mismatched_list["goals"][0]["record"]["edit_reconciliation"]["status"],
+        "pending"
+    );
+    assert!(
+        mismatched_list["goals"][0]["observation_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("GOAL_EDIT_RECONCILIATION_PENDING")),
+        "{mismatched_list}"
+    );
+    assert_eq!(
+        fs::read(&record_path).unwrap(),
+        pending_bytes,
+        "a mismatched remote schedule must remain a read-only pending observation"
+    );
+    fs::remove_file(root.join(".edit-status-mismatch")).unwrap();
+
+    for marker in [".edit-wrong-event", ".edit-wrong-subject", ".edit-missing-worker"] {
+        let marker_path = root.join(marker);
+        fs::write(&marker_path, "").unwrap();
+        let status = run(&["goal", "status", "--goal-id", &goal_id, "--json"]);
+        let list = run(&["goal", "list", "--json"]);
+        fs::remove_file(marker_path).unwrap();
+        assert!(status.status.success());
+        assert!(list.status.success());
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        let list: Value = serde_json::from_slice(&list.stdout).unwrap();
+        assert_eq!(
+            status["record"]["edit_reconciliation"]["status"],
+            "pending",
+            "{marker}: {status}"
+        );
+        assert_eq!(
+            list["goals"][0]["record"]["edit_reconciliation"]["status"],
+            "pending",
+            "{marker}: {list}"
+        );
+        assert_eq!(fs::read(&record_path).unwrap(), pending_bytes);
+    }
+
+    let retried = run(&[
+        "goal",
+        "edit",
+        "--goal-id",
+        &goal_id,
+        "--interval",
+        "3m",
+        "--repeat",
+        "4",
+        "--json",
+    ]);
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
+    assert_eq!(retried["ok"], true);
+    assert_eq!(retried["subscription_id"], "sub-edit-loss");
+    assert_eq!(retried["record"]["interval"], "3m");
+    assert_eq!(retried["record"]["repeat_count"], 4);
+    assert!(retried["record"].get("edit_reconciliation").is_none());
+
+    fs::write(root.join("revised-task.md"), "# Revised goal\n").unwrap();
+    fs::remove_file(root.join(".edit-response-lost")).unwrap();
+    let mixed_edit = run(&[
+        "goal",
+        "edit",
+        "--goal-id",
+        &goal_id,
+        "--goal",
+        "revised-task.md",
+        "--interval",
+        "3m",
+        "--json",
+    ]);
+    assert_eq!(mixed_edit.status.code(), Some(1));
+    let pending_bytes = fs::read(&record_path).unwrap();
+    let status = run(&["goal", "status", "--goal-id", &goal_id, "--json"]);
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["record"]["collab_subscription"]["interval_ms"], 180_000);
+    assert_eq!(
+        status["record"]["edit_reconciliation"]["status"], "pending",
+        "matching periodic fields do not confirm the requested goal document: {status}"
+    );
+    assert_eq!(fs::read(&record_path).unwrap(), pending_bytes);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_cancel_response_loss_keeps_pending_until_same_cancel_retries() {
+    let root = temp_root("goal-cancel-response-loss");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "goal reconcile")
+    goal_id=
+    desired=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --goal-id) goal_id="$2"; shift ;;
+        --desired) desired="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ "$desired" = "ended" ] && [ ! -f .cancel-response-lost ]; then
+      /usr/bin/touch .cancel-response-lost
+      # The remote cancellation is committed before its response is lost.
+      exit 124
+    fi
+    if [ "$desired" = "ended" ]; then
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"desired\":\"ended\",\"status\":\"ended\",\"subscription\":null}"
+    else
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"master-peer\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-cancel-loss\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:$goal_id\",\"worker_id\":\"master-peer\",\"owner\":\"master-peer\",\"interval_ms\":300000,\"repeat_count\":100,\"ttl_seconds\":604800,\"periodic_declared\":true}}"
+    fi
+    ;;
+  "notify status")
+    if [ -f .cancel-response-lost ]; then
+      printf '%s\n' '{"subscriptions":[]}'
+    else
+      printf '%s\n' '{"subscriptions":[{"id":"sub-cancel-loss","status":"armed","event":"deadline","subject":"goal:REPLACE_GOAL_ID","worker_id":"master-peer","owner":"master-peer","interval_ms":300000,"repeat_count":100,"goal_content":{"ttl_seconds":604800},"periodic_declared":true}]}'
+    fi
+    ;;
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}'
+    ;;
+  "master status")
+    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
+    ;;
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    install_goal_test_context(&fake_collab, &root);
+    let run = |args: &[&str]| {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+
+    let subscribed = run(&["goal", "subscribe", "--goal", "long-task.md", "--json"]);
+    assert!(
+        subscribed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&subscribed.stderr)
+    );
+    let subscribed: Value = serde_json::from_slice(&subscribed.stdout).unwrap();
+    let goal_id = subscribed["goal_id"].as_str().unwrap().to_owned();
+    let record_path = goal_test_record_path(&root);
+
+    let script = fs::read_to_string(&fake_collab).unwrap();
+    fs::write(
+        &fake_collab,
+        script.replace("REPLACE_GOAL_ID", &goal_id),
+    )
+    .unwrap();
+
+    let failed = run(&["goal", "cancel", "--goal-id", &goal_id, "--json"]);
+    assert_eq!(failed.status.code(), Some(1));
+    let failed: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["desired"], "cancel_pending");
+    assert_eq!(failed["observed"], "unknown");
+    assert_eq!(failed["active"], false);
+    assert_eq!(failed["subscription_id"], "sub-cancel-loss");
+    assert_eq!(
+        failed["error"],
+        "GOAL_CANCEL_COLLAB_FAILED:exit=124"
+    );
+
+    let pending_bytes = fs::read(&record_path).unwrap();
+    let status = run(&["goal", "status", "--goal-id", &goal_id, "--json"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["active"], false);
+    assert_eq!(status["desired"], "cancel_pending");
+    assert_eq!(status["observed"], "unknown");
+    assert_eq!(status["record"]["subscription_id"], "sub-cancel-loss");
+    assert!(status["record"]["cancel_receipt"].is_null());
+    assert_eq!(
+        fs::read(&record_path).unwrap(),
+        pending_bytes,
+        "read-only status must not turn an unknown cancellation into a local success"
+    );
+
+    let retried = run(&["goal", "cancel", "--goal-id", &goal_id, "--json"]);
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
+    assert_eq!(retried["ok"], true);
+    assert_eq!(retried["status"], "cancelled");
+    assert_eq!(retried["subscription_id"], "sub-cancel-loss");
+    assert_eq!(retried["record"]["desired"], "unsubscribed");
+    assert_eq!(retried["record"]["observed"], "cancelled");
+    assert_eq!(retried["record"]["remote_state"], "cancelled");
+    assert_eq!(retried["record"]["cancel_receipt"]["desired"], "ended");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_stale_lock_is_recovered_after_owner_exit() {
     let root = temp_root("goal-stale-lock");
     let control_dir = goal_test_control_dir(&root);

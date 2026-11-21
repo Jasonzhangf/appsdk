@@ -632,6 +632,7 @@ enum SubscriptionConsumptionStatus {
     Unchanged,
     Consumed,
     Armed,
+    Expired,
 }
 
 #[derive(Clone, Copy)]
@@ -656,6 +657,32 @@ fn subscription_consumption_total(subscription: &NotificationSubscription) -> u3
     }
 }
 
+fn periodic_goal_is_expired(
+    subscription: &NotificationSubscription,
+    consumed_ms: Option<i64>,
+) -> bool {
+    subscription.status == "expired"
+        || consumed_ms.is_some_and(|time| time >= subscription.expires_ms)
+}
+
+fn subscription_read_time(
+    subscription: &NotificationSubscription,
+    message: Option<&Message>,
+    consumed_ms: Option<i64>,
+) -> Option<i64> {
+    if is_goal_deadline(subscription) && subscription.periodic_declared {
+        consumed_ms
+    } else if subscription.event == "master-idle" {
+        message.and_then(|message| {
+            [message.last_wake_attempt_ms, message.created_ms]
+                .into_iter()
+                .find(|timestamp| *timestamp > 0)
+        })
+    } else {
+        None
+    }
+}
+
 fn consume_subscription_for_preflight(
     subscription: &NotificationSubscription,
     consumed_ms: Option<i64>,
@@ -675,7 +702,13 @@ fn consume_subscription_for_preflight(
         // exhausted, so the preflight keeps it armed alongside the real
         // consume path.
         if subscription.periodic_declared {
-            if fired_count >= subscription_consumption_total(subscription) {
+            if periodic_goal_is_expired(subscription, consumed_ms) {
+                return SubscriptionConsumption {
+                    fired_count,
+                    status: SubscriptionConsumptionStatus::Expired,
+                };
+            }
+            if subscription.interval_ms.is_none() || fired_count >= subscription.repeat_count {
                 return SubscriptionConsumption {
                     fired_count,
                     status: SubscriptionConsumptionStatus::Consumed,
@@ -686,7 +719,6 @@ fn consume_subscription_for_preflight(
                 status: SubscriptionConsumptionStatus::Armed,
             };
         }
-        let _ = consumed_ms;
         return SubscriptionConsumption {
             fired_count,
             status: SubscriptionConsumptionStatus::Consumed,
@@ -698,7 +730,6 @@ fn consume_subscription_for_preflight(
             status: SubscriptionConsumptionStatus::Consumed,
         };
     }
-    let _ = consumed_ms;
     SubscriptionConsumption {
         fired_count,
         status: SubscriptionConsumptionStatus::Armed,
@@ -951,7 +982,12 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     }
                 }
             }
-            Event::Acked { ids } | Event::ReceiveCommitted { ids, .. } => {
+            Event::Acked { ids, .. } | Event::ReceiveCommitted { ids, .. } => {
+                let read_ms = match event {
+                    Event::Acked { consumed_ms, .. } => *consumed_ms,
+                    Event::ReceiveCommitted { receipt, .. } => Some(receipt.received_ms),
+                    _ => None,
+                };
                 for id in ids {
                     if let Some(message) = simulated_msgs.get_mut(id) {
                         message.state = "read".into();
@@ -982,15 +1018,7 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     if read_count > subscription.fired_count {
                         let consumed = consume_subscription_for_preflight(
                             &subscription,
-                            if subscription.event == "master-idle" {
-                                simulated_msgs.get(id).and_then(|message| {
-                                    [message.last_wake_attempt_ms, message.created_ms]
-                                        .into_iter()
-                                        .find(|timestamp| *timestamp > 0)
-                                })
-                            } else {
-                                None
-                            },
+                            subscription_read_time(&subscription, simulated_msgs.get(id), read_ms),
                         );
                         if let Some(subscription) =
                             simulated_subscriptions.get_mut(&subscription_id)
@@ -1002,6 +1030,7 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                                 }
                                 SubscriptionConsumptionStatus::Consumed => "consumed".into(),
                                 SubscriptionConsumptionStatus::Armed => "armed".into(),
+                                SubscriptionConsumptionStatus::Expired => "expired".into(),
                             };
                         }
                     }
@@ -1021,6 +1050,7 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                             SubscriptionConsumptionStatus::Unchanged => subscription.status.clone(),
                             SubscriptionConsumptionStatus::Consumed => "consumed".into(),
                             SubscriptionConsumptionStatus::Armed => "armed".into(),
+                            SubscriptionConsumptionStatus::Expired => "expired".into(),
                         };
                     }
                 }
@@ -1605,6 +1635,8 @@ pub enum Event {
     },
     Acked {
         ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consumed_ms: Option<i64>,
     },
     #[serde(rename = "Nudged")]
     LegacyNudged {

@@ -582,6 +582,7 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
     assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
     state.apply(&Event::Acked {
         ids: vec!["idle-1".into()],
+        consumed_ms: None,
     });
     assert_eq!(state.master_wake.generation, 1);
     assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
@@ -920,6 +921,7 @@ fn recv_style_ack_clears_master_goal_due() {
     });
     state.apply(&Event::Acked {
         ids: vec!["goal-message".into()],
+        consumed_ms: None,
     });
 
     assert!(
@@ -1181,6 +1183,7 @@ fn message_lifecycle() {
 
     st.apply(&Event::Acked {
         ids: vec!["m1".into()],
+        consumed_ms: None,
     });
     assert_eq!(st.msgs["m1"].state, "read");
     assert!(st.inbox_of("w2").is_empty());

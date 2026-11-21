@@ -1711,6 +1711,7 @@ mod tests {
 
         server.commit(&[Event::Acked {
             ids: vec![first_id],
+            consumed_ms: None,
         }]);
         tick_at(&server, now + 4);
         assert_eq!(idle_notice_count(&server), 1);
@@ -1756,6 +1757,7 @@ mod tests {
         };
         server.commit(&[Event::Acked {
             ids: vec![first_id],
+            consumed_ms: None,
         }]);
 
         observe_agent(
@@ -1825,6 +1827,7 @@ mod tests {
         };
         server.commit(&[Event::Acked {
             ids: vec![first_id],
+            consumed_ms: None,
         }]);
         server.commit(&[Event::Sent {
             msg: Message {
@@ -1894,6 +1897,7 @@ mod tests {
         // not merely the unconsumed-batch gate.
         server.commit(&[Event::Acked {
             ids: vec![first_id],
+            consumed_ms: None,
         }]);
         for i in 0..3 {
             observe(&server, Busy, "current");
@@ -1979,6 +1983,7 @@ mod tests {
         };
         server.commit(&[Event::Acked {
             ids: vec![first_id],
+            consumed_ms: None,
         }]);
 
         for activity in [WaitingUser, Unknown] {
@@ -2048,6 +2053,7 @@ mod tests {
         };
         server.commit(&[Event::Acked {
             ids: vec![first_id],
+            consumed_ms: None,
         }]);
         // Worker stays Idle; the actionable status change is a new revision.
         let mut changed = server.state.lock().unwrap().tasks["task-still"].clone();
@@ -2176,6 +2182,7 @@ mod tests {
         };
         server.commit(&[Event::Acked {
             ids: vec![first_id],
+            consumed_ms: None,
         }]);
         for i in 0..3 {
             for (worker, session) in [("worker-a", "session-a"), ("worker-b", "session-b")] {

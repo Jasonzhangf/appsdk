@@ -137,6 +137,181 @@ fn find_subscription<'a>(status: &'a Value, subscription_id: &str) -> &'a Value 
 }
 
 #[test]
+fn late_periodic_goal_read_defers_the_overdue_next_occurrence() {
+    let (fixture, pane) = single_pane_fixture("goal-late-read-cadence");
+    let registered = fixture.registered_context(&pane, true);
+    let owner = registered["name"].as_str().unwrap();
+    let goal_id = "goal-late-read-cadence";
+    let interval_ms = 2_000;
+    let trigger_ms = now_epoch_ms() + interval_ms;
+    let armed = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_id,
+            "--owner",
+            owner,
+            "--desired",
+            "active",
+            "--at-ms",
+            &trigger_ms.to_string(),
+            "--every-ms",
+            &interval_ms.to_string(),
+            "--repeat",
+            "3",
+            "--ttl-seconds",
+            "60",
+        ],
+        Some(&pane),
+    );
+    let subscription_id = armed["subscription"]["id"].as_str().unwrap();
+    let expires_ms = armed["subscription"]["expires_ms"].as_i64().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while native_deadline_occurrences(&fixture, &pane, goal_id) == 0
+        || now_epoch_ms() <= trigger_ms + interval_ms
+    {
+        assert!(
+            Instant::now() < deadline,
+            "did not observe the first unread occurrence"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let before_recv = now_epoch_ms();
+    let received = fixture.run_ok(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "goal-cadence-read",
+        ],
+        Some(&pane),
+    );
+    let ids = deadline_message_ids(&received, goal_id);
+    assert_eq!(ids.len(), 1, "{received}");
+    let status = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let subscription = find_subscription(&status, subscription_id);
+    assert_eq!(subscription["fired_count"], 1, "{subscription}");
+    assert_eq!(subscription["expires_ms"], expires_ms, "{subscription}");
+    assert!(
+        subscription["trigger_ms"].as_i64().unwrap() >= before_recv + interval_ms,
+        "{subscription}"
+    );
+    let repeated = fixture.run_ok(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "goal-cadence-read",
+        ],
+        Some(&pane),
+    );
+    assert_eq!(deadline_message_ids(&repeated, goal_id), ids);
+    let status = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let observed = find_subscription(&status, subscription_id);
+    assert_eq!(observed["trigger_ms"], subscription["trigger_ms"]);
+    assert_eq!(observed["fired_count"], 1);
+
+    let second_trigger = observed["trigger_ms"].as_i64().unwrap();
+    let second_deadline = Instant::now() + Duration::from_secs(10);
+    while native_deadline_occurrences(&fixture, &pane, goal_id) < 2
+        || now_epoch_ms() <= second_trigger + interval_ms
+    {
+        assert!(
+            Instant::now() < second_deadline,
+            "did not observe the second unread occurrence"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (_, occurrences) = current_deadline_relations(&fixture, subscription_id, goal_id);
+    assert_eq!(occurrences.len(), 2);
+    let second_id = occurrences.iter().find(|id| **id != ids[0]).unwrap();
+    let before_ack = now_epoch_ms();
+    let acked = fixture.run_ok(&["ack", second_id], Some(&pane));
+    assert_eq!(
+        acked["acked"][0].as_str(),
+        Some(second_id.as_str()),
+        "{acked}"
+    );
+    let status = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let subscription = find_subscription(&status, subscription_id);
+    assert_eq!(subscription["fired_count"], 2, "{subscription}");
+    assert_eq!(subscription["expires_ms"], expires_ms, "{subscription}");
+    assert!(
+        subscription["trigger_ms"].as_i64().unwrap() >= before_ack + interval_ms,
+        "{subscription}"
+    );
+}
+
+#[test]
+fn accepted_periodic_reminder_stays_readable_after_its_schedule_expires() {
+    let (mut fixture, pane) = single_pane_fixture("goal-expired-read");
+    let registered = fixture.registered_context(&pane, true);
+    let owner = registered["name"].as_str().unwrap();
+    let goal_id = "goal-expired-read";
+    let trigger_ms = now_epoch_ms() + 1_500;
+    let armed = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_id,
+            "--owner",
+            owner,
+            "--desired",
+            "active",
+            "--at-ms",
+            &trigger_ms.to_string(),
+            "--every-ms",
+            "2000",
+            "--repeat",
+            "3",
+            "--ttl-seconds",
+            "5",
+        ],
+        Some(&pane),
+    );
+    let subscription_id = armed["subscription"]["id"].as_str().unwrap();
+    let expires_ms = armed["subscription"]["expires_ms"].as_i64().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(14);
+    loop {
+        let status = fixture.run_ok(&["notify", "status"], Some(&pane));
+        let subscription = find_subscription(&status, subscription_id);
+        if subscription["status"] == "expired" {
+            assert_eq!(subscription["fired_count"], 0, "{subscription}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{subscription}");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(native_deadline_occurrences(&fixture, &pane, goal_id), 1);
+    let args = [
+        "recv",
+        "--timeout",
+        "0",
+        "--receive-id",
+        "goal-expired-read",
+    ];
+    let received = fixture.run_ok(&args, Some(&pane));
+    let ids = deadline_message_ids(&received, goal_id);
+    assert_eq!(ids.len(), 1, "{received}");
+    let status = fixture.run_ok(&["notify", "status"], Some(&pane));
+    let subscription = find_subscription(&status, subscription_id);
+    assert_eq!(subscription["status"], "expired", "{subscription}");
+    assert_eq!(subscription["fired_count"], 1, "{subscription}");
+    assert_eq!(subscription["expires_ms"], expires_ms, "{subscription}");
+
+    fixture.restart_daemon();
+    let repeated = fixture.run_ok(&args, Some(&pane));
+    assert_eq!(deadline_message_ids(&repeated, goal_id), ids);
+    let status = fixture.run_ok(&["notify", "status"], Some(&pane));
+    assert_eq!(find_subscription(&status, subscription_id), subscription);
+    assert_eq!(native_deadline_occurrences(&fixture, &pane, goal_id), 1);
+}
+
+#[test]
 fn explicit_periodic_goal_deadline_consumes_three_restarts_and_stops_on_end() {
     let (mut fixture, pane) = single_pane_fixture("goal-periodic-blackbox");
     let registered = fixture.registered_context(&pane, true);

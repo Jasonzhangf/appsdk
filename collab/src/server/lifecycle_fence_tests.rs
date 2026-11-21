@@ -377,6 +377,7 @@ fn fence_allows_safe_message_consumption_and_exact_retirement() {
             },
             Event::Acked {
                 ids: vec!["msg-1".into()],
+                consumed_ms: None,
             },
             Event::NotificationConsumed {
                 subscription_id: "sub-consumed".into(),
@@ -887,6 +888,7 @@ fn ack_reactivating_retired_subscription_is_rejected_before_current_state_change
         &root,
         &[Event::Acked {
             ids: vec!["msg-retired".into()],
+            consumed_ms: None,
         }],
     );
     assert!(error.contains("target_closing"), "{error}");
@@ -1036,6 +1038,7 @@ fn ack_consuming_one_shot_or_counted_subscription_stays_allowed() {
     server
         .commit_checked(&[Event::Acked {
             ids: vec!["msg-counted".into(), "msg-one-shot".into()],
+            consumed_ms: None,
         }])
         .unwrap();
     let state = server.state.lock().unwrap();
@@ -1105,6 +1108,7 @@ fn ack_read_count_at_or_below_fired_count_does_not_reactivate_retired_subscripti
         server
             .commit_checked(&[Event::Acked {
                 ids: vec!["msg-unread".into()],
+                consumed_ms: None,
             }])
             .unwrap();
         let state = server.state.lock().unwrap();
@@ -1139,6 +1143,7 @@ fn ack_reactivation_followed_by_same_batch_retirement_is_allowed() {
         .commit_checked(&[
             Event::Acked {
                 ids: vec!["msg-retired".into()],
+                consumed_ms: None,
             },
             Event::NotificationStatus {
                 subscription_id: "sub-retired".into(),

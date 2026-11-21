@@ -654,6 +654,7 @@ use super::*;
                 if fired.insert(message_id.clone()) {
                     server.commit(&[Event::Acked {
                         ids: vec![message_id],
+                        consumed_ms: None,
                     }]);
                 }
             }
@@ -1391,6 +1392,7 @@ use super::*;
             },
             Event::Acked {
                 ids: vec![message_id.clone()],
+                consumed_ms: None,
             },
         ]);
         tick_with_idle(&server, &|_| false);
@@ -1610,6 +1612,7 @@ use super::*;
             },
             Event::Acked {
                 ids: vec![first_message_id],
+                consumed_ms: None,
             },
         ]);
 
@@ -2074,7 +2077,10 @@ use super::*;
             0
         );
 
-        server.commit(&[Event::Acked { ids: msg_ids }]);
+        server.commit(&[Event::Acked {
+            ids: msg_ids,
+            consumed_ms: None,
+        }]);
         assert_eq!(
             server
                 .state
@@ -2184,7 +2190,10 @@ use super::*;
 
         // ACK clears the safety limit. The zero-attempt message must stay
         // eligible for the same automatic attempt owner.
-        server.commit(&[Event::Acked { ids: delivered_ids }]);
+        server.commit(&[Event::Acked {
+            ids: delivered_ids,
+            consumed_ms: None,
+        }]);
         assert_eq!(
             server
                 .state

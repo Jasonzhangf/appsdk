@@ -382,7 +382,12 @@ impl Fixture {
             self.pane_cli_script_command_with_binary("client", &self.tmux_socket, pane, &agy);
         command
             .arg("--")
-            .args(["-c", "\"$@\"; s=$?; exit $s", "_", self.binary.to_str().expect("binary path")])
+            .args([
+                "-c",
+                "\"$@\"; s=$?; exit $s",
+                "_",
+                self.binary.to_str().expect("binary path"),
+            ])
             .args(args)
             .env("HOME", self.root.join("home"))
             .env("CODEX_HOME", self.root.join("home"))
@@ -589,20 +594,32 @@ impl Fixture {
 
     pub fn project_state_for(&self, project: &Path, app_scope: &str) -> PathBuf {
         let root = std::fs::canonicalize(project).unwrap();
-        let routes: Vec<Value> = serde_json::from_slice(&std::fs::read(self.host_routes()).unwrap()).unwrap();
-        let matches: Vec<_> = routes.iter().filter(|route|
-            route["project_scope"] == root.to_string_lossy().as_ref()
-                && route["app_scope_id"] == app_scope).collect();
+        let routes: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(self.host_routes()).unwrap()).unwrap();
+        let matches: Vec<_> = routes
+            .iter()
+            .filter(|route| {
+                route["project_scope"] == root.to_string_lossy().as_ref()
+                    && route["app_scope_id"] == app_scope
+            })
+            .collect();
         assert_eq!(matches.len(), 1, "one exact current project/app route");
-        PathBuf::from(matches[0]["storage_root"].as_str().unwrap()).join(".agent-collab/server/state.json")
+        PathBuf::from(matches[0]["storage_root"].as_str().unwrap())
+            .join(".agent-collab/server/state.json")
     }
 
     pub fn current_state(&self) -> Value {
-        serde_json::from_slice::<Value>(&std::fs::read(self.project_state()).unwrap()).unwrap()["state"].clone()
+        serde_json::from_slice::<Value>(&std::fs::read(self.project_state()).unwrap()).unwrap()
+            ["state"]
+            .clone()
     }
 
     pub fn current_state_for(&self, project: &Path, app_scope: &str) -> Value {
-        serde_json::from_slice::<Value>(&std::fs::read(self.project_state_for(project, app_scope)).unwrap()).unwrap()["state"].clone()
+        serde_json::from_slice::<Value>(
+            &std::fs::read(self.project_state_for(project, app_scope)).unwrap(),
+        )
+        .unwrap()["state"]
+            .clone()
     }
 
     /// Compare current control/business resources, including explicit absence.
@@ -633,18 +650,36 @@ impl Fixture {
             let entries = match std::fs::read_dir(path) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    values.insert(path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), Value::Null);
+                    values.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                        Value::Null,
+                    );
                     return;
                 }
-                Err(error) => panic!("read current resource directory {}: {error}", path.display()),
+                Err(error) => panic!(
+                    "read current resource directory {}: {error}",
+                    path.display()
+                ),
             };
             for entry in entries {
                 let entry = entry.unwrap();
                 let path = entry.path();
                 if entry.file_type().unwrap().is_dir() {
                     visit(root, &path, values);
-                } else if matches!(entry.file_name().to_str(), Some("state.json" | "identity.json")) {
-                    values.insert(path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), read(&path));
+                } else if matches!(
+                    entry.file_name().to_str(),
+                    Some("state.json" | "identity.json")
+                ) {
+                    values.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                        read(&path),
+                    );
                 }
             }
         }
@@ -768,7 +803,6 @@ impl Fixture {
         }
         self.start_daemon_with(command);
     }
-
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1150,6 +1184,7 @@ pub struct Mcp {
     stdin: Option<ChildStdin>,
     replies: Receiver<Result<Value, String>>,
     reader: Option<JoinHandle<()>>,
+    executor_facts: Option<(String, String)>,
 }
 
 impl Mcp {
@@ -1204,7 +1239,81 @@ impl Mcp {
             stdin: Some(stdin),
             replies,
             reader: Some(reader),
+            executor_facts: None,
         }
+    }
+
+    pub fn start_with_executor_facts(fixture: &Fixture, session: &str, thread: &str) -> Self {
+        let mut command = Command::new(collab_test_mcp_binary());
+        command
+            .current_dir(&fixture.root)
+            .env("COLLAB_STATE_DIR", &fixture.host_state)
+            .env("CODEX_HOME", fixture.root.join("home"))
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+            .env("CODEX_SESSION_ID", session)
+            .env("COLLAB_BIN", &fixture.binary)
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("CODEX_APP_TOOLS_PIPE_PATH")
+            .env_remove("DSH_SESSION_ID")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("launch Desktop collab-mcp");
+        let stdin = child.stdin.take().expect("MCP stdin");
+        let stdout = child.stdout.take().expect("MCP stdout");
+        let (sender, replies) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let reply = line.map_err(|error| error.to_string()).and_then(|line| {
+                    serde_json::from_str(&line).map_err(|error| error.to_string())
+                });
+                if sender.send(reply).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            stdin: Some(stdin),
+            replies,
+            reader: Some(reader),
+            executor_facts: Some((session.to_owned(), thread.to_owned())),
+        }
+    }
+
+    pub fn call_tool(&mut self, id: u64, name: &str, arguments: Value) -> Value {
+        let meta = self
+            .executor_facts
+            .as_ref()
+            .map(|(_, thread)| {
+                json!({
+                    "openai/threadId":thread,
+                    "x-codex-turn-metadata":{"thread_id":thread}
+                })
+            })
+            .unwrap_or(Value::Null);
+        let stdin = self.stdin.as_mut().expect("MCP stdin is open");
+        serde_json::to_writer(
+            &mut *stdin,
+            &json!({
+                "jsonrpc":"2.0",
+                "id":id,
+                "method":"tools/call",
+                "params":{"name":name,"arguments":arguments,"_meta":meta}
+            }),
+        )
+        .expect("serialize MCP request");
+        writeln!(stdin).expect("write MCP request");
+        stdin.flush().expect("flush MCP request");
+        let reply = self
+            .replies
+            .recv_timeout(Duration::from_secs(30))
+            .expect("MCP returns a bounded response")
+            .expect("MCP returns valid JSON");
+        assert_eq!(reply["id"], id, "{reply}");
+        reply["result"].clone()
     }
 
     pub fn send_context(&mut self, id: u64, arguments: Value) {
@@ -1215,7 +1324,10 @@ impl Mcp {
                 "jsonrpc":"2.0",
                 "id":id,
                 "method":"tools/call",
-                "params":{"name":"collab_context","arguments":arguments}
+                "params":{"name":"collab_context","arguments":arguments,"_meta":self.executor_facts.as_ref().map(|(session, thread)| json!({
+                    "openai/threadId":thread,
+                    "x-codex-turn-metadata":{"thread_id":thread}
+                })).unwrap_or(Value::Null)}
             }),
         )
         .expect("serialize MCP request");

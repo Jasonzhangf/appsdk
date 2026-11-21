@@ -592,7 +592,11 @@ fn context_typed_incomplete_result_is_a_tool_result_but_transport_failure_is_not
         std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("COLLAB_BIN", &script);
-        let result = call("collab_context", &json!({"operation_id": "ctxop-typed"}));
+        let result = call(
+            "collab_context",
+            &json!({"operation_id": "ctxop-typed"}),
+            None,
+        );
         std::env::remove_var("COLLAB_BIN");
         result
     };

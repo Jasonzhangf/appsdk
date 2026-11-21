@@ -288,6 +288,33 @@ fn rex_value_on_server(
     block: &str,
     server: &str,
 ) -> BindingValue {
+    let mut value = rex_value_on_endpoint(
+        key,
+        agent,
+        runtime,
+        "rex-session",
+        block,
+        server,
+        "instance",
+    );
+    value.binding.session_id = Some(SessionId::new(session).unwrap());
+    value
+        .transport
+        .as_mut()
+        .unwrap()
+        .session_id = Some(session.into());
+    value
+}
+
+fn rex_value_on_endpoint(
+    key: &IdentityBindingKey,
+    agent: &str,
+    runtime: &str,
+    session: &str,
+    block: &str,
+    server: &str,
+    instance: &str,
+) -> BindingValue {
     let binding = RuntimeBinding::new_with_session(
         key.project_scope.clone(),
         key.app_scope_id.clone(),
@@ -309,10 +336,10 @@ fn rex_value_on_server(
             tmux_endpoint: None,
             rex_endpoint: Some(RexEndpoint {
                 server: server.into(),
-                session_id: "rex-session".into(),
+                session_id: session.into(),
                 block_id: block.into(),
                 host_id: Some("host".into()),
-                instance_id: "instance".into(),
+                instance_id: instance.into(),
                 cwd: key.project_scope.as_str().into(),
             }),
             capabilities: vec!["send_message_to_block".into()],
@@ -733,10 +760,11 @@ fn ordinary_rex_lookup_rejects_non_rex_session_holder_against_rex_target() {
         ..Default::default()
     };
 
-    let error = control
+    let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
-        .unwrap_err();
-    assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
+        .unwrap()
+        .expect("agent-session priority survives without a verified physical endpoint");
+    assert_eq!(selected.identity_key, alice);
 }
 
 #[test]
@@ -783,7 +811,14 @@ fn current_rex_anchor_disambiguates_a_reused_agent_session() {
     };
 
     let selected = control
-        .lookup(&bob.project_scope, &bob.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &bob.project_scope,
+            &bob.app_scope_id,
+            &facts,
+            None,
+            &verified_rex("unix:///tmp/rex-test.sock", "instance", "rex-session", "block-bob"),
+            false,
+        )
         .unwrap()
         .expect("the exact current Rex block disambiguates duplicate session history");
     assert_eq!(selected.identity_key, bob);
@@ -914,7 +949,14 @@ fn current_lookup_uses_unique_session_when_a_rex_block_has_seeded_duplicate_curr
     };
 
     let selected = control
-        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &alice.project_scope,
+            &alice.app_scope_id,
+            &facts,
+            None,
+            &verified_rex("unix:///tmp/rex-test.sock", "instance", "rex-session", "shared-block"),
+            false,
+        )
         .unwrap()
         .expect(
             "the known session repairs the seeded duplicate without choosing an arbitrary owner",
@@ -959,7 +1001,14 @@ fn current_lookup_allows_a_rex_session_holder_to_replace_an_occupied_block() {
     };
 
     let selected = control
-        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &alice.project_scope,
+            &alice.app_scope_id,
+            &facts,
+            None,
+            &verified_rex("unix:///tmp/rex-test.sock", "instance", "rex-session", "block-alice"),
+            false,
+        )
         .unwrap()
         .expect("the current Rex session holder may replace the occupied block");
     assert_eq!(selected.identity_key, bob);
@@ -1010,10 +1059,38 @@ fn current_lookup_matches_the_full_rex_server_and_block() {
     };
 
     let selected = control
-        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &alice.project_scope,
+            &alice.app_scope_id,
+            &facts,
+            None,
+            &verified_rex("unix:///tmp/rex-a.sock", "instance", "rex-session", "shared-block"),
+            false,
+        )
         .unwrap()
         .expect("the full server scope selects only the matching principal");
     assert_eq!(selected.identity_key, alice);
+}
+
+fn verified_rex(server: &str, instance: &str, session: &str, block: &str) -> SelectedTransport {
+    SelectedTransport {
+        kind: TransportKind::Rex,
+        endpoint: None,
+        namespace: None,
+        session_id: Some("agent-session".into()),
+        thread_id: None,
+        tmux_endpoint: None,
+        rex_endpoint: Some(RexEndpoint {
+            server: server.into(),
+            session_id: session.into(),
+            block_id: block.into(),
+            host_id: Some("host".into()),
+            instance_id: instance.into(),
+            cwd: "/tmp/collab-binding-slot".into(),
+        }),
+        capabilities: vec!["send_message_to_block".into()],
+        self_check: "verified".into(),
+    }
 }
 
 #[test]
@@ -1209,7 +1286,14 @@ fn rex_lookup_continues_a_unique_current_block_with_a_new_agent_session() {
         REX_BLOCK,
     );
     let found = control
-        .lookup(&key.project_scope, &key.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &key.project_scope,
+            &key.app_scope_id,
+            &facts,
+            None,
+            &verified_rex(REX_SERVER, "instance-old", REX_SESSION, REX_BLOCK),
+            false,
+        )
         .unwrap()
         .expect("the unique current Rex block should continue Alice");
     assert_eq!(found.identity_key, key);
@@ -1284,13 +1368,23 @@ fn rex_lookup_continues_the_same_agent_session_across_adaptors() {
 fn rex_lookup_reports_ambiguity_for_multiple_current_slots_on_one_block() {
     let alice = key("alice");
     let bob = key("bob");
+    let alice_value = rex_value_default(&alice, "alice-agent", "alice");
+    let mut bob_value = rex_value_default(&bob, "bob-agent", "bob");
+    bob_value
+        .transport
+        .as_mut()
+        .unwrap()
+        .rex_endpoint
+        .as_mut()
+        .unwrap()
+        .instance_id = "instance-alice".into();
     let control = BindingControlSet::from_parts(
         vec![
             committed_slot(
                 alice.clone(),
-                rex_value_default(&alice, "alice-agent", "alice"),
+                alice_value,
             ),
-            committed_slot(bob.clone(), rex_value_default(&bob, "bob-agent", "bob")),
+            committed_slot(bob.clone(), bob_value),
         ],
         Vec::new(),
     );
@@ -1302,7 +1396,14 @@ fn rex_lookup_reports_ambiguity_for_multiple_current_slots_on_one_block() {
         REX_BLOCK,
     );
     let error = control
-        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &alice.project_scope,
+            &alice.app_scope_id,
+            &facts,
+            None,
+            &verified_rex(REX_SERVER, "instance-alice", REX_SESSION, REX_BLOCK),
+            false,
+        )
         .unwrap_err();
     assert!(error.starts_with("IDENTITY_MAP_AMBIGUOUS:"), "{error}");
 }
@@ -1319,13 +1420,33 @@ fn rex_lookup_uses_the_exact_current_session_when_names_share_one_block() {
             None,
         )
         .unwrap();
-    let bob_value = rex_value_default(&bob, "bob-agent", "bob");
+    let mut bob_value = rex_value_default(&bob, "bob-agent", "bob");
+    bob_value
+        .transport
+        .as_mut()
+        .unwrap()
+        .rex_endpoint
+        .as_mut()
+        .unwrap()
+        .instance_id = "instance-alice".into();
     let bob_session = bob_value.binding.session_id.as_ref().unwrap().to_string();
     control.commit(&bob, bob_value, None).unwrap();
     let before = serde_json::to_value(&control).unwrap();
     let facts = rex_facts(Some(&bob_session), REX_SERVER, REX_SESSION, REX_BLOCK);
     let found = control
-        .lookup(&bob.project_scope, &bob.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &bob.project_scope,
+            &bob.app_scope_id,
+            &facts,
+            None,
+            &verified_rex(
+                REX_SERVER,
+                "instance-alice",
+                REX_SESSION,
+                REX_BLOCK,
+            ),
+            false,
+        )
         .unwrap()
         .expect("the exact current session disambiguates its name");
     assert_eq!(found.identity_key, bob);
@@ -1361,7 +1482,14 @@ fn rex_lookup_rejects_session_holder_against_current_block_anchor() {
         REX_BLOCK,
     );
     let error = control
-        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &alice.project_scope,
+            &alice.app_scope_id,
+            &facts,
+            None,
+            &verified_rex(REX_SERVER, "instance-alice", REX_SESSION, REX_BLOCK),
+            false,
+        )
         .unwrap_err();
     assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
 }
@@ -1393,7 +1521,14 @@ fn rex_lookup_rejects_session_holder_when_the_target_block_belongs_to_another_id
         REX_BLOCK,
     );
     let error = control
-        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .lookup_verified_rex(
+            &alice.project_scope,
+            &alice.app_scope_id,
+            &facts,
+            None,
+            &verified_rex(REX_SERVER, "instance-alice", REX_SESSION, REX_BLOCK),
+            false,
+        )
         .unwrap_err();
     assert!(error.starts_with("IDENTITY_ANCHOR_CONFLICT:"), "{error}");
 }
@@ -2019,6 +2154,88 @@ fn unchanged_rex_winner_still_retires_a_seeded_duplicate_current() {
 }
 
 #[test]
+fn rex_block_commit_keeps_same_locator_different_physical_endpoints_independent() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let mut set = BindingControlSet::new();
+    let alice_value = rex_value_on_endpoint(
+        &alice,
+        "alice",
+        "runtime-a",
+        "rex-session-a",
+        "shared-block",
+        REX_SERVER,
+        "instance-a",
+    );
+    let bob_value = rex_value_on_endpoint(
+        &bob,
+        "bob",
+        "runtime-b",
+        "rex-session-b",
+        "shared-block",
+        REX_SERVER,
+        "instance-b",
+    );
+
+    set.commit(&alice, alice_value.clone(), None).unwrap();
+    set.commit(&bob, bob_value.clone(), None).unwrap();
+
+    assert_eq!(
+        set.slot(&alice).unwrap().active_binding(),
+        Some(&alice_value)
+    );
+    assert_eq!(set.slot(&bob).unwrap().active_binding(), Some(&bob_value));
+    assert_eq!(
+        set.active_values()
+            .filter(|value| value.transport.as_ref().is_some_and(|transport| {
+                transport.kind == TransportKind::Rex
+                    && transport.rex_endpoint.as_ref().is_some_and(|endpoint| {
+                        endpoint.server == REX_SERVER && endpoint.block_id == "shared-block"
+                    })
+            }))
+            .count(),
+        2,
+        "different Rex session/instance tuples must not be retired by locator collision"
+    );
+    set.validate().unwrap();
+}
+
+#[test]
+fn rex_block_commit_replaces_only_the_same_physical_endpoint() {
+    let alice = key("alice");
+    let bob = key("bob");
+    let mut set = BindingControlSet::new();
+    let first = rex_value_on_endpoint(
+        &alice,
+        "alice",
+        "runtime-a",
+        "rex-session",
+        "shared-block",
+        REX_SERVER,
+        "instance",
+    );
+    let second = rex_value_on_endpoint(
+        &bob,
+        "bob",
+        "runtime-b",
+        "rex-session",
+        "shared-block",
+        REX_SERVER,
+        "instance",
+    );
+
+    set.commit(&alice, first, None).unwrap();
+    set.commit(&bob, second.clone(), None).unwrap();
+
+    assert_eq!(
+        set.slot(&alice).unwrap().identity_status(),
+        IdentityStatus::Unregistered
+    );
+    assert_eq!(set.slot(&bob).unwrap().active_binding(), Some(&second));
+    set.validate().unwrap();
+}
+
+#[test]
 fn stale_rex_generation_cannot_restore_an_old_block() {
     let alice = key("alice");
     let mut set = BindingControlSet::new();
@@ -2053,15 +2270,85 @@ fn rex_publication_rejects_an_incomplete_current_without_mutation() {
         .rex_endpoint
         .as_mut()
         .unwrap()
-        .block_id
+        .instance_id
         .clear();
 
     let error = set.commit(&alice, incomplete, Some(0)).unwrap_err();
     assert!(
-        matches!(error, SlotError::Invalid(ref message) if message.contains("requires a complete server, session and block")),
+        matches!(error, SlotError::Invalid(ref message) if message.contains("requires a complete server, instance, session and block")),
         "{error}"
     );
     assert_eq!(set, BindingControlSet::new());
+}
+
+#[test]
+fn unverified_rex_selection_does_not_use_the_caller_three_field_locator() {
+    let alice = key("alice");
+    let mut control = BindingControlSet::new();
+    control
+        .commit(
+            &alice,
+            rex_value_on_endpoint(
+                &alice,
+                "alice",
+                "runtime-alice",
+                "rex-session",
+                "shared-block",
+                REX_SERVER,
+                "instance-a",
+            ),
+            None,
+        )
+        .unwrap();
+    let facts = rex_facts(
+        Some("new-agent-session"),
+        REX_SERVER,
+        "rex-session",
+        "shared-block",
+    );
+
+    assert!(
+        control
+            .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+            .unwrap()
+            .is_none(),
+        "caller-reported server/session/block must not select a current without verified instance"
+    );
+}
+
+#[test]
+fn verified_rex_selection_uses_the_complete_physical_endpoint() {
+    let alice = key("alice");
+    let mut control = BindingControlSet::new();
+    let value = rex_value_on_endpoint(
+        &alice,
+        "alice",
+        "runtime-alice",
+        "rex-session",
+        "shared-block",
+        REX_SERVER,
+        "instance-a",
+    );
+    control.commit(&alice, value, None).unwrap();
+    let facts = rex_facts(
+        Some("new-agent-session"),
+        REX_SERVER,
+        "rex-session",
+        "shared-block",
+    );
+
+    let selected = control
+        .lookup_verified_rex(
+            &alice.project_scope,
+            &alice.app_scope_id,
+            &facts,
+            None,
+            &verified_rex(REX_SERVER, "instance-a", "rex-session", "shared-block"),
+            false,
+        )
+        .unwrap()
+        .expect("verified complete physical endpoint selects the matching current");
+    assert_eq!(selected.identity_key, alice);
 }
 
 #[test]

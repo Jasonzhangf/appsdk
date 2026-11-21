@@ -584,6 +584,51 @@ impl RexLiveFixture {
         })
     }
 
+    pub fn replace_current_rex_instance(
+        &self,
+        owned: &OwnedRexSession,
+        instance_id: &str,
+    ) -> String {
+        assert!(
+            !instance_id.trim().is_empty(),
+            "the persisted Rex instance fixture must be non-empty"
+        );
+        let path = self.host_state.join("identity-map.json");
+        let mut map = self.identity_map();
+        let current = map["slots"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|slot| slot["current"]["binding"]["session_id"] == owned.agent_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "current Rex binding for agent session {} is missing",
+                    owned.agent_session_id
+                )
+            });
+        let endpoint = current["current"]["transport"]["rex_endpoint"]
+            .as_object_mut()
+            .unwrap_or_else(|| {
+                panic!(
+                    "current Rex binding for agent session {} has no endpoint",
+                    owned.agent_session_id
+                )
+            });
+        let old_instance = endpoint
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "current Rex binding for agent session {} has no instance id",
+                    owned.agent_session_id
+                )
+            })
+            .to_owned();
+        endpoint.insert("instance_id".into(), Value::String(instance_id.into()));
+        fs::write(&path, serde_json::to_vec(&map).unwrap()).unwrap();
+        old_instance
+    }
+
     /// Every Rex block mapped to its currently published identity names. Only
     /// `active current` rows participate; previous relations are history.
     pub fn rex_block_current_owners(&self) -> std::collections::BTreeMap<String, Vec<String>> {

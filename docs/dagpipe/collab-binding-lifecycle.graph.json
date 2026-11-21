@@ -1,4 +1,8 @@
 {
+  "rex_current_endpoint": {
+    "读取当前权威绑定": "重复物理归属按已核实的 server、instance、Rex session、block 判定，历史记录不选 winner。",
+    "同步已授权端点变化": "同主体经官方事实确认的新 instance 可沿原 slot 恢复，保留名字和工作。不同完整物理端点间的替换须有现有授权和当前事实。"
+  },
   "id":"appsdk-collab-binding-lifecycle","version":"1.1.0",
   "description":"一次绑定生命周期收敛。只判断当前已提交渠道适用的能力，其他渠道不要求。当前绑定只从持久控制资源读取；每个逻辑身份只保留 current 与上一次有效 previous，previous 只供交接及参考，不作为投递候选或恢复输入。旧 route-only 文件保持惰性，启动和目录查询不得为其创建控制槽或物化项目 runtime；目录只读当前控制/route 投影 targets 与局部错误，route不是身份或block归属真源。Desktop 使用 host runtime 共享入口；bridge 从共享 enrollment 向当前 native host 逐条核实 session/thread/cwd 后恢复，不依赖 agent 的 MCP 调用。当前发布者以私有 typed runtime descriptor 公布端点与 namespace；daemon 未继承 host pipe 或 Node 路径时，只向该 descriptor 对应服务请求 exact scope admission，由服务重新核实 native thread/canonical cwd。Rex作为typed transport沿同一条单源单汇生命周期收敛：有效current必须包含实际server/session/block/cwd，agent sessionID与身份继续由identity-anchor持有；同一实际server内一个block只有一个current identity，旧current的route与观察在替换后不得继续作为投递来源。地址更新交回原binding owner，不因Rex暂时失联重新Register或撤销身份；block归属替换由context集合级commit完成，refresh只更新同一主体的完整current。未知、错误项目、陈旧/不安全/畸形descriptor明确失败；多个活跃发布者同时admission成功时按歧义失败，不静默选择。同一端点字符串不证明发布者存活，仅存活ping可直接复用。声明缺失与能力丢失分别判断：已知能力确实丢失才提示该peer更新，未知不冒充丢失。DSH的unknown-agent是确定缺席，退役当前路由并进入终止结果；其他未决结果才是下一次独立调用。重试不构造图回边；失败止于所属绑定，不回滚身份、不阻塞其他绑定、不启动宿主或tmux。",
   "inputs":[{"id":"lifecycle_event","schema":"Object"}],

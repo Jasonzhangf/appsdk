@@ -470,24 +470,22 @@ impl BindingValue {
         if self.transport.as_ref().is_some_and(|transport| {
             transport.kind == crate::proto::TransportKind::Rex
                 && transport.rex_endpoint.as_ref().is_none_or(|endpoint| {
-                    endpoint.server.trim().is_empty()
-                        || endpoint.session_id.trim().is_empty()
-                        || endpoint.block_id.trim().is_empty()
+                    rex_physical_endpoint(endpoint).is_none()
                 })
         }) {
             return Err(SlotError::Invalid(
-                "Rex binding requires a complete server, session and block".into(),
+                "Rex binding requires a complete server, instance, session and block".into(),
             ));
         }
         Ok(())
     }
 
-    fn rex_block_key(&self) -> Option<(&str, &str)> {
+    pub(crate) fn rex_physical_endpoint(&self) -> Option<(&str, &str, &str, &str)> {
         self.transport
             .as_ref()
             .filter(|transport| transport.kind == crate::proto::TransportKind::Rex)
             .and_then(|transport| transport.rex_endpoint.as_ref())
-            .map(|endpoint| (endpoint.server.as_str(), endpoint.block_id.as_str()))
+            .and_then(rex_physical_endpoint)
     }
 
     /// Confirm the value belongs to the given slot partition. The agent_id
@@ -928,22 +926,22 @@ pub(crate) struct BindingControlSet {
     pub(crate) pending_resets: Vec<String>,
 }
 
-/// Exact match of a caller's current Rex target against a saved binding. The
-/// Rex `server`/`session`/`block` triple is the placement identity; `host_id`
-/// and `instance_id` are transport routing details that the caller does not
-/// claim, and the agent session is a mutable carrier that may change inside the
-/// same block.
-fn rex_target_matches(value: &BindingValue, candidate: &crate::proto::RexCandidate) -> bool {
-    value
-        .transport
-        .as_ref()
-        .filter(|transport| transport.kind == crate::proto::TransportKind::Rex)
-        .and_then(|transport| transport.rex_endpoint.as_ref())
-        .is_some_and(|endpoint| {
-            endpoint.server == candidate.server
-                && endpoint.session_id == candidate.session_id
-                && endpoint.block_id == candidate.block_id
-        })
+/// Return the complete physical Rex endpoint key. An endpoint with any blank
+/// required field is logical history and cannot select or replace an owner.
+pub(crate) fn rex_physical_endpoint(
+    endpoint: &crate::proto::RexEndpoint,
+) -> Option<(&str, &str, &str, &str)> {
+    let fields = (
+        endpoint.server.as_str(),
+        endpoint.instance_id.as_str(),
+        endpoint.session_id.as_str(),
+        endpoint.block_id.as_str(),
+    );
+    (!fields.0.trim().is_empty()
+        && !fields.1.trim().is_empty()
+        && !fields.2.trim().is_empty()
+        && !fields.3.trim().is_empty())
+        .then_some(fields)
 }
 
 impl BindingControlSet {
@@ -964,7 +962,7 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
-        self.lookup_scoped(project, app, facts, cwd, false)
+        self.lookup_scoped(project, app, facts, cwd, false, None)
     }
 
     /// Select the caller's current actor after the daemon has validated an
@@ -978,7 +976,34 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
-        self.lookup_scoped(project, app, facts, cwd, true)
+        self.lookup_scoped(project, app, facts, cwd, true, None)
+    }
+
+    pub(crate) fn lookup_verified_rex(
+        &self,
+        project: &ProjectScopeId,
+        app: &AppServerId,
+        facts: &crate::proto::IdentityFacts,
+        cwd: Option<&str>,
+        verified: &SelectedTransport,
+        allow_explicit_rex_session_override: bool,
+    ) -> Result<Option<&IdentityBindingSlot>, String> {
+        let verified_rex = verified
+            .rex_endpoint
+            .as_ref()
+            .and_then(rex_physical_endpoint)
+            .ok_or_else(|| {
+                "REX_ENDPOINT_REJECTED: verified Rex transport has an incomplete physical endpoint"
+                    .to_owned()
+            })?;
+        self.lookup_scoped(
+            project,
+            app,
+            facts,
+            cwd,
+            allow_explicit_rex_session_override,
+            Some(verified_rex),
+        )
     }
 
     fn lookup_scoped(
@@ -988,6 +1013,7 @@ impl BindingControlSet {
         facts: &crate::proto::IdentityFacts,
         cwd: Option<&str>,
         allow_explicit_rex_session_override: bool,
+        verified_rex: Option<(&str, &str, &str, &str)>,
     ) -> Result<Option<&IdentityBindingSlot>, String> {
         let dsh = facts.dsh_session_id.as_deref().or_else(|| {
             facts
@@ -1068,10 +1094,13 @@ impl BindingControlSet {
         // move to a new block or cross adaptors. If that block still names a
         // prior owner, publishing the selected session later replaces only the
         // block's current owner; the prior identity and its history remain.
-        if let Some(rex) = facts.rex.as_ref() {
+        if facts.rex.is_some() {
             let targets = candidates
                 .iter()
-                .filter(|(_, value)| rex_target_matches(value, rex))
+                .filter(|(_, value)| {
+                    verified_rex
+                        .is_some_and(|verified| value.rex_physical_endpoint() == Some(verified))
+                })
                 .map(|(slot, _)| *slot)
                 .collect::<Vec<_>>();
             return match session_matches.as_slice() {
@@ -1629,12 +1658,12 @@ impl BindingControlSet {
             })
         }
 
-        let rex_target = value.rex_block_key();
+        let rex_target = value.rex_physical_endpoint();
         let mut replaced = Vec::new();
         let mut superseded_effects = Vec::new();
         if let Some(existing_index) = self.slots.iter().position(|slot| &slot.identity_key == key) {
             if let Some(existing) = self.slots[existing_index].active_binding() {
-                if existing.rex_block_key() != rex_target {
+                if existing.rex_physical_endpoint() != rex_target {
                     superseded_effects
                         .push(superseded_effect_owner(&self.slots[existing_index]).unwrap());
                 }
@@ -1645,7 +1674,11 @@ impl BindingControlSet {
                 if slot.identity_key == *key {
                     continue;
                 }
-                if slot.active_binding().and_then(BindingValue::rex_block_key) == Some(target) {
+                if slot
+                    .active_binding()
+                    .and_then(BindingValue::rex_physical_endpoint)
+                    == Some(target)
+                {
                     if let Some(owner) = superseded_effect_owner(slot) {
                         superseded_effects.push(owner);
                     }

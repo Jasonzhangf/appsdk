@@ -360,6 +360,61 @@ async fn rex_maintenance_keeps_identity_when_block_response_is_malformed() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_maintenance_does_not_probe_or_retire_an_incomplete_endpoint() {
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (server, root) = test_server();
+    let _fixture = RexFixture::new(&root, "block_missing");
+    let transport = rex_transport(&root);
+    let response = seed_committed_owner(
+        &server,
+        "rex-incomplete-endpoint",
+        "token-rex-incomplete-endpoint",
+        &transport,
+        root.to_str().unwrap(),
+        None,
+    );
+    assert!(response.ok, "{response:?}");
+    {
+        let mut state = server.state.lock().unwrap();
+        state
+            .workers
+            .get_mut("rex-incomplete-endpoint")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .rex_endpoint
+            .as_mut()
+            .unwrap()
+            .instance_id
+            .clear();
+    }
+    let server = Arc::new(server);
+    let maintenance_server = server.clone();
+    let summary = tokio::task::spawn_blocking(move || {
+        maintain_definitive_missing(&maintenance_server, 7_504)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        entry(&summary, "retained", "rex-incomplete-endpoint")["reason"]["presence"],
+        "unknown",
+        "{summary}"
+    );
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .contains_key("rex-incomplete-endpoint"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn entry<'a>(
     summary: &'a serde_json::Value,
     bucket: &str,

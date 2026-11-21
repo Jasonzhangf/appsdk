@@ -155,6 +155,7 @@ impl ProjectRuntimeManager {
                 &facts,
                 request.invocation_cwd.as_deref(),
                 allow_explicit_rex_rebind,
+                rex_recovery.as_ref().map(|recovery| &recovery.transport),
             ) {
                 return (self.host.clone(), Resp::err(error));
             }
@@ -392,7 +393,8 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         request: &IdentityContextRequest,
     ) -> (Arc<Server>, Resp) {
-        match self.pending_registration_context(context, request) {
+        let verified_rex = self.verified_rex_transport_for_context(context, &request.facts);
+        match self.pending_registration_context(context, request, verified_rex.as_ref()) {
             Ok(Some(result)) => return result,
             Ok(None) => {}
             Err(error) => return (self.host.clone(), Resp::err(error)),
@@ -402,6 +404,7 @@ impl ProjectRuntimeManager {
             &request.facts,
             request.invocation_cwd.as_deref(),
             false,
+            verified_rex.as_ref(),
         ) {
             Ok(Some(identity)) => identity,
             Ok(None) => {
@@ -454,14 +457,27 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         request: &IdentityContextRequest,
+        verified_rex: Option<&crate::proto::SelectedTransport>,
     ) -> Result<Option<(Arc<Server>, Resp)>, String> {
         let control = self.binding_control_store().load()?;
-        let Some(slot) = control.lookup(
-            &context.project_scope,
-            &context.app_scope_id,
-            &request.facts,
-            request.invocation_cwd.as_deref(),
-        )? else {
+        let slot = if let Some(verified) = verified_rex {
+            control.lookup_verified_rex(
+                &context.project_scope,
+                &context.app_scope_id,
+                &request.facts,
+                request.invocation_cwd.as_deref(),
+                verified,
+                false,
+            )?
+        } else {
+            control.lookup(
+                &context.project_scope,
+                &context.app_scope_id,
+                &request.facts,
+                request.invocation_cwd.as_deref(),
+            )?
+        };
+        let Some(slot) = slot else {
             return Ok(None);
         };
         let value = slot

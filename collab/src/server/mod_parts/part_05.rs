@@ -636,15 +636,17 @@ pub(crate) fn notification_target(
         // Rex is addressed by its full service-scoped terminal target. The
         // compact JSON array keeps the server and session/block boundary
         // visible in the subscription target instead of borrowing thread_id.
-        TransportKind::Rex => transport.rex_endpoint.as_ref().map(|endpoint| {
-            std::borrow::Cow::Owned(
+        TransportKind::Rex => transport.rex_endpoint.as_ref().and_then(|endpoint| {
+            crate::server::binding_slot::rex_physical_endpoint(endpoint)?;
+            Some(std::borrow::Cow::Owned(
                 serde_json::json!([
                     endpoint.server.as_str(),
+                    endpoint.instance_id.as_str(),
                     endpoint.session_id.as_str(),
                     endpoint.block_id.as_str(),
                 ])
                 .to_string(),
-            )
+            ))
         }),
         _ => transport
             .thread_id
@@ -800,20 +802,22 @@ fn select_current_rex_delivery_binding(
         })?;
     let selected = notification_contract::SelectedDeliveryBinding::from_slot(slot)
         .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding"))?;
+    if selected.transport.kind != TransportKind::Rex {
+        return Err(format!(
+            "REX_CURRENT_BINDING_CHANGED: cached transport for {recipient} is not Rex"
+        ));
+    }
     let endpoint = selected
         .transport
         .rex_endpoint
         .as_ref()
-        .filter(|endpoint| {
-            !endpoint.server.trim().is_empty()
-                && !endpoint.session_id.trim().is_empty()
-                && !endpoint.block_id.trim().is_empty()
-        })
         .ok_or_else(|| {
             format!("REX_CURRENT_BINDING_CHANGED: {recipient} has an incomplete Rex endpoint")
         })?;
-    if selected.transport.kind != TransportKind::Rex
-        || selected.binding.agent_id.as_str() != recipient
+    let endpoint_key = crate::server::binding_slot::rex_physical_endpoint(endpoint).ok_or_else(|| {
+        format!("REX_CURRENT_BINDING_CHANGED: {recipient} has an incomplete Rex endpoint")
+    })?;
+    if selected.binding.agent_id.as_str() != recipient
         || selected.binding.project_scope != route.project_scope_id
         || selected.binding.app_scope_id != route.app_scope_id
         || selected.transport != *proposed
@@ -822,14 +826,9 @@ fn select_current_rex_delivery_binding(
             "REX_CURRENT_BINDING_CHANGED: cached transport for {recipient} is not its exact current binding"
         ));
     }
-    let mut owners = control.active_values().filter(|value| {
-        value.transport.as_ref().is_some_and(|transport| {
-            transport.kind == TransportKind::Rex
-                && transport.rex_endpoint.as_ref().is_some_and(|candidate| {
-                    candidate.server == endpoint.server && candidate.block_id == endpoint.block_id
-                })
-        })
-    });
+    let mut owners = control
+        .active_values()
+        .filter(|value| value.rex_physical_endpoint() == Some(endpoint_key));
     let unique_owner = owners.next().is_some_and(|owner| {
         owner.binding.agent_id.as_str() == recipient
             && owner.binding == selected.binding

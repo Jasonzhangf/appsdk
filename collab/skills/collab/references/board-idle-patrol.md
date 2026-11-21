@@ -71,7 +71,8 @@ owner 是 core 实现与项目 DAG。
 `collab who` 或 `collab worker status` 返回 `identity-mismatch`、`cold`、`offline`、
 `unknown` 或 `presence=missing`，且该 peer 仍在派发候选或仍持有未关闭任务的，由当前
 master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不长期滞留在派发队列。
-每轮巡检先做一次真实核实，再走有界等待与终判：
+新出现的异常做一次真实核实，再走有界等待与终判。同一异常在后续巡检复用已有回执，
+仅在状态或绑定出现新证据时重新判断是否需要联系。
 
 1. 主动核实：先对 Codex TUI/tmux peer 运行
    `collab worker snapshot <id> --lines 80`，检查真实 pane 当前状态；再对该稳定名字
@@ -86,7 +87,7 @@ master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不�
    `identity-mismatch`/`cold`/`offline`/`unknown`/`missing` 且无真实回执的判为当前
    不可用，从派发队列排除；已恢复 `online` 的按优先级放入派发队列，用
    `collab board publish --executor <peer>` 入队或 `collab board dispatch`/`invite` 派单。
-   仍未关闭任务且离线或未知的，同时通知 Jenny 任务 id、缺失完成项和请求处置。
+   若离线或未知影响未关闭任务的交付，当前 master 在原任务记录影响和处置安排。
 4. 移除：确认不可用、且不再持有未关闭任务、未交付内容或受保护资源时，尝试
    `collab worker close <id> --reason '<auditable reason>'` 显式退休该 peer。
    `worker close` 需要可证明的 lifecycle target；`identity-mismatch`、`cold`、

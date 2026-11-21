@@ -13,7 +13,7 @@
 ## 角色更新
 
 基础 master/peer 关系和可复制的派单模板见
-[Collab 操作手册](../../skills/collab/operations.md#基本项目关系与最小派单模板)。
+[Collab 操作手册](../../skills/collab/operations.md#完整派单与交回)。
 普通 peer 无需先声明专长或配置 policy。master 复用或发布已有授权任务，再 dispatch
 或 invite；peer 接受后才承担该子目标。未指定执行者时，先按专长偏好，再优先无未结
 任务及待接邀请的 peer，最后按稳定名字排序。指定执行者不受该排序改变。

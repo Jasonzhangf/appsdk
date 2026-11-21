@@ -6,7 +6,7 @@
   "nodes": [
     {
       "id":"解析当前目标归属","operator":"appsdk.collab_goal.resolve_owner","operator_version":"1",
-      "description":"认证当前调用者并解析目标项目、稳定名字与当前绑定。本人管理自己，项目master管理本项目peer，跨项目管理须当前typed CEO grant。拒绝未授权或无当前绑定的目标，不以pane可达性推导身份。",
+      "description":"认证当前调用者并按目标项目和稳定名字确定当前逻辑持有者。本人管理自己，项目master管理本项目peer，跨项目管理须当前typed CEO grant。拒绝未授权或无当前持有者的目标。投递路由可为空，目标创建、修改和结束沿已有业务准入提交。",
       "inputs":["goal_request"],"output":{"id":"goal_scope","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },

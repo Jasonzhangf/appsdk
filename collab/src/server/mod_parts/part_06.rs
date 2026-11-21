@@ -192,16 +192,10 @@ fn handle_notification_subscribe(
             return Resp::err("master-idle subscription requires the current registered master");
         }
     }
-    let Some(worker) = state.workers.get(&worker_id).cloned() else {
+    let Some(worker) = state.workers.get(&worker_id) else {
         return Resp::err("notification subscription requires a registered worker");
     };
-    let Some(transport) = selected_transport_for_worker(&worker) else {
-        return Resp::err("registered worker has no server-selected transport");
-    };
-    let Some(thread_id) = notification_target(&transport) else {
-        return Resp::err("selected transport has no route address");
-    };
-    let target = thread_id.into_owned();
+    let projection = notification_route_projection(worker);
     if goal_deadline {
         let requested_key = trigger_ms
             .or_else(|| trigger_times_ms.first().copied())
@@ -221,9 +215,11 @@ fn handle_notification_subscribe(
             .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
             .cloned()
         {
-            if existing.method != transport.kind.as_str() || existing.target != target {
-                existing.method = transport.kind.as_str().into();
-                existing.target = target.clone();
+            if let Some((method, target)) = projection.as_ref().filter(|(method, target)| {
+                method != &existing.method || target != &existing.target
+            }) {
+                existing.method.clone_from(method);
+                existing.target.clone_from(target);
                 existing.updated_ms = now;
                 if let Err(error) = server.commit_locked(
                     &mut state,
@@ -252,8 +248,9 @@ fn handle_notification_subscribe(
             exact_project_patrol(&state.notification_subscriptions, &worker_id, now).cloned();
         if let Some(mut existing) = existing {
             let was_cancelled = existing.status == "cancelled";
-            let transport_changed =
-                existing.method != transport.kind.as_str() || existing.target != target;
+            let route_change = projection.as_ref().filter(|(method, target)| {
+                method != &existing.method || target != &existing.target
+            });
             if was_cancelled {
                 existing.status = "armed".into();
                 existing.status_reason = None;
@@ -268,9 +265,11 @@ fn handle_notification_subscribe(
                     (ttl_seconds as i64).saturating_mul(1000),
                 );
             }
-            if was_cancelled || transport_changed {
-                existing.method = transport.kind.as_str().into();
-                existing.target = target;
+            if was_cancelled || route_change.is_some() {
+                if let Some((method, target)) = route_change {
+                    existing.method.clone_from(method);
+                    existing.target.clone_from(target);
+                }
                 existing.updated_ms = now;
                 if let Err(error) = server.commit_locked(
                     &mut state,
@@ -286,7 +285,7 @@ fn handle_notification_subscribe(
                 "one_shot": false,
                 "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
                 "deduplicated": !was_cancelled,
-                "changed": was_cancelled || transport_changed,
+                "changed": was_cancelled || route_change.is_some(),
                 "status": if was_cancelled { "rearmed" } else { "armed" },
             }));
         }
@@ -354,13 +353,14 @@ fn handle_notification_subscribe(
         }
     }
     let id = format!("sub-{}", gen_msg_id());
+    let (method, target) = projection.unwrap_or_default();
     let subscription = NotificationSubscription {
         id: id.clone(),
         worker_id,
         event,
         subject,
         target,
-        method: transport.kind.as_str().into(),
+        method,
         trigger_ms,
         trigger_times_ms,
         interval_ms,

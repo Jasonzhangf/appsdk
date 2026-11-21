@@ -1,3 +1,111 @@
+#[test]
+fn authorized_subscription_and_goal_admission_survive_missing_transport() {
+    let (mut fixture, host, identity) = lifecycle_native_fixture("offline-subscription-crud");
+    let worker = identity["worker_id"].as_str().unwrap();
+    fixture.stop_daemon();
+    let native_starts = host.start_request_count();
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let slot = map["slots"].as_array_mut().unwrap().iter_mut().find(|slot| {
+        slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
+    }).unwrap();
+    let owner = slot["identity_key"]["name"].as_str().unwrap().to_owned();
+    slot["current"].as_object_mut().unwrap().remove("transport");
+    fs::write(&map_path, serde_json::to_vec_pretty(&map).unwrap()).unwrap();
+    fixture.restart_after_external_stop();
+
+    let run = |args: &[&str]| -> Value {
+        let output = fixture.configured_command(args, None)
+            .env("CODEX_SESSION_ID", "lifecycle-session")
+            .env("CODEX_THREAD_ID", "lifecycle-thread")
+            .output().unwrap();
+        assert!(output.status.success(), "collab {args:?} failed: {}", text(&output));
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let subscription = run(&[
+        "notify", "subscribe", "--event", "deadline", "--subject", "offline-subscription",
+        "--every-ms", "1000", "--repeat-count", "2", "--ttl-seconds", "600",
+    ]);
+    let created = run(&[
+        "goal", "reconcile", "--goal-id", "offline-goal", "--owner", &owner, "--desired", "active",
+        "--content", "Continue the offline goal", "--every-ms", "120000", "--repeat", "2",
+        "--ttl-seconds", "600",
+    ]);
+    let subscription_id = subscription["subscription"]["id"].as_str().unwrap();
+    assert_eq!(subscription["subscription"]["status"], "armed");
+    assert_eq!(subscription["subscription"]["method"], "");
+    assert_eq!(subscription["subscription"]["target"], "");
+    let goal = &created["subscription"];
+    let goal_id = goal["id"].as_str().unwrap();
+    assert_eq!(goal["method"], "");
+    assert_eq!(goal["target"], "");
+
+    let denied = lifecycle_wire(&fixture, &identity, json!({
+        "op":"GoalScheduleReconcile","worker_id":worker,"token":"wrong-token",
+        "goal_id":"offline-goal","goal_owner":owner,"desired":"ended"
+    }));
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert_eq!(fixture.current_state()["notification_subscriptions"][goal_id], *goal);
+
+    let edited = run(&[
+        "goal", "reconcile", "--goal-id", "offline-goal", "--owner", &owner, "--desired", "active",
+        "--operation", "edit", "--content", "Updated content while offline",
+    ]);
+    for field in ["id","trigger_ms","expires_ms","repeat_count","fired_count"] {
+        assert_eq!(edited["subscription"][field], goal[field], "{edited}");
+    }
+    let ended = run(&[
+        "goal", "reconcile", "--goal-id", "offline-goal", "--owner", &owner, "--desired", "ended",
+    ]);
+    assert_eq!(ended["status"], "ended", "{ended}");
+    let retired_goal = run(&["notify", "status"]);
+    assert!(retired_goal["subscriptions"].as_array().unwrap().iter().any(|entry| {
+        entry["id"] == goal_id && entry["status"] == "cancelled"
+    }));
+    let pending_deadline = |state: &Value| -> Option<String> {
+        state["wake_bindings"].as_object().unwrap().iter()
+            .find(|(_, bound)| *bound == subscription_id)
+            .map(|(id, _)| id.clone())
+    };
+    assert!(wait_until(Duration::from_secs(15), || {
+        pending_deadline(&fixture.current_state()).is_some()
+    }), "the offline subscription should produce a durable deadline");
+    let state = fixture.current_state();
+    let message_id = pending_deadline(&state).unwrap();
+    assert_eq!(state["msgs"][&message_id]["state"], "pending");
+    assert_eq!(state["msgs"][&message_id]["wake_attempt_count"], 0);
+    assert!(state["notification_delivery_accepted"][&message_id].is_null());
+    assert_eq!(state["notification_subscriptions"][goal_id]["status"], "cancelled");
+    assert_eq!(
+        state["notification_subscriptions"][subscription_id],
+        subscription["subscription"]
+    );
+    assert_eq!(host.start_request_count(), native_starts);
+
+    let restored = fixture.context_provide(
+        "offline-subscription-crud-restore",
+        &json!({
+            "session_id":"lifecycle-session","thread_id":"lifecycle-thread",
+            "endpoint":host.endpoint(),"namespace":"codex_tui"
+        }),
+        None,
+    );
+    assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
+    assert_eq!(restored["result"]["snapshot"]["identity"]["worker_id"], worker);
+    let restored_state = fixture.current_state();
+    let retargeted = &restored_state["notification_subscriptions"][subscription_id];
+    assert_eq!(retargeted["method"], "appserver");
+    assert_eq!(retargeted["target"], "lifecycle-thread");
+    for field in ["id","trigger_ms","expires_ms","repeat_count","fired_count","status"] {
+        assert_eq!(retargeted[field], subscription["subscription"][field], "{retargeted}");
+    }
+    assert_eq!(restored_state["notification_subscriptions"][goal_id]["status"], "cancelled");
+    let received = run(&["recv", "--timeout", "2"]);
+    assert!(received["messages"].as_array().unwrap().iter().any(|message| {
+        message["id"] == message_id && message["subject"] == "deadline:offline-subscription"
+    }), "{received}");
+}
+
 fn unmapped_worker_row(response: &Value, worker_id: &str) -> Value {
     response["workers"]
         .as_array()

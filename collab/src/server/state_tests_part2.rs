@@ -145,6 +145,16 @@ use super::*;
             .matching_subscription("waiter", "resource-released", Some("holder-task"), 10_000)
             .is_none());
 
+        let subscription = state.notification_subscriptions.get_mut("sub-release").unwrap();
+        subscription.method.clear();
+        assert!(state
+            .matching_subscription("waiter", "resource-released", Some("holder-task"), 9_999)
+            .is_none());
+        state.notification_subscriptions.get_mut("sub-release").unwrap().target.clear();
+        assert!(state
+            .matching_subscription("waiter", "resource-released", Some("holder-task"), 9_999)
+            .is_some());
+
         state.apply(&Event::NotificationConsumed {
             subscription_id: "sub-release".into(),
             message_id: "message".into(),

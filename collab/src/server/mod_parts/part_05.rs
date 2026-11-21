@@ -874,22 +874,21 @@ fn attempt_tmux_notification_with_retry(
     {
         return NotificationAttempt::Deferred(None);
     }
-    let _register_guard = if transport.kind == TransportKind::Rex {
-        match server.register_gate.try_lock() {
-            Ok(guard) => Some(guard),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return NotificationAttempt::Deferred(Some(
-                    "REX_BINDING_PUBLICATION_BUSY: retry after current binding publication".into(),
-                ));
-            }
-            Err(std::sync::TryLockError::Poisoned(error)) => {
-                return NotificationAttempt::Rejected(format!(
-                    "REX_BINDING_PUBLICATION_FAILED: registration gate poisoned: {error}"
-                ));
-            }
+    let rex = transport.kind == TransportKind::Rex;
+    let hold_registration = matches!(transport.kind, TransportKind::Rex | TransportKind::Tmux);
+    let mut register_guard = match server.register_gate.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let code = if rex { "REX_BINDING_PUBLICATION_BUSY" } else { "BINDING_PUBLICATION_BUSY" };
+            return NotificationAttempt::Deferred(Some(format!(
+                "{code}: retry after current binding publication"
+            )));
         }
-    } else {
-        None
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+            return NotificationAttempt::Rejected(format!(
+                "BINDING_PUBLICATION_FAILED: registration gate poisoned: {error}"
+            ));
+        }
     };
     let mut state = server.state.lock().unwrap();
     let Some(seed_id) = state.msgs.get(message_id).map(|message| message.id.clone()) else {
@@ -1246,6 +1245,12 @@ fn attempt_tmux_notification_with_retry(
         (entry, state.msgs[&entry.1].wake_attempt_count)
     }).collect::<Vec<_>>();
     drop(state);
+    // These adapters submit to the terminal directly. Keep the current
+    // publication stable until the input result is committed. In tmux, even
+    // finishing the same holder's physical rename can advance its slot.
+    if !hold_registration {
+        drop(register_guard.take());
+    }
 
     let current_attempt_members = |state: &State| {
         let still_selected =
@@ -1276,7 +1281,7 @@ fn attempt_tmux_notification_with_retry(
     // decorated id reached the gateway as `collab:<digest>:collab-notification-…`,
     // so the peer's ack named a message the mailbox did not have and the
     // receipt was reported `not_found` while the send still looked successful.
-    match deliver(
+    let delivery_result = deliver(
         transport,
         source_thread_id,
         &text,
@@ -1287,7 +1292,29 @@ fn attempt_tmux_notification_with_retry(
         } else {
             &delivery_mode
         },
-    ) {
+    );
+    if register_guard.is_none() {
+        register_guard = match server.register_gate.lock() {
+            Ok(guard) => Some(guard),
+            Err(error) => return NotificationAttempt::ReceiptUnconfirmed(format!(
+                "BINDING_PUBLICATION_FAILED: registration gate poisoned: {error}"
+            )),
+        };
+    }
+    let _result_guard = register_guard;
+    let seed_was_submitted = batch.iter().any(|member| member.1 == seed_id);
+    let binding_is_current = if let Some(selected) = selected_binding.as_ref() {
+        let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return NotificationAttempt::ReceiptUnconfirmed(error),
+        };
+        control.slot(&selected.identity_key)
+            .and_then(notification_contract::SelectedDeliveryBinding::from_slot)
+            .as_ref() == Some(selected)
+    } else {
+        true
+    };
+    match delivery_result {
         Ok(receipt) => {
             append_log(
                 &server.log_path(),
@@ -1302,7 +1329,8 @@ fn attempt_tmux_notification_with_retry(
             // only to messages whose current wake is still this delivery's;
             // a late acceptance must never overwrite the current holder's
             // evidence or failure.
-            let owned = current_attempt_members(&state);
+            let owned = if binding_is_current { current_attempt_members(&state) } else { Vec::new() };
+            let seed_is_current = owned.iter().any(|member| member.1 == seed_id);
             if let Err(error) = server.commit_locked_checked(
                 &mut state,
                 &owned
@@ -1323,7 +1351,13 @@ fn attempt_tmux_notification_with_retry(
                     &format!("WAKE_ATTRIBUTION_DROPPED recipient={recipient} message={seed_id} dropped={}", batch.len() - owned.len()),
                 );
             }
-            NotificationAttempt::Accepted
+            if !seed_was_submitted {
+                NotificationAttempt::Deferred(None)
+            } else if seed_is_current {
+                NotificationAttempt::Accepted
+            } else {
+                NotificationAttempt::StaleAccepted
+            }
         }
         Err(error) => {
             append_log(
@@ -1342,7 +1376,7 @@ fn attempt_tmux_notification_with_retry(
             // Same attribution gate as the accepted path: a failure observed
             // after the message moved to another holder belongs to this
             // superseded delivery, not to the current holder's wake.
-            let failed = current_attempt_members(&state);
+            let failed = if binding_is_current { current_attempt_members(&state) } else { Vec::new() };
             server.commit_locked_reporting(
                 &mut state,
                 &failed
@@ -1368,7 +1402,11 @@ fn attempt_tmux_notification_with_retry(
                     })
                     .collect::<Vec<_>>(),
             );
-            NotificationAttempt::Rejected(error)
+            if seed_was_submitted {
+                NotificationAttempt::Rejected(error)
+            } else {
+                NotificationAttempt::Deferred(None)
+            }
         }
     }
 }
@@ -1926,6 +1964,15 @@ fn notification_send_response(
             data["notification_error"] = json!(error);
             data["consumed"] = json!(false);
             Resp::data(data)
+        }
+        NotificationAttempt::StaleAccepted => {
+            data["durable"] = json!(true);
+            data["notification"] = json!("stale-attempt-accepted");
+            data["consumed"] = json!(false);
+            Resp::err_data(
+                "NOTIFICATION_ATTEMPT_STALE: the former transport accepted the notification",
+                data,
+            )
         }
         NotificationAttempt::Rejected(error) => {
             data["durable"] = json!(true);

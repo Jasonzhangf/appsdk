@@ -801,6 +801,16 @@ fn transport_agent_view(
                 } else {
                     IdentityPresence::Cold
                 };
+                let thread_state = match crate::client::adapters::dsh::activity(
+                    endpoint, runtime_id, agent_id,
+                ) {
+                    Ok(activity) if activity.live => match activity.status.as_str() {
+                        "running" => "working",
+                        "inactive" => "idle",
+                        _ => "unknown",
+                    },
+                    _ => "unknown",
+                };
                 let view = serde_json::json!({
                     "transport": "dsh",
                     "runtimeId": facts.runtime_id,
@@ -812,7 +822,7 @@ fn transport_agent_view(
                 (
                     presence,
                     serde_json::json!({
-                        "thread_state": facts.status,
+                        "thread_state": thread_state,
                         "active_flags": [],
                         "can_accept_direct_input": running,
                         "latest_turn_status": serde_json::Value::Null,
@@ -1729,6 +1739,31 @@ fn same_selected_endpoint(left: &crate::proto::SelectedTransport, right: &crate:
         && left.thread_id == right.thread_id
         && left.tmux_endpoint == right.tmux_endpoint
         && left.rex_endpoint == right.rex_endpoint
+}
+
+fn rex_worker_status_view(
+    server: &Server,
+    worker: &WorkerRec,
+) -> (IdentityPresence, serde_json::Value, bool, Option<bool>) {
+    let state = server.state.lock().unwrap();
+    let valid = rex_identity_presence(server, &state, worker) == IdentityPresence::Present;
+    let current_execution = worker.transport.as_ref().is_some_and(|transport| {
+        state.rex_executions.get(&worker.id).is_some_and(|execution| {
+            transport.rex_endpoint.as_ref() == Some(&execution.endpoint)
+                && transport.session_id.as_deref() == Some(execution.agent_session_id.as_str())
+        })
+    });
+    if valid && current_execution {
+        if let Some((presence, view)) = worker_agent_view_in_state(server, &state, worker) {
+            let live = match presence {
+                IdentityPresence::Present => Some(true),
+                IdentityPresence::Missing => Some(false),
+                _ => None,
+            };
+            return (presence, view, valid, live);
+        }
+    }
+    (IdentityPresence::Unknown, serde_json::Value::Null, valid, None)
 }
 
 fn worker_status_agent_session_id(transport: &crate::proto::SelectedTransport) -> Option<&str> {

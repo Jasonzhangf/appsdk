@@ -641,20 +641,7 @@ fn handle_notification_cancel(
             .filter(|value| !value.is_empty())
             .unwrap_or("new project work or a durable wait release");
         let status_reason = format!("{reason}; resume_condition={resume}");
-        let pending_ids: Vec<String> = state
-            .wake_bindings
-            .iter()
-            .filter_map(|(message_id, subscription_id)| {
-                (subscription_id == &subscription.id
-                    && state.msgs.get(message_id).is_some_and(|message| {
-                        message.state == "pending"
-                            && !state
-                                .notification_delivery_accepted
-                                .contains_key(message_id)
-                    }))
-                .then(|| message_id.clone())
-            })
-            .collect();
+        let pending_ids = retractable_messages_for_subscription(&state, &subscription.id);
         let mut events = vec![Event::NotificationSuppressed {
             subscription_id: subscription.id.clone(),
             status: "cancelled".into(),

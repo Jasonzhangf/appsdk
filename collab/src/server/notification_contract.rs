@@ -11,6 +11,8 @@ pub(crate) struct SelectedDeliveryBinding {
     pub(crate) identity_key: super::binding_slot::IdentityBindingKey,
     pub(crate) binding: super::global_state::RuntimeBinding,
     pub(crate) transport: crate::proto::SelectedTransport,
+    #[serde(default)]
+    pub(crate) binding_generation: u64,
 }
 
 impl SelectedDeliveryBinding {
@@ -20,6 +22,7 @@ impl SelectedDeliveryBinding {
             identity_key: slot.identity_key.clone(),
             binding: current.binding.clone(),
             transport: current.transport.clone()?,
+            binding_generation: slot.generation(),
         })
     }
 }

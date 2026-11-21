@@ -623,9 +623,13 @@ fn worker_status_summary_with_maps(
             projected = WorkerRec { transport: transport.cloned(), ..w.clone() };
             &projected
         };
-        let (presence, view) = worker_presence_with_view(server, worker);
-        let (valid, endpoint) = worker_identity_and_endpoint(server, worker);
-        (presence, view, valid, endpoint)
+        if transport.is_some_and(|transport| transport.kind == TransportKind::Rex) {
+            rex_worker_status_view(server, worker)
+        } else {
+            let (presence, view) = worker_presence_with_view(server, worker);
+            let (valid, endpoint) = worker_identity_and_endpoint(server, worker);
+            (presence, view, valid, endpoint)
+        }
     };
     let thread_state = transport_view
         .get("thread_state")

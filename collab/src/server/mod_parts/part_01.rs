@@ -506,6 +506,7 @@ enum NotificationDeliveryError {
 #[derive(Debug)]
 pub(crate) enum NotificationAttempt {
     Accepted,
+    StaleAccepted,
     ReceiptUnconfirmed(String),
     Consumed,
     Deferred(Option<String>),

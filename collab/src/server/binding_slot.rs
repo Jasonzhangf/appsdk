@@ -108,6 +108,24 @@ pub(crate) struct BindingValue {
     pub(crate) rex_execution: Option<VerifiedRexExecutionAssociation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) rex_execution_fence: Option<RexExecutionFence>,
+    /// Retain legacy map metadata on an unchanged record. New bindings do
+    /// not allocate it, and it has no role in name or delivery selection.
+    #[serde(
+        default,
+        rename = "registration_number",
+        deserialize_with = "deserialize_legacy_registration_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    legacy_registration_number: Option<u64>,
+}
+
+fn deserialize_legacy_registration_number<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u64::deserialize(deserializer).map(Some)
 }
 
 /// Current admission boundary in the local process-start clock domain.
@@ -349,6 +367,7 @@ impl BindingValue {
             layout_binding_id: None,
             rex_execution: None,
             rex_execution_fence: None,
+            legacy_registration_number: None,
         }
     }
 
@@ -523,6 +542,7 @@ pub(crate) enum IdentityStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IdentityBindingSlot {
     pub(crate) identity_key: IdentityBindingKey,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
     pub(crate) display_slot: Option<u32>,
     pub(crate) identity_status: IdentityStatus,
     pub(crate) generation: u64,
@@ -816,7 +836,10 @@ impl IdentityBindingSlot {
         self.validate_shape()?;
         let expected_display_slot = super::name_resolution::display_slot(&self.identity_key.name)
             .map_err(SlotError::Invalid)?;
-        if expected_display_slot.is_some() && expected_display_slot != self.display_slot {
+        if expected_display_slot
+            .zip(self.display_slot)
+            .is_some_and(|(expected, recorded)| expected != recorded)
+        {
             return Err(SlotError::Invariant(
                 "display slot differs from the registered name".into(),
             ));
@@ -847,7 +870,12 @@ impl IdentityBindingSlot {
             facts.validate()?;
         }
         if let (Some(current), Some(previous)) = (self.current.as_ref(), self.previous.as_ref()) {
-            if current.same_fact(previous) {
+            // Older writers compared registration numbers as binding facts.
+            // Those records can have the same route on either side of a handoff.
+            if current.same_fact(previous)
+                && current.legacy_registration_number.unwrap_or_default()
+                    == previous.legacy_registration_number.unwrap_or_default()
+            {
                 return Err(SlotError::Invariant(
                     "current and previous bindings must be different facts".into(),
                 ));

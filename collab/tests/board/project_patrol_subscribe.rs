@@ -862,44 +862,92 @@ fn cancel_supersedes_a_pending_project_patrol_wake_without_delivery() {
     let armed = subscribe_patrol(&fixture);
     let patrol_id = armed["subscription"]["id"].as_str().unwrap().to_owned();
 
-    let message_id = "msg-fixture-pending-project-patrol";
+    // Keep these four durable states stable until the public cancellation.
+    // Startup can otherwise submit the never-attempted wake before the test
+    // reaches cancellation, changing which branch the case exercises.
+    let config_path = fixture.root.join("home/.appsdk/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(config_path, "[notifications]\nenabled=false\n").unwrap();
+
+    let never_attempted_id = "msg-fixture-never-attempted-project-patrol";
+    let explicit_failure_id = "msg-fixture-explicit-failure-project-patrol";
+    let unknown_attempt_id = "msg-fixture-unknown-project-patrol";
+    let accepted_id = "msg-fixture-accepted-project-patrol";
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
     fixture.update_current_state(|state| {
-        state["msgs"][message_id] = json!({
-                "id": message_id,
-                "from": "collab-server",
-                "to": master_id,
-                "type": "notify",
-                "subject": "master-idle:project-patrol",
-                "body": "stale project patrol wake",
-                "created_ms": now,
-                "state": "pending",
-                "wake_attempt_count": 1,
-                "last_wake_attempt_ms": 0,
-                "retry_attempted": true
+        for (message_id, wake_attempt_count, last_wake_attempt_ms, retry_attempted) in [
+            (never_attempted_id, 0, 0, false),
+            (explicit_failure_id, 1, now + 1, false),
+            (unknown_attempt_id, 1, now + 2, false),
+            (accepted_id, 1, now + 3, false),
+        ] {
+            state["msgs"][message_id] = json!({
+                    "id": message_id,
+                    "from": "collab-server",
+                    "to": master_id,
+                    "type": "notify",
+                    "subject": "master-idle:project-patrol",
+                    "body": "fixture project patrol wake",
+                    "created_ms": now,
+                    "state": "pending",
+                    "wake_attempt_count": wake_attempt_count,
+                    "last_wake_attempt_ms": last_wake_attempt_ms,
+                    "retry_attempted": retry_attempted
+            });
+            state["delivery_modes"][message_id] = json!("explicit-notification");
+            state["wake_bindings"][message_id] = json!(patrol_id);
+        }
+        state["notification_delivery_failures"][explicit_failure_id] = json!({
+            "message_id": explicit_failure_id,
+            "operation": "notification.emitted",
+            "error": "ADAPTER_ROUTE_UNAVAILABLE: disconnected",
+            "failed_ms": now + 1,
+            "retryable": true,
+            "resume_on_reconnect": true
         });
-        state["delivery_modes"][message_id] = json!("explicit-notification");
-        state["wake_bindings"][message_id] = json!(patrol_id);
+        state["notification_delivery_accepted"][accepted_id] = json!(now + 4);
     });
-    assert_eq!(
-        fixture.run_public(&["msg", message_id], THREAD_A)["state"],
-        "pending",
-        "the fixture must seed one undelivered pending patrol wake"
-    );
+    for message_id in [
+        never_attempted_id,
+        explicit_failure_id,
+        unknown_attempt_id,
+        accepted_id,
+    ] {
+        assert_eq!(
+            fixture.run_public(&["msg", message_id], THREAD_A)["state"],
+            "pending",
+            "the fixture must seed an undelivered pending patrol wake: {message_id}"
+        );
+    }
 
     let cancelled = cancel_patrol(&fixture, THREAD_A);
     assert_eq!(cancelled["changed"], true, "{cancelled}");
     assert_eq!(
-        fixture.run_public(&["msg", message_id], THREAD_A)["state"],
+        fixture.run_public(&["msg", never_attempted_id], THREAD_A)["state"],
         "superseded",
-        "cancel must end the pending wake's delivery eligibility"
+        "cancel must end a never-attempted pending wake's delivery eligibility"
+    );
+    assert_eq!(
+        fixture.run_public(&["msg", explicit_failure_id], THREAD_A)["state"],
+        "superseded",
+        "cancel may end a pending wake with an explicit known-undelivered failure"
+    );
+    assert_eq!(
+        fixture.run_public(&["msg", unknown_attempt_id], THREAD_A)["state"],
+        "pending",
+        "cancel must preserve an in-flight or unknown pending wake"
+    );
+    assert_eq!(
+        fixture.run_public(&["msg", accepted_id], THREAD_A)["state"],
+        "pending",
+        "cancel must preserve an accepted but unread pending wake"
     );
     assert!(
-        fixture.current_state()["notification_delivery_accepted"][message_id].is_null(),
-        "a superseded pending wake must never be accepted as a fresh patrol"
+        fixture.current_state()["notification_delivery_accepted"][accepted_id].is_number(),
+        "the accepted receipt must remain readable after cancellation"
     );
 
     assert!(!fixture
@@ -908,17 +956,38 @@ fn cancel_supersedes_a_pending_project_patrol_wake_without_delivery() {
         .unwrap()
         .values()
         .flat_map(|thread| &thread.inputs)
-        .any(|input| input.to_string().contains(message_id)));
-    // A daemon restart must retain the same terminal state, not a fresh wake.
+        .any(|input| {
+            let input = input.to_string();
+            input.contains(never_attempted_id)
+                || input.contains(explicit_failure_id)
+                || input.contains(unknown_attempt_id)
+                || input.contains(accepted_id)
+        }));
+    // A daemon restart must retain each cancellation outcome, not create a
+    // fresh wake or retract an attempt whose outcome is unknown.
     fixture.restart_daemon();
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(
-        fixture.run_public(&["msg", message_id], THREAD_A)["state"],
+        fixture.run_public(&["msg", never_attempted_id], THREAD_A)["state"],
         "superseded"
     );
+    assert_eq!(
+        fixture.run_public(&["msg", explicit_failure_id], THREAD_A)["state"],
+        "superseded"
+    );
+    assert_eq!(
+        fixture.run_public(&["msg", unknown_attempt_id], THREAD_A)["state"],
+        "pending",
+        "restart must not retract an unknown patrol wake"
+    );
+    assert_eq!(
+        fixture.run_public(&["msg", accepted_id], THREAD_A)["state"],
+        "pending",
+        "restart must preserve the accepted unread patrol wake"
+    );
     assert!(
-        fixture.current_state()["notification_delivery_accepted"][message_id].is_null(),
-        "restart must not deliver the superseded patrol wake"
+        fixture.current_state()["notification_delivery_accepted"][accepted_id].is_number(),
+        "restart must retain the accepted receipt"
     );
 }
 

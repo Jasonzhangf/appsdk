@@ -1,6 +1,6 @@
 {
   "id": "appsdk-collab-goal-ownership",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "一次长程目标请求的 SESE。本人可维护自己的目标，项目 master 可为本项目 peer 设置订阅，当前 typed CEO 可修改任意项目成员订阅。目标项目与稳定名字决定归属，调用者和目标载体分别解析。新周期长程订阅默认100次，周期由任务单明确声明，旧单次记录不自动升级。派发将任务内容、目标绑定与订阅在同一持久提交中更新；内容从任务单真源投影到唤醒消息。只结束选定目标的有限计划，保留基础收件和其他订阅。",
   "inputs": [{"id":"goal_request","schema":"Object"}],
   "nodes": [
@@ -24,7 +24,7 @@
     },
     {
       "id":"收敛本人目标调度","operator":"appsdk.collab_goal.reconcile_schedule","operator_version":"1",
-      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。派发把邀请或执行归属、任务单内容和目标订阅事件在同一事务提交，容量或保存失败不留下部分派发。首次邀请的目标订阅面向被派发的稳定名字，执行归属在接单前仍属原持有者。接单沿用同一有效订阅及进度。首次拒绝或撤回结束该轮订阅，下一次明确派发可开启新一轮。已开始工作的转派在接单前保留原目标订阅，接受后保持进度并更新目标。任务结束抑制该订阅尚未接受的pending wake，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
+      "description":"GoalScheduleReconcile与派发复用唯一计划准备owner。新周期计划省略次数采用100，显式次数在1到100内；周期和TTL约束实际触发。显式at-ms保留单次入口。派发把邀请或执行归属、任务单内容和目标订阅事件在同一事务提交，容量或保存失败不留下部分派发。首次邀请的目标订阅面向被派发的稳定名字，执行归属在接单前仍属原持有者。接单沿用同一有效订阅及进度。首次拒绝或撤回结束该轮订阅，下一次明确派发可开启新一轮。已开始工作的转派在接单前保留原目标订阅，接受后保持进度并更新目标。任务结束只撤回从未尝试或最新尝试明确未提交的pending wake；已预留、正在调用宿主、结果未知或已接受的pending wake保留且不自动重投，基础收件和无关计划保持。项目master本人的worker巡检仍使用既有真实arm回执。",
       "inputs":["goal_transition_request"],"output":{"id":"goal_transition_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },

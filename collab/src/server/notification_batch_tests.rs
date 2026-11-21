@@ -543,7 +543,17 @@ fn run_late_old_acceptance_interleaving(new_wake_fails: bool) {
 
     release_tx.send(()).unwrap();
     let old_delivery = old_delivery.join().unwrap();
-    assert!(old_delivery.accepted(), "{old_delivery:?}");
+    assert!(!old_delivery.accepted(), "{old_delivery:?}");
+    let old_response = notification_send_response(
+        json!({"msg_id": "notice"}),
+        true,
+        "appserver",
+        &old_delivery,
+    );
+    assert!(!old_response.ok, "{old_response:?}");
+    assert_eq!(old_response.data["durable"], true);
+    assert_eq!(old_response.data["notification"], "stale-attempt-accepted");
+    assert_eq!(old_response.data["consumed"], false);
 
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs["notice"].to, "new");
@@ -621,7 +631,7 @@ fn late_acceptance_cannot_replace_evidence_from_a_newer_attempt() {
             Ok(json!({"receipt": "old"}))
         },
     );
-    assert!(attempt.accepted(), "{attempt:?}");
+    assert!(matches!(attempt, NotificationAttempt::StaleAccepted), "{attempt:?}");
     let state = server.state.lock().unwrap();
     assert_eq!(
         state.notification_delivery_evidence["notice"],
@@ -915,6 +925,126 @@ fn unknown_batch_failure_records_every_submitted_member_without_resend() {
         "unknown batch must not be resent: {next:?}"
     );
     assert_eq!(*sink_calls.lock().unwrap(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn queued_appserver_wake_drains_through_the_existing_timer_once() {
+    let (mut server, root) = test_server();
+    let subscription_id = register_and_subscribe(&server, "recipient");
+    let now = now_ms();
+    queue_message(&server, "recipient", &subscription_id, "queued-appserver", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "queued-appserver".into(),
+        mode: "queued".into(),
+        source_thread_id: None,
+    }]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let observed = calls.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _, mode| {
+        observed
+            .lock()
+            .unwrap()
+            .push((message_id.to_owned(), mode.to_owned()));
+        Ok(json!({"accepted": true}))
+    });
+
+    timers::tick_with_idle_at(&server, now + 1, &|_| false);
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [("queued-appserver".to_owned(), "queued".to_owned())]
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["queued-appserver"].id, "queued-appserver");
+    assert_eq!(state.msgs["queued-appserver"].state, "pending");
+    assert_eq!(state.msgs["queued-appserver"].wake_attempt_count, 1);
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("queued-appserver"));
+    drop(state);
+
+    timers::tick_with_idle_at(&server, now + 2, &|_| false);
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "accepted queued AppServer wake must not be submitted again"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dsh_known_non_submission_resumes_once_and_keeps_the_original_message() {
+    let (mut server, root) = test_server();
+    let subscription_id = register_and_subscribe(&server, "recipient");
+    {
+        let mut state = server.state.lock().unwrap();
+        state
+            .workers
+            .get_mut("recipient")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .kind = TransportKind::Dsh;
+        state
+            .notification_subscriptions
+            .get_mut(&subscription_id)
+            .unwrap()
+            .method = "dsh".into();
+    }
+    let now = now_ms();
+    queue_message(&server, "recipient", &subscription_id, "dsh-retry", now);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "dsh-retry".into(),
+        mode: "immediate".into(),
+        source_thread_id: None,
+    }]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let observed = calls.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _, _| {
+        let mut calls = observed.lock().unwrap();
+        calls.push(message_id.to_owned());
+        if calls.len() == 1 {
+            Err("DSH_ENDPOINT_BLOCKED: gateway control socket is unreachable".into())
+        } else {
+            Ok(json!({"accepted": true}))
+        }
+    });
+
+    let first = attempt_notification_detailed_with_at(&server, "dsh-retry", &subscription_id, now);
+    assert!(matches!(first, NotificationAttempt::Rejected(_)), "{first:?}");
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["dsh-retry"].id, "dsh-retry");
+        assert_eq!(state.msgs["dsh-retry"].wake_attempt_count, 1);
+        let failure = state
+            .notification_delivery_failures
+            .get("dsh-retry")
+            .expect("typed DSH non-submission is durable");
+        assert!(failure.retryable);
+        assert_eq!(failure.failed_ms, state.msgs["dsh-retry"].last_wake_attempt_ms);
+        assert!(notification_reconnect_pending(&state, &state.msgs["dsh-retry"]));
+    }
+
+    timers::tick_with_idle_at(&server, now + 1, &|_| false);
+    timers::tick_with_idle_at(&server, now + 2, &|_| false);
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["dsh-retry".to_owned(), "dsh-retry".to_owned()]
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["dsh-retry"].id, "dsh-retry");
+    assert_eq!(state.msgs["dsh-retry"].wake_attempt_count, 2);
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("dsh-retry"));
+    assert!(!state.notification_delivery_failures.contains_key("dsh-retry"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2696,11 +2826,14 @@ fn four_notice_batch_uses_the_original_window_start_after_capping() {
             Ok(serde_json::json!({"accepted": true}))
         });
     }
-    assert!(attempt_notification_with_at(
-        &server,
-        "backlog-0",
-        &subscription_id,
-        window_start + 120_000,
+    assert!(matches!(
+        attempt_notification_detailed_with_at(
+            &server,
+            "backlog-0",
+            &subscription_id,
+            window_start + 120_000,
+        ),
+        NotificationAttempt::Deferred(None)
     ));
     let text = delivered.lock().unwrap().join("\n");
     assert!(!text.contains("backlog-0"));

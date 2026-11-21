@@ -274,6 +274,11 @@ fn finish_task_review_notification(
             response.data["notification_error"] = json!(error);
             return response;
         }
+        NotificationAttempt::StaleAccepted => {
+            response.data["durable"] = json!(true);
+            response.data["notification"] = json!("stale-attempt-accepted");
+            return response;
+        }
         NotificationAttempt::Rejected(error) | NotificationAttempt::NotAttempted(error) => {
             Some(error)
         }

@@ -332,7 +332,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 49] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 50] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -397,6 +397,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 49] {
         (
             "docs/dagpipe/collab-context.graph.json",
             include_str!("../../docs/dagpipe/collab-context.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-mcp-desktop-caller.graph.json",
+            include_str!("../../docs/dagpipe/collab-mcp-desktop-caller.graph.json"),
         ),
         (
             "docs/dagpipe/collab-role-context-projection.graph.json",
@@ -535,7 +539,7 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 49] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 46] {
+fn design_graph_ids() -> [&'static str; 47] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -552,6 +556,7 @@ fn design_graph_ids() -> [&'static str; 46] {
         "collab-role-assignment",
         "collab-required-review",
         "appsdk-collab-context",
+        "appsdk-collab-mcp-desktop-caller",
         "appsdk-collab-role-context-projection",
         "appsdk-collab-role-work-cycle",
         "appsdk-collab-desktop-bridge-service",
@@ -586,7 +591,7 @@ fn design_graph_ids() -> [&'static str; 46] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 275] {
+fn design_graph_operator_names() -> [&'static str; 282] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -759,6 +764,13 @@ fn design_graph_operator_names() -> [&'static str; 275] {
         "appsdk.collab_desktop_delivery.classify",
         "appsdk.collab_desktop_delivery.commit",
         "appsdk.collab_context.resolve_root",
+        "appsdk.collab_mcp_caller.receive_managed_request",
+        "appsdk.collab_mcp_caller.verify_native_thread",
+        "appsdk.collab_mcp_caller.resolve_exact_enrollment",
+        "appsdk.collab_mcp_caller.handoff_stored_session",
+        "appsdk.collab_mcp_caller.admit_identity_and_authority",
+        "appsdk.collab_mcp_caller.read_authoritative_view",
+        "appsdk.collab_mcp_caller.emit_result",
         "appsdk.collab_control_plane.authorize_reset",
         "appsdk.collab_control_plane.commit_reset_control",
         "appsdk.collab_control_plane.online_project_reset",

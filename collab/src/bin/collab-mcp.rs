@@ -258,6 +258,130 @@ fn executor_thread(meta: &Value) -> Result<String, String> {
     }
 }
 
+/// The managed Desktop host launcher reports itself through the originator
+/// override. The launcher's denylist excludes the standalone CLI and TUI, so
+/// only the two Desktop values own the caller-facts path.
+fn managed_desktop_host() -> bool {
+    matches!(
+        std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").as_deref(),
+        Ok("Codex") | Ok("Codex Desktop")
+    )
+}
+
+fn desktop_state_root() -> Option<std::path::PathBuf> {
+    let state_dir = std::env::var_os("COLLAB_STATE_DIR").filter(|value| !value.is_empty());
+    let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
+    state_dir
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.map(|home| std::path::PathBuf::from(home).join(".collab")))
+}
+
+/// Distinct launcher-persisted sessions for exactly this host pipe, project and
+/// native thread. Unsafe or non-matching records are ignored, never repaired.
+fn desktop_enrollment_sessions(pipe: &str, cwd: &std::path::Path, thread: &str) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(directory) =
+        desktop_state_root().map(|root| root.join("runtime").join("desktop").join("enrollments"))
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut sessions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "json")
+        {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            continue;
+        }
+        let Ok(record) = std::fs::read(&path)
+            .map_err(|_| ())
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ()))
+        else {
+            continue;
+        };
+        if record.get("schema").and_then(Value::as_str) != Some("collab-desktop-enrollment/v2") {
+            continue;
+        }
+        if record.get("host_pipe").and_then(Value::as_str) != Some(pipe) {
+            continue;
+        }
+        let Some(record_cwd) = record.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        if !std::path::Path::new(record_cwd).is_absolute()
+            || std::path::Path::new(record_cwd)
+                .canonicalize()
+                .ok()
+                .as_deref()
+                != Some(cwd)
+        {
+            continue;
+        }
+        let Some(binding) = record.get("binding") else {
+            continue;
+        };
+        if binding.get("thread").and_then(Value::as_str) != Some(thread) {
+            continue;
+        }
+        let Some(session) = binding
+            .get("session")
+            .and_then(Value::as_str)
+            .filter(|session| !session.trim().is_empty())
+        else {
+            continue;
+        };
+        if !sessions.iter().any(|seen| seen == session) {
+            sessions.push(session.to_owned());
+        }
+    }
+    sessions
+}
+
+/// Managed Desktop owns the session only through the current invocation: the
+/// executor env when present, otherwise the launcher-persisted enrollment for
+/// this exact host pipe, project and verified thread. Anything else fails
+/// closed; the session is never derived from the thread or the caller input.
+fn desktop_session(thread: &str) -> Result<String, String> {
+    if let Some(session) = std::env::var("CODEX_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(session);
+    }
+    let pipe = std::env::var("CODEX_APP_TOOLS_PIPE_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: current agent session_id")?;
+    let cwd = std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .map_err(|_| "DESKTOP_BRIDGE_SCOPE_INVALID: current project directory".to_string())?;
+    let enrolled = desktop_enrollment_sessions(&pipe, &cwd, thread);
+    match enrolled.len() {
+        1 => Ok(enrolled.into_iter().next().unwrap_or_default()),
+        0 => Err(
+            "DESKTOP_BRIDGE_SESSION_REQUIRED: no trusted Desktop enrollment matches the current host pipe, project and thread"
+                .into(),
+        ),
+        count => Err(format!(
+            "DESKTOP_BRIDGE_SESSION_AMBIGUOUS: {count} enrolled Desktop sessions match the current host pipe, project and thread"
+        )),
+    }
+}
+
 fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String), String> {
     let meta = params.get("_meta").cloned().unwrap_or_default();
     let thread = executor_thread(&meta)?;
@@ -267,11 +391,7 @@ fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String)
                 .into(),
         );
     }
-    let session = std::env::var("CODEX_SESSION_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: current agent session_id")?;
-    Ok((session, thread))
+    Ok((desktop_session(&thread)?, thread))
 }
 
 fn set_desktop_context_facts(args: &mut Value, session: &str, thread: &str) -> Result<(), String> {
@@ -1006,6 +1126,11 @@ fn normalize_desktop_caller_facts(req: &Value) -> Result<Value, String> {
         return Ok(req.clone());
     }
     let mut request = req.clone();
+    // Caller facts are adapter-owned. A client-supplied value is never honored,
+    // so strip it here and keep only the launcher-derived insertion below.
+    if let Some(object) = request.get_mut("params").and_then(Value::as_object_mut) {
+        object.remove("_collab_caller_facts");
+    }
     let params = request.get("params").cloned().unwrap_or_default();
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     if !matches!(
@@ -1022,7 +1147,7 @@ fn normalize_desktop_caller_facts(req: &Value) -> Result<Value, String> {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").as_deref() == Ok("Codex Desktop") {
+    if managed_desktop_host() {
         let (session, thread) = desktop_caller_facts(&params, &args)?;
         if name == "collab_context" {
             set_desktop_context_facts(&mut args, &session, &thread)?;

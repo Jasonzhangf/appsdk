@@ -31,6 +31,11 @@ function controlDirectory(target){
 }
 function callSocket(target,request,timeout=TIMEOUT_MS){return new Promise((resolve,reject)=>{const s=net.createConnection(target);let done=false;const finish=(e,r)=>{if(done)return;done=true;clearTimeout(timer);s.destroy();e?reject(e):resolve(r);};const timer=setTimeout(()=>finish(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: service timeout')),timeout);s.on('error',e=>finish(e));s.on('close',()=>finish(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: service closed')));s.on('connect',()=>s.write(encoded(request)));readNative(s,r=>finish(null,r),e=>finish(e));});}
 function localCall(request){return callSocket(socketPath,request);}
+// Query resolves its session through the running bridge service, which verifies
+// this request's native thread and returns the single stored enrollment. The
+// CLI child receives only that session, so its read-only query never reads the
+// capability declaration and never trusts caller-supplied facts.
+async function residentSession(thread,cwd){await ensureService();const r=await localCall({id:randomUUID(),op:'resolve',thread_id:thread,cwd});if(!r.ok)throw Error(typeof r.error==='string'?r.error:JSON.stringify(r.error));return r.session_id;}
 async function publisherLive(endpoint){try{const r=await callSocket(endpoint.slice('unix://'.length),{id:randomUUID(),op:'ping'},1000);return r?.ok===true;}catch{return false;}}
 async function ensureService(){
   if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED: current host pipe missing');requireSystemVolume(stateRoot);controlDirectory(runtimeDir);
@@ -67,10 +72,28 @@ async function runService(){
   function enrollmentRecords(){const root=enrollmentDir(),records=[];for(const name of fs.readdirSync(root)){const file=path.join(root,name);try{const s=fs.lstatSync(file);if(s.isSymbolicLink())throw Error('DESKTOP_BRIDGE_ENROLLMENT_UNSAFE');if(s.isDirectory()){if(s.uid!==process.getuid()||(s.mode&0o077))throw Error('DESKTOP_BRIDGE_ENROLLMENT_UNSAFE');for(const child of fs.readdirSync(file))if(child.endsWith('.json'))records.push(path.join(file,child));}else if(name.endsWith('.json'))records.push(file);}catch(e){process.stderr.write(`Desktop bridge enrollment pending: ${e.message}\n`);}}return records;}
   function publishRuntimeDescriptor(){const file=path.join(servicesDir(),`pipe-${runtimeKey}.json`),temp=file+'.'+randomUUID()+'.tmp',descriptor={schema:'collab-desktop-runtime/v1',runtime_key:runtimeKey,endpoint:`unix://${socketPath}`,namespace:tools.get('send_message_to_thread').namespace,publisher_id:publicationId};try{fs.writeFileSync(temp,JSON.stringify(descriptor),{flag:'wx',mode:0o600});fs.renameSync(temp,file);return file;}finally{try{fs.unlinkSync(temp);}catch(e){if(e.code!=='ENOENT')throw e;}}}
   async function enroll(b,cwd,explicit=false){const observed=await verify(b,cwd);if(stopping)throw Error('DESKTOP_BRIDGE_UNAVAILABLE');if(!explicit){let other;try{other=JSON.parse(fs.readFileSync(path.join(scopeDir(b,observed),'current.json'),'utf8'))?.desktop_bridge?.endpoint;}catch(e){if(e.code!=='ENOENT')throw e;}if(typeof other==='string'&&other!==`unix://${socketPath}`&&await publisherLive(other))throw Error('DESKTOP_BRIDGE_SCOPE_AMBIGUOUS: another live publisher owns the current declaration');}persist(b,observed);const candidate=publish(b,observed);bindings.set(key(b.session,b.thread),b);return candidate;}
+  // Query resolution: verify this request's thread through the native host, then
+  // return the one stored (session, thread) pair for this host pipe and project.
+  // The caller never supplies the session, and the thread is never its substitute.
+  async function resolveEnrollment(thread,cwd){
+    if(typeof cwd!=='string'||!path.isAbsolute(cwd))throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED: cwd');
+    const observed=await verify({thread},cwd);
+    if(observed!==fs.realpathSync(cwd))throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: native project differs');
+    const sessions=[];
+    for(const file of enrollmentRecords()){try{const s=fs.lstatSync(file);if(!s.isFile()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o077))throw Error('DESKTOP_BRIDGE_ENROLLMENT_UNSAFE');const v=JSON.parse(fs.readFileSync(file,'utf8'));if(v.schema!=='collab-desktop-enrollment/v2'||v.host_pipe!==pipe||typeof v.cwd!=='string'||!path.isAbsolute(v.cwd))continue;if(fs.realpathSync(v.cwd)!==observed)continue;if(v.binding?.thread!==thread)continue;const session=v.binding?.session;if(typeof session!=='string'||!session.trim())continue;if(!sessions.includes(session))sessions.push(session);}catch(e){process.stderr.write(`Desktop bridge enrollment pending: ${e.message}\n`);}}
+    if(sessions.length===1)return sessions[0];
+    if(!sessions.length)throw Error('DESKTOP_BRIDGE_SESSION_REQUIRED: no trusted Desktop enrollment matches the current host pipe, project and thread');
+    throw Error(`DESKTOP_BRIDGE_SESSION_AMBIGUOUS: ${sessions.length} enrolled Desktop sessions match the current host pipe, project and thread`);
+  }
   async function handle(r){
-    if(!r||typeof r!=='object')throw Error('DESKTOP_BRIDGE_INVALID_REQUEST');const fields=r.op==='admit'?['id','op','session_id','thread_id','cwd']:r.op==='send'?['id','op','session_id','thread_id','text']:r.op==='ping'?['id','op']:['id','op','session_id','thread_id'];
+    if(!r||typeof r!=='object')throw Error('DESKTOP_BRIDGE_INVALID_REQUEST');const fields=r.op==='admit'?['id','op','session_id','thread_id','cwd']:r.op==='resolve'?['id','op','thread_id','cwd']:r.op==='send'?['id','op','session_id','thread_id','text']:r.op==='ping'?['id','op']:['id','op','session_id','thread_id'];
     if(Object.keys(r).some(k=>!fields.includes(k))||!['number','string'].includes(typeof r.id)||r.id==='')throw Error('DESKTOP_BRIDGE_INVALID_REQUEST');
     if(r.op==='ping')return {id:r.id,ok:true,runtime_key:runtimeKey,pid:process.pid};
+    if(r.op==='resolve'){
+      if(typeof r.thread_id!=='string'||!r.thread_id.trim())throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED: thread');
+      try{return {id:r.id,ok:true,session_id:await resolveEnrollment(r.thread_id,r.cwd)};}
+      catch(e){return {id:r.id,ok:false,error:e.message};}
+    }
     if(!['admit','probe','send'].includes(r.op))throw Error('DESKTOP_BRIDGE_OPERATION_UNSUPPORTED');if(['session_id','thread_id'].some(k=>typeof r[k]!=='string'||!r[k].trim()))throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED');
     if(r.op==='admit'){if(typeof r.cwd!=='string'||!path.isAbsolute(r.cwd))throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED: cwd');return {id:r.id,ok:true,desktop_bridge:await enroll({session:r.session_id,thread:r.thread_id},r.cwd,true)};}
     const b=bindings.get(key(r.session_id,r.thread_id));if(!b)throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: target is not enrolled');if(r.op==='send'&&typeof r.text!=='string')throw Error('DESKTOP_BRIDGE_INVALID_TEXT');const v=await nativeCall(b,r.op==='probe'?'read_thread':'send_message_to_thread',r.op==='probe'?{threadId:b.thread,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:100}:{threadId:b.thread,prompt:r.text});if(v.error)return {id:r.id,ok:false,error:v.error};return {id:r.id,ok:v.result?.success===true,session_id:b.session,thread_id:b.thread,native:v.result,...(v.result?.success===true?{}:{error:'DESKTOP_BRIDGE_NATIVE_REJECTED'})};
@@ -100,8 +123,29 @@ function runMcp(){
   const child=spawn(mcpBin,[],{stdio:['pipe','pipe','pipe']});let stopping=false;
   const stop=code=>{if(stopping)return;stopping=true;child.stdin.end();const timer=setTimeout(()=>child.kill('SIGTERM'),1000);child.once('close',()=>{clearTimeout(timer);process.exit(code);});if(child.exitCode!==null||child.signalCode!==null){clearTimeout(timer);process.exit(code);}};
   const ready=desktop?ensureService():Promise.resolve();ready.catch(()=>{});
-  async function forward(body,kind){let r;try{r=JSON.parse(body);}catch{child.stdin.write(mcpFrame(body,kind));return;}if(!(desktop&&r.method==='tools/call'&&r.params?.name==='collab_context'&&r.params.arguments?.query!==true)){child.stdin.write(mcpFrame(body,kind));return;}const original=body.toString(),span=idSpan(original),rawId=span?original.slice(span.start,span.end):undefined;
-    try{const thread=executorThread(r.params._meta);if(!thread)throw Error('DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing');await ready;const args=r.params.arguments??{},facts=args.provide===undefined?{}:typeof args.provide==='string'?JSON.parse(args.provide):args.provide;if(!facts||typeof facts!=='object'||Array.isArray(facts))throw Error('DESKTOP_BRIDGE_INVALID_FACTS');if(['caller','caller_thread_id','caller_turn_id','turn_id'].some(k=>k in facts))throw Error('DESKTOP_BRIDGE_INVALID_FACTS: caller context is executor-owned');const session=stringValue(facts,['session_id'])||stringValue(process.env,['CODEX_SESSION_ID']);if(!session)throw Error('DESKTOP_BRIDGE_SESSION_REQUIRED: current agent session_id');facts.desktop_bridge=await admit({session_id:session,thread_id:thread,cwd:args.project_scope||process.cwd()});facts.session_id=session;facts.thread_id=thread;delete facts.endpoint;delete facts.namespace;r.params.arguments={...args,provide:JSON.stringify(facts)};}catch(e){process.stdout.write(rewrittenFrame({jsonrpc:'2.0',id:r.id,result:{content:[{type:'text',text:e.message}],isError:true}},kind,rawId));return;}child.stdin.write(rewrittenFrame(r,kind,rawId));
+  // Managed Desktop owns the caller facts. For every managed read the bridge
+  // verifies this request's native thread and resolves the one stored enrollment
+  // for its host pipe and project, and only that session is handed to a
+  // single-request collab-mcp child. Caller `provide` is never identity. A query
+  // skips admission, so it never reads or rewrites the current declaration and
+  // never touches the identity map. A first registration has no enrollment yet,
+  // so it alone may carry the executor session it was started with.
+  async function forwardManaged(body,kind,r,rawId){
+    const thread=executorThread(r.params._meta);if(!thread)throw Error('DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing');
+    const name=r.params.name,args=r.params.arguments&&typeof r.params.arguments==='object'?r.params.arguments:{};
+    if(args.provide!==undefined)throw Error('DESKTOP_CALLER_FACTS_REJECTED: managed Desktop caller facts come only from the current invocation');
+    await ready;const cwd=typeof args.project_scope==='string'&&args.project_scope?args.project_scope:process.cwd(),query=args.query===true;
+    const session=query?await residentSession(thread,cwd):stringValue(process.env,['CODEX_SESSION_ID'])||await residentSession(thread,cwd);
+    if(name==='collab_context'&&!query)await admit({session_id:session,thread_id:thread,cwd});
+    const worker=spawn(mcpBin,[],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread}});
+    const closed=new Promise(resolve=>worker.once('close',resolve));let failure;worker.on('error',e=>{failure=e;});
+    let buffer=Buffer.alloc(0),reply;const answered=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: managed child timeout')),TIMEOUT_MS);worker.stdout.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);for(;;){const end=buffer.indexOf('\n');if(end<0)return;const line=buffer.subarray(0,end).toString();buffer=buffer.subarray(end+1);if(!line.trim())continue;clearTimeout(timer);reply=line;resolve();}});worker.once('close',()=>{clearTimeout(timer);reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: managed child closed'))});});
+    worker.stdin.end(mcpFrame(body,kind));
+    try{await answered;}finally{worker.kill('SIGTERM');await closed;}
+    if(failure)throw failure;process.stdout.write(mcpFrame(Buffer.from(reply),kind));
+  }
+  async function forward(body,kind){let r;try{r=JSON.parse(body);}catch{child.stdin.write(mcpFrame(body,kind));return;}if(!(desktop&&r.method==='tools/call'&&['collab_context','collab_recv','collab_task_status','collab_board_show','collab_board_describe'].includes(r.params?.name))){child.stdin.write(mcpFrame(body,kind));return;}const original=body.toString(),span=idSpan(original),rawId=span?original.slice(span.start,span.end):undefined;
+    try{await forwardManaged(body,kind,r,rawId);}catch(e){process.stdout.write(rewrittenFrame({jsonrpc:'2.0',id:r.id,result:{content:[{type:'text',text:e.message}],isError:true}},kind,rawId));}
   }
   let input=Buffer.alloc(0),queue=Promise.resolve();process.stdin.on('data',c=>{input=Buffer.concat([input,c]);try{while(input.length){let body,kind='line';if(input.subarray(0,15).toString().toLowerCase().startsWith('content-length:')){const end=input.indexOf('\r\n\r\n');if(end<0)return;const m=/^Content-Length:\s*(\d+)\r?$/im.exec(input.subarray(0,end).toString());if(!m)throw Error('invalid MCP frame');const n=Number(m[1]);if(n>MAX_FRAME)throw Error('MCP frame too large');if(input.length<end+4+n)return;body=input.subarray(end+4,end+4+n);input=input.subarray(end+4+n);kind='header';}else{const end=input.indexOf('\n');if(end<0){if(input.length>MAX_FRAME)throw Error('MCP frame too large');return;}body=input.subarray(0,end);input=input.subarray(end+1);if(body.length>MAX_FRAME)throw Error('MCP frame too large');if(!body.toString().trim())continue;}queue=queue.then(()=>forward(body,kind)).catch(e=>{process.stderr.write(e.message+'\n');stop(1);});}}catch(e){process.stderr.write(e.message+'\n');stop(1);}});
   child.stdout.pipe(process.stdout);child.stderr.pipe(process.stderr);child.on('error',e=>{process.stderr.write(e.message+'\n');stop(1);});child.on('close',()=>{if(!stopping)stop(child.exitCode??1);});process.stdin.on('end',()=>void queue.finally(()=>stop(0)));process.on('SIGTERM',()=>stop(0));process.on('SIGINT',()=>stop(0));

@@ -1283,6 +1283,78 @@ impl Mcp {
         }
     }
 
+    /// Launch the managed Desktop shape exactly as the host launcher does: the
+    /// real `Codex` originator, the host pipe that scopes enrollment, and no
+    /// `CODEX_SESSION_ID`/`CODEX_THREAD_ID` in the environment. Only `_meta`
+    /// carries the executor thread, so the session slot stays empty.
+    pub fn start_managed_desktop(fixture: &Fixture, pipe: &Path, thread: &str) -> Self {
+        let mut command = Command::new(collab_test_mcp_binary());
+        command
+            .current_dir(&fixture.root)
+            .env("COLLAB_STATE_DIR", &fixture.host_state)
+            .env("CODEX_HOME", fixture.root.join("home"))
+            .env("COLLAB_BIN", &fixture.binary)
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex")
+            .env("CODEX_APP_TOOLS_PIPE_PATH", pipe)
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("DSH_SESSION_ID")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("launch managed Desktop collab-mcp");
+        let stdin = child.stdin.take().expect("MCP stdin");
+        let stdout = child.stdout.take().expect("MCP stdout");
+        let (sender, replies) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let reply = line.map_err(|error| error.to_string()).and_then(|line| {
+                    serde_json::from_str(&line).map_err(|error| error.to_string())
+                });
+                if sender.send(reply).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            stdin: Some(stdin),
+            replies,
+            reader: Some(reader),
+            executor_facts: Some((String::new(), thread.to_owned())),
+        }
+    }
+
+    /// Send tool-call params verbatim so a test can exercise adapter-only
+    /// request fields exactly as a client would send them.
+    pub fn call_tool_raw_params(&mut self, id: u64, params: Value) -> Value {
+        let stdin = self.stdin.as_mut().expect("MCP stdin is open");
+        serde_json::to_writer(
+            &mut *stdin,
+            &json!({
+                "jsonrpc":"2.0",
+                "id":id,
+                "method":"tools/call",
+                "params":params
+            }),
+        )
+        .expect("serialize MCP request");
+        writeln!(stdin).expect("write MCP request");
+        stdin.flush().expect("flush MCP request");
+        let reply = self
+            .replies
+            .recv_timeout(Duration::from_secs(30))
+            .expect("MCP returns a bounded response")
+            .expect("MCP returns valid JSON");
+        assert_eq!(reply["id"], id, "{reply}");
+        reply["result"].clone()
+    }
+
     pub fn call_tool(&mut self, id: u64, name: &str, arguments: Value) -> Value {
         let meta = self
             .executor_facts

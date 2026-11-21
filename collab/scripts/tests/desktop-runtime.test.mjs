@@ -140,12 +140,91 @@ test('direct MCP cannot supply a Desktop session while the formal wrapper admits
   delete baseEnv.CODEX_SESSION_ID;delete baseEnv.CODEX_THREAD_ID;
   const direct=await mcpContext(mcp,[],{cwd:f.root,env:baseEnv});
   assert.equal(direct.result.isError,true);
-  assert.match(direct.result.content[0].text,/DESKTOP_BRIDGE_SESSION_REQUIRED: current agent sessionID is missing/);
-  const wrapperEnv={...baseEnv,COLLAB_MCP_BIN:mcp,CODEX_SESSION_ID:'agent-session'};
+  assert.match(direct.result.content[0].text,/DESKTOP_BRIDGE_SESSION_REQUIRED/);
+  const enrolled=f.admit('agent-session','real-thread');await enrolled;
+  const wrapperEnv={...baseEnv,COLLAB_MCP_BIN:mcp};
   const formal=await mcpContext(process.execPath,[script],{cwd:f.root,env:wrapperEnv});
   assert.equal(formal.result.isError,false);
   assert.match(formal.result.content[0].text,/committed|completed/);
-  assert.ok(f.calls.some(call=>call.params?.tool==='read_thread'&&call.params?.threadId==='real-thread'),'wrapper verifies the same isolated executor thread');
+  assert.ok(f.calls.some(call=>call.params?.tool==='read_thread'&&call.params?.threadId==='real-thread'),'admission and wrapper verify the same isolated executor thread');
+});
+
+test('managed wrapper verifies the request thread and queries its enrolled project from another cwd',async t=>{
+  const binary=process.env.COLLAB_TEST_BINARY;
+  if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
+  const f=await fixture(t),project=await fs.realpath(f.root),home=path.join(project,'home');
+  await fs.mkdir(home);await fs.mkdir(path.join(project,'.agent-collab'));
+  const session='enrolled-session',thread='real-thread';
+  const env={PATH:process.env.PATH,HOME:home,CODEX_HOME:home,COLLAB_STATE_DIR:f.state,
+    CODEX_APP_TOOLS_PIPE_PATH:f.env.CODEX_APP_TOOLS_PIPE_PATH,CODEX_MCP_NODE_PATH:process.execPath,
+    COLLAB_DESKTOP_BRIDGE_SCRIPT:script,COLLAB_BIN:binary,
+    COLLAB_MCP_BIN:path.join(path.dirname(binary),'collab-mcp'),CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex'};
+  const daemon=spawn(binary,['serve'],{cwd:project,env:{PATH:env.PATH,HOME:home,COLLAB_STATE_DIR:f.state},stdio:'ignore'});
+  try{
+    const deadline=Date.now()+10000;
+    while(!(await fs.stat(path.join(f.state,'server.sock')).catch(()=>null))){
+      assert.ok(daemon.exitCode===null&&Date.now()<deadline,'isolated daemon failed to start');
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+    const setup=spawn(binary,['context'],{cwd:project,env:{...env,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex Desktop',CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread},stdio:['ignore','pipe','pipe']});
+    let out='',err='';setup.stdout.on('data',b=>out+=b);setup.stderr.on('data',b=>err+=b);
+    assert.equal(await new Promise(r=>setup.once('close',r)),0,out+err);
+    const snapshot=JSON.parse(out).result.snapshot;
+    assert.equal(snapshot.binding.session_id,session);
+    assert.ok(snapshot.identity.worker_id);
+    const records=await fs.readdir(path.join(f.state,'runtime','desktop','enrollments'));
+    assert.equal(records.length,1);
+    const enrollment=JSON.parse(await fs.readFile(path.join(f.state,'runtime','desktop','enrollments',records[0])));
+    assert.deepEqual(enrollment.binding,{session,thread});
+    assert.equal(enrollment.cwd,project);assert.equal(enrollment.host_pipe,env.CODEX_APP_TOOLS_PIPE_PATH);
+    const identityMap=path.join(f.state,'identity-map.json'),before=await fs.readFile(identityMap);
+    const {createInterface}=await import('node:readline');
+    async function query(from,label,tool='collab_context',args={query:true}){
+      const wrapper=spawn(process.execPath,[script],{cwd:from,env,stdio:['pipe','pipe','pipe']});
+      const closed=new Promise(resolve=>wrapper.once('close',resolve));
+      const timer=setTimeout(()=>wrapper.kill('SIGTERM'),15000);
+      const lines=createInterface({input:wrapper.stdout})[Symbol.asyncIterator]();
+      async function rpc(id,method,params){
+        wrapper.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');
+        for(;;){const line=await lines.next();assert.ok(!line.done,`${label}: wrapper closed before responding`);
+          const response=JSON.parse(line.value);if(response.id===id)return response;}
+      }
+      try{
+        await rpc('init','initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'enrolled-query',version:'1'}});
+        const start=f.calls.length;
+        const response=await rpc('query','tools/call',{name:tool,arguments:tool==='collab_context'?{query:true,project_scope:project,app_scope_id:'appserver-cli'}:{},_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
+        const reads=f.calls.slice(start).filter(c=>c.params?.tool==='read_thread'&&c.params.threadId===thread&&c.params.arguments.threadId===thread);
+        return {response,reads:reads.length};
+      }finally{wrapper.stdin.end();await closed;clearTimeout(timer);}
+    }
+    // The request names its project scope; the process cwd must not decide which
+    // enrollment answers it, so both shapes are observed in one run.
+    const elsewhere=await query(home,'cwd outside the project');
+    const inside=await query(project,'cwd at the project');
+    assert.deepEqual(await fs.readFile(identityMap),before,'a query must not mutate the identity map');
+    assert.ok(elsewhere.reads>0,`query from another cwd made ${elsewhere.reads} exact native read_thread calls: ${JSON.stringify(elsewhere.response)}`);
+    assert.equal(elsewhere.response.result.isError,false,JSON.stringify(elsewhere.response));
+    const result=JSON.parse(elsewhere.response.result.content[0].text).result.snapshot;
+    assert.equal(result.identity.worker_id,snapshot.identity.worker_id);
+    assert.equal(result.binding.session_id,session);
+    assert.ok(inside.reads>0,`query at the project made ${inside.reads} exact native read_thread calls: ${JSON.stringify(inside.response)}`);
+    // Board and task reads are the same managed caller: from the enrolled project
+    // they resolve the same session through the same verified thread, and from
+    // outside the project they fail closed instead of adopting a stray enrollment.
+    for(const tool of ['collab_task_status','collab_board_show','collab_board_describe']){
+      const read=await query(project,`${tool} at the project`,tool);
+      assert.ok(read.reads>0,`${tool} made ${read.reads} exact native read_thread calls: ${JSON.stringify(read.response)}`);
+      const identity=read.response.result.content[0].text;
+      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SESSION_(REQUIRED|AMBIGUOUS)/,identity);
+      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,identity);
+      const outside=await query(home,`${tool} from another cwd`,tool);
+      assert.equal(outside.response.result.isError,true,`${tool} outside the project must fail closed: ${JSON.stringify(outside.response)}`);
+      assert.match(outside.response.result.content[0].text,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,outside.response.result.content[0].text);
+    }
+    assert.deepEqual(await fs.readFile(identityMap),before,'managed reads must not mutate the identity map');
+  }finally{
+    if(daemon.exitCode===null&&daemon.signalCode===null){const stopped=new Promise(r=>daemon.once('close',r));daemon.kill('SIGTERM');await stopped;}
+  }
 });
 
 test('daemon admits a legacy Desktop binding through a live publisher without host or node environment',async t=>{

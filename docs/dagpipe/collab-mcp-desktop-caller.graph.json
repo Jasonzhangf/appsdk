@@ -1,0 +1,216 @@
+{
+  "id": "appsdk-collab-mcp-desktop-caller",
+  "version": "1.0.1",
+  "description": "一次 managed Desktop MCP caller 请求到一次身份/权限结果，以及 context/query、board-show、task-status 的只读投影。入口是当前 host pipe、invocation _meta 中的 native thread、managed Desktop originator=Codex，以及公开 MCP 请求；不得使用 caller session、provide、历史 session/thread、cwd 名称、master role 或 recency 选择身份。Collab Desktop bridge 是唯一候选解析 owner：先以 native read_thread 核实 thread 与 canonical cwd，再在 authenticated pipe 与 project/app scope 内解析恰好一个已存 (session, thread) enrollment。零候选、多个候选、foreign/mismatched 或 metadata 歧义均 typed fail-closed，不发布 caller session。bridge 只返回该 enrollment 的 stored session，不决定名字、角色或 board 权限；daemon identity/authority owner 以该 stored session 在现有 BindingControlStore/identity context 中完成身份与权限决定。成功或拒绝的 typed result 再经同一 MCP request 投影 context/query、board-show、task-status；只读调用不写 identity-map、task、route、credential、grant 或 communication state。thread 不等于 session，agent code 不扫描 enrollment，本图不复制 Desktop bridge service 生命周期、身份注册/换绑、通知消费或消息投递图。SESE 线性节点共享同一 typed stage envelope。任一节点返回 terminal 时，后续节点不得调用自己的 bridge、enrollment、identity、authority 或 read owner，只能把同一 terminal envelope 原样传递到唯一出口；只有 proceed envelope 可进入下一 owner。图是设计产物，不证明当前产品已实现。",
+  "inputs": [
+    {
+      "id": "desktop_mcp_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "接收托管Desktop调用者请求",
+      "operator": "appsdk.collab_mcp_caller.receive_managed_request",
+      "operator_version": "1",
+      "description": "接收一个公开 managed Desktop MCP request，保留 host pipe、originator=Codex、当前 _meta 中唯一 thread 与 project/app scope，以及 context/query、board-show、task-status 请求类型。拒绝 caller-provided facts 作为身份来源；缺 pipe、缺 thread、metadata 别名冲突或 caller facts 冲突时生成含 typed rejection 的 terminal envelope，不调用 master、Rex、cwd 或历史绑定 fallback。terminal envelope 不含 caller session，后续节点不得调用 bridge、enrollment、identity、authority 或 read owner，只原样转发到出口。此节点只观察本次请求事实，不选择身份，不启动 bridge 或 daemon。",
+      "inputs": [
+        "desktop_mcp_request"
+      ],
+      "output": {
+        "id": "managed_caller_candidate",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "核实当前原生线程与工作范围",
+      "operator": "appsdk.collab_mcp_caller.verify_native_thread",
+      "operator_version": "1",
+      "description": "若输入已是 terminal envelope，本节点不调用 read_thread，只原样透传并不产生线程事实。仅 proceed envelope 可经 authenticated Desktop bridge service 调用当前 host 的 native read_thread，要求返回的 thread 与本次 _meta 一致，并返回 canonical cwd。read_thread 失败、未知 thread、foreign/host-mismatched response 或 canonical cwd 不属于请求 project/app 时生成 terminal envelope；不得使用 bridge 对另一 thread 的响应选身份，也不得把 thread 当 session。terminal 不调用后续 enrollment、identity 或 read owner。此节点只核实 host/thread/cwd，不做 enrollment 基数选择或 board authority 决定。",
+      "inputs": [
+        "managed_caller_candidate"
+      ],
+      "output": {
+        "id": "verified_native_thread",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "解析唯一已登记调用者会话",
+      "operator": "appsdk.collab_mcp_caller.resolve_exact_enrollment",
+      "operator_version": "1",
+      "description": "若输入已是 terminal envelope，本节点不读取 enrollment，只原样透传。仅 proceed envelope 可在 authenticated pipe 与 project/app scope 内，以已验证 thread 从现有 Desktop enrollment owner 解析已存 (session, thread) 对。恰好一个候选时只返回其 stored session；零候选生成 typed missing-enrollment terminal，多个候选生成 typed ambiguity terminal，均不给 caller session。终止时不调用 session handoff、daemon identity/authority 或 read owner。禁止 agent-side enrollment scan、thread-to-session 替代、cwd 名称匹配、最近使用排序、caller provide、历史 session 或 master fallback。此节点不修改 enrollment，也不决定名字或权限。",
+      "inputs": [
+        "verified_native_thread"
+      ],
+      "output": {
+        "id": "resolved_enrollment",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "交回唯一存储会话",
+      "operator": "appsdk.collab_mcp_caller.handoff_stored_session",
+      "operator_version": "1",
+      "description": "若输入已是 terminal envelope，本节点不做 handoff，只原样透传且不产生 caller session。仅 proceed envelope 可把 resolve 的唯一 stored session、已验证 thread/cwd 与 project/app scope 交回该 MCP request 的 sibling identity-context 调用。missing、ambiguous 与 foreign 结果保持各自 typed rejection terminal，不产生 caller session，不调用其他身份 resolver、daemon identity/authority 或 read owner。handoff 是一次 request-local 事实传递，不持久化新身份，也不改变 bridge service 生命周期。",
+      "inputs": [
+        "resolved_enrollment"
+      ],
+      "output": {
+        "id": "stored_session_caller",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "判定调用者身份与只读权限",
+      "operator": "appsdk.collab_mcp_caller.admit_identity_and_authority",
+      "operator_version": "1",
+      "description": "若输入已是 terminal envelope，本节点不调用 daemon identity/authority owner，只原样透传。仅 proceed envelope 可由现有 daemon identity/authority owner 以 stored session 与 project/app scope 解析当前 binding、名字、角色和 board 权限。该节点与 bridge enrollment resolution 分离：bridge 的 unique candidate 不是身份授予，master grant 不能替代 caller identity。unmapped、binding ambiguity 或 unauthorized reader 请求均生成 typed denial terminal；终止时不调用 authoritative read owner，context/query、board-show、task-status 不修改 identity-map、task、route、credential、grant、subscription 或消息状态。",
+      "inputs": [
+        "stored_session_caller"
+      ],
+      "output": {
+        "id": "authenticated_mcp_caller",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "读取请求对应的权威数据",
+      "operator": "appsdk.collab_mcp_caller.read_authoritative_view",
+      "operator_version": "1",
+      "description": "若输入已是 terminal envelope，本节点不读取任何权威视图，只原样透传。仅 proceed envelope 可在已授权 caller 下读取本次请求唯一需要的权威视图：context/query 的当前身份与通信投影、board-show 的可见任务板，或 task-status 的已知任务状态。读取复用现有 owner，不构造第二份身份真源；不写 assignment、session、route、subscription、task evidence 或通知状态。读取失败生成 typed terminal，不触发注册、恢复、重派或消息消费。",
+      "inputs": [
+        "authenticated_mcp_caller"
+      ],
+      "output": {
+        "id": "authoritative_mcp_view",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "输出调用者身份与读取结果",
+      "operator": "appsdk.collab_mcp_caller.emit_result",
+      "operator_version": "1",
+      "description": "唯一出口检查输入 envelope 的 status。terminal 时不得补做身份或读取，只返回前面节点保留的 typed fail-closed 结果；proceed 时返回成功读取结果。覆盖 missing caller facts、ambiguous thread metadata、native read_thread rejection、zero enrollment、multiple enrollment、foreign/mismatched thread、unmapped identity、authority denial 和既有 MCP request error；拒绝结果不包含 caller session，不选择备用身份，不改变持久状态。成功结果只证明本次 context/query、board-show、task-status 读取，不证明消息投递、消费、回复、身份恢复、runtime 安装或 live 行为。",
+      "inputs": [
+        "authoritative_mcp_view"
+      ],
+      "output": {
+        "id": "mcp_caller_result",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "接收托管Desktop调用者请求",
+      "to": "核实当前原生线程与工作范围",
+      "arc_id": "managed_caller_candidate"
+    },
+    {
+      "from": "核实当前原生线程与工作范围",
+      "to": "解析唯一已登记调用者会话",
+      "arc_id": "verified_native_thread"
+    },
+    {
+      "from": "解析唯一已登记调用者会话",
+      "to": "交回唯一存储会话",
+      "arc_id": "resolved_enrollment"
+    },
+    {
+      "from": "交回唯一存储会话",
+      "to": "判定调用者身份与只读权限",
+      "arc_id": "stored_session_caller"
+    },
+    {
+      "from": "判定调用者身份与只读权限",
+      "to": "读取请求对应的权威数据",
+      "arc_id": "authenticated_mcp_caller"
+    },
+    {
+      "from": "读取请求对应的权威数据",
+      "to": "输出调用者身份与读取结果",
+      "arc_id": "authoritative_mcp_view"
+    }
+  ],
+  "outputs": [
+    "mcp_caller_result"
+  ]
+}

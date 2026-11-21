@@ -19,7 +19,7 @@ impl SelectedDeliveryBinding {
         Some(Self {
             identity_key: slot.identity_key.clone(),
             binding: current.binding.clone(),
-            transport: current.transport.clone(),
+            transport: current.transport.clone()?,
         })
     }
 }

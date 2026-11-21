@@ -65,7 +65,7 @@ fn current_target(
         slot.identity_key.project_scope.as_str() == scope
             && slot.active_binding().is_some_and(|value| {
                 value.binding.agent_id.as_str() == worker_id
-                    && &value.transport == transport
+                    && value.transport.as_ref() == Some(transport)
                     && state
                         .global
                         .lookup_project(&value.binding.project_scope)

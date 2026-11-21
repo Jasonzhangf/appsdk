@@ -1,3 +1,25 @@
+fn context_transport_candidates(facts: &IdentityFacts, cwd: &str) -> TransportCandidates {
+    TransportCandidates {
+        desktop_bridge: facts.desktop_bridge.clone(),
+        // Native AppServer admission requires one complete set of facts.
+        appserver: match (&facts.endpoint, &facts.namespace, &facts.session_id, &facts.thread_id) {
+            (Some(endpoint), Some(namespace), Some(session_id), Some(thread_id)) => {
+                Some(AppServerCandidate {
+                    endpoint: endpoint.clone(),
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    thread_id: thread_id.clone(),
+                    cwd: cwd.into(),
+                })
+            }
+            _ => None,
+        },
+        tmux: facts.tmux.clone(),
+        dsh: facts.dsh.clone(),
+        rex: facts.rex.clone(),
+    }
+}
+
 fn verify_local_rex_socket(server: &str) -> anyhow::Result<()> {
     let path = server
         .strip_prefix("unix://")
@@ -537,7 +559,12 @@ impl ProjectRuntimeManager {
         if facts
             .dsh
             .as_ref()
-            .is_some_and(|candidate| !identity::dsh_transport_matches(candidate, &value.transport))
+            .is_some_and(|candidate| {
+                value
+                    .transport
+                    .as_ref()
+                    .is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport))
+            })
         {
             anyhow::bail!("IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the current mapped binding");
         }
@@ -548,7 +575,7 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| {
                 anyhow::anyhow!("IDENTITY_CREDENTIAL_MISSING: mapped worker is not registered")
             })?;
-        ident.transport = Some(value.transport.clone());
+        ident.transport = value.transport.clone();
         Ok(Some(ident))
     }
 
@@ -565,14 +592,17 @@ impl ProjectRuntimeManager {
         ident: &mut identity::Identity,
         scope: &Scope,
     ) -> anyhow::Result<RuntimeBinding> {
-        let mut transport = runtime
-            .state
-            .lock()
-            .unwrap()
-            .workers
-            .get(&ident.worker_id)
-            .and_then(|worker| worker.transport.clone())
-            .ok_or_else(|| anyhow::anyhow!("IDENTITY_TRANSPORT_MISSING"))?;
+        let mut transport = match ident.transport.clone() {
+            Some(current) => current,
+            None => {
+                let candidates = TransportCandidates {
+                    tmux: Some(candidate.clone()),
+                    ..Default::default()
+                };
+                validate_transport_candidates(runtime, &candidates, saved.project_scope.as_str())
+                    .map_err(anyhow::Error::msg)?
+            }
+        };
         transport.tmux_endpoint = Some(candidate.endpoint.clone());
         if transport.kind == TransportKind::Tmux {
             transport.endpoint = Some(candidate.endpoint.socket_path.clone());
@@ -784,7 +814,10 @@ impl ProjectRuntimeManager {
         } else if let Some(baseline) = expected_baseline {
             if next.binding_id == baseline.current.binding.binding_id
                 && next.session_id == baseline.current.binding.session_id
-                && transport.rex_endpoint == baseline.current.transport.rex_endpoint
+                && transport.rex_endpoint.as_ref()
+                    == baseline.current.transport.as_ref().and_then(|transport| {
+                        transport.rex_endpoint.as_ref()
+                    })
             {
                 value.rex_execution = baseline.current.rex_execution.clone();
             }
@@ -895,7 +928,9 @@ impl ProjectRuntimeManager {
                         && slot.identity_key.app_scope_id == context.app_scope_id
                         && slot.active_binding().is_some_and(|value| {
                             value.binding.agent_id.as_str() != identity.worker_id.as_str()
-                                && value.transport.kind == crate::proto::TransportKind::Tmux
+                                && value.transport.as_ref().is_some_and(|transport| {
+                                    transport.kind == crate::proto::TransportKind::Tmux
+                                })
                                 && value.binding.tmux_endpoint.as_ref().is_some_and(|saved| {
                                     saved.socket_path == candidate.endpoint.socket_path
                                         && saved.tmux_session_id
@@ -980,8 +1015,41 @@ impl ProjectRuntimeManager {
                     current = Some(self.refresh_session_endpoint(
                         &runtime, saved, candidate, &mut ident, &scope,
                     )?);
-                }
-                if facts.tmux.is_none() {
+                } else if let Some(saved) = current.as_ref().filter(|saved| {
+                    ident.transport.is_none()
+                        && facts.session_id.is_some()
+                        && saved.session_id.as_ref().map(identity::SessionId::as_str)
+                            == facts.session_id.as_deref()
+                }) {
+                    let candidates = context_transport_candidates(&facts, &context.canonical_root);
+                    if candidates.rex.is_some() || candidates.dsh.is_some()
+                        || candidates.desktop_bridge.is_some() || candidates.appserver.is_some()
+                    {
+                        let (execution, baseline) = match candidates.rex.as_ref() {
+                            Some(candidate) => self.rex_execution_for_refresh(
+                                rex_recovery.as_ref(),
+                                saved,
+                                candidate,
+                                facts.session_id.as_deref(),
+                                allow_explicit_rex_rebind,
+                            )?,
+                            None => (None, None),
+                        };
+                        let transport = match rex_recovery.as_ref() {
+                            Some(observed) => observed.transport.clone(),
+                            None => validate_transport_candidates_for_session(
+                                &runtime.root,
+                                &candidates,
+                                &context.canonical_root,
+                                facts.session_id.as_deref(),
+                            ).map_err(anyhow::Error::msg)?,
+                        };
+                        current = Some(self.refresh_session_transport(
+                            &runtime, saved, transport, &mut ident, &scope,
+                            execution.as_ref(), baseline.as_ref(),
+                        )?);
+                    }
+                } else if facts.tmux.is_none() {
                     if let (Some(saved), Some(mut transport)) =
                         (current.as_ref(), ident.transport.clone())
                     {
@@ -1125,11 +1193,7 @@ impl ProjectRuntimeManager {
                     let persisted =
                         identity::read_persisted(&self.host.host_paths, &ident.worker_id)?;
                     if persisted.as_ref().map(|saved| json!(saved)) != Some(json!(ident)) {
-                        let transport = ident.transport.clone().ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "IDENTITY_RESTORE_CONFLICT: persisted selected adaptor missing"
-                            )
-                        })?;
+                        let transport = ident.transport.clone();
                         identity::persist_current_binding_at(
                             &self.host.host_paths,
                             &scope,
@@ -1186,32 +1250,7 @@ impl ProjectRuntimeManager {
             if facts.dsh_session_id.is_some() && facts.dsh.is_none() && facts.tmux.is_none() {
                 return Err(anyhow::anyhow!("IDENTITY_INFORMATION_REQUIRED: first DSH registration requires dsh endpoint, runtime_id, agent_id, session_id and cwd facts").into());
             }
-            let candidates = TransportCandidates {
-                desktop_bridge: facts.desktop_bridge,
-                // A pane needs no native IDs. Only construct the adjacent
-                // candidate when all its facts exist; selected native paths
-                // already require these fields in preflight.
-                appserver: match (
-                    &facts.endpoint,
-                    &facts.namespace,
-                    &facts.session_id,
-                    &facts.thread_id,
-                ) {
-                    (Some(endpoint), Some(namespace), Some(session_id), Some(thread_id)) => {
-                        Some(AppServerCandidate {
-                            endpoint: endpoint.clone(),
-                            namespace: namespace.clone(),
-                            session_id: session_id.clone(),
-                            thread_id: thread_id.clone(),
-                            cwd: context.canonical_root.clone(),
-                        })
-                    }
-                    _ => None,
-                },
-                tmux: facts.tmux,
-                dsh: facts.dsh,
-                rex: facts.rex,
-            };
+            let candidates = context_transport_candidates(&facts, &context.canonical_root);
             let provisional = RuntimeIdentity::cli_adapter(&ident.worker_id)?;
             let register_runtime = ident.runtime.as_ref().unwrap_or(&provisional);
             let register_context =
@@ -1955,17 +1994,20 @@ mod anchor_provenance_tests {
             .active_binding()
             .unwrap();
         assert_eq!(returned.binding.session_id.as_ref().unwrap().as_str(), "session-s1");
-        assert_eq!(returned.transport.kind, TransportKind::Rex);
+        assert_eq!(returned.transport.as_ref().unwrap().kind, TransportKind::Rex);
         assert_eq!(
-            returned.transport.rex_endpoint,
-            target_previous.transport.rex_endpoint
+            returned.transport.as_ref().unwrap().rex_endpoint,
+            target_previous.transport.as_ref().unwrap().rex_endpoint
         );
         assert_eq!(
             control
                 .active_values()
                 .filter(|value| {
-                    value.transport.kind == TransportKind::Rex
-                        && value.transport.rex_endpoint == returned.transport.rex_endpoint
+                    value.transport.as_ref().is_some_and(|transport| {
+                        transport.kind == TransportKind::Rex
+                            && transport.rex_endpoint
+                                == returned.transport.as_ref().unwrap().rex_endpoint
+                    })
                 })
                 .count(),
             1,

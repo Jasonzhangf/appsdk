@@ -692,7 +692,24 @@ fn lifecycle_native_pair_fixture(
     label: &str,
     child_effect: &str,
 ) -> (Fixture, TestAppServer, TestAppServer, Value, Value) {
-    let fixture = Fixture::without_tmux(label);
+    seed_lifecycle_native_pair(Fixture::without_tmux(label), child_effect)
+}
+
+fn defer_background_timer(fixture: &mut Fixture) {
+    let config = fixture.root.join("home/.appsdk");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "[timers]\ntick_interval_ms=60000\n",
+    )
+    .unwrap();
+    fixture.restart_daemon();
+}
+
+fn seed_lifecycle_native_pair(
+    fixture: Fixture,
+    child_effect: &str,
+) -> (Fixture, TestAppServer, TestAppServer, Value, Value) {
     let master_host = TestAppServer::start_with_effect_at(
         &fixture.root,
         "lifecycle-master.sock",
@@ -887,11 +904,9 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     };
     let before_restart = subscriptions(&file["state"]);
     assert!(!before_restart.is_empty());
-    assert!(
-        before_restart
-            .values()
-            .all(|subscription| subscription["status"] == "armed")
-    );
+    assert!(before_restart
+        .values()
+        .all(|subscription| subscription["status"] == "armed"));
     file["state"]["worker_closures"][child_id] = json!({
         "worker_id":child_id, "closed_by":parent["worker_id"], "reason":"record-only fixture", "at_ms":1
     });

@@ -463,8 +463,11 @@ fn name_mailbox_new_holder_wake_ignores_old_budget_and_consumes_no_old_subscript
     old_subscription.id = "old-timer".into(); old_subscription.event = "deadline".into();
     old_subscription.trigger_ms = Some(1); old_subscription.status = "cancelled".into();
     let mut initial = vec![Event::NotificationSubscribed { subscription: old_subscription }];
+    let created_ms = now_ms();
     for id in ["pending", "delivered"] {
-        initial.push(Event::Sent { msg: message(id, id) });
+        let mut message = message(id, id);
+        message.created_ms = created_ms;
+        initial.push(Event::Sent { msg: message });
         initial.push(Event::WakeBound { message_id: id.into(), subscription_id: "old-timer".into() });
         initial.push(Event::NotificationDeliveryAccepted { message_id: id.into(), accepted_ms: 1, evidence: None });
     }

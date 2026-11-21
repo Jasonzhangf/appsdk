@@ -128,6 +128,111 @@ fn mcp_callers_share_identity_context_board_and_task_views() {
 }
 
 #[test]
+fn mcp_rejects_supplied_desktop_caller_facts_without_mutation() {
+    let fixture = Fixture::without_tmux("mcp-caller-rejects-provided-facts");
+    let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
+    registered_native_identity(&fixture, &host);
+    let resources_before = fixture.current_resources();
+
+    let mut mcp =
+        Mcp::start_with_executor_facts(&fixture, "mcp-caller-session", "mcp-caller-thread");
+    let result = mcp.call_context(
+        6,
+        json!({
+            "project_scope": fixture.root,
+            "app_scope_id": "appserver-cli",
+            "provide": {
+                "session_id": "foreign-session",
+                "thread_id": "mcp-caller-thread"
+            }
+        }),
+    );
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        mcp_tool_text(&result).contains("DESKTOP_CALLER_FACTS_REJECTED"),
+        "{result}"
+    );
+    assert_eq!(fixture.current_resources(), resources_before);
+    mcp.finish();
+    drop(fixture);
+}
+
+#[test]
+fn mcp_rejects_ambiguous_desktop_caller_facts_without_mutation() {
+    let fixture = Fixture::without_tmux("mcp-caller-rejects-ambiguous-facts");
+    let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
+    registered_native_identity(&fixture, &host);
+    let resources_before = fixture.current_resources();
+
+    let mut mcp =
+        Mcp::start_with_executor_facts(&fixture, "mcp-caller-session", "mcp-caller-thread");
+    let result = mcp.call_tool_with_meta(
+        8,
+        "collab_board_show",
+        json!({}),
+        json!({
+            "openai/threadId": "mcp-caller-thread",
+            "thread": {"id": "foreign-thread"}
+        }),
+    );
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        mcp_tool_text(&result).contains("DESKTOP_CALLER_FACTS_AMBIGUOUS"),
+        "{result}"
+    );
+    assert_eq!(fixture.current_resources(), resources_before);
+    mcp.finish();
+    drop(fixture);
+}
+
+#[test]
+fn mcp_board_denies_missing_caller_even_when_master_exists() {
+    let fixture = Fixture::without_tmux("mcp-caller-master-only");
+    let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
+    let (master, _, _) = registered_native_identity(&fixture, &host);
+    let socket = host
+        .endpoint()
+        .strip_prefix("unix://")
+        .expect("test AppServer endpoint uses unix://")
+        .to_owned();
+    let promoted = fixture
+        .configured_command(
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "isolated master-status-only fixture",
+            ],
+            None,
+        )
+        .env("CODEX_APP_SERVER_SOCKET", socket)
+        .env("CODEX_SESSION_ID", "mcp-caller-session")
+        .env("CODEX_THREAD_ID", "mcp-caller-thread")
+        .output()
+        .expect("run isolated master promotion");
+    assert!(
+        promoted.status.success(),
+        "master promote failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&promoted.stdout),
+        String::from_utf8_lossy(&promoted.stderr)
+    );
+    let promoted: Value = serde_json::from_slice(&promoted.stdout).unwrap();
+    assert_eq!(promoted["master"], master, "{promoted}");
+    let resources_before = fixture.current_resources();
+
+    let mut mcp = Mcp::start(&fixture, None);
+    let board = mcp.call_tool(7, "collab_board_show", json!({}));
+    assert_eq!(board["isError"], true, "{board}");
+    assert!(
+        mcp_tool_text(&board).contains("BOARD_IDENTITY_REQUIRED"),
+        "master status alone must not authorize board access: {board}"
+    );
+    assert_eq!(fixture.current_resources(), resources_before);
+    mcp.finish();
+    drop(fixture);
+}
+
+#[test]
 fn mcp_context_fails_closed_without_caller_facts() {
     let fixture = Fixture::without_tmux("mcp-caller-facts");
     let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");

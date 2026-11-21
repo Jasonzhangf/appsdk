@@ -207,7 +207,7 @@ fn collab_bin() -> std::path::PathBuf {
         .unwrap_or_else(|| "collab".into())
 }
 
-fn executor_thread(meta: &Value) -> Option<String> {
+fn executor_thread(meta: &Value) -> Result<String, String> {
     const META_KEYS: &[&str] = &[
         "openai/threadId",
         "openai/thread_id",
@@ -216,55 +216,59 @@ fn executor_thread(meta: &Value) -> Option<String> {
         "threadId",
         "thread_id",
     ];
-    META_KEYS
-        .iter()
-        .find_map(|key| meta.get(*key).and_then(Value::as_str))
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            let raw = meta.get("x-codex-turn-metadata")?;
-            let parsed;
-            let turn_metadata = if let Some(raw) = raw.as_str() {
-                parsed = serde_json::from_str::<Value>(raw).ok()?;
-                &parsed
-            } else {
-                raw
-            };
-            turn_metadata
-                .get("thread_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            meta.get("thread")
-                .and_then(|thread| thread.get("id"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_owned)
-        })
+    let mut threads = Vec::new();
+    for key in META_KEYS {
+        if let Some(value) = meta.get(*key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                threads.push(value.to_owned());
+            }
+        }
+    }
+    if let Some(raw) = meta.get("x-codex-turn-metadata") {
+        let parsed;
+        let turn_metadata = if let Some(raw) = raw.as_str() {
+            parsed = serde_json::from_str::<Value>(raw).map_err(|_| {
+                "DESKTOP_CALLER_FACTS_AMBIGUOUS: x-codex-turn-metadata is not valid JSON"
+            })?;
+            &parsed
+        } else {
+            raw
+        };
+        if let Some(value) = turn_metadata.get("thread_id").and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                threads.push(value.to_owned());
+            }
+        }
+    }
+    if let Some(value) = meta
+        .get("thread")
+        .and_then(|thread| thread.get("id"))
+        .and_then(Value::as_str)
+    {
+        if !value.trim().is_empty() {
+            threads.push(value.to_owned());
+        }
+    }
+    threads.sort();
+    threads.dedup();
+    match threads.len() {
+        0 => Err("DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing".into()),
+        1 => Ok(threads.remove(0)),
+        _ => Err("DESKTOP_CALLER_FACTS_AMBIGUOUS: conflicting executor thread metadata".into()),
+    }
 }
 
 fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String), String> {
     let meta = params.get("_meta").cloned().unwrap_or_default();
-    let thread = executor_thread(&meta)
-        .ok_or("DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing")?;
-    let existing = args
-        .get("provide")
-        .and_then(|value| match value {
-            Value::Object(object) => Some(object.clone()),
-            Value::String(raw) => serde_json::from_str::<Value>(raw)
-                .ok()?
-                .as_object()
-                .cloned(),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let session = existing
-        .get("session_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| std::env::var("CODEX_SESSION_ID").ok())
+    let thread = executor_thread(&meta)?;
+    if args.get("provide").is_some() {
+        return Err(
+            "DESKTOP_CALLER_FACTS_REJECTED: managed Desktop caller facts come only from the current invocation"
+                .into(),
+        );
+    }
+    let session = std::env::var("CODEX_SESSION_ID")
+        .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: current agent session_id")?;
     Ok((session, thread))

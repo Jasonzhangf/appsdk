@@ -1294,6 +1294,16 @@ impl Mcp {
                 })
             })
             .unwrap_or(Value::Null);
+        self.call_tool_with_meta(id, name, arguments, meta)
+    }
+
+    pub fn call_tool_with_meta(
+        &mut self,
+        id: u64,
+        name: &str,
+        arguments: Value,
+        meta: Value,
+    ) -> Value {
         let stdin = self.stdin.as_mut().expect("MCP stdin is open");
         serde_json::to_writer(
             &mut *stdin,

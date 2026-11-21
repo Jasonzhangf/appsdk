@@ -1,3 +1,24 @@
+fn load_runtime_state(
+    state_path: &Path,
+    host_paths: &HostPaths,
+    key: &RouteKey,
+) -> Result<State, String> {
+    let mut state = current_state::load(state_path, false)?;
+    let control = binding_store::BindingControlStore::new(host_paths.state_root()).load()?;
+    for value in control.active_values().filter(|value| {
+        value.binding.app_scope_id.as_str() == key.0
+            && value.binding.project_scope.as_str() == key.1
+            && value.transport.is_none()
+    }) {
+        if let Some(worker) = state.workers.get_mut(value.binding.agent_id.as_str()) {
+            // A legacy state snapshot can still carry this worker's old
+            // endpoint. Drop it before startup leases or timers can use it.
+            worker.transport = None;
+        }
+    }
+    Ok(state)
+}
+
 impl ProjectRuntimeManager {
     pub(crate) fn with_tmux_monitor_state<R>(
         &self, runtime: &Server,
@@ -136,7 +157,7 @@ impl ProjectRuntimeManager {
             )
         };
         let state_path = server_dir.join("state.json");
-        let state = current_state::load(&state_path, false)?;
+        let state = load_runtime_state(&state_path, &self.host.host_paths, key)?;
         let runtime = Arc::new(Server {
             config: crate::config::load(&root).map_err(|error| {
                 format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: load project config: {error}")
@@ -717,7 +738,10 @@ impl ProjectRuntimeManager {
                 .and_then(|slot| slot.active_binding())
                 .ok_or_else(|| Resp::err("TASK_CURRENT_BINDING_REQUIRED: actor has no current stable name"))?;
             let transport_matches = worker.transport.as_ref().is_some_and(|transport| {
-                current.transport.as_ref().is_some_and(|current| same_selected_endpoint(current, transport))
+                current
+                    .transport
+                    .as_ref()
+                    .is_some_and(|current| same_selected_endpoint(current, transport))
             });
             if current.binding != binding || !transport_matches {
                 return Err(Resp::err(

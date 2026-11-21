@@ -898,7 +898,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     prepare_socket_path(&sock_path)?;
 
     let state_path = project_server_dir.join("state.json");
-    let state = current_state::load(&state_path, false).map_err(anyhow::Error::msg)?;
+    let state = load_runtime_state(&state_path, &host_paths, &resident_key)
+        .map_err(anyhow::Error::msg)?;
 
 
     append_log(&host_paths.log_path(), "server starting");

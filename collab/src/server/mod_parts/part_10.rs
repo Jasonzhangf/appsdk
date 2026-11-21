@@ -543,12 +543,20 @@ fn worker_status_summary_with_maps(
     let keepalive = keepalives.get(&w.id);
     let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
     let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
-    let (display_name, work_roles) = {
+    let (display_name, work_roles, current_transport) = {
         let state = server.state.lock().unwrap();
         let route = server_route_scope(server, &state)?;
+        let transport = match &route {
+            Some(route) => control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, &w.id)?
+                .and_then(|slot| slot.active_binding())
+                .map(|current| current.transport.as_ref()),
+            None => None,
+        };
         (
             worker_display_name(control, route.as_ref(), &w.id)?,
             worker_work_roles(&state, control, route.as_ref(), &w.id)?,
+            transport,
         )
     };
 
@@ -604,8 +612,21 @@ fn worker_status_summary_with_maps(
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
-    let (presence, transport_view) = worker_presence_with_view(server, w);
-    let (identity_valid, endpoint_live) = worker_identity_and_endpoint(server, w);
+    let transport = current_transport.unwrap_or(w.transport.as_ref());
+    let (presence, transport_view, identity_valid, endpoint_live) = if current_transport == Some(None) {
+        (IdentityPresence::Unknown, serde_json::Value::Null, true, None)
+    } else {
+        let projected;
+        let worker = if transport == w.transport.as_ref() {
+            w
+        } else {
+            projected = WorkerRec { transport: transport.cloned(), ..w.clone() };
+            &projected
+        };
+        let (presence, view) = worker_presence_with_view(server, worker);
+        let (valid, endpoint) = worker_identity_and_endpoint(server, worker);
+        (presence, view, valid, endpoint)
+    };
     let thread_state = transport_view
         .get("thread_state")
         .and_then(serde_json::Value::as_str);
@@ -656,7 +677,7 @@ fn worker_status_summary_with_maps(
         "work_roles": work_roles,
         "role": role_brief["role"].clone(),
         "role_brief": role_brief,
-        "transport": w.transport.as_ref().map(|transport| json!({
+        "transport": transport.map(|transport| json!({
             "kind": transport.kind.as_str(),
             "endpoint": transport.endpoint,
             "namespace": transport.namespace,
@@ -702,9 +723,11 @@ fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet)
         control.current_for_worker(&route.project_scope_id, &route.app_scope_id, binding.agent_id.as_str())?;
         let display_name = slot.identity_key.name.clone();
         let address = project_key.as_ref().map(|project| format!("{project}.{display_name}"));
-        let transport = current.transport.as_ref().map(|transport| crate::proto::DirectoryTransport {
-            kind: transport.kind.as_str().to_owned(),
-            namespace: transport.namespace.clone(),
+        let transport = current.transport.as_ref().map(|transport| {
+            crate::proto::DirectoryTransport {
+                kind: transport.kind.as_str().to_owned(),
+                namespace: transport.namespace.clone(),
+            }
         });
         targets.push(crate::proto::DirectoryTarget {
             worker_id: binding.agent_id.as_str().to_owned(),
@@ -717,7 +740,10 @@ fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet)
             project: project_key.clone(),
             address,
             project_root: Some(server.root.to_string_lossy().into_owned()),
-            channel_type: current.transport.as_ref().map(|transport| transport.kind.as_str().to_owned()),
+            channel_type: current
+                .transport
+                .as_ref()
+                .map(|transport| transport.kind.as_str().to_owned()),
             deliverable: Some("unknown".to_owned()),
             machine: None,
             qualified_address: None,
@@ -757,7 +783,10 @@ fn cross_route_worker_status(
         return Ok(None);
     }
 
-    let endpoint_live = current.transport.as_ref().and_then(|transport| selected_transport_endpoint_live(server, transport));
+    let endpoint_live = current
+        .transport
+        .as_ref()
+        .and_then(|transport| selected_transport_endpoint_live(server, transport));
     let status = if endpoint_live == Some(false) {
         "lost"
     } else {

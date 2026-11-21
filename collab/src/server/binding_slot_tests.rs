@@ -1948,14 +1948,13 @@ fn rex_block_commit_retires_the_previous_current_and_persists_cleanup() {
     );
     assert_eq!(
         set.active_values()
-            .filter(|value| value
-                .transport
-                .as_ref()
-                .is_some_and(|transport| transport.kind == TransportKind::Rex
+            .filter(|value| value.transport.as_ref().is_some_and(|transport| {
+                transport.kind == TransportKind::Rex
                     && transport
                         .rex_endpoint
                         .as_ref()
-                        .is_some_and(|endpoint| endpoint.block_id == "block-b")))
+                        .is_some_and(|endpoint| endpoint.block_id == "block-b")
+            }))
             .count(),
         1
     );

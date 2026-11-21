@@ -973,7 +973,12 @@ fn refresh_board_fixture(server: &Server, route: &RouteScope, worker: &str, sess
         .transport
         .clone();
     transport.as_mut().unwrap().session_id = Some(session.into());
-    if let Some(endpoint) = transport.as_mut().unwrap().tmux_endpoint.as_mut() {
+    if let Some(endpoint) = transport
+        .as_mut()
+        .unwrap()
+        .tmux_endpoint
+        .as_mut()
+    {
         endpoint.codex_session_id = Some(session.into());
     }
     let response = crate::server::peer_tests::seed_committed_owner(

@@ -1656,13 +1656,8 @@ async fn rex_service_generation_change_refreshes_same_block_and_retries_once() {
         .active_binding()
         .unwrap()
         .clone();
-    let refreshed_endpoint = refreshed
-        .transport
-        .as_ref()
-        .unwrap()
-        .rex_endpoint
-        .as_ref()
-        .unwrap();
+    let refreshed_transport = refreshed.transport.unwrap();
+    let refreshed_endpoint = refreshed_transport.rex_endpoint.as_ref().unwrap();
     let stale_endpoint = stale.rex_endpoint.as_ref().unwrap();
     assert_eq!(refreshed_endpoint.server, stale_endpoint.server);
     assert_eq!(refreshed_endpoint.session_id, stale_endpoint.session_id);

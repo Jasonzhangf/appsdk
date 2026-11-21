@@ -260,7 +260,8 @@ impl NotificationSubscription {
         self.worker_id == worker_id
             && self.event == event
             && self.subject.as_deref() == subject
-            && crate::proto::TransportKind::from_method(self.method.as_str()).is_some()
+            && ((self.method.is_empty() && self.target.is_empty())
+                || crate::proto::TransportKind::from_method(self.method.as_str()).is_some())
             && self.status == "armed"
             && self.expires_ms > now
     }

@@ -475,7 +475,10 @@ impl ProjectRuntimeManager {
             .dsh
             .as_ref()
             .is_some_and(|candidate| {
-                value.transport.as_ref().is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport))
+                value
+                    .transport
+                    .as_ref()
+                    .is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport))
             })
         {
             return Err(

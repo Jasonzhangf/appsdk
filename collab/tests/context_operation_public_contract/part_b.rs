@@ -1366,6 +1366,244 @@ fn identity_map_corruption_is_not_ignored_for_history_recovery() {
 }
 
 #[test]
+fn daemon_startup_accepts_current_identity_without_transport_and_context_repairs_it() {
+    let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (mut fixture, pane) = Fixture::isolated("identity-map-current-without-transport");
+    let initial = fixture.registered_context("identity-map-current-without-transport-seed", &pane);
+    let worker = initial["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name = initial["result"]["snapshot"]["name"].as_str().unwrap();
+    let before = fixture.current_state();
+    let subscription_id = before["notification_subscriptions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, subscription)| {
+            subscription["worker_id"] == worker && subscription["status"] == "armed"
+        })
+        .map(|(id, _)| id)
+        .expect("the registered worker has an armed subscription");
+    fixture.stop_daemon();
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let current = map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| {
+            slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
+        })
+        .expect("the registered worker has one active current");
+    current["current"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transport");
+    fs::write(&map_path, serde_json::to_vec_pretty(&map).unwrap()).unwrap();
+
+    fixture.restart_after_external_stop();
+    let saved = fs::read(&map_path).unwrap();
+    let query = fixture.context_query("identity-map-current-without-transport-query", Some(&pane));
+    assert_eq!(query["result"]["snapshot"]["identity"]["worker_id"], worker);
+    assert!(query["result"]["snapshot"]["identity"]["transport"].is_null());
+    assert_eq!(fs::read(&map_path).unwrap(), saved);
+    let body = "mail preserved while the current transport is missing";
+    let output = fixture.command(
+        &[
+            "send",
+            "--unknown-sender",
+            "--to",
+            name,
+            "--subject",
+            "endpointless startup",
+            body,
+        ],
+        None,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let sent: Value = serde_json::from_str(
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("collab response: "))
+            .expect("Send must return an explicit durable response"),
+    ).unwrap();
+    let message_id = sent["msg_id"].as_str().unwrap();
+    assert_eq!(sent["durable"], true, "{sent}");
+    assert_eq!(sent["notification"], "subscribed-not-sent", "{sent}");
+    assert!(sent["notification_error"]
+        .as_str()
+        .unwrap()
+        .starts_with("IDENTITY_TRANSPORT_MISSING:"));
+    let endpointless = fixture.current_state();
+    assert_eq!(
+        endpointless["notification_subscriptions"][subscription_id],
+        before["notification_subscriptions"][subscription_id]
+    );
+    assert_eq!(endpointless["msgs"][message_id]["state"], "pending");
+    assert_eq!(endpointless["msgs"][message_id]["wake_attempt_count"], 0);
+    assert!(endpointless["notification_delivery_accepted"][message_id].is_null());
+    let restored =
+        fixture.registered_context("identity-map-current-without-transport-restore", &pane);
+    assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
+    assert_eq!(
+        restored["result"]["snapshot"]["identity"]["worker_id"],
+        worker,
+        "{restored}"
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["identity"]["transport"]["kind"],
+        "tmux",
+        "{restored}"
+    );
+    let repaired: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let current = repaired["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
+        })
+        .expect("the repaired worker still owns the current slot");
+    assert_eq!(current["current"]["transport"]["kind"], "tmux");
+    let received = fixture.run_ok(&["recv", "--timeout", "2"], Some(&pane));
+    assert!(received["messages"].as_array().unwrap().iter().any(|message| {
+        message["id"] == message_id && message["body"] == body
+    }));
+}
+
+#[test]
+fn endpointless_startup_does_not_rearm_or_report_stale_transport() {
+    let (mut fixture, host, identity) = lifecycle_native_fixture("endpointless-stale-transport");
+    let worker = identity["worker_id"].as_str().unwrap();
+    let lease_id = format!("sub-default-direct-message-{worker}");
+    let route_request = json!({"op":"RouteResolveNative","session_id":"lifecycle-session"});
+    let current_route = lifecycle_wire(&fixture, &identity, route_request.clone());
+    assert_eq!(current_route["ok"], true, "{current_route}");
+    let trigger_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let subscribed = lifecycle_wire(&fixture, &identity, json!({
+        "op":"NotificationSubscribe","worker_id":worker,"token":identity["token"],
+        "event":"deadline","subject":"endpointless-timer",
+        "trigger_ms":trigger_ms+60_000,"repeat_count":1,"ttl_seconds":3600
+    }));
+    assert_eq!(subscribed["ok"], true, "{subscribed}");
+    let deadline_id = subscribed["subscription"]["id"].as_str().unwrap();
+    fixture.stop_daemon();
+    let native_starts = host.start_request_count();
+
+    let state_path = fixture.project_state();
+    let mut saved: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let state = &mut saved["state"];
+    assert!(state["workers"][worker]["transport"].is_object());
+    let subscriptions = state["notification_subscriptions"].as_object_mut().unwrap();
+    assert!(subscriptions.remove(&lease_id).is_some(), "{subscriptions:?}");
+    // The saved deadline becomes due while the fixture daemon is stopped.
+    subscriptions.get_mut(deadline_id).unwrap()["trigger_ms"] = json!(trigger_ms);
+    let expected_subscriptions = subscriptions.clone();
+    fs::write(&state_path, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let slot = map["slots"].as_array_mut().unwrap().iter_mut().find(|slot| {
+        slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
+    }).unwrap();
+    slot["current"].as_object_mut().unwrap().remove("transport");
+    fs::write(&map_path, serde_json::to_vec_pretty(&map).unwrap()).unwrap();
+    fixture.restart_after_external_stop();
+
+    let old_route = lifecycle_wire(&fixture, &identity, route_request);
+    assert_eq!(old_route["ok"], false, "{old_route}");
+    assert!(old_route["error"].as_str().unwrap().starts_with("ROUTE_RESOLVE_NOT_FOUND:"));
+
+    let status = lifecycle_wire(&fixture, &identity, json!({"op":"WorkerStatus","worker_id":worker}));
+    assert_eq!(status["ok"], true, "{status}");
+    let row = unmapped_worker_row(&status, worker);
+    assert!(row["transport"].is_null(), "{row}");
+    assert!(row["transport_view"].is_null(), "{row}");
+    assert!(row["endpoint_live"].is_null(), "{row}");
+    assert_eq!(row["identity_valid"], true, "{row}");
+    assert_eq!(row["status"], "unknown", "{row}");
+
+    let context = lifecycle_wire(&fixture, &identity, json!({
+        "op":"Context","worker_id":worker,"token":identity["token"]
+    }));
+    assert_eq!(context["ok"], true, "{context}");
+    assert!(wait_until(Duration::from_secs(15), || {
+        fixture.current_state()["wake_bindings"].as_object().unwrap().iter().any(
+            |(_, subscription)| subscription == deadline_id
+        )
+    }), "the deadline must enter the durable mailbox while the endpoint is absent");
+    let after = fixture.current_state();
+    let message_id = after["wake_bindings"].as_object().unwrap().iter()
+        .find(|(_, subscription)| *subscription == deadline_id)
+        .map(|(id, _)| id).unwrap();
+    assert_eq!(after["msgs"][message_id]["state"], "pending");
+    assert_eq!(after["msgs"][message_id]["wake_attempt_count"], 0);
+    assert!(after["notification_delivery_accepted"][message_id].is_null());
+    assert_eq!(host.start_request_count(), native_starts);
+    assert_eq!(
+        after["notification_subscriptions"],
+        Value::Object(expected_subscriptions)
+    );
+}
+
+#[test]
+fn endpointless_native_identity_rebinds_with_verified_current_session() {
+    let (mut fixture, host, identity) = lifecycle_native_fixture("endpointless-native-rebind");
+    fixture.stop_daemon();
+    let path = fixture.host_state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let current = &mut map["slots"][0]["current"];
+    assert_eq!(current["binding"]["agent_id"], identity["worker_id"]);
+    current.as_object_mut().unwrap().remove("transport");
+    fs::write(&path, serde_json::to_vec(&map).unwrap()).unwrap();
+    fixture.restart_after_external_stop();
+    let before = fs::read(&path).unwrap();
+    let missing_endpoint = json!({
+        "session_id": "lifecycle-session",
+        "thread_id": "lifecycle-thread",
+        "endpoint": format!("unix://{}", fixture.root.join("absent.sock").display()),
+        "namespace": "codex_tui",
+    });
+    let rejected = fixture.command(
+        &[
+            "context",
+            "--op",
+            "endpointless-native-rebind-rejected",
+            "--provide",
+            &missing_endpoint.to_string(),
+        ],
+        None,
+    );
+    assert!(!rejected.status.success());
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    let restored = fixture.context_provide(
+        "endpointless-native-rebind-current",
+        &json!({
+            "session_id": "lifecycle-session",
+            "thread_id": "lifecycle-thread",
+            "endpoint": host.endpoint(),
+            "namespace": "codex_tui",
+        }),
+        None,
+    );
+    assert_eq!(restored["result"]["outcome"], "completed");
+    assert_eq!(
+        restored["result"]["snapshot"]["identity"]["worker_id"],
+        identity["worker_id"]
+    );
+    assert_eq!(
+        restored["result"]["snapshot"]["identity"]["transport"]["kind"],
+        "appserver"
+    );
+}
+
+#[test]
 fn identity_map_role_change_and_restore_survive_restart() {
     let (mut fixture, host, original) =
         lifecycle_native_fixture_effect("map-no-journal", "ack_only");
@@ -3623,7 +3861,8 @@ fn same_tmux_anchor_with_new_agent_session_keeps_name_across_invocation_cwd() {
 #[test]
 fn cross_subject_anchor_match_is_rejected_before_publication() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
-    let (fixture, pane) = Fixture::isolated("cross-subject-anchor-conflict");
+    let (mut fixture, pane) = Fixture::isolated("cross-subject-anchor-conflict");
+    defer_background_timer(&mut fixture);
     let root = PathBuf::from(canonical_root(&fixture));
     let seed = fixture.registered_context("cross-subject-anchor-conflict-seed", &pane);
     let (seed_name, seed_worker) = seeded_name_and_worker(&seed);

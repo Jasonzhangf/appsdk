@@ -353,19 +353,31 @@ impl Server {
             current.clone()
         } else {
             let transport = transport.expect("new registration requires transport");
-            let native_thread_id = transport.thread_id.as_ref()
-                .map(|value| NativeThreadId::new(value.clone())).transpose()
+            let native_thread_id = transport
+                .thread_id
+                .as_ref()
+                .map(|value| NativeThreadId::new(value.clone()))
+                .transpose()
                 .map_err(|error| error.to_string())?;
-            let session_id = transport.session_id.as_ref()
-                .map(|value| crate::identity::SessionId::new(value.clone())).transpose()
+            let session_id = transport
+                .session_id
+                .as_ref()
+                .map(|value| crate::identity::SessionId::new(value.clone()))
+                .transpose()
                 .map_err(|error| error.to_string())?;
             if transport.kind != TransportKind::Tmux && session_id.is_none() {
                 return Err("App Server registration requires session_id".into());
             }
             let mut binding = RuntimeBinding::new_with_session(
-                project_scope.clone(), app_scope, agent_id, runtime_id,
-                binding_id.clone(), session_id, native_thread_id,
-            ).map_err(|error| error.to_string())?;
+                project_scope.clone(),
+                app_scope,
+                agent_id,
+                runtime_id,
+                binding_id.clone(),
+                session_id,
+                native_thread_id,
+            )
+            .map_err(|error| error.to_string())?;
             binding.tmux_endpoint = transport.tmux_endpoint.clone();
             binding
         };

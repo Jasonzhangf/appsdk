@@ -79,7 +79,9 @@ fn goal_schedule_target_with_control(
         .and_then(|slot| slot.active_binding())
         .ok_or_else(|| Resp::err("GOAL_SCHEDULE_TARGET_UNAVAILABLE"))?;
     let target = slot.binding.agent_id.as_str();
-    authoritative_send_binding(state, &route, target).map_err(Resp::err)?;
+    if !state.workers.contains_key(target) {
+        return Err(Resp::err("GOAL_SCHEDULE_TARGET_UNAVAILABLE"));
+    }
     Ok(target.to_owned())
 }
 
@@ -283,7 +285,7 @@ fn prepare_goal_schedule(
             .workers
             .get(target)
             .ok_or_else(|| Resp::err("goal schedule target is not registered"))?;
-        let (method, address) = notification_route_projection(worker);
+        let projection = notification_route_projection(worker);
         let periodic_request = change.interval_ms.is_some()
             || change.trigger_ms.is_none()
                 && matching
@@ -407,8 +409,8 @@ fn prepare_goal_schedule(
                 worker_id: target.into(),
                 event: "deadline".into(),
                 subject: Some(subject.clone()),
-                target: address.clone(),
-                method: method.clone(),
+                target: String::new(),
+                method: String::new(),
                 trigger_ms: Some(trigger),
                 trigger_times_ms: Vec::new(),
                 interval_ms: interval,
@@ -428,8 +430,11 @@ fn prepare_goal_schedule(
             superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
         }
         subscription.worker_id = target.into();
-        subscription.target = address;
-        subscription.method = method;
+        if !projection.0.is_empty() || !projection.1.is_empty() {
+            let (method, address) = projection;
+            subscription.method = method;
+            subscription.target = address;
+        }
         subscription.subject = Some(subject);
         subscription.trigger_ms = Some(trigger);
         subscription.expires_ms = expiry;

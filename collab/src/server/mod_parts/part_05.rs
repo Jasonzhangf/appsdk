@@ -823,11 +823,12 @@ fn select_current_rex_delivery_binding(
         ));
     }
     let mut owners = control.active_values().filter(|value| {
-        value.transport.as_ref().filter(|transport| transport.kind == TransportKind::Rex)
-                .and_then(|transport| transport.rex_endpoint.as_ref())
-                .is_some_and(|candidate| {
+        value.transport.as_ref().is_some_and(|transport| {
+            transport.kind == TransportKind::Rex
+                && transport.rex_endpoint.as_ref().is_some_and(|candidate| {
                     candidate.server == endpoint.server && candidate.block_id == endpoint.block_id
                 })
+        })
     });
     let unique_owner = owners.next().is_some_and(|owner| {
         owner.binding.agent_id.as_str() == recipient
@@ -1183,24 +1184,32 @@ fn attempt_tmux_notification_with_retry(
             Err(error) => return NotificationAttempt::NotAttempted(error),
         }
     } else {
-        let selected = (|| -> Result<_, String> {
-            let Some(route) = server_route_scope(server, &state)? else {
+        let selected = (|| -> Result<_, NotificationAttempt> {
+            let Some(route) = server_route_scope(server, &state)
+                .map_err(|error| NotificationAttempt::Rejected(error.into()))?
+            else {
                 return Ok(None);
             };
-            let control =
-                binding_store::BindingControlStore::new(server.host_paths.state_root()).load()?;
-            let slot = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)?;
-            if slot.and_then(|slot| slot.active_binding())
-                .is_some_and(|current| current.transport.as_ref() != Some(transport))
-            {
-                return Err("IDENTITY_TRANSPORT_CHANGED: current identity no longer owns the selected delivery transport".into());
+            let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .map_err(NotificationAttempt::Rejected)?;
+            let slot = control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
+                .map_err(NotificationAttempt::Rejected)?;
+            match slot.and_then(|slot| slot.active_binding()).map(|current| current.transport.as_ref()) {
+                Some(None) => return Err(NotificationAttempt::NotAttempted(
+                    "IDENTITY_TRANSPORT_MISSING: current identity has no delivery transport".into(),
+                )),
+                Some(Some(current)) if current != transport => return Err(NotificationAttempt::NotAttempted(
+                    "IDENTITY_TRANSPORT_CHANGED: current identity no longer owns the selected delivery transport".into(),
+                )),
+                _ => {}
             }
-            Ok(slot
-                .and_then(notification_contract::SelectedDeliveryBinding::from_slot))
+            Ok(slot.and_then(notification_contract::SelectedDeliveryBinding::from_slot))
         })();
         match selected {
             Ok(binding) => binding,
-            Err(error) => return NotificationAttempt::Rejected(error),
+            Err(attempt) => return attempt,
         }
     };
     if board_invitation.is_some_and(|invitation| {
@@ -1451,9 +1460,23 @@ fn attempt_notification_detailed_with_mode_at_inner(
             .get(&recipient)
             .and_then(selected_transport_for_worker);
         let Some(transport) = worker_transport else {
-            return NotificationAttempt::Deferred(Some(
-                "registered worker has no server-selected transport".into(),
-            ));
+            let reason = (|| -> Result<&'static str, String> {
+                if let Some(route) = server_route_scope(server, &state)? {
+                    let control =
+                        binding_store::BindingControlStore::new(server.host_paths.state_root())
+                            .load()?;
+                    let current = control
+                        .current_for_worker(&route.project_scope_id, &route.app_scope_id, &recipient)?
+                        .and_then(|slot| slot.active_binding());
+                    if current.is_some_and(|current| current.transport.is_none()) {
+                        return Ok("IDENTITY_TRANSPORT_MISSING: current identity has no delivery transport");
+                    }
+                }
+                Ok("registered worker has no server-selected transport")
+            })();
+            return NotificationAttempt::NotAttempted(
+                reason.map(str::to_owned).unwrap_or_else(|error| error),
+            );
         };
         if let Some(required_session) = state.target_sessions.get(message_id) {
             if transport.session_id.as_deref() != Some(required_session.as_str()) {
@@ -1971,7 +1994,10 @@ fn refresh_rex_notification_binding(
     let value = slot
         .active_binding()
         .ok_or_else(|| format!("REX_CURRENT_BINDING_MISSING: {recipient} has no active binding"))?;
-    let saved_transport = value.transport.clone().ok_or_else(|| format!("REX_CURRENT_BINDING_CHANGED: {recipient} has no current transport"))?;
+    let saved_transport = value
+        .transport
+        .clone()
+        .ok_or_else(|| format!("REX_CURRENT_BINDING_CHANGED: {recipient} has no current transport"))?;
     let endpoint = saved_transport
         .rex_endpoint
         .as_ref()

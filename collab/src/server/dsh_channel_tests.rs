@@ -1575,7 +1575,7 @@ fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
         .active_values()
         .find(|value| value.binding.agent_id.as_str() == "dsh-moved")
         .unwrap();
-    assert_eq!(mapped.transport.as_ref(), Some(current));
+    assert_eq!(mapped.transport, Some(current.clone()));
 
     // The live effect: a wake now reaches the new socket and not the dead one.
     let subscription = handle_notification_subscribe(

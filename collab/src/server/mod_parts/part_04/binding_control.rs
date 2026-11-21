@@ -89,7 +89,10 @@ impl ProjectRuntimeManager {
             return Err("IDENTITY_CREDENTIAL_INVALID: exact mapped principal or token differs".into());
         }
         let prepared = runtime.prepare_register_envelope_for_current(
-            worker, &credential.token, value.transport.as_ref(), value.binding.project_scope.clone(),
+            worker,
+            &credential.token,
+            value.transport.as_ref(),
+            value.binding.project_scope.clone(),
             &runtime.root.to_string_lossy(), value.binding.app_scope_id.clone(),
             false, Some(&value.binding), pending.filter(|effect|
                 effect.is_register())
@@ -376,7 +379,10 @@ impl ProjectRuntimeManager {
         control
             .active_values()
             .filter(|value| {
-                value.transport.as_ref().is_some_and(|transport| &transport.kind == kind)
+                value
+                    .transport
+                    .as_ref()
+                    .is_some_and(|transport| &transport.kind == kind)
                     && value.binding.native_thread_id.is_some()
                     && Path::new(value.binding.project_scope.as_str()) == runtime.root
             })
@@ -894,7 +900,10 @@ impl ProjectRuntimeManager {
                     runtime_id:binding.runtime_id.clone(), appserver_id:binding.app_scope_id.clone(),
                     binding_id:binding.binding_id.clone(), session_id:binding.session_id.clone(),
                     native_thread_id:binding.native_thread_id.clone() },
-                value.transport.clone().ok_or("REGISTER_TRANSPORT_MISSING: new principal requires a selected transport")?,
+                value
+                    .transport
+                    .clone()
+                    .ok_or("REGISTER_TRANSPORT_MISSING: new principal requires a selected transport")?,
             ).map_err(|error| format!("{error:#}"))?)
         } else { None };
         let change = match effect {
@@ -1810,8 +1819,20 @@ impl ProjectRuntimeManager {
     ) -> Result<(), String> {
         let mut bindings = Vec::new();
         for value in controlled.active_values() {
-            if value.transport.is_none()
-                || (value.binding.tmux_endpoint.is_none() && value.binding.native_thread_id.is_none()) {
+            if value.transport.is_none() {
+                let indexed = self.host.state.lock().unwrap().global
+                    .current_thread_routes.values()
+                    .any(|binding| binding == &value.binding);
+                if indexed {
+                    self.host
+                        .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+                            binding: value.binding.clone(),
+                        }])
+                        .map_err(|error| format!("STALE_ROUTE_CLEANUP_FAILED: {error}"))?;
+                }
+                continue;
+            }
+            if value.binding.tmux_endpoint.is_none() && value.binding.native_thread_id.is_none() {
                 append_log(
                     &self.host.log_path(),
                     &format!(

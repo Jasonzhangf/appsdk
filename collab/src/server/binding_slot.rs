@@ -528,7 +528,8 @@ pub(crate) struct IdentityBindingSlot {
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
     pub(crate) previous: Option<BindingValue>,
-    // The 0527 writer stored detached facts here. Neither field selects a caller or route.
+    // Retained facts are logical identity only. They cannot select a caller
+    // or route because they carry no transport or endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     retained: Option<BindingValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1054,7 +1055,9 @@ impl BindingControlSet {
                     if holder
                         .active_binding()
                         .is_some_and(|value| {
-                            value.transport.as_ref().is_some_and(|transport| transport.kind == crate::proto::TransportKind::Rex)
+                            value.transport.as_ref().is_some_and(|transport| {
+                                transport.kind == crate::proto::TransportKind::Rex
+                            })
                         }) =>
                 {
                     // A current Rex holder may publish onto an occupied block.

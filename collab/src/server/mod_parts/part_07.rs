@@ -1807,7 +1807,12 @@ fn worker_status_capture(
     let active = slot
         .active_binding()
         .ok_or_else(|| "WORKER_STATUS_CAPTURE_NAME_NOT_CURRENT".to_owned())?;
-    if active.binding != binding || active.transport.as_ref().is_none_or(|transport| !same_selected_endpoint(transport, &selected_transport)) {
+    if active.binding != binding
+        || active
+            .transport
+            .as_ref()
+            .is_none_or(|transport| !same_selected_endpoint(transport, &selected_transport))
+    {
         return Err("WORKER_STATUS_CAPTURE_TARGET_CHANGED".into());
     }
     let agent_session_id = worker_status_agent_session_id(&selected_transport)
@@ -2197,7 +2202,9 @@ fn handle_worker_status_judgment(
         || slot.generation != capture.binding_generation
         || slot.active_binding().is_none_or(|active| {
             active.binding != capture.binding
-                || active.transport.as_ref().is_none_or(|transport| !same_selected_endpoint(transport, &capture.selected_transport))
+                || active.transport.as_ref().is_none_or(|transport| {
+                    !same_selected_endpoint(transport, &capture.selected_transport)
+                })
         })
     {
         return worker_status_judgment_receipt(

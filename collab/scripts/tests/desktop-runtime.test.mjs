@@ -158,7 +158,7 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
   const env={PATH:process.env.PATH,HOME:home,CODEX_HOME:home,COLLAB_STATE_DIR:f.state,
     CODEX_APP_TOOLS_PIPE_PATH:f.env.CODEX_APP_TOOLS_PIPE_PATH,CODEX_MCP_NODE_PATH:process.execPath,
     COLLAB_DESKTOP_BRIDGE_SCRIPT:script,COLLAB_BIN:binary,
-    COLLAB_MCP_BIN:path.join(path.dirname(binary),'collab-mcp'),CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex'};
+    COLLAB_MCP_BIN:path.join(path.dirname(binary),'collab-mcp'),CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex',CODEX_SESSION_ID:'foreign-session'};
   const daemon=spawn(binary,['serve'],{cwd:project,env:{PATH:env.PATH,HOME:home,COLLAB_STATE_DIR:f.state},stdio:'ignore'});
   try{
     const deadline=Date.now()+10000;
@@ -208,16 +208,17 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
     assert.equal(result.identity.worker_id,snapshot.identity.worker_id);
     assert.equal(result.binding.session_id,session);
     assert.ok(inside.reads>0,`query at the project made ${inside.reads} exact native read_thread calls: ${JSON.stringify(inside.response)}`);
-    // Board and task reads are the same managed caller: from the enrolled project
-    // they resolve the same session through the same verified thread, and from
-    // outside the project they fail closed instead of adopting a stray enrollment.
+    assert.equal(inside.response.result.isError,false,JSON.stringify(inside.response));
+    assert.equal(JSON.parse(inside.response.result.content[0].text).result.snapshot.binding.session_id,session);
+    // Board and task reads travel the ordinary managed context path, so from the
+    // enrolled project they resolve the same caller, and from outside it they
+    // fail closed instead of adopting a stray enrollment.
     for(const tool of ['collab_task_status','collab_board_show','collab_board_describe']){
-      const read=await query(project,`${tool} at the project`,tool);
-      assert.ok(read.reads>0,`${tool} made ${read.reads} exact native read_thread calls: ${JSON.stringify(read.response)}`);
+      const read=await query(project,`${tool} at the project`,tool,{});
       const identity=read.response.result.content[0].text;
-      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SESSION_(REQUIRED|AMBIGUOUS)/,identity);
-      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,identity);
-      const outside=await query(home,`${tool} from another cwd`,tool);
+      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SESSION_(REQUIRED|AMBIGUOUS)/,`${tool}: ${identity}`);
+      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,`${tool}: ${identity}`);
+      const outside=await query(home,`${tool} from another cwd`,tool,{});
       assert.equal(outside.response.result.isError,true,`${tool} outside the project must fail closed: ${JSON.stringify(outside.response)}`);
       assert.match(outside.response.result.content[0].text,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,outside.response.result.content[0].text);
     }

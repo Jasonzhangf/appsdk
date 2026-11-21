@@ -66,10 +66,15 @@ function setupRegistration(t,root,home,f,session,thread){
 /** One managed Desktop MCP lifecycle: the host passes only the pipe, the real
  *  originator and the current `_meta` thread. No session environment and no
  *  caller-supplied facts are present. */
-async function managed(t,root,f,{origin='Codex',tool='collab_context',args={},thread='real-thread',cwd=root}={}){
+async function managed(t,root,f,{origin='Codex',tool='collab_context',args={},thread='real-thread',cwd=root,session,envThread}={}){
   const env={...f.hostEnv,HOME:path.join(root,'home'),CODEX_HOME:path.join(root,'home'),COLLAB_BIN:binary,
     COLLAB_MCP_BIN:path.join(path.dirname(binary),'collab-mcp'),CODEX_INTERNAL_ORIGINATOR_OVERRIDE:origin};
+  // The launcher's caller session slot is the adapter's, not the caller's. A test
+  // that sets it proves the environment alone never authorizes a managed request.
+  if(session!==undefined)env.CODEX_SESSION_ID=session;
+  if(envThread!==undefined)env.CODEX_THREAD_ID=envThread;
   const child=spawn(process.execPath,[script],{cwd,env,stdio:['pipe','pipe','pipe']});
+  let nextResponses;
   const {createInterface}=await import('node:readline');
   const lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
   let stderr='';child.stderr.on('data',b=>stderr+=b);
@@ -83,8 +88,14 @@ async function managed(t,root,f,{origin='Codex',tool='collab_context',args={},th
     await rpc('init','initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'caller-gate',version:'1'}});
     const before=f.calls.length;
     const response=await rpc('call','tools/call',{name:tool,arguments:args,_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
-    return Object.assign({},response,{starts:f.calls.length,reads:f.calls.slice(before).filter(c=>c.params?.tool==='read_thread').length,stderr});
-  }finally{child.stdin.end();await closed;clearTimeout(timer);}
+    nextResponses=(value,start)=>Object.assign({},value,{starts:f.calls.length,reads:f.calls.slice(start).filter(c=>c.params?.tool==='read_thread').length,after:(nextTool,nextArgs={})=>{
+      const nextStart=f.calls.length;
+      return rpc(Math.random().toString(36).slice(2),'tools/call',{name:nextTool,arguments:nextArgs,_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'following-turn'}}}).then(next=>nextResponses(next,nextStart));
+    }});
+    return nextResponses(response,before);
+    // A test that chains more calls must keep the single MCP lifecycle open until
+    // it finishes, so closing stdin belongs to test teardown, not this finally.
+  }finally{t.after(async()=>{clearTimeout(timer);child.stdin.end();await closed;});}
 }
 
 const text=response=>response.result?.content?.[0]?.text??'';
@@ -101,6 +112,10 @@ test('managed originator registers its enrolled caller through the verified host
   assert.equal(snapshot.binding.session_id,'enrolled-session',JSON.stringify(snapshot));
   assert.equal(snapshot.identity.worker_id,worker,JSON.stringify(snapshot));
   assert.ok(f.calls.some(c=>c.params?.tool==='read_thread'&&c.params?.threadId==='real-thread'),'the host must verify the request thread');
+  const board=await response.after('collab_board_show',{});
+  assert.equal(isError(board),false,`a following lifecycle request must resolve the same caller: ${JSON.stringify(board)}`);
+  const task=await board.after('collab_task_status',{id:'missing-task'});
+  assert.match(text(task),/task not found/,text(task));
 });
 
 test('managed query resolves the same enrolled caller without reading the current declaration',async t=>{
@@ -143,6 +158,45 @@ test('managed request fails closed when two distinct sessions match the verified
   const response=await managed(t,root,f,{args:{project_scope:root,app_scope_id:'appserver-cli'}});
   assert.equal(isError(response),true,`multiple candidates must fail closed: ${JSON.stringify(response)}`);
   assert.match(text(response),/DESKTOP_BRIDGE_SESSION_AMBIGUOUS/,text(response));
+});
+
+test('a stale or foreign launcher environment session never authorizes the managed caller',async t=>{
+  if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
+  const f=await fixture(t),root=await fs.realpath(f.root),home=await startDaemon(t,f,root);
+  const setup=await setupRegistration(t,root,home,f,'enrolled-session','real-thread');
+  const worker=setup.result.snapshot.identity.worker_id;
+  const identityMap=path.join(f.state,'identity-map.json'),before=await fs.readFile(identityMap);
+  const state=await fs.readdir(f.state);
+  // A differently-scoped enrollment exists, so a session-adopting adapter would
+  // find something to trust. The environment announces both a foreign session and
+  // a foreign thread; neither may become the caller.
+  await f.admit('foreign-session','foreign-thread',root);
+  const foreignReads=f.reads('foreign-thread');
+  const response=await managed(t,root,f,{session:'foreign-session',envThread:'foreign-thread',args:{project_scope:root,app_scope_id:'appserver-cli'}});
+  assert.equal(isError(response),false,`the verified host thread must still resolve the real caller: ${JSON.stringify(response)}`);
+  const snapshot=JSON.parse(text(response)).result.snapshot;
+  assert.equal(snapshot.binding.session_id,'enrolled-session',JSON.stringify(snapshot));
+  assert.equal(snapshot.identity.worker_id,worker,JSON.stringify(snapshot));
+  assert.ok(f.calls.some(c=>c.params?.tool==='read_thread'&&c.params?.threadId==='real-thread'),'the host must verify the request thread, not the environment thread');
+  assert.equal(f.reads('foreign-thread'),foreignReads,'an environment thread must never be verified or adopted');
+  assert.doesNotMatch(text(response),/foreign-session/,text(response));
+  assert.deepEqual(await fs.readFile(identityMap),before,'an environment session must not rewrite the identity map');
+});
+
+test('a lone launcher environment session cannot replace a missing enrollment',async t=>{
+  if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
+  const f=await fixture(t),root=await fs.realpath(f.root);
+  // An unrelated enrollment establishes the bridge state root, so the only
+  // difference the managed request can make is a new caller for real-thread.
+  await f.admit('other-session','other-thread',root);
+  const enrollments=path.join(f.state,'runtime','desktop','enrollments');
+  const records=await fs.readdir(enrollments);
+  // No enrollment matches the verified thread. The environment offers a session
+  // that looks usable, which is exactly the fallback this gate must forbid.
+  const response=await managed(t,root,f,{session:'stale-session',envThread:'real-thread',args:{project_scope:root,app_scope_id:'appserver-cli'}});
+  assert.equal(isError(response),true,`an unenrolled thread must fail closed: ${JSON.stringify(response)}`);
+  assert.match(text(response),/DESKTOP_BRIDGE_SESSION_REQUIRED/,text(response));
+  assert.deepEqual(await fs.readdir(enrollments),records,'a denied request must not create an enrollment');
 });
 
 test('standalone launcher originators stay outside the managed caller path',async t=>{

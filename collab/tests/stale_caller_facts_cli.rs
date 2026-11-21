@@ -81,8 +81,15 @@ fn mcp_context_hydrates_executor_facts_and_uses_enrolled_identity() {
     let map_before = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
     let state_before = fixture.current_state();
 
-    let mut mcp =
-        Mcp::start_with_executor_facts(&fixture, "mcp-caller-session", "mcp-caller-thread");
+    let pipe = fixture.root.join("fixture-host.pipe");
+    seed_desktop_enrollment(
+        &fixture,
+        &pipe,
+        "seeded",
+        "mcp-caller-session",
+        "mcp-caller-thread",
+    );
+    let mut mcp = Mcp::start_managed_desktop(&fixture, &pipe, "mcp-caller-thread");
     let result = mcp.call_context(
         2,
         json!({"project_scope": fixture.root, "app_scope_id": "appserver-cli"}),
@@ -125,8 +132,15 @@ fn mcp_callers_share_identity_context_board_and_task_views() {
     let map_before = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
     let state_before = fixture.current_state();
 
-    let mut mcp =
-        Mcp::start_with_executor_facts(&fixture, "mcp-caller-session", "mcp-caller-thread");
+    let pipe = fixture.root.join("host.pipe");
+    seed_desktop_enrollment(
+        &fixture,
+        &pipe,
+        "seeded",
+        "mcp-caller-session",
+        "mcp-caller-thread",
+    );
+    let mut mcp = Mcp::start_managed_desktop(&fixture, &pipe, "mcp-caller-thread");
     let context = mcp.call_context(
         3,
         json!({"project_scope": fixture.root, "app_scope_id": "appserver-cli"}),
@@ -167,7 +181,7 @@ fn mcp_callers_share_identity_context_board_and_task_views() {
 
 #[test]
 fn mcp_rejects_supplied_desktop_caller_facts_without_mutation() {
-    let fixture = Fixture::without_tmux("mcp-caller-rejects-provided-facts");
+    let fixture = Fixture::without_tmux("mcp-caller-provided");
     let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
     registered_native_identity(&fixture, &host);
     let resources_before = fixture.current_resources();
@@ -197,7 +211,7 @@ fn mcp_rejects_supplied_desktop_caller_facts_without_mutation() {
 
 #[test]
 fn mcp_rejects_ambiguous_desktop_caller_facts_without_mutation() {
-    let fixture = Fixture::without_tmux("mcp-caller-rejects-ambiguous-facts");
+    let fixture = Fixture::without_tmux("mcp-caller-ambiguous");
     let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
     registered_native_identity(&fixture, &host);
     let resources_before = fixture.current_resources();
@@ -430,7 +444,7 @@ fn managed_desktop_context_fails_closed_on_ambiguous_enrollment() {
 
 #[test]
 fn managed_desktop_rejects_conflicting_executor_thread_aliases() {
-    let fixture = Fixture::without_tmux("mcp-managed-thread-conflict");
+    let fixture = Fixture::without_tmux("mcp-managed-conflict");
     let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
     registered_native_identity(&fixture, &host);
     let pipe = fixture.root.join("host.pipe");
@@ -559,6 +573,133 @@ fn managed_desktop_never_honors_client_supplied_caller_facts() {
         fixture.current_state(),
         state_before,
         "a rejected client fact must not mutate task state"
+    );
+    mcp.finish();
+    drop(fixture);
+}
+#[test]
+fn managed_desktop_environment_session_authorizes_only_through_bridge() {
+    let fixture = Fixture::without_tmux("mcp-managed-env-authority");
+    let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
+    let (expected_worker, expected_session, expected_thread) =
+        registered_native_identity(&fixture, &host);
+    let pipe = fixture.root.join("host.pipe");
+    seed_desktop_enrollment(
+        &fixture,
+        &pipe,
+        "seeded",
+        &expected_session,
+        &expected_thread,
+    );
+    let map_before = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let state_before = fixture.current_state();
+
+    let mut mcp = Mcp::start_managed_desktop_with_environment_facts(
+        &fixture,
+        &pipe,
+        Some("foreign-session"),
+        &expected_thread,
+    );
+    let context = mcp.call_context(
+        25,
+        json!({"project_scope": fixture.root, "app_scope_id": "appserver-cli"}),
+    );
+    assert_eq!(context["isError"], false, "{context}");
+    let context_payload: Value = serde_json::from_str(mcp_tool_text(&context)).unwrap();
+    assert_eq!(
+        context_payload["result"]["snapshot"]["identity"]["worker_id"], expected_worker,
+        "{context_payload}"
+    );
+    assert_eq!(
+        context_payload["result"]["snapshot"]["binding"]["session_id"], expected_session,
+        "{context_payload}"
+    );
+    assert!(
+        !serde_json::to_string(&context_payload)
+            .unwrap()
+            .contains("foreign-session"),
+        "{context_payload}"
+    );
+
+    let board = mcp.call_tool(26, "collab_board_show", json!({}));
+    assert_eq!(board["isError"], false, "{board}");
+    assert!(
+        !mcp_tool_text(&board).contains("BOARD_IDENTITY_REQUIRED"),
+        "{}",
+        mcp_tool_text(&board)
+    );
+    let task = mcp.call_tool(27, "collab_task_status", json!({"id":"missing-task"}));
+    assert!(
+        mcp_tool_text(&task).contains("task not found"),
+        "{}",
+        mcp_tool_text(&task)
+    );
+    assert_eq!(
+        std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        map_before
+    );
+    assert_eq!(fixture.current_state(), state_before);
+    mcp.finish();
+    drop(fixture);
+}
+
+#[test]
+fn managed_desktop_reads_fail_closed_without_bridge_authority() {
+    let fixture = Fixture::without_tmux("mcp-managed-no-bridge");
+    let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
+    registered_native_identity(&fixture, &host);
+    let pipe = fixture.root.join("host.pipe");
+    seed_desktop_enrollment(
+        &fixture,
+        &pipe,
+        "seeded",
+        "mcp-caller-session",
+        "mcp-caller-thread",
+    );
+    let map_before = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let state_before = fixture.current_state();
+
+    let mut mcp = Mcp::start_managed_desktop_without_bridge(
+        &fixture,
+        &pipe,
+        Some("foreign-session"),
+        "mcp-caller-thread",
+    );
+    let calls = [
+        (
+            "collab_context",
+            json!({
+                "project_scope": fixture.root,
+                "app_scope_id": "appserver-cli",
+                "query": true
+            }),
+        ),
+        ("collab_board_show", json!({})),
+        ("collab_task_status", json!({"id":"missing-task"})),
+    ];
+    for (offset, (name, args)) in calls.into_iter().enumerate() {
+        let response = mcp.call_tool(28 + offset as u64, name, args);
+        assert_eq!(response["isError"], true, "{name}: {response}");
+        assert!(
+            mcp_tool_text(&response).contains("DESKTOP_BRIDGE_"),
+            "{name}: {}",
+            mcp_tool_text(&response)
+        );
+        assert!(
+            !mcp_tool_text(&response).contains("foreign-session"),
+            "{name}: {}",
+            mcp_tool_text(&response)
+        );
+    }
+    assert_eq!(
+        std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        map_before,
+        "missing bridge proof must not mutate identity-map"
+    );
+    assert_eq!(
+        fixture.current_state(),
+        state_before,
+        "missing bridge proof must not mutate task state"
     );
     mcp.finish();
     drop(fixture);

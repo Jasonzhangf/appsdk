@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -268,120 +269,6 @@ fn managed_desktop_host() -> bool {
     )
 }
 
-fn desktop_state_root() -> Option<std::path::PathBuf> {
-    let state_dir = std::env::var_os("COLLAB_STATE_DIR").filter(|value| !value.is_empty());
-    let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
-    state_dir
-        .map(std::path::PathBuf::from)
-        .or_else(|| home.map(|home| std::path::PathBuf::from(home).join(".collab")))
-}
-
-/// Distinct launcher-persisted sessions for exactly this host pipe, project and
-/// native thread. Unsafe or non-matching records are ignored, never repaired.
-fn desktop_enrollment_sessions(pipe: &str, cwd: &std::path::Path, thread: &str) -> Vec<String> {
-    use std::os::unix::fs::MetadataExt;
-    let Some(directory) =
-        desktop_state_root().map(|root| root.join("runtime").join("desktop").join("enrollments"))
-    else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&directory) else {
-        return Vec::new();
-    };
-    let mut sessions = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext == "json")
-        {
-            continue;
-        }
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !metadata.file_type().is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-        {
-            continue;
-        }
-        let Ok(record) = std::fs::read(&path)
-            .map_err(|_| ())
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ()))
-        else {
-            continue;
-        };
-        if record.get("schema").and_then(Value::as_str) != Some("collab-desktop-enrollment/v2") {
-            continue;
-        }
-        if record.get("host_pipe").and_then(Value::as_str) != Some(pipe) {
-            continue;
-        }
-        let Some(record_cwd) = record.get("cwd").and_then(Value::as_str) else {
-            continue;
-        };
-        if !std::path::Path::new(record_cwd).is_absolute()
-            || std::path::Path::new(record_cwd)
-                .canonicalize()
-                .ok()
-                .as_deref()
-                != Some(cwd)
-        {
-            continue;
-        }
-        let Some(binding) = record.get("binding") else {
-            continue;
-        };
-        if binding.get("thread").and_then(Value::as_str) != Some(thread) {
-            continue;
-        }
-        let Some(session) = binding
-            .get("session")
-            .and_then(Value::as_str)
-            .filter(|session| !session.trim().is_empty())
-        else {
-            continue;
-        };
-        if !sessions.iter().any(|seen| seen == session) {
-            sessions.push(session.to_owned());
-        }
-    }
-    sessions
-}
-
-/// Managed Desktop owns the session only through the current invocation: the
-/// executor env when present, otherwise the launcher-persisted enrollment for
-/// this exact host pipe, project and verified thread. Anything else fails
-/// closed; the session is never derived from the thread or the caller input.
-fn desktop_session(thread: &str) -> Result<String, String> {
-    if let Some(session) = std::env::var("CODEX_SESSION_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(session);
-    }
-    let pipe = std::env::var("CODEX_APP_TOOLS_PIPE_PATH")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: current agent session_id")?;
-    let cwd = std::env::current_dir()
-        .and_then(|cwd| cwd.canonicalize())
-        .map_err(|_| "DESKTOP_BRIDGE_SCOPE_INVALID: current project directory".to_string())?;
-    let enrolled = desktop_enrollment_sessions(&pipe, &cwd, thread);
-    match enrolled.len() {
-        1 => Ok(enrolled.into_iter().next().unwrap_or_default()),
-        0 => Err(
-            "DESKTOP_BRIDGE_SESSION_REQUIRED: no trusted Desktop enrollment matches the current host pipe, project and thread"
-                .into(),
-        ),
-        count => Err(format!(
-            "DESKTOP_BRIDGE_SESSION_AMBIGUOUS: {count} enrolled Desktop sessions match the current host pipe, project and thread"
-        )),
-    }
-}
-
 fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String), String> {
     let meta = params.get("_meta").cloned().unwrap_or_default();
     let thread = executor_thread(&meta)?;
@@ -391,7 +278,216 @@ fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String)
                 .into(),
         );
     }
-    Ok((desktop_session(&thread)?, thread))
+    let pipe = std::env::var("CODEX_APP_TOOLS_PIPE_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: current host pipe is missing")?;
+    let cwd = std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .map_err(|_| "DESKTOP_BRIDGE_SCOPE_INVALID: current project directory".to_string())?;
+    let generation = std::env::var("COLLAB_DESKTOP_BRIDGE_RUNTIME_GENERATION")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    let session = match resolve_desktop_session(&pipe, &cwd, &thread, generation) {
+        Ok(session) => session,
+        // A directly launched `collab-mcp` has no launcher service beside it, so
+        // the bridge resolver is an enhancement channel, not the only one. Fall
+        // back to the launcher's own enrollment records, which carry the same
+        // trust anchor. A bridge that answered and rejected stays authoritative.
+        Err(error) if bridge_unavailable(&error) => desktop_session(&pipe, &cwd, &thread)?,
+        Err(error) => return Err(error),
+    };
+    Ok((session, thread))
+}
+
+fn bridge_unavailable(error: &str) -> bool {
+    error.starts_with("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge")
+}
+
+fn desktop_state_root() -> Option<std::path::PathBuf> {
+    std::env::var_os("COLLAB_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| std::path::PathBuf::from(home).join(".collab"))
+        })
+}
+
+/// Collect the distinct sessions the launcher enrolled for exactly this host
+/// pipe, project and thread. Records are the launcher's own private control
+/// files, so the same safety rules apply: regular, not a symlink, owned by the
+/// current user, and unreadable by group and other.
+fn desktop_enrollment_sessions(
+    pipe: &str,
+    cwd: &std::path::Path,
+    thread: &str,
+) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(root) = desktop_state_root() else {
+        return Vec::new();
+    };
+    let directory = root.join("runtime").join("desktop").join("enrollments");
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<Value>(&body) else {
+            continue;
+        };
+        if record.get("schema").and_then(Value::as_str) != Some("collab-desktop-enrollment/v2")
+            || record.get("host_pipe").and_then(Value::as_str) != Some(pipe)
+        {
+            continue;
+        }
+        let Some(record_cwd) = record.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(record_cwd) = std::path::Path::new(record_cwd).canonicalize() else {
+            continue;
+        };
+        if record_cwd != cwd {
+            continue;
+        }
+        let binding = record.get("binding");
+        if binding.and_then(|value| value.get("thread")).and_then(Value::as_str) != Some(thread) {
+            continue;
+        }
+        let Some(session) = binding
+            .and_then(|value| value.get("session"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        if !sessions.iter().any(|known| known == session) {
+            sessions.push(session.to_owned());
+        }
+    }
+    sessions
+}
+
+/// Resolve the caller session from the launcher's enrollments. Zero and more
+/// than one distinct session both fail closed; the environment session only
+/// backstops when the launcher enrolled nothing for this exact caller.
+fn desktop_session(
+    pipe: &str,
+    cwd: &std::path::Path,
+    thread: &str,
+) -> Result<String, String> {
+    let sessions = desktop_enrollment_sessions(pipe, cwd, thread);
+    match sessions.len() {
+        1 => return Ok(sessions[0].clone()),
+        0 => {}
+        count => {
+            return Err(format!(
+                "DESKTOP_BRIDGE_SESSION_AMBIGUOUS: {count} enrolled Desktop sessions match the current host pipe, project and thread"
+            ))
+        }
+    }
+    std::env::var("CODEX_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "DESKTOP_BRIDGE_SESSION_REQUIRED: no trusted Desktop enrollment matches the current host pipe, project and thread"
+                .to_string()
+        })
+}
+
+fn resolve_desktop_session(
+    pipe: &str,
+    cwd: &std::path::Path,
+    thread: &str,
+    expected_generation: Option<u64>,
+) -> Result<String, String> {
+    let state_root = std::env::var_os("COLLAB_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| std::path::PathBuf::from(home).join(".collab"))
+        })
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: Collab state root is missing")?;
+    let runtime_directory = state_root.join("runtime").join("desktop");
+    let mut stream = bridge_socket(&runtime_directory, pipe)?;
+    let request = serde_json::to_vec(&json!({
+        "id": format!("mcp-{}", std::process::id()),
+        "op": "resolve",
+        "thread_id": thread,
+        "cwd": cwd,
+    }))
+    .map_err(|error| error.to_string())?;
+    let mut frame = Vec::with_capacity(4 + request.len());
+    frame.extend_from_slice(&(request.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&request);
+    stream
+        .write_all(&frame)
+        .and_then(|_| stream.flush())
+        .map_err(|_| {
+            "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge request failed".to_string()
+        })?;
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge response failed".to_string()
+    })?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length == 0 || length > 8 * 1024 * 1024 {
+        return Err("DESKTOP_BRIDGE_SESSION_REQUIRED: invalid trusted bridge response".into());
+    }
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge response failed".to_string()
+    })?;
+    let response: Value = serde_json::from_slice(&body).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: invalid trusted bridge response".to_string()
+    })?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge rejected the caller")
+            .to_owned());
+    }
+    if let Some(expected) = expected_generation {
+        if response.get("runtime_generation").and_then(Value::as_u64) != Some(expected) {
+            return Err("DESKTOP_BRIDGE_UNAVAILABLE: bridge lifecycle changed".into());
+        }
+    }
+    response
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|session| !session.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge returned no session".into())
+}
+
+fn bridge_socket(directory: &std::path::Path, pipe: &str) -> Result<UnixStream, String> {
+    use sha2::{Digest, Sha256};
+    let runtime_key: String = Sha256::digest(pipe.as_bytes())[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let direct = directory.join(format!("pipe-{runtime_key}.sock"));
+    UnixStream::connect(direct).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge resolver is unavailable".into()
+    })
 }
 
 fn set_desktop_context_facts(args: &mut Value, session: &str, thread: &str) -> Result<(), String> {

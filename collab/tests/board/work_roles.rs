@@ -335,7 +335,20 @@ fn minimal_registration_notice_survives_a_rejected_native_wake() {
     let id = messages[0]["id"].as_str().unwrap();
     assert_eq!(messages[0]["state"], "pending");
     assert!(current["notification_delivery_accepted"][id].is_null());
-    assert!(current["notification_delivery_failures"][id].is_object());
+    // The registration transaction only admits the durable notice. The
+    // daemon timer owns submission after the binding publication unlocks.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let current = fixture.current_state();
+        assert!(current["notification_delivery_accepted"][id].is_null());
+        if current["notification_delivery_failures"][id].is_object() {
+            assert_eq!(current["msgs"][id]["state"], "pending");
+            assert_eq!(current["msgs"][id]["wake_attempt_count"], 1);
+            break;
+        }
+        assert!(Instant::now() < deadline, "no wake attempt was recorded for {id}");
+        thread::sleep(Duration::from_millis(25));
+    }
     fixture
         .state
         .lock()

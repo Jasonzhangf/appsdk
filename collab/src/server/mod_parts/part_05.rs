@@ -1289,6 +1289,8 @@ fn attempt_tmux_notification_with_retry(
         explicit,
         if queued_tmux {
             DAEMON_LIVE_CLOSURE_MODE
+        } else if delivery_mode == mailbox::REGISTRATION_NOTIFICATION_MODE {
+            "explicit-notification"
         } else {
             &delivery_mode
         },
@@ -1690,6 +1692,7 @@ fn notification_delivery_delay_ms(
     match state.delivery_modes.get(message_id).map(String::as_str) {
         Some(
             "explicit-notification"
+            | mailbox::REGISTRATION_NOTIFICATION_MODE
             | "immediate"
             | "queued"
             | DAEMON_LIVE_CLOSURE_MODE

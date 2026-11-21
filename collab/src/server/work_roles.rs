@@ -1,7 +1,7 @@
 // Relationship changes and advisory mail share the current-state transaction.
 fn relationship_notice_events(
     state: &State, control: &binding_slot::BindingControlSet, route: &RouteScope,
-    recipient: &str, subject: &str, body: String,
+    recipient: &str, mode: &str, subject: &str, body: String,
 ) -> Result<Vec<Event>, String> {
     let now = now_ms();
     let id = format!("relationship-{}", rand::random::<u128>());
@@ -11,7 +11,7 @@ fn relationship_notice_events(
         in_reply_to: None, created_ms: now, state: "pending".into(),
         wake_attempt_count: 0, last_wake_attempt_ms: 0, retry_attempted: false,
     } }, Event::DeliveryMode {
-        msg_id: id.clone(), mode: "explicit-notification".into(), source_thread_id: None,
+        msg_id: id.clone(), mode: mode.into(), source_thread_id: None,
     }];
     if let Some(slot) = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)? {
         events.push(Event::MailboxNameAddressed { message_id: id.clone(),
@@ -113,7 +113,7 @@ fn handle_work_roles(
             current.active_binding().map(|current| current.binding.agent_id.as_str().to_owned())
         };
         if let Some(recipient) = recipient.filter(|recipient| recipient != &actor && state.workers.contains_key(recipient)) {
-            notices = match relationship_notice_events(&state, &control, &route, &recipient, "work-roles-changed",
+            notices = match relationship_notice_events(&state, &control, &route, &recipient, "explicit-notification", "work-roles-changed",
                 format!("{name} 的工作专长已变更为 {:?}。读取 collab context / collab board show 获取当前关系。只调整受影响的新任务或交接；已接任务的归属与验收保持。无需仅因角色变化改模板或向用户例行汇报。", normalized)) {
                 Ok(events) => events, Err(error) => return Resp::err(error),
             };

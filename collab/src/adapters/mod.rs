@@ -165,6 +165,7 @@ impl AdapterError {
     pub fn notification_waits_for_reconnect(error: &str) -> bool {
         error.starts_with(desktop_bridge::NOT_SUBMITTED_PREFIX)
             || error.starts_with(tmux::DELIVERY_NOT_ATTACHED)
+            || error.starts_with("DSH_ENDPOINT_BLOCKED:")
     }
 
     pub fn notification_class_from_display(error: &str) -> NotificationDeliveryClass {

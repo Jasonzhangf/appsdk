@@ -280,6 +280,29 @@ async def check(connection):
                 assert snapshot["name"] == name
                 assert snapshot["identity"]["transport"]["tmux_endpoint"]["tmux_session_id"] == session
                 print("PASS: detach preserves the logical name, unread mail and deadline follow it, and online replacement requires explicit confirmation")
+
+                pane_id = pane.session_id
+                tty = await pane.async_get_variable("session.tty")
+                next_session = start_session(
+                    "2", "isolated-iterm-same-pane", ("same-pane",),
+                    ("--approve-identity", (root / "force").read_text()),
+                )
+                tmux("switch-client", "-c", tty, "-t", next_session)
+                await wait_for(lambda: f"{tty} {next_session}" in tmux(
+                    "list-clients", "-F", "#{client_tty} #{session_id}"
+                ).splitlines())
+                current_pane = (await iterm2.async_get_app(connection)).get_session_by_id(pane_id)
+                assert current_pane and await current_pane.async_get_variable("session.tty") == tty
+                status, value, error = await context("same-pane")
+                assert status == 0, error
+                switched = value["result"]["snapshot"]
+                assert switched["name"] == name and switched["session_id"] == "isolated-iterm-same-pane"
+                assert switched["identity"]["transport"]["tmux_endpoint"]["tmux_session_id"] == next_session
+                assert tmux("display-message", "-p", "-t", session, "#{session_name}").isdigit()
+                assert tmux("display-message", "-p", "-t", next_session, "#{session_name}") == f"{next_session[1:]}_{name}"
+                print(json.dumps({"outcome": "same-iterm2-pane-rebound", "pane_id": pane_id,
+                                  "old_tmux_session": session, "current_tmux_session": next_session,
+                                  "name": name}), flush=True)
             finally:
                 await release_fixture(connection, owned_panes, daemon, tmux, owned_sessions,
                                       tmux_server_pid, tmux_socket)

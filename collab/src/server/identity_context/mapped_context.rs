@@ -18,7 +18,7 @@ impl ProjectRuntimeManager {
 
     fn mapped_context(
         &self,
-        context: ProjectContext,
+        mut context: ProjectContext,
         mut request: IdentityContextRequest,
     ) -> (Arc<Server>, Resp) {
         if request.action != "context" && !request.query {
@@ -33,7 +33,7 @@ impl ProjectRuntimeManager {
             Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
         };
         request.facts = facts.clone();
-        match self.requested_name_scope_requirement(&context, &request) {
+        match self.requested_name_scope_requirement(&mut context, &request) {
             Ok(Some(requirement)) => return (self.host.clone(), requirement),
             Ok(None) => {}
             Err(error) => return (self.host.clone(), Resp::err(error)),
@@ -323,11 +323,11 @@ impl ProjectRuntimeManager {
     }
 
     /// A uniquely held target name keeps its existing app partition. Resolve
-    /// that partition before registration so a wrong `--app-scope` cannot
-    /// allocate an ordinary name or mutate the map first.
+    /// that partition before registration so the caller does not resubmit an
+    /// internal app choice, while ambiguity stays explicit.
     fn requested_name_scope_requirement(
         &self,
-        context: &ProjectContext,
+        context: &mut ProjectContext,
         request: &IdentityContextRequest,
     ) -> Result<Option<Resp>, String> {
         let Some(raw) = request
@@ -348,26 +348,23 @@ impl ProjectRuntimeManager {
         {
             return Ok(None);
         }
+        if targets.len() == 1 {
+            context.app_scope_id = targets[0].identity_key.app_scope_id.clone();
+            return Ok(None);
+        }
         let target_apps = targets
             .iter()
             .map(|slot| slot.identity_key.app_scope_id.as_str().to_owned())
             .collect::<Vec<_>>();
-        let unique_target = (targets.len() == 1).then(|| targets[0]);
-        let target_app = unique_target.map(|slot| slot.identity_key.app_scope_id.as_str());
-        let repair_invocation = match target_app {
-            Some(target_app) => format!(
-                "collab context --project <project> --app-scope {target_app} --approve-grant <existing-approval-json>"
-            ),
-            None => format!(
-                "collab context --project <project> --app-scope <one of: {}> --approve-grant <existing-approval-json>",
-                target_apps.join(", ")
-            ),
-        };
+        let repair_invocation = format!(
+            "collab context --project <project> --app-scope <one of: {}> --approve-grant <existing-approval-json>",
+            target_apps.join(", ")
+        );
         let sources = json!({
             "requested_name": requested_name,
-            "target_app_scope_id": target_app,
+            "target_app_scope_id": null,
             "target_app_scope_ids": target_apps,
-            "target_key": unique_target.map(|slot| &slot.identity_key),
+            "target_key": null,
             "target_keys": targets.iter().map(|slot| &slot.identity_key).collect::<Vec<_>>(),
         }).as_object().unwrap().clone();
         Ok(Some(typed_operation_resp(crate::proto::ContextOperationResult {

@@ -1,6 +1,6 @@
 {
   "id": "collab-send-message",
-  "wake_attempt_outcome_gate": "每次通知先按当前消息、订阅、逻辑 owner 和 current binding 判定既有 policy，再按声明的 delivery mode 编译为当前宿主支持的操作。发布锁忙或尚未到投递窗口属于 native I/O 前 deferred：消息保持 durable，不预留 wake attempt，不调用 native transport，响应中的 notification=queued 不改写持久 mode，也不代表接受或消费。普通 immediate 可由现有 timer 续投同一 virgin message；只有当前尝试明确未提交的持久证明或名称交接的既有专门路径可以继续。accepted 保存本 holder 的原尝试结果且不自动重放；unknown、部分提交或 receipt-unconfirmed 保留不确定状态，不自动重发原尝试；已消费复用真实消费状态；资格不符、取消或过期明确拒绝或结束该通知资格，不伪造消费。收件与稳定名字业务不读取宿主错误内容。",
+  "wake_attempt_outcome_gate": "通知 owner 根据当前消息、订阅和逻辑名字选择 current binding 和声明的 delivery mode。发布锁忙或投递窗口未到时消息保持 durable，未预留尝试或调用 adapter。timer 可续投普通 immediate 和当前宿主支持的 queued 原消息。已经尝试的消息只有最新明确未提交或既有名称交接政策允许续投。每条回执核对选中的 binding、generation 和本次尝试号。旧承载实际接受但归属已变时返回 stale-attempt-accepted，保留当前投递与消费状态。accepted、unknown、部分提交和 receipt-unconfirmed 不自动重发。取消或过期结束适用投递资格，已消费复用真实回执。收件和稳定名字不依赖宿主错误内容。",
   "version": "1.2.0",
   "description": "消息发送 SESE 图。任何两个注册对象均可通信，角色与项目级别不限制普通发送。精确名字地址及名字继承只从本次请求的 current identity map 解析，不读业务旧占名、label 或 previous。无行、坏表、缺绑定、真实认证与持久化错误分别返回。持久提交后通知与并发消费共用当前消息事实，入队、通知接受、消费和回信分别呈现。发送不授予任务或管理权限。",
   "inputs": [{"id": "send_request", "schema": "Object"}],

@@ -554,20 +554,19 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
     match state.delivery_modes.get(&message.id).map(String::as_str) {
         None => true,
         Some("queued") => {
-            state
+            let transport = state
                 .workers
                 .get(&message.to)
-                .and_then(super::selected_transport_for_worker)
-                .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Tmux)
-                && !state
-                    .notification_delivery_accepted
-                    .contains_key(&message.id)
-                && state
-                    .notification_delivery_failures
-                    .get(&message.id)
-                    .is_none_or(|failure| failure.retryable)
+                .and_then(super::selected_transport_for_worker);
+            transport.is_some_and(|transport| {
+                use crate::proto::TransportKind;
+                matches!(transport.kind, TransportKind::Tmux | TransportKind::AppServer | TransportKind::Dsh)
+                    && super::can_resume_notification(state, message)
+            })
         }
-        Some("immediate") => super::can_resume_notification(state, message),
+        Some("immediate" | super::mailbox::REGISTRATION_NOTIFICATION_MODE) => {
+            super::can_resume_notification(state, message)
+        }
         Some("explicit-notification") => {
             super::current_board_invitation_for_message(state, message).is_some()
                 && super::can_resume_notification(state, message)

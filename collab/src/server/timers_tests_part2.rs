@@ -2242,7 +2242,7 @@ use super::*;
 
         let first_id = "msg-batch-0";
         let delivered_text = std::sync::Mutex::new(String::new());
-        assert!(super::super::attempt_notification_with_default(
+        assert!(!super::super::attempt_notification_with_default(
             &server,
             first_id,
             &sub,

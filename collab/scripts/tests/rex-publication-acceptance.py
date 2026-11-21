@@ -188,6 +188,12 @@ trust_level = "trusted"
         replay = terminal_json(recv, "publication-receive-replay")
         assert not any(msg["id"] == message_id for msg in replay["messages"])
         assert len(native_turns()) == 1
+        worker_id = snapshot["identity"]["worker_id"]
+        status = terminal_json([collab, "worker", "status", worker_id], "publication-worker-status")
+        worker = next(row for row in status.get("workers", [status]) if row["id"] == worker_id)
+        facts = {key: worker.get(key) for key in ("identity_valid", "presence", "endpoint_live", "agent_state")}
+        assert facts["identity_valid"] and facts["presence"] == "present" and facts["endpoint_live"], facts
+        print(json.dumps({"status_after_native_receive": facts}), flush=True)
         print(json.dumps({"message_id": message_id, "exact_body": True, "native_turns": 1,
                           "consumed": True, "recv_replay": 0}), flush=True)
     finally:

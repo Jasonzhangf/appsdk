@@ -829,7 +829,10 @@ fn late_notification_acceptance_stays_with_original_holder_after_name_handoff() 
     server.commit_checked(&handoff).unwrap();
 
     release_tx.send(()).unwrap();
-    assert!(delivery.join().unwrap().accepted());
+    assert!(matches!(
+        delivery.join().unwrap(),
+        NotificationAttempt::StaleAccepted
+    ));
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs[message_id].to, new_worker);
     assert!(state.handoff_wake_pending(&state.msgs[message_id]));

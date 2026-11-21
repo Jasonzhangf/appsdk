@@ -27,6 +27,41 @@ fn local_upgrade_check_rejects_an_unreadable_identity_map_before_publication() {
 }
 
 #[test]
+fn local_check_rejects_malformed_legacy_identity_fields() {
+    let _test = test_guard();
+    let root = temp_root("local-malformed-legacy-map");
+    let project = create_project(&root);
+    let state = root.join("host-state");
+    let cli = copy_pair(&root);
+    retained_dsh_identity(&project, &state);
+    let path = state.join("identity-map.json");
+    let mut map: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    map["slots"][0]["current"]["registration_number"] = Value::String("17".into());
+    let wrong_type = serde_json::to_vec(&map).unwrap();
+    map["slots"][0]["current"]["registration_number"] = Value::from(17);
+    map["slots"][0].as_object_mut().unwrap().remove("display_slot");
+    let missing_field = serde_json::to_vec(&map).unwrap();
+
+    for (bytes, error) in [
+        (wrong_type, "expected u64"),
+        (missing_field, "missing field `display_slot`"),
+    ] {
+        std::fs::write(&path, &bytes).unwrap();
+        let output = run_check(&cli, &project, &state, true);
+        assert!(!output.status.success(), "{}", text(&output));
+        assert!(
+            text(&output).contains("IDENTITY_MAP_DECODE_FAILED"),
+            "{}",
+            text(&output)
+        );
+        assert!(text(&output).contains(error), "{}", text(&output));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!state.join("server.sock").exists());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn status_check_is_a_public_read_only_entry() {
     let _test = test_guard();
     let root = temp_root("public-entry");

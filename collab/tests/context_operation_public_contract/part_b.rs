@@ -1366,6 +1366,37 @@ fn identity_map_corruption_is_not_ignored_for_history_recovery() {
 }
 
 #[test]
+fn identity_map_legacy_registration_numbers_survive_daemon_startup() {
+    let (mut fixture, _host, identity) = lifecycle_native_fixture("legacy-registration-number");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let registered: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+
+    for generated_name in [false, true] {
+        fixture.stop_daemon();
+        let mut map = registered.clone();
+        let slot = map["slots"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|slot| slot["current"]["binding"]["agent_id"] == identity["worker_id"])
+            .unwrap();
+        if generated_name {
+            slot["identity_key"]["name"] = json!("peer-17");
+        }
+        slot["display_slot"] = Value::Null;
+        slot["current"]["registration_number"] = json!(17);
+        slot["previous"] = slot["current"].clone();
+        slot["previous"]["registration_number"] = json!(0);
+        slot["generation"] = json!(2);
+        let bytes = serde_json::to_vec_pretty(&map).unwrap();
+        fs::write(&map_path, &bytes).unwrap();
+
+        fixture.restart_daemon(); // Waits for a public Ping on the private socket.
+        assert_eq!(fs::read(&map_path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn daemon_startup_accepts_current_identity_without_transport_and_context_repairs_it() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("identity-map-current-without-transport");
@@ -5036,44 +5067,13 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
     );
     assert!(
         !output.status.success(),
-        "a typed scope requirement is not a completed mutation: {}",
+        "an online target still requires explicit takeover confirmation: {}",
         text(&output)
     );
-    let payload = json_stdout(&output);
-    assert_eq!(payload["ok"], false, "{payload}");
-    assert_eq!(
-        payload["result"]["outcome"], "scope_required",
-        "{payload}"
-    );
-    assert_eq!(
-        payload["result"]["phase"], "target_scope_resolution",
-        "{payload}"
-    );
-    assert_eq!(
-        payload["result"]["requires"]["kind"], "app_scope",
-        "{payload}"
-    );
-    assert_eq!(
-        payload["result"]["requires"]["sources"]["target_app_scope_id"], "appserver-cli",
-        "{payload}"
-    );
-    assert_eq!(
-        payload["result"]["requires"]["sources"]["requested_name"], "Alice",
-        "{payload}"
-    );
     assert!(
-        payload["result"]["requires"]["repair_invocation"]
-            .as_str()
-            .is_some_and(|invocation| invocation.contains("--app-scope appserver-cli")),
-        "{payload}"
-    );
-    assert_eq!(
-        payload["result"]["snapshot"]["registered"], false,
-        "target-scope resolution must not publish an ordinary identity: {payload}"
-    );
-    assert!(
-        payload["result"]["snapshot"]["identity"].is_null(),
-        "{payload}"
+        text(&output).contains("TMUX_NAME_ONLINE_CONFLICT"),
+        "{}",
+        text(&output)
     );
 
     assert_eq!(
@@ -5267,8 +5267,6 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
             "context",
             "--op",
             "cross-app-name-target-scope-takeover",
-            "--app-scope",
-            "appserver-cli",
             "--approve-grant",
             r#"{"action":"restore_name","requested_name":"Alice","authorization":"fixture cross-app source takeover","replace_confirmed":true}"#,
         ],
@@ -5413,10 +5411,10 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        takeover_proof["app_scope_id"], "appserver-cli",
-        "the corrected operation keeps its actual target scope: {takeover_proof}"
-    );
+    assert_eq!(takeover_proof["app_scope_id"], "appserver-cli");
+    let replay = fixture.context_query("cross-app-name-target-scope-takeover", Some(&other_pane));
+    assert_eq!(replay["result"]["outcome"], "completed", "{replay}");
+    assert_eq!(replay["result"]["snapshot"]["name"], "Alice", "{replay}");
 }
 
 #[test]

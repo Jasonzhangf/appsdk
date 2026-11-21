@@ -342,7 +342,7 @@ fn handle_workflow_template_set(
         }
         recipients.sort();
         for recipient in recipients {
-            let events = match relationship_notice_events(&state, &control, &route, &recipient,
+            let events = match relationship_notice_events(&state, &control, &route, &recipient, "explicit-notification",
                 "workflow-template-changed", format!("流程模板 {} 已{}。读取 collab context 获取当前模板。已接任务的归属、指定执行者、reviewer 和验收条件保持；只协调受影响的职责或交接。", plan.target, if plan.outcome == "reset" {"重置"} else {"更新"})) {
                 Ok(events) => events, Err(error) => return Resp::err(error),
             };

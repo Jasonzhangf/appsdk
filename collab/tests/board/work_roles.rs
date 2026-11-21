@@ -2344,6 +2344,112 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
 }
 
 #[test]
+fn waiting_assignment_rework_preserves_schedule_when_old_owner_is_retired() {
+    let mut fixture = f7_fixture();
+    publish(
+        &fixture,
+        "waiting-assignment-schedule",
+        &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
+    );
+    fixture.run_public(
+        &["board", "claim", "waiting-assignment-schedule", "--expected-revision", "1"],
+        THREAD_C,
+    );
+    fixture.run_public(
+        &["board", "start", "waiting-assignment-schedule", "--expected-revision", "2", "--attempt", "1"],
+        THREAD_C,
+    );
+    fixture.run_public(
+        &[
+            "task", "deliver", "waiting-assignment-schedule", "--no-candidate",
+            "--evidence", "first delivery before the stable owner retires", "--attempt", "1",
+        ],
+        THREAD_C,
+    );
+
+    let before_retire = fixture.current_state();
+    let subscription = f7_goal_subscriptions(&before_retire, "waiting-assignment-schedule")
+        .into_iter()
+        .next()
+        .expect("the delivered task has one linked schedule");
+    let subscription_id = subscription["id"].as_str().expect("linked schedule has an id");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let mut bob = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["identity_key"]["name"] == "Bob")
+        .expect("Bob has a current identity")
+        .clone();
+
+    fixture.run_public(
+        &[
+            "context", "--op", "waiting-assignment-retire-bob", "--approve-grant",
+            r#"{"action":"retire_name","requested_name":"Bob","authorization":"waiting assignment regression retires the old owner"}"#,
+        ],
+        THREAD_A,
+    );
+    let retired = fixture.current_state();
+    assert_eq!(
+        retired["notification_subscriptions"][subscription_id]["status"],
+        "waiting-owner",
+        "{retired}"
+    );
+
+    let reworked = fixture.run_public(
+        &[
+            "task", "review", "waiting-assignment-schedule", "--rework",
+            "--evidence", "reopen after the old owner retired",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(reworked["status"], "rework", "{reworked}");
+
+    let after = fixture.current_state();
+    let phase = after["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| {
+            phase["task_id"] == "waiting-assignment-schedule" && phase["phase"] == "execute"
+        })
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap_or_default())
+        .expect("rework leaves an execute phase");
+    assert_eq!(phase["status"], "waiting_assignment", "{after}");
+    assert!(phase["slot_name"].is_null(), "{after}");
+    assert_eq!(
+        after["notification_subscriptions"][subscription_id],
+        retired["notification_subscriptions"][subscription_id],
+        "waiting assignment must preserve the old schedule record"
+    );
+
+    // Load a supported retained identity with absent transport while the
+    // ticket still awaits assignment. Explicit goal editing uses its owner.
+    fixture.stop_daemon();
+    let bob_worker = bob["current"]["binding"]["agent_id"].as_str().unwrap().to_owned();
+    let mut retained_worker = before_retire["workers"][&bob_worker].clone();
+    retained_worker.as_object_mut().unwrap().remove("transport");
+    bob["current"].as_object_mut().unwrap().remove("transport");
+    let mut map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
+    let slots = map["slots"].as_array_mut().unwrap();
+    slots.retain(|slot| slot["identity_key"] != bob["identity_key"]);
+    slots.push(bob);
+    std::fs::write(&map_path, serde_json::to_vec_pretty(&map).unwrap()).unwrap();
+    fixture.update_current_state(|state| state["workers"][&bob_worker] = retained_worker);
+    let explicitly_edited = fixture.run_public(
+        &[
+            "goal", "reconcile", "--goal-id", "task:waiting-assignment-schedule", "--owner", "Bob",
+            "--desired", "active", "--operation", "edit", "--every-ms", "180000", "--repeat", "3",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(explicitly_edited["subscription"]["id"], subscription_id);
+    assert_eq!(explicitly_edited["subscription"]["interval_ms"], 180_000);
+    assert_eq!(explicitly_edited["subscription"]["repeat_count"], 3);
+}
+
+#[test]
 fn publish_admits_ticket_to_shortest_slot_queue_and_rotates_on_ties() {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);

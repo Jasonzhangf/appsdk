@@ -4810,6 +4810,44 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     assert_eq!(promoted_a["scope"]["project_scope"], project_scope);
     assert_eq!(promoted_a["scope"]["app_scope_id"], app_scope_id);
 
+    let existing_task = "jenny-before-replacement";
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            existing_task,
+            "--title",
+            "Existing Jenny work",
+            "--description",
+            "keep ownership on the same logical name",
+            "--delivery-condition",
+            "the successor resumes the original task",
+            "--test-condition",
+            "the original task is retained",
+            "--priority",
+            "p2",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &["board", "claim", existing_task, "--expected-revision", "1"],
+        THREAD_A,
+    );
+    let existing = fixture.run_public(&["task", "status", existing_task], THREAD_A);
+    assert_eq!(existing["owner"], worker_a, "{existing}");
+    let unopened = fixture.run_public(
+        &[
+            "sendmessage",
+            "--to",
+            "Jenny",
+            "--subject",
+            "before replacement",
+            "keep this original unread message",
+        ],
+        THREAD_B,
+    );
+    let unopened_id = unopened["msg_id"].as_str().unwrap();
+
     fixture.update_current_state(|state| {
         state["agent_presence"][project_scope.as_str()][worker_a.as_str()] = json!({
             "project_scope":project_scope, "worker_id":worker_a, "session_id":THREAD_A,
@@ -4832,6 +4870,17 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     assert_eq!(status["master"]["worker_id"], worker_b);
     assert_eq!(status["scope"]["project_scope"], project_scope);
     assert_eq!(status["scope"]["app_scope_id"], app_scope_id);
+    let continued = fixture.run_public(&["task", "status", existing_task], THREAD_B);
+    assert_eq!(continued["owner"], worker_b, "{continued}");
+    assert_eq!(continued["status"], existing["status"], "{continued}");
+    let retained = fixture.run_public(&["msg", unopened_id], THREAD_B);
+    assert_eq!(retained["id"], unopened_id, "{retained}");
+    assert_eq!(retained["to"], worker_b, "{retained}");
+    assert_eq!(
+        retained["body"], "keep this original unread message",
+        "{retained}"
+    );
+    assert_eq!(retained["consumed_by_recv"], false, "{retained}");
 
     // R6 does not create a companion. Only the old holder's next context
     // registers an ordinary peer that can publish new work.
@@ -4915,8 +4964,7 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     );
     assert_eq!(invited["task"]["status"], "invited");
 
-    // The replaced holder keeps its own peer row, task and mailbox while it
-    // loses only control authority.
+    // The former holder can create and use fresh work under its new peer name.
     fixture.run_public(
         &[
             "task",
@@ -4946,7 +4994,7 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
     let context_a = fixture.run_public(&["context"], THREAD_A);
     assert_eq!(
         context_a["identity"]["worker_id"], worker_a,
-        "replacement must preserve the replaced holder's peer identity: {context_a}"
+        "ordinary context must keep the new peer identity: {context_a}"
     );
     assert!(
         context_a["tasks"]
@@ -4954,7 +5002,7 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
             .expect("context lists tasks")
             .iter()
             .any(|task| task["id"] == "a-preserved-task"),
-        "replacement must preserve the replaced holder's task: {context_a}"
+        "ordinary context must show the new peer's task: {context_a}"
     );
     assert!(
         context_a["inbox"]["messages"]
@@ -4962,7 +5010,7 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
             .expect("context lists inbox messages")
             .iter()
             .any(|message| message["id"].as_str() == Some(preserved_message.as_str())),
-        "replacement must preserve the replaced holder's mailbox: {context_a}"
+        "ordinary context must show the new peer's mailbox: {context_a}"
     );
 
     // The AppServer delivery path still works after the authority change.
@@ -4977,8 +5025,76 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         ],
         THREAD_B,
     );
-    assert_eq!(sent["notification"], "appserver-input-submitted");
-    assert_eq!(sent["consumed"], false);
+    assert_eq!(sent["durable"], true, "{sent}");
+    assert_eq!(sent["consumed"], false, "{sent}");
+    assert!(
+        matches!(
+            sent["notification"].as_str(),
+            Some("queued" | "appserver-input-submitted")
+        ),
+        "{sent}"
+    );
+    let message_id = sent["msg_id"]
+        .as_str()
+        .expect("send names the durable message");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = fixture.run_public(&["msg", message_id], THREAD_B);
+        let inputs = fixture.state.lock().unwrap();
+        let submitted_to = |thread_id| {
+            inputs.get(thread_id).map_or(0, |thread| {
+                thread
+                    .inputs
+                    .iter()
+                    .filter(|input| native_input_has_message(input, message_id))
+                    .count()
+            })
+        };
+        let native_attempts = submitted_to(THREAD_A);
+        assert_eq!(submitted_to(THREAD_B), 0, "{sent}: {status}");
+        assert!(native_attempts <= 1, "{sent}: {status}");
+        drop(inputs);
+        assert_eq!(status["to"], worker_a, "{status}");
+        assert_eq!(status["consumed_by_recv"], false, "{status}");
+        assert!(
+            status["notification_delivery_failure"].is_null(),
+            "{status}"
+        );
+        if status["wake_transport_evidence"].is_object() && native_attempts == 1 {
+            assert_eq!(status["wake_attempts"], 1, "{status}");
+            eprintln!("replacement delivery: initial={sent}; accepted={status}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replacement delivery never reached the current thread: {sent}; {status}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let received = fixture.run_public(
+        &[
+            "recv",
+            "--timeout",
+            "0",
+            "--receive-id",
+            "replacement-final-read",
+        ],
+        THREAD_A,
+    );
+    let messages = received["messages"].as_array().expect("inbox messages");
+    assert!(
+        messages.iter().any(|message| {
+            message["id"] == message_id
+                && message["from"] == worker_b
+                && message["subject"] == "after replacement"
+                && message["body"] == "deliver to the replaced peer"
+        }),
+        "{received}"
+    );
+    let consumed = fixture.run_public(&["msg", message_id], THREAD_B);
+    assert_eq!(consumed["consumed_by_recv"], true, "{consumed}");
+    assert_eq!(consumed["wake_attempts"], 1, "{consumed}");
 
     drop(fixture);
 }

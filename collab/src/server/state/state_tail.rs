@@ -97,6 +97,10 @@ pub struct State {
     pub delivery_source_threads: HashMap<String, String>,
     pub notification_subscriptions: HashMap<String, NotificationSubscription>,
     pub wake_bindings: HashMap<String, String>,
+    /// Occurrence identity for newly issued explicit periodic goal deadlines.
+    /// Keyed by message id so ACK and retention can decide exact-once
+    /// consumption without relying on retained message history.
+    pub notification_occurrences: HashMap<String, NotificationOccurrence>,
     /// Project-mirrored global CEO grant. `CeoGrantSet` is the only writer;
     /// `None` revokes the grant and never touches bootstrap history.
     pub ceo_grant: Option<crate::ceo::CeoGrant>,

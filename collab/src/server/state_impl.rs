@@ -963,6 +963,20 @@ impl State {
             } => {
                 self.consume_notification(subscription_id, Some(*consumed_ms));
             }
+            Event::NotificationOccurrenceIssued {
+                message_id,
+                subscription_id,
+                trigger_ms,
+            } => {
+                self.notification_occurrences.insert(
+                    message_id.clone(),
+                    NotificationOccurrence {
+                        subscription_id: subscription_id.clone(),
+                        trigger_ms: *trigger_ms,
+                        consumed_ms: None,
+                    },
+                );
+            }
             Event::WakeBound {
                 message_id,
                 subscription_id,
@@ -1010,6 +1024,10 @@ impl State {
             }
             Event::Acked { ids, consumed_ms } => {
                 for id in ids {
+                    let message_was_unread = self
+                        .msgs
+                        .get(id)
+                        .is_some_and(|message| message.state != "read");
                     if let Some(m) = self.msgs.get_mut(id) {
                         m.state = "read".into();
                     }
@@ -1025,6 +1043,28 @@ impl State {
                         || !subscription.trigger_times_ms.is_empty()
                         || subscription.interval_ms.is_some();
                     if !consumes_on_read {
+                        continue;
+                    }
+                    if let Some(consumed) = consume_marked_periodic_goal(
+                        subscription,
+                        self.notification_occurrences.get(id),
+                        message_was_unread,
+                        *consumed_ms,
+                    ) {
+                        if matches!(
+                            consumed.status,
+                            SubscriptionConsumptionStatus::Unchanged
+                        ) {
+                            continue;
+                        }
+                        let read_time =
+                            subscription_read_time(subscription, self.msgs.get(id), *consumed_ms);
+                        self.consume_notification(&subscription_id, read_time);
+                        if let Some(occurrence) =
+                            self.notification_occurrences.get_mut(id)
+                        {
+                            occurrence.consumed_ms = *consumed_ms;
+                        }
                         continue;
                     }
                     let fired_count = subscription.fired_count;
@@ -1527,6 +1567,7 @@ impl State {
         self.delivery_modes.remove(id);
         self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
+        self.notification_occurrences.remove(id);
         self.channel_envelopes.remove(id);
         self.platform_event_index
             .retain(|_, target| target.local_message_id() != Some(id));

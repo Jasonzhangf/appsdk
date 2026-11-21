@@ -156,6 +156,21 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
     assert_eq!(value["submission_queued"], true);
     assert_eq!(value["consumed"], false);
     let calls = env.calls();
+    assert_eq!(
+        calls.iter().map(method).collect::<Vec<_>>(),
+        [
+            "server.status",
+            "com.superlogical.terminal.write",
+            "send-key"
+        ]
+    );
+    let write_ns = calls[1]["monotonic_ns"].as_u64().unwrap();
+    let enter_ns = calls[2]["monotonic_ns"].as_u64().unwrap();
+    assert!(
+        Duration::from_nanos(enter_ns - write_ns) >= Duration::from_millis(100),
+        "Enter arrived only {} ms after the text write",
+        (enter_ns - write_ns) / 1_000_000
+    );
     let writes: Vec<&Value> = calls
         .iter()
         .filter(|call| method(call) == "com.superlogical.terminal.write")
@@ -191,6 +206,16 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
         .as_slice(),
         "Enter must target the selected session and block"
     );
+}
+
+#[tokio::test]
+async fn notify_deadline_during_settle_skips_enter() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::new("normal");
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+    let error = send_enter_until(&endpoint(), deadline).await.unwrap_err();
+    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+    assert!(env.calls().is_empty());
 }
 
 #[tokio::test]

@@ -35,6 +35,7 @@ pub const NATIVE_REJECTION_CODES: [&str; 7] = [
 ];
 
 const DEFAULT_TIMEOUT_SECS: f64 = 10.0;
+const ENTER_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
 /// True only for the proven-before-write service generation failure.
 ///
@@ -1182,6 +1183,15 @@ async fn write_text_until(
 }
 
 async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
+    // Rex has queued the text, but the foreground TUI may still be processing it.
+    tokio::time::sleep_until(deadline.min(Instant::now() + ENTER_SETTLE_DELAY)).await;
+    if Instant::now() >= deadline {
+        return Err(RexError::unknown(
+            "send_enter",
+            RexInputStage::BeforeWrite,
+            "Rex operation deadline elapsed while waiting to submit the queued text",
+        ));
+    }
     let call = run_cli(
         "send_enter",
         Path::new(&official_cli_path()),

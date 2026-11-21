@@ -1,6 +1,8 @@
 use super::*;
 use crate::proto::RexEndpoint;
-use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
+use crate::server::state::{
+    Event, NotificationSubscription, ReceiveReceipt, State, WorkerRec,
+};
 use serde_json::Value;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
@@ -876,6 +878,246 @@ fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
         assert!(state.notification_delivery_accepted.contains_key(id));
     }
     drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn periodic_deadline_advances_after_prior_read_is_pruned() {
+    let (mut server, root) = test_server();
+    let direct_message = register_and_subscribe(&server, "recipient");
+    let subscription = format!("storm-{direct_message}");
+    let now = now_ms();
+    let interval = 60_000;
+    let second_trigger = now + interval;
+    let third_trigger = second_trigger + interval;
+    let expires_ms = now + 86_400_000;
+    {
+        let mut state = server.state.lock().unwrap();
+        let direct = state
+            .notification_subscriptions
+            .get(&direct_message)
+            .cloned()
+            .unwrap();
+        let sub = NotificationSubscription {
+            id: subscription.clone(),
+            event: "deadline".into(),
+            subject: Some("goal:task:storm".into()),
+            trigger_ms: Some(now),
+            trigger_times_ms: Vec::new(),
+            interval_ms: Some(interval),
+            repeat_count: 100,
+            expires_ms,
+            periodic_declared: true,
+            ..direct
+        };
+        state.notification_subscriptions.insert(sub.id.clone(), sub);
+    }
+    timers::tick_with_idle_at(&server, now, &|_| false);
+    let first_id = {
+        let state = server.state.lock().unwrap();
+        state
+            .wake_bindings
+            .iter()
+            .find_map(|(id, bound)| {
+                (bound == &subscription
+                    && state.notification_occurrences.get(id).is_some_and(|occurrence| {
+                        occurrence.trigger_ms == now
+                    }))
+                .then(|| id.clone())
+            })
+            .expect("the first occurrence is issued with an occurrence marker")
+    };
+    server.commit(&[Event::ReceiveCommitted {
+        receipt: ReceiveReceipt {
+            receive_id: "recv-first".into(),
+            worker_id: "recipient".into(),
+            route_scope: None,
+            message_ids: vec![first_id.clone()],
+            received_ms: now + 1,
+        },
+        ids: vec![first_id.clone()],
+    }]);
+    server.commit(&[Event::ReceiveCommitted {
+        receipt: ReceiveReceipt {
+            receive_id: "recv-first".into(),
+            worker_id: "recipient".into(),
+            route_scope: None,
+            message_ids: vec![first_id.clone()],
+            received_ms: now + 1,
+        },
+        ids: vec![first_id.clone()],
+    }]);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.notification_subscriptions[&subscription].fired_count, 1);
+        assert_eq!(
+            state.notification_subscriptions[&subscription].trigger_ms,
+            Some(second_trigger)
+        );
+    }
+
+    let config = &mut Arc::get_mut(&mut server).unwrap().config;
+    config.retention.ttl_days = 0;
+    timers::tick_with_idle_at(&server, second_trigger, &|_| false);
+    let second_id = {
+        let state = server.state.lock().unwrap();
+        let id = state
+            .wake_bindings
+            .iter()
+            .find_map(|(id, bound)| {
+                (bound == &subscription
+                    && state.notification_occurrences.get(id).is_some_and(|occurrence| {
+                        occurrence.trigger_ms == second_trigger
+                    }))
+                .then(|| id.clone())
+            })
+            .expect("the next periodic occurrence remains valid");
+        assert_eq!(state.notification_subscriptions[&subscription].fired_count, 1);
+        assert!(
+            !state.msgs.contains_key(&first_id),
+            "the old read occurrence must be removed by the real retention owner"
+        );
+        id
+    };
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .config
+        .retention
+        .ttl_days = 7;
+    {
+        let reloaded = current_state::load(&server.state_path, false).unwrap();
+        assert_eq!(
+            reloaded.notification_occurrences[&second_id].trigger_ms,
+            second_trigger
+        );
+        *server.state.lock().unwrap() = reloaded;
+    }
+    server.commit(&[Event::Acked {
+        ids: vec![second_id.clone()],
+        consumed_ms: Some(second_trigger + 1),
+    }]);
+    server.commit(&[Event::Acked {
+        ids: vec![second_id.clone()],
+        consumed_ms: Some(second_trigger + 2),
+    }]);
+    timers::tick_with_idle_at(&server, third_trigger - 1, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.notification_subscriptions[&subscription].fired_count, 2);
+        assert_eq!(
+            state.notification_subscriptions[&subscription].trigger_ms,
+            Some(third_trigger)
+        );
+        assert_eq!(
+            state.notification_subscriptions[&subscription].expires_ms,
+            expires_ms
+        );
+        assert_eq!(
+            state
+                .notification_occurrences
+                .values()
+                .filter(|occurrence| occurrence.subscription_id == subscription)
+                .count(),
+            1,
+            "a third occurrence must wait for its own deadline: {:?}",
+            state.notification_subscriptions[&subscription]
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn periodic_deadline_consumption_survives_exact_retention_cutoff() {
+    let (mut server, root) = test_server();
+    let direct_message = register_and_subscribe(&server, "recipient");
+    let now = now_ms();
+    let interval = 86_400_000;
+    let second_trigger = now + interval;
+    let third_trigger = second_trigger + interval;
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .config
+        .retention
+        .ttl_days = 1;
+    let assert_consumed_marker = |server: &Arc<Server>, trigger: i64, expected: bool| {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state
+                .notification_occurrences
+                .values()
+                .any(|occurrence| {
+                    occurrence.subscription_id == "storm-retention-condition"
+                        && occurrence.trigger_ms == trigger
+                }),
+            expected
+        );
+    };
+    let subscription = {
+        let state = server.state.lock().unwrap();
+        let direct = state
+            .notification_subscriptions
+            .get(&direct_message)
+            .cloned()
+            .unwrap();
+        NotificationSubscription {
+            id: "storm-retention-condition".into(),
+            event: "deadline".into(),
+            subject: Some("goal:retention:condition".into()),
+            trigger_ms: Some(now),
+            trigger_times_ms: Vec::new(),
+            interval_ms: Some(interval),
+            repeat_count: 100,
+            expires_ms: now + 2 * 86_400_000,
+            periodic_declared: true,
+            ..direct
+        }
+    };
+    server.commit(&[Event::NotificationSubscribed { subscription }]);
+
+    for (trigger, received_ms) in [(now, now + 1), (second_trigger, second_trigger + 1)] {
+        timers::tick_with_idle_at(&server, trigger, &|_| false);
+        let message_id = {
+            let state = server.state.lock().unwrap();
+            state
+                .wake_bindings
+                .iter()
+                .find_map(|(id, bound)| {
+                    (bound == "storm-retention-condition"
+                        && state.notification_occurrences[id].trigger_ms == trigger)
+                        .then(|| id.clone())
+                })
+        }
+            .expect("the due timer issues one marked occurrence");
+        assert_eq!(
+            server.state.lock().unwrap().notification_subscriptions
+                ["storm-retention-condition"]
+                .trigger_ms,
+            Some(trigger)
+        );
+        server.commit(&[Event::Acked {
+            ids: vec![message_id],
+            consumed_ms: Some(received_ms),
+        }]);
+        assert_consumed_marker(&server, trigger, true);
+    }
+    let next_after_late_receive = server.state.lock().unwrap().notification_subscriptions
+        ["storm-retention-condition"]
+        .trigger_ms;
+    assert_eq!(next_after_late_receive, Some(third_trigger));
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.notification_subscriptions["storm-retention-condition"].fired_count,
+        2
+    );
+    assert_eq!(
+        state
+            .notification_occurrences
+            .values()
+            .filter(|occurrence| occurrence.subscription_id == "storm-retention-condition")
+            .count(),
+        1,
+        "retention must remove the first consumed occurrence marker"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

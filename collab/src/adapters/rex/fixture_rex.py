@@ -110,6 +110,7 @@ def record(serial: int, argv: list[str], stdin: str) -> None:
     rex_env = sorted(key for key in os.environ if key.startswith("REX_"))
     entry = {
         "serial": serial,
+        "monotonic_ns": time.monotonic_ns(),
         "pid": os.getpid(),
         "argv": argv,
         "stdin": stdin,

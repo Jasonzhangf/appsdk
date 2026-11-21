@@ -1063,9 +1063,8 @@ fn ack_consuming_one_shot_or_counted_subscription_stays_allowed() {
 
 #[test]
 fn ack_read_count_at_or_below_fired_count_does_not_reactivate_retired_subscription() {
-    // After acknowledging the one unread message, the durable read count is
-    // `read_count + 1`. Keep it at the cursor (`fired_count`) so the reducer
-    // and preflight agree that no new read occurrence needs consuming.
+    // Retained history can be below the lifetime cursor. An unmarked legacy
+    // record stays retired instead of inferring a new occurrence from count.
     for (fired_count, read_count) in [(2, 1), (1, 0)] {
         let (server, root) = fence_server();
         let mut events = vec![
@@ -1118,6 +1117,55 @@ fn ack_read_count_at_or_below_fired_count_does_not_reactivate_retired_subscripti
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[test]
+fn ack_marked_occurrence_below_retained_read_count_cannot_reactivate_retired_subscription() {
+    let (server, root) = fence_server();
+    let trigger_ms = 10;
+    let mut goal = repeating_subscription(TARGET, "sub-retired", "expired", 2, 3);
+    goal.event = "deadline".into();
+    goal.subject = Some("goal:retired".into());
+    goal.trigger_ms = Some(trigger_ms);
+    goal.periodic_declared = true;
+    server
+        .commit_checked(&[
+            Event::NotificationSubscribed { subscription: goal },
+            Event::NotificationOccurrenceIssued {
+                message_id: "msg-unread".into(),
+                subscription_id: "sub-retired".into(),
+                trigger_ms,
+            },
+            Event::Sent {
+                msg: delivery_message(TARGET, "msg-unread", "delivered"),
+            },
+            Event::WakeBound {
+                message_id: "msg-unread".into(),
+                subscription_id: "sub-retired".into(),
+            },
+            fence_with_snapshot(&server, TARGET, "close-op"),
+        ])
+        .unwrap();
+
+    server
+        .commit_checked(&[Event::Acked {
+            ids: vec!["msg-unread".into()],
+            consumed_ms: Some(trigger_ms + 1),
+        }])
+        .unwrap();
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.notification_subscriptions["sub-retired"].status,
+        "expired"
+    );
+    assert_eq!(
+        state.notification_subscriptions["sub-retired"].fired_count,
+        2
+    );
+    assert!(state.notification_occurrences["msg-unread"]
+        .consumed_ms
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

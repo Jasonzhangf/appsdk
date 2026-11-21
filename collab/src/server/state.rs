@@ -251,6 +251,14 @@ pub struct NotificationSubscription {
     pub goal_content: Option<GoalScheduleBinding>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationOccurrence {
+    pub subscription_id: String,
+    pub trigger_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_ms: Option<i64>,
+}
+
 pub fn default_repeat_count() -> u32 {
     1
 }
@@ -641,6 +649,35 @@ struct SubscriptionConsumption {
     status: SubscriptionConsumptionStatus,
 }
 
+fn consume_marked_periodic_goal(
+    subscription: &NotificationSubscription,
+    occurrence: Option<&NotificationOccurrence>,
+    message_was_unread: bool,
+    consumed_ms: Option<i64>,
+) -> Option<SubscriptionConsumption> {
+    if !is_goal_deadline(subscription) || !subscription.periodic_declared {
+        return None;
+    }
+    let occurrence = occurrence?;
+    let current_occurrence = goal_deadline_key(subscription)
+        .is_some_and(|(_, _, trigger)| trigger == occurrence.trigger_ms);
+    if subscription.status != "armed"
+        || !message_was_unread
+        || occurrence.subscription_id != subscription.id
+        || occurrence.consumed_ms.is_some()
+        || !current_occurrence
+    {
+        return Some(SubscriptionConsumption {
+            fired_count: subscription.fired_count,
+            status: SubscriptionConsumptionStatus::Unchanged,
+        });
+    }
+    Some(consume_subscription_for_preflight(
+        subscription,
+        consumed_ms,
+    ))
+}
+
 /// A retired runtime binding carries no live native thread or tmux pane, so it
 /// is an exact control-plane retirement record rather than a new
 /// responsibility. The session id is intentionally not required to be absent:
@@ -843,6 +880,7 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
             }
             Some(_) | None => ResponsibilityEffect::Safe,
         },
+        Event::NotificationOccurrenceIssued { .. } => ResponsibilityEffect::Safe,
         Event::Acked { .. } | Event::ReceiveCommitted { .. } => ResponsibilityEffect::Safe,
         // CEO coordination records are control-plane state; they never add or
         // change business task responsibility.
@@ -920,6 +958,7 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
     let mut simulated_msgs = st.msgs.clone();
     let mut simulated_subscriptions = st.notification_subscriptions.clone();
     let mut simulated_wake_bindings = st.wake_bindings.clone();
+    let mut simulated_occurrences = st.notification_occurrences.clone();
     for event in evs {
         match event {
             Event::ResponsibilityFenceSet { fence } => {
@@ -973,6 +1012,20 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
             } => {
                 simulated_wake_bindings.insert(message_id.clone(), subscription_id.clone());
             }
+            Event::NotificationOccurrenceIssued {
+                message_id,
+                subscription_id,
+                trigger_ms,
+            } => {
+                simulated_occurrences.insert(
+                    message_id.clone(),
+                    NotificationOccurrence {
+                        subscription_id: subscription_id.clone(),
+                        trigger_ms: *trigger_ms,
+                        consumed_ms: None,
+                    },
+                );
+            }
             Event::Delivered { ids } => {
                 for id in ids {
                     if let Some(message) = simulated_msgs.get_mut(id) {
@@ -989,6 +1042,9 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     _ => None,
                 };
                 for id in ids {
+                    let message_was_unread = simulated_msgs
+                        .get(id)
+                        .is_some_and(|message| message.state != "read");
                     if let Some(message) = simulated_msgs.get_mut(id) {
                         message.state = "read".into();
                     }
@@ -1004,6 +1060,35 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                         || !subscription.trigger_times_ms.is_empty()
                         || subscription.interval_ms.is_some();
                     if !consumes_on_read {
+                        continue;
+                    }
+                    if let Some(consumed) = consume_marked_periodic_goal(
+                        &subscription,
+                        simulated_occurrences.get(id),
+                        message_was_unread,
+                        read_ms,
+                    ) {
+                        if !matches!(
+                            consumed.status,
+                            SubscriptionConsumptionStatus::Unchanged
+                        ) {
+                            if let Some(subscription) =
+                                simulated_subscriptions.get_mut(&subscription_id)
+                            {
+                                subscription.fired_count = consumed.fired_count;
+                                subscription.status = match consumed.status {
+                                    SubscriptionConsumptionStatus::Unchanged => {
+                                        subscription.status.clone()
+                                    }
+                                    SubscriptionConsumptionStatus::Consumed => "consumed".into(),
+                                    SubscriptionConsumptionStatus::Armed => "armed".into(),
+                                    SubscriptionConsumptionStatus::Expired => "expired".into(),
+                                };
+                            }
+                            if let Some(occurrence) = simulated_occurrences.get_mut(id) {
+                                occurrence.consumed_ms = read_ms;
+                            }
+                        }
                         continue;
                     }
                     let read_count = simulated_wake_bindings
@@ -1620,6 +1705,13 @@ pub enum Event {
         subscription_id: String,
         message_id: String,
         consumed_ms: i64,
+    },
+    /// One explicit periodic goal occurrence issued with its Sent and WakeBound
+    /// events. The marker survives message-body retention.
+    NotificationOccurrenceIssued {
+        message_id: String,
+        subscription_id: String,
+        trigger_ms: i64,
     },
     WakeBound {
         message_id: String,

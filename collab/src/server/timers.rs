@@ -463,6 +463,13 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                     subscription_id: subscription.id.clone(),
                 },
             ]);
+            if is_goal_deadline(subscription) && subscription.periodic_declared {
+                due_events.push(Event::NotificationOccurrenceIssued {
+                    message_id,
+                    subscription_id: subscription.id.clone(),
+                    trigger_ms: next_trigger.expect("due subscription has a trigger"),
+                });
+            }
         }
         // A due batch must land in the same guard that derived it. Goal
         // reconciliation takes this same lock, so an ended or replaced

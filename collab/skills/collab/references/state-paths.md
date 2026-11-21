@@ -22,7 +22,7 @@ log.txt
 - `identities/` 保存表内已选定 principal 的精确凭据。不扫描旧凭据选身份。
 - 每个项目/app 的 `state.json` 保存最新任务、描述、证据、消息及消费状态、
   当前关系与有效授权。变更直接更新当前文件；重启直接读取，不保存变更历史。
-- `server.sock`、`daemon.lock` 和 `server.pid` 归全局用户管理的 daemon。
+- `server.sock`、`daemon.lock` 和 `server.pid` 归全局 daemon。
   不手改、不删除锁、不启动第二个 daemon。
 - `service-record.json` 声明正式监督服务的根目录。安装与激活是不同动作。
 - `log.txt` 只供诊断，不参与身份、任务或投递决策。
@@ -66,8 +66,8 @@ collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"..."
 
 ## 维护边界
 
-安装只写产品与 Skill，不代表运行中的 daemon 已更新。daemon 关闭、启动由用户
-通过正式维护入口执行。Collab 不拥有 tmux 生命周期；任何安装、恢复或状态交接
+安装只写产品与 Skill，不代表运行中的 daemon 已更新。agent 按需通过正式服务入口
+启动和维护 daemon。Collab 不拥有 tmux 生命周期；任何安装、恢复或状态交接
 都不关闭 tmux server、不重启 tmux，也不终止宿主 pane。
 
 当前项目 master 可用 `collab reset --project` 清除此项目的当前数据。

@@ -1060,7 +1060,7 @@ fn current_lookup_does_not_match_same_tmux_session_id_on_a_different_socket() {
 }
 
 #[test]
-fn current_lookup_keeps_same_tmux_session_id_on_the_same_socket() {
+fn current_lookup_keeps_only_the_same_tmux_server_instance_and_session() {
     let alice = key("alice");
     let mut control = BindingControlSet::new();
     control
@@ -1077,7 +1077,7 @@ fn current_lookup_keeps_same_tmux_session_id_on_the_same_socket() {
             None,
         )
         .unwrap();
-    let facts = IdentityFacts {
+    let mut facts = IdentityFacts {
         tmux: Some(crate::proto::TmuxCandidate {
             endpoint: crate::proto::TmuxEndpoint {
                 socket_path: "/tmp/tmux-a.sock".into(),
@@ -1093,10 +1093,17 @@ fn current_lookup_keeps_same_tmux_session_id_on_the_same_socket() {
         ..Default::default()
     };
 
+    assert!(control
+        .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
+        .unwrap()
+        .is_none());
+    let saved = control.slot(&alice).unwrap().active_binding().unwrap();
+    facts.tmux.as_mut().unwrap().endpoint.server_pid =
+        saved.binding.tmux_endpoint.as_ref().unwrap().server_pid;
     let selected = control
         .lookup(&alice.project_scope, &alice.app_scope_id, &facts, None)
         .unwrap()
-        .expect("the same socket and tmux session preserve the identity anchor");
+        .expect("the same live tmux server and session preserve the identity anchor");
     assert_eq!(selected.identity_key, alice);
 }
 

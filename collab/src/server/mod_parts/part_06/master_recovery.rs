@@ -293,7 +293,7 @@ fn communication_recovery_brief() -> serde_json::Value {
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
             "Run `collab context` and inspect the named route, identity, daemon, task, and inbox state.",
-            "If context returns requires_identity_update, supply only its required_fields once through `collab context --provide '<JSON>'`; the daemon owns identity recovery and binding updates.",
+            "If context returns missing host facts, preserve the exact fields and sources for the corresponding host maintainer. Rerun `collab context` in the same session when the capability is ready.",
             "If context fails, preserve the exact error and report through a healthy peer or the human. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
         ],
         "close_only_when": [

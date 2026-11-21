@@ -370,6 +370,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.collab == 'true'
     runs-on: ubuntu-latest
+    env:
+      COLLAB_TEST_ITERM2_ATTACHMENT: fixture
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -378,7 +380,7 @@ jobs:
         run: |
           set -euo pipefail
           artifact_log="$RUNNER_TEMP/collab-cargo-artifacts.jsonl"
-          cargo build --manifest-path collab/Cargo.toml --locked \
+          cargo build --manifest-path collab/Cargo.toml --locked --features lifecycle-test-hooks \
             --bin collab --bin collab-mcp --message-format=json \
             | tee "$artifact_log"
           python3 - "$artifact_log" <<'PY'
@@ -413,7 +415,7 @@ jobs:
           PY
       - name: Build AppSDK public consumer binary
         run: cargo build --manifest-path rust/Cargo.toml --locked --bin appsdk
-      - run: cargo test --manifest-path collab/Cargo.toml --locked -- --test-threads=1
+      - run: cargo test --manifest-path collab/Cargo.toml --locked --features lifecycle-test-hooks -- --test-threads=1
       - name: Desktop bridge MCP consumer
         run: node --test collab/scripts/tests/desktop-bridge.test.mjs collab/scripts/tests/desktop-runtime.test.mjs
 

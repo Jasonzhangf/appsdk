@@ -830,7 +830,7 @@ fn design_graph_operator_names() -> [&'static str; 275] {
         "appsdk.collab_subscription.classify_transition",
         "appsdk.collab_subscription.commit_state",
         "appsdk.collab_subscription.emit_result",
-        "appsdk.collab_subscription.select_transport",
+        "appsdk.collab_subscription.read_owner",
         "appsdk.collab_task.classify_accepted_delivery",
         "appsdk.collab_task.close",
         "appsdk.collab_task.record_terminal_disposition",

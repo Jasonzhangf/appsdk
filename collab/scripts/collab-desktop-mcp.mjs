@@ -32,14 +32,35 @@ function controlDirectory(target){
 function callSocket(target,request,timeout=TIMEOUT_MS){return new Promise((resolve,reject)=>{const s=net.createConnection(target);let done=false;const finish=(e,r)=>{if(done)return;done=true;clearTimeout(timer);s.destroy();e?reject(e):resolve(r);};const timer=setTimeout(()=>finish(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: service timeout')),timeout);s.on('error',e=>finish(e));s.on('close',()=>finish(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: service closed')));s.on('connect',()=>s.write(encoded(request)));readNative(s,r=>finish(null,r),e=>finish(e));});}
 function localCall(request){return callSocket(socketPath,request);}
 async function publisherLive(endpoint){try{const r=await callSocket(endpoint.slice('unix://'.length),{id:randomUUID(),op:'ping'},1000);return r?.ok===true;}catch{return false;}}
-async function ensureService(){
+let startingService;
+function ensureService(){
+  startingService??=startService().finally(()=>{startingService=undefined;});
+  return startingService;
+}
+async function startService(){
   if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED: current host pipe missing');requireSystemVolume(stateRoot);controlDirectory(runtimeDir);
   const ping=async()=>{const r=await localCall({id:randomUUID(),op:'ping'});if(!r.ok||r.runtime_key!==runtimeKey)throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: runtime');return r;};
   try{return await ping();}catch(e){if(!['ENOENT','ECONNREFUSED'].includes(e.code))throw e;}
   const log=fs.openSync(path.join(runtimeDir,`pipe-${runtimeKey}.log`),'a',0o600);
-  const child=spawn(process.execPath,[script,'--service'],{detached:true,stdio:['ignore',log,log],env:process.env});fs.closeSync(log);let failure;child.on('error',e=>{failure=e;});child.unref();
-  const end=Date.now()+TIMEOUT_MS;while(Date.now()<end){if(failure)throw failure;try{return await ping();}catch(e){if(!['ENOENT','ECONNREFUSED'].includes(e.code))throw e;}await new Promise(r=>setTimeout(r,40));}
-  throw Error('DESKTOP_BRIDGE_UNAVAILABLE: runtime service startup failed');
+  const child=spawn(process.execPath,[script,'--service'],{detached:true,stdio:['ignore',log,log,'ipc'],env:process.env});
+  fs.closeSync(log);
+  let failure;
+  child.on('error',error=>{failure=error;});
+  child.on('message',receipt=>{
+    if(typeof receipt?.startupError==='string')failure=Error(receipt.startupError);
+  });
+  child.unref();
+  try{
+    const end=Date.now()+TIMEOUT_MS;
+    while(Date.now()<end){
+      try{return await ping();}catch(error){if(!['ENOENT','ECONNREFUSED'].includes(error.code))throw error;}
+      if(failure)throw failure;
+      await new Promise(resolve=>setTimeout(resolve,40));
+    }
+    throw failure??Error('DESKTOP_BRIDGE_UNAVAILABLE: runtime service startup failed');
+  }finally{
+    if(child.connected)child.disconnect();
+  }
 }
 async function admit(facts){await ensureService();const r=await localCall({...facts,id:randomUUID(),op:'admit'});if(!r.ok)throw Error(typeof r.error==='string'?r.error:JSON.stringify(r.error));return r.desktop_bridge;}
 async function runService(){
@@ -51,7 +72,7 @@ async function runService(){
   const servicesDir=()=>controlDirectory(path.join(runtimeDir,'services'));
   const scopeDir=(b,cwd)=>{let dir=path.join(runtimeDir,'capabilities','v1');for(const [label,value] of [['cwd',cwd],['session',b.session],['thread',b.thread]])dir=path.join(dir,label,...Buffer.from(value).toString('hex').match(/.{1,120}/g));return controlDirectory(dir);};
   function stop(code){if(stopping)return;stopping=true;for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: host closed'));}pending.clear();for(const s of clients)s.destroy();listener?.close();upstream?.destroy();if(ownedSocket){try{const s=fs.lstatSync(socketPath);if(s.ino===ownedSocket.ino&&s.dev===ownedSocket.dev)fs.unlinkSync(socketPath);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}if(runtimeDescriptor){try{if(JSON.parse(fs.readFileSync(runtimeDescriptor,'utf8')).publisher_id===publicationId)fs.unlinkSync(runtimeDescriptor);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}for(const p of publications){try{fs.unlinkSync(p);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}process.exitCode=code;}
-  function hostCall(method,params){if(hostFailure||stopping)return Promise.reject(hostFailure||Error('DESKTOP_BRIDGE_UNAVAILABLE'));const id=`bridge-${++sequence}`;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: host response timeout'));},TIMEOUT_MS);pending.set(id,{resolve,reject,timer});upstream.write(encoded({jsonrpc:'2.0',id,method,params}));});}
+  function hostCall(method,params){if(hostFailure||stopping)return Promise.reject(hostFailure||Error('DESKTOP_BRIDGE_UNAVAILABLE'));const id=++sequence;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: host response timeout'));},TIMEOUT_MS);pending.set(id,{resolve,reject,timer});upstream.write(encoded({jsonrpc:'2.0',id,method,params}));});}
   function nativeCall(b,name,args){const tool=tools.get(name);if(!tool)throw Error(`DESKTOP_BRIDGE_TOOL_UNAVAILABLE: ${name}`);return hostCall('tools/call',{arguments:args,callerSource:'codex',callId:`collab-${randomUUID()}`,namespace:tool.namespace,threadId:b.thread,turnId:`collab-service-correlate-${randomUUID()}`,tool:name});}
   async function verify(b,expected){const r=await nativeCall(b,'read_thread',{threadId:b.thread,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:1});if(r.error)throw Error(JSON.stringify(r.error));if(r.result?.success!==true)throw Error('DESKTOP_BRIDGE_NATIVE_REJECTED: admission');const item=r.result.contentItems?.find(i=>i.type==='inputText'&&typeof i.text==='string'),v=item?JSON.parse(item.text):undefined;if(v?.thread?.id!==b.thread||typeof v.thread.cwd!=='string')throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: native thread/project');const cwd=fs.realpathSync(v.thread.cwd);if(expected!==undefined&&cwd!==fs.realpathSync(expected))throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: native project differs');return cwd;}
   function publish(b,cwd){
@@ -75,8 +96,11 @@ async function runService(){
     if(r.op==='admit'){if(typeof r.cwd!=='string'||!path.isAbsolute(r.cwd))throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED: cwd');return {id:r.id,ok:true,desktop_bridge:await enroll({session:r.session_id,thread:r.thread_id},r.cwd,true)};}
     const b=bindings.get(key(r.session_id,r.thread_id));if(!b)throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: target is not enrolled');if(r.op==='send'&&typeof r.text!=='string')throw Error('DESKTOP_BRIDGE_INVALID_TEXT');const v=await nativeCall(b,r.op==='probe'?'read_thread':'send_message_to_thread',r.op==='probe'?{threadId:b.thread,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:100}:{threadId:b.thread,prompt:r.text});if(v.error)return {id:r.id,ok:false,error:v.error};return {id:r.id,ok:v.result?.success===true,session_id:b.session,thread_id:b.thread,native:v.result,...(v.result?.success===true?{}:{error:'DESKTOP_BRIDGE_NATIVE_REJECTED'})};
   }
-  upstream=net.createConnection(pipe);readNative(upstream,r=>{const p=pending.get(String(r.id));if(p){pending.delete(String(r.id));clearTimeout(p.timer);p.resolve(r);}},e=>{hostFailure=e;stop(1);});upstream.on('error',e=>{hostFailure=e;});upstream.on('close',()=>stop(0));await new Promise((resolve,reject)=>{upstream.once('connect',resolve);upstream.once('error',reject);});
-  const r=await hostCall('tools/list',{threadStartKind:'all'});if(r.error||!Array.isArray(r.result?.tools))throw Error('DESKTOP_BRIDGE_INVALID_CAPABILITIES');tools=new Map(r.result.tools.filter(t=>typeof t.name==='string'&&typeof t.namespace==='string').map(t=>[t.name,t]));for(const n of ['read_thread','send_message_to_thread'])if(!tools.has(n))throw Error(`DESKTOP_BRIDGE_TOOL_UNAVAILABLE: ${n}`);
+  upstream=net.createConnection(pipe);readNative(upstream,r=>{const id=Number(r.id),p=pending.get(id);if(p){pending.delete(id);clearTimeout(p.timer);p.resolve(r);}},e=>{hostFailure=e;stop(1);});upstream.on('error',e=>{hostFailure=e;});upstream.on('close',()=>stop(0));await new Promise((resolve,reject)=>{upstream.once('connect',resolve);upstream.once('error',reject);});
+  let r;
+  try{r=await hostCall('tools/list',{threadStartKind:'all'});}
+  catch(error){throw Error(`DESKTOP_BRIDGE_HANDSHAKE_FAILED: tools/list: ${error.message}`);}
+  if(r.error||!Array.isArray(r.result?.tools))throw Error('DESKTOP_BRIDGE_INVALID_CAPABILITIES');tools=new Map(r.result.tools.filter(t=>typeof t.name==='string'&&typeof t.namespace==='string').map(t=>[t.name,t]));for(const n of ['read_thread','send_message_to_thread'])if(!tools.has(n))throw Error(`DESKTOP_BRIDGE_TOOL_UNAVAILABLE: ${n}`);
   listener=net.createServer(s=>{clients.add(s);s.on('error',()=>{});s.on('close',()=>clients.delete(s));readNative(s,r=>{void handle(r).then(v=>{if(!s.destroyed)s.write(encoded(v));},e=>{if(!s.destroyed)s.write(encoded({id:r?.id??null,ok:false,error:e.message}));});},()=>s.destroy());});
   const listen=()=>new Promise((resolve,reject)=>{const error=e=>{listener.off('listening',ready);reject(e);},ready=()=>{listener.off('error',error);resolve();};listener.once('error',error);listener.once('listening',ready);listener.listen(socketPath);});
   try{await listen();}catch(e){if(e.code!=='EADDRINUSE')throw e;const prior=fs.lstatSync(socketPath);try{const active=await localCall({id:randomUUID(),op:'ping'});if(active.ok&&active.runtime_key===runtimeKey){stop(0);return;}throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH');}catch(error){if(error.code!=='ECONNREFUSED')throw error;const now=fs.lstatSync(socketPath);if(now.ino!==prior.ino||now.dev!==prior.dev)throw Error('DESKTOP_BRIDGE_UNAVAILABLE: socket owner changed');fs.unlinkSync(socketPath);await listen();}}
@@ -99,11 +123,19 @@ function runMcp(){
   const mcpBin=process.env.COLLAB_MCP_BIN||path.join(path.dirname(script),'collab-mcp');
   const child=spawn(mcpBin,[],{stdio:['pipe','pipe','pipe']});let stopping=false;
   const stop=code=>{if(stopping)return;stopping=true;child.stdin.end();const timer=setTimeout(()=>child.kill('SIGTERM'),1000);child.once('close',()=>{clearTimeout(timer);process.exit(code);});if(child.exitCode!==null||child.signalCode!==null){clearTimeout(timer);process.exit(code);}};
-  const ready=desktop?ensureService():Promise.resolve();ready.catch(()=>{});
+  if(desktop)void ensureService().catch(()=>{/* The next admission can start a new handshake. */});
   async function forward(body,kind){let r;try{r=JSON.parse(body);}catch{child.stdin.write(mcpFrame(body,kind));return;}if(!(desktop&&r.method==='tools/call'&&r.params?.name==='collab_context'&&r.params.arguments?.query!==true)){child.stdin.write(mcpFrame(body,kind));return;}const original=body.toString(),span=idSpan(original),rawId=span?original.slice(span.start,span.end):undefined;
-    try{const thread=executorThread(r.params._meta);if(!thread)throw Error('DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing');await ready;const args=r.params.arguments??{},facts=args.provide===undefined?{}:typeof args.provide==='string'?JSON.parse(args.provide):args.provide;if(!facts||typeof facts!=='object'||Array.isArray(facts))throw Error('DESKTOP_BRIDGE_INVALID_FACTS');if(['caller','caller_thread_id','caller_turn_id','turn_id'].some(k=>k in facts))throw Error('DESKTOP_BRIDGE_INVALID_FACTS: caller context is executor-owned');const session=stringValue(facts,['session_id'])||stringValue(process.env,['CODEX_SESSION_ID']);if(!session)throw Error('DESKTOP_BRIDGE_SESSION_REQUIRED: current agent session_id');facts.desktop_bridge=await admit({session_id:session,thread_id:thread,cwd:args.project_scope||process.cwd()});facts.session_id=session;facts.thread_id=thread;delete facts.endpoint;delete facts.namespace;r.params.arguments={...args,provide:JSON.stringify(facts)};}catch(e){process.stdout.write(rewrittenFrame({jsonrpc:'2.0',id:r.id,result:{content:[{type:'text',text:e.message}],isError:true}},kind,rawId));return;}child.stdin.write(rewrittenFrame(r,kind,rawId));
+    try{const thread=executorThread(r.params._meta);if(!thread)throw Error('DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing');const args=r.params.arguments??{},facts=args.provide===undefined?{}:typeof args.provide==='string'?JSON.parse(args.provide):args.provide;if(!facts||typeof facts!=='object'||Array.isArray(facts))throw Error('DESKTOP_BRIDGE_INVALID_FACTS');if(['caller','caller_thread_id','caller_turn_id','turn_id'].some(k=>k in facts))throw Error('DESKTOP_BRIDGE_INVALID_FACTS: caller context is executor-owned');const session=stringValue(facts,['session_id'])||stringValue(process.env,['CODEX_SESSION_ID']);if(!session)throw Error('DESKTOP_BRIDGE_SESSION_REQUIRED: current agent session_id');facts.desktop_bridge=await admit({session_id:session,thread_id:thread,cwd:args.project_scope||process.cwd()});facts.session_id=session;facts.thread_id=thread;delete facts.endpoint;delete facts.namespace;r.params.arguments={...args,provide:JSON.stringify(facts)};}catch(e){process.stdout.write(rewrittenFrame({jsonrpc:'2.0',id:r.id,result:{content:[{type:'text',text:e.message}],isError:true}},kind,rawId));return;}child.stdin.write(rewrittenFrame(r,kind,rawId));
   }
   let input=Buffer.alloc(0),queue=Promise.resolve();process.stdin.on('data',c=>{input=Buffer.concat([input,c]);try{while(input.length){let body,kind='line';if(input.subarray(0,15).toString().toLowerCase().startsWith('content-length:')){const end=input.indexOf('\r\n\r\n');if(end<0)return;const m=/^Content-Length:\s*(\d+)\r?$/im.exec(input.subarray(0,end).toString());if(!m)throw Error('invalid MCP frame');const n=Number(m[1]);if(n>MAX_FRAME)throw Error('MCP frame too large');if(input.length<end+4+n)return;body=input.subarray(end+4,end+4+n);input=input.subarray(end+4+n);kind='header';}else{const end=input.indexOf('\n');if(end<0){if(input.length>MAX_FRAME)throw Error('MCP frame too large');return;}body=input.subarray(0,end);input=input.subarray(end+1);if(body.length>MAX_FRAME)throw Error('MCP frame too large');if(!body.toString().trim())continue;}queue=queue.then(()=>forward(body,kind)).catch(e=>{process.stderr.write(e.message+'\n');stop(1);});}}catch(e){process.stderr.write(e.message+'\n');stop(1);}});
   child.stdout.pipe(process.stdout);child.stderr.pipe(process.stderr);child.on('error',e=>{process.stderr.write(e.message+'\n');stop(1);});child.on('close',()=>{if(!stopping)stop(child.exitCode??1);});process.stdin.on('end',()=>void queue.finally(()=>stop(0)));process.on('SIGTERM',()=>stop(0));process.on('SIGINT',()=>stop(0));
 }
-try{if(process.argv[2]==='--service')await runService();else if(process.argv[2]==='--admit')process.stdout.write(JSON.stringify(await admit(JSON.parse(process.argv[3])))+'\n');else runMcp();}catch(e){process.stderr.write(e.message+'\n');process.exit(1);}
+const serviceMode=process.argv[2]==='--service';
+try{if(serviceMode)await runService();else if(process.argv[2]==='--admit')process.stdout.write(JSON.stringify(await admit(JSON.parse(process.argv[3])))+'\n');else runMcp();}
+catch(error){
+  if(serviceMode&&process.connected){
+    await new Promise(resolve=>process.send({startupError:error.message},resolve));
+  }
+  process.stderr.write(error.message+'\n');
+  process.exit(1);
+}

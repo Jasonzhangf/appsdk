@@ -193,6 +193,29 @@ impl ProjectRuntimeManager {
             Err(error) => return (self.host.clone(), Resp::err(format!("{error:#}"))),
         };
         if !response.ok {
+            if let Some(error) = response.error.as_deref().and_then(|error| {
+                error.strip_prefix("CONTROL_COMMITTED_EFFECTS_PENDING: ")
+                    .and_then(|error| error.strip_prefix(PHYSICAL_ANCHOR_PENDING))
+            }) {
+                let (runtime, mut readback) = self.current_mapped_context(&context, &request);
+                let result = &mut readback.data["result"];
+                if result.is_object() && result["snapshot"]["registered"] == true {
+                    result["invocation"] = json!(request.invocation);
+                    result["outcome"] = json!("incomplete");
+                    result["phase"] = json!("physical_anchor");
+                    result["failed_phase"] = json!("physical_anchor");
+                    result["committed_phases"] = json!(["current", "business_effects"]);
+                    result["requires"]["kind"] = json!("physical_anchor");
+                    result["requires"]["repair_invocation"] = json!("collab context");
+                    result["owner_readback"]["physical_anchor"]["error"] = json!(error);
+                    readback.ok = false;
+                    readback.error = Some(error.into());
+                    return (runtime, readback);
+                }
+            }
+            if let Some(data) = response.data.as_object_mut() {
+                data.remove("command");
+            }
             return (runtime, response);
         }
         if response.data["identity_receipt"].is_null() {
@@ -841,6 +864,11 @@ impl ProjectRuntimeManager {
             &target,
         );
         let previous = map.slot(&key).and_then(|slot| slot.active_binding());
+        verify_tmux_replacement(
+            previous,
+            &value,
+            intent.as_ref().is_some_and(|intent| intent.user_authorized && intent.replace_confirmed),
+        )?;
         if intent.as_ref().is_some_and(|intent| intent.user_authorized) {
             if let Some(previous) = previous {
                 value.replace_rex_holder(previous)?;
@@ -909,26 +937,17 @@ impl ProjectRuntimeManager {
             pane_anchor: pane,
             created_ms: now_ms(),
         };
-        let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker);
         drop(state);
-        let rename = rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master)?;
-        let physical = rename.readback(value.physical_name.clone());
-        let committed = match self.commit_control_change_locked(
+        let committed = self.commit_control_change_locked(
             super::binding_store::ControlChange::MoveNameWithEffect {
                 target: key,
-                value,
+                value: value.clone(),
                 source_names: effect.source_names.clone(),
                 expected_generation: None,
                 effect: effect.clone(),
                 companion: None,
             },
-        ) {
-            Ok(committed) => committed,
-            Err(error) => return Err(match rename.rollback() {
-                Ok(_) => error,
-                Err(rollback) => format!("{error}; TMUX_SESSION_RENAME_ROLLBACK_FAILED: {rollback}"),
-            }),
-        };
+        )?;
         if committed.durability == super::binding_store::Durability::Unknown {
             return Err(
                 "BINDING_CONTROL_DURABILITY_UNKNOWN: map published; effects remain pending".into(),
@@ -937,6 +956,7 @@ impl ProjectRuntimeManager {
         let published = self.binding_control_store().load()?;
         self.recover_pending_effect_locked(&published, &effect)
             .map_err(|error| format!("CONTROL_COMMITTED_EFFECTS_PENDING: {error}"))?;
+        let physical = physical_anchor_projection(&value, &target);
         Ok(
             json!({"outcome":"committed","name":target,"session_id":session,
                 "physical_anchor":physical,"effects":{"grant_committed":role.is_some()}}),

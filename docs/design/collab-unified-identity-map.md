@@ -12,6 +12,12 @@
 
 ## 宿主绑定
 
+### tmux 的当前接入口和直接换绑
+
+`req-collab-tmux-current-pane-binding` 定义 tmux 的准入和可投递性。通过官方当前 iTerm2 pane ID、client TTY 与实际 tmux server/session 核实承载。新 session 缺 pane 时无名字、无角色改名、无投递路由。已登记 session 缺 pane 时离线，保留名字与业务。此前无 iTerm2 的底层 tmux 能力验收只证明适配器能力。
+
+合法同名新 session 可立即接替缺当前 pane 的旧 session。daemon 在唯一 current 写入口替换名字指向的 session ID，同时失效旧身份权限和路由。逻辑名字继续承载任务、角色、订阅和未消费消息。再按精确 ID 把旧会话改为数字显示名，把新会话改成角色显示名，并分别读回。改名中断只续作剩余效果。当前在线旧端依现有明确授权接替。上述 tmux 条款对下方原有绑定流程补充了 pane 准入和改名时序。
+
 | 宿主 | 当前事实 | 写入与恢复绑定 | tmux改名 |
 |---|---|---|---|
 | Codex TUI | 真实Codex sessionID、daemon观察到的当前tmux端点 | 映射中的固定project/tab/slot与当前载体；已登记sessionID可在同文件反查 | 是 |
@@ -22,12 +28,12 @@
 
 第一次注册写表。sessionID、端点、名字或角色变化时，由唯一writer提交当前绑定。只读query只返回已持久结果，不补注册、不迁移、不重放。
 
-tmux物理显示名由唯一可靠manifest中的 `tab_id`、`pane_order` 和逻辑名字组成。
-位置来自真实布局。无可靠位置时保留当前物理标签，普通池序号和 `peer-n` 数字只用于
-逻辑名字分配。tmux内Jenny/master使用项目固定位置1。Rex绑定当前block，session名
+tmux 有唯一固定布局时，物理显示名由 manifest 中的 `tab_id`、`pane_order` 和逻辑名字组成。
+没有唯一固定布局时，显示名使用 `<tmux session 编号>_<Collab 名字>`。编号来自当前 tmux
+server，支持多个项目在同一 server 上各自登记同名角色。tmux内Jenny/master使用项目固定位置1。Rex绑定当前block，session名
 使用项目cwd末级目录，peer的身份、角色或任务变化在当前block上完成。
 
-iTerm2只负责显示。它的manifest用`tab_id + pane_order`排列和对应pane，不能解析可变session名。Collab保存已登记的固定位置；恢复不读取外部manifest，也不从iTerm当前布局决定身份。Desktop和DSH不为兼容此表虚构tmux位置。
+iTerm2 提供当前 pane 和 TTY 的接入证据。布局 manifest 的 `tab_id + pane_order` 用于固定物理位置和显示名。项目名字与授权仍从 Collab 当前关系读取。Desktop 和 DSH 各自通过其原生宿主事实选取当前绑定。
 
 profile在注册/显式重绑时从真实tmux端点反查runtime启动参数，记录实际值；不要求Codex自报，不按模型猜测，不保存整条可能含敏感数据的命令行。没有profile不增加恢复准入门禁。
 

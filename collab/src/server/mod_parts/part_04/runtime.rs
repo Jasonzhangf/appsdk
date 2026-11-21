@@ -1359,6 +1359,7 @@ impl ProjectRuntimeManager {
             &runtime,
             context.as_ref(),
             &mut response,
+            false,
         );
         if workspace_reset && response.ok {
             if let Err(error)=self.reconcile_ceo_workspace_reset(context.as_ref()) {

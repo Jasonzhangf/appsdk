@@ -16,12 +16,15 @@ function capabilityPath(state,cwd,session='agent-session',thread='real-thread'){
 }
 function encode(value){const body=Buffer.from(JSON.stringify(value));const head=Buffer.alloc(4);head.writeUInt32LE(body.length);return Buffer.concat([head,body]);}
 function decode(stream,fn){let bytes=Buffer.alloc(0);stream.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);while(bytes.length>=4){const n=bytes.readUInt32LE(0);assert.ok(n<=8*1024*1024);if(bytes.length<n+4)return;const v=JSON.parse(bytes.subarray(4,n+4));bytes=bytes.subarray(n+4);fn(v);}});}
-async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex Desktop',stateRoot,nativeCwd,hostPipe}={}){
+async function fixture(t,{host=true,legacy=false,launcher=false,origin='Codex Desktop',stateRoot,nativeCwd,hostPipe,allowHandshake=()=>true}={}){
   const root=await fs.mkdtemp('/tmp/cdb-');
   const calls=[];const connections=new Set();
   const server=net.createServer(stream=>{connections.add(stream);stream.on('close',()=>connections.delete(stream));decode(stream,req=>{
     calls.push(req);
-    if(req.method==='tools/list')stream.write(encode({id:req.id,result:{tools:[{name:'read_thread',namespace:'codex_app'},{name:'send_message_to_thread',namespace:'codex_app'}]}}));
+    if(req.method==='tools/list'){
+      if(allowHandshake())stream.write(encode({id:req.id,result:{tools:[{name:'read_thread',namespace:'codex_app'},{name:'send_message_to_thread',namespace:'codex_app'}]}}));
+      else stream.destroy();
+    }
     else if(req.params.tool==='read_thread')stream.write(encode({id:req.id,result:{success:true,contentItems:[{type:'inputText',text:JSON.stringify({schemaVersion:1,thread:{id:'real-thread',cwd:nativeCwd??root,status:{type:'idle'}},turns:[{id:'old-turn',status:'completed'}]})}]}}));
     else if(req.params.arguments.prompt==='DISCONNECT')stream.destroy();
     else if(req.params.arguments.prompt==='RPCERROR')stream.write(encode({id:req.id,error:{code:-32003,message:'native scope denied'}}));
@@ -243,6 +246,22 @@ test('missing executor metadata cannot enroll a target; absent host remains a pl
   assert.equal((await plain.facts()).desktop_bridge,undefined);
   const tui=await fixture(t,{origin:'Codex CLI'});
   await tui.context();assert.equal((await tui.facts()).desktop_bridge,undefined);
+});
+
+test('the same MCP wrapper can enroll after an initial native handshake failure',async t=>{
+  let available=false;
+  const f=await fixture(t,{allowHandshake:()=>available});
+  const failure=await f.context();
+  assert.equal(failure.result?.isError,true);
+  assert.match(failure.result.content[0].text,/DESKTOP_BRIDGE_HANDSHAKE_FAILED/);
+  await assert.rejects(f.facts(),{code:'ENOENT'});
+  available=true;
+  const restored=await f.context();
+  assert.notEqual(restored.result?.isError,true,JSON.stringify(restored));
+  const {desktop_bridge:bridge}=await f.facts();
+  assert.equal(bridge.thread_id,'real-thread');
+  assert.equal(f.calls.filter(r=>r.params?.tool==='send_message_to_thread').length,0);
+  await f.stopService(bridge);
 });
 
 test('host disconnect after a send never becomes success and ends the owned service',async t=>{

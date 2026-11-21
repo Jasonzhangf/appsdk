@@ -240,6 +240,12 @@ fn default_tmux_notification_sink() -> Arc<TmuxNotificationSink> {
             let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
                 "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
             })?;
+            if crate::client::adapters::tmux::iterm2_panes_for_endpoint(endpoint)
+                .map_err(|error| format!("ADAPTER_ROUTE_UNAVAILABLE: {error}"))?
+                .is_empty()
+            {
+                return Err(format!("{} the current tmux session has no iTerm2 pane", crate::client::adapters::tmux::DELIVERY_NOT_ATTACHED));
+            }
             crate::client::adapters::tmux::notify(endpoint, message_id, body)
         },
     )
@@ -500,8 +506,9 @@ enum NotificationDeliveryError {
 #[derive(Debug)]
 pub(crate) enum NotificationAttempt {
     Accepted,
+    ReceiptUnconfirmed(String),
     Consumed,
-    Deferred,
+    Deferred(Option<String>),
     NotAttempted(String),
     Rejected(String),
 }

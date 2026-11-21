@@ -121,7 +121,7 @@ pub struct State {
     pub federation: crate::server::federation::FederationStore,
 }
 
-fn has_current_master_grant(state: &State, worker_id: &str, target: &str) -> bool {
+fn has_current_master_grant(state: &State, worker_id: &str) -> bool {
     state.global.projects.values().any(|project| {
         project.master_grants.values().any(|grant| {
             grant.agent_id.as_str() == worker_id
@@ -138,13 +138,7 @@ fn has_current_master_grant(state: &State, worker_id: &str, target: &str) -> boo
                         },
                         &grant.binding_id,
                     )
-                    .is_some_and(|binding| {
-                        binding.agent_id == grant.agent_id
-                            && binding
-                                .native_thread_id
-                                .as_ref()
-                                .is_some_and(|thread_id| thread_id.as_str() == target)
-                    })
+                    .is_some_and(|binding| binding.agent_id == grant.agent_id)
         })
     })
 }
@@ -155,7 +149,7 @@ fn subscription_affects_master_wake(
 ) -> bool {
     matches!(subscription.event.as_str(), "deadline" | "master-idle")
         && (state.master_worker_id.as_deref() == Some(subscription.worker_id.as_str())
-            || has_current_master_grant(state, &subscription.worker_id, &subscription.target))
+            || has_current_master_grant(state, &subscription.worker_id))
 }
 
 #[path = "../state_impl.rs"]

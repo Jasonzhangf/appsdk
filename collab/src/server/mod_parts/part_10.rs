@@ -595,6 +595,20 @@ fn worker_status_summary_with_maps(
         }));
     };
 
+    // Current control owns delivery facts; the worker cache cannot restore a
+    // channel which the retained identity no longer has.
+    let mut current_worker = w.clone();
+    let route = {
+        let state = server.state.lock().unwrap();
+        server_route_scope(server, &state)?
+    };
+    if let Some(route) = route.as_ref() {
+        if let Some(current) = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &w.id)?
+            .and_then(|slot| slot.active_binding()) {
+            current_worker.transport = current.transport.clone();
+        }
+    }
+    let w = &current_worker;
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
@@ -631,7 +645,16 @@ fn worker_status_summary_with_maps(
     let status = if !identity_valid {
         "identity-mismatch"
     } else if endpoint_live == Some(false) {
-        "lost"
+        if w.transport.as_ref().and_then(|transport| transport.tmux_endpoint.as_ref()).is_some_and(|endpoint| {
+            matches!(
+                crate::client::adapters::tmux::probe(endpoint),
+                Ok(crate::client::adapters::tmux::PanePresence::Present)
+            )
+        }) {
+            "offline"
+        } else {
+            "lost"
+        }
     } else if agent_state == "unknown" {
         "unknown"
     } else if suspected_offline {

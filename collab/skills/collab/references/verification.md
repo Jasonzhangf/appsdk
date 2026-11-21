@@ -12,9 +12,9 @@ build version, installed versions and canonical command paths. Refresh the Skill
 exact `$CARGO_HOME/bin/collab` binary, not a bare command that may resolve an
 older PATH entry. Remove only legacy copies whose ownership is established, then
 validate the affected current behavior: do not
-migrate or replay old local control-plane history. The global daemon is managed
-by the user. Agents do not operate its lifecycle or request maintenance credentials.
-Installation and live activation are separate results. After user activation,
+migrate or replay old local control-plane history. Follow the
+[daemon recovery procedure](../operations.md#全局-daemon-与默认身份恢复) for authorized service maintenance.
+Installation and live activation are separate results. After service activation,
 verify the affected installed entry and live behavior. MCP initialization is
 needed only for an affected MCP surface, not every installation or recovery.
 
@@ -77,5 +77,5 @@ Review the complete milestone at the host contract's integration boundary after
 applicable author checks and public-entry evidence pass. Findings need affected
 verification and finding review; unchanged valid evidence is reused. Integration
 and cleanup follow the delivery owner. Install and replay only when that surface
-is in scope, after user-managed activation where needed. Source, installation
+is in scope, after service activation where needed. Source, installation
 and live results remain separate.

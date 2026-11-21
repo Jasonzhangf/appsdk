@@ -1,4 +1,4 @@
-# Current Identity and User-Managed Daemon Boundary
+# Current Identity and Daemon Boundary
 
 ## Context uses the current identity map
 
@@ -63,11 +63,9 @@ Use the formal installer from the reviewed current source:
 scripts/install-global-collab.sh
 ```
 
-Obtain the user's approval for this installation before writing global runtime
-artifacts. Earlier approvals do not cover another installation. After approval,
-check for and handle the installer's blocking confirmation window. Do not leave
-it waiting unattended or bypass a denied action. Installation approval does not
-authorize an agent to activate or replace the running daemon.
+Use the authorization for the current target and action. The installer publishes
+the binaries and Skill. The service manager activates the daemon. A production
+rollback requires specific authorization.
 
 It builds and installs Collab and refreshes the embedded Skill. It does not
 activate the new global daemon or discard durable state. Verify the installed
@@ -164,14 +162,9 @@ needs no follow-up ACK. `collab inbox` and `collab msg <id>` only inspect.
 A reply uses `collab sendmessage` to the original sender when authorized.
 Queue acceptance, actual arrival, consumption and reply are separate evidence.
 
-Collab has one global user-managed daemon. Agents never start, stop, restart or
-kill it, request maintenance credentials, or create a second global runtime.
-User maintenance commands and credentials are outside the agent interface.
-When the service is unavailable, preserve durable state and report that fact.
-Project state read failure must not disable authenticated user maintenance: its
-credential check and shutdown path belong to the host, independently of the
-project state owner. Agents report the failure and do not edit control files or acquire
-maintenance authority to compensate.
+Collab has one global daemon. Agents start and maintain it through the existing
+service manager when needed, preserving durable state and using no second runtime.
+Do not edit control files or use broad process termination to repair it.
 AppSDK/Collab maintenance never requires tmux server lifecycle operations or
 termination of the host pane.
 

@@ -1,4 +1,32 @@
 use super::*;
+
+#[test]
+fn takeover_preserves_terminal_task_history() {
+    let fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    for status in ["closed", "cancelled"] {
+        fixture.run_public(&["task", "register", status, "--next", "original"], THREAD_B);
+        if status == "closed" {
+            fixture.run_public(&["task", "close", status, "--force", "--reason", "fixture cleanup"], THREAD_B);
+        } else {
+            fixture.run_public(&["task", "update", status, "--status", status], THREAD_B);
+        }
+    }
+    fixture.run_public(
+        &["context", "--approve-grant", r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture user authorizes Bob takeover"}"#],
+        THREAD_A,
+    );
+    for status in ["closed", "cancelled"] {
+        let before = fixture.run_public(&["task", "status", status], THREAD_A);
+        assert_eq!(before["status"], status);
+        let update = fixture.command_public(&["task", "update", status, "--next", "late edit"], THREAD_A);
+        assert!(!update.status.success());
+        assert!(String::from_utf8_lossy(&update.stderr).contains("TASK_TERMINAL"));
+        assert_eq!(fixture.run_public(&["task", "status", status], THREAD_A), before);
+    }
+}
+
 fn assignment_ownership(state: &Value) -> std::collections::BTreeMap<String, [Value; 4]> {
     // TaskAssignment ownership is stable across name_stewardship::tick_locked.
     // That independent producer may update reflow and updated_ms. The scheduler-free
@@ -182,4 +210,18 @@ fn task_status_follows_assignment_name_after_takeover() {
         assignment_ownership(&after_second_query),
         assignment_ownership(&before_second_query)
     );
+
+    let update = [
+        "task",
+        "update",
+        "target-bob-work",
+        "--next",
+        "resumed by Bob",
+    ];
+    assert!(!fixture.command_public(&update, THREAD_C).status.success());
+    let receipt = fixture.run_public(&update, THREAD_A);
+    assert_eq!(receipt["owner"], target["owner"], "{receipt}");
+    let resumed = fixture.run_public(&["task", "status", "target-bob-work"], THREAD_A);
+    assert_eq!(resumed["next_step"], "resumed by Bob");
+    assert_eq!(resumed["owner_session_id"], THREAD_A);
 }

@@ -2560,19 +2560,25 @@ fn task_update_locked(
             decision_reason,
         );
     }
-    let is_master = board_check_master_locked(server, st, &worker_id).is_ok();
-    if task.owner != worker_id && !is_master {
-        return Resp::err("only the task owner may update its lifecycle");
-    }
-    if task.owner == worker_id {
-        if let Err(error) =
-            task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
-        {
-            return error;
+    let owner_is_actor = match task_owner_gate_maybe_with_control(
+        server, st, control, &task_id, &worker_id,
+    ) {
+        Ok(()) => true,
+        Err(error) if task.owner == worker_id => return error,
+        Err(error) => {
+            if !error.error.as_deref().is_some_and(|reason| reason.starts_with("TASK_OWNER_REQUIRED:")) {
+                return error;
+            }
+            if board_check_master_locked(server, st, &worker_id).is_err() {
+                return Resp::err("only the task owner may update its lifecycle");
+            }
+            false
         }
+    };
+    if matches!(task.status.as_str(), "closed" | "cancelled") {
+        return Resp::err("TASK_TERMINAL: completed task history cannot be updated");
     }
     let original_status = task.status.clone();
-    let owner_is_actor = task.owner == worker_id;
     if owner_is_actor
         && status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed"))
     {
@@ -2704,7 +2710,7 @@ fn task_update_locked(
     Resp::data(json!({
         "task": task.id,
         "status": task.status,
-        "owner": task.owner,
+        "owner": if owner_is_actor { &worker_id } else { &task.owner },
         "notification": "none",
         "next_action": task.next_step,
     }))

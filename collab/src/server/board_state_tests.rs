@@ -983,7 +983,29 @@ fn task_view_with_identity_follows_current_name_and_preserves_closed_history() {
     let closed = task_view_with_identity(&state, &control, Some(&route), &closed).unwrap();
     assert_eq!(closed["owner"], "old");
     assert_eq!(closed["owner_session_id"], "session-old");
+    let old_token = state.workers["old"].token.clone();
+    let current_token = state.workers["current"].token.clone();
     drop(state);
+    let update = |actor: &str, token: String| {
+        handle_task_update(
+            &server,
+            actor.into(),
+            token,
+            "named-work".into(),
+            None,
+            Some("resume audit".into()),
+        )
+    };
+    assert!(!update("old", old_token).ok);
+    let updated = update("current", current_token);
+    assert!(updated.ok, "{:?}", updated.error);
+    assert_eq!(updated.data["owner"], "current");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["named-work"]
+            .next_step
+            .as_deref(),
+        Some("resume audit")
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

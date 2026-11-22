@@ -41,6 +41,9 @@ specialties 模板卡只含 target、source、base_version、revision；master �
 `execution_phase.status` 和 `execution_phase.attempt`。阶段和权限来自实时回执。
 `next_contract` 按当前 board 事实提供合同路径，路径相对 Collab Skill 根目录。
 负责人确认未按合同推进时，即使回执仍为 `execute`，也按下表先取证。
+这张图是合同路由和项目记忆的语义源。DAGPipe 验证拓扑。Collab runtime 读取图内
+合同引用，并根据权威 board 状态提供下一合同。身份、开工、阻塞和审查仍由对应的
+Collab 命令与原有门禁执行。
 
 | 当前事实 | 由谁执行并交给谁 | 合同与进入下一步的证据 |
 | --- | --- | --- |

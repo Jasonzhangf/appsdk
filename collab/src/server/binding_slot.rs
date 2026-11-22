@@ -1497,7 +1497,9 @@ impl BindingControlSet {
         loop {
             let name = format!("peer-{number}");
             if !self.slots.iter().any(|slot| {
-                &slot.identity_key.project_scope == project && slot.identity_key.name == name
+                &slot.identity_key.project_scope == project
+                    && slot.identity_key.name == name
+                    && slot.active_binding().is_some()
             }) {
                 return Ok(name);
             }

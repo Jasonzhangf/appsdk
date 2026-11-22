@@ -35,7 +35,11 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 ### 首次注册与缺项提示
 
 在要加入的项目目录、当前 agent 自己的会话中运行 `collab context`。
-CLI 从当前宿主收集事实。看到 `missing_facts` 时，保留回执的
+在 Rex 中，直接用该 agent 自己当前会话的执行工具，在原有 block 获取或恢复身份。
+禁止为身份命令 split 或新建 pane、tab、窗口，也禁止借用其他 block 或会话执行。
+tmux、Rex、DSH 和 Codex Desktop 使用同一个入口，由各宿主适配器收集本会话的事实。
+Rex 适配器读取当前会话的 `REX_SESSION` 和 `REX_BLOCK`，调用官方 Rex CLI 解析并核验
+当前端点后完成绑定。看到 `missing_facts` 时，保留回执的
 `result.requires.fields` 和 `result.requires.sources`，由所列来源的维护者补齐能力。
 普通注册继续使用同一条命令。成功时核对返回的
 `registered: true` 和自己的名字。各宿主的字段和取值入口见[注册手册](operations.md#宿主注册所需信息)。
@@ -108,9 +112,8 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 同操作修改意图会返回 conflict。不确定结果不能换操作号盲发。
 显式恢复操作号当前用于远端发送。
 
-在当前 Rex block 运行 `collab context`。命令从当前宿主获取 agent 会话，并从 Rex
-原生接口获取 server、Rex session ID、block ID 和当前项目。返回缺项时，把原回执交给
-对应来源的维护者。
+Rex 身份获取和恢复沿用[当前 agent 会话入口](#首次注册与缺项提示)。命令从当前宿主
+获取 agent 会话，并从 Rex 原生接口获取 server、Rex session ID、block ID 和当前项目。
 Rex 的 working、blocked/question 和断连事件投影到 activity。
 输入 ACK、Enter 接受和 activity 都不能代替正式 `collab recv` 消费。
 服务 instance 变化后刷新绑定，再继续输入。
@@ -202,7 +205,8 @@ Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 
 
 派单使用 [Worker 合同](../codex-orchestrator/references/worker-contract.md#任务合同模板)，
 明确允许/禁止、验收、升级与停止点；peer 另带任务 ID、稳定双方身份、目标层级和
-集成分工。范围内投入和预算边界不另设一套。Planner/Reviewer 模型、并发调度、接管
+集成分工。注册 peer 的执行合同补充[执行唤醒周期](operations.md#执行任务的定时唤醒)，
+默认每 10 分钟，可按任务改。范围内投入和预算边界不另设一套。Planner/Reviewer 模型、并发调度、接管
 与 Review 准入均沿 [codex-orchestrator](../codex-orchestrator/SKILL.md)；任务板记录
 本身不授权范围外 backlog 或生产动作。
 

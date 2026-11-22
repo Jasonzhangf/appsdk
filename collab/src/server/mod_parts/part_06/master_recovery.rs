@@ -292,7 +292,7 @@ fn communication_recovery_brief() -> serde_json::Value {
     json!({
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
-            "Run `collab context` and inspect the named route, identity, daemon, task, and inbox state.",
+            "Run `collab context` directly with the current agent's execution tool in its own session and project. Context collects the current host's own registration facts. In Rex, use the agent's existing block so Collab can resolve and verify that placement with the official Rex CLI. Do not split or open a pane, tab, or window for identity commands, and do not run them from another block or session. Inspect the named route, identity, daemon, task, and inbox state.",
             "If context returns missing host facts, preserve the exact fields and sources for the corresponding host maintainer. Rerun `collab context` in the same session when the capability is ready.",
             "If context fails, preserve the exact error and report through a healthy peer or the human. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
         ],

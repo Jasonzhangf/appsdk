@@ -42,6 +42,7 @@ master 负责项目总目标、跨 peer 依赖和最终集成。peer 负责接�
 权限与资源：<已授权动作；资源归属>
 输入与依赖：<可访问的材料路径、已知依赖和交付前必须完成的交接；没有则写无>
 验收：<交付物/位置；可重复的验证及通过条件>
+执行唤醒：<注册执行者每 10 分钟唤醒一次，可填写任务约定的其他周期>
 交回：<派单 owner；需要时指定 reviewer 和集成人>
 停止条件：<什么情况只暂停受影响工作；向谁报告原错与下一步>
 ```
@@ -73,6 +74,20 @@ peer 将执行细节留在本人任务记录。Jenny 只按需看 board 状态�
 peer 在约定终点一次交回可用产物、验收证据、仍待处理的事项及其 owner，并更新原任务。
 交给合同指定的接收人。正式交付若需消息或关联回复，用同一份结果完成；不要另发一份
 给 Jenny 备案。Jenny 核验证据，按需安排具体返工或下一任务。没有后续动作时保留可接收状态。
+
+#### 执行任务的定时唤醒
+
+发给已注册执行 peer 的任务，在原任务单写明执行唤醒周期。默认每 10 分钟
+（`600000` 毫秒），任务约定的周期优先。发布或更新任务单时，用
+`--long-horizon-content` 写入完整执行要求，用 `--long-horizon-every-ms` 写入该周期。
+派发或邀请后检查 `goal_schedule` 回执，确认订阅归执行者、绑定原任务且周期正确。
+
+执行者接单后核对该订阅，有有效批次就复用，立即推进可做工作。每次唤醒按原合同和
+任务记录继续实现、验证或解阻，更新本人的任务记录。周期唤醒无需给 Jenny 发进度。
+订阅缺失或批次耗尽且仍有执行职责时，以自己的稳定名用
+`collab goal reconcile --goal-id 'task:<任务ID>' --owner '<本人稳定名>' --desired active`
+恢复该任务原定周期。任务关闭或取消时沿任务生命周期结束订阅。唤醒不可用时记录实际
+错误，并继续不依赖唤醒的工作。一次性未注册 worker 沿其派发宿主的执行合同推进。
 
 首次建立普通名字占用时，daemon 向现有 master 发一条 `peer-registered` 通知。
 同名恢复和重复 context 不重复发送。真实专长变更通知相对方；真实模板更新或重置
@@ -2166,15 +2181,16 @@ subscription, as part of bootstrap.
 在目标项目和当前 agent 会话中执行 `collab context`。宿主决定要报告的事实，
 不决定角色：任何宿主注册后默认是 peer；成为 master 只能由用户明确授权
 （`collab master promote --approval '…'` 或 `collab context --approve-grant`
-action=restore_master），或由已授权 master 委托。CLI 识别当前宿主，读取它提供的
-本次事实并提交给 daemon。daemon 按当前绑定和实时端点证据裁决。
+action=restore_master），或由已授权 master 委托。各宿主统一运行 `collab context`。
+CLI 按当前宿主从下表的来源收集本次事实，由 daemon 按当前绑定和实时端点证据裁决。
+代理使用自身原会话的执行入口，避免手动收集或混用其他宿主的注册字段。
 
 | 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
 | --- | --- | --- | --- |
 | DSH | 当前 gateway session（`DSH_SESSION_ID`） | CLI 用本次 gateway session 查已有身份。首次建立通信时从 gateway 获取该 session 的控制能力；gateway 负责 Poll/Ack | 不从日志或 plist 猜 ID，不混报 Codex 或 tmux 字段 |
 | Codex TUI / CLI | 当前 agent session；用该 TUI 的已选适配器定位投递 | 原生 AppServer 提供 `session_id`、`thread_id`、`endpoint`、`namespace`。选用 tmux 时，daemon 从实时 iTerm2 pane 与 client TTY 核实所连 session。新旧角色显示名由 daemon 按原生 ID 执行并读回。 | 不用 tmux 的 `$N` 或内部 `%pane` 冒充 agent session 或 iTerm2 pane，不借用其他进程的 endpoint |
 | Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
-| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 在当前 block 运行 `collab context`。该命令通过 Rex 原生接口取得本次 server、Rex session 和 block ID，并使用当前项目目录 | 不把 Rex session 当作 agent session，不混入 AppServer thread/endpoint/namespace |
+| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 用当前 agent 自己的执行工具在原有 Rex block 运行 `collab context`。它沿原环境读取 `REX_SESSION`、`REX_BLOCK`，调用官方 `rex whoami --json --autostart=false` 获取 server endpoint，daemon 再用 Rex CLI 核验该 session 和 terminal block | 禁止为身份命令 split、新建 pane、tab 或窗口，或借用其他 block、会话或身份。Rex session ID 和 AppServer 字段不用于代填 agent 身份 |
 
 返回 `missing_facts` 时，`result.requires.fields` 列出缺项，`sources` 给出来源。
 普通注册把缺项交给当前宿主的维护者。`--provide` 用于依现有能力合同的非标准集成诊断。
@@ -2189,9 +2205,9 @@ action=restore_master），或由已授权 master 委托。CLI 识别当前宿�
 新 session 完成接入后，离线同名会话可被接替。daemon 按精确 session ID 更新当前绑定，
 把旧会话改回数字名。当前同名端点仍在线时，按回执取得本次明确接替确认后再换绑。
 物理改名失败时，读取回执中的 `physical_anchor` 结果。已提交的逻辑身份继续有效。
-如果 Rex 中收到 `REX_EXECUTION_CALLER_MISMATCH`，保留原错误并检查当前 Codex
-的执行归属。共享 AppServer 的 PID 可能与前台 TUI 不同。新建独立 Rex TUI 时可用
-`codex --no-daemon`，再从该会话执行 `collab context`。
+如果 Rex 返回 `REX_EXECUTION_CALLER_MISMATCH` 或当前调用缺少身份事实，保留原始回执，
+交给该宿主的维护者核对当前 agent 的执行归属。能力恢复后只在同一 agent 的原有 block
+重试。当前会话无法取得身份时，继续无需该身份的已授权工作。
 
 DSH 在 tmux 中运行时仍使用 gateway session 识别当前执行者。pane 只定位观测。
 普通身份恢复读取持久身份与绑定，

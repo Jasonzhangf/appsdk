@@ -48,7 +48,7 @@ pub struct Record {
 /// before it is worth one scheduling notification.
 const SUBAGENT_STATE_SETTLE_MS: i64 = 60_000;
 
-const NON_LIVE_PEER_DISPATCH_RULE: &str = "For newly unknown peers, including peers that just registered, inspect `collab worker status <id>` this round. For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --lines 80` and inspect the existing block or pane. Apply the same check for identity-mismatch, cold, offline or missing peers. If facts are still needed from the peer, send one context-recovery request and wait at most 15 minutes before a final status check. Use that check to remove the still-unavailable from the dispatch queue and enqueue the available. Keep other ready work moving.";
+const NON_LIVE_PEER_DISPATCH_RULE: &str = "For newly unknown peers, including peers that just registered, inspect `collab worker status <id>` this round. For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --capture --lines 80` and inspect the existing block or pane. Apply the same check for identity-mismatch, cold, offline or missing peers. If facts are still needed from the peer, send one context-recovery request and wait at most 15 minutes before a final status check. Use that check to remove the still-unavailable from the dispatch queue and enqueue the available. Keep other ready work moving.";
 
 pub(crate) fn actionable(status: &str) -> bool {
     matches!(
@@ -2716,7 +2716,7 @@ mod tests {
         );
         assert!(body.contains("codex exec --profile gcm"), "{body}");
         assert!(
-            body.contains("collab worker snapshot <id> --lines 80"),
+            body.contains("collab worker snapshot <id> --capture --lines 80"),
             "{body}"
         );
         assert!(body.contains("wait at most 15 minutes"), "{body}");

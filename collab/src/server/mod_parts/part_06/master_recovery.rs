@@ -335,6 +335,7 @@ fn base_role_brief(
             "goal_level": "project",
             "responsibilities": [
                 "Start every cycle from the current board, buglist and goal: read open work, prioritize P0/P1 by urgency and dependency, and apply the architect intake in work_role_execution_rule. Managers do not debug, reproduce, investigate root cause, or implement the work themselves. Verify evidence, decide scope and priority, and delegate detailed design, debugging and implementation to the assigned roles.",
+                "Jenny coordinates and reclaims project resources, patrols task progress, dispatches project work, resolves cross-task dependencies, and owns external project communication and final delivery. Route detailed task decomposition, design, execution blockers and acceptance through the assigned architect. Keep concrete action items for project-level decisions and resource handoffs.",
                 own_goal_rule,
                 goal_document_rule,
                 execution_cycle_rule,
@@ -428,7 +429,7 @@ fn base_role_brief(
         serde_json::Value::String("Collab/AppSDK and tmux have independent lifecycles. Do not run broad process kills or perform daemon or tmux lifecycle actions. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.".to_owned()),
         serde_json::Value::String("Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.".to_owned()),
         serde_json::Value::String("You are the sole delivery owner for your accepted scope. Delegation or asking for help does not transfer responsibility. Investigate failures, verify subworker limitations at the real entry, and pursue authorized remedies or another executor; do not wait for master or others to solve your task, exceed authority or repeat unchanged failures.".to_owned()),
-        serde_json::Value::String("For a scope, resource, conflict or external dependency blocker that needs master coordination, contact the current master promptly with task/affected acceptance, exact failing entry and original error or evidence path, attempted remedies/results, why authorized alternatives cannot proceed, external dependency, exact decision and resume condition. Separate facts from hypotheses; do not delay help until root cause is proven. This is not an approved stop: master must independently verify evidence before approving a scoped blocker. Continue independent work while awaiting a decision or if master is unavailable; preserve delivery ownership unless explicitly reassigned.".to_owned()),
+        serde_json::Value::String("Route blocker reports to the original task dispatcher under execution_cycle_rule. An architect handles blockers on the execution they assigned and brings only project-level decisions to Jenny. Do not wait for a proven root cause, a status request, or final delivery to report a blocker. Formal blocked status still requires authorized verification; preserve delivery ownership unless explicitly reassigned.".to_owned()),
     ];
     if peer_orchestration {
         peer_responsibilities.extend([
@@ -461,7 +462,7 @@ fn base_role_brief(
             "kind": "peer",
             "parent": null
         },
-        "blocked_boundary": "A suspected blocker is not an approved stop. Route the question through the current workflow's clarification rules. For blockers requiring master coordination, request verification with exact failure evidence, attempted remedies, exhausted authorized alternatives and the decision/resume condition. Pause only truly dependent or unsafe actions, continue independent work, and retain delivery ownership unless explicitly reassigned. Never wait merely for a scheduled wake.",
+        "blocked_boundary": "Report an actual blocker to the original task dispatcher before waiting. Use the evidence and action fields in execution_cycle_rule. Pause only affected actions, continue independent work, and retain delivery ownership unless explicitly reassigned.",
         "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
     })
 }

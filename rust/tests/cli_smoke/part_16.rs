@@ -123,12 +123,14 @@ esac
         .as_str()
         .unwrap()
         .contains("Peer-first"));
-    assert!(payload["charter"].as_str().unwrap().contains("Peer-first"));
     assert!(payload["charter"]
         .as_str()
         .unwrap()
         .contains("派发原子开启目标peer订阅"));
-    assert!(payload["fleet_rules"].as_str().unwrap().contains("先检查 idle、获授权且合适的 peer 与可用容量"));
+    let fleet_rules = payload["fleet_rules"].as_str().unwrap();
+    assert!(fleet_rules.contains("Jenny 将任务和缺陷交可承接的 architect"));
+    assert!(fleet_rules.contains("由 architect 完成计划、直接交执行 peer 并验收"));
+    assert!(fleet_rules.contains("其他工作先检查 idle、授权和容量，优先派给合适 peer"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()
@@ -963,6 +965,7 @@ esac
     assert!(prompt.contains("peer 不是执行 worker"));
     assert!(prompt.contains("目标、执行计划、实际进度和行动项"));
     assert!(prompt.contains("无可执行行动项时核对剩余验收"));
+    assert!(prompt.contains("立即报告给原任务派发者，再进入依赖等待"));
     assert!(prompt.contains("appsdk bug"));
     assert_eq!(sub_json["schedule"], "periodic");
     assert_eq!(sub_json["local_schedule"], "daemon-periodic");

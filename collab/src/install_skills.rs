@@ -7,6 +7,10 @@
 #[allow(dead_code)]
 pub const SKILL_ROOT: &str = "skills/collab";
 
+pub(crate) const TASK_CONTRACT_GRAPH_PATH: &str = "references/task-execution-contract.graph.json";
+pub(crate) const TASK_CONTRACT_GRAPH: &str =
+    include_str!("../skills/collab/references/task-execution-contract.graph.json");
+
 pub const SKILL_FILES: &[(&str, &str)] = &[
     ("SKILL.md", include_str!("../skills/collab/SKILL.md")),
     (
@@ -33,6 +37,7 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "references/orchestration.md",
         include_str!("../skills/collab/references/orchestration.md"),
     ),
+    (TASK_CONTRACT_GRAPH_PATH, TASK_CONTRACT_GRAPH),
     (
         "references/resource-waits.md",
         include_str!("../skills/collab/references/resource-waits.md"),

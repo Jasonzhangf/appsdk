@@ -137,7 +137,11 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   peer 管理受托子目标；两者都负责拆解、派发、资源管理、验收与交付，优先交子 agent
   完成具体编码、执行和观察。普通 peer 是编排者；仅当明确 `worker`/`executor`
   专长或任务合同指定直接执行时，才在合同边界内执行。`patrol` 是独立常驻检查，
-  不接临时开发派单；`memory` 提炼纠偏经验；`architect` 负责架构计划及代码准入。
+  不接临时开发派单；`memory` 提炼纠偏经验。有适合的 `architect` 时，Jenny 负责项目
+  派发、资源协调和回收、巡检及对外沟通。Architect 拆解和详细设计，直接向执行 peer
+  交完整合同，接收阻塞并落实行动项，最后验收。执行 peer 按合同做、验和交回。
+  当前状态、角色、受领人和命令沿[任务执行 DAG](collab/skills/collab/references/task-execution-contract.graph.json)
+  及[操作合同](collab/skills/collab/operations.md#task-contract-state)。
   context 回显的有效职责由源码 workflow 模板和共享 `role_brief` 投影，角色标签不
   授权。注册和恢复须说明此职责，并推荐对自身目标、阻塞和资源配置定时巡检。
   master 与 peer 均可维护本人的 longhorizon goal。项目 master 派发任务单时填写

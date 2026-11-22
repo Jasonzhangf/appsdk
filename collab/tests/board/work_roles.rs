@@ -2620,6 +2620,20 @@ fn ticket_start_and_result_require_the_current_claimed_attempt() {
     );
     assert_eq!(claimed["task"]["status"], "working");
     assert_eq!(claimed["task"]["revision"], 2);
+    assert_eq!(claimed["task"]["execution_phase"]["status"], "claimed");
+    assert_eq!(claimed["task"]["next_contract"]["key"], "execute");
+    let attempt = claimed["task"]["execution_phase"]["attempt"]
+        .as_u64()
+        .expect("claim must return the allocated attempt")
+        .to_string();
+    let own_board = fixture.run_public(&["board", "show"], thread);
+    let own_row = own_board["tasks"]
+        .as_array().unwrap().iter().find(|row| row["id"] == "ticket-lifecycle").unwrap();
+    assert_eq!(own_row["execution_phase"], claimed["task"]["execution_phase"]);
+    let other_board = fixture.run_public(&["board", "show"], other_thread);
+    let other_row = other_board["tasks"]
+        .as_array().unwrap().iter().find(|row| row["id"] == "ticket-lifecycle").unwrap();
+    assert!(other_row["execution_phase"].is_null());
 
     // Only the claim owner may start the claimed ticket.
     let not_owner = rejected(
@@ -2693,11 +2707,12 @@ fn ticket_start_and_result_require_the_current_claimed_attempt() {
             "--expected-revision",
             "2",
             "--attempt",
-            "1",
+            &attempt,
         ],
         thread,
     );
     assert_eq!(started["task"]["status"], "working");
+    assert_eq!(started["task"]["execution_phase"]["status"], "running");
     let phase_after_start = fixture.current_state()["ticket_phases"]
         .as_array()
         .unwrap()

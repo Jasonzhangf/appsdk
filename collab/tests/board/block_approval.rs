@@ -140,6 +140,10 @@ fn member_block_is_pending_until_master_approves() {
         "working",
         "a pending application never flips the board status"
     );
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let row = board["tasks"].as_array().unwrap().iter()
+        .find(|task| task["id"] == "approval-happy").unwrap();
+    assert_eq!(row["next_contract"]["key"], "unblock");
     let pending = fixture.current_state()["task_block_requests"]["approval-happy"].clone();
     assert_eq!(pending["state"], "pending", "{pending}");
     fixture.restart_daemon();
@@ -173,6 +177,17 @@ fn member_block_is_pending_until_master_approves() {
         "restart must retain the exact approved decision"
     );
     assert_eq!(board_status(&fixture, "approval-happy"), "blocked");
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let row = board["tasks"].as_array().unwrap().iter()
+        .find(|task| task["id"] == "approval-happy").unwrap();
+    let revision = row["revision"].as_u64().unwrap().to_string();
+    let resumed = fixture.run_public(
+        &["board", "update", "approval-happy", "--expected-revision", &revision,
+          "--status", "working", "--next", "external dependency is ready"],
+        THREAD_B,
+    );
+    assert_eq!(resumed["task"]["status"], "working");
+    assert_eq!(resumed["task"]["next_contract"]["key"], "execute");
 }
 
 #[test]

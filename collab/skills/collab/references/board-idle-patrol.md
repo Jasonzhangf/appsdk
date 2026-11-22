@@ -89,7 +89,7 @@ master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不�
 两个回执。同一异常在后续巡检复用已有回执，仅在状态或绑定出现新证据时重新判断。
 
 1. 主动核实：用 `collab worker status <id>` 查看该 peer 的状态、绑定和缺项。对 Rex
-   或 Codex TUI/tmux peer 运行 `collab worker snapshot <id> --lines 80`，检查实际
+   或 Codex TUI/tmux peer 运行 `collab worker snapshot <id> --capture --lines 80`，检查实际
    返回的状态及终端内容。Rex 使用现有绑定的 block，禁止 split、新开窗口或写入终端。
    若 capture 因 Rex server 不可达或实例变化被拒绝，保留原错，等原会话恢复后再核实。
    Capture 只提供观察证据，派发容量以核实后的当前状态为准。仍需 peer 补事实时，向该

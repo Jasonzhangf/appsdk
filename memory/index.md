@@ -35,6 +35,10 @@ _Empty._
 - tags: `anchor`, `collab`, `identity`, `ontology`, `rex`
 - details: [L3/appsdk-rex-block-is-anchor.md](L3/appsdk-rex-block-is-anchor.md)
 
+### Collab 任务执行合同 DAG
+- tags: `collab`, `dag`, `ontology`, `workflow`
+- details: [L3/collab-task-execution-contract-dag.md](L3/collab-task-execution-contract-dag.md)
+
 ## Skill description candidates
 
 Base budget: 8 lines. Copy the compact lines into the project Skill `description` after manual architecture deduplication. Fill level 1 first; use level 2, then level 3, only for remaining slots.
@@ -43,3 +47,4 @@ Base budget: 8 lines. Copy the compact lines into the project Skill `description
 - L3: Collab stable name and current anchor semantics (knowledge) [anchor,collab,identity,ontology,stable-name,user-approved] -> L3/appsdk-collab-stable-name-lifecycle.md
 - L3: Rex block anchor and current-owner relations (knowledge) [anchor,collab,identity,ontology,rex] -> L3/appsdk-rex-block-anchor-scope-clarification.md
 - L3: Rex block is the anchor (knowledge) [anchor,collab,identity,ontology,rex] -> L3/appsdk-rex-block-is-anchor.md
+- L3: Collab 任务执行合同 DAG (path) [collab,dag,ontology,workflow] -> L3/collab-task-execution-contract-dag.md

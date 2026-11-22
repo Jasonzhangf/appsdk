@@ -31,6 +31,27 @@ specialties 模板卡只含 target、source、base_version、revision；master �
 
 ### 完整派单与交回
 
+<a id="task-contract-state"></a>
+
+#### 任务状态与合同
+
+在目标项目根、原会话使用[任务执行 DAG](references/task-execution-contract.graph.json)。
+已有有效身份时直接读 `collab board show`。核对任务 ID、`status`、当前 owner、
+指定执行者与 reviewer、邀请及 `next_contract`。执行者读取本人任务的
+`execution_phase.status` 和 `execution_phase.attempt`。阶段和权限来自实时回执。
+`next_contract` 按当前 board 事实提供合同路径，路径相对 Collab Skill 根目录。
+负责人确认未按合同推进时，即使回执仍为 `execute`，也按下表先取证。
+
+| 当前事实 | 由谁执行并交给谁 | 合同与进入下一步的证据 |
+| --- | --- | --- |
+| 无有效身份或绑定被拒绝 | 当前 agent 使用原宿主。缺必需能力时把原错交宿主维护者 | [身份注册/恢复](#宿主注册所需信息)。以 `collab context` 的 `registered: true` 和当前名字为准 |
+| 项目任务已获授权，执行合同未就绪 | Jenny 交 architect。Architect 完成设计与行动项后，直接交指定 peer | [派发合同](#dispatch-task-contract)。board 发布或邀请的回执需再核对接单 |
+| 任务待认领或邀请给本人 | 指定 peer 用自己的身份认领或接受，结果留原 board | [执行合同](#execute-task-contract)。owner 生效，当前 Execute phase 已认领后才开工 |
+| 开工回执为 `running`，依赖就绪 | 执行者按行动项做和验，结果交 architect | [执行合同](#execute-task-contract)。用实际产物、命令输出及验收记录推进 |
+| 未达到合同进展检查点，或执行疑似停滞 | 直属负责人先核实。Rex/tmux 由负责人只读 capture 原终端 | [停滞取证](references/board-idle-patrol.md#任务阻塞或停滞先取证)。根据具体证据更新行动项。进度慢本身不改任务状态 |
+| 执行阻塞、待裁决或批准等待 | 执行者先通知原派发者。Architect 落实解阻行动项；授权主管裁决正式申请 | [阻塞与恢复合同](#report-task-blocker)。记录恢复信号。收到实际恢复证据后由当前 owner 继续，未满足的依赖仍保留 |
+| 已交付或待收口 | 指定 architect/reviewer 验收。Jenny 协调适用集成、回收及对外 | [验收合同](#accept-task-contract)。返工写明行动项，由执行者按当前 `rework` 状态重新进入执行合同 |
+
 master 负责项目总目标、跨 peer 依赖和最终集成。peer 负责接受的子目标，管理自己的
 执行者、验证和资源。master 用一次派单交齐合同与可访问的必要材料，peer 按合同完成
 约定的交付终点。工作专长不是接单前置，也不授予权限。master 可把下列内容填入
@@ -70,9 +91,37 @@ peer 将执行细节留在本人任务记录。Jenny 只按需看 board 状态�
 无需跟踪实现步骤、子 worker 动态和中间结果。双方省略手动确认接单、进度汇报、
 催报、预告交付、申请 idle，以及收到结果后的客套回信。
 
-执行中，只有真实阻塞需要对方行动、实质变更影响对方授权或依赖、合同明确约定的
-中途交接才发消息。先查已有材料，并在授权内自行解决。确需协调时，
-一次说明受影响任务、已试办法、证据和需要的决定或动作。其余工作继续推进。
+<a id="report-task-blocker"></a>
+
+执行者遇到真实阻塞就立即通过合同通道通知原派发者，然后才等待受影响的依赖。
+例如 architect 派单，peer 直接报给 architect。一次提交任务 ID、受影响验收、原错或
+证据路径、已试办法、需要对方做的事和恢复信号，并更新原任务。派发者须核实并安排解阻、
+改派或落实等待责任，有决定或恢复信号时直接通知执行者。通道失败就保留原错并走已有升级渠道。其余
+可执行工作继续。执行中另外联系仅限实质授权或依赖变更，以及约定交接。
+
+在目标项目根、以当前执行者身份运行。替换任务 ID、原派发者的稳定名字、当前卡点和证据。
+派发者取自当前任务合同。Architect 直派时对应执行子任务的发布者。
+
+```sh
+collab sendmessage --to 'Lina' --subject 'auth-cookie-verify 阻塞' '任务 auth-cookie-verify；卡点：启动浏览器验收；证据：验收脚本返回 TEST_ACCOUNT_REQUIRED；已试：复查现有测试配置；影响：登录续期验收无法开始；请 Lina 确定可用测试账号入口；恢复：测试配置能读取账号并成功登录。'
+```
+
+`durable=true` 表示消息已保存。通道报错时记录原错并沿合同中的备用联系路径处理。
+确需正式记录阻塞状态时，由执行者运行 `collab task block 'auth-cookie-verify' --next
+'等待 architect 确定测试账号入口'`。有权裁决的人读取待决申请，以
+`collab task update 'auth-cookie-verify' --blocker-action approve --decision-reason
+'已核实缺少测试账号入口'` 批准。拒绝时用 `--blocker-action reject` 并给出原因。
+以返回的 `block_request.state` 判断申请与裁决结果。任务状态沿回执核实。
+
+Architect 把阻塞或返工发现填回原设计和任务，按此格式交给实际处理人：
+
+```text
+任务/验收：<原任务 ID、受影响验收>
+行动项：<实际负责人> 执行 <具体动作或命令，附输入来源>
+预期产物：<可访问位置或可观察结果>
+完成证据：<验证命令、预期回执或负责人验收条件>
+恢复条件：<依赖何时解除；由谁通知原执行者>
+```
 
 peer 在约定终点一次交回可用产物、验收证据、仍待处理的事项及其 owner，并更新原任务。
 交给合同指定的接收人。正式交付若需消息或关联回复，用同一份结果完成；不要另发一份
@@ -114,7 +163,8 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 英文角色名。执行 worker 不被假设具备设计者同等判断力、项目背景或继承父会话。
 
 - Jenny 按项目优先级将 buglist 缺陷和项目任务交给 architect。在原任务单记明本阶段
-  的 architect，关联缺陷和证据，邀请时指定该 architect。
+  的 architect，关联缺陷和证据，邀请时指定该 architect。Jenny 负责项目派发、资源协调
+  与回收、任务巡检、跨任务依赖和对外沟通，跟踪项目最终交付。
   Architect 查清问题和根因、完成详细设计、选定一个或多个执行 peer，并把各自不重叠的
   执行合同直接交给他们。执行子任务关联原任务，记录指定的执行 peer（`--executor`）和
   负责验收的 architect（`--reviewer`）。普通授权内分工使用下方的直接发布与认领，
@@ -122,18 +172,20 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
   Peer 按合同实现、验证并向 architect 交回证据。Architect review 并按验收条件作出
   通过或返工决定，保留真实行为证据。适用 Review 门禁照常执行。
   用户明确指定 architect 参与实现时，交给其他人 review 该 architect 的实现。
-- 详细设计须落盘。对每位执行者写清任务要求与输入、负责和禁止改动的模块或路径、适用的
+- Architect 负责完整任务拆解和详细设计，须落盘。对每位执行者写清任务要求与输入、负责和禁止改动的模块或路径、适用的
   接口和数据流、实施步骤及顺序、依赖、必须做的事项与明确排除的事项、交付物和接收人、
   验收入口和通过条件。按实际范围写出须处理的失败、副作用和停止条件。以执行者只读
-  合同和引用材料就能开工为准。
+  合同和引用材料就能开工为准。每个工作点都要对应行动项，注明负责人、具体步骤、
+  预期产物及完成证据。
 - 交接一律引用已落盘文件。消息携带文件路径、必要摘要及接收者，正文不能代替交接文件；
   接收者必须能访问文件，不可访问时沿已授权资料交付通道提供文件，不让 worker 猜测或
   自行补齐关键设计。
 - 执行中，peer 和 architect 直接处理必须澄清的设计问题、真实阻塞和约定的依赖交接。
   执行细节和进度写入原任务记录。一次交回产物和验收证据；省略催报、例行确认和抄送。
-- worker 按设计实现和验证。发现设计缺口、矛盾或新证据导致方案不成立时，把具体问题
-  交回负责设计的人。有 architect 的任务由 architect 修订原设计。执行者只暂停受影响的
-  步骤，待设计补齐后继续。
+- 执行者按设计实现和验证。受阻时立即把卡点及证据交给 architect。Architect 把卡点
+  转成可执行行动项，明确谁做什么、预期结果和复验条件，更新原设计和任务，再直接交给
+  负责执行或取证的人。信息不足时先给出可执行的取证项。执行者继续其他步骤，并在收到
+  可执行的新安排后恢复受影响步骤。交付、解阻和返工都沿原任务跟踪到验收。
 - 上述设计、规划与审查角色负责分析、设计落盘、指导和审查。具体实现交给执行者，除非
   用户明确指定其他分工。reviewer 输出带定位、理由、修改要求和复验条件的文件，由执行者
   修复，不亲自代修；保留必要的只读检查和文案落盘能力。
@@ -1215,16 +1267,54 @@ stale or competing claim fails without taking the task. Do not update a
 pending task to `working` to bypass claim. Never claim outside the user's
 authorized goal or take another owner's working or blocked task.
 
-Architect 可在原目标授权内直接发布执行子任务并把合同路径交指定 peer。Peer 使用
-board 最新 revision 自行认领。任务交付及返工在 architect 和 peer 之间完成：
+<a id="dispatch-task-contract"></a>
+
+Jenny 从 buglist 或已有 board 任务取得 ID 和证据。确定当前可承接的 architect 后，在
+Jenny 的原会话邀请该 architect，revision 从刚读取的原任务取值：
 
 ```sh
-collab board publish "$child_id" --parent-task "$parent_id" --title "$title" --description "$contract" --delivery-condition "$delivery" --test-condition "$verification" --executor "$peer_name" --reviewer "$architect_name"
-collab sendmessage --to "$peer_name" --subject "$child_id" "$contract_path"
-# 下面两条由指定 peer 在自己的会话执行，revision 取自当前 board 回执。
-collab board show
-collab board claim "$child_id" --expected-revision "$revision"
+task_id='auth-cookie'
+architect='Lina'
+revision=$(collab board show | jq -er --arg id "$task_id" '.tasks[] | select(.id == $id) | .revision') || exit 1
+collab board invite "$task_id" --to "$architect" --expected-revision "$revision"
 ```
+
+已有邀请就复用。Architect 接受后确认当前 owner。尚无任务单时，先用本节上方的完整
+派单模板发布，填写缺陷证据与待达目标。Architect 完成详细设计后，再派执行子任务。
+
+Architect 可在原目标授权内直接发布执行子任务并把合同路径交指定 peer。以下以父任务
+`auth-cookie`、执行者 `Bo`、architect `Lina` 为样本。将父任务 ID 从当前 board
+取值，子任务 ID 用本次新工作命名。执行者和 reviewer 用当前稳定名字；设计路径从
+已落盘、双方可读的合同取值。交付及验收条件取该设计。
+
+```sh
+contract_path='/absolute/project/contracts/auth-cookie-verify.md'
+collab board publish 'auth-cookie-verify' --parent-task 'auth-cookie' --title '验证登录续期' --description "$contract_path" --delivery-condition '交登录续期验收回执与证据' --test-condition '真实登录入口通过续期验收' --executor 'Bo' --reviewer 'Lina'
+collab sendmessage --to 'Bo' --subject 'auth-cookie-verify 执行合同' "$contract_path"
+```
+
+<a id="execute-task-contract"></a>
+
+以下由指定执行者从自己的会话执行，需 `jq`。有给本人的邀请时，以
+`claimed=$(collab board respond "$task_id" --accept --expected-revision "$revision") || exit 1`
+替换认领行。此脚本适用于带 Execute phase 的工单。旧任务没有该阶段时按其既有合同执行。
+认领或接受失败时保留原错；revision 变化就重读 board，确认归属后再决定。
+
+```sh
+task_id='auth-cookie-verify'
+revision=$(collab board show | jq -er --arg id "$task_id" '.tasks[] | select(.id == $id) | .revision') || exit 1
+claimed=$(collab board claim "$task_id" --expected-revision "$revision") || exit 1
+claim_revision=$(printf '%s\n' "$claimed" | jq -er '.task.revision') || exit 1
+attempt=$(printf '%s\n' "$claimed" | jq -er '.task.execution_phase | select(.status == "claimed") | .attempt') || exit 1
+collab board start "$task_id" --expected-revision "$claim_revision" --attempt "$attempt"
+```
+
+开工后核对回执 `task.execution_phase.status == "running"`。恢复任务或遗失认领回执时，
+用 `collab board show` 回读本人任务当前 revision 和 `execution_phase`。只在当前
+阶段为 `claimed` 时开工；已为 `running` 就继续原行动项。正式 `blocked` 解除并
+核实恢复证据后，owner 用当前 revision 执行 `collab board update "$task_id"
+--expected-revision "$revision" --status working --next "$next_action"`，再根据
+返回的 Execute 阶段执行。缺 attempt 时保留缺项，不猜值。
 
 直接认领时，若原任务没有有效执行唤醒，执行者用任务关联的同一 Markdown 文档登记
 本人的有限目标并在同一任务记录关联回执。默认间隔 10 分钟，合同约定优先。任务完成或
@@ -1236,6 +1326,20 @@ appsdk goal cancel --goal-id "$goal_id"
 ```
 
 需要代 peer 配置 board 自动订阅或使用 `board invite` 时，才走已有 master 权限入口。
+
+<a id="accept-task-contract"></a>
+
+执行者以当前 `running` attempt 交回证据；证据地址取实际产物。指定 reviewer 从自己的
+会话执行一条审查命令。下例假设验收通过。需要返工时改用 `--rework`，证据写清返工
+行动项与复验。验收通过后参考 `completion_missing` 完成适用集成及资源回收，owner
+凭当前 `collab task close "$task_id"` 回执收口。
+
+```sh
+# 执行者，attempt 取当前本人任务的 execution_phase.attempt。
+collab task deliver "$task_id" --attempt "$attempt" --evidence '/absolute/project/evidence/auth-cookie-verify.md'
+# 指定 reviewer，证据取自己完成的验收记录。
+collab task review "$task_id" --accept --evidence '/absolute/project/evidence/auth-cookie-review.md'
+```
 
 For a long-horizon goal, master may instead offer a public task to one ordinary
 peer:

@@ -413,6 +413,10 @@ pub struct BoardTaskView {
     pub publisher_display_name: String,
     pub priority: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_phase: Option<BoardExecutionPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_contract: Option<TaskContractRef>,
     pub next_step: Option<String>,
     pub work_kind: Option<String>,
     pub parent_task_id: Option<String>,
@@ -435,6 +439,57 @@ pub struct BoardTaskView {
     pub integration_commit: Option<String>,
     pub cleanup_status: String,
     pub blocking_task: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BoardExecutionPhase {
+    pub status: &'static str,
+    pub attempt: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TaskContractRef {
+    pub key: String,
+    pub reference: String,
+}
+
+#[derive(Deserialize)]
+struct TaskContractNode {
+    contract: Option<TaskContractRef>,
+}
+
+#[derive(Deserialize)]
+struct TaskContractGraph {
+    id: String,
+    version: String,
+    nodes: Vec<TaskContractNode>,
+}
+
+fn task_contract_graph() -> &'static TaskContractGraph {
+    static GRAPH: std::sync::OnceLock<TaskContractGraph> = std::sync::OnceLock::new();
+    GRAPH.get_or_init(|| {
+        serde_json::from_str(crate::install_skills::TASK_CONTRACT_GRAPH)
+            .expect("embedded task execution contract must be valid")
+    })
+}
+
+pub(crate) fn task_contract_reference(key: &str) -> TaskContractRef {
+    task_contract_graph()
+        .nodes
+        .iter()
+        .filter_map(|node| node.contract.as_ref())
+        .find(|contract| contract.key == key)
+        .unwrap_or_else(|| panic!("unknown task execution contract: {key}"))
+        .clone()
+}
+
+pub(crate) fn task_contract_graph_view() -> serde_json::Value {
+    let graph = task_contract_graph();
+    serde_json::json!({
+        "id": graph.id,
+        "version": graph.version,
+        "path": crate::install_skills::TASK_CONTRACT_GRAPH_PATH,
+    })
 }
 
 #[derive(Debug, Serialize)]

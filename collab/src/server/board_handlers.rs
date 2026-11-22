@@ -73,10 +73,11 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
     let (completion_delivery_complete,completion_missing)=state.delivery_completion_projection(&task.id);
     let assignment = state.task_assignment(&task.id);
     let historical = matches!(task.status.as_str(), "closed" | "cancelled");
-    let current = match assignment.zip(route) {
-        Some((assignment, route)) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, &assignment.name)?
-            .and_then(|slot| slot.active_binding()), None => None,
+    let current_slot = match assignment.zip(route) {
+        Some((assignment, route)) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, &assignment.name)?,
+        None => None,
     };
+    let current = current_slot.and_then(|slot| slot.active_binding());
     let current_owner = if historical { Some(task.owner.as_str()) }
         else if assignment.is_some() { current.map(|current| current.binding.agent_id.as_str()) }
         else { Some(task.owner.as_str()) };
@@ -84,6 +85,44 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         viewer == owner || board_parent_for_actor(state, owner) == Some(viewer)));
     if !details.public_visibility && !private_owner && !master_view { return Ok(None); }
     let reassignment_reason = assignment_unavailability(state, control, task, route)?.map(str::to_owned);
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+    let execute_phase = state.ticket_phases.iter()
+        .filter(|phase| phase.task_id == task.id && phase.phase == TicketPhaseKind::Execute
+            && phase.status != TicketPhaseStatus::Revoked)
+        .max_by_key(|phase| phase.batch);
+    let execution_phase = execute_phase.zip(current_slot)
+        .filter(|(phase, slot)| !historical && reassignment_reason.is_none()
+            && viewer.is_some() && viewer == current_owner
+            && phase.slot_name.as_deref() == Some(slot.identity_key.name.as_str())
+            && phase.binding_generation == slot.generation)
+        .and_then(|(phase, _)| {
+            let status = match phase.status {
+                TicketPhaseStatus::Claimed => "claimed",
+                TicketPhaseStatus::Running => "running",
+                _ => return None,
+            };
+            Some(crate::board::BoardExecutionPhase { status, attempt: phase.attempt_generation })
+        });
+    let pending_block = state.task_block_requests.get(&task.id).is_some_and(|request| {
+        request.state == crate::server::state::TaskBlockRequestState::Pending
+            && request.task_revision == details.revision
+    });
+    let next_contract = match task.status.as_str() {
+        "closed" | "cancelled" => None,
+        "blocked" | "waiting" => Some("unblock"),
+        _ if pending_block => Some("unblock"),
+        "delivered" | "accepted" | "merged" => Some("accept"),
+        _ if details.invitation.is_some() => Some("execute"),
+        "pending" if !execute_phase.is_some_and(|phase| {
+            phase.status == TicketPhaseStatus::Queued && phase.slot_name.is_some()
+        }) => Some("dispatch"),
+        "assigned" | "working" | "verifying" | "reviewed" | "rework"
+            if reassignment_reason.is_some() => Some("observe"),
+        "pending" | "invited" | "assigned" | "working" | "verifying" | "reviewed" | "rework" => {
+            Some("execute")
+        }
+        _ => None,
+    }.map(crate::board::task_contract_reference);
     let owner = if reassignment_reason.is_some() {
         String::new()
     } else if details.public_visibility {
@@ -118,6 +157,8 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         publisher,
         priority: task.priority.clone(),
         status: task.status.clone(),
+        execution_phase,
+        next_contract,
         next_step: task.next_step.clone(),
         work_kind:policy.work_kind,
         parent_task_id:details.parent_task_id.clone(),

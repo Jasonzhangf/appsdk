@@ -192,11 +192,22 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-项目有适合本任务的 architect 时，Jenny 将 buglist 中已授权的缺陷和项目任务先派给
-architect。Architect 完成详细计划，直接向一个或多个 peer 交执行合同。Peer 实现、
-验证并直接将结果交回 architect。执行中只为真实阻塞、必要设计决定或约定交接直接联系。
-Architect 按计划及真实行为证据验收，返工也由其交回
-原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。
+先用[任务状态与合同](operations.md#task-contract-state)定位当前动作。该路径由
+[任务执行 DAG](references/task-execution-contract.graph.json)定义。
+
+项目有适合本任务的 architect 时，Jenny 将已授权的 buglist 缺陷和项目任务先派给
+architect。按以下分工推进：
+
+- Architect 负责整个任务的拆解、详细设计和验收。把每步怎么做、要做什么、产物和
+  验收写成可执行行动项，直接交一个或多个 peer。收到执行阻塞后，负责把卡点转成新的
+  行动项，补齐原设计并交回执行者或相应责任人。按证据验收或派具体返工。
+- 执行者按合同执行和验证，把结果直接交 architect。无法推进时立即告诉 architect
+  卡在哪一步、造成什么影响、需要什么决定。只暂停受影响项，继续其他可执行项。
+- Jenny 负责项目派发、优先级、资源协调与回收、任务巡检、跨任务依赖和对外沟通，
+  并对最终交付负责。执行者与 architect 直接处理任务内的设计、阻塞和验收。
+
+每次交接都写清行动项、负责人和完成证据，沿[文件交接合同](operations.md#设计规划与审查角色的文件交接合同)执行。
+用户另有分工要求时按其要求执行。
 只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
 
 任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。

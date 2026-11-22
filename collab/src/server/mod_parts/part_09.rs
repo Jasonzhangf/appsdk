@@ -2984,6 +2984,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         },
         "daemon": daemon_context_view(server),
         "next_actions": next_actions,
+        "task_contract_graph": crate::board::task_contract_graph_view(),
         "operations": operations,
         "scope": scope_view(route_scope.as_ref()),
         "master": master,

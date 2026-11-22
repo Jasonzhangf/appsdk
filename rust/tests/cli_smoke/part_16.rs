@@ -87,8 +87,9 @@ esac
     assert!(text.contains("有 ready 工作可承接时优先派给该 peer"));
     assert!(text.contains("仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`"));
     assert!(text.contains("Peer bounded subwork"));
-    assert!(text.contains("直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker"));
-    assert!(text.contains("不是 manager 绕过可用 peer 容量"));
+    assert!(text.contains("直接并发派独立 `codex exec --profile gcm` 执行或观察子任务"));
+    assert!(text.contains("指定执行者按 architect 的详细设计直接执行和验证"));
+    assert!(text.contains("承担编排的普通 peer 可将本人目标拆成互不重叠的范围"));
     assert!(!text.contains("一次性执行或观察直接派独立"));
     assert!(!text.contains("不以其他 peer 忙闲为前提"));
     assert!(!text.contains("一次性执行直接 GCM，不等待 peer 忙闲"));

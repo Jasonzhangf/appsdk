@@ -27,7 +27,8 @@ owner 是 core 实现与项目 DAG。
   「Master 取消与恢复项目巡检」。
 - Jenny 每次巡检提醒都先执行两个强制步骤：第一，运行 `collab board show` 与
   `collab who`，列出全部 live idle peer（包括没有当前任务的成员）及通道来源；
-  第二，按当前优先级把 ready 的非重叠 P0/P1 派给每个 idle eligible peer。不得
+  第二，按当前优先级和[派单顺序](../SKILL.md#派单顺序与一-peer-一任务)派发 ready 的
+  非重叠 P0/P1。适用 architect 的缺陷和任务先交 architect。不得
   先做实现、debug、merge 或资源清理。Planner/Reviewer 缺位不是等待理由：独立
   reviewer 先用独立 Codex OAuth/`codex-auto-review`，不可用则改派普通空闲 peer；
   只有无 idle worker、subagent review 入口真实失效且无其他 peer 时，Jenny 才临时
@@ -71,18 +72,18 @@ owner 是 core 实现与项目 DAG。
 `collab who` 或 `collab worker status` 返回 `identity-mismatch`、`cold`、`offline`、
 `unknown` 或 `presence=missing`，且该 peer 仍在派发候选或仍持有未关闭任务的，由当前
 master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不长期滞留在派发队列。
-新出现的异常做一次真实核实，再走有界等待与终判。同一异常在后续巡检复用已有回执，
-仅在状态或绑定出现新证据时重新判断是否需要联系。
+新注册 peer 显示 `unknown` 时，master 当轮先主动核实。注册成功与观测到当前活动是
+两个回执。同一异常在后续巡检复用已有回执，仅在状态或绑定出现新证据时重新判断。
 
-1. 主动核实：先对 Codex TUI/tmux peer 运行
-   `collab worker snapshot <id> --lines 80`，检查真实 pane 当前状态；再对该稳定名字
-   发一条 `collab send --to '<peer>' --subject '<核实事由>' --type request '<请运行 collab context 并回复真实结果>'`
-   核实消息，要求对方运行 `collab context` 恢复身份并回一条真实结果，同时读取
-   `collab worker status <id>` 的当前投影。pane snapshot 是观察证据，不是身份或消费回执。
-   `identity-mismatch` 只以 `collab context`
-   为修复入口，不编辑、推断或复制绑定。
+1. 主动核实：用 `collab worker status <id>` 查看该 peer 的状态、绑定和缺项。对 Rex
+   或 Codex TUI/tmux peer 运行 `collab worker snapshot <id> --lines 80`，检查实际
+   返回的状态及终端内容。Rex 使用现有绑定的 block，禁止 split、新开窗口或写入终端。
+   若 capture 因 Rex server 不可达或实例变化被拒绝，保留原错，等原会话恢复后再核实。
+   Capture 只提供观察证据，派发容量以核实后的当前状态为准。仍需 peer 补事实时，向该
+   稳定名字发一次请求，要求其在自己原会话运行 `collab context` 并交回真实回执。
+   `identity-mismatch` 沿同一入口修复，保留已有身份及任务。
 2. 有界等待：对方未响应时使用最长 15 分钟的有界等待（`board-idle` 兜底 tick 即
-   `900000` 毫秒），不循环催报、不叠加同批提醒。等待期间这些 peer 不计入派发容量。
+   `900000` 毫秒），保留原回执。等待期间只停依赖该 peer 的动作，其余 ready 工作继续派发。
 3. 终判：到期运行一次 `collab worker status <id>` 做最终状态核实。仍为
    `identity-mismatch`/`cold`/`offline`/`unknown`/`missing` 且无真实回执的判为当前
    不可用，从派发队列排除；已恢复 `online` 的按优先级放入派发队列，用

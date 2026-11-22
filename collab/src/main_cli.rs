@@ -488,11 +488,11 @@ pub(crate) enum WorkerCmd {
         /// Optional worker ID to inspect (defaults to all registered workers)
         id: Option<String>,
     },
-    /// Read the latest live buffer from an exact registered tmux peer
+    /// Check a registered peer's status and capture its tmux pane or Rex block when needed
     Snapshot {
-        /// Exact worker ID whose pane buffer is captured
+        /// Exact worker ID whose terminal is inspected
         target_id: String,
-        /// Maximum number of recent tmux buffer lines to return (1..=200)
+        /// Maximum number of recent terminal lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,
     },
@@ -665,11 +665,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: WorkerCmd,
     },
-    /// Read the latest live buffer from an exact registered tmux peer
+    /// Check a registered peer's status and capture its tmux pane or Rex block when needed
     Snapshot {
-        /// Exact worker ID whose pane buffer is captured
+        /// Exact worker ID whose terminal is inspected
         target_id: String,
-        /// Maximum number of recent tmux buffer lines to return (1..=200)
+        /// Maximum number of recent terminal lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,
     },

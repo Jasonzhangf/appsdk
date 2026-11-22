@@ -107,11 +107,13 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 总设计师、架构师、规划师、reviewer 及承担同类职责的角色共同适用本合同，不依赖特定
 英文角色名。执行 worker 不被假设具备设计者同等判断力、项目背景或继承父会话。
 
-- Jenny 在任务合同指定一名可承接的 architect 和一个或多个执行 peer。多个执行者各有
-  明确且不重叠的责任范围。Architect 负责把问题分析清楚，用实际证据写明现象、预期、
-  受影响范围及原因。修复任务先查证根因。Architect 作出全部详细设计决定，写成每位 peer
-  可直接执行的任务合同，Jenny 据此派发实现。Peer 按合同实现、验证并交回证据，由同一 architect
-  review。适用 Review 门禁照常执行，无需另派常规 Planner 或 Reviewer。
+- Jenny 按项目优先级将 buglist 缺陷和项目任务交给 architect。在原任务单记明本阶段
+  的 architect，关联缺陷和证据，邀请时指定该 architect。
+  Architect 查清问题和根因、完成详细设计、选定一个或多个执行 peer，并把各自不重叠的
+  执行合同交给他们。执行子任务关联原任务，记录指定的执行 peer（`--executor`）和
+  负责验收的 architect（`--reviewer`）。需 master 权限的 board 邀请由 Jenny 按该分工提交。
+  Peer 按合同实现、验证并向 architect 交回证据。Architect review 并按验收条件作出
+  通过或返工决定，保留真实行为证据。适用 Review 门禁照常执行。
   用户明确指定 architect 参与实现时，交给其他人 review 该 architect 的实现。
 - 详细设计须落盘。对每位执行者写清任务要求与输入、负责和禁止改动的模块或路径、适用的
   接口和数据流、实施步骤及顺序、依赖、必须做的事项与明确排除的事项、交付物和接收人、
@@ -1742,39 +1744,20 @@ worker's blocker. Concretely:
 
 ## Master splits and assigns
 
-The human remains the only final authority for goals, money, irreversible
-risk, and version promotion. Collab master is the user-approved project
-dispatcher, not the human 主脑 and not Codex root. Master compiles
-the goal into a task graph, then assigns; it does not take another peer's
-task or worktree.
+The human remains the final authority for goals, money, irreversible risk and
+version promotion. Master owns project priorities, cross-task dependencies
+and final delivery. Use the [file handoff contract](#设计规划与审查角色的文件交接合同)
+for architect assignments.
 
-**Master is an architect and dispatcher, never an everyday code-author.**
-Master authoring business diffs is an anti-pattern and a failure of division
-of labor. Master's scarce capacity belongs to task graph compilation, strict
-dependency boundaries, unblocking workers, and driving overall throughput.
-Master operates under two prime directives:
-1. **Exemplary Task Decomposition**: Slice goals along clear dependencies and
-   non-overlapping file ownership. Every dispatched task must be closed-loop
-   by design: define explicit done-iff (DoD), artifacts, forbidden edits, exact
-   test commands, expected results, and evidence location. Every assignment must
-   anticipate failure and define an exception resolution path: **fallbacks,
-   silent downgrades, or masking errors are strictly prohibited**. A blocked
-   peer supplies failure evidence, attempted remedies and the decision needed
-   for master verification; an unknown root cause does not delay requesting
-   help. Master must actively close the lifecycle rather than patch
-   output symptoms.
-2. **Peer-first Capacity**: Master must keep eligible capacity saturated
-   without serial bottlenecks. Offer long-horizon goals through the public
-   board to suitable, consenting peers. Each peer may split its accepted goal
-   and orchestrate independent `codex exec --profile gcm` workers for its
-   bounded subwork.
-   Check idle, suitable authorized peers and available capacity first; use peer
-   capacity that can take the ready work. Direct-dispatch independent GCM
-   workers only when no suitable authorized peer can take the work. Before
-   ending each scheduling turn, inspect ready work, peer capacity, protected
-   holds, P0/P1 work, and the active issue backlog.
-   Delivery, merge, review, task close, and cleanup are lifecycle steps, never
-   reasons to leave eligible work undispatched.
+- Where a suitable architect is assigned, route buglist items and project tasks
+  to the architect first. The architect plans, hands the implementation to
+  authorized peers, and accepts their results. Reuse the original board task
+  and its scope. When all suitable architects are busy, queue the intake and
+  keep unrelated ready work moving.
+- For work without an applicable architect assignment, use the existing
+  peer and independent-worker routing. Apply explicit user instructions about
+  who plans, executes and accepts the task. Record decisions, evidence and
+  needed next actions on the existing task.
 
 **Sovereignty and Backlog Priority**:
 - **No autonomous technical debt refactoring**: When assigned tasks complete
@@ -1785,9 +1768,8 @@ Master operates under two prime directives:
   unbounded autonomous runs risk destabilizing user intent.
 - **Autonomous Bug Tracking Backlog Resolution**: If pre-existing issues or
   requirements are logged in the bug system (`appsdk bug list --status open`),
-  these represent authorized project work. Master autonomously pulls and
-  dispatches open bugs in strict priority order (P0 > P1 > P2) to keep
-  worker capacity saturated before suggesting closure.
+  master pulls authorized open bugs in priority order (P0 > P1 > P2) and
+  routes them under the same architect intake rule as project tasks.
 
 **Worker->Master idle fact and master long-horizon wake**:
 When a worker transitions from `working` to `idle`, it emits one idempotent
@@ -1837,6 +1819,8 @@ Execute diagnostic closure immediately:
 ```sh
 collab worker status <id>
 ```
+For a Rex or tmux peer with missing status facts, inspect its bound terminal
+through the [non-live peer procedure](references/board-idle-patrol.md#非-live-peer-的主动核实流程).
 Use durable Collab state and the selected binding's status source to choose the
 next action. For an AppServer binding, query native thread state. A tmux pane is
 address proof only and never proves the agent is alive or `Present`; its agent
@@ -1845,8 +1829,9 @@ without the receive receipt. A tmux screen cannot establish task completion,
 peer consumption, or Codex turn state. Do not infer those facts or restart a
 shared runtime from a pane probe.
 
-Master keeps architecture, dispatch, integration, critical repair, and final
-acceptance. Use a board invitation for a long-horizon peer goal. Use an
+Master keeps project dispatch, integration and final delivery accountability.
+Architect owns planning and task acceptance when assigned. Use a board
+invitation for a long-horizon peer goal. Use an
 independent `codex exec --profile gcm` worker for bounded execution or
 observation. Legacy managed-subagent records grant no new execution authority
 and fail closed for unsupported thread creation. Give each peer and GCM worker
@@ -2178,22 +2163,100 @@ subscription, as part of bootstrap.
 
 ## 宿主注册所需信息
 
-在目标项目和当前 agent 会话中执行 `collab context`。宿主决定要报告的事实，
-不决定角色：任何宿主注册后默认是 peer；成为 master 只能由用户明确授权
-（`collab master promote --approval '…'` 或 `collab context --approve-grant`
-action=restore_master），或由已授权 master 委托。各宿主统一运行 `collab context`。
-CLI 按当前宿主从下表的来源收集本次事实，由 daemon 按当前绑定和实时端点证据裁决。
-代理使用自身原会话的执行入口，避免手动收集或混用其他宿主的注册字段。
+工作目录设为目标项目根。用当前 agent 原会话的 shell，只执行适用的取值命令。
+DSH 即使运行于 Rex 或 tmux 内，也优先使用 DSH 的身份来源。
+禁止用 Computer Use、CUA 或 GUI 取值、发命令或关闭界面。保留原终端，
+不 split、不新建 pane、tab 或窗口，不为取值改名。
 
-| 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
-| --- | --- | --- | --- |
-| DSH | 当前 gateway session（`DSH_SESSION_ID`） | CLI 用本次 gateway session 查已有身份。首次建立通信时从 gateway 获取该 session 的控制能力；gateway 负责 Poll/Ack | 不从日志或 plist 猜 ID，不混报 Codex 或 tmux 字段 |
-| Codex TUI / CLI | 当前 agent session；用该 TUI 的已选适配器定位投递 | 原生 AppServer 提供 `session_id`、`thread_id`、`endpoint`、`namespace`。选用 tmux 时，daemon 从实时 iTerm2 pane 与 client TTY 核实所连 session。新旧角色显示名由 daemon 按原生 ID 执行并读回。 | 不用 tmux 的 `$N` 或内部 `%pane` 冒充 agent session 或 iTerm2 pane，不借用其他进程的 endpoint |
-| Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
-| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 用当前 agent 自己的执行工具在原有 Rex block 运行 `collab context`。它沿原环境读取 `REX_SESSION`、`REX_BLOCK`，调用官方 `rex whoami --json --autostart=false` 获取 server endpoint，daemon 再用 Rex CLI 核验该 session 和 terminal block | 禁止为身份命令 split、新建 pane、tab 或窗口，或借用其他 block、会话或身份。Rex session ID 和 AppServer 字段不用于代填 agent 身份 |
+### Rex 中的 Codex
+
+Codex 宿主注入 `CODEX_SESSION_ID`。Rex 注入 `REX_SESSION` 和 `REX_BLOCK`，官方
+Rex CLI 的 JSON `endpoint` 给出当前 server。三个 Rex 字段共同定位投递 block。
+在当前 block 内执行：
+
+```sh
+printf 'CODEX_SESSION_ID=%s\nREX_SESSION=%s\nREX_BLOCK=%s\n' \
+  "${CODEX_SESSION_ID:-}" "${REX_SESSION:-}" "${REX_BLOCK:-}"
+if [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ]; then
+  if command -v rex >/dev/null 2>&1; then
+    rex whoami --json --autostart=false
+  else
+    rex_bundle='Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex'
+    rex_cli="/Applications/$rex_bundle"
+    if [ ! -x "$rex_cli" ]; then
+      rex_cli="$HOME/Applications/$rex_bundle"
+    fi
+    if [ -x "$rex_cli" ]; then
+      "$rex_cli" whoami --json --autostart=false
+    else
+      printf '%s\n' 'Rex CLI unavailable in this shell' >&2
+    fi
+  fi
+fi
+```
+
+`collab context` 从同一环境自动读取这些值，daemon 核实 Rex server、session 和
+terminal block。Rex session/block 只用于投递。缺 `CODEX_SESSION_ID` 时由当前 Codex
+宿主补传。此路径无需 AppServer thread、endpoint 或 namespace。
+
+### iTerm2 中的 tmux / Codex TUI
+
+Codex 注入 `CODEX_SESSION_ID`。tmux 注入 `TMUX_PANE`。在现有 pane 中执行：
+
+```sh
+printf 'CODEX_SESSION_ID=%s\nTMUX_PANE=%s\n' "${CODEX_SESSION_ID:-}" "${TMUX_PANE:-}"
+if [ -n "${TMUX_PANE:-}" ]; then
+  tmux display-message -p -t "$TMUX_PANE" 'tmux_session=#{session_id} pane=#{pane_id} pane_tty=#{pane_tty}'
+fi
+```
+
+这是只读 pane 查看。注册时 daemon 从宿主声明的 tmux socket 和进程祖先链核实
+当前 pane，再用 `tmux list-clients -F '#{pid}|#{session_id}|#{client_tty}'` 将该
+session 的 client TTY 与 iTerm2 已连接 session 的 TTY 匹配，取得 iTerm2 原生 ID。
+iTerm2 附着证据由 daemon 获取，agent 只运行 `collab context`，无需调用 AppleScript。
+`$TMUX` 不作为 Collab socket 来源。tmux session、pane ID 和 iTerm2 ID 都是宿主位置。
+
+### DSH
+
+```sh
+printf 'DSH_SESSION_ID=%s\n' "${DSH_SESSION_ID:-}"
+```
+
+`DSH_SESSION_ID` 由当前 DSH 宿主注入。首次注册时，`collab context` 通过 gateway
+发布的控制能力调用 `resolve-agent`，按该 session 和项目核实 `runtime_id`、
+`agent_id`、`session_id` 和 `cwd`。已有唯一绑定可用同一 ID 恢复。缺 ID 或能力
+就保留原错给 DSH 宿主维护者，禁止从 Codex、tmux 或历史记录补取。
+
+### Codex Desktop
+
+```sh
+printf 'CODEX_SESSION_ID=%s\nCODEX_THREAD_ID=%s\n' \
+  "${CODEX_SESSION_ID:-}" "${CODEX_THREAD_ID:-}"
+```
+
+两项均由当前 Desktop chat 的 shell 工具环境提供。`CODEX_SESSION_ID` 识别 agent，
+`CODEX_THREAD_ID` 定位当前 chat。`collab context` 用 Desktop runtime 的原生工具管道
+接入共享 bridge，由 Desktop 核实当前 thread 和 cwd。常规注册无需 MCP、手填 socket
+或 AppServer namespace。出现 `DESKTOP_BRIDGE_SESSION_REQUIRED` 或
+`DESKTOP_BRIDGE_THREAD_REQUIRED` 时，由当前 Desktop 宿主补传对应字段。
+
+### 提交给 Collab
+
+在取值的同一 agent 会话和项目根目录运行：
+
+```sh
+pwd -P
+collab context
+```
+
+CLI 自动提交本次宿主事实，daemon 核实后绑定。默认注册为 peer。master 仍需用户
+明确授权或已授权 master 委托。明确集成了直连 AppServer 的调用使用该宿主实际提供的
+`CODEX_SESSION_ID`、`CODEX_THREAD_ID`、socket 和 namespace，见
+[直连 AppServer 字段](#appserver-runtime-registration)。
 
 返回 `missing_facts` 时，`result.requires.fields` 列出缺项，`sources` 给出来源。
-普通注册把缺项交给当前宿主的维护者。`--provide` 用于依现有能力合同的非标准集成诊断。
+四个 AppServer 字段同时缺失时，先按上面的宿主路径确认 placement 和 agent session。
+普通注册把缺项交给当前宿主的维护者。`--provide` 用于已有真实能力回执的非标准集成。
 
 返回 `registered: true` 后核对名字。需要验证消息时，核对接收方的正式
 `recv` 回执；DSH 查 gateway Poll/Ack。服务不可达时先检查服务启动结果。
@@ -2346,8 +2409,8 @@ claim an independent goal or infer master authority.
   human-authorized handoff. Independent peers may
   decline a master collaboration invite. Master splits by dependency then
   unique write scope, offers long-horizon work to a consenting peer through the
-  public board with unambiguous delivery and test conditions, and keeps
-  architecture/integration/acceptance; it does not take another peer's task.
+  public board with unambiguous delivery and test conditions. Use the
+  [architect handoff](#设计规划与审查角色的文件交接合同) when applicable.
   Peers request help promptly with available failure evidence and attempts;
   root cause and solution need not be proven first. Apply Registered patrol
   duties for master verification and continued ownership. Legacy managed records grant no new task

@@ -5,6 +5,8 @@ description: "未注册调用者可只读查询项目通信目录与匿名发送
 
 # Collab
 
+Collab 操作用 shell CLI 或专用 MCP。禁止用 Computer Use、CUA 或 GUI 工具操作 Collab。
+
 本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
 不整篇加载；手册与本入口属于同一个 Skill。
 
@@ -34,22 +36,32 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 
 ### 首次注册与缺项提示
 
-在要加入的项目目录、当前 agent 自己的会话中运行 `collab context`。
-在 Rex 中，直接用该 agent 自己当前会话的执行工具，在原有 block 获取或恢复身份。
-禁止为身份命令 split 或新建 pane、tab、窗口，也禁止借用其他 block 或会话执行。
-tmux、Rex、DSH 和 Codex Desktop 使用同一个入口，由各宿主适配器收集本会话的事实。
-Rex 适配器读取当前会话的 `REX_SESSION` 和 `REX_BLOCK`，调用官方 Rex CLI 解析并核验
-当前端点后完成绑定。看到 `missing_facts` 时，保留回执的
-`result.requires.fields` 和 `result.requires.sources`，由所列来源的维护者补齐能力。
-普通注册继续使用同一条命令。成功时核对返回的
-`registered: true` 和自己的名字。各宿主的字段和取值入口见[注册手册](operations.md#宿主注册所需信息)。
+身份注册、恢复、查状态和终端取证只调用 shell 中的 Collab CLI，以及需要时的宿主 CLI
+或专用 MCP。禁止调用 Computer Use、CUA、桌面或浏览器控制工具，包括用它们切换、
+停止或关闭界面。禁止向 GUI 终端注入命令。Rex 身份恢复禁止 split、新建 pane、tab、
+窗口、改名或借用其他 block、会话。
+
+用当前 agent 自己会话的 shell 命令工具，工作目录设为当前项目根。按
+[宿主注册所需信息](operations.md#宿主注册所需信息)运行对应的取值命令，然后执行：
+
+```sh
+pwd -P
+collab context
+```
+
+Rex 和 tmux 只提供终端位置，Codex 提供当前 agent 的 `CODEX_SESSION_ID`。
+DSH 的身份来源是 gateway 注入的 `DSH_SESSION_ID`。Desktop 还使用当前
+`CODEX_THREAD_ID` 及原生 bridge。成功时核对 `registered: true` 和自己的名字。
+缺必需事实时，保留宿主命令原错或 `missing_facts` 的 `result.requires.fields` 和
+`result.requires.sources`，指出哪个宿主须补传哪个字段。禁止猜填字段、借用其他
+会话或改用 GUI。继续能独立推进的工作，宿主补齐后在原会话重试。
 
 若返回 `DAEMON_UNAVAILABLE`，按[正式服务恢复步骤](operations.md#全局-daemon-与默认身份恢复)
 检查启动状态与首个错误。
 `TMUX_OBSERVATION_CAPABILITY_MISSING` 表示 daemon 缺少可核实的 tmux 机器端点。
 把原错误交给宿主维护者。端点就绪后，从同一会话重跑 `collab context`。
-`TMUX_ITERM2_PANE_REQUIRED` 表示新 tmux 会话缺当前 iTerm2 接入。先将该 session
-接入 iTerm2，再运行 `collab context`。daemon 核实 pane 所连的 session ID。
+`TMUX_ITERM2_PANE_REQUIRED` 表示新 tmux 会话缺当前 iTerm2 接入。在宿主维护者
+将原 session 接入 iTerm2 后从原 agent 会话重试。daemon 核实 pane 所连的 session ID。
 已登记会话断开 iTerm2 时，名字和业务保留，消息在 daemon 排队。
 `IDENTITY_MAP_DECODE_FAILED` 表示当前程序读不懂已保存的身份表；
 补注册字段无法修复它。保留身份表，交由维护者恢复兼容运行版后再试。
@@ -155,7 +167,7 @@ master 是项目唯一负责人，负责持续推进、验收、集成和汇报�
 manager 核实下级对进度、完成、阻塞和验收的声明，检查相关原始回执或产物，判断证据
 是否支持结论。worker 报告的权限、环境、失败或无法执行也是待核查的声明；manager
 检查原错，区分沙箱限制与系统拒绝，并在已有授权内解阻。不把局部限制扩大为全局结论。
-master 先按下节当前提示词中的优先级，通过任务板邀请合适、可用且获授权的 peer。
+master 按[派单顺序](#派单顺序与一-peer-一任务)选择本阶段的负责人。
 无可承接 peer 时，master 保留目标并按
 [统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)直接派独立
 `codex exec --profile gcm` execution/observation worker，不等待注册，也不把角色缺位
@@ -168,8 +180,8 @@ idle peer，包括没有当前任务的成员，并显式显示各自通道来�
 Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
 `identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
 [非 live peer 主动核实流程](references/board-idle-patrol.md#非-live-peer-的主动核实流程)
-处理：一次主动核实、最长 15 分钟有界等待、终判后不可用者移除、可用者进入派发队列；
-等待期间不计入容量，也不因这些 peer 未响应停工。
+处理。刚注册的 Rex peer 显示 `unknown` 时，master 当轮主动查状态和原 block 的 snapshot。
+仍需 peer 补事实时最多等 15 分钟。状态未核实的 peer 不计入容量，其他 ready 工作继续派发。
 先按任务权限、能力、依赖和实际容量筛选，再按当前用户或任务提示词中的优先级选择。
 派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
 默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，
@@ -180,10 +192,11 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-项目有可承接本任务的 architect 时，默认由同一 architect 查清问题、完成详细设计并 review
-执行结果。Jenny 指定一个或多个 peer，拿到可直接执行的设计和任务合同后再派实现。
-只有用户明确要求时，architect 才承担具体执行，
-并由其他人 review 该 architect 的实现。用户另有分工要求时按其要求执行。
+项目有适合本任务的 architect 时，Jenny 将 buglist 中已授权的缺陷和项目任务先派给
+architect。Architect 完成详细计划，把可执行合同交给一个或多个 peer。Peer 实现、
+验证并将结果交回 architect。Architect 按计划及真实行为证据验收，返工也由其交回
+原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。
+只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
 
 任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
 独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review`/独立

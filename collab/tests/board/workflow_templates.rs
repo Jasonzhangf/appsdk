@@ -92,6 +92,24 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         assert!(context_instruction.contains("In Rex, use the agent's existing block"));
         assert!(context_instruction.contains("official Rex CLI"));
         assert!(context_instruction.contains("Do not split or open a pane, tab, or window"));
+        assert!(context_instruction.contains("Run `pwd -P` and `collab context`"));
+        assert!(context_instruction.contains("Never invoke Computer Use, CUA, or GUI controls"));
+        for source in [
+            "rex whoami --json --autostart=false",
+            "CODEX_SESSION_ID",
+            "TMUX_PANE",
+            "iTerm2 attachment",
+            "DSH_SESSION_ID",
+            "CODEX_THREAD_ID",
+        ] {
+            assert!(context_instruction.contains(source), "{label}: {source}");
+        }
+        assert!(
+            brief["communication_recovery"]["steps"][1]
+                .as_str()
+                .unwrap()
+                .contains("Never guess or manually fill session_id, thread_id, endpoint or namespace")
+        );
         let role_text = brief.to_string();
         for retired_rule in [
             "report routinely",
@@ -981,8 +999,10 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
         "master role_brief must require active non-live peer verification: {text}"
     );
     assert!(
-        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
-        "master role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+        contains_ci(&text, "including when the worker just registered")
+            && contains_ci(&text, "For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --lines 80`")
+            && contains_ci(&text, "Keep other ready work moving during verification"),
+        "master role_brief must inspect the bound terminal and keep unrelated work moving: {text}"
     );
     assert!(
         contains_ci(&text, "wait at most 15 minutes"),
@@ -1042,9 +1062,15 @@ fn master_role_brief_defaults_to_independent_review_with_three_condition_excepti
     assert!(
         contains_ci(
             &text,
-            "assign the same architect to plan and review it and designate one or more peer executors with non-overlapping scopes"
+            "master routes both buglist items and project tasks to that architect first"
         ),
-        "master role_brief must route planning and review to the architect and implementation to peers: {text}"
+        "master role_brief must route both task intakes to the architect first: {text}"
+    );
+    assert!(
+        contains_ci(&text, "architect owns planning and acceptance")
+            && contains_ci(&text, "hands implementation to one or more peer executors")
+            && contains_ci(&text, "peers implement, verify and return evidence to the architect"),
+        "master role_brief must distinguish architect acceptance from peer execution: {text}"
     );
     assert!(
         contains_ci(&text, "complete written design and execution contract for each peer"),
@@ -1122,8 +1148,8 @@ fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
         "patrol role_brief must name the non-live peer states: {text}"
     );
     assert!(
-        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
-        "patrol role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+        contains_ci(&text, "For Rex and Codex TUI/tmux, it requires `collab worker snapshot <id> --lines 80`"),
+        "patrol role_brief must check for Rex and tmux snapshot evidence: {text}"
     );
     assert!(
         contains_ci(&text, "wait at most 15 minutes"),
@@ -1226,6 +1252,8 @@ fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
     );
     for phrase in [
         "own both planning and review for the assigned task",
+        "select one or more peer executors for disjoint scopes",
+        "review and accept their work or return it for rework",
         "make all detailed design decisions",
         "produce a detailed architecture or plan file on disk",
         "ordered implementation steps",

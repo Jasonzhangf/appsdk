@@ -1036,6 +1036,10 @@ fn master_role_brief_defaults_to_independent_review_with_three_condition_excepti
         "master role_brief must route planning and review to the architect and implementation to peers: {text}"
     );
     assert!(
+        contains_ci(&text, "complete written design and execution contract for each peer"),
+        "master role_brief must require the architect's executable handoff: {text}"
+    );
+    assert!(
         contains_ci(
             &text,
             "For tasks without an assigned architect reviewer, default to the task's own independent Codex OAuth reviewer using codex-auto-review."
@@ -1211,7 +1215,13 @@ fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
     );
     for phrase in [
         "own both planning and review for the assigned task",
+        "make all detailed design decisions",
         "produce a detailed architecture or plan file on disk",
+        "ordered implementation steps",
+        "required work and exclusions",
+        "reproducible acceptance checks and pass conditions",
+        "without guessing",
+        "update the original design before that step resumes",
         "only implement when the user explicitly asks you to",
         "keep a separate reviewer for any work you implement",
         "execute the actual work",

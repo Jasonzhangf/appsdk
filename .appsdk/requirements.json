@@ -593,9 +593,90 @@
         "version": 1
       },
       "version": 22
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "当前绑定状态只有一个 identity map。身份缺乏就提醒注册，缺什么就提醒什么，并提供如何进行信息获取注册。宿主事实只用于注册时填 identity-map；map 更新失败只报错，不做历史回放或多阶段 handoff replay。周期唤醒保留简化版；任务订阅保留当前状态恢复；明确退役释放普通名字并允许复用；顶替与角色接续一次 map 更新完成。",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d semantic audit 2026-11-22"
+        },
+        "base_version": 5,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-minimal-identity-v6-20261122",
+        "requirement_id": "req-collab-identity",
+        "text": "Collab 的身份与绑定唯一真源是 identity-map.json。同一 canonical project 内一个已分配名字最多一个 active current；名字承载持续工作归属，agent sessionID 和端点只是可替换执行载体。注册、恢复、换绑、改名、角色变化和退役由同一个 map owner 原子提交。当前宿主事实（Rex block、tmux session/pane、AppServer thread/socket 或显式 sessionID）只作为输入；缺失或冲突时直接返回 IDENTITY_FACT_REQUIRED，并列出缺什么字段、宿主如何获取该字段、以及用 collab context 重新注册/重试。不得猜测名字、复制他人身份、读取 route/archive/journal 历史、或用第二身份源 fallback。人类明确指定接管既有名字时，一次 map 更新同时替换 target current holder、适用角色和 target 名下工作；旧 holder 不能凭旧记录夺回，source 名下工作保留。人类明确注销普通名字时释放该名字，下一次普通注册可复用；既有任务归属保持不变，直到后续邀请被新 owner 接受。daemon 重启只加载当前 identity map、当前任务、未读 name mailbox 和当前订阅状态；不重放历史操作，不迁移归档，不恢复已消费消息或 reply obligation。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "当前绑定状态只有一个 identity map。身份缺乏就提醒注册，缺什么就提醒什么，并提供如何进行信息获取注册。宿主事实只用于注册时填 identity-map；map 更新失败只报错，不做历史回放或多阶段 handoff replay。周期唤醒保留简化版；任务订阅保留当前状态恢复；明确退役释放普通名字并允许复用；顶替与角色接续一次 map 更新完成。",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d semantic audit 2026-11-22"
+        },
+        "requirement_id": "req-collab-identity",
+        "status": "active",
+        "text": "Collab 的身份与绑定唯一真源是 identity-map.json。同一 canonical project 内一个已分配名字最多一个 active current；名字承载持续工作归属，agent sessionID 和端点只是可替换执行载体。注册、恢复、换绑、改名、角色变化和退役由同一个 map owner 原子提交。当前宿主事实（Rex block、tmux session/pane、AppServer thread/socket 或显式 sessionID）只作为输入；缺失或冲突时直接返回 IDENTITY_FACT_REQUIRED，并列出缺什么字段、宿主如何获取该字段、以及用 collab context 重新注册/重试。不得猜测名字、复制他人身份、读取 route/archive/journal 历史、或用第二身份源 fallback。人类明确指定接管既有名字时，一次 map 更新同时替换 target current holder、适用角色和 target 名下工作；旧 holder 不能凭旧记录夺回，source 名下工作保留。人类明确注销普通名字时释放该名字，下一次普通注册可复用；既有任务归属保持不变，直到后续邀请被新 owner 接受。daemon 重启只加载当前 identity map、当前任务、未读 name mailbox 和当前订阅状态；不重放历史操作，不迁移归档，不恢复已消费消息或 reply obligation。",
+        "version": 6
+      },
+      "version": 23
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "收件箱是根据名字存储的数据库，不需要 reply。mailbox 只保留未读和当前状态：消费后删除正文，只留任务必要结果；无消息 archive。周期唤醒保留简化版，删除补发和复杂回放；任务唤醒只恢复当前订阅、剩余次数和下一触发点。",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65c0-7461-a8d2-a9cdbfb39013 semantic audit 2026-11-22"
+        },
+        "base_version": 8,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-minimal-mailbox-v9-20261122",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。recv 一次返回当前未读批次并删除已消费正文和逐消息投递簿记；只有任务结果等业务 owner 明确必需的状态可保留在各自业务 owner。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。通知只是触发回读；通知丢失不等于消息丢失。周期唤醒由 daemon 维护当前订阅：busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "收件箱是根据名字存储的数据库，不需要 reply。mailbox 只保留未读和当前状态：消费后删除正文，只留任务必要结果；无消息 archive。周期唤醒保留简化版，删除补发和复杂回放；任务唤醒只恢复当前订阅、剩余次数和下一触发点。",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65c0-7461-a8d2-a9cdbfb39013 semantic audit 2026-11-22"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。recv 一次返回当前未读批次并删除已消费正文和逐消息投递簿记；只有任务结果等业务 owner 明确必需的状态可保留在各自业务 owner。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。通知只是触发回读；通知丢失不等于消息丢失。周期唤醒由 daemon 维护当前订阅：busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。",
+        "version": 9
+      },
+      "version": 24
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "Architect board 权限保留三项：architect 可直接计划、改单、派发。",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65c0-7461-a8d2-a9cdbfb39013 semantic audit 2026-11-22"
+        },
+        "base_version": 0,
+        "operation": "create",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-architect-board-v1-20261122",
+        "requirement_id": "req-collab-architect-board-authority",
+        "text": "已认证且持有 architect 工作角色的 peer，在明确受托的任务范围内可以直接创建和修改计划字段，并直接向同 scope 可承接 peer 派发执行任务。计划字段包括标题、描述、交付/测试条件和规划 next step；已邀请或已接手任务仍受当前 revision 与合同变更约束。派发沿用既有可见性、revision、受邀确认、执行准入、状态、证据和 review 门禁。architect 自设工作角色不构成自授 board 权限；不能修改无关项目、应用 scope 或他人目标，不能继承或转授 master/CEO 权限，不能代替 peer 接受、伪造进度或跳过 review。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "Architect board 权限保留三项：architect 可直接计划、改单、派发。",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65c0-7461-a8d2-a9cdbfb39013 semantic audit 2026-11-22"
+        },
+        "requirement_id": "req-collab-architect-board-authority",
+        "status": "active",
+        "text": "已认证且持有 architect 工作角色的 peer，在明确受托的任务范围内可以直接创建和修改计划字段，并直接向同 scope 可承接 peer 派发执行任务。计划字段包括标题、描述、交付/测试条件和规划 next step；已邀请或已接手任务仍受当前 revision 与合同变更约束。派发沿用既有可见性、revision、受邀确认、执行准入、状态、证据和 review 门禁。architect 自设工作角色不构成自授 board 权限；不能修改无关项目、应用 scope 或他人目标，不能继承或转授 master/CEO 权限，不能代替 peer 接受、伪造进度或跳过 review。",
+        "version": 1
+      },
+      "version": 25
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 22
+  "version": 25
 }

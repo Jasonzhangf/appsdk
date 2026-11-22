@@ -92,6 +92,10 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 总设计师、架构师、规划师、reviewer 及承担同类职责的角色共同适用本合同，不依赖特定
 英文角色名。执行 worker 不被假设具备设计者同等判断力、项目背景或继承父会话。
 
+- Jenny 在任务合同指定一名可承接的 architect 和一个或多个执行 peer。多个执行者各有
+  明确且不重叠的责任范围。Architect 交付可执行计划，peer 按计划实现、验证并交回证据，
+  同一 architect review 执行结果。适用 Review 门禁照常执行，无需另派常规 Planner 或 Reviewer。
+  用户明确指定 architect 参与实现时，交给其他人 review 该 architect 的实现。
 - 设计和规划必须产出可直接执行的详细设计文件并落盘，不只是给方向。内容按任务实际
   需要明确目标、现状与输入、模块/接口/数据流、操作顺序、依赖、允许与禁止的路径和
   动作、异常与停止/升级条件、交付物位置、成功/失败与副作用验收、接收者和后续责任人；
@@ -102,8 +106,8 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 - worker 只负责在合同内执行，不自行改变目标、架构、权限或验收；发现歧义、冲突或关键
   缺失时向设计/派单 owner 提交具体问题，只暂停受影响步骤。合同须写明能做、不能做、
   如何交付和怎样通过验收。
-- 上述设计、规划与审查角色负责分析、设计落盘、指导和审查，不直接承担编码、运行修改、
-  提交等具体实现执行。reviewer 输出带定位、理由、修改要求和复验条件的文件，由执行者
+- 上述设计、规划与审查角色负责分析、设计落盘、指导和审查。具体实现交给执行者，除非
+  用户明确指定其他分工。reviewer 输出带定位、理由、修改要求和复验条件的文件，由执行者
   修复，不亲自代修；保留必要的只读检查和文案落盘能力。
 - 项目 master 创建或更新这些角色的流程模板时，将本合同写入 `responsibilities` 并沿下游
   派单传递；示例模板不能继续只写泛泛的“推进设计任务”。不增加权限；普通 peer 不越权更新
@@ -495,8 +499,8 @@ closure is a long-horizon goal.
   authority. Patrol performs its authorized standing inspection and reports
   evidenced findings, but does not take temporary implementation dispatch.
   Memory refines source-backed facts and corrects stale conclusions through the
-  owning memory entry. Architect produces the on-disk design and code-admission
-  handoff; implementation and final review remain separate.
+  owning memory entry. Architect plans the work and reviews the peer's completed
+  implementation under the file handoff contract above.
 - A managed-subagent record is legacy compatibility state. It preserves
   existing facts for diagnosis and grants no new production
   execution authority.

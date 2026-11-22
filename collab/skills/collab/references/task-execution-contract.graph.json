@@ -1,77 +1,90 @@
 {
   "id": "appsdk-collab-task-execution-contract",
   "version": "1.0.0",
-  "description": "一次 Collab 任务事件的合同路由图。DAGPipe 校验拓扑。Collab 从图读取合同引用，按当前身份、任务、执行阶段和证据选择分支，使用现有 CLI 及权限门禁执行。节点绑定标识描述合同职责。每个分支回到同一结果出口，新回执、恢复信号或返工进入下一次事件。",
+  "description": "一次 Collab 任务事件的合同路由图。核对当前事实后选择一份合同，执行后返回本轮回执。六种合同是同一输入的互斥路由。Collab 从图读取合同引用，使用现有 CLI 和权限门禁执行。新回执、恢复信号或返工进入下一次事件。",
   "inputs": [{"id": "任务事件", "schema": "Object"}],
   "nodes": [
     {
-      "id": "核对当前身份和任务证据", "operator": "appsdk.collab_task_contract.classify", "operator_version": "1",
-      "description": "读取当前 context、board、调用者、邀请、当前 Execute attempt、业务阻塞申请、验收或清理证据。停滞须由计划检查点和实际进展证明，busy、idle、时间戳和注册能否投递都不代替任务事实。",
-      "inputs": ["任务事件"], "output": {"id": "合同选择", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "id": "核对当前身份和任务证据",
+      "operator": "appsdk.collab_task_contract.classify",
+      "operator_version": "1",
+      "description": "核对 context、board、当前执行阶段、阻塞申请及验收证据。停滞由合同检查点和实际进展确认。",
+      "inputs": ["任务事件"],
+      "output": {"id": "已核实的任务事实", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "注册或恢复原会话身份", "operator": "appsdk.collab_task_contract.identity", "operator_version": "1",
-      "contract": {"key": "identity", "reference": "operations.md#宿主注册所需信息"},
-      "description": "身份缺失或绑定错误时，当前调用者从原宿主取得当前会话事实，运行 collab context。注册成功以本次 registered 与稳定名字为准，缺项按 requires.fields 和 sources 交宿主维护者。保留原任务和资源。不猜身份，不分窗，不使用 GUI。",
-      "inputs": ["合同选择"], "output": {"id": "身份回执", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "id": "选择并履行当前合同",
+      "operator": "appsdk.collab_task_contract.route",
+      "operator_version": "1",
+      "description": "选择当前事件对应的合同。终态凭原回执收口，缺证据时保留原错和下一动作。",
+      "contracts": [
+        {
+          "key": "identity",
+          "reference": "operations.md#宿主注册所需信息",
+          "trigger": "缺少有效身份，或当前绑定被拒绝",
+          "owner": "当前 agent",
+          "result": "原宿主 CLI 事实及 context 注册回执。缺项交宿主维护者。"
+        },
+        {
+          "key": "dispatch",
+          "reference": "operations.md#dispatch-task-contract",
+          "trigger": "已授权任务待派，执行合同未就绪",
+          "owner": "Jenny 交项目任务，architect 交执行合同",
+          "result": "关联原任务的详细设计、行动项、执行者、验收和派发回执。"
+        },
+        {
+          "key": "execute",
+          "reference": "operations.md#execute-task-contract",
+          "trigger": "任务待认领、收到邀请、开工、执行或返工",
+          "owner": "当前指定执行者",
+          "result": "认领或接受后用本人当前 attempt 开工。留下实际进展和交付证据。"
+        },
+        {
+          "key": "observe",
+          "reference": "references/board-idle-patrol.md#任务阻塞或停滞先取证",
+          "trigger": "负责人核实失联、unknown、阻塞或未达到进展检查点",
+          "owner": "当前任务的直属负责人",
+          "result": "保留原位 capture 或对应宿主只读回执，记录下一行动及负责人。"
+        },
+        {
+          "key": "unblock",
+          "reference": "operations.md#report-task-blocker",
+          "trigger": "执行者确认阻塞、等待裁决或获得恢复信号",
+          "owner": "执行者报告，原派发者核实并跟踪",
+          "result": "Architect 落实解阻行动项，授权主管裁决正式阻塞。执行者收到恢复信号后继续。"
+        },
+        {
+          "key": "accept",
+          "reference": "operations.md#accept-task-contract",
+          "trigger": "执行者交回完整结果，或已验收任务待集成及收口",
+          "owner": "指定 architect 或 reviewer，其余收口义务由各 owner 完成",
+          "result": "真实验收、返工行动项或适用集成、资源和关闭回执。"
+        }
+      ],
+      "inputs": ["已核实的任务事实"],
+      "output": {"id": "本次合同回执", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     },
     {
-      "id": "拆解设计并交接行动项", "operator": "appsdk.collab_task_contract.dispatch", "operator_version": "1",
-      "contract": {"key": "dispatch", "reference": "operations.md#dispatch-task-contract"},
-      "description": "Jenny 将授权项目任务交 architect，协调资源、巡检、回收和对外沟通。Architect 写完整设计、行动项、允许范围及验收，为指定 peer 发布关联父任务的执行合同，并直接交对方。发布不能证明已接单。",
-      "inputs": ["合同选择"], "output": {"id": "派发回执", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
-    },
-    {
-      "id": "认领开工并核对执行进度", "operator": "appsdk.collab_task_contract.execute", "operator_version": "1",
-      "contract": {"key": "execute", "reference": "operations.md#execute-task-contract"},
-      "description": "指定执行者用当前 revision 接受邀请或认领本人任务。公开工单的 claimed 阶段用公开回执提供的 attempt 开工，等 running 再执行与交回。按行动项推进并留实际证据。落后于合同检查点时由负责人核实状态、原因及原终端；无证据保留未知，其他工作继续。",
-      "inputs": ["合同选择"], "output": {"id": "执行回执", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
-    },
-    {
-      "id": "采集阻塞或停滞的原位证据", "operator": "appsdk.collab_task_contract.observe", "operator_version": "1",
-      "contract": {"key": "observe", "reference": "references/board-idle-patrol.md#任务阻塞或停滞先取证"},
-      "description": "负责人比较检查点和交付证据。遇到失联、unknown、阻塞或无推进，对有终端绑定的执行者只读 capture 原 block 或 pane。根据证据生成带负责人的推进或解阻行动项。取证失败保留原错并指定下一取证动作，继续不依赖该通道的工作。",
-      "inputs": ["合同选择"], "output": {"id": "取证回执", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
-    },
-    {
-      "id": "报告阻塞并落实恢复", "operator": "appsdk.collab_task_contract.unblock", "operator_version": "1",
-      "contract": {"key": "unblock", "reference": "operations.md#report-task-blocker"},
-      "description": "执行者先向原派发者报告卡点、影响、实际尝试和所需动作，再暂停依赖步骤。Architect 把问题变成可执行行动项，证据不足则交明确取证任务。获授权主管独立决定正式阻塞申请。派发者跟踪并通知恢复，执行者以真实恢复信号和当前回执重新入图。",
-      "inputs": ["合同选择"], "output": {"id": "解阻回执", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
-    },
-    {
-      "id": "交回验收返工或收口", "operator": "appsdk.collab_task_contract.accept", "operator_version": "1",
-      "contract": {"key": "accept", "reference": "operations.md#accept-task-contract"},
-      "description": "执行者以原任务回执交产物和验证证据。指定 architect 或 reviewer 独立接受或返工；返工的每一项明确责任人和复验，再进入下一事件。按现有适用集成、资源回收和 completion_missing 证据收口。任务关闭或授权取消按各自真实回执。",
-      "inputs": ["合同选择"], "output": {"id": "验收回执", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
-    },
-    {
-      "id": "归还本次合同和实际结果", "operator": "appsdk.collab_task_contract.emit", "operator_version": "1",
-      "description": "返回当前输入依据、实际角色、选中的可复用合同、接收者和恢复或完成条件。错误、待决、未知和成功均从本出口返回。读取不代替派发、同意、消费、执行、验收或关闭。",
-      "inputs": ["身份回执", "派发回执", "执行回执", "取证回执", "解阻回执", "验收回执"], "output": {"id": "合同结果", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"
+      "id": "返回合同与实际结果",
+      "operator": "appsdk.collab_task_contract.emit",
+      "operator_version": "1",
+      "description": "返回选中的合同、执行身份、接收者、证据和下一动作。等待保留处理人和恢复条件，取消及完成各凭实际回执。",
+      "inputs": ["本次合同回执"],
+      "output": {"id": "任务事件结果", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
     }
   ],
   "edges": [
-    {"from": "核对当前身份和任务证据", "to": "注册或恢复原会话身份", "arc_id": "合同选择"},
-    {"from": "核对当前身份和任务证据", "to": "拆解设计并交接行动项", "arc_id": "合同选择"},
-    {"from": "核对当前身份和任务证据", "to": "认领开工并核对执行进度", "arc_id": "合同选择"},
-    {"from": "核对当前身份和任务证据", "to": "采集阻塞或停滞的原位证据", "arc_id": "合同选择"},
-    {"from": "核对当前身份和任务证据", "to": "报告阻塞并落实恢复", "arc_id": "合同选择"},
-    {"from": "核对当前身份和任务证据", "to": "交回验收返工或收口", "arc_id": "合同选择"},
-    {"from": "注册或恢复原会话身份", "to": "归还本次合同和实际结果", "arc_id": "身份回执"},
-    {"from": "拆解设计并交接行动项", "to": "归还本次合同和实际结果", "arc_id": "派发回执"},
-    {"from": "认领开工并核对执行进度", "to": "归还本次合同和实际结果", "arc_id": "执行回执"},
-    {"from": "采集阻塞或停滞的原位证据", "to": "归还本次合同和实际结果", "arc_id": "取证回执"},
-    {"from": "报告阻塞并落实恢复", "to": "归还本次合同和实际结果", "arc_id": "解阻回执"},
-    {"from": "交回验收返工或收口", "to": "归还本次合同和实际结果", "arc_id": "验收回执"}
+    {"from": "核对当前身份和任务证据", "to": "选择并履行当前合同", "arc_id": "已核实的任务事实"},
+    {"from": "选择并履行当前合同", "to": "返回合同与实际结果", "arc_id": "本次合同回执"}
   ],
-  "outputs": ["合同结果"]
+  "outputs": ["任务事件结果"]
 }

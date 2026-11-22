@@ -228,6 +228,10 @@ fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_de
         graph("appsdk-collab-name-ownership")["binding_kind"],
         "design"
     );
+    assert_eq!(
+        graph("appsdk-collab-task-execution-contract")["binding_kind"],
+        "design"
+    );
 }
 
 #[test]

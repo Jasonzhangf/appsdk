@@ -455,7 +455,8 @@ pub struct TaskContractRef {
 
 #[derive(Deserialize)]
 struct TaskContractNode {
-    contract: Option<TaskContractRef>,
+    #[serde(default)]
+    contracts: Vec<TaskContractRef>,
 }
 
 #[derive(Deserialize)]
@@ -477,7 +478,7 @@ pub(crate) fn task_contract_reference(key: &str) -> TaskContractRef {
     task_contract_graph()
         .nodes
         .iter()
-        .filter_map(|node| node.contract.as_ref())
+        .flat_map(|node| &node.contracts)
         .find(|contract| contract.key == key)
         .unwrap_or_else(|| panic!("unknown task execution contract: {key}"))
         .clone()

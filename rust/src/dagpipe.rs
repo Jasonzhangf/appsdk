@@ -332,7 +332,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operators, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 50] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 51] {
     [
         (
             "docs/dagpipe/collab-activation.graph.json",
@@ -409,6 +409,10 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 50] {
         (
             "docs/dagpipe/collab-role-work-cycle.graph.json",
             include_str!("../../docs/dagpipe/collab-role-work-cycle.graph.json"),
+        ),
+        (
+            "collab/skills/collab/references/task-execution-contract.graph.json",
+            include_str!("../../collab/skills/collab/references/task-execution-contract.graph.json"),
         ),
         (
             "docs/dagpipe/collab-desktop-bridge-service.graph.json",
@@ -539,7 +543,7 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 50] {
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 47] {
+fn design_graph_ids() -> [&'static str; 48] {
     [
         "appsdk-collab-activation",
         "appsdk-collab-task-block-approval",
@@ -559,6 +563,7 @@ fn design_graph_ids() -> [&'static str; 47] {
         "appsdk-collab-mcp-desktop-caller",
         "appsdk-collab-role-context-projection",
         "appsdk-collab-role-work-cycle",
+        "appsdk-collab-task-execution-contract",
         "appsdk-collab-desktop-bridge-service",
         "appsdk-collab-desktop-bridge-delivery",
         "appsdk-collab-name-ownership",
@@ -591,7 +596,7 @@ fn design_graph_ids() -> [&'static str; 47] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 282] {
+fn design_graph_operator_names() -> [&'static str; 285] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -833,6 +838,9 @@ fn design_graph_operator_names() -> [&'static str; 282] {
         "appsdk.collab_stewardship.rearm_one_shot_wake",
         "appsdk.collab_stewardship.select_execution_owner",
         "appsdk.collab_stewardship.verify_closure_or_park",
+        "appsdk.collab_task_contract.classify",
+        "appsdk.collab_task_contract.route",
+        "appsdk.collab_task_contract.emit",
         "appsdk.collab_subagent.admit_request",
         "appsdk.collab_subagent.apply_action",
         "appsdk.collab_subagent.emit_result",

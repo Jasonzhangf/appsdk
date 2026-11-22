@@ -692,7 +692,26 @@ fn lifecycle_native_pair_fixture(
     label: &str,
     child_effect: &str,
 ) -> (Fixture, TestAppServer, TestAppServer, Value, Value) {
-    let fixture = Fixture::without_tmux(label);
+    lifecycle_native_pair_fixture_with_config(label, child_effect, None)
+}
+
+fn lifecycle_native_pair_fixture_without_background_delivery(
+    label: &str,
+    child_effect: &str,
+) -> (Fixture, TestAppServer, TestAppServer, Value, Value) {
+    lifecycle_native_pair_fixture_with_config(
+        label,
+        child_effect,
+        Some("[timers]\nenabled=false\n[notifications]\nenabled=false\n"),
+    )
+}
+
+fn lifecycle_native_pair_fixture_with_config(
+    label: &str,
+    child_effect: &str,
+    config: Option<&str>,
+) -> (Fixture, TestAppServer, TestAppServer, Value, Value) {
+    let fixture = Fixture::without_tmux_with_config(label, config);
     let master_host = TestAppServer::start_with_effect_at(
         &fixture.root,
         "lifecycle-master.sock",
@@ -1127,4 +1146,5 @@ include!("context_operation_public_contract/part_a.rs");
 include!("context_operation_public_contract/part_b.rs");
 include!("context_operation_public_contract/part_c.rs");
 include!("context_operation_public_contract/part_d.rs");
+include!("context_operation_public_contract/preserved_peer_projection.rs");
 include!("context_operation_public_contract/part_e.rs");

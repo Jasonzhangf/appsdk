@@ -117,6 +117,249 @@ fn binding_for(server: &Server, worker_id: &str) -> RuntimeBinding {
     binding
 }
 
+fn rex_transport(root: &Path) -> SelectedTransport {
+    SelectedTransport {
+        kind: TransportKind::Rex,
+        endpoint: None,
+        namespace: None,
+        session_id: Some(format!(
+            "agent-{}",
+            root.file_name().unwrap().to_string_lossy()
+        )),
+        thread_id: None,
+        tmux_endpoint: None,
+        rex_endpoint: Some(crate::proto::RexEndpoint {
+            server: "unix:///tmp/rex-fixture.sock".into(),
+            session_id: "session:11111111-1111-1111-1111-111111111111".into(),
+            block_id: "block:22222222-2222-2222-2222-222222222222".into(),
+            host_id: Some("host-fixture".into()),
+            instance_id: "instance-fixture".into(),
+            cwd: root.display().to_string(),
+        }),
+        capabilities: vec!["send_message_to_block".into()],
+        self_check: "maintenance Rex fixture".into(),
+    }
+}
+
+struct RexFixture {
+    dir: PathBuf,
+    old_log_dir: Option<std::ffi::OsString>,
+    old_scenario: Option<std::ffi::OsString>,
+}
+
+impl RexFixture {
+    fn new(root: &Path, scenario: &str) -> Self {
+        let dir = root.join("rex-cli-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = dir.join("rex-cli");
+        std::fs::write(&fixture, include_str!("../../adapters/rex/fixture_rex.py")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::client::adapters::rex::set_test_cli(Some(fixture));
+        crate::client::adapters::rex::set_test_timeout(Some(std::time::Duration::from_secs(5)));
+        let old_log_dir = std::env::var_os("REXPRIMITIVE_LOG_DIR");
+        let old_scenario = std::env::var_os("REXPRIMITIVE_SCENARIO");
+        std::env::set_var("REXPRIMITIVE_LOG_DIR", &dir);
+        std::env::set_var("REXPRIMITIVE_SCENARIO", scenario);
+        Self {
+            dir,
+            old_log_dir,
+            old_scenario,
+        }
+    }
+}
+
+impl Drop for RexFixture {
+    fn drop(&mut self) {
+        crate::client::adapters::rex::set_test_cli(None);
+        crate::client::adapters::rex::set_test_timeout(None);
+        match self.old_log_dir.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_LOG_DIR", value),
+            None => std::env::remove_var("REXPRIMITIVE_LOG_DIR"),
+        }
+        match self.old_scenario.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_SCENARIO", value),
+            None => std::env::remove_var("REXPRIMITIVE_SCENARIO"),
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_maintenance_retires_a_definitively_missing_block() {
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (server, root) = test_server();
+    let _fixture = RexFixture::new(&root, "block_missing");
+    let transport = rex_transport(&root);
+    let response = seed_committed_owner(
+        &server,
+        "rex-missing-block",
+        "token-rex-missing-block",
+        &transport,
+        root.to_str().unwrap(),
+        None,
+    );
+    assert!(response.ok, "{response:?}");
+    let server = Arc::new(server);
+    let maintenance_server = server.clone();
+    let summary = tokio::task::spawn_blocking(move || {
+        maintain_definitive_missing(&maintenance_server, 7_500)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        entry(&summary, "retired", "rex-missing-block")["close"]["runtime_archive"]["state"],
+        "missing",
+        "{summary}"
+    );
+    assert!(!server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .contains_key("rex-missing-block"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_maintenance_keeps_identity_when_the_block_probe_is_unknown() {
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (server, root) = test_server();
+    let _fixture = RexFixture::new(&root, "status_unknown");
+    let transport = rex_transport(&root);
+    let response = seed_committed_owner(
+        &server,
+        "rex-unknown-block",
+        "token-rex-unknown-block",
+        &transport,
+        root.to_str().unwrap(),
+        None,
+    );
+    assert!(response.ok, "{response:?}");
+    let binding = binding_for(&server, "rex-unknown-block");
+    let server = Arc::new(server);
+    let maintenance_server = server.clone();
+    let summary = tokio::task::spawn_blocking(move || {
+        maintain_definitive_missing(&maintenance_server, 7_501)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        entry(&summary, "retained", "rex-unknown-block")["reason"]["presence"],
+        "unknown",
+        "{summary}"
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("rex-unknown-block"));
+    assert_eq!(
+        state
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            .unwrap(),
+        &binding
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_maintenance_keeps_identity_when_session_response_is_malformed() {
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (server, root) = test_server();
+    let _fixture = RexFixture::new(&root, "session_malformed");
+    let transport = rex_transport(&root);
+    let response = seed_committed_owner(
+        &server,
+        "rex-malformed-session",
+        "token-rex-malformed-session",
+        &transport,
+        root.to_str().unwrap(),
+        None,
+    );
+    assert!(response.ok, "{response:?}");
+    let binding = binding_for(&server, "rex-malformed-session");
+    let server = Arc::new(server);
+    let maintenance_server = server.clone();
+    let summary = tokio::task::spawn_blocking(move || {
+        maintain_definitive_missing(&maintenance_server, 7_502)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        entry(&summary, "retained", "rex-malformed-session")["reason"]["presence"],
+        "unknown",
+        "{summary}"
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("rex-malformed-session"));
+    assert_eq!(
+        state
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            .unwrap(),
+        &binding
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_maintenance_keeps_identity_when_block_response_is_malformed() {
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (server, root) = test_server();
+    let _fixture = RexFixture::new(&root, "blocks_malformed");
+    let transport = rex_transport(&root);
+    let response = seed_committed_owner(
+        &server,
+        "rex-malformed-blocks",
+        "token-rex-malformed-blocks",
+        &transport,
+        root.to_str().unwrap(),
+        None,
+    );
+    assert!(response.ok, "{response:?}");
+    let binding = binding_for(&server, "rex-malformed-blocks");
+    let server = Arc::new(server);
+    let maintenance_server = server.clone();
+    let summary = tokio::task::spawn_blocking(move || {
+        maintain_definitive_missing(&maintenance_server, 7_503)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        entry(&summary, "retained", "rex-malformed-blocks")["reason"]["presence"],
+        "unknown",
+        "{summary}"
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.workers.contains_key("rex-malformed-blocks"));
+    assert_eq!(
+        state
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            .unwrap(),
+        &binding
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn entry<'a>(
     summary: &'a serde_json::Value,
     bucket: &str,

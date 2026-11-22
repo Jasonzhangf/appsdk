@@ -258,6 +258,56 @@
   `collab-mcp` 27 passed: `green/post-review-finding-full-binary-suite-green.log`.
 - Commit: `2bfc8277 fix(collab): preserve binding in worker status diagnosis`.
 
+## 2026-11-14 — Rex block-anchor integration delivery
+
+- Long-term goal: complete the Rex block-anchor ontology and recovery/adapter
+  behavior, validate the public contract, then commit, push, merge to `main`,
+  and build the Collab candidate. The block is the identity anchor. Window,
+  pane layout, split, resize, move, and swap are layout facts only. A split
+  creates a new block; layout changes do not change an existing block identity.
+- Current candidate: branch
+  `codex/rex-recovery-observation-20261113-integration`, PR `#164`, with
+  source baseline `origin/main=56548a85` and current committed head
+  `47a14ea5`. The six-file working-tree diff is limited to the Rex recovery,
+  projection, task-owner gate, and public contract changes for this goal.
+- This round observed the prior PR failure
+  `context_names_takeover_keeps_source_name_work_and_continues_target_name_work`.
+  The failure was caused by the current holder updating retained source-name
+  work without the current-name owner gate. The candidate fix passed the exact
+  public integration test.
+- A full local suite attempt reached the MCP authority test and failed only
+  because inherited Rex environment variables made the fixture's child caller
+  fail with `REX_EXECUTION_CALLER_MISMATCH`. Re-running that exact test with
+  `REX_SERVER`, `REX_SESSION`, `REX_BLOCK`, and `REX_TRANSPORT` unset passed.
+  This is host evidence, not a product failure; the full suite must be rerun
+  in the sanitized environment before delivery.
+- Remaining gap: current six-file diff still needs independent milestone review,
+  sanitized full Collab regression, commit/push, fresh PR CI, merge verification,
+  and the authorized candidate build. Do not install or restart the live
+  Collab daemon from this task.
+
+### Independent review and finding repair
+
+- Independent milestone review of the six-file diff returned two P1 findings:
+  the Rex lookup path still returned a unique agent-session holder without
+  comparing it against a unique current Rex block target, and the delivery note
+  lacked a sanitized full-suite receipt.
+- Fixed the first finding in `collab/src/server/binding_slot.rs`. A unique Rex
+  block target is now authoritative: when a unique agent session points at a
+  different identity in the same scope, lookup returns the typed
+  `IDENTITY_ANCHOR_CONFLICT` before publication. Duplicate block currents and
+  the no-block-target session recovery paths are unchanged.
+- Updated three prior binding-slot tests that encoded the old "session holder
+  overrides block owner" behavior to assert rejection, and added one new
+  cross-subject Rex block/session conflict unit test. `collab` binary unit
+  tests pass 1494, 0 failed.
+- The sanitized full local suite has one unrelated, pre-existing failure:
+  `board_cli::recv_explicit_timeout_waits_and_returns_early_on_arrival` times
+  out instead of returning early on this macOS host. The same test passes in
+  the Ubuntu CI job and fails on a clean `origin/main` checkout on this host,
+  so it is a platform timing difference, not a candidate regression. The
+  authoritative full-suite evidence is the post-push Ubuntu CI job.
+
 ## 2026-10-20 — stable names and runtime closure
 
 Names own project work; the agent sessionID is its current execution carrier.
@@ -795,3 +845,42 @@ TUI公开CLI6项、Desktop bridge公开投递与recv、DSH gateway公开投递�
 - 剩余：需要独立 review 后提交/合并/推送；当前 Collab 身份命令在 REX anchor
   冲突下不能安全执行 `task deliver`/`close`，该状态需由后续身份 owner 解决，
   不通过编辑 identity-map、控制状态或 daemon 绕过。
+
+## 2026-11-14 Rex block-anchor delivery follow-up
+
+- The explicit Rex rebind path stays separate from ordinary lookup. A
+  user-approved name replacement may select the session holder, while ordinary
+  context/query rejects a conflicting unique Rex block/session pair with
+  `IDENTITY_ANCHOR_CONFLICT`.
+- After this correction the public context contract suite passed `101/101`
+  serially, the binding-slot suite passed `52/52`, and the `collab` binary unit
+  tests passed `1494`, all with 0 failures.
+
+### Delivery attempt and remaining gaps
+
+- Resumed the same integration worktree. Public context regression passed again;
+  the previous CI name-takeover failure passed its exact public test.
+- Corrected the concurrent board tests to obtain online presence through the
+  public snapshot operation, distinguish offline board projection from durable
+  ownership, and compare task-status fields through the same public interface.
+  All six current-master targeted tests passed.
+- Release candidate build completed with version `0.2.0499`; no global install
+  or live daemon restart was performed.
+- Sanitized full regression command:
+  `env -u REX_SERVER -u REX_SESSION -u REX_BLOCK -u REX_TRANSPORT cargo test --manifest-path collab/Cargo.toml --locked -- --test-threads=1`.
+  Evidence: `/Volumes/Intel/playground/appsdk/.worker-runs/rex-recovery-observation-20261113/full-suite-final.log`.
+  The appserver integration target ended with 265 passed, two failed and six
+  ignored, stopping later targets. Failures: the previously recorded macOS
+  explicit-recv timeout and dispatch-gap fixture `reject_as_missing` assertion.
+  Exact dispatch-gap rerun passed (`/tmp/rex-dispatch-final.log`); its full-run
+  failure remains an unresolved intermittent result, not a full-suite PASS.
+- Follow-up independent review accepted the Rex conflict fix and explicit
+  rebind separation, but retained the missing full regression evidence finding.
+- Commit attempt was rejected by the actual hook: 21 registered worktrees
+  exceed the maximum of 20. No bypass or destructive cleanup was used. Jenny
+  consumed message `m1794627990629-174` with the original error, cleanup request,
+  and request to confirm ownership of concurrent board changes.
+- No new commit, push or merge succeeded this round. Keep the staged repair and
+  concurrent board changes intact. Next: resolve worktree ownership/cleanup,
+  complete regression and review evidence, commit/push PR 164, then merge only
+  after applicable CI succeeds.

@@ -462,7 +462,9 @@ impl Server {
             // of a live, different claimant. Retired rows grant no authority.
             if !old.same_principal(incoming)
                 && authorized_replace.is_none()
-                && state.workers.contains_key(old.agent_id.as_str())
+                && control
+                    .active_values()
+                    .any(|current| current.binding.same_principal(old))
             {
                 return Err(
                     "REGISTER_RUNTIME_RELEASE_REJECTED: releasing another claimant on the same runtime requires an explicit user-authorized replacement".into(),
@@ -1701,7 +1703,12 @@ mod scoped_register_tests {
 
         let incoming = prepared_incoming_register(&old, "role-current-intruder");
         let error = server
-            .register_execution_release_events(&state, &control, &incoming, None)
+            .register_execution_release_events(
+                &state,
+                &control,
+                &incoming,
+                Some("fixture replacement authorization"),
+            )
             .expect_err("a current map that still protects the prior principal must block release");
         assert!(
             error.contains("current map still protects the prior principal"),

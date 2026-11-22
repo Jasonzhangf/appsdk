@@ -155,6 +155,188 @@ fn public_master_commands_discover_send_consume_and_reply_across_projects() {
     std::fs::remove_dir_all(target_root).unwrap();
 }
 
+#[test]
+fn foreign_project_master_cannot_update_target_task_and_target_master_can() {
+    let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
+    let (fixture, source_master) =
+        Fixture::isolated_with_pane_command("manager-scope", "sleep 600");
+    let source_root = fixture.root.canonicalize().unwrap();
+    let target_root = create_external_project(&fixture, "manager-scope-target");
+    let target_owner = create_session(&fixture, "manager-scope-target-owner");
+    let target_master = create_session(&fixture, "manager-scope-target-master");
+
+    let source_context = register_context(
+        &fixture,
+        &source_root,
+        &source_master,
+        "manager-scope-source-master",
+        false,
+    );
+    let target_owner_context = register_context(
+        &fixture,
+        &target_root,
+        &target_owner,
+        "manager-scope-target-owner",
+        false,
+    );
+    let target_master_context = register_context(
+        &fixture,
+        &target_root,
+        &target_master,
+        "manager-scope-target-master",
+        false,
+    );
+    let (source_master_id, _) = identity(&source_context);
+    let (target_owner_id, _) = identity(&target_owner_context);
+    let (target_master_id, _) = identity(&target_master_context);
+    assert_ne!(target_owner_id, target_master_id);
+
+    for (root, pane, approval) in [
+        (
+            &source_root,
+            &source_master,
+            "user approved isolated source master",
+        ),
+        (
+            &target_root,
+            &target_master,
+            "user approved isolated target master",
+        ),
+    ] {
+        run_ok_at(
+            &fixture,
+            root,
+            pane,
+            &["master", "promote", "--approval", approval],
+            false,
+        );
+    }
+    let source_status = run_ok_at(
+        &fixture,
+        &source_root,
+        &source_master,
+        &["master", "status"],
+        false,
+    );
+    assert_eq!(
+        source_status["master"]["worker_id"], source_master_id,
+        "{source_status}"
+    );
+    let target_status = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_master,
+        &["master", "status"],
+        false,
+    );
+    assert_eq!(
+        target_status["master"]["worker_id"], target_master_id,
+        "{target_status}"
+    );
+
+    let task_id = "manager-scope-task";
+    let registered = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_owner,
+        &[
+            "task",
+            "register",
+            task_id,
+            "--next",
+            "target owner retains the task",
+        ],
+        false,
+    );
+    assert_eq!(registered["owner"], target_owner_id, "{registered}");
+
+    let before_board = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_master,
+        &["board", "show"],
+        false,
+    );
+    let before = before_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == task_id)
+        .expect("target task is visible through target board")
+        .clone();
+    assert_eq!(before["owner"], target_owner_id, "{before_board}");
+    assert_eq!(before["status"], "working", "{before_board}");
+    let revision = before["revision"].as_u64().unwrap().to_string();
+
+    let denied = run_error_at(
+        &fixture,
+        &source_root,
+        &source_master,
+        &[
+            "board",
+            "update",
+            task_id,
+            "--expected-revision",
+            &revision,
+            "--next",
+            "source project master must not update target work",
+        ],
+        false,
+    );
+    assert!(
+        denied.contains("BOARD_TASK_NOT_FOUND: no described task with this id"),
+        "cross-project update did not fail through target scope isolation: {denied}"
+    );
+
+    let unchanged_board = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_master,
+        &["board", "show"],
+        false,
+    );
+    let unchanged = unchanged_board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == task_id)
+        .expect("target task remains visible after foreign denial")
+        .clone();
+    assert_eq!(unchanged["next_step"], "target owner retains the task");
+    assert_eq!(unchanged["owner"], before["owner"]);
+    assert_eq!(unchanged["status"], before["status"]);
+    assert_eq!(unchanged["revision"], before["revision"]);
+
+    let controlled = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_master,
+        &[
+            "board",
+            "update",
+            task_id,
+            "--expected-revision",
+            &revision,
+            "--next",
+            "target project master updates the same valid task",
+        ],
+        false,
+    );
+    assert_eq!(
+        controlled["task"]["next_step"],
+        "target project master updates the same valid task"
+    );
+    assert_eq!(controlled["task"]["owner"], target_owner_id, "{controlled}");
+    assert_eq!(controlled["task"]["status"], "working", "{controlled}");
+    assert_eq!(
+        controlled["task"]["revision"].as_u64().unwrap(),
+        before["revision"].as_u64().unwrap() + 1
+    );
+
+    drop(fixture);
+    std::fs::remove_dir_all(target_root).unwrap();
+}
+
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("collab CLI emits JSON")
 }

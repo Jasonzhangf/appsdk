@@ -1,6 +1,6 @@
 # Memory Index
 
-Index stores short titles, tags, and relative detail paths. Open the linked Markdown detail for content.
+Index stores short titles, tags, and detail paths. Open the linked Markdown detail for content.
 
 ## Raw sources
 
@@ -19,10 +19,27 @@ _Empty._
 
 ## Level 3 — new or unreviewed
 
-_Empty._
+### Rex block has one current identity binding
+- tags: `appsdk`, `collab`, `identity`, `ontology`, `rex`
+- details: [L3/appsdk-collab-rex-block-current-binding.md](L3/appsdk-collab-rex-block-current-binding.md)
+
+### Collab stable name and current anchor semantics
+- tags: `anchor`, `collab`, `identity`, `ontology`, `stable-name`, `user-approved`
+- details: [L3/appsdk-collab-stable-name-lifecycle.md](L3/appsdk-collab-stable-name-lifecycle.md)
+
+### Rex block anchor and current-owner relations
+- tags: `anchor`, `collab`, `identity`, `ontology`, `rex`
+- details: [L3/appsdk-rex-block-anchor-scope-clarification.md](L3/appsdk-rex-block-anchor-scope-clarification.md)
+
+### Rex block is the anchor
+- tags: `anchor`, `collab`, `identity`, `ontology`, `rex`
+- details: [L3/appsdk-rex-block-is-anchor.md](L3/appsdk-rex-block-is-anchor.md)
 
 ## Skill description candidates
 
 Base budget: 8 lines. Copy the compact lines into the project Skill `description` after manual architecture deduplication. Fill level 1 first; use level 2, then level 3, only for remaining slots.
 
-- _No reviewed or searchable entries yet._
+- L3: Rex block has one current identity binding (knowledge) [appsdk,collab,identity,ontology,rex] -> L3/appsdk-collab-rex-block-current-binding.md
+- L3: Collab stable name and current anchor semantics (knowledge) [anchor,collab,identity,ontology,stable-name,user-approved] -> L3/appsdk-collab-stable-name-lifecycle.md
+- L3: Rex block anchor and current-owner relations (knowledge) [anchor,collab,identity,ontology,rex] -> L3/appsdk-rex-block-anchor-scope-clarification.md
+- L3: Rex block is the anchor (knowledge) [anchor,collab,identity,ontology,rex] -> L3/appsdk-rex-block-is-anchor.md

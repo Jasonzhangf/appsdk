@@ -1534,7 +1534,10 @@ async fn worker_snapshot_dispatches_rex_capture_without_writing_input() {
     };
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = TEST_FIXTURE_LOCK.lock().await;
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _fixture_guard = TEST_FIXTURE_LOCK.lock().await;
     let (server, root) = test_server();
     let fixture_dir = root.join("rex-fixture");
     std::fs::create_dir_all(&fixture_dir).unwrap();

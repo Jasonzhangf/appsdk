@@ -79,3 +79,183 @@
 - 结果：1 passed，0 failed。夹具自建真实 Rex receiver/sender 会话与隔离 daemon，公开 `context/notify/recv/reply/restart` 全链路执行。
 - 状态链证据：`state=working` 投影 busy；`state=blocked:kind=question` 投影 waiting_user；`state=done` 投影 idle；receiver 的 program_status owner 与 Python foreground pid/name 匹配。
 - 该用例第 140 行旧断言把 done 期望建模为 `unknown`；按用户要求的 idle 正确显示语义，已更新为 `idle`。
+
+## Rex parity P0 当前修订（2026-11-12）
+
+长期目标仍是完成 Rex parity 的真实投递修复、ontology 校验、独立 review、
+合并、重建与重启。当前 P0 是先恢复同一 server/session/block 服务实例变化后的
+自动投递，尤其覆盖 QQBot 默认 CEO 入站。
+
+当前通知语义：
+
+- Rex block 本身是 anchor。window/layer/layout 只描述布局；split 创建新 block，
+  resize/move/swap 保留原 block。server/session 用于定位和核实 block。
+- 通知提交先原样写入正文并验证完整 UTF-8 字节，再对同一
+  server/session/block 执行一次独立 `send-key enter`。
+- `REX_SERVICE_CHANGED` 只有在 `stage=BeforeWrite` 且
+  `operation=server.status` 时可恢复。恢复只刷新现有服务的 instance/host
+  代际，并拒绝 server、session 或 block 的任何变化。
+- 刷新成功后原 durable message 只重试一次；accepted 或 unknown 结果不进入恢复
+  路径，也不重写正文或重复 Enter。
+
+已实际执行的聚焦证据：
+
+- `server::notification_batch_tests::rex_service_generation_change_is_recovered_for_qqbot_ceo_inbound`
+  1 passed，覆盖 QQBot CEO 入站、服务代际变化、同一目标刷新、一次 write、
+  一次 Enter 和最终 accepted。
+- `server::notification_batch_tests` 36 passed，覆盖 timer 恢复、同 block、
+  wrong block 拒绝、unknown 不重试、旧 binding 替换隔离和重复 owner 拒绝。
+- 公开 `channel_inbound_cli::` 用例 6 passed，覆盖原路回复、重复平台事件、
+  错误 envelope、CEO 授权/替换、receiver 只投当前 CEO 和名字交接。
+- `cargo fmt --manifest-path collab/Cargo.toml -- --check`、`git diff --check`
+  通过。
+- 9 个受影响 DAG 文件全部通过 `dagpipe graph validate`。
+- `project-memory verify` 通过；Rex anchor/current-binding L3 记忆与当前设计一致。
+
+仍待完成：
+
+- 完整 Collab package 回归与适用 live/公开入口复验。
+- 完整 milestone 的独立 review。
+- commit、更新最新 `origin/main`、merge、push 和远端核对。
+- 通过正式构建/安装路径重建，并由用户管理 daemon 生命周期完成后做 live
+  QQBot 默认 CEO 投递、正式 recv、消费和关联回复验收。
+- 本轮 `collab recv --timeout 30` 只返回 receive ID 和 timeout，没有可消费正文；
+  不猜测或伪造通知内容。
+
+## Ontology worktree handoff（2026-11-12 PT）
+
+- 收到并消费消息 `m1794546435512-276`，subject「停止竞写 ontology 工作树并交接」，
+  `collab recv` receive ID `receive-41783-1794550263587565000-0`。发送者是 unknown。
+- 冻结交接对象：
+  `/Volumes/Intel/playground/appsdk/collab-stable-names-20261112`，
+  branch `codex/collab-stable-names-20261112`，PR157。该树属于 ontology 聊天
+  `01a1cf28-1d6f-7bc1-918e-186d04f98666`，不是本 Rex 候选，我不交付、合并、推送或清理该树。
+- 原通知记录我在 04:49 UTC 改写 `collab/src/server/work_assignment.rs`，
+  随后暂存四处合流文件；收到停止指令后已停止写入、暂存、提交、合并、推送和清理，
+  并且没有回滚任何内容。
+- 交接时只读回执：`HEAD` 为 `023b8650`，`git status` 干净，branch ahead 13；
+  后续提交 `48ca5fbf`（2026-11-12 22:06 PST）包含 `work_assignment.rs` 等合流文件。
+  该树当前 `lsof +D` 无打开文件，无仍在写入的本树进程。
+- 未验证项：该工作线尚未通过新组合 Review，我不得代为交付。
+- 交接记录路径：
+  `/Users/fanzhang/Documents/github/appsdk/task-runs/collab-identity-lifecycle-ontology-20261112/note.md`。
+- Rex P0 继续在本人原授权工作树
+  `/Volumes/Intel/playground/appsdk/rex-parity-implementation-20261110` 推进。
+
+## Ontology 语义复核与候选收口（2026-11-13 PT）
+
+按已批准语义复核当前未提交候选，三个产品代码改动均保持 ontology 一致：
+
+1. `send_enter_until` 不再重复调用 `verify_service_until`。通知提交已经先完成正文
+   write 与字节确认，再对同一 server/session/block 执行一次 `send-key enter`；
+   Enter 内部不再另做一次服务代际核实，保留原设计的一条通知路径。
+2. Enter 失败时保留 `operation: send_key` 与底层错误 `class`，不再强制改成
+   `notify` / `Unknown`。这与通知提交图一致：正文阶段和 Enter 阶段分别保留实际
+   `known-not-delivered` / `unknown` 及真实操作字段，不把 Enter 失败伪装成通知入口失败。
+3. `handle_master_status` 增加 `master_wake`，使用现有
+   `project_master_wake_idle_capacity` 投影，与 board 和 context 的 master 唤醒容量
+   保持同一事实来源。
+
+聚焦测试证据：
+
+- `cargo test --manifest-path collab/Cargo.toml --bin collab rex -- --test-threads=1`
+  80 passed，0 failed。
+- `cargo test --manifest-path collab/Cargo.toml --bin collab master_wake -- --test-threads=1`
+  16 passed，0 failed。
+- `cargo fmt --manifest-path collab/Cargo.toml -- --check` 与 `git diff --check` 通过。
+
+下一步：
+
+- 提交当前候选，合入最新 `origin/main`（当前 `ae8ff52b`）并解决冲突，保留 main
+  的身份、名字和任务语义。
+- 合流后重跑 Rex、`master_wake`、`notification_batch_tests`、`channel_inbound_cli`
+  公开用例，并跑完整 Collab bin 套件（`--test-threads=1`）。
+- 校验受影响 DAG 与 `project-memory verify`，再跑公开 Rex E2E。
+- 完成一次独立 milestone review，推 PR，等 CI，再 `gh pr merge --admin`。
+
+## 合流最新 main 后验证（2026-11-13 PT）
+
+- 候选提交 `3299da4d`；合入 `origin/main` `ae8ff52b` 得到 `91dec687`。
+- 唯一冲突为 `collab-notification-consumption.graph.json` 描述：保留本候选 0.3.0 的
+  精确收件人 / Rex block owner 语义，同时并入 main 的非阻塞 recv 与空结果不生成消费回执。
+- 完整 Collab bin（`--test-threads=1`）：1368 passed，0 failed，1 ignored。首次全量运行有 15 个失败：
+  两个 Rex 恢复用例因真实 CLI 进程退出超时，随后 `TEST_ENV_LOCK` PoisonError 连锁；
+  单独复跑全部通过，第二次全量运行全绿。记为既有测试夹具时序不稳定，不是本候选回归。
+- 聚焦组：`rex` 80、`master_wake` 16、`notification_batch_tests` 36、公开 `channel_inbound_cli` 6，全部通过。
+- 公开 Rex E2E（真实 Rex server，`--ignored`）：4 passed；测试前后 Rex session 列表相同，无残留。
+- 5 个受影响 DAG `dagpipe graph validate` 通过；`project-memory verify` 通过。
+- 独立 milestone review 合同：`milestone-review-20261113-task.md`。
+
+## 精确缺失退役与伪造服务标记验证（2026-11-13 PT）
+
+本轮补上上一节未提交的两个边界，进一步收紧 ontology 的 block anchor 语义：
+
+1. `resolve_target` 只在官方 `session.list`/`session.list_blocks` 返回精确
+   `session_not_found`/`block_not_found`，或 `resolve_target` 的精确 absence
+   结论出现时，才把 stale-identity maintenance 判为 Missing 并退役执行绑定。
+   `server.status` 的 generation/timeout、缺 `sessions`/`blocks` 数组、以及未知
+   原生错误都保留 Unknown，不触发名字绑定退役。
+2. `server.status` 的 service-change 错误增加 typed generation-mismatch 标记；
+   `is_refreshable_service_change` 不再只凭 `REX_SERVICE_CHANGED` 文本判定，
+   而要求 `detail=` 后携带该 typed marker，防止伪造或不完整 native detail 被当作
+   可恢复代际变化。Enter 失败仍保留真实 `send_key` 操作与底层错误 class。
+
+验证：
+
+- `cargo test --manifest-path collab/Cargo.toml --locked --bin collab rex -- --test-threads=1`
+  87 passed，0 failed。
+- 完整 `cargo test --manifest-path collab/Cargo.toml --locked --bin collab -- --test-threads=1`
+  1375 passed，0 failed，1 ignored。
+- 真实 Rex 公开契约
+  `COLLAB_REX_TEST_SERVER=unix:///Users/fanzhang/Library/Application%20Support/rex/server.sock cargo test --manifest-path collab/Cargo.toml --locked --test rex_public_contract -- --ignored --test-threads=1`
+  4 passed，0 failed。
+- `cargo fmt --manifest-path collab/Cargo.toml -- --check`、`git diff --check` 通过。
+- 正式构建入口 `scripts/build-collab.sh` 通过，产物版本
+  `collab_build_version=0.2.0495`。直接 `cargo build --release` 被项目
+  `build.rs` 拒绝，未绕过门禁。
+- 10 个受影响 DAG 全部通过 `dagpipe graph validate`。
+- `project-memory verify` 通过；`project-memory query "rex anchor block session window"`
+  返回三条一致记录，均确认 block 是 anchor、split 创建新 block、布局变化不改 block、
+  仅权威 block 缺失退役名字绑定，没有冲突结论。
+
+## 最终候选回归与交付前状态（2026-11-13 PT）
+
+- 完整 Collab bin 首次重跑出现 1 个真实 tmux fixture failure：默认
+  `IsolatedTmux::start()` 未显式启动 shell，ready probe 在 tmux 启动进程退出后未被
+  执行；其余 27 个 `PoisonError` 是 `TEST_ENV_LOCK` 连锁失败。
+- 修复只作用于测试夹具：默认隔离 tmux session 显式启动 `/bin/sh`，并保留唯一 marker
+  probe 作为 shell 可执行性确认。受影响 tmux 组随后通过 `38 passed, 0 failed, 1 ignored`。
+- 修复后的完整命令
+  `cargo test --manifest-path collab/Cargo.toml --locked --bin collab -- --test-threads=1`
+  通过：`1491 passed, 0 failed, 2 ignored`，耗时 421.02 秒。
+- 该失败没有改变 Rex ontology 或生产路径；`TEST_ENV_LOCK` 连锁不再出现。当前候选仍需
+  完成基于最新 `origin/main=56548a85` 的独立 milestone review、提交、push、PR CI、
+  main 合并和正式 `scripts/build-collab.sh` 构建。
+
+## 提交前最终候选（2026-11-13 PT）
+
+- 最终夹具与 Rex activity 修复已提交为 `87acb6d4`：
+  `fix(collab): complete Rex activity and fixture readiness`。
+- `origin/main=56548a85` 已是当前提交的祖先；未发生新的冲突，候选相对
+  `origin/main` 保留 Rex block-anchor、同目标代际刷新、精确缺失退役和主线身份/任务语义。
+- 提交后聚焦回归：
+  `cargo test --manifest-path collab/Cargo.toml --locked --bin collab rex -- --test-threads=1`
+  为 `117 passed, 0 failed`；`master_wake`、`notification_batch_tests` 和
+  `channel_inbound_cli` 继续通过。
+- 旧 review 输出不适用于本候选。必须重新执行合同
+  `milestone-review-20261113-task.md`，其当前候选为 `87acb6d4`，再进入远端交付。
+
+## 最终审查前 P2 收口（2026-11-13 PT）
+
+- 独立 reviewer 针对 `87acb6d4` 未发现 P0/P1，提出 1 个 P2：恢复谓词此前只解析格式化错误字符串，原生 `server.status` 错误若伪造同名 detail 可能获得错误的恢复资格。
+- 已在 `e4430cf2` 修复：恢复条件现在还要求 `native_code=none`；新增原生错误伪造 marker 的拒绝用例和本地 typed generation-mismatch 的放行用例。
+- 修复后 Rex 聚焦组单线程通过 `119 passed, 0 failed`，格式和 diff 检查通过。
+- 当前必须基于最终提交 `d390a7ae` 重新执行独立 milestone review；无 P0/P1 后再 push、等 CI、合并和正式构建。
+
+## 最终独立审查（2026-11-13 PT）
+
+- reviewer 已基于 `d390a7ae` 相对 `origin/main=56548a85` 完成整体 milestone 审查，结果无 P0、P1 或 P2。
+- 审查确认 block 是 Rex anchor；布局变化不改变 block；current owner 替换只改变该 block 的当前归属；精确 block 缺失才退役名字；通知写入、单次 Enter、同目标代际刷新、活动投影和主线通信语义均保持一致。
+- 审查输出：`docs/evidence/rex-adapter-reliability-20261111/milestone-review-20261113-final3-stdout.jsonl`。
+- 最终候选正式构建 `scripts/build-collab.sh` 通过，产物版本 `collab_build_version=0.2.0498`。
+- 真实 Rex 公开契约 `rex_public_contract`（`--ignored`）通过：4 passed，0 failed。

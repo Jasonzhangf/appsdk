@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 #[path = "daemon_readiness.rs"]
 mod daemon_readiness;
 
-/// Fixture roots live under `/tmp` so the AF_UNIX socket stays inside
+/// Fixture roots live under `/var/tmp` so the AF_UNIX socket stays inside
 /// `SUN_LEN`. The macOS default temp dir is long enough to make every daemon
 /// start fail with `path must be shorter than SUN_LEN` before any product
-/// behavior is reachable.
-const FIXTURE_ROOT_PREFIX: &str = "/tmp/v23f";
+/// behavior is reachable. Unlike `/tmp`, `/var/tmp` does not inherit a host
+/// `.agent-collab` marker that changes public context root resolution.
+const FIXTURE_ROOT_PREFIX: &str = "/var/tmp/v23f";
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub static TMUX_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -299,6 +300,10 @@ impl Fixture {
     }
 
     pub fn without_tmux(label: &str) -> Self {
+        Self::without_tmux_with_config(label, None)
+    }
+
+    pub fn without_tmux_with_config(label: &str, config: Option<&str>) -> Self {
         let root = unique_root(label);
         let host_state = root.join("h");
         std::fs::create_dir_all(&host_state).expect("create isolated host state");
@@ -311,6 +316,12 @@ impl Fixture {
             daemon: None,
             owned_sessions: std::sync::Mutex::new(Vec::new()),
         };
+        if let Some(config) = config {
+            let config_path = fixture.root.join("home/.appsdk/config.toml");
+            std::fs::create_dir_all(config_path.parent().unwrap())
+                .expect("create isolated config directory");
+            std::fs::write(config_path, config).expect("write isolated config");
+        }
         fixture.start_daemon();
         fixture
     }

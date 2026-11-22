@@ -24,6 +24,7 @@ fn test_server() -> (Arc<Server>, PathBuf, PathBuf) {
         storage_root: root.clone(),
         state_path: state_path.clone(),
         host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(State::default()),
         appserver_candidate_check: Arc::new(|candidate| Ok(verified_appserver(candidate))),
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {

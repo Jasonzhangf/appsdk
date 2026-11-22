@@ -23,6 +23,7 @@ fn task_register_preserves_current_worktree_binding() {
         storage_root: root.clone(),
         state_path: server_dir.join("state.json"),
         host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(State::default()),
         appserver_candidate_check: Arc::new(|candidate| {
             Ok(peer_tests::test_appserver_transport(&candidate.thread_id))

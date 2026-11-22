@@ -24,6 +24,7 @@ fn server() -> Arc<Server> {
         storage_root: root.clone(),
         state_path,
         host_paths: HostPaths::for_state_root(root.join("host")).unwrap(),
+        register_gate: Arc::new(Mutex::new(())),
         state: Mutex::new(State::default()),
         appserver_candidate_check: Arc::new(|_| unreachable!()),
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| unreachable!()),

@@ -81,6 +81,9 @@ impl Drop for PathEnvGuard {
 fn integration_git_queries_do_not_spawn_git() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = std::env::temp_dir().join(format!(
         "collab-safegit-{}-{}",
         std::process::id(),

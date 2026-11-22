@@ -46,7 +46,10 @@ fn read_effect_snapshot(fixture: &Fixture) -> Value {
 #[test]
 fn unmapped_worker_status_reads_preserve_retained_records_without_side_effects() {
     let (fixture, old_host, next_host, old, next) =
-        lifecycle_native_pair_fixture("unmapped-worker-status-read", "ack_only");
+        lifecycle_native_pair_fixture_without_background_delivery(
+            "unmapped-worker-status-read",
+            "ack_only",
+        );
     let old_worker = old["worker_id"].as_str().unwrap().to_owned();
     let next_worker = next["worker_id"].as_str().unwrap().to_owned();
     let child_socket = next_host

@@ -4,6 +4,7 @@ use super::{
     Server,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Record {
@@ -90,12 +91,20 @@ pub fn tick(server: &Server) {
 /// notification attempt. The keepalive coordinator owns only the durable
 /// worker-idle transition; it does not infer agent state from terminal text.
 pub(crate) fn tick_at(server: &Server, now: i64) {
+    tick_at_with_runtime(server, None, now);
+}
+
+pub(crate) fn tick_with_rex_recovery(server: &Arc<Server>, now: i64) {
+    tick_at_with_runtime(server, Some(server), now);
+}
+
+fn tick_at_with_runtime(server: &Server, recovery_server: Option<&Arc<Server>>, now: i64) {
     if !server.config.timers.enabled {
         return;
     }
     // The dispatch-gap reminder has its own 600000ms idempotence window and is
     // independent of the keepalive-idle batch owner.
-    dispatch_gap_check_at(server, now);
+    dispatch_gap_check_with_runtime(server, recovery_server, now);
     if !server.config.keepalive.enabled {
         return;
     }
@@ -420,7 +429,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
         }
     }
     flush_idle_batches_if_ready(server, now);
-    board_patrol_pass_at(server, now);
+    board_patrol_pass_at(server, recovery_server, now);
 }
 
 /// Periodic board-idle patrol.
@@ -430,7 +439,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
 /// and gate are revalidated before any wake is committed. Unknown or waiting
 /// hosts advance the periodic window; a transport error is logged and treated
 /// as Unknown so a failed read cannot leave the gate due for every tick.
-fn board_patrol_pass_at(server: &Server, now: i64) {
+fn board_patrol_pass_at(server: &Server, recovery_server: Option<&Arc<Server>>, now: i64) {
     if !server.config.notifications.enabled {
         return;
     }
@@ -442,12 +451,17 @@ fn board_patrol_pass_at(server: &Server, now: i64) {
         state.workers.values().cloned().collect()
     };
     for worker in workers {
-        board_patrol_worker_at(server, &worker, now);
+        board_patrol_worker_at(server, recovery_server, &worker, now);
     }
 }
 
-fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now: i64) {
-    if let Err(error) = board_patrol_worker_checked(server, worker, now) {
+fn board_patrol_worker_at(
+    server: &Server,
+    recovery_server: Option<&Arc<Server>>,
+    worker: &super::state::WorkerRec,
+    now: i64,
+) {
+    if let Err(error) = board_patrol_worker_checked(server, recovery_server, worker, now) {
         super::presence::append_log(
             &server.log_path(),
             &format!("BOARD_PATROL_IDENTITY_FAILED: {}: {error}", worker.id),
@@ -457,6 +471,7 @@ fn board_patrol_worker_at(server: &Server, worker: &super::state::WorkerRec, now
 
 fn board_patrol_worker_checked(
     server: &Server,
+    recovery_server: Option<&Arc<Server>>,
     worker: &super::state::WorkerRec,
     now: i64,
 ) -> Result<(), String> {
@@ -583,12 +598,20 @@ fn board_patrol_worker_checked(
                 .commit_locked_checked(&mut state, &events)
                 .map_err(|error| error.to_string())?;
             drop(state);
-            let _ = super::attempt_notification_detailed_with_at(
-                server,
-                &message_id,
-                &subscription_id,
-                now,
-            );
+            let _ = match recovery_server {
+                Some(server) => super::attempt_notification_detailed_with_rex_recovery(
+                    server,
+                    &message_id,
+                    &subscription_id,
+                    now,
+                ),
+                None => super::attempt_notification_detailed_with_at(
+                    server,
+                    &message_id,
+                    &subscription_id,
+                    now,
+                ),
+            };
         }
     }
     Ok(())
@@ -883,6 +906,14 @@ pub(crate) const DISPATCH_GAP_IDEMPOTENCE_MS: i64 = 600_000;
 /// it never dispatches work, changes task owner/status, or treats
 /// unknown/cold/offline/waiting_user and managed children as idle capacity.
 pub(crate) fn dispatch_gap_check_at(server: &Server, now: i64) {
+    dispatch_gap_check_with_runtime(server, None, now);
+}
+
+fn dispatch_gap_check_with_runtime(
+    server: &Server,
+    recovery_server: Option<&Arc<Server>>,
+    now: i64,
+) {
     if !server.config.notifications.enabled {
         return;
     }
@@ -978,7 +1009,20 @@ pub(crate) fn dispatch_gap_check_at(server: &Server, now: i64) {
         );
     } else {
         drop(state);
-        let _ = super::attempt_notification_with_at(server, &message_id, &subscription.id, now);
+        let _ = match recovery_server {
+            Some(server) => super::attempt_notification_detailed_with_rex_recovery(
+                server,
+                &message_id,
+                &subscription.id,
+                now,
+            ),
+            None => super::attempt_notification_detailed_with_at(
+                server,
+                &message_id,
+                &subscription.id,
+                now,
+            ),
+        };
     }
 }
 

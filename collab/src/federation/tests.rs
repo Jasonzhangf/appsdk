@@ -425,8 +425,10 @@ import json, os, socket, sys, time
 forward = sys.argv[sys.argv.index('-L') + 1]
 local = forward.split(':', 1)[0]
 listener = socket.socket(socket.AF_UNIX)
-listener.bind(local)
+pending = local + '.pending'
+listener.bind(pending)
 listener.listen(4)
+os.rename(pending, local)
 with open({record:?}, 'w') as output:
     json.dump({{'pid': os.getpid(), 'socket': local}}, output)
 for request in range(2):

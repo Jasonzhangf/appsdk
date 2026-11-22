@@ -58,6 +58,9 @@ impl IsolatedDaemon {
             .env_remove("CODEX_THREAD_ID")
             .env_remove("COLLAB_SOCKET_PATH")
             .env_remove("COLLAB_HOST_SOCKET")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log);
@@ -94,7 +97,10 @@ impl IsolatedDaemon {
             .env_remove("COLLAB_HOST_SOCKET")
             .env_remove("COLLAB_APPSERVER_SOCKET")
             .env_remove("CODEX_APP_SERVER_SOCKET")
-            .env_remove("COLLAB_APPSERVER_NAMESPACE");
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK");
         command
     }
 
@@ -176,7 +182,7 @@ impl IsolatedDaemon {
             .collect::<Vec<_>>()
             .join(" ");
         std::fs::write(&script, format!(
-            "cd {root}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE\nexport HOME={home} CODEX_HOME={home} COLLAB_STATE_DIR={host} TMUX_PANE={pane} CODEX_SESSION_ID={session} CODEX_THREAD_ID={thread}\n{binary} {command} >{stdout} 2>{stderr}\nprintf '%s' \"$?\" >{status}\n",
+            "cd {root}\nunset COLLAB_SOCKET_PATH COLLAB_HOST_SOCKET COLLAB_LOCK_PATH COLLAB_HOST_LOCK COLLAB_APPSERVER_SOCKET CODEX_APP_SERVER_SOCKET COLLAB_APPSERVER_NAMESPACE REX_SERVER REX_SESSION REX_BLOCK\nexport HOME={home} CODEX_HOME={home} COLLAB_STATE_DIR={host} TMUX_PANE={pane} CODEX_SESSION_ID={session} CODEX_THREAD_ID={thread}\n{binary} {command} >{stdout} 2>{stderr}\nprintf '%s' \"$?\" >{status}\n",
             root=quote(&root.to_string_lossy()), home=quote(&self.home.to_string_lossy()),
             host=quote(&self.host.to_string_lossy()), pane=quote(&pane.pane_id),
             session=quote(&pane.session_anchor), thread=quote(&pane.thread_anchor),
@@ -420,6 +426,9 @@ fn run_pty(fixture: &IsolatedDaemon, input: &[u8]) -> Output {
         .env_remove("COLLAB_APPSERVER_SOCKET")
         .env_remove("CODEX_APP_SERVER_SOCKET")
         .env_remove("COLLAB_APPSERVER_NAMESPACE")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

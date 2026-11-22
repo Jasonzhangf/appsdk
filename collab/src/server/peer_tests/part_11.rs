@@ -1,6 +1,5 @@
 #[test]
 fn capture_and_probe_errors_do_not_change_persisted_pane_identity() {
-    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start_single(&root);
     assert!(register_tmux(&server, "pane-owner", tmux.endpoints().remove(0)).ok);

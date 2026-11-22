@@ -194,6 +194,7 @@ fn handle_master_status(server: &Server) -> Resp {
         .as_ref()
         .and_then(|worker| worker_identity_and_endpoint(server, worker).1);
     let state = server.state.lock().unwrap();
+    let projected_master_wake = project_master_wake_idle_capacity(server, &state);
     let workspace = workspace_idle_view(
         server,
         &state,
@@ -208,6 +209,7 @@ fn handle_master_status(server: &Server) -> Resp {
     };
     if let Some(master_object) = master.as_object_mut() {
         master_object.insert("workspace".into(), workspace);
+        master_object.insert("master_wake".into(), json!(projected_master_wake));
     }
     Resp::data(json!({
         "master": master,
@@ -371,6 +373,29 @@ pub(crate) fn handle_channel_inbound(
     body: String,
     envelope: crate::server::channel_envelope::ChannelEnvelope,
 ) -> Resp {
+    handle_channel_inbound_impl(server, None, from, to, subject, body, envelope)
+}
+
+pub(crate) fn handle_channel_inbound_with_rex_recovery(
+    server: &Arc<Server>,
+    from: String,
+    to: String,
+    subject: String,
+    body: String,
+    envelope: crate::server::channel_envelope::ChannelEnvelope,
+) -> Resp {
+    handle_channel_inbound_impl(server, Some(server), from, to, subject, body, envelope)
+}
+
+fn handle_channel_inbound_impl(
+    server: &Server,
+    recovery_server: Option<&Arc<Server>>,
+    from: String,
+    to: String,
+    subject: String,
+    body: String,
+    envelope: crate::server::channel_envelope::ChannelEnvelope,
+) -> Resp {
     let mut st = server.state.lock().unwrap();
     let intent = match channel_inbound_address_intent(
         &st,
@@ -403,7 +428,7 @@ pub(crate) fn handle_channel_inbound(
         &intent,
     );
     drop(st);
-    channel_inbound_finish(server, &mut response);
+    channel_inbound_finish(server, recovery_server, &mut response);
     response
 }
 
@@ -564,7 +589,11 @@ fn channel_inbound_commit_locked(
 }
 
 /// Notification runs only after the inbound commit released the state guard.
-fn channel_inbound_finish(server: &Server, response: &mut Resp) {
+fn channel_inbound_finish(
+    server: &Server,
+    recovery_server: Option<&Arc<Server>>,
+    response: &mut Resp,
+) {
     if response.data.get("deduplicated").and_then(|value| value.as_bool()) == Some(true) {
         return;
     }
@@ -601,7 +630,15 @@ fn channel_inbound_finish(server: &Server, response: &mut Resp) {
         }
         return;
     };
-    let notification = attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms());
+    let notification = match recovery_server {
+        Some(server) => attempt_notification_detailed_with_rex_recovery(
+            server,
+            &msg_id,
+            &subscription.id,
+            now_ms(),
+        ),
+        None => attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms()),
+    };
     let method = {
         let st = server.state.lock().unwrap();
         notification_method_for_worker(&st, &to.unwrap_or_default())
@@ -2523,27 +2560,22 @@ fn task_update_locked(
             decision_reason,
         );
     }
-    if task.owner != worker_id {
-        // A task whose owner name/binding is unavailable projects an empty
-        // owner and `needs_reassignment` on the board. The current project
-        // master owns that repair path so the task cannot stay stuck without a
-        // legal owner or wait state.
-        let master_repair = task_owner_unavailable(server, st, &task)
-            && board_check_master_locked(server, st, &worker_id).is_ok();
-        if !master_repair {
-            if let Err(error) =
-                task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
-            {
-                return error;
-            }
+    let is_master = board_check_master_locked(server, st, &worker_id).is_ok();
+    if task.owner != worker_id && !is_master {
+        return Resp::err("only the task owner may update its lifecycle");
+    }
+    if task.owner == worker_id {
+        if let Err(error) =
+            task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+        {
+            return error;
         }
-    } else if let Err(error) =
-        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
-    {
-        return error;
     }
     let original_status = task.status.clone();
-    if status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed")) {
+    let owner_is_actor = task.owner == worker_id;
+    if owner_is_actor
+        && status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed"))
+    {
         let result = match control {
             Some(control) => server_route_scope(server, st)
                 .map_err(Resp::err)

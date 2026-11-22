@@ -412,7 +412,9 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 51] {
         ),
         (
             "collab/skills/collab/references/task-execution-contract.graph.json",
-            include_str!("../../collab/skills/collab/references/task-execution-contract.graph.json"),
+            include_str!(
+                "../../collab/skills/collab/references/task-execution-contract.graph.json"
+            ),
         ),
         (
             "docs/dagpipe/collab-desktop-bridge-service.graph.json",

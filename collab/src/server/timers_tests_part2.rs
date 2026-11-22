@@ -351,7 +351,20 @@ use super::*;
         let subscription_id = subscribe(
             &server, "owner", "deadline", Some("goal:detached"), Some(now_ms() - 1),
         );
-        server.state.lock().unwrap().workers.get_mut("owner").unwrap().transport = None;
+        {
+            let mut state = server.state.lock().unwrap();
+            state.workers.get_mut("owner").unwrap().transport = None;
+            state
+                .notification_subscriptions
+                .get_mut(&subscription_id)
+                .unwrap()
+                .goal_content = Some(crate::server::state::GoalScheduleBinding {
+                source: Some(crate::server::state::GoalScheduleContent::Inline {
+                    content: "Verify the existing goal result".to_owned(),
+                }),
+                ttl_seconds: 60,
+            });
+        }
 
         tick_with_idle(&server, &|_| false);
         tick_with_idle(&server, &|_| false);
@@ -365,6 +378,10 @@ use super::*;
         assert_eq!(messages[0].to, "owner");
         assert_eq!(messages[0].state, "pending");
         assert_eq!(messages[0].wake_attempt_count, 0);
+        assert!(messages[0].body.contains("Verify the existing goal result"));
+        assert!(messages[0]
+            .body
+            .contains("execution plan, evidence-based progress, and action items"));
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

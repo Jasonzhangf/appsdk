@@ -38,6 +38,9 @@ master 负责项目总目标、跨 peer 依赖和最终集成。peer 负责接�
 
 ```text
 目标：<本次要交付的可用结果>
+执行计划：<按依赖排序的步骤和验证；可引用可访问的详细设计>
+实际进度：<已有结果、证据和待验收缺口；新任务写当前基线>
+行动项：<每条关联目标、验收或缺口，写负责人、动作、产物、完成证据及必要恢复条件>
 范围：<负责的模块/路径；不包含的工作>
 权限与资源：<已授权动作；资源归属>
 输入与依赖：<可访问的材料路径、已知依赖和交付前必须完成的交接；没有则写无>
@@ -78,12 +81,15 @@ peer 在约定终点一次交回可用产物、验收证据、仍待处理的事
 #### 执行任务的定时唤醒
 
 发给已注册执行 peer 的任务，在原任务单写明执行唤醒周期。默认每 10 分钟
-（`600000` 毫秒），任务约定的周期优先。发布或更新任务单时，用
+（`600000` 毫秒），任务约定的周期优先。Architect 与 peer 直接交接时，沿
+[直接发布与认领](#public-task-board-and-read-only-dashboard) 使用执行者自己的目标订阅。
+需要由 master 代派并自动绑定 board 订阅时，用
 `--long-horizon-content` 写入完整执行要求，用 `--long-horizon-every-ms` 写入该周期。
 派发或邀请后检查 `goal_schedule` 回执，确认订阅归执行者、绑定原任务且周期正确。
 
-执行者接单后核对该订阅，有有效批次就复用，立即推进可做工作。每次唤醒按原合同和
-任务记录继续实现、验证或解阻，更新本人的任务记录。周期唤醒无需给 Jenny 发进度。
+执行者接单后核对该订阅，有有效批次就复用，立即推进可做工作。每次唤醒按
+[四项执行合同](references/orchestration.md#目标计划进度和行动项)复核实际进度和前次
+未清项，继续实现、验证或解阻，更新本人的任务记录。周期唤醒无需给 Jenny 发进度。
 订阅缺失或批次耗尽且仍有执行职责时，以自己的稳定名用
 `collab goal reconcile --goal-id 'task:<任务ID>' --owner '<本人稳定名>' --desired active`
 恢复该任务原定周期。任务关闭或取消时沿任务生命周期结束订阅。唤醒不可用时记录实际
@@ -110,8 +116,9 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 - Jenny 按项目优先级将 buglist 缺陷和项目任务交给 architect。在原任务单记明本阶段
   的 architect，关联缺陷和证据，邀请时指定该 architect。
   Architect 查清问题和根因、完成详细设计、选定一个或多个执行 peer，并把各自不重叠的
-  执行合同交给他们。执行子任务关联原任务，记录指定的执行 peer（`--executor`）和
-  负责验收的 architect（`--reviewer`）。需 master 权限的 board 邀请由 Jenny 按该分工提交。
+  执行合同直接交给他们。执行子任务关联原任务，记录指定的执行 peer（`--executor`）和
+  负责验收的 architect（`--reviewer`）。普通授权内分工使用下方的直接发布与认领，
+  仅在权限、跨任务依赖或项目交付需要 Jenny 决定时请她处理对应事项。
   Peer 按合同实现、验证并向 architect 交回证据。Architect review 并按验收条件作出
   通过或返工决定，保留真实行为证据。适用 Review 门禁照常执行。
   用户明确指定 architect 参与实现时，交给其他人 review 该 architect 的实现。
@@ -122,6 +129,8 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 - 交接一律引用已落盘文件。消息携带文件路径、必要摘要及接收者，正文不能代替交接文件；
   接收者必须能访问文件，不可访问时沿已授权资料交付通道提供文件，不让 worker 猜测或
   自行补齐关键设计。
+- 执行中，peer 和 architect 直接处理必须澄清的设计问题、真实阻塞和约定的依赖交接。
+  执行细节和进度写入原任务记录。一次交回产物和验收证据；省略催报、例行确认和抄送。
 - worker 按设计实现和验证。发现设计缺口、矛盾或新证据导致方案不成立时，把具体问题
   交回负责设计的人。有 architect 的任务由 architect 修订原设计。执行者只暂停受影响的
   步骤，待设计补齐后继续。
@@ -1206,6 +1215,28 @@ stale or competing claim fails without taking the task. Do not update a
 pending task to `working` to bypass claim. Never claim outside the user's
 authorized goal or take another owner's working or blocked task.
 
+Architect 可在原目标授权内直接发布执行子任务并把合同路径交指定 peer。Peer 使用
+board 最新 revision 自行认领。任务交付及返工在 architect 和 peer 之间完成：
+
+```sh
+collab board publish "$child_id" --parent-task "$parent_id" --title "$title" --description "$contract" --delivery-condition "$delivery" --test-condition "$verification" --executor "$peer_name" --reviewer "$architect_name"
+collab sendmessage --to "$peer_name" --subject "$child_id" "$contract_path"
+# 下面两条由指定 peer 在自己的会话执行，revision 取自当前 board 回执。
+collab board show
+collab board claim "$child_id" --expected-revision "$revision"
+```
+
+直接认领时，若原任务没有有效执行唤醒，执行者用任务关联的同一 Markdown 文档登记
+本人的有限目标并在同一任务记录关联回执。默认间隔 10 分钟，合同约定优先。任务完成或
+取消后按实际 goal ID 关闭这条自有订阅，同时保留其他目标。
+
+```sh
+appsdk goal subscribe --goal "$task_doc" --interval 10m
+appsdk goal cancel --goal-id "$goal_id"
+```
+
+需要代 peer 配置 board 自动订阅或使用 `board invite` 时，才走已有 master 权限入口。
+
 For a long-horizon goal, master may instead offer a public task to one ordinary
 peer:
 
@@ -2055,17 +2086,17 @@ master grant.
 
 ### Peer observation
 
-Any authenticated peer of the same registered project may read the latest live
-buffer of an exact registered tmux peer. Master authority is not required
-because the read changes no durable state.
+An authenticated peer can read the bounded live buffer of an exact Rex or
+tmux peer in the same project. Explicit capture leaves durable state unchanged.
 
 | When | Command | Required result |
 |---|---|---|
-| Decide whether to keep waiting, escalate, or steer | `collab snapshot <peer-id> --lines <1..200>` | Returns the latest bounded, transient tmux pane buffer through one presence check and one `capture-pane`. It sends no input, consumes no mailbox message, bumps no revision, and writes no durable snapshot receipt. AppServer and DSH peers remain unsupported. |
+| Inspect a blocked or stalled executor | `collab worker snapshot <peer-id> --capture --lines 80` | Reads the currently bound Rex block or tmux pane even when status is known. The response reports `snapshot_collected: true` and `output` after a capture. Desktop, AppServer and DSH return `not_supported`. |
+| Fill missing status facts | `collab worker snapshot <peer-id> --lines 80` | Can return `not_collected` when status facts suffice. |
 
-`collab worker snapshot <peer-id> --lines <1..200>` remains a compatibility
-alias. The buffer is only the latest visible pane text. It does not prove
-busy/idle, Codex turn state, message consumption, or task completion.
+`collab snapshot` is an alias with the same options. `--lines` accepts 1–200.
+Use the buffer as current diagnostic evidence. Verify activity, message
+consumption and task completion through their respective receipts.
 
 For `refused`, `partial`, or `unknown`, keep the typed response and its
 operation ID. A responsibility or project-scope refusal has no lifecycle

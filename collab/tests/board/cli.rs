@@ -1635,6 +1635,41 @@ fn board_publish_is_shared_but_does_not_start_execution() {
 }
 
 #[test]
+fn architect_and_executor_can_handoff_without_master() {
+    let fixture = AppFixture::new();
+    let architect = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_A);
+    let executor = fixture.run_public(&["context", "--work-roles", "executor"], THREAD_B);
+    let architect_name = architect["name"].as_str().unwrap();
+    let executor_name = executor["name"].as_str().unwrap();
+    fixture.run_public(
+        &[
+            "board", "publish", "architect-parent", "--title", "Authorized design",
+            "--description", "Design delivery", "--delivery-condition", "Design available",
+            "--test-condition", "Accepted design evidence",
+        ],
+        THREAD_A,
+    );
+    let published = fixture.run_public(
+        &[
+            "board", "publish", "architect-child", "--parent-task", "architect-parent",
+            "--title", "Implement design", "--description", "Approved execution contract",
+            "--delivery-condition", "Implementation complete", "--test-condition", "Public behavior verified",
+            "--executor", executor_name, "--reviewer", architect_name,
+        ],
+        THREAD_A,
+    );
+    let revision = published["task"]["revision"].to_string();
+    let claimed = fixture.run_public(
+        &["board", "claim", "architect-child", "--expected-revision", &revision],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["publisher"], architect["identity"]["worker_id"]);
+    assert_eq!(claimed["task"]["owner"], executor["identity"]["worker_id"]);
+    assert_eq!(claimed["task"]["reviewer_name"], architect_name);
+    assert_eq!(claimed["task"]["status"], "working");
+}
+
+#[test]
 fn peer_publication_can_be_claimed_by_self_or_master() {
     let (fixture, master, peer) = setup();
     let peer_publish = fixture.run_public(

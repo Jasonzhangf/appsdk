@@ -319,6 +319,9 @@ fn base_role_brief(
         "Master and peer are goal orchestrators at different levels, not execution workers. {own_goal_shared}"
     );
     let goal_document_rule = workflow_template_rule("goal_document_rule");
+    let execution_cycle_rule = workflow_template_rule("execution_cycle_rule");
+    let blocked_task_observation_rule = workflow_template_rule("blocked_task_observation_rule");
+    let architect_handoff_rule = workflow_template_rule("architect_handoff_rule");
     let idle_patrol_rule = workflow_template_rule("idle_patrol_rule");
     let collaboration_reply_rule = workflow_template_rule("collaboration_reply_rule");
     let work_role_assignment_rule = workflow_template_rule("work_role_assignment_rule");
@@ -334,6 +337,9 @@ fn base_role_brief(
                 "Start every cycle from the current board, buglist and goal: read open work, prioritize P0/P1 by urgency and dependency, and apply the architect intake in work_role_execution_rule. Managers do not debug, reproduce, investigate root cause, or implement the work themselves. Verify evidence, decide scope and priority, and delegate detailed design, debugging and implementation to the assigned roles.",
                 own_goal_rule,
                 goal_document_rule,
+                execution_cycle_rule,
+                blocked_task_observation_rule,
+                architect_handoff_rule,
                 work_role_assignment_rule,
                 work_role_execution_rule,
                 work_role_next_action_rule,
@@ -411,6 +417,9 @@ fn base_role_brief(
             own_goal_shared.to_owned()
         }),
         serde_json::Value::String(goal_document_rule.to_owned()),
+        serde_json::Value::String(execution_cycle_rule.to_owned()),
+        serde_json::Value::String(blocked_task_observation_rule.to_owned()),
+        serde_json::Value::String(architect_handoff_rule.to_owned()),
         serde_json::Value::String(work_role_assignment_rule.to_owned()),
         serde_json::Value::String(work_role_execution_rule.to_owned()),
         serde_json::Value::String(work_role_next_action_rule.to_owned()),

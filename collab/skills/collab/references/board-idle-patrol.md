@@ -67,6 +67,19 @@ owner 是 core 实现与项目 DAG。
   缺口，不盲目输入。发送前刷新状态；使用既有绑定适配器，不切换传输绕过失败。
   事件能力不等于常驻事件订阅；没有真实当前状态时用周期 tick 检查，不用缓存推断。
 
+## 任务阻塞或停滞先取证
+
+未关闭任务出现阻塞，或证据显示执行者没有推进时，直属负责人当轮核实，即使
+`collab worker status <id>` 显示 online 或 busy。对有 Rex 或 tmux 绑定的执行者，运行
+`collab worker snapshot <id> --capture --lines 80` 读取原 block 或 pane。先看当前输出和任务证据，
+判断卡在什么动作、影响哪项验收，再推进、解阻、调整计划或交给有权处理的人。
+只读 capture，不写入终端、不拆分 pane、不调用 GUI。
+
+若 snapshot 失败则保存原错。Desktop 或 DSH 没有该 pane capture 时，用
+`collab worker status <id>`、原任务证据和相应宿主的现有只读状态入口核实。
+仍缺关键事实再向当前 owner 发一次定向请求。把结论、具体行动、负责人、预期产物和
+复验条件写回原任务，跟踪到实际结果。等待外部依赖时记录恢复信号，其他工作继续。
+
 ## 非 live peer 的主动核实流程
 
 `collab who` 或 `collab worker status` 返回 `identity-mismatch`、`cold`、`offline`、
@@ -208,6 +221,10 @@ collab notify status
 daemon 负责产生真实的合格唤醒：按 owner、按任务取消状态和新鲜 idle 选择对象并投递。
 Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒循环，也不替 peer 重新 arm
 其取消。
+
+巡检合同与每轮回执沿[四项执行合同](orchestration.md#目标计划进度和行动项)。
+每个检查点关联要保护的交付和验收。对照前次行动项验证实际进度，把需要处理的发现写入
+原任务并跟踪结果。无进展或无可执行项时按合同落实解阻、补项、带恢复条件的等待或证据收口。
 
 1. 先运行 `collab board show` 与 `collab who`，列出全部 live idle peer（包括无
    当前任务者），再读取当前项目未关闭 board 任务与 owner，结合按任务取消状态得出

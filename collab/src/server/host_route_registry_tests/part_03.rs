@@ -349,6 +349,7 @@
                 token: "token-app-a".into(),
                 target_id: "project-b-worker".into(),
                 lines: 40,
+                capture: true,
             },
         );
         assert!(!cross_route_snapshot.1.ok, "{:?}", cross_route_snapshot.1);

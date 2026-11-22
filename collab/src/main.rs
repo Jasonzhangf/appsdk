@@ -1450,7 +1450,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Ceo { command } => main_ceo::run(command),
-        Cmd::Snapshot { target_id, lines } => {
+        Cmd::Snapshot { target_id, lines, capture } => {
             let scope = Scope::resolve()?;
             let ident = me(&scope)?;
             let v: serde_json::Value = call_project(
@@ -1461,6 +1461,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     token: ident.token.clone(),
                     target_id,
                     lines,
+                    capture,
                 },
             )?;
             out(&v);
@@ -1486,7 +1487,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     out(&v);
                     Ok(())
                 }
-                WorkerCmd::Snapshot { target_id, lines } => {
+                WorkerCmd::Snapshot { target_id, lines, capture } => {
                     let ident = me(&scope)?;
                     let v: serde_json::Value = call_project(
                         &scope,
@@ -1496,6 +1497,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                             token: ident.token.clone(),
                             target_id,
                             lines,
+                            capture,
                         },
                     )?;
                     out(&v);

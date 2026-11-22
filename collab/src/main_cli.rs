@@ -495,6 +495,9 @@ pub(crate) enum WorkerCmd {
         /// Maximum number of recent terminal lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,
+        /// Capture the bound terminal even when the current status is known
+        #[arg(long)]
+        capture: bool,
     },
     /// Let the current project master commit a typed judgment for one snapshot capture
     Judge {
@@ -672,6 +675,9 @@ pub(crate) enum Cmd {
         /// Maximum number of recent terminal lines to return (1..=200)
         #[arg(long, default_value_t = 40)]
         lines: usize,
+        /// Capture the bound terminal even when the current status is known
+        #[arg(long)]
+        capture: bool,
     },
     /// Current project master clears this project's Collab history and load
     Reset {

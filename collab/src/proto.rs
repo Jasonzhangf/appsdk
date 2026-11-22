@@ -1090,6 +1090,8 @@ pub enum Req {
         token: String,
         target_id: String,
         lines: usize,
+        #[serde(default)]
+        capture: bool,
     },
     WorkerStatusJudgment {
         worker_id: String,

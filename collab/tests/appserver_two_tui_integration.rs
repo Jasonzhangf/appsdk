@@ -1202,6 +1202,13 @@ fn context_recovery_pool_overflow_registers_generated_names() {
         repeated["identity"]["worker_id"], first_extra["identity"]["worker_id"],
         "{repeated}"
     );
+    let closed = fixture.run_public(&["worker", "close", "--self"], "generated-pool-extra-one");
+    assert_eq!(closed["ok"], true, "{closed}");
+    let replacement = fixture.run_public(&["context"], "generated-pool-extra-replacement");
+    assert_eq!(
+        replacement["name"], first_name,
+        "{replacement}: the closed carrier's generated name must be reusable"
+    );
     // No original ordinary holder may be displaced by overflow registration.
     for original in &registered {
         let replayed = fixture.run_public(

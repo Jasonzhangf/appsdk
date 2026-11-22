@@ -110,7 +110,8 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 - Jenny 按项目优先级将 buglist 缺陷和项目任务交给 architect。在原任务单记明本阶段
   的 architect，关联缺陷和证据，邀请时指定该 architect。
   Architect 查清问题和根因、完成详细设计、选定一个或多个执行 peer，并把各自不重叠的
-  执行合同交给他们。需 master 权限的 board 邀请由 Jenny 按 architect 给出的分工提交。
+  执行合同交给他们。执行子任务关联原任务，记录指定的执行 peer（`--executor`）和
+  负责验收的 architect（`--reviewer`）。需 master 权限的 board 邀请由 Jenny 按该分工提交。
   Peer 按合同实现、验证并向 architect 交回证据。Architect review 并按验收条件作出
   通过或返工决定，保留真实行为证据。适用 Review 门禁照常执行。
   用户明确指定 architect 参与实现时，交给其他人 review 该 architect 的实现。

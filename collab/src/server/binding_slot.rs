@@ -84,6 +84,11 @@ pub(crate) struct BindingValue {
     pub(crate) physical_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) layout_binding_id: Option<String>,
+    /// Compatibility metadata preserved from historical maps. It is never
+    /// allocated, matched or used to drive identity, routing or generation
+    /// decisions; an omitted field stays omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) registration_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +132,7 @@ impl BindingValue {
             },
             physical_name: None,
             layout_binding_id: None,
+            registration_number: None,
         }
     }
 
@@ -151,7 +157,8 @@ impl BindingValue {
     }
 
     /// Compare only durable routing facts. Capability ordering, self-check
-    /// text, readiness and the control generation are not binding changes.
+    /// text, readiness, compatibility metadata and the control generation are
+    /// not binding changes.
     fn same_fact(&self, other: &Self) -> bool {
         self.binding.project_scope == other.binding.project_scope
             && self.binding.app_scope_id == other.binding.app_scope_id
@@ -187,7 +194,11 @@ pub(crate) enum IdentityStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct IdentityBindingSlot {
     pub(crate) identity_key: IdentityBindingKey,
-    pub(crate) display_slot: u32,
+    // Historical maps carry `display_slot: null`. The name-derived slot is
+    // authoritative; the field stays required so an omitted value is still a
+    // decode error rather than a silently accepted map.
+    #[serde(deserialize_with = "deserialize_required_display_slot")]
+    pub(crate) display_slot: Option<u32>,
     pub(crate) identity_status: IdentityStatus,
     pub(crate) generation: u64,
     pub(crate) current: Option<BindingValue>,
@@ -345,7 +356,7 @@ impl IdentityBindingSlot {
     pub(crate) fn commit(
         &mut self,
         key: &IdentityBindingKey,
-        value: BindingValue,
+        mut value: BindingValue,
         expected_generation: Option<u64>,
     ) -> Result<CommitOutcome, SlotError> {
         self.check_expected(expected_generation)?;
@@ -360,6 +371,15 @@ impl IdentityBindingSlot {
                     key.name.clone(),
                 ),
             });
+        }
+
+        // A rebuilt value has no persisted metadata. Carry the slot's current
+        // registration number forward before comparing routing facts so an
+        // ordinary refresh or session rebind preserves it without advancing
+        // the generation. An incoming value cannot replace the metadata
+        // already owned by this same logical slot.
+        if let Some(current) = self.current.as_ref() {
+            value.registration_number = current.registration_number;
         }
 
         if let Some(current) = self.current.as_ref() {
@@ -416,10 +436,12 @@ impl IdentityBindingSlot {
 
     pub(crate) fn validate(&self) -> Result<(), SlotError> {
         self.validate_shape()?;
-        if super::name_resolution::display_slot(&self.identity_key.name)
-            .map_err(SlotError::Invalid)?
-            != self.display_slot
-        {
+        let expected = super::name_resolution::display_slot(&self.identity_key.name)
+            .map_err(SlotError::Invalid)?;
+        // Historical fixed-name slots may contain null. The derived numeric
+        // slot still rejects any persisted numeric mismatch. Generated names
+        // must not acquire a numeric slot.
+        if self.display_slot.is_some() && self.display_slot != expected {
             return Err(SlotError::Invariant(
                 "display slot differs from the registered name".into(),
             ));
@@ -429,13 +451,6 @@ impl IdentityBindingSlot {
         }
         if let Some(previous) = self.previous.as_ref() {
             previous.validate()?;
-        }
-        if let (Some(current), Some(previous)) = (self.current.as_ref(), self.previous.as_ref()) {
-            if current.same_fact(previous) {
-                return Err(SlotError::Invariant(
-                    "current and previous bindings must be different facts".into(),
-                ));
-            }
         }
         Ok(())
     }
@@ -884,4 +899,40 @@ impl BindingControlSet {
 pub(crate) struct MoveNameOutcome {
     pub(crate) target: CommitOutcome,
     pub(crate) sources_retired: usize,
+}
+
+/// Accept an explicit display slot number or an explicit `null`. The field has
+/// no `default`, so a missing `display_slot` still fails to decode.
+fn deserialize_required_display_slot<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RequiredDisplaySlot;
+
+    impl<'de> serde::de::Visitor<'de> for RequiredDisplaySlot {
+        type Value = Option<u32>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("null or a display slot number")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u32::try_from(value)
+                .map(Some)
+                .map_err(|_| E::custom("display slot exceeds u32 range"))
+        }
+    }
+
+    deserializer.deserialize_any(RequiredDisplaySlot)
 }

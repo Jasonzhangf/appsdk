@@ -122,6 +122,336 @@ fn invalid_duplicate_set_fails_closed() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+fn legacy_map() -> serde_json::Value {
+    let key = key_in("/tmp/collab-binding-store-legacy", "alice");
+    let mut set = BindingControlSet::new();
+    set.commit(&key, value(&key, "alice", "runtime-a"), Some(0))
+        .unwrap();
+    set.commit(&key, value(&key, "alice", "runtime-b"), Some(1))
+        .unwrap();
+    let set_value = serde_json::to_value(&set).unwrap();
+    serde_json::json!({
+        "schema_version": 1,
+        "slots": set_value["slots"],
+        "effects": [],
+        "pending_resets": []
+    })
+}
+
+#[test]
+fn legacy_registration_number_loads_and_round_trips_without_rewrite() {
+    let root = temp_root("legacy-registration-number");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    map["slots"][0]["current"]["registration_number"] = serde_json::json!(4242);
+    let bytes = serde_json::to_vec_pretty(&map).unwrap();
+    std::fs::write(store.path(), &bytes).unwrap();
+
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        std::fs::read(store.path()).unwrap(),
+        bytes,
+        "load must not rewrite the identity map"
+    );
+    store.save(&loaded).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        after["slots"][0]["current"]["registration_number"],
+        serde_json::json!(4242)
+    );
+    assert_eq!(store.load().unwrap(), loaded);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn legacy_null_display_slot_loads_and_round_trips_without_rewrite() {
+    let root = temp_root("legacy-null-display-slot");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    map["slots"][0]["display_slot"] = serde_json::Value::Null;
+    let bytes = serde_json::to_vec_pretty(&map).unwrap();
+    std::fs::write(store.path(), &bytes).unwrap();
+
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        std::fs::read(store.path()).unwrap(),
+        bytes,
+        "load must not rewrite the identity map"
+    );
+    store.save(&loaded).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(after["slots"][0]["display_slot"], serde_json::Value::Null);
+    assert_eq!(store.load().unwrap(), loaded);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn combined_legacy_shape_preserves_current_and_previous_registration_numbers() {
+    let root = temp_root("legacy-combined-shape");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    map["slots"][0]["display_slot"] = serde_json::Value::Null;
+    map["slots"][0]["current"]["registration_number"] = serde_json::json!(0);
+    map["slots"][0]["previous"]["registration_number"] = serde_json::json!(8);
+    std::fs::write(store.path(), serde_json::to_vec_pretty(&map).unwrap()).unwrap();
+
+    let loaded = store.load().unwrap();
+    store.save(&loaded).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+    let slot = &after["slots"][0];
+    assert_eq!(slot["display_slot"], serde_json::Value::Null);
+    assert_eq!(slot["current"]["registration_number"], serde_json::json!(0));
+    assert_eq!(
+        slot["current"]["binding"]["runtime_id"],
+        serde_json::json!("runtime-b")
+    );
+    assert_eq!(
+        slot["previous"]["registration_number"],
+        serde_json::json!(8),
+        "the retained previous value keeps its own number"
+    );
+    assert_eq!(
+        slot["previous"]["binding"]["runtime_id"],
+        serde_json::json!("runtime-a")
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn same_current_and_previous_route_with_different_compatibility_metadata_loads_unchanged() {
+    let root = temp_root("same-current-previous-route");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    let current = map["slots"][0]["current"].clone();
+    map["slots"][0]["previous"] = current;
+    map["slots"][0]["current"]["registration_number"] = serde_json::json!(2);
+    map["slots"][0]["previous"]["registration_number"] = serde_json::json!(0);
+    let bytes = serde_json::to_vec_pretty(&map).unwrap();
+    std::fs::write(store.path(), &bytes).unwrap();
+
+    let loaded = store
+        .load()
+        .expect("a historical previous reference may equal current");
+    assert_eq!(loaded.active_values().count(), 1);
+    assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+    assert_eq!(
+        loaded
+            .slots()
+            .next()
+            .unwrap()
+            .active_binding()
+            .unwrap()
+            .registration_number,
+        Some(2)
+    );
+    assert_eq!(
+        loaded
+            .slots()
+            .next()
+            .unwrap()
+            .reference_previous()
+            .unwrap()
+            .registration_number,
+        Some(0)
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn identical_refresh_through_store_commit_does_not_rewrite_the_map() {
+    let root = temp_root("legacy-identical-refresh");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    map["slots"][0]["current"]["registration_number"] = serde_json::json!(4242);
+    let bytes = serde_json::to_vec_pretty(&map).unwrap();
+    std::fs::write(store.path(), &bytes).unwrap();
+
+    let key = key_in("/tmp/collab-binding-store-legacy", "alice");
+    let outcome = store
+        .commit(ControlChange::Commit {
+            key: key.clone(),
+            value: value(&key, "alice", "runtime-b"),
+            expected_generation: Some(2),
+        })
+        .unwrap();
+    assert_eq!(outcome.durability, Durability::Confirmed);
+    assert!(matches!(
+        outcome.outcome,
+        StoreChangeOutcome::Slot(super::binding_slot::CommitOutcome::Unchanged { generation: 2 })
+    ));
+    assert_eq!(
+        std::fs::read(store.path()).unwrap(),
+        bytes,
+        "an identical refresh must not rewrite the persisted map"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn same_identity_commit_changes_only_the_intended_transition() {
+    let root = temp_root("legacy-real-rebind");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    map["slots"][0]["display_slot"] = serde_json::Value::Null;
+    map["slots"][0]["current"]["registration_number"] = serde_json::json!(4242);
+    map["slots"][0]["previous"]["registration_number"] = serde_json::json!(8);
+    std::fs::write(store.path(), serde_json::to_vec_pretty(&map).unwrap()).unwrap();
+    let before: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+
+    let key = key_in("/tmp/collab-binding-store-legacy", "alice");
+    let outcome = store
+        .commit(ControlChange::Commit {
+            key: key.clone(),
+            value: value(&key, "alice", "runtime-c"),
+            expected_generation: Some(2),
+        })
+        .unwrap();
+    assert_eq!(outcome.durability, Durability::Confirmed);
+
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+    let slot = &after["slots"][0];
+    assert_eq!(slot["identity_key"], before["slots"][0]["identity_key"]);
+    assert_eq!(slot["display_slot"], serde_json::Value::Null);
+    assert_eq!(slot["identity_status"], serde_json::json!("active"));
+    assert_eq!(slot["generation"], serde_json::json!(3));
+    assert_eq!(
+        slot["current"]["binding"]["runtime_id"],
+        serde_json::json!("runtime-c")
+    );
+    assert_eq!(
+        slot["current"]["registration_number"],
+        serde_json::json!(4242)
+    );
+    assert_eq!(
+        slot["previous"]["binding"]["runtime_id"],
+        before["slots"][0]["current"]["binding"]["runtime_id"]
+    );
+    assert_eq!(
+        slot["previous"]["registration_number"],
+        serde_json::json!(4242)
+    );
+    assert_eq!(after["schema_version"], before["schema_version"]);
+    assert_eq!(after["effects"], before["effects"]);
+    assert!(
+        after["pending_resets"]
+            .as_array()
+            .map_or(true, Vec::is_empty),
+        "the rebind must not introduce pending resets"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn unknown_name_with_null_display_slot_still_fails_closed() {
+    let root = temp_root("legacy-unknown-name");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    map["slots"][0]["identity_key"]["name"] = serde_json::json!("Unknown");
+    map["slots"][0]["display_slot"] = serde_json::Value::Null;
+    let bytes = serde_json::to_vec_pretty(&map).unwrap();
+    std::fs::write(store.path(), &bytes).unwrap();
+
+    let error = store.load().unwrap_err();
+    assert!(error.contains("IDENTITY_MAP_INVALID"), "{error}");
+    assert!(
+        error.contains("NAME_INVALID"),
+        "null must not bypass name validation: {error}"
+    );
+    assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn fixed_pool_name_with_wrong_display_slot_still_fails_closed() {
+    let root = temp_root("legacy-fixed-pool-wrong-slot");
+    let store = BindingControlStore::new(&root);
+    let mut map = legacy_map();
+    map["slots"][0]["display_slot"] = serde_json::json!(3);
+    let bytes = serde_json::to_vec_pretty(&map).unwrap();
+    std::fs::write(store.path(), &bytes).unwrap();
+
+    let error = store.load().unwrap_err();
+    assert!(error.contains("IDENTITY_MAP_INVALID"), "{error}");
+    assert!(
+        error.contains("display slot differs from the registered name"),
+        "a numeric mismatch must not bypass fixed display-slot validation: {error}"
+    );
+    assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn legacy_rejection_matrix_preserves_input_bytes() {
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        {
+            let mut map = legacy_map();
+            map["slots"][0]["display_slot"] = serde_json::json!(3);
+            ("wrong-numeric-slot", map)
+        },
+        {
+            let mut map = legacy_map();
+            map["slots"][0]["unexpected"] = serde_json::json!(1);
+            ("unknown-field", map)
+        },
+        {
+            let mut map = legacy_map();
+            map["slots"][0]["display_slot"] = serde_json::json!("2");
+            ("wrong-field-type", map)
+        },
+        {
+            let mut map = legacy_map();
+            map["slots"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("display_slot");
+            ("missing-display-slot", map)
+        },
+        {
+            let mut map = legacy_map();
+            map["schema_version"] = serde_json::json!(2);
+            ("unsupported-version", map)
+        },
+        {
+            let mut map = legacy_map();
+            let slot = map["slots"][0].clone();
+            map["slots"].as_array_mut().unwrap().push(slot);
+            ("duplicate-identity-key", map)
+        },
+    ];
+
+    for (label, map) in cases {
+        let root = temp_root(&format!("legacy-reject-{label}"));
+        let store = BindingControlStore::new(&root);
+        let bytes = serde_json::to_vec_pretty(&map).unwrap();
+        std::fs::write(store.path(), &bytes).unwrap();
+        let error = store.load().unwrap_err();
+        assert!(
+            error.contains("IDENTITY_MAP_"),
+            "{label}: unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(store.path()).unwrap(),
+            bytes,
+            "{label}: rejected input must remain unchanged"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    let root = temp_root("legacy-reject-malformed-json");
+    let store = BindingControlStore::new(&root);
+    let bytes = b"{\"slots\": not-json".to_vec();
+    std::fs::write(store.path(), &bytes).unwrap();
+    let error = store.load().unwrap_err();
+    assert!(error.contains("IDENTITY_MAP_DECODE_FAILED"), "{error}");
+    assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn publish_failure_is_returned_and_leaves_no_temporary_file() {
     use std::os::unix::fs::PermissionsExt;

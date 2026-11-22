@@ -179,6 +179,182 @@ fn repeated_binding_fact_does_not_roll_or_advance_generation() {
 }
 
 #[test]
+fn current_and_previous_may_reference_the_same_route_fact() {
+    let key = key("alice");
+    let current = value(&key, "alice", "runtime-a", "endpoint-a");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    slot.commit(&key, current.clone(), Some(0)).unwrap();
+    slot.previous = Some(current);
+
+    slot.validate()
+        .expect("previous is historical and does not compete with current");
+    assert_eq!(slot.active_binding(), slot.reference_previous());
+}
+
+#[test]
+fn generated_name_rejects_a_fixed_display_slot() {
+    let key = key("peer-17");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    slot.commit(
+        &key,
+        value(&key, "peer-17", "runtime-a", "endpoint-a"),
+        Some(0),
+    )
+    .unwrap();
+    slot.display_slot = Some(2);
+
+    assert!(
+        slot.validate().is_err(),
+        "generated names have no fixed display slot"
+    );
+}
+
+#[test]
+fn fixed_pool_name_allows_a_legacy_null_display_slot() {
+    let key = key("alice");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    slot.display_slot = None;
+
+    slot.validate()
+        .expect("historical fixed-name maps may have no display slot");
+}
+
+#[test]
+fn fixed_pool_name_rejects_a_wrong_display_slot() {
+    let key = key("alice");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    slot.display_slot = Some(3);
+
+    assert!(slot.validate().is_err());
+}
+
+#[test]
+fn identical_refresh_preserves_registration_number_without_advancing_generation() {
+    let key = key("alice");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    let mut persisted = value(&key, "alice", "runtime-a", "endpoint-a");
+    persisted.registration_number = Some(4242);
+    slot.commit(&key, persisted, Some(0)).unwrap();
+
+    let mut refresh = value(&key, "alice", "runtime-a", "endpoint-a");
+    refresh.transport.capabilities = vec!["rebuilt".to_owned()];
+    assert_eq!(
+        slot.commit(&key, refresh, Some(1)).unwrap(),
+        CommitOutcome::Unchanged { generation: 1 }
+    );
+    let current = slot.active_binding().unwrap();
+    assert_eq!(current.registration_number, Some(4242));
+    assert_eq!(slot.generation(), 1);
+    assert!(slot.reference_previous().is_none());
+}
+
+#[test]
+fn same_identity_rebind_carries_registration_number_to_the_new_current() {
+    let key = key("alice");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    let mut persisted = value(&key, "alice", "runtime-a", "endpoint-a");
+    persisted.registration_number = Some(4242);
+    slot.commit(&key, persisted, Some(0)).unwrap();
+
+    assert_eq!(
+        slot.commit(
+            &key,
+            value(&key, "alice", "runtime-b", "endpoint-b"),
+            Some(1)
+        )
+        .unwrap(),
+        CommitOutcome::Committed { generation: 2 }
+    );
+    let current = slot.active_binding().unwrap();
+    assert_eq!(current.binding.runtime_id.as_str(), "runtime-b");
+    assert_eq!(current.registration_number, Some(4242));
+    assert_eq!(
+        slot.reference_previous().unwrap().registration_number,
+        Some(4242)
+    );
+    slot.validate().unwrap();
+}
+
+#[test]
+fn same_slot_registration_number_is_not_replaced_by_an_incoming_value() {
+    let key = key("alice");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    let mut persisted = value(&key, "alice", "runtime-a", "endpoint-a");
+    persisted.registration_number = Some(4242);
+    slot.commit(&key, persisted, Some(0)).unwrap();
+
+    let mut replacement = value(&key, "alice", "runtime-b", "endpoint-b");
+    replacement.registration_number = Some(7);
+    slot.commit(&key, replacement, Some(1)).unwrap();
+    assert_eq!(
+        slot.active_binding().unwrap().registration_number,
+        Some(4242),
+        "the logical slot owns its persisted metadata"
+    );
+}
+
+#[test]
+fn registration_number_type_and_scope_errors_are_not_suppressed() {
+    let key = key("alice");
+    let value = serde_json::json!({
+        "identity_key": key.clone(),
+        "display_slot": 2,
+        "identity_status": "active",
+        "generation": 1,
+        "current": {
+            "binding": {
+                "project_scope": "/tmp/collab-binding-slot",
+                "app_scope_id": "appserver-cli",
+                "agent_id": "alice",
+                "runtime_id": "runtime-a",
+                "binding_id": "binding-runtime-a"
+            },
+            "transport": {
+                "kind": "appserver",
+                "endpoint": "endpoint-a",
+                "namespace": "test",
+                "session_id": "runtime-a-session",
+                "thread_id": "runtime-a-thread",
+                "capabilities": ["test"],
+                "self_check": "ok"
+            },
+            "tab_id": {
+                "project_scope": "/tmp/collab-binding-slot",
+                "app_scope_id": "appserver-cli"
+            },
+            "host": {"agent_kind": null, "host_type": "native", "profile": null},
+            "invocation_cwd": "/tmp/collab-binding-slot",
+            "physical_name": null,
+            "layout_binding_id": null,
+            "registration_number": "not-a-number"
+        },
+        "previous": null
+    });
+    let error = serde_json::from_value::<IdentityBindingSlot>(value)
+        .expect_err("a string registration number must fail decode");
+    assert!(error.to_string().contains("u64"), "{error}");
+}
+
+#[test]
+fn new_slot_serializes_without_registration_number_but_with_numeric_display_slot() {
+    let key = key("alice");
+    let mut slot = IdentityBindingSlot::new(key.clone());
+    slot.commit(
+        &key,
+        value(&key, "alice", "runtime-a", "endpoint-a"),
+        Some(0),
+    )
+    .unwrap();
+
+    let value = serde_json::to_value(&slot).unwrap();
+    assert_eq!(value["display_slot"], serde_json::json!(2));
+    assert!(
+        value["current"].get("registration_number").is_none(),
+        "an absent registration number must stay absent: {value}"
+    );
+}
+
+#[test]
 fn stable_name_keeps_one_slot_across_session_derived_agents() {
     let key = key("alice");
     let mut set = BindingControlSet::new();

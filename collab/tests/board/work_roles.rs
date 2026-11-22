@@ -135,7 +135,7 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
                 "--long-horizon-content",
                 "Complete the first task under its current board contract",
                 "--long-horizon-every-ms",
-                "3600000",
+                "600000",
             ],
         );
         let first = if owned {
@@ -151,6 +151,10 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
         };
         assert_eq!(
             first["goal_schedule"]["subscription"]["worker_id"], alice["identity"]["worker_id"],
+            "{first}"
+        );
+        assert_eq!(
+            first["goal_schedule"]["subscription"]["interval_ms"], 600_000,
             "{first}"
         );
         fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
@@ -173,6 +177,10 @@ fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
         assert_eq!(
             preferred["task"]["invited_peer"],
             alice["identity"]["worker_id"]
+        );
+        assert_eq!(
+            preferred["goal_schedule"]["subscription"]["interval_ms"], 3_600_000,
+            "{preferred}"
         );
         publish(
             &fixture,

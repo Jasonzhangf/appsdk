@@ -202,7 +202,8 @@ Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 
 
 派单使用 [Worker 合同](../codex-orchestrator/references/worker-contract.md#任务合同模板)，
 明确允许/禁止、验收、升级与停止点；peer 另带任务 ID、稳定双方身份、目标层级和
-集成分工。范围内投入和预算边界不另设一套。Planner/Reviewer 模型、并发调度、接管
+集成分工。注册 peer 的执行合同补充[执行唤醒周期](operations.md#执行任务的定时唤醒)，
+默认每 10 分钟，可按任务改。范围内投入和预算边界不另设一套。Planner/Reviewer 模型、并发调度、接管
 与 Review 准入均沿 [codex-orchestrator](../codex-orchestrator/SKILL.md)；任务板记录
 本身不授权范围外 backlog 或生产动作。
 

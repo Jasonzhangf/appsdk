@@ -107,11 +107,12 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 总设计师、架构师、规划师、reviewer 及承担同类职责的角色共同适用本合同，不依赖特定
 英文角色名。执行 worker 不被假设具备设计者同等判断力、项目背景或继承父会话。
 
-- Jenny 在任务合同指定一名可承接的 architect 和一个或多个执行 peer。多个执行者各有
-  明确且不重叠的责任范围。Architect 负责把问题分析清楚，用实际证据写明现象、预期、
-  受影响范围及原因。修复任务先查证根因。Architect 作出全部详细设计决定，写成每位 peer
-  可直接执行的任务合同，Jenny 据此派发实现。Peer 按合同实现、验证并交回证据，由同一 architect
-  review。适用 Review 门禁照常执行，无需另派常规 Planner 或 Reviewer。
+- Jenny 按项目优先级将 buglist 缺陷和项目任务交给 architect。在原任务单记明本阶段
+  的 architect，关联缺陷和证据，邀请时指定该 architect。
+  Architect 查清问题和根因、完成详细设计、选定一个或多个执行 peer，并把各自不重叠的
+  执行合同交给他们。需 master 权限的 board 邀请由 Jenny 按 architect 给出的分工提交。
+  Peer 按合同实现、验证并向 architect 交回证据。Architect review 并按验收条件作出
+  通过或返工决定，保留真实行为证据。适用 Review 门禁照常执行。
   用户明确指定 architect 参与实现时，交给其他人 review 该 architect 的实现。
 - 详细设计须落盘。对每位执行者写清任务要求与输入、负责和禁止改动的模块或路径、适用的
   接口和数据流、实施步骤及顺序、依赖、必须做的事项与明确排除的事项、交付物和接收人、
@@ -1742,39 +1743,20 @@ worker's blocker. Concretely:
 
 ## Master splits and assigns
 
-The human remains the only final authority for goals, money, irreversible
-risk, and version promotion. Collab master is the user-approved project
-dispatcher, not the human 主脑 and not Codex root. Master compiles
-the goal into a task graph, then assigns; it does not take another peer's
-task or worktree.
+The human remains the final authority for goals, money, irreversible risk and
+version promotion. Master owns project priorities, cross-task dependencies
+and final delivery. Use the [file handoff contract](#设计规划与审查角色的文件交接合同)
+for architect assignments.
 
-**Master is an architect and dispatcher, never an everyday code-author.**
-Master authoring business diffs is an anti-pattern and a failure of division
-of labor. Master's scarce capacity belongs to task graph compilation, strict
-dependency boundaries, unblocking workers, and driving overall throughput.
-Master operates under two prime directives:
-1. **Exemplary Task Decomposition**: Slice goals along clear dependencies and
-   non-overlapping file ownership. Every dispatched task must be closed-loop
-   by design: define explicit done-iff (DoD), artifacts, forbidden edits, exact
-   test commands, expected results, and evidence location. Every assignment must
-   anticipate failure and define an exception resolution path: **fallbacks,
-   silent downgrades, or masking errors are strictly prohibited**. A blocked
-   peer supplies failure evidence, attempted remedies and the decision needed
-   for master verification; an unknown root cause does not delay requesting
-   help. Master must actively close the lifecycle rather than patch
-   output symptoms.
-2. **Peer-first Capacity**: Master must keep eligible capacity saturated
-   without serial bottlenecks. Offer long-horizon goals through the public
-   board to suitable, consenting peers. Each peer may split its accepted goal
-   and orchestrate independent `codex exec --profile gcm` workers for its
-   bounded subwork.
-   Check idle, suitable authorized peers and available capacity first; use peer
-   capacity that can take the ready work. Direct-dispatch independent GCM
-   workers only when no suitable authorized peer can take the work. Before
-   ending each scheduling turn, inspect ready work, peer capacity, protected
-   holds, P0/P1 work, and the active issue backlog.
-   Delivery, merge, review, task close, and cleanup are lifecycle steps, never
-   reasons to leave eligible work undispatched.
+- Where a suitable architect is assigned, route buglist items and project tasks
+  to the architect first. The architect plans, hands the implementation to
+  authorized peers, and accepts their results. Reuse the original board task
+  and its scope. When all suitable architects are busy, queue the intake and
+  keep unrelated ready work moving.
+- For work without an applicable architect assignment, use the existing
+  peer and independent-worker routing. Apply explicit user instructions about
+  who plans, executes and accepts the task. Record decisions, evidence and
+  needed next actions on the existing task.
 
 **Sovereignty and Backlog Priority**:
 - **No autonomous technical debt refactoring**: When assigned tasks complete
@@ -1785,9 +1767,8 @@ Master operates under two prime directives:
   unbounded autonomous runs risk destabilizing user intent.
 - **Autonomous Bug Tracking Backlog Resolution**: If pre-existing issues or
   requirements are logged in the bug system (`appsdk bug list --status open`),
-  these represent authorized project work. Master autonomously pulls and
-  dispatches open bugs in strict priority order (P0 > P1 > P2) to keep
-  worker capacity saturated before suggesting closure.
+  master pulls authorized open bugs in priority order (P0 > P1 > P2) and
+  routes them under the same architect intake rule as project tasks.
 
 **Worker->Master idle fact and master long-horizon wake**:
 When a worker transitions from `working` to `idle`, it emits one idempotent
@@ -1845,8 +1826,9 @@ without the receive receipt. A tmux screen cannot establish task completion,
 peer consumption, or Codex turn state. Do not infer those facts or restart a
 shared runtime from a pane probe.
 
-Master keeps architecture, dispatch, integration, critical repair, and final
-acceptance. Use a board invitation for a long-horizon peer goal. Use an
+Master keeps project dispatch, integration and final delivery accountability.
+Architect owns planning and task acceptance when assigned. Use a board
+invitation for a long-horizon peer goal. Use an
 independent `codex exec --profile gcm` worker for bounded execution or
 observation. Legacy managed-subagent records grant no new execution authority
 and fail closed for unsupported thread creation. Give each peer and GCM worker
@@ -2346,8 +2328,8 @@ claim an independent goal or infer master authority.
   human-authorized handoff. Independent peers may
   decline a master collaboration invite. Master splits by dependency then
   unique write scope, offers long-horizon work to a consenting peer through the
-  public board with unambiguous delivery and test conditions, and keeps
-  architecture/integration/acceptance; it does not take another peer's task.
+  public board with unambiguous delivery and test conditions. Use the
+  [architect handoff](#设计规划与审查角色的文件交接合同) when applicable.
   Peers request help promptly with available failure evidence and attempts;
   root cause and solution need not be proven first. Apply Registered patrol
   duties for master verification and continued ownership. Legacy managed records grant no new task

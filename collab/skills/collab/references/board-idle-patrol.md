@@ -27,7 +27,8 @@ owner 是 core 实现与项目 DAG。
   「Master 取消与恢复项目巡检」。
 - Jenny 每次巡检提醒都先执行两个强制步骤：第一，运行 `collab board show` 与
   `collab who`，列出全部 live idle peer（包括没有当前任务的成员）及通道来源；
-  第二，按当前优先级把 ready 的非重叠 P0/P1 派给每个 idle eligible peer。不得
+  第二，按当前优先级和[派单顺序](../SKILL.md#派单顺序与一-peer-一任务)派发 ready 的
+  非重叠 P0/P1。适用 architect 的缺陷和任务先交 architect。不得
   先做实现、debug、merge 或资源清理。Planner/Reviewer 缺位不是等待理由：独立
   reviewer 先用独立 Codex OAuth/`codex-auto-review`，不可用则改派普通空闲 peer；
   只有无 idle worker、subagent review 入口真实失效且无其他 peer 时，Jenny 才临时

@@ -1042,9 +1042,15 @@ fn master_role_brief_defaults_to_independent_review_with_three_condition_excepti
     assert!(
         contains_ci(
             &text,
-            "assign the same architect to plan and review it and designate one or more peer executors with non-overlapping scopes"
+            "master routes both buglist items and project tasks to that architect first"
         ),
-        "master role_brief must route planning and review to the architect and implementation to peers: {text}"
+        "master role_brief must route both task intakes to the architect first: {text}"
+    );
+    assert!(
+        contains_ci(&text, "architect owns planning and acceptance")
+            && contains_ci(&text, "hands implementation to one or more peer executors")
+            && contains_ci(&text, "peers implement, verify and return evidence to the architect"),
+        "master role_brief must distinguish architect acceptance from peer execution: {text}"
     );
     assert!(
         contains_ci(&text, "complete written design and execution contract for each peer"),
@@ -1226,6 +1232,8 @@ fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
     );
     for phrase in [
         "own both planning and review for the assigned task",
+        "select one or more peer executors for disjoint scopes",
+        "review and accept their work or return it for rework",
         "make all detailed design decisions",
         "produce a detailed architecture or plan file on disk",
         "ordered implementation steps",

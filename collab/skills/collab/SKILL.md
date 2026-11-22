@@ -155,7 +155,7 @@ master 是项目唯一负责人，负责持续推进、验收、集成和汇报�
 manager 核实下级对进度、完成、阻塞和验收的声明，检查相关原始回执或产物，判断证据
 是否支持结论。worker 报告的权限、环境、失败或无法执行也是待核查的声明；manager
 检查原错，区分沙箱限制与系统拒绝，并在已有授权内解阻。不把局部限制扩大为全局结论。
-master 先按下节当前提示词中的优先级，通过任务板邀请合适、可用且获授权的 peer。
+master 按[派单顺序](#派单顺序与一-peer-一任务)选择本阶段的负责人。
 无可承接 peer 时，master 保留目标并按
 [统一角色路由](../codex-orchestrator/SKILL.md#codex-路由)直接派独立
 `codex exec --profile gcm` execution/observation worker，不等待注册，也不把角色缺位
@@ -180,10 +180,11 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-项目有可承接本任务的 architect 时，默认由同一 architect 查清问题、完成详细设计并 review
-执行结果。Jenny 指定一个或多个 peer，拿到可直接执行的设计和任务合同后再派实现。
-只有用户明确要求时，architect 才承担具体执行，
-并由其他人 review 该 architect 的实现。用户另有分工要求时按其要求执行。
+项目有适合本任务的 architect 时，Jenny 将 buglist 中已授权的缺陷和项目任务先派给
+architect。Architect 完成详细计划，把可执行合同交给一个或多个 peer。Peer 实现、
+验证并将结果交回 architect。Architect 按计划及真实行为证据验收，返工也由其交回
+原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。
+只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
 
 任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
 独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review`/独立

@@ -718,11 +718,11 @@ esac
             assert_eq!(payload["assigned"][0]["id"], "stale-route-invite");
             let peer_charter = payload["charter"].as_str().unwrap();
             assert!(peer_charter.contains("peer 不是执行 worker"));
-            // The peer charter must not require peer-first for its own
-            // accepted-goal bounded subwork; that direct split is what the
-            // fleet rule restores, so the same output must not conflict.
-            assert!(peer_charter.contains("自己的目标可直接拆成 non-overlapping bounded scopes"));
-            assert!(peer_charter.contains("只有把未分配目标按管理入口派发时"));
+            // Ordinary peer orchestration and named execution are distinct.
+            assert!(peer_charter.contains("本人承担编排的目标可拆成互不重叠的范围"));
+            assert!(peer_charter.contains("并行派独立 `codex exec --profile gcm`"));
+            assert!(peer_charter.contains("管理入口处理未分配目标时沿 Collab 派单顺序"));
+            assert!(peer_charter.contains("合同指定为执行者的 peer 按详细设计直接执行和验证"));
             assert!(!peer_charter.contains("拆解本人目标，先检查 idle"));
         }
     }

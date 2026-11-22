@@ -130,7 +130,7 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
 1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将任务和缺陷交可承接的 architect，由 architect 完成计划、直接交执行 peer 并验收。其他工作先检查 idle、授权和容量，优先派给合适 peer。仅当无合适 peer 可承接时，派独立 `codex exec --profile gcm` 执行或观察 worker。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
-2. **Peer bounded subwork**：已接受目标的 peer 可将自己的目标拆成 non-overlapping bounded scopes，并直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker；这是 peer 自己执行的分拆，不是 manager 绕过可用 peer 容量。该 peer 核验证据并完成 assigned delivery。
+2. **Peer bounded subwork**：承担编排的普通 peer 可将本人目标拆成互不重叠的范围，并直接并发派独立 `codex exec --profile gcm` 执行或观察子任务。该 peer 核验证据并负责交付。指定执行者按 architect 的详细设计直接执行和验证。
 3. **兼容边界**：`collab subagent`、`appsdk subworker` 及其 managed records 只用于旧状态诊断、迁移和有证据的兼容操作，不授予新任务执行指导。任务结束后只回收自有 worker 和资源。
 4. **Standing patrol**：每次巡检只收敛本人目标范围。可恢复提取后移除不需要的自有 worktree；回收自有 stale resource；逐项处理本目标 open P0/P1 或用 owner、原因、解除条件明确停车；每个新生产问题先走项目 canonical issue intake。
 5. **PROTECTED_HOLD**：dirty、active、shared、unknown 资源必须保留并报告。不得删除其他 owner 的资源，不得批量终止进程，不得以 Collab/AppSDK 维护重启共享 daemon、tmux server 或宿主 pane。

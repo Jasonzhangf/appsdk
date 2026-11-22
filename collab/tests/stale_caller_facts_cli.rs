@@ -704,3 +704,69 @@ fn managed_desktop_reads_fail_closed_without_bridge_authority() {
     mcp.finish();
     drop(fixture);
 }
+
+#[test]
+fn managed_desktop_rejects_a_thread_the_native_host_does_not_know() {
+    let fixture = Fixture::without_tmux("mcp-managed-unknown-thread");
+    let host = TestAppServer::start(&fixture.root, "mcp-caller-session", "mcp-caller-thread");
+    registered_native_identity(&fixture, &host);
+    let map_before = std::fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+    let state_before = fixture.current_state();
+
+    // The host pipe answers, but only for the thread it really knows. The
+    // request names a stranger, so the native read_thread rejects it and no
+    // enrollment may be adopted on its behalf.
+    let pipe = fixture.root.join("host.pipe");
+    seed_desktop_enrollment(
+        &fixture,
+        &pipe,
+        "seeded",
+        "mcp-caller-session",
+        "mcp-caller-thread",
+    );
+    let mut mcp = Mcp::start_managed_desktop_with_unknown_thread(
+        &fixture,
+        &pipe,
+        Some("foreign-session"),
+        "stranger-thread",
+        "mcp-caller-thread",
+    );
+    let calls = [
+        (
+            "collab_context",
+            json!({
+                "project_scope": fixture.root,
+                "app_scope_id": "appserver-cli",
+                "query": true
+            }),
+        ),
+        ("collab_board_show", json!({})),
+        ("collab_board_describe", json!({})),
+        ("collab_task_status", json!({"id":"missing-task"})),
+    ];
+    for (offset, (name, args)) in calls.into_iter().enumerate() {
+        let response = mcp.call_tool(40 + offset as u64, name, args);
+        assert_eq!(response["isError"], true, "{name}: {response}");
+        let text = mcp_tool_text(&response);
+        assert!(
+            text.contains("DESKTOP_BRIDGE_NATIVE_REJECTED"),
+            "{name} must be rejected by the native host: {text}"
+        );
+        assert!(
+            !text.contains("mcp-caller-session") && !text.contains("foreign-session"),
+            "{name} must not leak an enrollment session: {text}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        map_before,
+        "an unknown thread must not mutate identity-map"
+    );
+    assert_eq!(
+        fixture.current_state(),
+        state_before,
+        "an unknown thread must not mutate task state"
+    );
+    mcp.finish();
+    drop(fixture);
+}

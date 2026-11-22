@@ -44,7 +44,7 @@ async function removeEnrollment(state,session,thread){
   try{await walk(root);}catch(e){if(e.code!=='ENOENT')throw e;}
 }
 
-async function mcpContext(command,args,{cwd,env}){
+async function mcpContext(command,args,{cwd,env,timeoutMs=15000}){
   const child=spawn(command,args,{cwd,env,stdio:['pipe','pipe','pipe']});
   let stdout='',stderr='';
   child.stdout.on('data',chunk=>stdout+=chunk);
@@ -53,7 +53,7 @@ async function mcpContext(command,args,{cwd,env}){
     JSON.stringify({jsonrpc:'2.0',id:'initialize',method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'desktop-gate',version:'1'}}}),
     JSON.stringify({jsonrpc:'2.0',id:'context',method:'tools/call',params:{name:'collab_context',arguments:{},_meta:{'x-codex-turn-metadata':{thread_id:'real-thread',turn_id:'real-origin-turn'}}}}),
   ].join('\n')+'\n');
-  const timer=setTimeout(()=>child.kill('SIGTERM'),15000);
+  const timer=setTimeout(()=>child.kill('SIGTERM'),timeoutMs);
   const code=await new Promise((resolve,reject)=>{child.on('error',reject);child.on('exit',resolve);});
   clearTimeout(timer);
   if(code!==0)throw Error(`MCP exited ${code}: ${stderr}`);
@@ -192,7 +192,7 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
       try{
         await rpc('init','initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'enrolled-query',version:'1'}});
         const start=f.calls.length;
-        const response=await rpc('query','tools/call',{name:tool,arguments:tool==='collab_context'?{query:true,project_scope:project,app_scope_id:'appserver-cli'}:{},_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
+        const response=await rpc('query','tools/call',{name:tool,arguments:tool==='collab_context'?{query:true,project_scope:project,app_scope_id:'appserver-cli'}:args,_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
         const reads=f.calls.slice(start).filter(c=>c.params?.tool==='read_thread'&&c.params.threadId===thread&&c.params.arguments.threadId===thread);
         return {response,reads:reads.length};
       }finally{wrapper.stdin.end();await closed;clearTimeout(timer);}
@@ -210,22 +210,115 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
     assert.ok(inside.reads>0,`query at the project made ${inside.reads} exact native read_thread calls: ${JSON.stringify(inside.response)}`);
     assert.equal(inside.response.result.isError,false,JSON.stringify(inside.response));
     assert.equal(JSON.parse(inside.response.result.content[0].text).result.snapshot.binding.session_id,session);
-    // Board and task reads travel the ordinary managed context path, so from the
-    // enrolled project they resolve the same caller, and from outside it they
-    // fail closed instead of adopting a stray enrollment.
-    for(const tool of ['collab_task_status','collab_board_show','collab_board_describe']){
-      const read=await query(project,`${tool} at the project`,tool,{});
-      const identity=read.response.result.content[0].text;
-      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SESSION_(REQUIRED|AMBIGUOUS)/,`${tool}: ${identity}`);
-      assert.doesNotMatch(identity,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,`${tool}: ${identity}`);
-      const outside=await query(home,`${tool} from another cwd`,tool,{});
-      assert.equal(outside.response.result.isError,true,`${tool} outside the project must fail closed: ${JSON.stringify(outside.response)}`);
-      assert.match(outside.response.result.content[0].text,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,outside.response.result.content[0].text);
+    // Board and task reads carry no scope argument, and a real Codex Desktop
+    // wrapper runs from `/`. The native read_thread answer names the project,
+    // so every managed tool must serve the enrolled project from any cwd, and
+    // each read must verify the request thread natively.
+    // A real board entry so collab_board_describe can return its projection.
+    const publish=spawn(binary,['board','publish','r2-describe-task','--title','R2 describe','--description','real entry','--delivery-condition','delivered','--test-condition','verified'],{cwd:project,env:{...env,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex Desktop',CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread},stdio:['ignore','pipe','pipe']});
+    let publishOut='',publishErr='';publish.stdout.on('data',b=>publishOut+=b);publish.stderr.on('data',b=>publishErr+=b);
+    assert.equal(await new Promise(r=>publish.once('close',r)),0,publishOut+publishErr);
+    // describe writes the description back, so it advances the revision each
+    // call; track the current one instead of asserting a fixed value.
+    let describeRevision=1;
+    const describeArgs=()=>({id:'r2-describe-task',expected_revision:describeRevision,title:'R2 describe',description:'real entry',delivery_condition:'delivered',test_condition:'verified'});
+    const boardArgs={collab_task_status:{},collab_board_show:{}};
+    for(const tool of ['collab_task_status','collab_board_show']){
+      const read=await query(project,`${tool} at the project`,tool,boardArgs[tool]);
+      assert.equal(read.response.result.isError,false,`${tool}: ${JSON.stringify(read.response)}`);
+      assert.ok(read.reads>0,`${tool} made ${read.reads} exact native read_thread calls`);
+      const text=read.response.result.content[0].text;
+      assert.doesNotMatch(text,/DESKTOP_BRIDGE_SESSION_(REQUIRED|AMBIGUOUS)/,`${tool}: ${text}`);
+      assert.doesNotMatch(text,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,`${tool}: ${text}`);
+      const root=await query('/',`${tool} from the wrapper root`,tool,boardArgs[tool]);
+      assert.ok(root.reads>0,`${tool} from / verified the thread natively ${root.reads} times`);
+      assert.equal(root.response.result.isError,false,`${tool} from / must serve the enrolled project: ${JSON.stringify(root.response)}`);
+      assert.ok(root.reads>0,`${tool} from / made ${root.reads} exact native read_thread calls`);
+      const rootText=root.response.result.content[0].text;
+      assert.doesNotMatch(rootText,/DESKTOP_BRIDGE_SESSION_(REQUIRED|AMBIGUOUS)/,`${tool} from /: ${rootText}`);
+      assert.doesNotMatch(rootText,/DESKTOP_BRIDGE_SCOPE_MISMATCH/,`${tool} from /: ${rootText}`);
     }
+    // collab_board_describe must work from `/` too: the wrapper cwd never
+    // decides its project scope.
+    const describeAtProject=await query(project,'collab_board_describe at the project','collab_board_describe',describeArgs());
+    assert.equal(describeAtProject.response.result.isError,false,`collab_board_describe: ${JSON.stringify(describeAtProject.response)}`);
+    assert.ok(describeAtProject.reads>0,'collab_board_describe made native read_thread calls');
+    describeRevision+=1;
+    const describeAtRoot=await query('/','collab_board_describe from the wrapper root','collab_board_describe',describeArgs());
+    assert.equal(describeAtRoot.response.result.isError,false,`collab_board_describe from / must serve the enrolled project: ${JSON.stringify(describeAtRoot.response)}`);
+    assert.ok(describeAtRoot.reads>0,'collab_board_describe from / made native read_thread calls');
+    for(const text of [describeAtProject.response.result.content[0].text,describeAtRoot.response.result.content[0].text])
+      assert.doesNotMatch(text,/DESKTOP_BRIDGE_(SESSION_(REQUIRED|AMBIGUOUS)|SCOPE_MISMATCH)/,`collab_board_describe: ${text}`);
+    // collab_recv resolves the same caller on its ordinary managed path: it
+    // takes no scope, must answer with its receive projection rather than a
+    // bridge rejection, and must still verify the thread natively.
+    const recv=await query('/','collab_recv from the wrapper root','collab_recv',{timeout:1,receive_id:'receive-enrolled'});
+    assert.equal(recv.response.result.isError,false,`collab_recv: ${JSON.stringify(recv.response)}`);
+    assert.ok(recv.reads>0,`collab_recv made ${recv.reads} exact native read_thread calls`);
+    assert.doesNotMatch(recv.response.result.content[0].text,/DESKTOP_BRIDGE_/,recv.response.result.content[0].text);
     assert.deepEqual(await fs.readFile(identityMap),before,'managed reads must not mutate the identity map');
   }finally{
     if(daemon.exitCode===null&&daemon.signalCode===null){const stopped=new Promise(r=>daemon.once('close',r));daemon.kill('SIGTERM');await stopped;}
   }
+});
+
+test('a slow native answer arrives as the service verdict before any client timeout',async t=>{
+  const binary=process.env.COLLAB_TEST_BINARY;
+  if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
+  // A host that answers read_thread slower than the plain socket budget but
+  // well inside the service's native budget. Every outer budget is strictly
+  // larger, so the client must receive the service's real rejection, never its
+  // own timeout.
+  const delayMs=6000;
+  const root=await fs.mkdtemp('/tmp/cdr-'),state=path.join(root,'state');
+  await fs.mkdir(state,{mode:0o700});
+  const streams=new Set();
+  const server=net.createServer(s=>{streams.add(s);s.on('close',()=>streams.delete(s));decode(s,r=>{
+    if(r.method==='tools/list'){s.write(frame({id:r.id,result:{tools:['read_thread','send_message_to_thread'].map(name=>({name,namespace:'codex_app'}))}}));return;}
+    const p=r.params;
+    if(p.tool==='read_thread')setTimeout(()=>s.write(frame({id:r.id,result:{success:false,contentItems:[]}})),delayMs);
+    else s.write(frame({id:r.id,result:{success:true,contentItems:[]}}));
+  });});
+  await new Promise(r=>server.listen(path.join(root,'host.sock'),r));
+  t.after(async()=>{for(const s of streams)s.destroy();await new Promise(r=>server.close(r));await fs.rm(root,{recursive:true,force:true});});
+  const mcp=path.join(path.dirname(binary),'collab-mcp');
+  const env={PATH:process.env.PATH,COLLAB_STATE_DIR:state,CODEX_APP_TOOLS_PIPE_PATH:path.join(root,'host.sock'),
+    CODEX_MCP_NODE_PATH:process.execPath,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex',COLLAB_MCP_BIN:mcp,COLLAB_BIN:binary};
+  const started=Date.now();
+  const answer=await mcpContext(process.execPath,[script],{cwd:'/',env:{...env,CODEX_SESSION_ID:'foreign-session'}});
+  const elapsed=Date.now()-started;
+  assert.equal(answer.result.isError,true,JSON.stringify(answer));
+  const text=answer.result.content[0].text;
+  assert.match(text,/DESKTOP_BRIDGE_NATIVE_REJECTED/,text);
+  assert.doesNotMatch(text,/service timeout/,text);
+  assert.doesNotMatch(text,/managed child timeout/,text);
+  assert.ok(elapsed>=delayMs,`the answer arrived after ${elapsed}ms, before the slow host replied`);
+});
+
+test('a silent bridge fails closed on its read bound instead of hanging the request',async t=>{
+  const binary=process.env.COLLAB_TEST_BINARY;
+  if(!binary){t.skip('Rust CLI consumer runs with COLLAB_TEST_BINARY');return;}
+  // A bridge service socket that accepts the frame and never answers. The
+  // adapter must end the request on its own bound with a typed timeout; it must
+  // never wait forever, and it must not read a silence as a rejection.
+  const {createHash}=await import('node:crypto');
+  const root=await fs.mkdtemp('/tmp/cdr-'),state=path.join(root,'state'),runtime=path.join(state,'runtime','desktop');
+  await fs.mkdir(runtime,{recursive:true,mode:0o700});
+  const pipe=path.join(root,'host.sock');
+  const silent=path.join(runtime,`pipe-${createHash('sha256').update(pipe).digest('hex').slice(0,24)}.sock`);
+  const silentStreams=new Set();
+  const server=net.createServer(s=>{silentStreams.add(s);s.on('close',()=>silentStreams.delete(s));});
+  await new Promise(r=>server.listen(silent,r));
+  t.after(async()=>{for(const s of silentStreams)s.destroy();await new Promise(r=>server.close(r));await fs.rm(root,{recursive:true,force:true});});
+  const mcp=path.join(path.dirname(binary),'collab-mcp');
+  const env={PATH:process.env.PATH,COLLAB_STATE_DIR:state,CODEX_APP_TOOLS_PIPE_PATH:pipe,CODEX_MCP_NODE_PATH:process.execPath,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:'Codex',COLLAB_BIN:binary};
+  const started=Date.now();
+  const answer=await mcpContext(mcp,[],{cwd:'/',env,timeoutMs:120000});
+  const elapsed=Date.now()-started;
+  assert.equal(answer.result.isError,true,JSON.stringify(answer));
+  assert.match(answer.result.content[0].text,/DESKTOP_BRIDGE_TIMEOUT/,answer.result.content[0].text);
+  assert.ok(elapsed>=39000,`the silent bridge was abandoned after only ${elapsed}ms`);
+  assert.ok(elapsed<90000,`the silent bridge held the request for ${elapsed}ms`);
 });
 
 test('daemon admits a legacy Desktop binding through a live publisher without host or node environment',async t=>{

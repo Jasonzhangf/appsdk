@@ -8,6 +8,13 @@ import {randomUUID,createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const MAX_FRAME=8*1024*1024,TIMEOUT_MS=5000,SERVICE_STARTUP_MS=30000,NATIVE_MS=30000;
+// One strict budget ladder, smallest to largest: the service gives its native
+// host NATIVE_MS, the client gives the service SERVICE_BUDGET_MS, and the
+// wrapper gives the managed CLI child CLIENT_BUDGET_MS. Every outer budget is
+// strictly larger than the budget it encloses, so an inner real answer (a
+// rejection included) always arrives first and only a party that never answers
+// at all reaches the next timeout.
+const SERVICE_BUDGET_MS=NATIVE_MS+TIMEOUT_MS+5000,CLIENT_BUDGET_MS=SERVICE_BUDGET_MS+TIMEOUT_MS+5000;
 const pipe=process.env.CODEX_APP_TOOLS_PIPE_PATH;
 // The originator selects the adapter path. A missing pipe is a bridge error,
 // never a reason to drop caller verification and forward raw requests.
@@ -37,7 +44,7 @@ function localCall(request,timeout){return callSocket(socketPath,request,timeout
 // this request's native thread and returns the single stored enrollment. The
 // CLI child receives only that session, so its read-only query never reads the
 // capability declaration and never trusts caller-supplied facts.
-async function residentSession(thread,cwd){await ensureService();const r=await localCall({id:randomUUID(),op:'resolve',thread_id:thread,cwd},NATIVE_MS+TIMEOUT_MS);if(!r.ok)throw Error(typeof r.error==='string'?r.error:JSON.stringify(r.error));return {session_id:r.session_id,runtime_generation:r.runtime_generation};}
+async function residentSession(thread,expected){await ensureService();const r=await localCall({id:randomUUID(),op:'resolve',thread_id:thread,...(typeof expected==='string'?{cwd:expected}:{})},SERVICE_BUDGET_MS);if(!r.ok)throw Error(typeof r.error==='string'?r.error:JSON.stringify(r.error));return {session_id:r.session_id,cwd:r.cwd};}
 async function publisherLive(endpoint){try{const r=await callSocket(endpoint.slice('unix://'.length),{id:randomUUID(),op:'ping'},1000);return r?.ok===true;}catch{return false;}}
 async function ensureService(){
   if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED: current host pipe missing');
@@ -58,16 +65,16 @@ async function ensureService(){
   while(Date.now()<end){if(failure)throw failure;try{return await ping();}catch(e){if(!starting(e))throw e;last=e;}if(exited!==undefined&&!fs.existsSync(pipe))throw Error('DESKTOP_BRIDGE_HOST_REQUIRED: current host pipe missing');await new Promise(r=>setTimeout(r,40));}
   throw Error(`DESKTOP_BRIDGE_UNAVAILABLE: runtime service startup failed (${last?last.message:'no answer within the startup budget'})`);
 }
-async function admit(facts){await ensureService();const r=await localCall({...facts,id:randomUUID(),op:'admit'},NATIVE_MS+TIMEOUT_MS);if(!r.ok)throw Error(typeof r.error==='string'?r.error:JSON.stringify(r.error));return r.desktop_bridge;}
+async function admit(facts){await ensureService();const r=await localCall({...facts,id:randomUUID(),op:'admit'},SERVICE_BUDGET_MS);if(!r.ok)throw Error(typeof r.error==='string'?r.error:JSON.stringify(r.error));return r.desktop_bridge;}
 async function runService(){
   if(!desktop)throw Error('DESKTOP_BRIDGE_HOST_REQUIRED');requireSystemVolume(stateRoot);controlDirectory(runtimeDir);
-  let upstream,listener,ownedSocket,stopping=false,sequence=0,tools,hostFailure,runtimeDescriptor,serviceGeneration=0;
+  let upstream,listener,ownedSocket,stopping=false,sequence=0,tools,hostFailure,runtimeDescriptor;
   const bindings=new Map(),pending=new Map(),clients=new Set(),publications=new Set(),publicationId=`${process.pid}-${randomUUID()}`;
   const key=(s,t)=>JSON.stringify([s,t]);
   const enrollmentDir=()=>controlDirectory(path.join(runtimeDir,'enrollments'));
   const servicesDir=()=>controlDirectory(path.join(runtimeDir,'services'));
   const scopeDir=(b,cwd)=>{let dir=path.join(runtimeDir,'capabilities','v1');for(const [label,value] of [['cwd',cwd],['session',b.session],['thread',b.thread]])dir=path.join(dir,label,...Buffer.from(value).toString('hex').match(/.{1,120}/g));return controlDirectory(dir);};
-  function stop(code){if(stopping)return;stopping=true;serviceGeneration++;for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: host closed'));}pending.clear();for(const s of clients)s.destroy();listener?.close();upstream?.destroy();if(ownedSocket){try{const s=fs.lstatSync(socketPath);if(s.ino===ownedSocket.ino&&s.dev===ownedSocket.dev)fs.unlinkSync(socketPath);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}if(runtimeDescriptor){try{if(JSON.parse(fs.readFileSync(runtimeDescriptor,'utf8')).publisher_id===publicationId)fs.unlinkSync(runtimeDescriptor);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}for(const p of publications){try{fs.unlinkSync(p);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}process.exitCode=code;}
+  function stop(code){if(stopping)return;stopping=true;for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: host closed'));}pending.clear();for(const s of clients)s.destroy();listener?.close();upstream?.destroy();if(ownedSocket){try{const s=fs.lstatSync(socketPath);if(s.ino===ownedSocket.ino&&s.dev===ownedSocket.dev)fs.unlinkSync(socketPath);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}if(runtimeDescriptor){try{if(JSON.parse(fs.readFileSync(runtimeDescriptor,'utf8')).publisher_id===publicationId)fs.unlinkSync(runtimeDescriptor);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}for(const p of publications){try{fs.unlinkSync(p);}catch(e){if(e.code!=='ENOENT')process.stderr.write(e.message+'\n');}}process.exitCode=code;}
   function hostCall(method,params){if(hostFailure||stopping)return Promise.reject(hostFailure||Error('DESKTOP_BRIDGE_UNAVAILABLE'));const id=`bridge-${++sequence}`;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: host response timeout'));},NATIVE_MS);pending.set(id,{resolve,reject,timer});upstream.write(encoded({jsonrpc:'2.0',id,method,params}));});}
   function nativeCall(b,name,args){const tool=tools.get(name);if(!tool)throw Error(`DESKTOP_BRIDGE_TOOL_UNAVAILABLE: ${name}`);return hostCall('tools/call',{arguments:args,callerSource:'codex',callId:`collab-${randomUUID()}`,namespace:tool.namespace,threadId:b.thread,turnId:`collab-service-correlate-${randomUUID()}`,tool:name});}
   async function verify(b,expected){const r=await nativeCall(b,'read_thread',{threadId:b.thread,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:1});if(r.error)throw Error(JSON.stringify(r.error));if(r.result?.success!==true)throw Error('DESKTOP_BRIDGE_NATIVE_REJECTED: admission');const item=r.result.contentItems?.find(i=>i.type==='inputText'&&typeof i.text==='string'),v=item?JSON.parse(item.text):undefined;if(v?.thread?.id!==b.thread||typeof v.thread.cwd!=='string')throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: native thread/project');const cwd=fs.realpathSync(v.thread.cwd);if(expected!==undefined&&cwd!==fs.realpathSync(expected))throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: native project differs');return cwd;}
@@ -87,13 +94,19 @@ async function runService(){
   // Query resolution: verify this request's thread through the native host, then
   // return the one stored (session, thread) pair for this host pipe and project.
   // The caller never supplies the session, and the thread is never its substitute.
-  async function resolveEnrollment(thread,cwd){
-    if(typeof cwd!=='string'||!path.isAbsolute(cwd))throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED: cwd');
-    const observed=await verify({thread},cwd);
-    if(observed!==fs.realpathSync(cwd))throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: native project differs');
+  // The native read_thread answer names the project; that canonical cwd is the
+  // only enrollment scope. A caller cwd is accepted only as an assertion on
+  // collab_context, never as the scope itself, so a wrapper running from `/`
+  // still resolves the thread's real project.
+  async function resolveEnrollment(thread,expected){
+    const observed=await verify({thread});
+    if(typeof expected==='string'){
+      if(!path.isAbsolute(expected))throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED: cwd');
+      if(observed!==fs.realpathSync(expected))throw Error('DESKTOP_BRIDGE_SCOPE_MISMATCH: native project differs');
+    }
     const sessions=[];
     for(const file of enrollmentRecords()){try{const s=fs.lstatSync(file);if(!s.isFile()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&0o077))throw Error('DESKTOP_BRIDGE_ENROLLMENT_UNSAFE');const v=JSON.parse(fs.readFileSync(file,'utf8'));if(v.schema!=='collab-desktop-enrollment/v2'||v.host_pipe!==pipe||typeof v.cwd!=='string'||!path.isAbsolute(v.cwd))continue;if(fs.realpathSync(v.cwd)!==observed)continue;if(v.binding?.thread!==thread)continue;const session=v.binding?.session;if(typeof session!=='string'||!session.trim())continue;if(!sessions.includes(session))sessions.push(session);}catch(e){process.stderr.write(`Desktop bridge enrollment pending: ${e.message}\n`);}}
-    if(sessions.length===1)return sessions[0];
+    if(sessions.length===1)return {session_id:sessions[0],cwd:observed};
     if(!sessions.length)throw Error('DESKTOP_BRIDGE_SESSION_REQUIRED: no trusted Desktop enrollment matches the current host pipe, project and thread');
     throw Error(`DESKTOP_BRIDGE_SESSION_AMBIGUOUS: ${sessions.length} enrolled Desktop sessions match the current host pipe, project and thread`);
   }
@@ -103,7 +116,7 @@ async function runService(){
     if(r.op==='ping')return {id:r.id,ok:true,runtime_key:runtimeKey,pid:process.pid};
     if(r.op==='resolve'){
       if(typeof r.thread_id!=='string'||!r.thread_id.trim())throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED: thread');
-      try{return {id:r.id,ok:true,session_id:await resolveEnrollment(r.thread_id,r.cwd),runtime_generation:serviceGeneration};}
+      try{const resolved=await resolveEnrollment(r.thread_id,r.cwd);return {id:r.id,ok:true,...resolved};}
       catch(e){return {id:r.id,ok:false,error:e.message};}
     }
     if(!['admit','probe','send'].includes(r.op))throw Error('DESKTOP_BRIDGE_OPERATION_UNSUPPORTED');if(['session_id','thread_id'].some(k=>typeof r[k]!=='string'||!r[k].trim()))throw Error('DESKTOP_BRIDGE_SCOPE_REQUIRED');
@@ -144,14 +157,25 @@ function runMcp(){
   async function forwardManaged(body,kind,r,rawId){
     const thread=executorThread(r.params._meta);if(!thread)throw Error('DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing');
     const name=r.params.name,args=r.params.arguments&&typeof r.params.arguments==='object'?r.params.arguments:{};
-    await ready;const cwd=typeof args.project_scope==='string'&&args.project_scope?args.project_scope:process.cwd(),query=args.query===true;
-    // Every managed read resolves one stored caller through the trusted bridge.
-    // A stale or foreign environment session is never an admission candidate.
-    const resolved=await residentSession(thread,cwd),session=resolved.session_id;
-    if(name==='collab_context'&&!query)await admit({session_id:session,thread_id:thread,cwd});
-    const worker=spawn(mcpBin,[],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,CODEX_SESSION_ID:session,CODEX_THREAD_ID:thread,COLLAB_DESKTOP_BRIDGE_RUNTIME_GENERATION:String(resolved.runtime_generation??'')}});
+    await ready;const query=args.query===true;
+    // Only collab_context may assert a project scope, and it is an assertion:
+    // the native read_thread answer names the project. Every other managed
+    // tool resolves through that native project alone, so a wrapper running
+    // from `/` still serves the thread's enrolled project.
+    const asserted=name==='collab_context'&&typeof args.project_scope==='string'&&args.project_scope?args.project_scope:undefined;
+    // The bridge owns session resolution. A read-only managed call resolves
+    // exactly once, inside the worker that serves it; only registration needs
+    // the wrapper to resolve, because admission is a bridge-side write anchored
+    // on the caller it just verified. A stale environment session is never an
+    // admission candidate.
+    let scope=process.cwd();
+    if(name==='collab_context'&&!query){const resolved=await residentSession(thread,asserted);scope=resolved.cwd;await admit({session_id:resolved.session_id,thread_id:thread,cwd:scope});}
+    // The worker inherits no identity from this process: it resolves through
+    // the same bridge, so the bridge stays the only session owner.
+    const workerEnv={...process.env};delete workerEnv.CODEX_SESSION_ID;delete workerEnv.CODEX_THREAD_ID;
+    const worker=spawn(mcpBin,[],{cwd:scope,stdio:['pipe','pipe','pipe'],env:workerEnv});
     const closed=new Promise(resolve=>worker.once('close',resolve));let failure;worker.on('error',e=>{failure=e;});
-    let buffer=Buffer.alloc(0),reply;const answered=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: managed child timeout')),NATIVE_MS);worker.stdout.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);for(;;){let frame;if(kind==='header'){const end=buffer.indexOf('\r\n\r\n');if(end<0||buffer.length<4)return;const n=Number(/^Content-Length:\s*(\d+)\r?$/im.exec(buffer.subarray(0,end).toString())?.[1]);if(!Number.isFinite(n)||buffer.length<end+4+n)return;frame=buffer.subarray(end+4,end+4+n);buffer=buffer.subarray(end+4+n);}else{const end=buffer.indexOf('\n');if(end<0)return;frame=buffer.subarray(0,end);buffer=buffer.subarray(end+1);}if(!frame.toString().trim())continue;clearTimeout(timer);reply=frame.toString();resolve();}});worker.once('close',()=>{clearTimeout(timer);reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: managed child closed'))});});
+    let buffer=Buffer.alloc(0),reply;const answered=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: managed child timeout')),CLIENT_BUDGET_MS);worker.stdout.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);for(;;){let frame;if(kind==='header'){const end=buffer.indexOf('\r\n\r\n');if(end<0||buffer.length<4)return;const n=Number(/^Content-Length:\s*(\d+)\r?$/im.exec(buffer.subarray(0,end).toString())?.[1]);if(!Number.isFinite(n)||buffer.length<end+4+n)return;frame=buffer.subarray(end+4,end+4+n);buffer=buffer.subarray(end+4+n);}else{const end=buffer.indexOf('\n');if(end<0)return;frame=buffer.subarray(0,end);buffer=buffer.subarray(end+1);}if(!frame.toString().trim())continue;clearTimeout(timer);reply=frame.toString();resolve();}});worker.once('close',()=>{clearTimeout(timer);reject(Error('DESKTOP_BRIDGE_RESULT_UNKNOWN: managed child closed'))});});
     worker.stdin.end(mcpFrame(body,kind));
     try{await answered;}finally{worker.kill('SIGTERM');await closed;}
     if(failure)throw failure;process.stdout.write(mcpFrame(Buffer.from(reply),kind));

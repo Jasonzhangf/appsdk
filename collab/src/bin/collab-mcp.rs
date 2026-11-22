@@ -4,6 +4,13 @@ use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
+
+/// Waiting budget for one bridge answer. The ladder is strict: the desktop
+/// service allows its native host 30s to answer, this client allows the
+/// service 40s, so a real bridge rejection always arrives before this timeout
+/// and only a bridge that never answers at all becomes DESKTOP_BRIDGE_TIMEOUT.
+const BRIDGE_READ_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[path = "collab-mcp/board_tools.rs"]
 mod board_tools;
@@ -269,7 +276,12 @@ fn managed_desktop_host() -> bool {
     )
 }
 
-fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String), String> {
+fn desktop_caller_facts(
+    name: &str,
+    params: &Value,
+    args: &Value,
+) -> Result<(String, String, Option<String>), String> {
+    let name_is_context = name == "collab_context";
     let meta = params.get("_meta").cloned().unwrap_or_default();
     let thread = executor_thread(&meta)?;
     if args.get("provide").is_some() {
@@ -282,22 +294,65 @@ fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: current host pipe is missing")?;
-    let cwd = std::env::current_dir()
-        .and_then(|cwd| cwd.canonicalize())
-        .map_err(|_| "DESKTOP_BRIDGE_SCOPE_INVALID: current project directory".to_string())?;
-    let generation = std::env::var("COLLAB_DESKTOP_BRIDGE_RUNTIME_GENERATION")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok());
-    let session = resolve_desktop_session(&pipe, &cwd, &thread, generation)?;
-    Ok((session, thread))
+    // Only collab_context may assert a project scope, and the assertion is the
+    // scope the caller named, not this process's directory. The bridge names
+    // the project from the native read_thread answer, so a wrapper running from
+    // `/` still resolves the thread's real project.
+    let asserted = if name_is_context {
+        args.get("project_scope")
+            .and_then(Value::as_str)
+            .filter(|scope| !scope.trim().is_empty())
+            .map(|scope| {
+                std::path::Path::new(scope)
+                    .canonicalize()
+                    .map(|scope| scope.to_string_lossy().into_owned())
+                    .map_err(|_| "DESKTOP_BRIDGE_SCOPE_INVALID: project_scope".to_string())
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let (session, scope) = resolve_desktop_session(&pipe, &thread, asserted.as_deref())?;
+    Ok((session, thread, scope))
 }
 
 fn resolve_desktop_session(
     pipe: &str,
-    cwd: &std::path::Path,
     thread: &str,
-    expected_generation: Option<u64>,
-) -> Result<String, String> {
+    asserted_scope: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    let mut request = json!({
+        "id": format!("mcp-{}", std::process::id()),
+        "op": "resolve",
+        "thread_id": thread,
+    });
+    if let Some(scope) = asserted_scope {
+        request["cwd"] = json!(scope);
+    }
+    let response = bridge_request(pipe, &request)?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge rejected the caller")
+            .to_owned());
+    }
+    let session = response
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|session| !session.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge returned no session")?;
+    let scope = response
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.trim().is_empty())
+        .map(str::to_owned);
+    Ok((session, scope))
+}
+
+fn bridge_request(pipe: &str, request: &Value) -> Result<Value, String> {
+    let request = serde_json::to_vec(request).map_err(|error| error.to_string())?;
     let state_root = std::env::var_os("COLLAB_STATE_DIR")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
@@ -309,13 +364,15 @@ fn resolve_desktop_session(
         .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: Collab state root is missing")?;
     let runtime_directory = state_root.join("runtime").join("desktop");
     let mut stream = bridge_socket(&runtime_directory, pipe)?;
-    let request = serde_json::to_vec(&json!({
-        "id": format!("mcp-{}", std::process::id()),
-        "op": "resolve",
-        "thread_id": thread,
-        "cwd": cwd,
-    }))
-    .map_err(|error| error.to_string())?;
+    // The bridge is the only authority, so a silent bridge must fail closed on a
+    // bound instead of hanging the whole MCP request. The budget is strictly
+    // larger than the service's own native budget: the service must be able to
+    // answer with its real rejection first, and only a service that never
+    // answers at all reaches this timeout.
+    stream
+        .set_read_timeout(Some(BRIDGE_READ_TIMEOUT))
+        .and_then(|_| stream.set_write_timeout(Some(BRIDGE_READ_TIMEOUT)))
+        .map_err(|_| "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge is unusable".to_string())?;
     let mut frame = Vec::with_capacity(4 + request.len());
     frame.extend_from_slice(&(request.len() as u32).to_le_bytes());
     frame.extend_from_slice(&request);
@@ -326,38 +383,34 @@ fn resolve_desktop_session(
             "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge request failed".to_string()
         })?;
     let mut length = [0_u8; 4];
-    stream.read_exact(&mut length).map_err(|_| {
-        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge response failed".to_string()
-    })?;
+    stream
+        .read_exact(&mut length)
+        .map_err(|error| bridge_read_error(&error))?;
     let length = u32::from_le_bytes(length) as usize;
     if length == 0 || length > 8 * 1024 * 1024 {
         return Err("DESKTOP_BRIDGE_SESSION_REQUIRED: invalid trusted bridge response".into());
     }
     let mut body = vec![0_u8; length];
-    stream.read_exact(&mut body).map_err(|_| {
-        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge response failed".to_string()
-    })?;
+    stream
+        .read_exact(&mut body)
+        .map_err(|error| bridge_read_error(&error))?;
     let response: Value = serde_json::from_slice(&body).map_err(|_| {
         "DESKTOP_BRIDGE_SESSION_REQUIRED: invalid trusted bridge response".to_string()
     })?;
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge rejected the caller")
-            .to_owned());
-    }
-    if let Some(expected) = expected_generation {
-        if response.get("runtime_generation").and_then(Value::as_u64) != Some(expected) {
-            return Err("DESKTOP_BRIDGE_UNAVAILABLE: bridge lifecycle changed".into());
+    Ok(response)
+}
+
+/// A silent bridge is a distinct failure from a bridge that refuses this caller.
+/// The refusal stays authoritative; only the missing answer becomes a timeout,
+/// and it keeps its own typed error so the request can never be mistaken for a
+/// resolution.
+fn bridge_read_error(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            "DESKTOP_BRIDGE_TIMEOUT: trusted bridge did not answer within 40s".to_string()
         }
+        _ => "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge response failed".to_string(),
     }
-    response
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|session| !session.trim().is_empty())
-        .map(str::to_owned)
-        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge returned no session".into())
 }
 
 fn bridge_socket(directory: &std::path::Path, pipe: &str) -> Result<UnixStream, String> {
@@ -405,6 +458,13 @@ fn add_caller_facts_to_command(command: &mut Command, facts: Option<&Value>) {
     command
         .env("CODEX_SESSION_ID", session)
         .env("CODEX_THREAD_ID", thread);
+    // The bridge verified which project owns this thread. Run the CLI there so
+    // the project scope never comes from the wrapper's own working directory.
+    if let Some(cwd) = facts.get("cwd").and_then(Value::as_str) {
+        if !cwd.trim().is_empty() {
+            command.current_dir(cwd);
+        }
+    }
 }
 
 fn call(name: &str, args: &Value, caller_facts: Option<&Value>) -> Result<String, String> {
@@ -1126,14 +1186,17 @@ fn normalize_desktop_caller_facts(req: &Value) -> Result<Value, String> {
         .cloned()
         .unwrap_or_else(|| json!({}));
     if managed_desktop_host() {
-        let (session, thread) = desktop_caller_facts(&params, &args)?;
+        let (session, thread, scope) = desktop_caller_facts(name, &params, &args)?;
         if name == "collab_context" {
             set_desktop_context_facts(&mut args, &session, &thread)?;
         }
         if let Some(object) = request.get_mut("params").and_then(Value::as_object_mut) {
+            // The verified project cwd travels with the adapter-owned facts so
+            // the CLI child runs in the enrolled project, whatever cwd the
+            // wrapper itself was started from.
             object.insert(
                 "_collab_caller_facts".into(),
-                json!({"session_id":session,"thread_id":thread}),
+                json!({"session_id":session,"thread_id":thread,"cwd":scope}),
             );
         }
     }

@@ -473,10 +473,6 @@ impl Fixture {
                 .expect("spawn isolated collab serve"),
         );
         let socket = self.host_state.join("server.sock");
-        // The daemon answers Ping in well under a second once scheduled, but a
-        // parallel test run can starve that long: the readiness wait shares the
-        // machine with every other lane's daemons and MCP children. Wait like
-        // the other fixtures do, instead of mistaking contention for a hang.
         daemon_readiness::wait_for_ping(
             self.daemon.as_mut().unwrap(),
             &socket,
@@ -1197,7 +1193,7 @@ pub struct Mcp {
 /// connection per client and answers every frame on it, so the shared bridge
 /// service stays connected across its capability probe and its thread
 /// verification.
-fn serve_desktop_host(pipe: &Path, root: &Path) -> Arc<AtomicBool> {
+fn serve_desktop_host(pipe: &Path, root: &Path, threads: &[String]) -> Arc<AtomicBool> {
     let listener = UnixListener::bind(pipe).expect("bind test host pipe");
     listener
         .set_nonblocking(true)
@@ -1205,6 +1201,9 @@ fn serve_desktop_host(pipe: &Path, root: &Path) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
     let host_root = root.to_string_lossy().into_owned();
+    // The host answers only threads it really knows. An unknown thread must be
+    // rejected by the native read_thread, so a caller cannot invent one.
+    let known = threads.to_vec();
     std::thread::spawn(move || {
         while !worker_stop.load(Ordering::Relaxed) {
             match listener.accept() {
@@ -1213,6 +1212,7 @@ fn serve_desktop_host(pipe: &Path, root: &Path) -> Arc<AtomicBool> {
                         continue;
                     }
                     let host_root = host_root.clone();
+                    let known = known.clone();
                     std::thread::spawn(move || loop {
                         let mut length = [0_u8; 4];
                         if stream.read_exact(&mut length).is_err() {
@@ -1235,20 +1235,24 @@ fn serve_desktop_host(pipe: &Path, root: &Path) -> Arc<AtomicBool> {
                                 let id = request["params"]["arguments"]["threadId"]
                                     .as_str()
                                     .unwrap_or_default();
-                                json!({
-                                    "id": request["id"],
-                                    "result": {
-                                        "success": true,
-                                        "contentItems": [{
-                                            "type": "inputText",
-                                            "text": serde_json::to_string(&json!({
-                                                "schemaVersion": 1,
-                                                "thread": {"id": id, "cwd": host_root, "status": {"type":"idle"}},
-                                                "turns": [{"id":"observed-turn","status":"completed"}]
-                                            })).expect("serialize host thread")
-                                        }]
-                                    }
-                                })
+                                if known.iter().any(|known| known == id) {
+                                    json!({
+                                        "id": request["id"],
+                                        "result": {
+                                            "success": true,
+                                            "contentItems": [{
+                                                "type": "inputText",
+                                                "text": serde_json::to_string(&json!({
+                                                    "schemaVersion": 1,
+                                                    "thread": {"id": id, "cwd": host_root, "status": {"type":"idle"}},
+                                                    "turns": [{"id":"observed-turn","status":"completed"}]
+                                                })).expect("serialize host thread")
+                                            }]
+                                        }
+                                    })
+                                } else {
+                                    json!({"id": request["id"], "result": {"success": false, "contentItems": []}})
+                                }
                             }
                             _ => {
                                 json!({"id": request["id"], "result": {"success": true, "contentItems": []}})
@@ -1312,9 +1316,8 @@ impl Mcp {
     }
 
     /// The directly launched managed Desktop shape: no launcher wrapper runs
-    /// beside it, so the adapter resolves the session from the persisted
-    /// enrollment for this host pipe and project. `_meta` still carries the
-    /// executor thread, exactly as the host sends it.
+    /// beside it, so the adapter must fail closed. The environment session is a
+    /// stale value here on purpose: it is never an admission candidate.
     pub fn start_with_executor_facts(fixture: &Fixture, session: &str, thread: &str) -> Self {
         let mut command = Command::new(collab_test_mcp_binary());
         command
@@ -1364,11 +1367,47 @@ impl Mcp {
         thread: &str,
         serve_host: bool,
     ) -> Self {
+        Self::launch_managed_desktop_serving(fixture, pipe, session, thread, serve_host, None)
+    }
+
+    /// Negative shape for the native gate: the host pipe answers, but only for
+    /// the threads it really knows. The requested thread is a stranger, so the
+    /// native read_thread must reject it and every managed read fails closed.
+    pub fn start_managed_desktop_with_unknown_thread(
+        fixture: &Fixture,
+        pipe: &Path,
+        session: Option<&str>,
+        thread: &str,
+        known_thread: &str,
+    ) -> Self {
+        Self::launch_managed_desktop_serving(
+            fixture,
+            pipe,
+            session,
+            thread,
+            true,
+            Some(&[known_thread]),
+        )
+    }
+
+    fn launch_managed_desktop_serving(
+        fixture: &Fixture,
+        pipe: &Path,
+        session: Option<&str>,
+        thread: &str,
+        serve_host: bool,
+        served_threads: Option<&[&str]>,
+    ) -> Self {
         let script =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/collab-desktop-mcp.mjs");
         // A missing bridge needs no listener. Do not create the host pipe: the
         // wrapper's startup check must remain bounded and fail closed.
-        let desktop_host = serve_host.then(|| serve_desktop_host(pipe, &fixture.root));
+        let desktop_host = serve_host.then(|| {
+            let threads: Vec<String> = served_threads
+                .map(|served| served.iter().map(|thread| (*thread).to_owned()).collect())
+                .unwrap_or_else(|| vec![thread.to_owned()]);
+            serve_desktop_host(pipe, &fixture.root, &threads)
+        });
         std::thread::sleep(Duration::from_millis(50));
         if !serve_host {
             std::fs::remove_file(pipe).ok();

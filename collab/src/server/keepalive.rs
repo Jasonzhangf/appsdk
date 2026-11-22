@@ -48,7 +48,7 @@ pub struct Record {
 /// before it is worth one scheduling notification.
 const SUBAGENT_STATE_SETTLE_MS: i64 = 60_000;
 
-const NON_LIVE_PEER_DISPATCH_RULE: &str = "For identity-mismatch, cold, offline, unknown or missing peers, first inspect a Codex TUI/tmux pane with `collab worker snapshot <id> --lines 80`, send one context-recovery request, wait at most 15 minutes for an unresponsive peer, then run a final status check; remove the still-unavailable from the dispatch queue and enqueue the available. Keep waiting out of dispatch capacity and keep other ready work moving.";
+const NON_LIVE_PEER_DISPATCH_RULE: &str = "For newly unknown peers, including peers that just registered, inspect `collab worker status <id>` this round. For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --lines 80` and inspect the existing block or pane. Apply the same check for identity-mismatch, cold, offline or missing peers. If facts are still needed from the peer, send one context-recovery request and wait at most 15 minutes before a final status check. Use that check to remove the still-unavailable from the dispatch queue and enqueue the available. Keep other ready work moving.";
 
 pub(crate) fn actionable(status: &str) -> bool {
     matches!(
@@ -2720,6 +2720,12 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("wait at most 15 minutes"), "{body}");
+        assert!(
+            body.contains("including peers that just registered")
+                && body.contains("For Rex or Codex TUI/tmux")
+                && body.contains("Keep other ready work moving"),
+            "{body}"
+        );
         assert!(
             body.contains(
                 "remove the still-unavailable from the dispatch queue and enqueue the available"

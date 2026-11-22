@@ -1819,6 +1819,8 @@ Execute diagnostic closure immediately:
 ```sh
 collab worker status <id>
 ```
+For a Rex or tmux peer with missing status facts, inspect its bound terminal
+through the [non-live peer procedure](references/board-idle-patrol.md#非-live-peer-的主动核实流程).
 Use durable Collab state and the selected binding's status source to choose the
 next action. For an AppServer binding, query native thread state. A tmux pane is
 address proof only and never proves the agent is alive or `Present`; its agent

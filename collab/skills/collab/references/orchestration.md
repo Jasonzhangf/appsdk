@@ -43,7 +43,9 @@ CEO 按授权管理项目 master。Master 按 [Collab 派单顺序](../SKILL.md#
 处理 buglist 和项目任务。有合适 architect 时先交其计划、交接 peer 实现并验收。其他任务按
 已有 peer 和独立 worker 路由推进。巡检或记忆 peer 从所有任务派发候选和可承接容量中排除。
 
-每轮派发先列出全部 live idle peer，包括没有当前任务的成员。`identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 不进入容量：Codex TUI/tmux peer 先运行 `collab worker snapshot <id> --lines 80` 看真实 pane 状态，再主动核实一次，最长 15 分钟有界等待后终判；不可用者从派发队列排除，可用者进入派发队列，等待期间不计入容量，也不因这些 peer 未响应停工。详细流程见 [board idle 巡检](board-idle-patrol.md#非-live-peer-的主动核实流程)。
+每轮派发先列出全部 live idle peer，包括没有当前任务的成员。遇到 `unknown` 等异常，
+按 [主动核实流程](board-idle-patrol.md#非-live-peer-的主动核实流程) 当轮查看状态。Rex
+和 Codex TUI/tmux 走现有 snapshot 入口。状态未知的 peer 不计入容量，其他工作继续派发。
 
 master 选择承接任务的 peer 时，按 Collab Skill
 [派单顺序与一 peer 一任务](../SKILL.md#派单顺序与一-peer-一任务) 维护的当前提示词优先级和容量边界执行；本文件不复制该排序细节。

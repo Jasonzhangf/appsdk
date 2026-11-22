@@ -981,8 +981,10 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
         "master role_brief must require active non-live peer verification: {text}"
     );
     assert!(
-        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
-        "master role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+        contains_ci(&text, "including when the worker just registered")
+            && contains_ci(&text, "For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --lines 80`")
+            && contains_ci(&text, "Keep other ready work moving during verification"),
+        "master role_brief must inspect the bound terminal and keep unrelated work moving: {text}"
     );
     assert!(
         contains_ci(&text, "wait at most 15 minutes"),
@@ -1128,8 +1130,8 @@ fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
         "patrol role_brief must name the non-live peer states: {text}"
     );
     assert!(
-        contains_ci(&text, "collab worker snapshot <id> --lines 80"),
-        "patrol role_brief must inspect the TUI pane before verifying a non-live peer: {text}"
+        contains_ci(&text, "For Rex and Codex TUI/tmux, it requires `collab worker snapshot <id> --lines 80`"),
+        "patrol role_brief must check for Rex and tmux snapshot evidence: {text}"
     );
     assert!(
         contains_ci(&text, "wait at most 15 minutes"),

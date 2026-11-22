@@ -168,8 +168,8 @@ idle peer，包括没有当前任务的成员，并显式显示各自通道来�
 Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
 `identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
 [非 live peer 主动核实流程](references/board-idle-patrol.md#非-live-peer-的主动核实流程)
-处理：一次主动核实、最长 15 分钟有界等待、终判后不可用者移除、可用者进入派发队列；
-等待期间不计入容量，也不因这些 peer 未响应停工。
+处理。刚注册的 Rex peer 显示 `unknown` 时，master 当轮主动查状态和原 block 的 snapshot。
+仍需 peer 补事实时最多等 15 分钟。状态未核实的 peer 不计入容量，其他 ready 工作继续派发。
 先按任务权限、能力、依赖和实际容量筛选，再按当前用户或任务提示词中的优先级选择。
 派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
 默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，

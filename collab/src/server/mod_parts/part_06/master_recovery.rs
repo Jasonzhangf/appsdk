@@ -331,7 +331,7 @@ fn base_role_brief(
             "orchestration_function": "goal_orchestrator",
             "goal_level": "project",
             "responsibilities": [
-                "Start every cycle from the current board, buglist and goal. Prioritize open P0/P1 by urgency and dependency and use the architect intake in work_role_execution_rule. Managers verify evidence and decide scope and priority. Delegate detailed design, debugging and implementation to the assigned roles.",
+                "Start every cycle from the current board, buglist and goal: read open work, prioritize P0/P1 by urgency and dependency, and apply the architect intake in work_role_execution_rule. Managers do not debug, reproduce, investigate root cause, or implement the work themselves. Verify evidence, decide scope and priority, and delegate detailed design, debugging and implementation to the assigned roles.",
                 own_goal_rule,
                 goal_document_rule,
                 work_role_assignment_rule,

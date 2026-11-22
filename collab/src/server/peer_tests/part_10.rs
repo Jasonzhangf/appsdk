@@ -225,9 +225,11 @@ fn master_context_routes_work_by_task_kind() {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    assert!(responsibilities.contains("long-horizon goals"));
-    assert!(responsibilities.contains("bounded subagent tasks"));
-    assert!(responsibilities.contains("route suitable long-horizon goals"));
+    assert!(responsibilities.contains("route work through the public board"));
+    assert!(
+        responsibilities.contains("master routes both buglist items and project tasks to that architect first")
+    );
+    assert!(responsibilities.contains("for work outside architect assignments"));
     assert!(responsibilities.contains("check idle, suitable authorized peers"));
     assert!(responsibilities.contains("no suitable authorized peer can take the work"));
     assert!(!responsibilities.contains("regardless of whether other peers are busy"));

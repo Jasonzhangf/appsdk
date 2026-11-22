@@ -980,6 +980,7 @@ fn register_desktop_binding(
 #[test]
 fn public_context_rex_target_conflict_reaches_admission_without_old_history_rejection() {
     let mut fixture = Fixture::without_tmux("rex-target-session-conflict");
+    let rex_cli = create_rex_admission_cli_stub(&fixture.root);
     let alice_host = TestAppServer::start_with_effect_at(
         &fixture.root,
         "conflict-alice.sock",
@@ -1045,7 +1046,7 @@ fn public_context_rex_target_conflict_reaches_admission_without_old_history_reje
         }
     }
     fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
-    fixture.restart_daemon();
+    fixture.restart_daemon_with_env("COLLAB_TEST_REX_CLI", &rex_cli.to_string_lossy());
 
     let provide = json!({
         "session_id": "conflict-agent-session",
@@ -1111,9 +1112,45 @@ fn public_context_rex_target_conflict_reaches_admission_without_old_history_reje
         "explicit human replacement must also reach Rex admission: {approved_error}"
     );
     assert!(
-        approved_error.contains("REX_"),
-        "the approved request must reach the Rex admission boundary: {approved_error}"
+        approved.status.success(),
+        "an approved replacement must complete once the exact Rex target is admitted: \
+         stdout={} stderr={approved_error}",
+        String::from_utf8_lossy(&approved.stdout)
     );
+    let approved: Value = serde_json::from_slice(&approved.stdout).unwrap();
+    assert_eq!(approved["result"]["outcome"], "completed", "{approved}");
+    assert_eq!(approved["result"]["snapshot"]["name"], "Alice", "{approved}");
+}
+
+/// Admission-only Rex CLI fixture. It proves the exact target exists so the
+/// identity gate is reached; every execution observation stays unavailable.
+fn create_rex_admission_cli_stub(root: &Path) -> PathBuf {
+    let path = root.join("rex-admission-cli");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+case "$*" in
+  *session.list_blocks*)
+    printf '%s\n' '{"blocks":[{"block_id":"block:22222222-2222-4222-8222-222222222222","creator_name":"com.superlogical.terminal","flavor":"fixture","placement":"window","window_id":"fixture-window","host_id":"conflict-rex-host"}]}'
+    ;;
+  *session.list*)
+    printf '%s\n' '{"sessions":[{"session_id":"session:11111111-1111-4111-8111-111111111111","label":"fixture"}]}'
+    ;;
+  *server.status*)
+    printf '%s\n' '{"rex_version":"0.1.0","platform":"fixture","dirty":false,"host_id":"conflict-rex-host","instance_id":"conflict-rex-instance"}'
+    ;;
+  *)
+    echo "fixture: execution observation is unavailable" >&2
+    exit 4
+    ;;
+esac
+"#,
+    )
+    .expect("write Rex admission CLI stub");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .expect("make Rex admission CLI stub executable");
+    path
 }
 
 // Explicit Rex facts must reach the Rex adapter even when the name/session is

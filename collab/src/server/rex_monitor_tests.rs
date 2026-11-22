@@ -34,7 +34,7 @@ fn record(state: &str, kind: Option<&str>) -> RexProgramStatusRecord {
         kind,
         Some(RexProgramStatusOwner {
             pid: 4242,
-            name: "python3".into(),
+            name: "codex".into(),
         }),
     )
 }
@@ -62,7 +62,7 @@ fn observation(
         endpoint: endpoint("block:22222222-2222-2222-2222-222222222222"),
         process: Some(RexProcessObservation {
             pid: Some(4242),
-            name: Some("python3".into()),
+            name: Some("codex".into()),
             path: None,
             cwd: None,
         }),
@@ -70,11 +70,58 @@ fn observation(
         program_status: records,
         sources: vec![
             "com.superlogical.terminal.process".into(),
+            "com.superlogical.terminal.pwd".into(),
             "com.superlogical.terminal.program_status".into(),
         ],
         source_errors: Vec::new(),
         gap_possible: false,
     }
+}
+
+#[test]
+fn login_wrapper_without_verified_execution_stays_unknown() {
+    let mut observed = observation(vec![RexProgramStatusRecord {
+        id: Some("agent".into()),
+        state: Some("blocked".into()),
+        kind: Some("question".into()),
+        app: Some("codex".into()),
+        msg: None,
+        updated_at: None,
+        owner: Some(RexProgramStatusOwner {
+            pid: 4243,
+            name: "codex".into(),
+        }),
+    }]);
+    observed.process.as_mut().unwrap().pid = Some(100);
+    observed.process.as_mut().unwrap().name = Some("login".into());
+    let projection = project_observation(&observed);
+    assert_eq!(projection.presence, AgentPresence::Unknown);
+    assert_eq!(projection.activity, AgentActivity::Unknown);
+}
+
+#[test]
+fn verified_wrapper_execution_projects_the_persisted_owner_activity() {
+    let mut observed = observation(vec![RexProgramStatusRecord {
+        id: Some("agent".into()),
+        state: Some("blocked".into()),
+        kind: Some("question".into()),
+        app: Some("codex".into()),
+        msg: None,
+        updated_at: None,
+        owner: Some(RexProgramStatusOwner {
+            pid: 4242,
+            name: "codex".into(),
+        }),
+    }]);
+    observed.process.as_mut().unwrap().pid = Some(100);
+    observed.process.as_mut().unwrap().name = Some("login".into());
+    let execution = RexProgramStatusOwner {
+        pid: 4242,
+        name: "codex".into(),
+    };
+    let projection = project_observation_with_current_execution(&observed, Some(&execution));
+    assert_eq!(projection.presence, AgentPresence::Online);
+    assert_eq!(projection.activity, AgentActivity::WaitingUser);
 }
 
 fn rex_server(target: &MonitorTarget) -> (Arc<Server>, PathBuf) {

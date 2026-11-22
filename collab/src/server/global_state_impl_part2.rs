@@ -180,6 +180,14 @@ impl GlobalState {
                 if old.session_id.is_none() || old.native_thread_id.is_none() {
                     continue;
                 }
+                // The approved Rex replacement binding is a placement-bound
+                // recovery target, not a complete desktop address. Its
+                // installation removes the prior desktop route, so it cannot
+                // fabricate the thread tombstone data; the removed route is
+                // nevertheless no longer resolvable.
+                if binding.session_id.is_none() || binding.native_thread_id.is_none() {
+                    continue;
+                }
                 let key = installed_route_address_key(&old).ok_or_else(|| {
                     StateError::invalid(
                         "current thread route tombstone",

@@ -69,6 +69,11 @@ fn installed_macos_cli(system_applications: &Path, user_home: Option<&Path>) -> 
 }
 
 fn official_cli_path() -> String {
+    #[cfg(feature = "lifecycle-test-hooks")]
+    if let Some(path) = std::env::var_os("COLLAB_TEST_REX_CLI").filter(|value| !value.is_empty())
+    {
+        return path.to_string_lossy().into_owned();
+    }
     #[cfg(test)]
     if let Some(path) = test_cli() {
         return path.to_string_lossy().into_owned();
@@ -200,7 +205,7 @@ pub struct RexProgramStatusOwner {
 }
 
 impl RexProgramStatusOwner {
-    fn is_complete(&self) -> bool {
+    pub(crate) fn is_complete(&self) -> bool {
         self.pid > 0 && !self.name.trim().is_empty()
     }
 }
@@ -217,8 +222,57 @@ pub struct RexObservation {
 }
 
 impl RexObservation {
-    /// Extract the one foreground Codex owner only when all current terminal
-    /// sources are complete and the program-status owner matches foreground.
+    /// Extract the foreground Codex owner when the process and program-status
+    /// sources are complete and their owner identity matches exactly.
+    pub(crate) fn foreground_codex_owner(&self) -> Result<RexProgramStatusOwner, String> {
+        for required in [
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.program_status",
+        ] {
+            if !self.sources.iter().any(|source| source == required) {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: current Rex observation is missing {required}"
+                ));
+            }
+        }
+        let process = self.process.as_ref().ok_or_else(|| {
+            "REX_EXECUTION_UNVERIFIED: Rex foreground process is missing".to_owned()
+        })?;
+        let foreground_pid = process.pid.filter(|pid| *pid > 1).ok_or_else(|| {
+            "REX_EXECUTION_UNVERIFIED: Rex foreground PID is missing".to_owned()
+        })?;
+        let foreground_name = process
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                "REX_EXECUTION_UNVERIFIED: Rex foreground name is missing".to_owned()
+            })?;
+        if !crate::host_runtime::is_codex_command(foreground_name) {
+            return Err(format!(
+                "REX_EXECUTION_UNVERIFIED: Rex foreground is not Codex ({foreground_name})"
+            ));
+        }
+        let owner = self
+            .program_status
+            .iter()
+            .filter(|record| record.app.as_deref() == Some("codex"))
+            .filter_map(|record| record.owner.as_ref())
+            .find(|owner| {
+                owner.is_complete()
+                    && owner.pid == foreground_pid
+                    && owner.name.trim() == foreground_name
+            })
+            .cloned()
+            .ok_or_else(|| {
+                "REX_EXECUTION_UNVERIFIED: program_status owner does not match the Rex foreground"
+                    .to_owned()
+            })?;
+        Ok(owner)
+    }
+
+    /// Recovery needs a complete source set before it can bind an execution.
     pub(crate) fn current_foreground_codex_owner(&self) -> Result<RexProgramStatusOwner, String> {
         if self.gap_possible || !self.source_errors.is_empty() {
             return Err(format!(
@@ -237,33 +291,7 @@ impl RexObservation {
                 ));
             }
         }
-        let process = self.process.as_ref().ok_or_else(|| {
-            "REX_EXECUTION_UNVERIFIED: Rex foreground process is missing".to_owned()
-        })?;
-        let pid = process
-            .pid
-            .filter(|pid| *pid > 1)
-            .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: Rex foreground PID is missing".to_owned())?;
-        let name = process
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: Rex foreground name is missing".to_owned())?;
-        if !crate::host_runtime::is_codex_command(name) {
-            return Err(format!(
-                "REX_EXECUTION_UNVERIFIED: Rex foreground is not Codex ({name})"
-            ));
-        }
-        self.program_status
-            .iter()
-            .filter_map(|record| record.owner.as_ref())
-            .find(|owner| owner.pid == pid && owner.name == name)
-            .cloned()
-            .ok_or_else(|| {
-                "REX_EXECUTION_UNVERIFIED: program_status owner does not match the Rex foreground"
-                    .to_owned()
-            })
+        self.foreground_codex_owner()
     }
 }
 

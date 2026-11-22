@@ -32,6 +32,8 @@ Scenarios (override behavior keyed by the extracted method):
   status_marker_only     server.status fails with the service marker but no
                          typed service-generation mismatch
   status_unknown         server.status fails without proving absence
+  status_codex_wrapper   foreground is a login wrapper and program_status
+                         names a different Codex process
   write_short            write returns bytes_written = 1
   write_unknown          write exits 124 with no JSON (timeout-like)
   write_typed_reject     write exits 1 with a structured native error code
@@ -329,6 +331,26 @@ def process() -> None:
             }
         )
         return
+    if scenario() == "status_codex_wrapper":
+        emit(
+            {
+                "last_exit": None,
+                "child": {
+                    "pid": 4242,
+                    "user_id": 501,
+                    "name": "login",
+                    "path": "/usr/bin/login",
+                    "cwd": "/tmp/rex-fixture-cwd",
+                },
+                "foreground": {
+                    "pid": 4242,
+                    "user_id": 501,
+                    "name": "login",
+                },
+                "home": "/Users/fixture",
+            }
+        )
+        return
     emit(
         {
             "last_exit": None,
@@ -369,7 +391,22 @@ def program_status() -> None:
             }
         )
         return
-    if mode == "status_working":
+    if mode == "status_codex_wrapper":
+        emit(
+            {
+                "records": [
+                    {
+                        "id": "agent",
+                        "state": "working",
+                        "app": "codex",
+                        "msg": "busy",
+                        "owner": {"pid": 4243, "name": "codex"},
+                        "updated_at": "2026-11-22T00:00:00Z",
+                    }
+                ]
+            }
+        )
+    elif mode == "status_working":
         emit(
             {
                 "records": [

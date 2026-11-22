@@ -271,23 +271,20 @@ fn project_observation_with_execution(
     execution: &mut Option<RexProgramStatusOwner>,
     process_exists: &dyn Fn(u64) -> Result<bool, String>,
 ) -> RexProjection {
-    let mut projection = project_observation(observation);
-    if projection.presence == AgentPresence::Online {
-        if let Some(process) = observation.process.as_ref() {
-            *execution =
-                process
-                    .pid
-                    .zip(process.name.as_ref())
-                    .map(|(pid, name)| RexProgramStatusOwner {
-                        pid,
-                        name: name.clone(),
-                    });
+    let mut projection =
+        project_observation_with_current_execution(observation, execution.as_ref());
+    let Some(previous) = execution.clone() else {
+        if projection.presence == AgentPresence::Online {
+            *execution = observation.foreground_codex_owner().ok();
         }
         return projection;
-    }
-    let Some(previous) = execution.as_ref() else {
-        return projection;
     };
+    if projection.presence == AgentPresence::Online {
+        if let Ok(owner) = observation.foreground_codex_owner() {
+            *execution = Some(owner);
+            return projection;
+        }
+    }
     let Some(process) = observation.process.as_ref() else {
         return projection;
     };
@@ -323,6 +320,13 @@ fn project_observation_with_execution(
 }
 
 fn project_observation(observation: &RexObservation) -> RexProjection {
+    project_observation_with_current_execution(observation, None)
+}
+
+fn project_observation_with_current_execution(
+    observation: &RexObservation,
+    execution: Option<&RexProgramStatusOwner>,
+) -> RexProjection {
     let missing_sources = [PROCESS_SOURCE, PROGRAM_STATUS_SOURCE]
         .into_iter()
         .filter(|source| !observation.sources.iter().any(|present| present == source))
@@ -339,21 +343,45 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
             ),
         };
     }
-    let Some((foreground_pid, foreground_name)) =
-        observation.process.as_ref().and_then(|process| {
-            let pid = process.pid.filter(|pid| *pid > 0)?;
-            let name = process
-                .name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())?;
-            Some((pid, name))
-        })
-    else {
+    let Some(process) = observation.process.as_ref() else {
+        return RexProjection {
+            presence: AgentPresence::Unknown,
+            activity: AgentActivity::Unknown,
+            reason: format!("rex.osc7501 foreground process identity unavailable source={PROGRAM_STATUS_SOURCE}"),
+        };
+    };
+    let foreground_pid = process.pid.filter(|pid| *pid > 0);
+    let foreground_name = process.name.as_deref().filter(|name| !name.trim().is_empty());
+    let (Some(foreground_pid), Some(foreground_name)) = (foreground_pid, foreground_name) else {
+        return RexProjection {
+            presence: AgentPresence::Unknown,
+            activity: AgentActivity::Unknown,
+            reason: format!("rex.osc7501 foreground process identity unavailable source={PROGRAM_STATUS_SOURCE}"),
+        };
+    };
+    let foreground_is_codex = crate::host_runtime::is_codex_command(foreground_name);
+    let wrapper_execution = execution.filter(|owner| owner.is_complete());
+    let owner = if foreground_is_codex {
+        match observation.foreground_codex_owner() {
+            Ok(owner) => owner,
+            Err(_) => {
+                return RexProjection {
+                    presence: AgentPresence::Unknown,
+                    activity: AgentActivity::Unknown,
+                    reason: format!(
+                        "rex.osc7501 no verified current Codex execution; foreground_pid={foreground_pid} foreground_name={foreground_name} source={PROGRAM_STATUS_SOURCE}"
+                    ),
+                };
+            }
+        }
+    } else if let Some(owner) = wrapper_execution {
+        owner.clone()
+    } else {
         return RexProjection {
             presence: AgentPresence::Unknown,
             activity: AgentActivity::Unknown,
             reason: format!(
-                "rex.osc7501 foreground process identity unavailable source={PROGRAM_STATUS_SOURCE}"
+                "rex.osc7501 foreground is not Codex ({foreground_name}) source={PROGRAM_STATUS_SOURCE}"
             ),
         };
     };
@@ -362,8 +390,8 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
         .iter()
         .filter(|record| {
             record.app.as_deref() == Some("codex")
-                && record.owner.as_ref().is_some_and(|owner| {
-                    owner.pid == foreground_pid && owner.name == foreground_name
+                && record.owner.as_ref().is_some_and(|record_owner| {
+                    record_owner.pid == owner.pid && record_owner.name == owner.name
                 })
         })
         .collect();
@@ -405,9 +433,11 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
         format!(" source_errors={}", observation.source_errors.join("; "))
     };
     let reason = format!(
-        "rex.osc7501 projection={} records={} foreground_pid={foreground_pid} foreground_name={foreground_name} source={PROGRAM_STATUS_SOURCE}{source_errors}",
+        "rex.osc7501 projection={} records={} foreground_pid={} foreground_name={} source={PROGRAM_STATUS_SOURCE}{source_errors}",
         activity_label(activity),
-        observation.program_status.len()
+        observation.program_status.len(),
+        owner.pid,
+        owner.name
     );
     RexProjection {
         presence: AgentPresence::Online,

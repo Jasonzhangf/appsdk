@@ -782,6 +782,23 @@ async fn observe_current_decodes_program_status_owner_without_loss() {
 }
 
 #[tokio::test]
+async fn current_owner_rejects_program_status_codex_execution_under_login_wrapper() {
+    let _fixture = fixture_guard().await;
+    let _env = TestEnv::new("status_codex_wrapper");
+    let observation = observe_current(&endpoint())
+        .await
+        .expect("observe current Rex target");
+    assert_eq!(
+        observation.process.as_ref().and_then(|p| p.name.as_deref()),
+        Some("login")
+    );
+    let error = observation
+        .current_foreground_codex_owner()
+        .expect_err("a wrapper requires a verified execution association");
+    assert!(error.contains("foreground is not Codex (login)"));
+}
+
+#[tokio::test]
 async fn observe_current_drops_incomplete_owner_identity() {
     let _fixture = fixture_guard().await;
     let incomplete = [

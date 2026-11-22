@@ -5,6 +5,8 @@ description: "未注册调用者可只读查询项目通信目录与匿名发送
 
 # Collab
 
+Collab 操作用 shell CLI 或专用 MCP。禁止用 Computer Use、CUA 或 GUI 工具操作 Collab。
+
 本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
 不整篇加载；手册与本入口属于同一个 Skill。
 
@@ -34,9 +36,36 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 
 ### 首次注册与缺项提示
 
-在要加入的项目目录、当前 agent 自己的会话中运行 `collab context`。
-在 Rex 中，直接用该 agent 自己当前会话的执行工具，在原有 block 获取或恢复身份。
-禁止为身份命令 split 或新建 pane、tab、窗口，也禁止借用其他 block 或会话执行。
+身份注册、恢复、查状态和终端取证只调用 shell 中的 Collab CLI，以及需要时的宿主 CLI
+或专用 MCP。禁止调用 Computer Use、CUA、桌面或浏览器控制工具，包括用它们切换、
+停止或关闭界面。禁止向 GUI 终端注入命令。Rex 身份恢复禁止 split、新建 pane、tab、
+窗口、改名或借用其他 block、会话。
+
+用当前 agent 自己会话的 shell 命令工具，工作目录设为当前项目根，执行：
+
+```sh
+pwd -P
+collab context
+```
+
+在 Rex 中保持原 block 的环境。成功时读取 `registered: true` 和返回的名字。
+若返回 `missing_facts` 且需核对 Rex 来源，在同一个 shell 只读检查：
+
+```sh
+printf 'REX_SESSION=%s\nREX_BLOCK=%s\n' "${REX_SESSION:-}" "${REX_BLOCK:-}"
+if command -v rex >/dev/null 2>&1; then
+  rex whoami --json --autostart=false
+elif [ -x '/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex' ]; then
+  '/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex' whoami --json --autostart=false
+else
+  printf '%s\n' 'Rex CLI unavailable in this shell' >&2
+fi
+```
+
+缺环境、CLI 或宿主事实时保留原回执，向对应宿主维护者说明缺项。禁止猜填
+`session_id`、`thread_id`、`endpoint`、`namespace`，禁止换到其他会话或改用 GUI。
+只暂停依赖该身份的动作。
+
 tmux、Rex、DSH 和 Codex Desktop 使用同一个入口，由各宿主适配器收集本会话的事实。
 Rex 适配器读取当前会话的 `REX_SESSION` 和 `REX_BLOCK`，调用官方 Rex CLI 解析并核验
 当前端点后完成绑定。看到 `missing_facts` 时，保留回执的

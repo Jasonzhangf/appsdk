@@ -292,8 +292,8 @@ fn communication_recovery_brief() -> serde_json::Value {
     json!({
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
-            "Run `collab context` directly with the current agent's execution tool in its own session and project. Context collects the current host's own registration facts. In Rex, use the agent's existing block so Collab can resolve and verify that placement with the official Rex CLI. Do not split or open a pane, tab, or window for identity commands, and do not run them from another block or session. Inspect the named route, identity, daemon, task, and inbox state.",
-            "If context returns missing host facts, preserve the exact fields and sources for the corresponding host maintainer. Rerun `collab context` in the same session when the capability is ready.",
+            "Use the current agent's shell command tool. Run `pwd -P` and `collab context` in the current project directory. Never invoke Computer Use, CUA, or GUI controls for Collab identity, state, or terminal inspection, including to close or stop a UI action. Context collects this host's registration facts. In Rex, use the agent's existing block so Collab can resolve it with the official Rex CLI. Do not split or open a pane, tab, or window, rename a Rex session, inject a GUI keystroke, or use another session for identity commands.",
+            "If context returns missing_facts, preserve result.requires.fields and result.requires.sources for the host maintainer. Never guess or manually fill session_id, thread_id, endpoint or namespace. Pause only identity-dependent actions and rerun `collab context` from the same shell once the host provides the required facts.",
             "If context fails, preserve the exact error and report through a healthy peer or the human. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
         ],
         "close_only_when": [

@@ -92,6 +92,14 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         assert!(context_instruction.contains("In Rex, use the agent's existing block"));
         assert!(context_instruction.contains("official Rex CLI"));
         assert!(context_instruction.contains("Do not split or open a pane, tab, or window"));
+        assert!(context_instruction.contains("Run `pwd -P` and `collab context`"));
+        assert!(context_instruction.contains("Never invoke Computer Use, CUA, or GUI controls"));
+        assert!(
+            brief["communication_recovery"]["steps"][1]
+                .as_str()
+                .unwrap()
+                .contains("Never guess or manually fill session_id, thread_id, endpoint or namespace")
+        );
         let role_text = brief.to_string();
         for retired_rule in [
             "report routinely",

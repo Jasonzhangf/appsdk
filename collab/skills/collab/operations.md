@@ -2168,7 +2168,9 @@ subscription, as part of bootstrap.
 （`collab master promote --approval '…'` 或 `collab context --approve-grant`
 action=restore_master），或由已授权 master 委托。各宿主统一运行 `collab context`。
 CLI 按当前宿主从下表的来源收集本次事实，由 daemon 按当前绑定和实时端点证据裁决。
-代理使用自身原会话的执行入口，避免手动收集或混用其他宿主的注册字段。
+使用 agent 自己原会话的 shell 命令工具直接运行 `collab context`。按
+[CLI 身份入口](SKILL.md#首次注册与缺项提示)处理缺项。禁止用 Computer Use、CUA 或 GUI
+获取身份、取证、发命令或关闭界面。禁止为身份恢复调整 Rex 布局或会话名。
 
 | 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
 | --- | --- | --- | --- |

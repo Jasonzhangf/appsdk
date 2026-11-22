@@ -2163,24 +2163,100 @@ subscription, as part of bootstrap.
 
 ## 宿主注册所需信息
 
-在目标项目和当前 agent 会话中执行 `collab context`。宿主决定要报告的事实，
-不决定角色：任何宿主注册后默认是 peer；成为 master 只能由用户明确授权
-（`collab master promote --approval '…'` 或 `collab context --approve-grant`
-action=restore_master），或由已授权 master 委托。各宿主统一运行 `collab context`。
-CLI 按当前宿主从下表的来源收集本次事实，由 daemon 按当前绑定和实时端点证据裁决。
-使用 agent 自己原会话的 shell 命令工具直接运行 `collab context`。按
-[CLI 身份入口](SKILL.md#首次注册与缺项提示)处理缺项。禁止用 Computer Use、CUA 或 GUI
-获取身份、取证、发命令或关闭界面。禁止为身份恢复调整 Rex 布局或会话名。
+工作目录设为目标项目根。用当前 agent 原会话的 shell，只执行适用的取值命令。
+DSH 即使运行于 Rex 或 tmux 内，也优先使用 DSH 的身份来源。
+禁止用 Computer Use、CUA 或 GUI 取值、发命令或关闭界面。保留原终端，
+不 split、不新建 pane、tab 或窗口，不为取值改名。
 
-| 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
-| --- | --- | --- | --- |
-| DSH | 当前 gateway session（`DSH_SESSION_ID`） | CLI 用本次 gateway session 查已有身份。首次建立通信时从 gateway 获取该 session 的控制能力；gateway 负责 Poll/Ack | 不从日志或 plist 猜 ID，不混报 Codex 或 tmux 字段 |
-| Codex TUI / CLI | 当前 agent session；用该 TUI 的已选适配器定位投递 | 原生 AppServer 提供 `session_id`、`thread_id`、`endpoint`、`namespace`。选用 tmux 时，daemon 从实时 iTerm2 pane 与 client TTY 核实所连 session。新旧角色显示名由 daemon 按原生 ID 执行并读回。 | 不用 tmux 的 `$N` 或内部 `%pane` 冒充 agent session 或 iTerm2 pane，不借用其他进程的 endpoint |
-| Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
-| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 用当前 agent 自己的执行工具在原有 Rex block 运行 `collab context`。它沿原环境读取 `REX_SESSION`、`REX_BLOCK`，调用官方 `rex whoami --json --autostart=false` 获取 server endpoint，daemon 再用 Rex CLI 核验该 session 和 terminal block | 禁止为身份命令 split、新建 pane、tab 或窗口，或借用其他 block、会话或身份。Rex session ID 和 AppServer 字段不用于代填 agent 身份 |
+### Rex 中的 Codex
+
+Codex 宿主注入 `CODEX_SESSION_ID`。Rex 注入 `REX_SESSION` 和 `REX_BLOCK`，官方
+Rex CLI 的 JSON `endpoint` 给出当前 server。三个 Rex 字段共同定位投递 block。
+在当前 block 内执行：
+
+```sh
+printf 'CODEX_SESSION_ID=%s\nREX_SESSION=%s\nREX_BLOCK=%s\n' \
+  "${CODEX_SESSION_ID:-}" "${REX_SESSION:-}" "${REX_BLOCK:-}"
+if [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ]; then
+  if command -v rex >/dev/null 2>&1; then
+    rex whoami --json --autostart=false
+  else
+    rex_bundle='Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex'
+    rex_cli="/Applications/$rex_bundle"
+    if [ ! -x "$rex_cli" ]; then
+      rex_cli="$HOME/Applications/$rex_bundle"
+    fi
+    if [ -x "$rex_cli" ]; then
+      "$rex_cli" whoami --json --autostart=false
+    else
+      printf '%s\n' 'Rex CLI unavailable in this shell' >&2
+    fi
+  fi
+fi
+```
+
+`collab context` 从同一环境自动读取这些值，daemon 核实 Rex server、session 和
+terminal block。Rex session/block 只用于投递。缺 `CODEX_SESSION_ID` 时由当前 Codex
+宿主补传。此路径无需 AppServer thread、endpoint 或 namespace。
+
+### iTerm2 中的 tmux / Codex TUI
+
+Codex 注入 `CODEX_SESSION_ID`。tmux 注入 `TMUX_PANE`。在现有 pane 中执行：
+
+```sh
+printf 'CODEX_SESSION_ID=%s\nTMUX_PANE=%s\n' "${CODEX_SESSION_ID:-}" "${TMUX_PANE:-}"
+if [ -n "${TMUX_PANE:-}" ]; then
+  tmux display-message -p -t "$TMUX_PANE" 'tmux_session=#{session_id} pane=#{pane_id} pane_tty=#{pane_tty}'
+fi
+```
+
+这是只读 pane 查看。注册时 daemon 从宿主声明的 tmux socket 和进程祖先链核实
+当前 pane，再用 `tmux list-clients -F '#{pid}|#{session_id}|#{client_tty}'` 将该
+session 的 client TTY 与 iTerm2 已连接 session 的 TTY 匹配，取得 iTerm2 原生 ID。
+iTerm2 附着证据由 daemon 获取，agent 只运行 `collab context`，无需调用 AppleScript。
+`$TMUX` 不作为 Collab socket 来源。tmux session、pane ID 和 iTerm2 ID 都是宿主位置。
+
+### DSH
+
+```sh
+printf 'DSH_SESSION_ID=%s\n' "${DSH_SESSION_ID:-}"
+```
+
+`DSH_SESSION_ID` 由当前 DSH 宿主注入。首次注册时，`collab context` 通过 gateway
+发布的控制能力调用 `resolve-agent`，按该 session 和项目核实 `runtime_id`、
+`agent_id`、`session_id` 和 `cwd`。已有唯一绑定可用同一 ID 恢复。缺 ID 或能力
+就保留原错给 DSH 宿主维护者，禁止从 Codex、tmux 或历史记录补取。
+
+### Codex Desktop
+
+```sh
+printf 'CODEX_SESSION_ID=%s\nCODEX_THREAD_ID=%s\n' \
+  "${CODEX_SESSION_ID:-}" "${CODEX_THREAD_ID:-}"
+```
+
+两项均由当前 Desktop chat 的 shell 工具环境提供。`CODEX_SESSION_ID` 识别 agent，
+`CODEX_THREAD_ID` 定位当前 chat。`collab context` 用 Desktop runtime 的原生工具管道
+接入共享 bridge，由 Desktop 核实当前 thread 和 cwd。常规注册无需 MCP、手填 socket
+或 AppServer namespace。出现 `DESKTOP_BRIDGE_SESSION_REQUIRED` 或
+`DESKTOP_BRIDGE_THREAD_REQUIRED` 时，由当前 Desktop 宿主补传对应字段。
+
+### 提交给 Collab
+
+在取值的同一 agent 会话和项目根目录运行：
+
+```sh
+pwd -P
+collab context
+```
+
+CLI 自动提交本次宿主事实，daemon 核实后绑定。默认注册为 peer。master 仍需用户
+明确授权或已授权 master 委托。明确集成了直连 AppServer 的调用使用该宿主实际提供的
+`CODEX_SESSION_ID`、`CODEX_THREAD_ID`、socket 和 namespace，见
+[直连 AppServer 字段](#appserver-runtime-registration)。
 
 返回 `missing_facts` 时，`result.requires.fields` 列出缺项，`sources` 给出来源。
-普通注册把缺项交给当前宿主的维护者。`--provide` 用于依现有能力合同的非标准集成诊断。
+四个 AppServer 字段同时缺失时，先按上面的宿主路径确认 placement 和 agent session。
+普通注册把缺项交给当前宿主的维护者。`--provide` 用于已有真实能力回执的非标准集成。
 
 返回 `registered: true` 后核对名字。需要验证消息时，核对接收方的正式
 `recv` 回执；DSH 查 gateway Poll/Ack。服务不可达时先检查服务启动结果。

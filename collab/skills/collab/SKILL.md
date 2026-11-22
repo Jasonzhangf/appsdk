@@ -41,44 +41,27 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 停止或关闭界面。禁止向 GUI 终端注入命令。Rex 身份恢复禁止 split、新建 pane、tab、
 窗口、改名或借用其他 block、会话。
 
-用当前 agent 自己会话的 shell 命令工具，工作目录设为当前项目根，执行：
+用当前 agent 自己会话的 shell 命令工具，工作目录设为当前项目根。按
+[宿主注册所需信息](operations.md#宿主注册所需信息)运行对应的取值命令，然后执行：
 
 ```sh
 pwd -P
 collab context
 ```
 
-在 Rex 中保持原 block 的环境。成功时读取 `registered: true` 和返回的名字。
-若返回 `missing_facts` 且需核对 Rex 来源，在同一个 shell 只读检查：
-
-```sh
-printf 'REX_SESSION=%s\nREX_BLOCK=%s\n' "${REX_SESSION:-}" "${REX_BLOCK:-}"
-if command -v rex >/dev/null 2>&1; then
-  rex whoami --json --autostart=false
-elif [ -x '/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex' ]; then
-  '/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex' whoami --json --autostart=false
-else
-  printf '%s\n' 'Rex CLI unavailable in this shell' >&2
-fi
-```
-
-缺环境、CLI 或宿主事实时保留原回执，向对应宿主维护者说明缺项。禁止猜填
-`session_id`、`thread_id`、`endpoint`、`namespace`，禁止换到其他会话或改用 GUI。
-只暂停依赖该身份的动作。
-
-tmux、Rex、DSH 和 Codex Desktop 使用同一个入口，由各宿主适配器收集本会话的事实。
-Rex 适配器读取当前会话的 `REX_SESSION` 和 `REX_BLOCK`，调用官方 Rex CLI 解析并核验
-当前端点后完成绑定。看到 `missing_facts` 时，保留回执的
-`result.requires.fields` 和 `result.requires.sources`，由所列来源的维护者补齐能力。
-普通注册继续使用同一条命令。成功时核对返回的
-`registered: true` 和自己的名字。各宿主的字段和取值入口见[注册手册](operations.md#宿主注册所需信息)。
+Rex 和 tmux 只提供终端位置，Codex 提供当前 agent 的 `CODEX_SESSION_ID`。
+DSH 的身份来源是 gateway 注入的 `DSH_SESSION_ID`。Desktop 还使用当前
+`CODEX_THREAD_ID` 及原生 bridge。成功时核对 `registered: true` 和自己的名字。
+缺必需事实时，保留宿主命令原错或 `missing_facts` 的 `result.requires.fields` 和
+`result.requires.sources`，指出哪个宿主须补传哪个字段。禁止猜填字段、借用其他
+会话或改用 GUI。继续能独立推进的工作，宿主补齐后在原会话重试。
 
 若返回 `DAEMON_UNAVAILABLE`，按[正式服务恢复步骤](operations.md#全局-daemon-与默认身份恢复)
 检查启动状态与首个错误。
 `TMUX_OBSERVATION_CAPABILITY_MISSING` 表示 daemon 缺少可核实的 tmux 机器端点。
 把原错误交给宿主维护者。端点就绪后，从同一会话重跑 `collab context`。
-`TMUX_ITERM2_PANE_REQUIRED` 表示新 tmux 会话缺当前 iTerm2 接入。先将该 session
-接入 iTerm2，再运行 `collab context`。daemon 核实 pane 所连的 session ID。
+`TMUX_ITERM2_PANE_REQUIRED` 表示新 tmux 会话缺当前 iTerm2 接入。在宿主维护者
+将原 session 接入 iTerm2 后从原 agent 会话重试。daemon 核实 pane 所连的 session ID。
 已登记会话断开 iTerm2 时，名字和业务保留，消息在 daemon 排队。
 `IDENTITY_MAP_DECODE_FAILED` 表示当前程序读不懂已保存的身份表；
 补注册字段无法修复它。保留身份表，交由维护者恢复兼容运行版后再试。

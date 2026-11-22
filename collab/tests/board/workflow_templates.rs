@@ -94,6 +94,16 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         assert!(context_instruction.contains("Do not split or open a pane, tab, or window"));
         assert!(context_instruction.contains("Run `pwd -P` and `collab context`"));
         assert!(context_instruction.contains("Never invoke Computer Use, CUA, or GUI controls"));
+        for source in [
+            "rex whoami --json --autostart=false",
+            "CODEX_SESSION_ID",
+            "TMUX_PANE",
+            "iTerm2 attachment",
+            "DSH_SESSION_ID",
+            "CODEX_THREAD_ID",
+        ] {
+            assert!(context_instruction.contains(source), "{label}: {source}");
+        }
         assert!(
             brief["communication_recovery"]["steps"][1]
                 .as_str()

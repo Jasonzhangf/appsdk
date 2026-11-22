@@ -1024,6 +1024,10 @@ impl State {
             }
             Event::Acked { ids, consumed_ms } => {
                 for id in ids {
+                    let message_created_ms = self
+                        .msgs
+                        .get(id)
+                        .map(|message| message.created_ms);
                     let message_was_unread = self
                         .msgs
                         .get(id)
@@ -1048,6 +1052,7 @@ impl State {
                     if let Some(consumed) = consume_marked_periodic_goal(
                         subscription,
                         self.notification_occurrences.get(id),
+                        message_created_ms,
                         message_was_unread,
                         *consumed_ms,
                     ) {

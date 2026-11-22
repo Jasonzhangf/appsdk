@@ -652,6 +652,7 @@ struct SubscriptionConsumption {
 fn consume_marked_periodic_goal(
     subscription: &NotificationSubscription,
     occurrence: Option<&NotificationOccurrence>,
+    message_created_ms: Option<i64>,
     message_was_unread: bool,
     consumed_ms: Option<i64>,
 ) -> Option<SubscriptionConsumption> {
@@ -661,7 +662,13 @@ fn consume_marked_periodic_goal(
     let occurrence = occurrence?;
     let current_occurrence = goal_deadline_key(subscription)
         .is_some_and(|(_, _, trigger)| trigger == occurrence.trigger_ms);
-    if subscription.status != "armed"
+    // An expired schedule can still own one unread occurrence issued while it
+    // was armed. The message timestamp at or after the trigger identifies that
+    // live occurrence; an older retained marker cannot reactivate history.
+    let issued_occurrence = message_created_ms
+        .is_some_and(|created_ms| created_ms >= occurrence.trigger_ms);
+    if (subscription.status != "armed"
+        && !(subscription.status == "expired" && issued_occurrence))
         || !message_was_unread
         || occurrence.subscription_id != subscription.id
         || occurrence.consumed_ms.is_some()
@@ -1042,6 +1049,9 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     _ => None,
                 };
                 for id in ids {
+                    let message_created_ms = simulated_msgs
+                        .get(id)
+                        .map(|message| message.created_ms);
                     let message_was_unread = simulated_msgs
                         .get(id)
                         .is_some_and(|message| message.state != "read");
@@ -1065,6 +1075,7 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     if let Some(consumed) = consume_marked_periodic_goal(
                         &subscription,
                         simulated_occurrences.get(id),
+                        message_created_ms,
                         message_was_unread,
                         read_ms,
                     ) {

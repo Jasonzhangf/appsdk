@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -207,10 +208,210 @@ fn collab_bin() -> std::path::PathBuf {
         .unwrap_or_else(|| "collab".into())
 }
 
-fn call(name: &str, args: &Value) -> Result<String, String> {
+fn executor_thread(meta: &Value) -> Result<String, String> {
+    const META_KEYS: &[&str] = &[
+        "openai/threadId",
+        "openai/thread_id",
+        "codexThreadId",
+        "codex_thread_id",
+        "threadId",
+        "thread_id",
+    ];
+    let mut threads = Vec::new();
+    for key in META_KEYS {
+        if let Some(value) = meta.get(*key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                threads.push(value.to_owned());
+            }
+        }
+    }
+    if let Some(raw) = meta.get("x-codex-turn-metadata") {
+        let parsed;
+        let turn_metadata = if let Some(raw) = raw.as_str() {
+            parsed = serde_json::from_str::<Value>(raw).map_err(|_| {
+                "DESKTOP_CALLER_FACTS_AMBIGUOUS: x-codex-turn-metadata is not valid JSON"
+            })?;
+            &parsed
+        } else {
+            raw
+        };
+        if let Some(value) = turn_metadata.get("thread_id").and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                threads.push(value.to_owned());
+            }
+        }
+    }
+    if let Some(value) = meta
+        .get("thread")
+        .and_then(|thread| thread.get("id"))
+        .and_then(Value::as_str)
+    {
+        if !value.trim().is_empty() {
+            threads.push(value.to_owned());
+        }
+    }
+    threads.sort();
+    threads.dedup();
+    match threads.len() {
+        0 => Err("DESKTOP_BRIDGE_CONTEXT_REQUIRED: executor thread metadata is missing".into()),
+        1 => Ok(threads.remove(0)),
+        _ => Err("DESKTOP_CALLER_FACTS_AMBIGUOUS: conflicting executor thread metadata".into()),
+    }
+}
+
+/// The managed Desktop host launcher reports itself through the originator
+/// override. The launcher's denylist excludes the standalone CLI and TUI, so
+/// only the two Desktop values own the caller-facts path.
+fn managed_desktop_host() -> bool {
+    matches!(
+        std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").as_deref(),
+        Ok("Codex") | Ok("Codex Desktop")
+    )
+}
+
+fn desktop_caller_facts(params: &Value, args: &Value) -> Result<(String, String), String> {
+    let meta = params.get("_meta").cloned().unwrap_or_default();
+    let thread = executor_thread(&meta)?;
+    if args.get("provide").is_some() {
+        return Err(
+            "DESKTOP_CALLER_FACTS_REJECTED: managed Desktop caller facts come only from the current invocation"
+                .into(),
+        );
+    }
+    let pipe = std::env::var("CODEX_APP_TOOLS_PIPE_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: current host pipe is missing")?;
+    let cwd = std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .map_err(|_| "DESKTOP_BRIDGE_SCOPE_INVALID: current project directory".to_string())?;
+    let generation = std::env::var("COLLAB_DESKTOP_BRIDGE_RUNTIME_GENERATION")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    let session = resolve_desktop_session(&pipe, &cwd, &thread, generation)?;
+    Ok((session, thread))
+}
+
+fn resolve_desktop_session(
+    pipe: &str,
+    cwd: &std::path::Path,
+    thread: &str,
+    expected_generation: Option<u64>,
+) -> Result<String, String> {
+    let state_root = std::env::var_os("COLLAB_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| std::path::PathBuf::from(home).join(".collab"))
+        })
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: Collab state root is missing")?;
+    let runtime_directory = state_root.join("runtime").join("desktop");
+    let mut stream = bridge_socket(&runtime_directory, pipe)?;
+    let request = serde_json::to_vec(&json!({
+        "id": format!("mcp-{}", std::process::id()),
+        "op": "resolve",
+        "thread_id": thread,
+        "cwd": cwd,
+    }))
+    .map_err(|error| error.to_string())?;
+    let mut frame = Vec::with_capacity(4 + request.len());
+    frame.extend_from_slice(&(request.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&request);
+    stream
+        .write_all(&frame)
+        .and_then(|_| stream.flush())
+        .map_err(|_| {
+            "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge request failed".to_string()
+        })?;
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge response failed".to_string()
+    })?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length == 0 || length > 8 * 1024 * 1024 {
+        return Err("DESKTOP_BRIDGE_SESSION_REQUIRED: invalid trusted bridge response".into());
+    }
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge response failed".to_string()
+    })?;
+    let response: Value = serde_json::from_slice(&body).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: invalid trusted bridge response".to_string()
+    })?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge rejected the caller")
+            .to_owned());
+    }
+    if let Some(expected) = expected_generation {
+        if response.get("runtime_generation").and_then(Value::as_u64) != Some(expected) {
+            return Err("DESKTOP_BRIDGE_UNAVAILABLE: bridge lifecycle changed".into());
+        }
+    }
+    response
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|session| !session.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or("DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge returned no session".into())
+}
+
+fn bridge_socket(directory: &std::path::Path, pipe: &str) -> Result<UnixStream, String> {
+    use sha2::{Digest, Sha256};
+    let runtime_key: String = Sha256::digest(pipe.as_bytes())[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let direct = directory.join(format!("pipe-{runtime_key}.sock"));
+    UnixStream::connect(direct).map_err(|_| {
+        "DESKTOP_BRIDGE_SESSION_REQUIRED: trusted bridge resolver is unavailable".into()
+    })
+}
+
+fn set_desktop_context_facts(args: &mut Value, session: &str, thread: &str) -> Result<(), String> {
+    let mut provide = args
+        .get("provide")
+        .and_then(|value| match value {
+            Value::Object(object) => Some(object.clone()),
+            Value::String(raw) => serde_json::from_str::<Value>(raw)
+                .ok()?
+                .as_object()
+                .cloned(),
+            _ => None,
+        })
+        .unwrap_or_default();
+    provide.insert("session_id".into(), json!(session));
+    provide.insert("thread_id".into(), json!(thread));
+    args.as_object_mut()
+        .ok_or("MCP arguments must be an object")?
+        .insert("provide".into(), Value::Object(provide));
+    Ok(())
+}
+
+fn add_caller_facts_to_command(command: &mut Command, facts: Option<&Value>) {
+    let Some(facts) = facts else {
+        return;
+    };
+    let Some(session) = facts.get("session_id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(thread) = facts.get("thread_id").and_then(Value::as_str) else {
+        return;
+    };
+    command
+        .env("CODEX_SESSION_ID", session)
+        .env("CODEX_THREAD_ID", thread);
+}
+
+fn call(name: &str, args: &Value, caller_facts: Option<&Value>) -> Result<String, String> {
     let argv = build_argv(name, args)?;
     let mut command = Command::new(collab_bin());
     command.args(argv);
+    add_caller_facts_to_command(&mut command, caller_facts);
     let output = command.output().map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -276,6 +477,7 @@ fn peer_lifecycle_cli_output(success: bool, stdout: &str, stderr: &str) -> Resul
 fn spawn_context_call(
     name: &str,
     args: &Value,
+    caller_facts: Option<&Value>,
 ) -> Result<(u32, mpsc::Receiver<Result<Option<String>, String>>), String> {
     let name = name.to_owned();
     let argv = build_argv(&name, args)?;
@@ -285,6 +487,7 @@ fn spawn_context_call(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    add_caller_facts_to_command(&mut command, caller_facts);
     let mut child = command.spawn().map_err(|error| error.to_string())?;
     let pid = child.id();
     let mut stdout = child
@@ -896,6 +1099,50 @@ fn write_message(out: &mut impl Write, frame: Frame, message: &Value) -> io::Res
     out.flush()
 }
 
+fn normalize_desktop_caller_facts(req: &Value) -> Result<Value, String> {
+    if req.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return Ok(req.clone());
+    }
+    let mut request = req.clone();
+    // Caller facts are adapter-owned. A client-supplied value is never honored,
+    // so strip it here and keep only the launcher-derived insertion below.
+    if let Some(object) = request.get_mut("params").and_then(Value::as_object_mut) {
+        object.remove("_collab_caller_facts");
+    }
+    let params = request.get("params").cloned().unwrap_or_default();
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    if !matches!(
+        name,
+        "collab_context"
+            | "collab_recv"
+            | "collab_task_status"
+            | "collab_board_show"
+            | "collab_board_describe"
+    ) {
+        return Ok(request);
+    }
+    let mut args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if managed_desktop_host() {
+        let (session, thread) = desktop_caller_facts(&params, &args)?;
+        if name == "collab_context" {
+            set_desktop_context_facts(&mut args, &session, &thread)?;
+        }
+        if let Some(object) = request.get_mut("params").and_then(Value::as_object_mut) {
+            object.insert(
+                "_collab_caller_facts".into(),
+                json!({"session_id":session,"thread_id":thread}),
+            );
+        }
+    }
+    if let Some(object) = request.get_mut("params").and_then(Value::as_object_mut) {
+        object.insert("arguments".into(), args);
+    }
+    Ok(request)
+}
+
 fn handle(req: &Value) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     if method.starts_with("notifications/") {
@@ -924,7 +1171,8 @@ fn handle(req: &Value) -> Option<Value> {
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match call(name, &args) {
+            let caller_facts = params.get("_collab_caller_facts");
+            match call(name, &args, caller_facts) {
                 Ok(text) => response(
                     &id,
                     json!({"content":[{"type":"text","text":text}],"isError":false}),
@@ -1027,6 +1275,17 @@ fn main() {
                     }
                     continue;
                 }
+                let req = match normalize_desktop_caller_facts(&req) {
+                    Ok(req) => req,
+                    Err(error) => {
+                        let reply = response(
+                            req.get("id").unwrap_or(&Value::Null),
+                            json!({"content":[{"type":"text","text":error}],"isError":true}),
+                        );
+                        let _ = write_message(&mut out, frame, &reply);
+                        continue;
+                    }
+                };
                 if method == "tools/call" {
                     let params = req.get("params").cloned().unwrap_or_default();
                     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -1036,7 +1295,8 @@ fn main() {
                             .get("arguments")
                             .cloned()
                             .unwrap_or_else(|| json!({}));
-                        match spawn_context_call(name, &args) {
+                        let caller_facts = params.get("_collab_caller_facts");
+                        match spawn_context_call(name, &args, caller_facts) {
                             Ok((pid, receiver)) => {
                                 let id_for_thread = id.clone();
                                 let tx = event_tx.clone();

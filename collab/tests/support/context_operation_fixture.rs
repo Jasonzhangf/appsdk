@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -382,7 +383,12 @@ impl Fixture {
             self.pane_cli_script_command_with_binary("client", &self.tmux_socket, pane, &agy);
         command
             .arg("--")
-            .args(["-c", "\"$@\"; s=$?; exit $s", "_", self.binary.to_str().expect("binary path")])
+            .args([
+                "-c",
+                "\"$@\"; s=$?; exit $s",
+                "_",
+                self.binary.to_str().expect("binary path"),
+            ])
             .args(args)
             .env("HOME", self.root.join("home"))
             .env("CODEX_HOME", self.root.join("home"))
@@ -467,10 +473,14 @@ impl Fixture {
                 .expect("spawn isolated collab serve"),
         );
         let socket = self.host_state.join("server.sock");
+        // The daemon answers Ping in well under a second once scheduled, but a
+        // parallel test run can starve that long: the readiness wait shares the
+        // machine with every other lane's daemons and MCP children. Wait like
+        // the other fixtures do, instead of mistaking contention for a hang.
         daemon_readiness::wait_for_ping(
             self.daemon.as_mut().unwrap(),
             &socket,
-            Duration::from_secs(10),
+            Duration::from_secs(30),
         );
     }
 
@@ -589,20 +599,32 @@ impl Fixture {
 
     pub fn project_state_for(&self, project: &Path, app_scope: &str) -> PathBuf {
         let root = std::fs::canonicalize(project).unwrap();
-        let routes: Vec<Value> = serde_json::from_slice(&std::fs::read(self.host_routes()).unwrap()).unwrap();
-        let matches: Vec<_> = routes.iter().filter(|route|
-            route["project_scope"] == root.to_string_lossy().as_ref()
-                && route["app_scope_id"] == app_scope).collect();
+        let routes: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(self.host_routes()).unwrap()).unwrap();
+        let matches: Vec<_> = routes
+            .iter()
+            .filter(|route| {
+                route["project_scope"] == root.to_string_lossy().as_ref()
+                    && route["app_scope_id"] == app_scope
+            })
+            .collect();
         assert_eq!(matches.len(), 1, "one exact current project/app route");
-        PathBuf::from(matches[0]["storage_root"].as_str().unwrap()).join(".agent-collab/server/state.json")
+        PathBuf::from(matches[0]["storage_root"].as_str().unwrap())
+            .join(".agent-collab/server/state.json")
     }
 
     pub fn current_state(&self) -> Value {
-        serde_json::from_slice::<Value>(&std::fs::read(self.project_state()).unwrap()).unwrap()["state"].clone()
+        serde_json::from_slice::<Value>(&std::fs::read(self.project_state()).unwrap()).unwrap()
+            ["state"]
+            .clone()
     }
 
     pub fn current_state_for(&self, project: &Path, app_scope: &str) -> Value {
-        serde_json::from_slice::<Value>(&std::fs::read(self.project_state_for(project, app_scope)).unwrap()).unwrap()["state"].clone()
+        serde_json::from_slice::<Value>(
+            &std::fs::read(self.project_state_for(project, app_scope)).unwrap(),
+        )
+        .unwrap()["state"]
+            .clone()
     }
 
     /// Compare current control/business resources, including explicit absence.
@@ -633,18 +655,36 @@ impl Fixture {
             let entries = match std::fs::read_dir(path) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    values.insert(path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), Value::Null);
+                    values.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                        Value::Null,
+                    );
                     return;
                 }
-                Err(error) => panic!("read current resource directory {}: {error}", path.display()),
+                Err(error) => panic!(
+                    "read current resource directory {}: {error}",
+                    path.display()
+                ),
             };
             for entry in entries {
                 let entry = entry.unwrap();
                 let path = entry.path();
                 if entry.file_type().unwrap().is_dir() {
                     visit(root, &path, values);
-                } else if matches!(entry.file_name().to_str(), Some("state.json" | "identity.json")) {
-                    values.insert(path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), read(&path));
+                } else if matches!(
+                    entry.file_name().to_str(),
+                    Some("state.json" | "identity.json")
+                ) {
+                    values.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                        read(&path),
+                    );
                 }
             }
         }
@@ -768,7 +808,6 @@ impl Fixture {
         }
         self.start_daemon_with(command);
     }
-
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1150,6 +1189,90 @@ pub struct Mcp {
     stdin: Option<ChildStdin>,
     replies: Receiver<Result<Value, String>>,
     reader: Option<JoinHandle<()>>,
+    executor_facts: Option<(String, String)>,
+    desktop_host: Option<Arc<AtomicBool>>,
+}
+
+/// Stand in for the native Desktop host on one bridge pipe. The host keeps a
+/// connection per client and answers every frame on it, so the shared bridge
+/// service stays connected across its capability probe and its thread
+/// verification.
+fn serve_desktop_host(pipe: &Path, root: &Path) -> Arc<AtomicBool> {
+    let listener = UnixListener::bind(pipe).expect("bind test host pipe");
+    listener
+        .set_nonblocking(true)
+        .expect("set test host pipe nonblocking");
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let host_root = root.to_string_lossy().into_owned();
+    std::thread::spawn(move || {
+        while !worker_stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
+                    let host_root = host_root.clone();
+                    std::thread::spawn(move || loop {
+                        let mut length = [0_u8; 4];
+                        if stream.read_exact(&mut length).is_err() {
+                            break;
+                        }
+                        let mut body = vec![0_u8; u32::from_le_bytes(length) as usize];
+                        if stream.read_exact(&mut body).is_err() {
+                            break;
+                        }
+                        let request: Value = serde_json::from_slice(&body).unwrap_or_default();
+                        let response = match request["method"].as_str() {
+                            Some("tools/list") => json!({
+                                "id": request["id"],
+                                "result": {"tools":[
+                                    {"name":"read_thread","namespace":"codex_app"},
+                                    {"name":"send_message_to_thread","namespace":"codex_app"}
+                                ]}
+                            }),
+                            Some("tools/call") if request["params"]["tool"] == "read_thread" => {
+                                let id = request["params"]["arguments"]["threadId"]
+                                    .as_str()
+                                    .unwrap_or_default();
+                                json!({
+                                    "id": request["id"],
+                                    "result": {
+                                        "success": true,
+                                        "contentItems": [{
+                                            "type": "inputText",
+                                            "text": serde_json::to_string(&json!({
+                                                "schemaVersion": 1,
+                                                "thread": {"id": id, "cwd": host_root, "status": {"type":"idle"}},
+                                                "turns": [{"id":"observed-turn","status":"completed"}]
+                                            })).expect("serialize host thread")
+                                        }]
+                                    }
+                                })
+                            }
+                            _ => {
+                                json!({"id": request["id"], "result": {"success": true, "contentItems": []}})
+                            }
+                        };
+                        let bytes = serde_json::to_vec(&response).expect("serialize host reply");
+                        if stream
+                            .write_all(&(bytes.len() as u32).to_le_bytes())
+                            .is_err()
+                            || stream.write_all(&bytes).is_err()
+                            || stream.flush().is_err()
+                        {
+                            break;
+                        }
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    stop
 }
 
 impl Mcp {
@@ -1185,7 +1308,109 @@ impl Mcp {
                 .env_remove("CODEX_SESSION_ID")
                 .env_remove("CODEX_THREAD_ID");
         }
-        let mut child = command.spawn().expect("launch real collab-mcp");
+        Self::spawn(command, None, None)
+    }
+
+    /// The directly launched managed Desktop shape: no launcher wrapper runs
+    /// beside it, so the adapter resolves the session from the persisted
+    /// enrollment for this host pipe and project. `_meta` still carries the
+    /// executor thread, exactly as the host sends it.
+    pub fn start_with_executor_facts(fixture: &Fixture, session: &str, thread: &str) -> Self {
+        let mut command = Command::new(collab_test_mcp_binary());
+        command
+            .current_dir(&fixture.root)
+            .env("COLLAB_STATE_DIR", &fixture.host_state)
+            .env("CODEX_HOME", fixture.root.join("home"))
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+            .env("CODEX_SESSION_ID", session)
+            .env("CODEX_APP_TOOLS_PIPE_PATH", fixture.root.join("host.pipe"))
+            .env("COLLAB_BIN", &fixture.binary)
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("DSH_SESSION_ID")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Self::spawn(command, Some((session.to_owned(), thread.to_owned())), None)
+    }
+
+    pub fn start_managed_desktop(fixture: &Fixture, pipe: &Path, thread: &str) -> Self {
+        Self::start_managed_desktop_with_environment_facts(fixture, pipe, None, thread)
+    }
+
+    pub fn start_managed_desktop_without_bridge(
+        fixture: &Fixture,
+        pipe: &Path,
+        session: Option<&str>,
+        thread: &str,
+    ) -> Self {
+        Self::launch_managed_desktop(fixture, pipe, session, thread, false)
+    }
+
+    pub fn start_managed_desktop_with_environment_facts(
+        fixture: &Fixture,
+        pipe: &Path,
+        session: Option<&str>,
+        thread: &str,
+    ) -> Self {
+        Self::launch_managed_desktop(fixture, pipe, session, thread, true)
+    }
+
+    fn launch_managed_desktop(
+        fixture: &Fixture,
+        pipe: &Path,
+        session: Option<&str>,
+        thread: &str,
+        serve_host: bool,
+    ) -> Self {
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/collab-desktop-mcp.mjs");
+        // A missing bridge needs no listener. Do not create the host pipe: the
+        // wrapper's startup check must remain bounded and fail closed.
+        let desktop_host = serve_host.then(|| serve_desktop_host(pipe, &fixture.root));
+        std::thread::sleep(Duration::from_millis(50));
+        if !serve_host {
+            std::fs::remove_file(pipe).ok();
+        }
+        let mut command = Command::new("node");
+        command
+            .current_dir(&fixture.root)
+            .arg(script)
+            .env("COLLAB_STATE_DIR", &fixture.host_state)
+            .env("CODEX_HOME", fixture.root.join("home"))
+            .env("COLLAB_BIN", &fixture.binary)
+            .env("COLLAB_MCP_BIN", collab_test_mcp_binary())
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex")
+            .env("CODEX_APP_TOOLS_PIPE_PATH", pipe)
+            .env("CODEX_MCP_NODE_PATH", "node")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("DSH_SESSION_ID")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(session) = session {
+            command.env("CODEX_SESSION_ID", session);
+        }
+        Self::spawn(
+            command,
+            Some((session.unwrap_or_default().to_owned(), thread.to_owned())),
+            desktop_host,
+        )
+    }
+
+    fn spawn(
+        mut command: Command,
+        executor_facts: Option<(String, String)>,
+        desktop_host: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        let mut child = command.spawn().expect("launch MCP process");
         let stdin = child.stdin.take().expect("MCP stdin");
         let stdout = child.stdout.take().expect("MCP stdout");
         let (sender, replies) = mpsc::channel();
@@ -1204,7 +1429,77 @@ impl Mcp {
             stdin: Some(stdin),
             replies,
             reader: Some(reader),
+            executor_facts,
+            desktop_host,
         }
+    }
+
+    /// Send tool-call params verbatim so a test can exercise adapter-only
+    /// request fields exactly as a client would send them.
+    pub fn call_tool_raw_params(&mut self, id: u64, params: Value) -> Value {
+        let stdin = self.stdin.as_mut().expect("MCP stdin is open");
+        serde_json::to_writer(
+            &mut *stdin,
+            &json!({
+                "jsonrpc":"2.0",
+                "id":id,
+                "method":"tools/call",
+                "params":params
+            }),
+        )
+        .expect("serialize MCP request");
+        writeln!(stdin).expect("write MCP request");
+        stdin.flush().expect("flush MCP request");
+        let reply = self
+            .replies
+            .recv_timeout(Duration::from_secs(30))
+            .expect("MCP returns a bounded response")
+            .expect("MCP returns valid JSON");
+        assert_eq!(reply["id"], id, "{reply}");
+        reply["result"].clone()
+    }
+
+    pub fn call_tool(&mut self, id: u64, name: &str, arguments: Value) -> Value {
+        let meta = self
+            .executor_facts
+            .as_ref()
+            .map(|(_, thread)| {
+                json!({
+                    "openai/threadId":thread,
+                    "x-codex-turn-metadata":{"thread_id":thread}
+                })
+            })
+            .unwrap_or(Value::Null);
+        self.call_tool_with_meta(id, name, arguments, meta)
+    }
+
+    pub fn call_tool_with_meta(
+        &mut self,
+        id: u64,
+        name: &str,
+        arguments: Value,
+        meta: Value,
+    ) -> Value {
+        let stdin = self.stdin.as_mut().expect("MCP stdin is open");
+        serde_json::to_writer(
+            &mut *stdin,
+            &json!({
+                "jsonrpc":"2.0",
+                "id":id,
+                "method":"tools/call",
+                "params":{"name":name,"arguments":arguments,"_meta":meta}
+            }),
+        )
+        .expect("serialize MCP request");
+        writeln!(stdin).expect("write MCP request");
+        stdin.flush().expect("flush MCP request");
+        let reply = self
+            .replies
+            .recv_timeout(Duration::from_secs(30))
+            .expect("MCP returns a bounded response")
+            .expect("MCP returns valid JSON");
+        assert_eq!(reply["id"], id, "{reply}");
+        reply["result"].clone()
     }
 
     pub fn send_context(&mut self, id: u64, arguments: Value) {
@@ -1215,7 +1510,10 @@ impl Mcp {
                 "jsonrpc":"2.0",
                 "id":id,
                 "method":"tools/call",
-                "params":{"name":"collab_context","arguments":arguments}
+                "params":{"name":"collab_context","arguments":arguments,"_meta":self.executor_facts.as_ref().map(|(session, thread)| json!({
+                    "openai/threadId":thread,
+                    "x-codex-turn-metadata":{"thread_id":thread}
+                })).unwrap_or(Value::Null)}
             }),
         )
         .expect("serialize MCP request");
@@ -1260,6 +1558,9 @@ impl Mcp {
     }
 
     pub fn finish(mut self) {
+        if let Some(host) = self.desktop_host.take() {
+            host.store(true, Ordering::Relaxed);
+        }
         self.stdin.take();
         let status = self.child.wait().expect("wait for MCP process");
         assert!(status.success(), "MCP process must exit cleanly: {status}");

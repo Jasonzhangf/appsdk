@@ -177,7 +177,11 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-reviewer、planner、裁判等是职责，不要求存在同名 agent 或固定角色标签。
+项目有可承接本任务的 architect 时，默认由同一 architect 出计划并 review 执行结果。
+Jenny 指定一个或多个 peer 为执行者。只有用户明确要求时，architect 才承担具体执行，
+并由其他人 review 该 architect 的实现。用户另有分工要求时按其要求执行。
+
+任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
 独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review`/独立
 Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 peer 承接 review，
 若仍有 reviewer 空闲就让它 review。每个任务默认用自己的独立 reviewer 验收；
@@ -191,7 +195,7 @@ Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 
 工作角色明确为 `worker`/`executor`，或任务合同明确指定直接执行时，peer 才在合同
 边界内直接执行，不得仅因 peer 身份强制先派子 worker。`patrol` 承担独立常驻检查，
 不接收 manager/master 的临时开发派单；`memory` 提炼事实和经验并修正失效结论；
-`architect` 产出架构计划及代码准入文件。默认职责正文由源码
+`architect` 产出计划和 review 文件。默认职责正文由源码
 [workflow-templates.json](references/workflow-templates.json) 编译，`collab context`
 只按当前身份、角色、精确 override 和任务边界投影；本入口不复制默认正文。
 
@@ -202,8 +206,7 @@ Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 
 本身不授权范围外 backlog 或生产动作。
 
 设计、规划与审查角色按
-[文件交接合同](operations.md#设计规划与审查角色的文件交接合同)产出并交接落盘文件，
-不直接执行实现。
+[文件交接合同](operations.md#设计规划与审查角色的文件交接合同)产出并交接落盘文件。
 
 ### 跨项目投递与协作边界
 

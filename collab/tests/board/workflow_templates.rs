@@ -810,8 +810,8 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
             "architect",
             [
                 "effective requirements",
-                "single implementation owner",
-                "planning, implementation, and final review separate",
+                "implementation owner for each scope",
+                "own both planning and review for the assigned task",
             ],
         ),
     ];
@@ -1031,7 +1031,17 @@ fn master_role_brief_defaults_to_independent_review_with_three_condition_excepti
     assert!(
         contains_ci(
             &text,
-            "Treat reviewer as a duty, not a required agent name or specialty label. Default to the task's own independent Codex OAuth reviewer using codex-auto-review. If that independent entry is unavailable, assign an available ordinary peer; use an available reviewer when one can take the work. Combine related release issues into one architecture review. Master Jenny is not the default reviewer and does not perform routine review. Only when no idle worker exists, the subagent review entry has actually failed and no other peer can take the review may master temporarily stand in."
+            "assign the same architect to plan and review it and designate one or more peer executors with non-overlapping scopes"
+        ),
+        "master role_brief must route planning and review to the architect and implementation to peers: {text}"
+    );
+    assert!(
+        contains_ci(
+            &text,
+            "For tasks without an assigned architect reviewer, default to the task's own independent Codex OAuth reviewer using codex-auto-review."
+        ) && contains_ci(
+            &text,
+            "Only when no idle worker exists, the subagent review entry has actually failed and no other peer can take the review may master temporarily stand in."
         ),
         "master role_brief must carry the current independent-review default and three-condition exception: {text}"
     );
@@ -1192,8 +1202,7 @@ fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
         );
     }
 
-    // Mixing the architect with the worker keeps both work texts and keeps
-    // planning, implementation and final review separated.
+    // Combined specialties preserve the architect's explicit execution boundary.
     let mixed = fixture.run_public(&["context", "--work-roles", "architect,worker"], THREAD_B);
     let mixed_text = role_projection_text(&mixed);
     assert!(
@@ -1201,8 +1210,10 @@ fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
         "patrol specialization boundaries are unrelated to this mix"
     );
     for phrase in [
-        "planning, implementation, and final review separate",
+        "own both planning and review for the assigned task",
         "produce a detailed architecture or plan file on disk",
+        "only implement when the user explicitly asks you to",
+        "keep a separate reviewer for any work you implement",
         "execute the actual work",
     ] {
         assert!(

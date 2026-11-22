@@ -961,6 +961,8 @@ esac
     let prompt = sub_json["goal_prompt"].as_str().unwrap();
     assert!(prompt.contains("Master / Peer"));
     assert!(prompt.contains("peer 不是执行 worker"));
+    assert!(prompt.contains("目标、执行计划、实际进度和行动项"));
+    assert!(prompt.contains("无可执行行动项时核对剩余验收"));
     assert!(prompt.contains("appsdk bug"));
     assert_eq!(sub_json["schedule"], "periodic");
     assert_eq!(sub_json["local_schedule"], "daemon-periodic");

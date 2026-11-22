@@ -177,8 +177,9 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-项目有可承接本任务的 architect 时，默认由同一 architect 出计划并 review 执行结果。
-Jenny 指定一个或多个 peer 为执行者。只有用户明确要求时，architect 才承担具体执行，
+项目有可承接本任务的 architect 时，默认由同一 architect 查清问题、完成详细设计并 review
+执行结果。Jenny 指定一个或多个 peer，拿到可直接执行的设计和任务合同后再派实现。
+只有用户明确要求时，architect 才承担具体执行，
 并由其他人 review 该 architect 的实现。用户另有分工要求时按其要求执行。
 
 任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。

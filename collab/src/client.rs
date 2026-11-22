@@ -1098,11 +1098,7 @@ fn readiness_probe_with_timeout(sock: &Path, timeout: Duration) -> io::Result<()
     let mut response = Vec::new();
     let mut reader = io::BufReader::new(&mut stream);
     loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out")
-            })?;
+        let remaining = remaining_ping_timeout(deadline)?;
         reader.get_ref().set_read_timeout(Some(remaining))?;
         let chunk = reader.fill_buf()?;
         if chunk.is_empty() {
@@ -1162,12 +1158,7 @@ fn write_ping_until<W: Write>(
     for part in [request, b"\n".as_slice()] {
         let mut remaining = part;
         while !remaining.is_empty() {
-            let timeout = deadline
-                .checked_duration_since(now())
-                .filter(|value| !value.is_zero())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out")
-                })?;
+            let timeout = remaining_ping_timeout_from(deadline, now())?;
             set_timeout(writer, timeout)?;
             match writer.write(remaining) {
                 Ok(0) => {
@@ -1182,14 +1173,26 @@ fn write_ping_until<W: Write>(
             }
         }
     }
-    let timeout = deadline
-        .checked_duration_since(now())
-        .filter(|value| !value.is_zero())
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out")
-        })?;
+    let timeout = remaining_ping_timeout_from(deadline, now())?;
     set_timeout(writer, timeout)?;
     writer.flush()
+}
+
+fn remaining_ping_timeout(deadline: Instant) -> io::Result<Duration> {
+    remaining_ping_timeout_from(deadline, Instant::now())
+}
+
+fn remaining_ping_timeout_from(deadline: Instant, now: Instant) -> io::Result<Duration> {
+    let remaining = deadline
+        .checked_duration_since(now)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out"))?;
+    if remaining < Duration::from_millis(1) {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "daemon readiness Ping timed out",
+        ));
+    }
+    Ok(remaining)
 }
 
 /// Check whether the daemon endpoint is accepting connections.

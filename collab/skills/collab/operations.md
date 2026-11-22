@@ -2181,15 +2181,16 @@ subscription, as part of bootstrap.
 在目标项目和当前 agent 会话中执行 `collab context`。宿主决定要报告的事实，
 不决定角色：任何宿主注册后默认是 peer；成为 master 只能由用户明确授权
 （`collab master promote --approval '…'` 或 `collab context --approve-grant`
-action=restore_master），或由已授权 master 委托。CLI 识别当前宿主，读取它提供的
-本次事实并提交给 daemon。daemon 按当前绑定和实时端点证据裁决。
+action=restore_master），或由已授权 master 委托。各宿主统一运行 `collab context`。
+CLI 按当前宿主从下表的来源收集本次事实，由 daemon 按当前绑定和实时端点证据裁决。
+代理使用自身原会话的执行入口，避免手动收集或混用其他宿主的注册字段。
 
 | 宿主 | 身份锚点 | 注册时报告的事实 | 不许做的事 |
 | --- | --- | --- | --- |
 | DSH | 当前 gateway session（`DSH_SESSION_ID`） | CLI 用本次 gateway session 查已有身份。首次建立通信时从 gateway 获取该 session 的控制能力；gateway 负责 Poll/Ack | 不从日志或 plist 猜 ID，不混报 Codex 或 tmux 字段 |
 | Codex TUI / CLI | 当前 agent session；用该 TUI 的已选适配器定位投递 | 原生 AppServer 提供 `session_id`、`thread_id`、`endpoint`、`namespace`。选用 tmux 时，daemon 从实时 iTerm2 pane 与 client TTY 核实所连 session。新旧角色显示名由 daemon 按原生 ID 执行并读回。 | 不用 tmux 的 `$N` 或内部 `%pane` 冒充 agent session 或 iTerm2 pane，不借用其他进程的 endpoint |
 | Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
-| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 用当前 agent 自己的执行工具在原有 Rex block 运行 `collab context`。该命令通过 Rex 原生接口取得本次 server、Rex session 和 block ID，并使用当前项目目录 | 禁止为身份命令 split、新建 pane、tab 或窗口，或借用其他 block、会话或身份。Rex session ID 和 AppServer 字段不用于代填 agent 身份 |
+| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 用当前 agent 自己的执行工具在原有 Rex block 运行 `collab context`。它沿原环境读取 `REX_SESSION`、`REX_BLOCK`，调用官方 `rex whoami --json --autostart=false` 获取 server endpoint，daemon 再用 Rex CLI 核验该 session 和 terminal block | 禁止为身份命令 split、新建 pane、tab 或窗口，或借用其他 block、会话或身份。Rex session ID 和 AppServer 字段不用于代填 agent 身份 |
 
 返回 `missing_facts` 时，`result.requires.fields` 列出缺项，`sources` 给出来源。
 普通注册把缺项交给当前宿主的维护者。`--provide` 用于依现有能力合同的非标准集成诊断。

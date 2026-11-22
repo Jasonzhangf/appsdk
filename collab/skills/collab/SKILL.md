@@ -37,7 +37,9 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 在要加入的项目目录、当前 agent 自己的会话中运行 `collab context`。
 在 Rex 中，直接用该 agent 自己当前会话的执行工具，在原有 block 获取或恢复身份。
 禁止为身份命令 split 或新建 pane、tab、窗口，也禁止借用其他 block 或会话执行。
-CLI 从当前宿主收集事实。看到 `missing_facts` 时，保留回执的
+tmux、Rex、DSH 和 Codex Desktop 使用同一个入口，由各宿主适配器收集本会话的事实。
+Rex 适配器读取当前会话的 `REX_SESSION` 和 `REX_BLOCK`，调用官方 Rex CLI 解析并核验
+当前端点后完成绑定。看到 `missing_facts` 时，保留回执的
 `result.requires.fields` 和 `result.requires.sources`，由所列来源的维护者补齐能力。
 普通注册继续使用同一条命令。成功时核对返回的
 `registered: true` 和自己的名字。各宿主的字段和取值入口见[注册手册](operations.md#宿主注册所需信息)。

@@ -35,6 +35,8 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 ### 首次注册与缺项提示
 
 在要加入的项目目录、当前 agent 自己的会话中运行 `collab context`。
+在 Rex 中，直接用该 agent 自己当前会话的执行工具，在原有 block 获取或恢复身份。
+禁止为身份命令 split 或新建 pane、tab、窗口，也禁止借用其他 block 或会话执行。
 CLI 从当前宿主收集事实。看到 `missing_facts` 时，保留回执的
 `result.requires.fields` 和 `result.requires.sources`，由所列来源的维护者补齐能力。
 普通注册继续使用同一条命令。成功时核对返回的
@@ -108,9 +110,8 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 同操作修改意图会返回 conflict。不确定结果不能换操作号盲发。
 显式恢复操作号当前用于远端发送。
 
-在当前 Rex block 运行 `collab context`。命令从当前宿主获取 agent 会话，并从 Rex
-原生接口获取 server、Rex session ID、block ID 和当前项目。返回缺项时，把原回执交给
-对应来源的维护者。
+Rex 身份获取和恢复沿用[当前 agent 会话入口](#首次注册与缺项提示)。命令从当前宿主
+获取 agent 会话，并从 Rex 原生接口获取 server、Rex session ID、block ID 和当前项目。
 Rex 的 working、blocked/question 和断连事件投影到 activity。
 输入 ACK、Enter 接受和 activity 都不能代替正式 `collab recv` 消费。
 服务 instance 变化后刷新绑定，再继续输入。

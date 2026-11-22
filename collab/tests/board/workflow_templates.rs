@@ -86,6 +86,11 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
                 && rule.contains("Use the cadence specified in the contract when it differs")
                 && rule.contains("On each wake, advance the task")
         }), "{label}: execution wake guidance is missing");
+        let context_instruction = brief["communication_recovery"]["steps"][0]
+            .as_str()
+            .expect("identity recovery instruction");
+        assert!(context_instruction.contains("In Rex, use the agent's existing block"));
+        assert!(context_instruction.contains("Do not split or open a pane, tab, or window"));
         let role_text = brief.to_string();
         for retired_rule in [
             "report routinely",

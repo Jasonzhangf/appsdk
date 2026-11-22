@@ -2189,7 +2189,7 @@ action=restore_master），或由已授权 master 委托。CLI 识别当前宿�
 | DSH | 当前 gateway session（`DSH_SESSION_ID`） | CLI 用本次 gateway session 查已有身份。首次建立通信时从 gateway 获取该 session 的控制能力；gateway 负责 Poll/Ack | 不从日志或 plist 猜 ID，不混报 Codex 或 tmux 字段 |
 | Codex TUI / CLI | 当前 agent session；用该 TUI 的已选适配器定位投递 | 原生 AppServer 提供 `session_id`、`thread_id`、`endpoint`、`namespace`。选用 tmux 时，daemon 从实时 iTerm2 pane 与 client TTY 核实所连 session。新旧角色显示名由 daemon 按原生 ID 执行并读回。 | 不用 tmux 的 `$N` 或内部 `%pane` 冒充 agent session 或 iTerm2 pane，不借用其他进程的 endpoint |
 | Codex Desktop | 当前 agent sessionID；native thread 定位通信 | 普通 `collab context` 自动接入 runtime 共享 bridge，由 native host 核实 thread/cwd 并登记；不需要先调用 MCP | 不手填 socket 或执行 turn，不猜 AppServer endpoint；daemon 只连 bridge UDS |
-| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 在当前 block 运行 `collab context`。该命令通过 Rex 原生接口取得本次 server、Rex session 和 block ID，并使用当前项目目录 | 不把 Rex session 当作 agent session，不混入 AppServer thread/endpoint/namespace |
+| Rex | 当前 agent 的 `session_id`；Rex 终端地址单独绑定 | 用当前 agent 自己的执行工具在原有 Rex block 运行 `collab context`。该命令通过 Rex 原生接口取得本次 server、Rex session 和 block ID，并使用当前项目目录 | 禁止为身份命令 split、新建 pane、tab 或窗口，或借用其他 block、会话或身份。Rex session ID 和 AppServer 字段不用于代填 agent 身份 |
 
 返回 `missing_facts` 时，`result.requires.fields` 列出缺项，`sources` 给出来源。
 普通注册把缺项交给当前宿主的维护者。`--provide` 用于依现有能力合同的非标准集成诊断。
@@ -2204,9 +2204,9 @@ action=restore_master），或由已授权 master 委托。CLI 识别当前宿�
 新 session 完成接入后，离线同名会话可被接替。daemon 按精确 session ID 更新当前绑定，
 把旧会话改回数字名。当前同名端点仍在线时，按回执取得本次明确接替确认后再换绑。
 物理改名失败时，读取回执中的 `physical_anchor` 结果。已提交的逻辑身份继续有效。
-如果 Rex 中收到 `REX_EXECUTION_CALLER_MISMATCH`，保留原错误并检查当前 Codex
-的执行归属。共享 AppServer 的 PID 可能与前台 TUI 不同。新建独立 Rex TUI 时可用
-`codex --no-daemon`，再从该会话执行 `collab context`。
+如果 Rex 返回 `REX_EXECUTION_CALLER_MISMATCH` 或当前调用缺少身份事实，保留原始回执，
+交给该宿主的维护者核对当前 agent 的执行归属。能力恢复后只在同一 agent 的原有 block
+重试。当前会话无法取得身份时，继续无需该身份的已授权工作。
 
 DSH 在 tmux 中运行时仍使用 gateway session 识别当前执行者。pane 只定位观测。
 普通身份恢复读取持久身份与绑定，

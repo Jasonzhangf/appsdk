@@ -903,7 +903,8 @@ fn dispatch_with_route_context_bound(
             token,
             target_id,
             lines,
-        } => handle_worker_snapshot(server, worker_id, token, target_id, lines),
+            capture,
+        } => handle_worker_snapshot(server, worker_id, token, target_id, lines, capture),
         Req::WorkerStatusJudgment { .. } => {
             Resp::err("WORKER_STATUS_JUDGMENT_REQUIRES_PROJECT_MANAGER")
         }

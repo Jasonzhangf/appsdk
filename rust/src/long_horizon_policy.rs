@@ -13,7 +13,8 @@ pub(crate) fn generate_long_horizon_goal_prompt(
 **执行边界**: `/goal` 和实现文档都不得声明 token、时间、上下文或轮次预算；只以目标文档中的完成条件和证据判断是否结束。
 
 RUN: `appsdk longhorizon show`
-THEN: 派发、解阻塞、或用证据收口。ACK 和摘要不是完成；仅真实外部依赖或未覆盖的授权才等待。
+THEN: 在原目标或任务记录维护目标、执行计划、实际进度和行动项。逐项关联验收或缺口，并写明负责人、动作、产物和完成证据。每次唤醒复核前次未清项并执行可做工作。
+无进展时记录卡点和已试路径，安排下一项核实、解阻或执行。无可执行行动项时核对剩余验收，补齐漏项、记录等待对象及恢复信号，或凭验收证据收口。其他独立工作继续。
 巡检只是兜底唤醒，不是执行依赖。登记或续订后立即继续当前可执行工作；不得以“等下一次唤醒”结束尚能推进的任务。未来 deadline、未收到唤醒或巡检服务不可用，都不阻塞已有授权内的工作。
 
 ## 1. 你的角色
@@ -40,12 +41,12 @@ THEN: 派发、解阻塞、或用证据收口。ACK 和摘要不是完成；仅�
 ## 6. 目标阻塞与项目仲裁
 - 只处理与本人目标有真实依赖的阻塞项；当前视图来自 `appsdk longhorizon show`，不另跑固定状态查询。项目范围的跨 owner 仲裁仍由 master 负责。
 - **阻塞须有证据并交给对应 owner**：peer 是受托范围的唯一交付负责人，派单或求助不转移责任。先调查、核实子 agent 限制并尝试已有授权内的解法；事实、接口和依赖问题交给负责该事实的 peer，架构、需求解释和设计取舍先交总设计师，范围、优先级、资源与跨 peer 冲突交 master，只有用户独占事实、新授权或硬约束变化才问用户。及时提交任务与受影响验收、真实失败入口和原错/证据路径、已尝试动作及结果、其他授权内路径为何不可行、外部依赖、所需决定和恢复条件。事实与假设分开；求助不要求先证明根因。待核实的阻塞不是停工批准，只暂停确实依赖或不安全的动作，继续其余工作，不等待别人替自己解决。
-- **master 核实后才认可阻塞**：不能直接相信 peer 的结论。独立检查或复现相关失败证据，核对权限、替代路径和影响范围。有确凿外部依赖或未覆盖决定才批准，并记录证据、受影响范围和恢复条件；证据不足退回继续调查。peer 仍负责交付，除非明确改派。不得为停掉提醒而强制关闭未完成任务。
+- **负责人先取证再处理**：执行者阻塞或停滞时，有 Rex/tmux 绑定就运行 `collab worker snapshot <id> --capture --lines 80` 查看原终端，即使状态显示 online 或 busy。核对实际失败证据、权限、替代路径和影响。只有真实外部依赖或未覆盖决定才按权限确认等待，记录负责人和恢复条件。架构任务中的设计决定、解阻和结果交回由 architect 与 peer 直接协调。项目级决定交 Jenny。
 - **AppSDK 框架缺陷**：按实际影响定级并经 canonical intake 判重登记，不能 hack 规避；缺陷报告本身不证明整个目标阻塞。继续未受影响工作，跨 owner 决策按上述路由与核实规则处理。
-- Worker 完成后督促其提交 solution 并关闭缺陷：`appsdk bug close <id> -m "Solution: ..."`。
+- 缺陷验收后由当前 owner 记录解决及证据，再走既有关闭入口 `appsdk bug close <id> -m "Solution: ..."`。
 
 ## 7. 结束条件
-当且仅当目标文档要求的结果和适用验收全部满足时，长程任务完成。完成后关闭本人目标调度和巡检；没有新任务且无可执行工作时同样关闭无意义的定时巡检，记录未完成目标的解除条件。保留新任务消息及必要事件接收；新任务到达后重新评估巡检范围。
+当目标文档要求的结果和适用验收均满足时，凭证据关闭本目标的有限调度和相关巡检。仍有未清项时，按上述路径补项、解阻或记录可恢复的等待。保留常驻巡检职责和新任务消息接收，按各自生命周期管理。
 "#,
         goal_path.display(),
         interval_str,
@@ -65,8 +66,8 @@ pub(crate) fn project_patrol_brief(role: ExecutionRole) -> String {
 
 （仅本项目 master / Jenny 适用；普通 peer 不 arm 项目巡检。）
 
-- **默认 arm 已完成**：`appsdk goal subscribe` 在初始化或恢复本人长程目标时，会确保本项目 `collab notify subscribe --event master-idle --subject project-patrol --every-ms 900000` 的 15 分钟巡检已 armed，并复用有效订阅、不重复创建。只读命令 `appsdk longhorizon show --json` 只投影真实 `patrol_armed` 与 `patrol_subscription_id`，绝不创建订阅，也不能拿投影当作已 arm 回执。
-- **每次巡检必须检查真实 worker 状态**：分别读每个 worker 的 `idle`、`busy`、`unknown`，不要只判断“非 busy”。同时核对 `collab status --all` 中未关闭 board 任务的所有权与每个任务的巡检取消状态。只有真实观测到 `idle` 且该任务未被本人取消时才继续；`busy` 跳过且不补发，`unknown`、`offline`、`absent` 记录具体缺口，不臆断唤醒。
+- **核对巡检回执**：`--event master-idle` 项目巡检沿已安装 Collab Skill 的 `project-patrol` 合同，复用有效订阅。以实际 `patrol_armed` 与 `patrol_subscription_id` 核对启动状态。
+- **每次巡检处理有证据的缺口**：核对 worker 状态、未关闭任务归属、订阅取消状态和上轮行动项结果。自动唤醒只针对满足条件的 idle 任务持有者。有任务阻塞或停滞时按上面的取证规则处理。把缺口绑定到原任务上的负责人、动作和复验条件，跟踪结果。
 - **维护逐 peer 任务清单并按可用性派发**：在项目现有 goal/task notes 记录每个 peer 的 goal、当前工作、变化、证据源与时间、剩余缺口和下一动作；每轮被动更新，包括无任务 peer，不把它当 board 或 live 状态。把已授权长程目标交给确认可用且无任务的 peer，跟踪接受与执行；peer 不可达、未知或不可用时保留该长程目标，把 ready 一次性执行或观察派给独立 `codex exec --profile gcm` subworker。未知不是 idle；无 ready 工作不发明任务。
 - **不 rearm 已取消任务**：peer 可取消其本人任务的 board 巡检，取消只停该任务的巡检，保留任务、direct-message 和其他订阅。巡检不得重新 arm 已被 peer 取消的任务；本人明确恢复后才恢复。
 - **有 CEO 时回报实质进度**：`collab ceo reply --subject "<项目进度>" <正文>`，正文必须含目标、已验收结果、剩余工作、有证据的阻塞和下一动作，不写无证据心跳，不按正文关键词猜测紧急程度。
@@ -128,7 +129,7 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 
 const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
-1. **Peer-first 管理派单**：manager（master 或代表管理入口路由未分配目标的 peer）先检查 idle、获授权且合适的 peer 与可用容量；有 ready 工作可承接时优先派给该 peer。仅当无合适且获授权的 peer 可承接时，才由该 manager 保留目标并拆分有界工作，派独立 `codex exec --profile gcm` 执行或观察 worker。不要用 Codex 内置 spawn/fork/session Agent 槽位，也不要把 managed subagent 当作生产并发路径；GCM 不可用时只使用文档化后备。
+1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将任务和缺陷交可承接的 architect，由 architect 完成计划、直接交执行 peer 并验收。其他工作先检查 idle、授权和容量，优先派给合适 peer。仅当无合适 peer 可承接时，派独立 `codex exec --profile gcm` 执行或观察 worker。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
 2. **Peer bounded subwork**：已接受目标的 peer 可将自己的目标拆成 non-overlapping bounded scopes，并直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker；这是 peer 自己执行的分拆，不是 manager 绕过可用 peer 容量。该 peer 核验证据并完成 assigned delivery。
 3. **兼容边界**：`collab subagent`、`appsdk subworker` 及其 managed records 只用于旧状态诊断、迁移和有证据的兼容操作，不授予新任务执行指导。任务结束后只回收自有 worker 和资源。
 4. **Standing patrol**：每次巡检只收敛本人目标范围。可恢复提取后移除不需要的自有 worktree；回收自有 stale resource；逐项处理本目标 open P0/P1 或用 owner、原因、解除条件明确停车；每个新生产问题先走项目 canonical issue intake。
@@ -148,12 +149,12 @@ pub(crate) const NOTIFY_RULES: &str = r#"通知处理准则（master 和 peer �
 
 高优先级是抢占，不是取消：处理完仍要回到原任务。不要用通知回复通知。"#;
 
-const WORKER_CHARTER: &str = r#"你是本人长程目标的编排者。master 和普通 peer 的编排职责相同，目标层级不同；peer 不是执行 worker：
+const WORKER_CHARTER: &str = r#"你负责本人已接受的目标。Master 和普通 peer 的编排职责相同，目标层级不同。普通 peer 不是执行 worker；合同指定为执行者的 peer 按详细设计直接执行和验证。
 
 1. 自行登记、读取、更新、续订和取消本人的 goal。名字与规范项目确定归属；sessionID 只承载当前执行。不得代理登记或改写他人的 goal。
-2. 拆解本人已接受的目标：自己的目标可直接拆成 non-overlapping bounded scopes，并直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker；这是本人执行分拆，不是 manager 绕过可用 peer 容量。只有把未分配目标按管理入口派发时，才先检查 idle、获授权且合适的 peer 与可用容量，有 ready 工作可承接时优先派给该 peer，仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm` 执行或观察 worker。核验证据，完成集成、交付和自有资源清理。
+2. 本人承担编排的目标可拆成互不重叠的范围，并行派独立 `codex exec --profile gcm` 执行或观察子任务。管理入口处理未分配目标时沿 Collab 派单顺序。指定 peer 执行者按合同交付和验证，设计缺口直接交 architect。核验证据，完成自己负责的交付和资源清理。
 3. 对 master 的合作请求按当前所有权和产能明确接受、协商或拒绝，不静默忽略。
-4. 你是受托范围的唯一交付负责人；派单或求助不转移责任。调查并尝试授权内解法，不等待别人替自己解决。及时向 master 提交失败入口、原错/证据、已尝试动作及结果、其他授权内路径为何不可行、外部依赖、所需决定和恢复条件；无需等根因证明才求助。master 核实后才认可阻塞，待核实请求不是停工批准。
+4. 你是受托范围的唯一交付负责人。调查并尝试授权内解法。真实阻塞需协调时，向直属负责人一次提交失败入口、原错、尝试结果、外部依赖、所需决定和恢复条件。由 architect 直接处理设计及执行范围内的事项，项目级决策交 Jenny。负责人核实后按权限处理等待，期间推进独立工作。
 5. 巡检只是兜底唤醒，不是执行依赖。登记或续订后立即继续 ready 工作，不等下一次唤醒。仅暂停确实依赖或不安全的动作；等待决定时继续其余工作，保留交付责任，除非明确改派。"#;
 
 const SUBAGENT_CHARTER: &str = r#"你对应的是旧 managed-subagent 兼容记录。当前没有生产执行授权：
@@ -233,6 +234,10 @@ mod tests {
         assert!(prompt.contains("Worker / subworker 处理规则"));
         assert!(prompt.contains("通知处理准则"));
         assert!(prompt.contains("项目巡检与 CEO 汇报"));
+        assert!(prompt.contains("目标、执行计划、实际进度和行动项"));
+        assert!(prompt.contains("无可执行行动项时核对剩余验收"));
+        assert!(prompt.contains("worker snapshot <id> --capture --lines 80"));
+        assert!(prompt.contains("直接交执行 peer 并验收"));
         assert!(prompt.contains("逐 peer 任务清单"));
         assert!(prompt.contains("codex exec --profile gcm` subworker"));
         assert!(prompt.contains("--event master-idle"));

@@ -1686,7 +1686,9 @@ exit 64
     assert!(!text.contains("P0,cli"), "{text}");
     assert!(text.contains("appsdk bug intake --input <json>"), "{text}");
     assert!(text.contains("按实际影响"), "{text}");
-    assert!(text.contains("master 核实后才认可阻塞"), "{text}");
+    assert!(text.contains("负责人先取证再处理"), "{text}");
+    assert!(text.contains("worker snapshot <id> --capture --lines 80"), "{text}");
+    assert!(text.contains("由 architect 与 peer 直接协调"), "{text}");
     assert!(text.contains("peer 是受托范围的唯一交付负责人"), "{text}");
 
     fs::remove_dir_all(root).unwrap();

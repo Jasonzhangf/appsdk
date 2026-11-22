@@ -1276,6 +1276,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "token-snapshot-master".into(),
         "snapshot-peer".into(),
         5,
+        false,
     );
     assert!(response.ok, "{}", response.error.unwrap_or_default());
     assert_eq!(response.data["transport"], "tmux");
@@ -1294,6 +1295,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "token-snapshot-master".into(),
         "snapshot-peer".into(),
         1,
+        false,
     );
     assert!(one.ok, "{}", one.error.unwrap_or_default());
     assert_eq!(one.data["output"], "SNAP-030");
@@ -1304,6 +1306,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "token-snapshot-master".into(),
         "snapshot-peer".into(),
         200,
+        false,
     );
     assert!(all.ok, "{}", all.error.unwrap_or_default());
     assert_eq!(all.data["output"].as_str().unwrap().lines().count(), 30);
@@ -1315,6 +1318,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
             "token-snapshot-master".into(),
             "snapshot-peer".into(),
             invalid,
+            false,
         );
         assert!(!response.ok);
         assert!(response
@@ -1333,6 +1337,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
             token.into(),
             target.into(),
             40,
+            false,
         );
         assert!(!response.ok);
         assert!(
@@ -1349,6 +1354,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "token-snapshot-master".into(),
         "snapshot-appserver".into(),
         40,
+        false,
     );
     assert!(resolved.ok, "{resolved:?}");
     assert_eq!(resolved.data["snapshot"], "not_collected");
@@ -1371,6 +1377,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "token-snapshot-master".into(),
         "snapshot-appserver".into(),
         40,
+        false,
     );
     assert!(!incidental_tmux.ok, "{incidental_tmux:?}");
     assert_eq!(incidental_tmux.error.as_deref(), Some("WORKER_STATUS_CAPTURE_BINDING_CHANGED"));
@@ -1388,6 +1395,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "token-snapshot-master".into(),
         "snapshot-appserver".into(),
         40,
+        false,
     );
     assert!(!no_transport.ok);
     assert!(no_transport.error.unwrap().contains("no registered transport"));
@@ -1417,6 +1425,7 @@ fn worker_snapshot_returns_bounded_tmux_buffer_without_side_effects() {
         "token-snapshot-master".into(),
         "snapshot-peer".into(),
         40,
+        false,
     );
     assert!(!missing.ok);
     assert!(missing.error.unwrap().starts_with("TMUX_PANE_MISSING:"));
@@ -1460,6 +1469,7 @@ fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
         "token-ordinary".into(),
         "master".into(),
         40,
+        false,
     );
     assert!(
         ordinary_snapshot.ok,
@@ -1479,6 +1489,7 @@ fn ordinary_worker_snapshots_master_and_master_closes_idempotently() {
         "token-master".into(),
         "ordinary".into(),
         40,
+        false,
     );
     assert!(transient_snapshot.ok, "{}", transient_snapshot.error.unwrap_or_default());
     assert_eq!(transient_snapshot.data["durable"], false);
@@ -1532,6 +1543,9 @@ async fn worker_snapshot_dispatches_rex_capture_without_writing_input() {
     use crate::client::adapters::rex::{
         set_test_cli, set_test_timeout, TEST_FIXTURE_LOCK,
     };
+    use crate::server::name_state::{
+        AgentActivity, AgentActivityRecord, AgentPresence, AgentPresenceRecord,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     let _env_guard = crate::scope::TEST_ENV_LOCK
@@ -1581,22 +1595,62 @@ async fn worker_snapshot_dispatches_rex_capture_without_writing_input() {
     );
     assert!(registered.ok, "{registered:?}");
 
+    let project_scope = GlobalState::canonical_project_scope(&root).unwrap().as_str().to_owned();
+    let observed_ms = now_ms();
+    server.commit(&[
+        Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: project_scope.clone(),
+                worker_id: "rex-snapshot-peer".into(),
+                session_id: "agent-session-rex-snapshot".into(),
+                presence: AgentPresence::Online,
+                reason: "fixture observed online".into(),
+                observed_ms,
+            },
+        },
+        Event::AgentActivityObserved {
+            activity: AgentActivityRecord {
+                project_scope,
+                worker_id: "rex-snapshot-peer".into(),
+                session_id: "agent-session-rex-snapshot".into(),
+                activity: AgentActivity::Busy,
+                background: false,
+                reason: "fixture observed busy".into(),
+                observed_ms,
+                idle_since_ms: None,
+            },
+        },
+    ]);
     let revision_before = server.state.lock().unwrap().revision;
     let state_before = std::fs::read(&server.state_path).unwrap();
     let server = Arc::new(server);
     let snapshot_server = server.clone();
     let response = tokio::task::spawn_blocking(move || {
+        let status_only = super::handle_worker_snapshot(
+            &snapshot_server,
+            "rex-snapshot-peer".into(),
+            "token-rex-snapshot-peer".into(),
+            "rex-snapshot-peer".into(),
+            3,
+            false,
+        );
+        assert!(status_only.ok, "{status_only:?}");
+        assert_eq!(status_only.data["snapshot_collected"], false);
+        assert_eq!(status_only.data["judgment_status"], "satisfied");
         super::handle_worker_snapshot(
             &snapshot_server,
             "rex-snapshot-peer".into(),
             "token-rex-snapshot-peer".into(),
             "rex-snapshot-peer".into(),
             3,
+            true,
         )
     })
     .await
     .unwrap();
     assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["snapshot_collected"], true);
+    assert_eq!(response.data["judgment_status"], "satisfied");
     assert_eq!(response.data["transport"], "rex");
     assert_eq!(response.data["worker_id"], "rex-snapshot-peer");
     assert_eq!(response.data["lines"], 3);

@@ -71,6 +71,21 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         let workflow = &snapshot["role_brief"]["workflow_template"];
         let brief = &snapshot["role_brief"];
         let responsibilities = brief["responsibilities"].as_array().unwrap();
+        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
+            rule.contains("execution plan, evidence-based progress, and action items")
+                && rule.contains("If progress stalls")
+                && rule.contains("If nothing is ready")
+                && rule.contains("owner and resume signal")
+        }), "{label}: task execution cycle is missing");
+        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
+            rule.contains("even if worker status is online or busy")
+                && rule.contains("collab worker snapshot <id> --capture --lines 80")
+        }), "{label}: blocked or stalled task requires terminal evidence");
+        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
+            rule.contains("Hand the complete contract directly to that peer")
+                && rule.contains("The peer claims it at the current board revision")
+                && rule.contains("Skip routine pings")
+        }), "{label}: direct architect handoff is missing");
         let handoff_rules: Vec<_> = responsibilities
             .iter()
             .filter_map(Value::as_str)

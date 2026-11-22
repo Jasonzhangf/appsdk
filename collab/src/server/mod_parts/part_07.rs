@@ -2486,6 +2486,7 @@ fn handle_worker_snapshot(
     token: String,
     target_id: String,
     lines: usize,
+    capture_terminal: bool,
 ) -> Resp {
     let control =
         match crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
@@ -2513,7 +2514,7 @@ fn handle_worker_snapshot(
         Ok(capture) => capture,
         Err(error) => return Resp::err(error),
     };
-    if capture.missing_fields.is_empty() {
+    if !capture_terminal && capture.missing_fields.is_empty() {
         drop(state);
         return worker_status_capture_response(
             &capture,
@@ -2527,28 +2528,26 @@ fn handle_worker_snapshot(
     drop(state);
 
     let mut capture = capture;
-    let baseline = capture.clone();
-    let session_probe = worker_status_session_probe(server, &mut capture, &target);
-    if session_probe == crate::proto::WorkerStatusSessionProbe::Applied {
-        if let Err(response) =
-            commit_worker_status_session_probe(server, &control, &baseline, &capture)
-        {
-            return response;
+    if !capture_terminal {
+        let baseline = capture.clone();
+        let session_probe = worker_status_session_probe(server, &mut capture, &target);
+        if session_probe == crate::proto::WorkerStatusSessionProbe::Applied {
+            if let Err(response) =
+                commit_worker_status_session_probe(server, &control, &baseline, &capture)
+            {
+                return response;
+            }
         }
-    }
-    if capture.missing_fields.is_empty() {
-        return worker_status_capture_response(
-            &capture,
-            false,
-            serde_json::json!({
-                "snapshot": "not_collected",
-                "reason": if session_probe == crate::proto::WorkerStatusSessionProbe::Applied {
-                    "session status capability resolved the current status facts"
-                } else {
-                    "current status facts are already sufficient"
-                },
-            }),
-        );
+        if capture.missing_fields.is_empty() {
+            return worker_status_capture_response(
+                &capture,
+                false,
+                serde_json::json!({
+                    "snapshot": "not_collected",
+                    "reason": "session status capability resolved the current status facts",
+                }),
+            );
+        }
     }
     if !matches!(
         capture.selected_transport.kind,
@@ -2559,8 +2558,9 @@ fn handle_worker_snapshot(
             false,
             serde_json::json!({
                 "snapshot": "not_supported",
-                "reason": match session_probe {
-                    crate::proto::WorkerStatusSessionProbe::Unsupported => {
+                "reason": match (capture_terminal, capture.session_probe) {
+                    (true, _) => "the selected transport has no terminal snapshot",
+                    (_, crate::proto::WorkerStatusSessionProbe::Unsupported) => {
                         "the selected transport has no independent session status capability or snapshot"
                     }
                     _ => "the session status capability did not resolve the remaining facts and the selected transport has no snapshot",
@@ -2979,6 +2979,7 @@ mod worker_status_judgment_tests {
             "token-status-dsh".into(),
             "status-dsh".into(),
             20,
+            false,
         );
         assert!(response.ok, "{response:?}");
         assert_eq!(response.data["snapshot"], "not_collected", "{response:?}");

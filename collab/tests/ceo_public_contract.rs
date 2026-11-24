@@ -541,7 +541,7 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
     let role_brief = &current["role_brief"];
     let role_task = role_brief["role_task"].as_str().unwrap_or_default();
     assert!(
-        role_task.contains("The wire role remains"),
+        role_task.starts_with("Execute your accepted task as an ordinary peer."),
         "base peer identity duty must stay ahead of the CEO text: {role_task}"
     );
     let serialized = current.to_string();

@@ -649,6 +649,39 @@ fn lifecycle_surfaces(fixture: &Fixture, identity: &Value) -> (Vec<u8>, Value, V
     )
 }
 
+fn wait_for_background_notification_outcomes(fixture: &Fixture, worker_id: &str) {
+    let settled = wait_until(Duration::from_secs(5), || {
+        let state = fixture.current_state();
+        state["msgs"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|message| {
+                message["to"] == worker_id
+                    && message["state"] == "pending"
+                    && message["type"] == "notification"
+            })
+            .all(|message| {
+                let message_id = message["id"].as_str().unwrap();
+                let attempted_ms = message["last_wake_attempt_ms"].as_i64().unwrap_or(0);
+                attempted_ms > 0
+                    && (state["notification_delivery_accepted"][message_id]
+                        .as_i64()
+                        .is_some_and(|accepted_ms| accepted_ms >= attempted_ms)
+                        || state["notification_delivery_failures"][message_id]
+                            .as_object()
+                            .is_some_and(|failure| {
+                                failure["failed_ms"].as_i64().unwrap_or(0) >= attempted_ms
+                                    && failure["retryable"] == false
+                            }))
+            })
+    });
+    assert!(
+        settled,
+        "background notification outcome did not settle for {worker_id}"
+    );
+}
+
 fn lifecycle_register_task(fixture: &Fixture, identity: &Value, task_id: &str) -> Value {
     let registered = lifecycle_wire(
         fixture,
@@ -921,6 +954,7 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     fixture.restart_daemon();
     assert_eq!(subscriptions(&fixture.current_state()), before_restart);
+    wait_for_background_notification_outcomes(&fixture, parent["worker_id"].as_str().unwrap());
     let before = lifecycle_surfaces(&fixture, &parent);
     let read = lifecycle_read(&fixture, &parent, Some(child_id));
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");
@@ -945,6 +979,7 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     file["state"]["responsibility_fences"]["legacy-exact-fence"] = fence;
     fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     fixture.restart_daemon();
+    wait_for_background_notification_outcomes(&fixture, parent["worker_id"].as_str().unwrap());
     let before = lifecycle_surfaces(&fixture, &parent);
     let read = lifecycle_read(&fixture, &parent, Some(child_id));
     assert_eq!(read["result"]["outcome"], "cleanup-open", "{read}");

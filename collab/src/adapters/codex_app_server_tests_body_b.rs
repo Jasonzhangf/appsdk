@@ -504,7 +504,7 @@
         )
         .unwrap_err();
         assert!(
-            error.to_string().contains("still reports not loaded"),
+            error.to_string().contains("RECIPIENT_NOT_ONLINE"),
             "{error}"
         );
         server.join().unwrap();

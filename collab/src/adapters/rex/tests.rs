@@ -13,6 +13,19 @@ const ONLINE_AGENT_PREFLIGHT: [&str; 4] = [
     "com.superlogical.terminal.pwd",
     "com.superlogical.terminal.program_status",
 ];
+const SUBMISSION_CALLS: [&str; 11] = [
+    ONLINE_AGENT_PREFLIGHT[0],
+    ONLINE_AGENT_PREFLIGHT[1],
+    ONLINE_AGENT_PREFLIGHT[2],
+    ONLINE_AGENT_PREFLIGHT[3],
+    "server.status",
+    "com.superlogical.terminal.write",
+    ONLINE_AGENT_PREFLIGHT[0],
+    ONLINE_AGENT_PREFLIGHT[1],
+    ONLINE_AGENT_PREFLIGHT[2],
+    ONLINE_AGENT_PREFLIGHT[3],
+    "send-key",
+];
 
 async fn fixture_guard() -> (
     std::sync::MutexGuard<'static, ()>,
@@ -181,18 +194,10 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
     let calls = env.calls();
     assert_eq!(
         calls.iter().map(method).collect::<Vec<_>>(),
-        [
-            ONLINE_AGENT_PREFLIGHT[0],
-            ONLINE_AGENT_PREFLIGHT[1],
-            ONLINE_AGENT_PREFLIGHT[2],
-            ONLINE_AGENT_PREFLIGHT[3],
-            "server.status",
-            "com.superlogical.terminal.write",
-            "send-key",
-        ]
+        SUBMISSION_CALLS
     );
     let write_ns = calls[5]["monotonic_ns"].as_u64().unwrap();
-    let enter_ns = calls[6]["monotonic_ns"].as_u64().unwrap();
+    let enter_ns = calls.last().unwrap()["monotonic_ns"].as_u64().unwrap();
     assert!(
         Duration::from_nanos(enter_ns - write_ns) >= Duration::from_millis(100),
         "Enter arrived only {} ms after the text write",
@@ -654,15 +659,7 @@ async fn typed_native_rejections_keep_exact_code() {
         assert_eq!(error.stage, RexInputStage::WriteQueued { bytes_written: 3 });
         assert_eq!(
             env.calls().iter().map(method).collect::<Vec<_>>(),
-            [
-                ONLINE_AGENT_PREFLIGHT[0],
-                ONLINE_AGENT_PREFLIGHT[1],
-                ONLINE_AGENT_PREFLIGHT[2],
-                ONLINE_AGENT_PREFLIGHT[3],
-                "server.status",
-                "com.superlogical.terminal.write",
-                "send-key",
-            ]
+            SUBMISSION_CALLS
         );
     }
 }
@@ -688,15 +685,7 @@ async fn enter_unknown_and_opaque_failure_never_rewrite_or_retry() {
         );
         assert_eq!(
             env.calls().iter().map(method).collect::<Vec<_>>(),
-            [
-                ONLINE_AGENT_PREFLIGHT[0],
-                ONLINE_AGENT_PREFLIGHT[1],
-                ONLINE_AGENT_PREFLIGHT[2],
-                ONLINE_AGENT_PREFLIGHT[3],
-                "server.status",
-                "com.superlogical.terminal.write",
-                "send-key",
-            ]
+            SUBMISSION_CALLS
         );
     }
 }
@@ -736,18 +725,9 @@ async fn allowed_modes_return_rex_receipt_json() {
         assert_eq!(value["consumed"], false);
         assert!(value.get("queued").is_none());
     }
-    let expected = [
-        ONLINE_AGENT_PREFLIGHT[0],
-        ONLINE_AGENT_PREFLIGHT[1],
-        ONLINE_AGENT_PREFLIGHT[2],
-        ONLINE_AGENT_PREFLIGHT[3],
-        "server.status",
-        "com.superlogical.terminal.write",
-        "send-key",
-    ];
     assert_eq!(
         env.calls().iter().map(method).collect::<Vec<_>>(),
-        expected.repeat(5)
+        SUBMISSION_CALLS.repeat(5)
     );
 }
 

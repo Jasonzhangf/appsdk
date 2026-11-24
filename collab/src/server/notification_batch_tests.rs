@@ -2700,7 +2700,7 @@ fn native_notifications_do_not_wait_for_previous_consumption() {
         let (server, root) = test_server();
         let gateway = (kind == TransportKind::Dsh).then(|| {
             crate::server::dsh_channel_tests::registration_gateway(
-                "native-notification-unconsumed",
+                "native-unconsumed",
                 &root,
                 None,
                 crate::server::dsh_channel_tests::wake_reply,

@@ -1122,7 +1122,11 @@ fn a_dsh_wake_never_reaches_the_tmux_sink() {
     // The pre-existing sink was `if kind != AppServer`, which sent a new kind
     // into the tmux sink and failed with "Collab notifications require tmux".
     let root = scratch("sink-route");
-    let gateway = Gateway::start("sink-route", |request| wake_reply(&request));
+    let gateway = Gateway::start("sink-route", |request| match request["method"].as_str() {
+        Some("agent-get") => Some(online_reply(&request)),
+        Some("enqueue") => wake_reply(&request),
+        _ => None,
+    });
     let transport = dsh_transport(&gateway.socket);
     let receipt = (default_appserver_notification_sink())(
         &transport,
@@ -1145,6 +1149,11 @@ fn a_dsh_wake_forwards_the_sink_mode_it_was_given() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let observer = Arc::clone(&seen);
     let gateway = Gateway::start("sink-mode", move |request| {
+        match request["method"].as_str() {
+            Some("agent-get") => return Some(online_reply(&request)),
+            Some("enqueue") => {}
+            _ => return None,
+        }
         observer.lock().unwrap().push(
             request
                 .pointer("/params/mode")

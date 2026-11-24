@@ -167,6 +167,7 @@ where
         }
         match request["method"].as_str().unwrap_or_default() {
             "agent-facts" => Some(facts_reply(&request, &root)),
+            "agent-get" => Some(online_reply(&request)),
             "enqueue" => {
                 if let Some(challenge) = registration_challenge(&request) {
                     let message_id = request["params"]["messageId"].as_str()?.to_owned();
@@ -232,6 +233,22 @@ where
             _ => None,
         }
     })
+}
+
+fn online_reply(request: &serde_json::Value) -> String {
+    serde_json::json!({
+        "ok": true,
+        "result": {
+            "ok": true,
+            "runtimeId": request["params"]["runtimeId"],
+            "result": {"agent": {
+                "agentId": request["params"]["agentId"],
+                "status": "running",
+                "live": true
+            }}
+        }
+    })
+    .to_string()
 }
 
 pub(crate) fn wake_reply(request: &serde_json::Value) -> Option<String> {

@@ -136,7 +136,7 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 
 const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
-1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将需要规划的任务和缺陷交可承接的 architect，由 architect 设计、直接交执行 peer 并验收。无可承接 architect 且需要新计划时，Jenny 按独立 Plan 合同启动只读 `codex exec --profile oauth --model gpt-6.2-sol`（medium），读取并验收落盘的 `plan.md`。已有有效计划直接复用。有合适的执行 peer 时由 Jenny 或受托 architect 派发；无可用执行 peer 时按 Codex 编排合同派独立 GCM worker，并传已验收计划与明确执行合同。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
+1. **Peer-first 管理派单**：先检查 idle、获授权且合适的 peer 与可用容量，再按 Collab Skill 处理 architect 进件。Jenny 将需要规划的任务和缺陷交可承接的 architect，由 architect 设计、直接交执行 peer 并验收。无可承接 architect 且需要新计划时，Jenny 按独立 Plan 合同启动只读 `codex exec --profile oauth --model gpt-6.2-sol`（medium），读取并验收落盘的 `plan.md`。已有有效计划直接复用。有合适的执行 peer 时由 Jenny 或受托 architect 派发；无可用执行 peer 时按 Codex 编排合同派独立 GCM worker，并传已验收计划与明确执行合同。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
 2. **已接受任务的子任务**：各角色可把职责内的工作拆成互不重叠的范围。先使用合适且已获授权的 peer；无可承接 peer 时按 Codex 编排合同使用独立子 worker。任务 owner 核验证据并完成交付。
 3. **兼容边界**：`collab subagent`、`appsdk subworker` 及其 managed records 只用于旧状态诊断、迁移和有证据的兼容操作，不授予新任务执行指导。任务结束后只回收自有 worker 和资源。
 4. **Standing patrol**：每次巡检只收敛本人目标范围。可恢复提取后移除不需要的自有 worktree；回收自有 stale resource；逐项处理本目标 open P0/P1 或用 owner、原因、解除条件明确停车；每个新生产问题先走项目 canonical issue intake。

@@ -2292,7 +2292,7 @@ async fn rex_service_generation_change_is_recovered_from_timer_owner() {
     Arc::get_mut(&mut server)
         .expect("unique test server")
         .appserver_notification_sink = default_appserver_notification_sink();
-    let fixture = RexCliFixture::new(&root, "service_changed");
+    let fixture = RexCliFixture::new(&root, "service_changed").with_codex_foreground();
     let route = seed_rex_route(&server);
     let stale = rex_transport(
         "agent-a",
@@ -2358,7 +2358,7 @@ async fn rex_service_generation_change_is_recovered_for_qqbot_ceo_inbound() {
     Arc::get_mut(&mut server)
         .expect("unique test server")
         .appserver_notification_sink = default_appserver_notification_sink();
-    let fixture = RexCliFixture::new(&root, "service_changed");
+    let fixture = RexCliFixture::new(&root, "service_changed").with_codex_foreground();
     let route = seed_rex_route(&server);
     let stale = rex_transport(
         "agent-a",
@@ -2443,7 +2443,7 @@ async fn rex_unknown_write_outcome_is_not_retried_by_timer_owner() {
     Arc::get_mut(&mut server)
         .expect("unique test server")
         .appserver_notification_sink = default_appserver_notification_sink();
-    let fixture = RexCliFixture::new(&root, "write_unknown");
+    let fixture = RexCliFixture::new(&root, "write_unknown").with_codex_foreground();
     let route = seed_rex_route(&server);
     let current = rex_transport(
         "agent-a",

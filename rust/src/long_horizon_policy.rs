@@ -232,8 +232,12 @@ mod tests {
 
     #[test]
     fn generated_prompt_uses_the_canonical_role_policy() {
-        let prompt =
-            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Master, None);
+        let prompt = generate_long_horizon_goal_prompt(
+            Path::new("goal.md"),
+            "15m",
+            ExecutionRole::Master,
+            None,
+        );
 
         assert!(prompt.contains("你是本项目的 master"));
         assert!(!prompt.contains("只有所有合适 peer 都忙"));
@@ -283,8 +287,12 @@ mod tests {
         assert!(unknown.contains("独立完成用户已授权的工作"));
         assert!(unknown.contains("codex exec --profile gcm"));
         assert!(!unknown.contains("只允许恢复绑定/注册"));
-        let worker_prompt =
-            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Worker, None);
+        let worker_prompt = generate_long_horizon_goal_prompt(
+            Path::new("goal.md"),
+            "15m",
+            ExecutionRole::Worker,
+            None,
+        );
         assert!(!worker_prompt.contains("默认 arm 已完成"));
         assert!(worker_prompt.contains("当前角色只维护本人职责内已授权的目标和巡检"));
     }

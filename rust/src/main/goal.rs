@@ -695,10 +695,12 @@ where
                 Ok(scope) => scope,
                 Err(error) => goal_fail(format_json, &error, None),
             };
-            let goal_prompt =
-                generate_long_horizon_goal_prompt(
-                    &goal_path, &interval_str, scope.role, scope.effective_peer_charter.as_deref(),
-                );
+            let goal_prompt = generate_long_horizon_goal_prompt(
+                &goal_path,
+                &interval_str,
+                scope.role,
+                scope.effective_peer_charter.as_deref(),
+            );
             let canonical_goal_path = goal_path
                 .canonicalize()
                 .unwrap_or_else(|_| goal_path.clone());
@@ -1584,7 +1586,10 @@ where
                 .unwrap_or("10m");
             let content = path_update.as_ref().map(|(path, _)| {
                 generate_long_horizon_goal_prompt(
-                    path, effective_interval, scope.role, scope.effective_peer_charter.as_deref(),
+                    path,
+                    effective_interval,
+                    scope.role,
+                    scope.effective_peer_charter.as_deref(),
                 )
             });
             let edit_result = goal_reconcile_edit(
@@ -2028,7 +2033,10 @@ where
             }
 
             let prompt = generate_long_horizon_goal_prompt(
-                &goal_path, &interval_str, scope.role, scope.effective_peer_charter.as_deref(),
+                &goal_path,
+                &interval_str,
+                scope.role,
+                scope.effective_peer_charter.as_deref(),
             );
             if format_json {
                 println!(

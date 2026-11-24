@@ -67,10 +67,7 @@ pub(crate) fn effective_peer_charter(context: &Value) -> Option<String> {
         charter.push_str("\n- ");
         charter.push_str(duty);
     }
-    for (field, label) in [
-        ("next_action", "下一步"),
-        ("completion_action", "完成交接"),
-    ] {
+    for (field, label) in [("next_action", "下一步"), ("completion_action", "完成交接")] {
         if let Some(action) = brief[field].as_str() {
             charter.push_str(&format!("\n\n{label}：{action}"));
         }

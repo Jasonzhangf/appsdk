@@ -278,8 +278,14 @@ master 的派发入口使用任务单的长程内容和周期，省略次数同�
 
 ## Registered patrol duties
 
+每轮先对照目标的评估标准和行动项。有可执行项就推进。剩余项全部已验收，或只能等有
+负责人和可观察恢复信号的外部依赖时，当前 owner 在当轮取消对应巡检，并在原日志记录
+回执和恢复条件。等待项仍在原任务。出现新授权工作或恢复信号后再按对应入口恢复。
+Context 恢复身份时保留取消状态。命令、参数来源和回执见
+[无可执行项时取消巡检](references/board-idle-patrol.md#无可执行项时取消巡检)。
+
 项目 Jenny/master 默认承担本项目 worker 巡检。初始化或恢复本人 longhorizon 后，
-须确保本人常驻项目巡检已 armed；它是一条 `master-idle` 订阅，subject
+有可执行项目工作时核对本人项目巡检已 armed；它是一条 `master-idle` 订阅，subject
 `project-patrol`、目标 interval `1500000` 毫秒（20-30 分钟窗口，默认 25 分钟），
 ensure/renew 复用同一订阅而不并排新建。该订阅默认登记 100 次；批次有剩余时
 继续复用，不逐轮续订或在 context/恢复后重置计数。批次耗尽后由原 owner 在职责仍有效
@@ -302,9 +308,9 @@ board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断�
 有 Rex/tmux 绑定时运行 `collab worker snapshot <id> --capture --lines 80` 查看原 block/pane，
 即使状态显示 online 或 busy。按实际情况安排解阻、改计划或带恢复条件的等待。
 
-peer 可取消本人 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
+没有可执行项时，peer 取消本人对应的 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
 持久保存；新任务不恢复旧任务取消，同稳定名字换会话保留取消。恢复使用明确入口。
-当前 master 也可取消本人的常驻项目巡检：`collab notify cancel --event master-idle`
+项目没有可执行项时，当前 master 取消本人的项目巡检。`collab notify cancel --event master-idle`
 只在项目已有 `ceo_report_state` 进度且无可执行未关闭项目任务时成功，成功回执返回
 原订阅 ID 与 `status=cancelled`；重复取消幂等。显式精确订阅或项目工作变化会 rearm
 同一订阅，direct-message 始终独立保留，peer board idle 取消语义不变。`notify status`

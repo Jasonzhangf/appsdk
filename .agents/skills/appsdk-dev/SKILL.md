@@ -13,6 +13,10 @@ description: "开发、调试、重构和发布 AppSDK 源码仓库；提供模�
 `appsdk-project-governance`；本 Skill 负责 SDK 源码开发。
 通用编码方法和 plan/review/交付按全局规则与实际宿主合同执行。
 
+巡检每轮按目标评估标准核对行动项。已验收或只等外部恢复信号，且当前没有可执行项时，
+负责人在当轮[取消对应巡检](../../../collab/skills/collab/references/board-idle-patrol.md#无可执行项时取消巡检)，
+并在原日志保留取消回执和恢复条件。收到新任务或恢复信号后，再判断是否需要恢复巡检。
+
 ## 项目开发操作
 
 1. 观察实际入口、当前行为与目标；debug 先尝试原样本或最小复现。

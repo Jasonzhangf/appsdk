@@ -964,7 +964,7 @@ use super::*;
     }
 
     #[test]
-    fn goal_reconcile_retires_transport_lost_and_rearm_leaves_one_active() {
+    fn goal_reconcile_ends_or_recovers_the_exact_transport_lost_batch() {
         let (server, root) = test_server();
         register_master(&server);
         let now = now_ms();
@@ -1063,11 +1063,12 @@ use super::*;
             Some("goal-rearm".into()),
         );
         assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
+        assert_eq!(rearmed.data["subscription"]["id"], "sub-goal-rearm-lost");
         {
             let state = server.state.lock().unwrap();
             assert_eq!(
                 state.notification_subscriptions["sub-goal-rearm-lost"].status,
-                "cancelled"
+                "armed"
             );
             let active = state
                 .notification_subscriptions
@@ -1085,18 +1086,10 @@ use super::*;
     }
 
     #[test]
-    fn goal_reconcile_retained_occurrence_retires_transport_lost_predecessor() {
+    fn goal_reconcile_rejects_ambiguous_armed_and_transport_lost_batches() {
         let (server, root) = test_server();
         register_master(&server);
         let now = now_ms();
-        let transport = server
-            .state
-            .lock()
-            .unwrap()
-            .workers
-            .get("master")
-            .and_then(|worker| worker.transport.clone())
-            .expect("registered master transport");
         let (target, method) = subscription_target(&server, "master");
         let seed = |id: &str, status: &str, trigger_ms: i64| {
             server.commit(&[Event::NotificationSubscribed {
@@ -1128,8 +1121,7 @@ use super::*;
         let retained_trigger = now + 120_000;
         seed("sub-goal-predecessor", "transport-lost", now + 60_000);
         seed("sub-goal-retained", "armed", retained_trigger);
-        // A pending scheduler message from the older occurrence must be
-        // superseded in the same commit as the retirement.
+        // An unresolved exact batch collision must not retract either wake.
         let pending_id = bind_message_with_id(
             &server,
             "master",
@@ -1149,26 +1141,18 @@ use super::*;
             None,
             Some("goal-rearm".into()),
         );
-        assert!(reconciled.ok, "{}", reconciled.error.unwrap_or_default());
-        assert_eq!(
-            reconciled.data["retired_subscription_ids"],
-            serde_json::json!(["sub-goal-predecessor"])
-        );
-        assert_eq!(
-            reconciled.data["superseded_message_ids"],
-            serde_json::json!(["msg-predecessor-deadline"])
-        );
+        assert!(reconciled.error.as_deref().unwrap().contains("GOAL_SCHEDULE_TARGET_AMBIGUOUS"));
         {
             let state = server.state.lock().unwrap();
             assert_eq!(
                 state.notification_subscriptions["sub-goal-predecessor"].status,
-                "cancelled"
+                "transport-lost"
             );
             assert_eq!(
                 state.notification_subscriptions["sub-goal-retained"].status,
                 "armed"
             );
-            assert_eq!(state.msgs[&pending_id].state, "superseded");
+            assert_eq!(state.msgs[&pending_id].state, "pending");
             let recoverable = state
                 .notification_subscriptions
                 .values()
@@ -1180,25 +1164,29 @@ use super::*;
                 })
                 .count();
             assert_eq!(
-                recoverable, 1,
-                "retaining a matching occurrence must leave exactly one recoverable occurrence"
+                recoverable, 2,
+                "a rejected exact selection preserves both retained rows"
             );
         }
 
-        // Context retarget must not revive the retired predecessor.
-        let retarget = super::super::retarget_owned_notification_events(
-            &server.state.lock().unwrap(),
-            "master",
-            &transport,
-            now + 1,
-        );
-        assert!(
-            retarget.iter().all(|event| !matches!(event, Event::NotificationSubscribed {
-                subscription
-            } if subscription.id == "sub-goal-predecessor")),
-            "a retired predecessor must stay terminal: {retarget:?}"
-        );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    fn rearm_due_master_goal(server: &Server, goal_id: &str, trigger_ms: i64) -> super::super::Resp {
+        super::super::handle_goal_schedule_for_actor(server, "master", "token-master", super::super::GoalScheduleChange {
+            goal_id: goal_id.into(),
+            goal_owner: "Jenny".into(),
+            desired: "active".into(),
+            trigger_ms: Some(trigger_ms),
+            ttl_seconds: Some(3600),
+            goal_subject: None,
+            reason: Some("goal-rearm".into()),
+            expected_subscription_id: None,
+            interval_ms: None,
+            repeat_count: None,
+            content: None,
+            operation: super::super::GoalScheduleOperation::Rearm,
+        })
     }
 
     #[test]
@@ -1332,18 +1320,7 @@ use super::*;
         );
         set_due(true, 11);
         let due_rearm = seed_due_goal("master", "goal:rearm-due");
-        let rearmed = super::super::handle_goal_schedule_reconcile(
-            &server,
-            "master".into(),
-            "token-master".into(),
-            "rearm-due".into(),
-            "Jenny".into(),
-            "active".into(),
-            Some(now + 120_000),
-            Some(3600),
-            None,
-            Some("goal-rearm".into()),
-        );
+        let rearmed = rearm_due_master_goal(&server, "rearm-due", now + 120_000);
         assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
         {
             let state = server.state.lock().unwrap();
@@ -2557,18 +2534,7 @@ use super::*;
         }]);
 
         tick_with_paused_due_batch(&server, now + 1, &subscription_id, || {
-            let rearmed = super::super::handle_goal_schedule_reconcile(
-                &server,
-                "master".into(),
-                "token-master".into(),
-                "rearm-race".into(),
-                "Jenny".into(),
-                "active".into(),
-                Some(now + 120_000),
-                Some(3600),
-                None,
-                Some("goal-rearm".into()),
-            );
+            let rearmed = rearm_due_master_goal(&server, "rearm-race", now + 120_000);
             assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
         });
 

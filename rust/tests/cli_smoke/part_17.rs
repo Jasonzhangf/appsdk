@@ -155,13 +155,20 @@ case "$1 $2" in
       shift
     done
     if [ "$desired" = "ended" ]; then
+      : > cancel-attempted
       printf '%s\n' 'goal reconcile failed' >&2
       exit 44
     fi
+    printf 'goal:%s' "$goal_id" > goal-subject
     printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-exact\",\"status\":\"armed\",\"event\":\"deadline\"}}"
     ;;
   "notify status")
-    subject="${STATUS_SUBJECT:-goal:long-task.md}"
+    [ "${BAD_STATUS:-}" != "1" ] || exit 42
+    if [ "${EMPTY_STATUS:-}" = "1" ]; then
+      printf '%s\n' '{"subscriptions":[]}'
+      exit 0
+    fi
+    subject="${STATUS_SUBJECT:-$(/bin/cat goal-subject)}"
     printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-exact\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
     ;;
   "status --all")
@@ -191,6 +198,26 @@ esac
         .output()
         .unwrap();
     assert!(subscribed.status.success());
+    let path = goal_test_record_path(&root);
+    let original = fs::read(&path).unwrap();
+    let mut legacy: Value = serde_json::from_slice(&original).unwrap();
+    legacy["subject"] = Value::String("goal:retained.md".into());
+    let legacy = serde_json::to_vec(&legacy).unwrap();
+    fs::write(&path, &legacy).unwrap();
+    for unavailable in ["BAD_STATUS", "EMPTY_STATUS"] {
+        let missing_snapshot = Command::new(binary())
+            .args(["goal", "cancel", "--json"])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env(unavailable, "1")
+            .env_remove("TMUX_PANE")
+            .output().unwrap();
+        assert!(!missing_snapshot.status.success());
+        assert!(String::from_utf8_lossy(&missing_snapshot.stderr).contains("GOAL_CANCEL_SELECTION_UNAVAILABLE"));
+        assert!(!root.join("cancel-attempted").exists());
+        assert_eq!(fs::read(&path).unwrap(), legacy);
+    }
+    fs::write(&path, original).unwrap();
     let cancel = Command::new(binary())
         .args(["goal", "cancel", "--json"])
         .current_dir(&root)
@@ -229,12 +256,7 @@ esac
     assert_eq!(drifted_resubscribe.status.code(), Some(1));
     let drifted_stderr = String::from_utf8_lossy(&drifted_resubscribe.stderr);
     assert!(
-        drifted_stderr.contains("GOAL_CANCEL_PENDING_RECONCILIATION_REQUIRED"),
-        "{}",
-        drifted_stderr
-    );
-    assert!(
-        drifted_stderr.contains("sub-exact remains armed under subject goal:drifted-subject"),
+        drifted_stderr.contains("GOAL_STATUS_SUBSCRIPTION_SCOPE_MISMATCH"),
         "{}",
         drifted_stderr
     );
@@ -274,7 +296,7 @@ case "$1 $2" in
     ;;
   "notify status")
     if [ "${STATUS_EXPIRED:-}" = "1" ]; then
-      printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"expired","event":"deadline","subject":"goal:sha256:legacy"}]}'
+      printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"expired","event":"deadline","subject":"goal:legacy-retained"}]}'
     elif [ "${DEDUPE_SUBJECT:-}" = "1" ]; then
       count=$((`/bin/cat status-count 2>/dev/null || printf '0'` + 1))
       printf '%s' "$count" > status-count
@@ -377,7 +399,7 @@ esac
         .unwrap()
         .parse()
         .unwrap();
-    assert!(status_calls >= 3, "subject candidates were not all queried");
+    assert_eq!(status_calls, 2, "one exact snapshot and one standing patrol check");
 
     let before_expired_status = fs::read(&record_path).unwrap();
     let expired = Command::new(binary())
@@ -525,6 +547,7 @@ case "$1 $2" in
     count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
     printf '%s' "$count" > subscribe-count
     if [ "$count" = "1" ]; then
+      printf 'goal:%s' "$goal_id" > goal-subject
       printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-consumed\",\"status\":\"armed\",\"event\":\"deadline\"}}"
     else
       printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-rearmed\",\"status\":\"armed\",\"event\":\"deadline\"}}"
@@ -532,7 +555,8 @@ case "$1 $2" in
     fi
     ;;
   "notify status")
-    printf '%s\n' '{"subscriptions":[{"id":"sub-consumed","status":"consumed","event":"deadline","subject":"goal:sha256:consumed-goal"}]}'
+    subject=$(/bin/cat goal-subject)
+    printf '%s\n' "{\"subscriptions\":[{\"id\":\"sub-consumed\",\"status\":\"consumed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
     ;;
   *) exit 64 ;;
 esac
@@ -1239,11 +1263,11 @@ esac
     );
     let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
     assert_eq!(retried["ok"], true);
-    assert_eq!(retried["status"], "cancelled");
+    assert_eq!(retried["status"], "ended");
     assert_eq!(retried["subscription_id"], "sub-cancel-loss");
     assert_eq!(retried["record"]["desired"], "unsubscribed");
-    assert_eq!(retried["record"]["observed"], "cancelled");
-    assert_eq!(retried["record"]["remote_state"], "cancelled");
+    assert_eq!(retried["record"]["observed"], "ended");
+    assert_eq!(retried["record"]["remote_state"], "ended");
     assert_eq!(retried["record"]["cancel_receipt"]["desired"], "ended");
 
     fs::remove_dir_all(root).unwrap();

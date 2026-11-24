@@ -91,9 +91,9 @@ esac
         String::from_utf8_lossy(&cancel.stderr)
     );
     let cancel_json: Value = serde_json::from_slice(&cancel.stdout).unwrap();
-    assert_eq!(cancel_json["status"], "cancelled");
+    assert_eq!(cancel_json["status"], "ended");
     assert_eq!(cancel_json["record"]["desired"], "unsubscribed");
-    assert_eq!(cancel_json["record"]["observed"], "cancelled");
+    assert_eq!(cancel_json["record"]["observed"], "ended");
 
     let rearmed = Command::new(binary())
         .args([
@@ -162,6 +162,7 @@ case "$1 $2" in
       esac
       shift
     done
+    printf 'goal:%s' "$goal_id" > goal-subject
     printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$owner\",\"desired\":\"$desired\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-$count\",\"status\":\"armed\"}}"
     ;;
   "notify status")

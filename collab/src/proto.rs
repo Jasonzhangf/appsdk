@@ -773,6 +773,8 @@ pub enum Req {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal_subject: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_subscription_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         /// Optional typed operation. `edit` updates an existing exact goal
         /// without creating or renewing a finite batch.

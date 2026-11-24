@@ -65,7 +65,7 @@ pub(crate) enum GoalCmd {
         /// active or ended
         #[arg(long)]
         desired: String,
-        /// Absolute UTC epoch milliseconds for an active one-shot occurrence
+        /// Initial UTC epoch milliseconds for an explicit active schedule
         #[arg(long = "at-ms")]
         trigger_ms: Option<i64>,
         #[arg(long = "ttl-seconds")]
@@ -77,13 +77,15 @@ pub(crate) enum GoalCmd {
         /// Total deliveries for a periodic active goal deadline (1..=100)
         #[arg(long = "repeat")]
         repeat_count: Option<u32>,
-        /// Caller-owned retained historical goal subject to retire alongside
-        /// the canonical goal identity. Exact and stable-name scoped only.
+        /// Exact subject assertion, must equal goal:<goal-id>
         #[arg(long = "goal-subject")]
         goal_subject: Option<String>,
+        /// Edit only if this is still the selected subscription
+        #[arg(long)]
+        expected_subscription_id: Option<String>,
         #[arg(long)]
         reason: Option<String>,
-        /// update an existing exact goal without creating or renewing a batch
+        /// edit (alias: update) an existing goal, or rearm a due one-shot
         #[arg(long)]
         operation: Option<String>,
     },

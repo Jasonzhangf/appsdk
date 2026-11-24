@@ -4,6 +4,7 @@ use state::{GoalScheduleBinding, GoalScheduleContent};
 enum GoalScheduleOperation {
     Explicit,
     Edit,
+    Rearm,
     Derived,
 }
 
@@ -11,7 +12,8 @@ impl GoalScheduleOperation {
     fn from_request(operation: Option<String>) -> Result<Self, Resp> {
         match operation.as_deref() {
             None => Ok(Self::Explicit),
-            Some("edit") => Ok(Self::Edit),
+            Some("edit" | "update") => Ok(Self::Edit),
+            Some("rearm") => Ok(Self::Rearm),
             Some(operation) => Err(Resp::err(format!(
                 "GOAL_SCHEDULE_OPERATION_INVALID: unknown operation {operation}"
             ))),
@@ -26,11 +28,62 @@ struct GoalScheduleChange {
     trigger_ms: Option<i64>,
     ttl_seconds: Option<u64>,
     goal_subject: Option<String>,
+    expected_subscription_id: Option<String>,
     reason: Option<String>,
     interval_ms: Option<i64>,
     repeat_count: Option<u32>,
     content: Option<GoalScheduleContent>,
     operation: GoalScheduleOperation,
+}
+
+impl GoalScheduleChange {
+    fn validate_intent(&self) -> Result<(), Resp> {
+        if !matches!(self.desired.as_str(), "active" | "ended") {
+            return Err(Resp::err(
+                "GOAL_SCHEDULE_DESIRED_INVALID: expected active or ended",
+            ));
+        }
+        if self.operation == GoalScheduleOperation::Edit {
+            if self.desired != "active" {
+                return Err(Resp::err(
+                    "GOAL_SCHEDULE_EDIT_REQUIRES_ACTIVE: edit keeps desired=active",
+                ));
+            }
+            if self.trigger_ms.is_some() {
+                return Err(Resp::err(
+                    "GOAL_SCHEDULE_EDIT_TRIGGER_UNSUPPORTED: edit cannot set --at-ms",
+                ));
+            }
+        }
+        if self
+            .expected_subscription_id
+            .as_ref()
+            .is_some_and(|id| id.trim().is_empty() || self.operation != GoalScheduleOperation::Edit)
+        {
+            return Err(Resp::err("GOAL_SCHEDULE_EXPECTED_SUBSCRIPTION_INVALID: a nonempty subscription ID is only valid for edit"));
+        }
+        if self.operation == GoalScheduleOperation::Rearm
+            && (self.desired != "active"
+                || self.trigger_ms.is_none()
+                || self.interval_ms.is_some()
+                || self.repeat_count.is_some())
+        {
+            return Err(Resp::err("GOAL_SCHEDULE_REARM_FIELDS_INVALID: rearm requires active and --at-ms for a one-shot goal"));
+        }
+        if self.desired == "ended"
+            && (self.trigger_ms.is_some()
+                || self.interval_ms.is_some()
+                || self.repeat_count.is_some()
+                || self.ttl_seconds.is_some()
+                || self.content.is_some())
+            && self.operation != GoalScheduleOperation::Derived
+        {
+            return Err(Resp::err(
+                "GOAL_SCHEDULE_END_FIELDS_INVALID: ended cannot edit schedule fields",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn handle_goal_schedule_for_actor(
@@ -91,19 +144,34 @@ fn commit_goal_schedule(
     target: &str,
     change: GoalScheduleChange,
 ) -> Resp {
-    if !matches!(change.desired.as_str(), "active" | "ended") {
-        return Resp::err("GOAL_SCHEDULE_DESIRED_INVALID: expected active or ended");
+    if let Err(error) = change.validate_intent() {
+        return error;
     }
-    if let Some(task_id) = change
-        .goal_id
-        .strip_prefix("task:")
-        .filter(|id| state.board_details.contains_key(*id))
-    {
-        let mut details = state.board_details[task_id].clone();
+    if let Some(task_id) = change.goal_id.strip_prefix("task:") {
+        let Some(mut details) = state.board_details.get(task_id).cloned() else {
+            return Resp::err(
+                "GOAL_SCHEDULE_TASK_NOT_FOUND: task goal requires an existing board task",
+            );
+        };
         let task = match state.tasks.get(task_id) {
             Some(task) => task,
-            None => return Resp::err("task not found"),
+            None => {
+                return Resp::err(
+                    "GOAL_SCHEDULE_TASK_NOT_FOUND: task goal requires an existing board task",
+                )
+            }
         };
+        if change.desired == "active" && matches!(task.status.as_str(), "closed" | "cancelled") {
+            return Resp::err(
+                "GOAL_SCHEDULE_TASK_TERMINAL: closed or cancelled tasks cannot start a schedule",
+            );
+        }
+        if change.trigger_ms.is_some()
+            || change.goal_subject.is_some()
+            || change.operation == GoalScheduleOperation::Rearm
+        {
+            return Resp::err("GOAL_SCHEDULE_TASK_FIELDS_INVALID: task schedules use the board goal and periodic cadence");
+        }
         if details.long_horizon.is_none() {
             return Resp::err("BOARD_LONG_HORIZON_CONTENT_REQUIRED");
         }
@@ -114,20 +182,22 @@ fn commit_goal_schedule(
             Err(error) => return error,
         }
         let spec = details.long_horizon.as_mut().unwrap();
-        if let Some(GoalScheduleContent::Inline { content }) = &change.content {
-            if content.trim().is_empty() {
-                return Resp::err("GOAL_SCHEDULE_CONTENT_REQUIRED");
+        if change.desired == "active" {
+            if let Some(GoalScheduleContent::Inline { content }) = &change.content {
+                if content.trim().is_empty() {
+                    return Resp::err("GOAL_SCHEDULE_CONTENT_REQUIRED");
+                }
+                spec.content = content.clone();
             }
-            spec.content = content.clone();
-        }
-        if let Some(interval) = change.interval_ms {
-            spec.interval_ms = interval;
-        }
-        if let Some(repeat) = change.repeat_count {
-            spec.repeat_count = repeat;
-        }
-        if let Some(ttl) = change.ttl_seconds {
-            spec.ttl_seconds = ttl;
+            if let Some(interval) = change.interval_ms {
+                spec.interval_ms = interval;
+            }
+            if let Some(repeat) = change.repeat_count {
+                spec.repeat_count = repeat;
+            }
+            if let Some(ttl) = change.ttl_seconds {
+                spec.ttl_seconds = ttl;
+            }
         }
         details.long_horizon =
             match crate::board::LongHorizonArgs::default().merge(details.long_horizon.as_ref()) {
@@ -142,6 +212,8 @@ fn commit_goal_schedule(
             Some(target),
             change.desired == "ended",
             change.operation,
+            change.reason.as_deref(),
+            change.expected_subscription_id.as_deref(),
             None,
         ) {
             Ok(result) => result,
@@ -181,6 +253,20 @@ fn commit_goal_schedule(
     response
 }
 
+fn effective_goal_schedule_status(subscription: &NotificationSubscription, now: i64) -> &str {
+    let status = subscription.status.as_str();
+    if !matches!(status, "armed" | "transport-lost" | "waiting-owner") {
+        return status;
+    }
+    if subscription.expires_ms <= now {
+        "expired"
+    } else if subscription.fired_count >= subscription.repeat_count {
+        "consumed"
+    } else {
+        status
+    }
+}
+
 /// The only finite goal-schedule reducer. Callers authorize the target, prepare
 /// their other business changes, then commit these events in the same batch.
 fn prepare_goal_schedule(
@@ -195,11 +281,6 @@ fn prepare_goal_schedule(
     if change.goal_owner.trim().is_empty() && change.desired != "ended" {
         return Err(Resp::err("GOAL_SCHEDULE_OWNER_REQUIRED"));
     }
-    if !matches!(change.desired.as_str(), "active" | "ended") {
-        return Err(Resp::err(
-            "GOAL_SCHEDULE_DESIRED_INVALID: expected active or ended",
-        ));
-    }
     if let Some(subject) = change.goal_subject.as_deref() {
         if subject.trim().is_empty() {
             return Err(Resp::err("GOAL_SCHEDULE_SUBJECT_REQUIRED"));
@@ -212,14 +293,22 @@ fn prepare_goal_schedule(
         }
     }
     let subject = format!("goal:{}", change.goal_id);
+    if change
+        .goal_subject
+        .as_deref()
+        .is_some_and(|old| old != subject)
+    {
+        return Err(Resp::err(
+            "GOAL_SCHEDULE_SUBJECT_CONFLICT: use the existing deadline's exact goal ID",
+        ));
+    }
     let task_id = match change.content.as_ref() {
         Some(GoalScheduleContent::BoardTask { task_id }) => Some(task_id),
         _ => None,
     };
     let mut matching: Vec<_> = state.notification_subscriptions.values().filter(|subscription| {
         subscription.event == "deadline"
-            && (subscription.subject.as_deref() == Some(subject.as_str())
-                || change.goal_subject.as_ref().is_some_and(|old| subscription.subject.as_ref() == Some(old)))
+            && subscription.subject.as_deref() == Some(subject.as_str())
             && (subscription.worker_id == target || task_id.is_some_and(|id| matches!(
                 subscription.goal_content.as_ref().and_then(|binding| binding.source.as_ref()), Some(GoalScheduleContent::BoardTask { task_id }) if task_id == id)))
     }).cloned().collect();
@@ -229,42 +318,66 @@ fn prepare_goal_schedule(
             .cmp(&left.created_ms)
             .then_with(|| left.id.cmp(&right.id))
     });
-    if change.operation == GoalScheduleOperation::Edit && change.desired != "active" {
-        return Err(Resp::err(
-            "GOAL_SCHEDULE_EDIT_REQUIRES_ACTIVE: edit keeps desired=active",
-        ));
-    }
-    let edit_current = if change.operation == GoalScheduleOperation::Edit {
-        let current: Vec<_> = matching
-            .iter()
-            .filter(|subscription| {
-                subscription.expires_ms > now
-                    && matches!(subscription.status.as_str(), "armed" | "transport-lost")
-            })
-            .collect();
-        if current.len() > 1 {
-            return Err(Resp::err(
-                "GOAL_SCHEDULE_TARGET_AMBIGUOUS: edit requires one current goal",
-            ));
+    let current =
+        if change.operation != GoalScheduleOperation::Derived || change.desired == "active" {
+            let mut current = matching.iter().filter(|subscription| {
+                matches!(
+                    effective_goal_schedule_status(subscription, now),
+                    "armed" | "transport-lost" | "waiting-owner"
+                )
+            });
+            let selected = current.next();
+            if current.next().is_some() {
+                let operation = if change.operation == GoalScheduleOperation::Edit {
+                    "edit"
+                } else {
+                    "reconcile"
+                };
+                return Err(Resp::err(format!(
+                    "GOAL_SCHEDULE_TARGET_AMBIGUOUS: {operation} requires one current goal"
+                )));
+            }
+            selected
+        } else {
+            None
+        };
+    let current = if change.operation == GoalScheduleOperation::Rearm {
+        let selected = current.filter(|row| row.status == "armed").ok_or_else(|| {
+            Resp::err("GOAL_SCHEDULE_REARM_REQUIRES_CURRENT: rearm requires an armed one-shot")
+        })?;
+        if selected.periodic_declared {
+            return Err(Resp::err("GOAL_SCHEDULE_REARM_REQUIRES_ONE_SHOT"));
         }
-        current.first().copied()
+        let trigger = selected
+            .trigger_ms
+            .or_else(|| selected.trigger_times_ms.first().copied())
+            .ok_or_else(|| Resp::err("GOAL_SCHEDULE_REARM_TRIGGER_MISSING"))?;
+        (trigger > now).then_some(selected)
     } else {
-        None
+        current
     };
     if change.operation == GoalScheduleOperation::Edit && matching.is_empty() {
         return Err(Resp::err(
             "GOAL_SCHEDULE_TARGET_NOT_FOUND: edit requires an existing exact goal",
         ));
     }
-    if change.operation == GoalScheduleOperation::Edit && edit_current.is_none() {
-        return terminal_goal_edit_schedule(change, target, &matching[0], now);
+    if let Some(expected) = change.expected_subscription_id.as_deref() {
+        if current
+            .or_else(|| matching.first())
+            .is_none_or(|selected| selected.id != expected)
+        {
+            return Err(Resp::err("GOAL_SCHEDULE_SELECTION_CHANGED: read the current exact batch before retrying the edit"));
+        }
+    }
+    if change.operation == GoalScheduleOperation::Edit && current.is_none() {
+        return terminal_goal_edit_schedule(change, target, &subject, &matching[0], now);
     }
     if change.operation == GoalScheduleOperation::Derived
         && task_id.is_some()
         && !matching.is_empty()
         && matching.iter().all(|subscription| {
             matches!(
-                subscription.status.as_str(),
+                effective_goal_schedule_status(subscription, now),
                 "cancelled" | "consumed" | "expired" | "suppressed"
             )
         })
@@ -286,54 +399,31 @@ fn prepare_goal_schedule(
             .get(target)
             .ok_or_else(|| Resp::err("goal schedule target is not registered"))?;
         let projection = notification_route_projection(worker);
-        let periodic_request = change.interval_ms.is_some()
-            || change.trigger_ms.is_none()
-                && matching
-                    .iter()
-                    .any(|subscription| subscription.periodic_declared);
-        let existing = if let Some(current) = edit_current {
-            Some(current)
-        } else {
-            matching
-                .iter()
-                .find(|subscription| {
-                    subscription.status == "armed"
-                        && subscription.expires_ms > now
-                        && if periodic_request {
-                            subscription.periodic_declared
-                        } else {
-                            !subscription.periodic_declared
-                                && subscription.trigger_ms == change.trigger_ms
-                        }
-                })
-                .or_else(|| {
-                    matching.iter().find(|subscription| {
-                        periodic_request
-                            && subscription.periodic_declared
-                            && subscription.status == "transport-lost"
-                            && subscription.expires_ms > now
-                    })
-                })
-                .or_else(|| {
-                    // A task-linked schedule whose holder retired keeps its
-                    // identity, content, progress and cadence while it waits
-                    // for the next committed owner.
-                    matching.iter().find(|subscription| {
-                        task_id.is_some()
-                            && subscription.status == "waiting-owner"
-                            && subscription.periodic_declared
-                    })
-                })
-        };
-        let interval = change.interval_ms.or_else(|| {
-            existing
-                .filter(|_| change.trigger_ms.is_none())
-                .and_then(|old| old.interval_ms)
+        let route_available = !projection.0.is_empty() && !projection.1.is_empty();
+        let existing = current.or_else(|| {
+            // A task-linked schedule keeps its progress while the owner rebinds.
+            matching.iter().find(|subscription| {
+                task_id.is_some()
+                    && effective_goal_schedule_status(subscription, now) == "waiting-owner"
+                    && subscription.periodic_declared
+            })
         });
+        // Older callers update an existing periodic batch without --at-ms.
+        // A start carrying an initial trigger and a one-shot reconcile retain
+        // their policy. The explicit edit operation handles both shapes.
+        let retain_policy = existing.is_some_and(|old| {
+            change.operation == GoalScheduleOperation::Rearm
+                || (change.operation == GoalScheduleOperation::Explicit
+                    && (change.trigger_ms.is_some() || !old.periodic_declared))
+        });
+        let interval = change
+            .interval_ms
+            .filter(|_| !retain_policy)
+            .or_else(|| existing.and_then(|old| old.interval_ms));
         if interval.is_some_and(|interval| interval <= 0) {
             return Err(Resp::err("interval_ms must be greater than zero"));
         }
-        if interval.is_none() && change.repeat_count.is_some() {
+        if !retain_policy && interval.is_none() && change.repeat_count.is_some() {
             return Err(Resp::err(
                 "GOAL_SCHEDULE_PERIOD_INCOMPLETE: repeat requires interval_ms",
             ));
@@ -341,6 +431,7 @@ fn prepare_goal_schedule(
         let repeat = if interval.is_some() {
             change
                 .repeat_count
+                .filter(|_| !retain_policy)
                 .or_else(|| existing.map(|old| old.repeat_count))
                 .unwrap_or(100)
         } else {
@@ -349,7 +440,7 @@ fn prepare_goal_schedule(
         if !(1..=state::MAX_NOTIFICATION_REPEATS).contains(&repeat) {
             return Err(Resp::err("repeat_count must be between 1 and 100"));
         }
-        let ttl = change.ttl_seconds;
+        let ttl = change.ttl_seconds.filter(|_| !retain_policy);
         if ttl.is_some_and(|ttl| ttl == 0 || ttl > MAX_NOTIFICATION_TTL_SECONDS) {
             return Err(Resp::err(format!(
                 "ttl_seconds must be between 1 and {MAX_NOTIFICATION_TTL_SECONDS}"
@@ -370,7 +461,9 @@ fn prepare_goal_schedule(
             ),
         };
         let trigger = match existing {
-            Some(old) if old.interval_ms == interval => old.trigger_ms,
+            Some(old) if old.interval_ms == interval => old
+                .trigger_ms
+                .or_else(|| old.trigger_times_ms.first().copied()),
             _ => change
                 .trigger_ms
                 .or_else(|| interval.map(|interval| now.saturating_add(interval))),
@@ -389,18 +482,6 @@ fn prepare_goal_schedule(
             if content.trim().is_empty() {
                 return Err(Resp::err("GOAL_SCHEDULE_CONTENT_REQUIRED"));
             }
-        }
-        let other_active = state
-            .notification_subscriptions
-            .values()
-            .filter(|subscription| {
-                subscription.worker_id == target
-                    && subscription.status == "armed"
-                    && !matching.iter().any(|old| old.id == subscription.id)
-            })
-            .count();
-        if other_active >= MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER {
-            return Err(Resp::err("maximum 3 active subscriptions per agent"));
         }
         let mut subscription = existing
             .cloned()
@@ -427,10 +508,16 @@ fn prepare_goal_schedule(
                 goal_content: None,
             });
         if subscription.worker_id != target {
-            superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
+            superseded.extend(retractable_messages_for_subscription(
+                state,
+                &subscription.id,
+            ));
         }
         subscription.worker_id = target.into();
-        if !projection.0.is_empty() || !projection.1.is_empty() {
+        if change.operation != GoalScheduleOperation::Edit
+            && (change.operation != GoalScheduleOperation::Rearm || existing.is_none())
+            && route_available
+        {
             let (method, address) = projection;
             subscription.method = method;
             subscription.target = address;
@@ -440,23 +527,62 @@ fn prepare_goal_schedule(
         subscription.expires_ms = expiry;
         subscription.interval_ms = interval;
         subscription.repeat_count = repeat;
-        subscription.periodic_declared = interval.is_some();
+        subscription.periodic_declared = existing.map_or(interval.is_some(), |old| {
+            old.periodic_declared
+                || (change.operation == GoalScheduleOperation::Edit && change.interval_ms.is_some())
+        });
         subscription.status = if subscription.fired_count >= repeat {
             "consumed"
+        } else if change.operation == GoalScheduleOperation::Edit
+            && existing.is_some_and(|old| old.status == "waiting-owner")
+        {
+            "waiting-owner"
+        } else if existing.is_some_and(|old| old.status == "transport-lost")
+            && (change.operation == GoalScheduleOperation::Edit || !route_available)
+        {
+            "transport-lost"
         } else {
             "armed"
         }
         .into();
-        if subscription.status != "armed" {
-            superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
+        if subscription.status == "armed"
+            && existing.is_none_or(|old| old.status != "armed" || old.worker_id != target)
+        {
+            let other_active = state
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| {
+                    subscription.worker_id == target
+                        && subscription.status == "armed"
+                        && !matching.iter().any(|old| old.id == subscription.id)
+                })
+                .count();
+            if other_active >= MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER {
+                return Err(Resp::err("maximum 3 active subscriptions per agent"));
+            }
         }
-        subscription.status_reason = None;
+        if subscription.status == "consumed" {
+            superseded.extend(retractable_messages_for_subscription(
+                state,
+                &subscription.id,
+            ));
+        }
+        if !matches!(
+            subscription.status.as_str(),
+            "transport-lost" | "waiting-owner"
+        ) {
+            subscription.status_reason = None;
+        }
         subscription.goal_content = Some(GoalScheduleBinding {
-            source: change.content.clone().or_else(|| {
-                existing
-                    .and_then(|old| old.goal_content.as_ref())
-                    .and_then(|binding| binding.source.clone())
-            }),
+            source: change
+                .content
+                .clone()
+                .filter(|_| !retain_policy)
+                .or_else(|| {
+                    existing
+                        .and_then(|old| old.goal_content.as_ref())
+                        .and_then(|binding| binding.source.clone())
+                }),
             ttl_seconds: ttl.or(previous_ttl).unwrap(),
         });
         let changed = existing != Some(&subscription);
@@ -468,12 +594,21 @@ fn prepare_goal_schedule(
         }
         active = Some(subscription);
     }
-    for old in &matching {
+    for old in matching.iter().filter(|_| {
+        change.operation != GoalScheduleOperation::Edit
+            && !(change.desired == "active"
+                && current.is_some()
+                && matches!(
+                    change.operation,
+                    GoalScheduleOperation::Explicit | GoalScheduleOperation::Rearm
+                )
+                && task_id.is_none())
+    }) {
         if active.as_ref().is_some_and(|current| current.id == old.id) {
             continue;
         }
         if matches!(
-            old.status.as_str(),
+            effective_goal_schedule_status(old, now),
             "armed" | "transport-lost" | "waiting-owner"
         ) {
             retired.push(old.id.clone());
@@ -499,11 +634,31 @@ fn prepare_goal_schedule(
     if let Some(event) = cleared_master_goal_due_event(state, target, &retired, now) {
         events.push(event);
     }
+    let ended_subscription = if change.desired == "ended" {
+        current.or_else(|| matching.first()).map(|old| {
+            let mut selection = old.clone();
+            selection.status = effective_goal_schedule_status(old, now).into();
+            if retired.contains(&old.id) {
+                selection.status = "cancelled".into();
+                selection.status_reason = Some(
+                    change
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "goal-schedule-ended".into()),
+                );
+                selection.updated_ms = now;
+            }
+            selection
+        })
+    } else {
+        None
+    };
     let response = Resp::data(json!({
         "goal_id": change.goal_id, "goal_owner": (!change.goal_owner.is_empty()).then_some(&change.goal_owner), "desired": change.desired,
         "status": active.as_ref().map_or("ended", |subscription| subscription.status.as_str()),
         "one_shot": active.as_ref().is_some_and(|subscription| !subscription.periodic_declared),
-        "subscription": active, "retired_subscription_ids": retired, "superseded_message_ids": superseded,
+        "subscription": active, "ended_subscription": ended_subscription,
+        "retired_subscription_ids": retired, "superseded_message_ids": superseded,
         "deduplicated": events.is_empty(), "max_repeat_count": state::MAX_NOTIFICATION_REPEATS,
     }));
     Ok((events, response))
@@ -512,6 +667,7 @@ fn prepare_goal_schedule(
 fn terminal_goal_edit_schedule(
     change: &GoalScheduleChange,
     target: &str,
+    subject: &str,
     existing: &NotificationSubscription,
     now: i64,
 ) -> Result<(Vec<Event>, Resp), Resp> {
@@ -545,10 +701,12 @@ fn terminal_goal_edit_schedule(
     }
 
     let mut subscription = existing.clone();
+    subscription.subject = Some(subject.to_owned());
+    subscription.status = effective_goal_schedule_status(existing, now).into();
     subscription.worker_id = target.into();
     subscription.interval_ms = interval;
     subscription.repeat_count = change.repeat_count.unwrap_or(existing.repeat_count);
-    subscription.periodic_declared = existing.periodic_declared || interval.is_some();
+    subscription.periodic_declared = existing.periodic_declared || change.interval_ms.is_some();
     if let Some(content) = change.content.clone() {
         let binding = subscription
             .goal_content
@@ -598,6 +756,8 @@ fn task_goal_events(
     selected: Option<&str>,
     ended: bool,
     operation: GoalScheduleOperation,
+    reason: Option<&str>,
+    expected_subscription_id: Option<&str>,
     current_control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<(Vec<Event>, serde_json::Value), Resp> {
     let Some(spec) = &details.long_horizon else {
@@ -623,10 +783,13 @@ fn task_goal_events(
     // committed owner has no live transport yet. The business commit for that
     // task must still succeed.
     if !state.workers.contains_key(target)
-        && state.notification_subscriptions.values().any(|subscription| {
-            subscription.subject.as_deref() == Some(subject.as_str())
-                && subscription.status == "waiting-owner"
-        })
+        && state
+            .notification_subscriptions
+            .values()
+            .any(|subscription| {
+                subscription.subject.as_deref() == Some(subject.as_str())
+                    && subscription.status == "waiting-owner"
+            })
     {
         return Ok((Vec::new(), serde_json::Value::Null));
     }
@@ -655,7 +818,9 @@ fn task_goal_events(
                     .and_then(|slot| slot.active_binding())
                     .is_some_and(|current| &current.binding == binding)
         }) {
-            return Err(Resp::err("BOARD_STALE_BINDING: goal target is not the current invited peer"));
+            return Err(Resp::err(
+                "BOARD_STALE_BINDING: goal target is not the current invited peer",
+            ));
         }
     }
     let name = slot.map(|slot| slot.identity_key.name.clone());
@@ -674,7 +839,8 @@ fn task_goal_events(
         trigger_ms: None,
         ttl_seconds: Some(spec.ttl_seconds),
         goal_subject: None,
-        reason: None,
+        expected_subscription_id: expected_subscription_id.map(str::to_owned),
+        reason: reason.map(str::to_owned),
         interval_ms: Some(spec.interval_ms),
         repeat_count: Some(spec.repeat_count),
         content: Some(GoalScheduleContent::BoardTask {
@@ -709,9 +875,10 @@ fn task_schedule_selection(
     details: &crate::board::BoardTaskDetails,
 ) -> Option<TaskScheduleSelection> {
     if task.status == "invited" {
-        return details.invitation.as_ref().map(|invitation| {
-            TaskScheduleSelection::Worker(invitation.peer_id.clone())
-        });
+        return details
+            .invitation
+            .as_ref()
+            .map(|invitation| TaskScheduleSelection::Worker(invitation.peer_id.clone()));
     }
     let task_owner = || (task.status != "pending").then(|| task.owner.clone());
     if let Some(phase) = state
@@ -728,10 +895,7 @@ fn task_schedule_selection(
             return Some(TaskScheduleSelection::WaitingAssignment(task_owner()));
         }
         if phase.status != ticket_state::TicketPhaseStatus::Queued {
-            return phase
-                .slot_name
-                .clone()
-                .map(TaskScheduleSelection::Name);
+            return phase.slot_name.clone().map(TaskScheduleSelection::Name);
         }
     }
     task_owner().map(TaskScheduleSelection::Worker)
@@ -860,6 +1024,8 @@ fn task_goal_transition_events(
             } else {
                 GoalScheduleOperation::Derived
             },
+            None,
+            None,
             control,
         )?;
         events.extend(goal_events);

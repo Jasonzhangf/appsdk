@@ -12,13 +12,13 @@
     },
     {
       "id":"选择本人持久目标","operator":"appsdk.collab_goal.select_record","operator_version":"1",
-      "description":"按目标规范项目和名字选择目标记录与锁。任务单保存长程内容和周期，订阅引用该任务内容。独立goal保存显式提供的prompt。同名换session或worktree接续，调用者不成为代设订阅的owner。",
+      "description":"按项目、应用范围、稳定名字和精确目标 ID 选择记录。task: 前缀要求已有任务单及其正式长程声明；不存在时拒绝。任务单保存长程内容和周期，订阅引用任务单。独立目标保存显式内容。同名换会话或工作树接续，代设者不成为订阅 owner。已留存的旧订阅按自身 subject 中的精确 goal ID 选取。",
       "inputs":["goal_scope"],"output":{"id":"owned_goal","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
     {
       "id":"执行本人目标转换","operator":"appsdk.collab_goal.apply_transition","operator_version":"1",
-      "description":"校验目标范围、任务版本、完整长程内容与明确周期。读取不写记录。重试、内容修改和同名换载体保留订阅ID、已消费次数和有效期。取消和关闭只结束该goal的有限计划，终态不被普通恢复复活。拒绝在提交前返回同一结果出口。",
+      "description":"区分读取、编辑、显式启动或续订、到期单次重新登记、结束和任务派生。edit 与 update 共用编辑。编辑要求精确已有目标且不能指定新起点；优先唯一有效批次，无当前批次时只编辑独立目标最近终态记录。编辑保留批次 ID 和已执行次数，终态保留状态及触发/过期时间。显式 active 复用唯一有效批次，获授权的终态续订才建新批次。rearm 原子替换触发已到且仍 armed 的单次批次，重试复用已登记的未来批次。已关闭或取消的任务不可启动或编辑。任务起点由任务单周期决定，派生事件保留已到期或耗尽的批次。ended 仅结束选定目标，拒绝在结束时修改调度字段。无效或歧义请求在提交前进入同一结果出口。",
       "inputs":["owned_goal"],"output":{"id":"goal_transition_request","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     },
@@ -30,7 +30,7 @@
     },
     {
       "id":"输出目标状态与回执","operator":"appsdk.collab_goal.emit_result","operator_version":"1",
-      "description":"返回目标owner、当前载体、任务与真实订阅回执，区分持久提交、armed、投递与消费。到期消息包含任务单的完整长程内容与当前接单状态，真实消费后推进次数。只读状态不触发写入。SDK读取本人确定的deadline订阅并投影有效周期、次数与TTL，远端已提交而本地未写入时也使用当前订阅真源。派发必须有目标订阅回执，错误或等待不冒充armed。",
+      "description":"返回目标 owner、当前载体及真实订阅回执，区分持久提交、armed、终态、投递与消费。编辑可带先前读取的订阅 ID，核对失败时拒绝写入。结束回执包含提交时的精确批次和有效终态。到期消息包含任务单内容和当前接单状态，真实消费后推进次数。只读状态不写入。SDK 投影精确 deadline 订阅的周期、次数与 TTL。结果未知时保留原错及目标批次，读取同一目标后再决定是否重试；远端已提交但本地投影失败时保留远端回执。派发须有目标订阅回执，错误或等待不冒充 armed。",
       "inputs":["goal_transition_result"],"output":{"id":"goal_result","schema":"Object"},
       "input_selector":{"include":[],"exclude":[],"predicate":null},"output_selector":{"include":[],"exclude":[],"predicate":null},"iterator":"Whole"
     }

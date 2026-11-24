@@ -799,6 +799,7 @@ fn handle_goal_schedule_reconcile_with_period(
 ) -> Resp {
     handle_goal_schedule_for_actor(server, &worker_id, &token, GoalScheduleChange {
         goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, reason,
+        expected_subscription_id: None,
         interval_ms, repeat_count, content: None,
         operation: GoalScheduleOperation::Explicit,
     })

@@ -413,8 +413,8 @@ fn dispatch_with_route_context_bound(
             token,
             goal_id,
             goal_owner,
-            project: _,
-            app: _,
+            project,
+            app,
             content,
             desired,
             trigger_ms,
@@ -422,15 +422,19 @@ fn dispatch_with_route_context_bound(
             interval_ms,
             repeat_count,
             goal_subject,
+            expected_subscription_id,
             reason,
             operation,
         } => {
+            if project.is_some() || app.is_some() {
+                return Resp::err("GOAL_SCHEDULE_SCOPE_UNAVAILABLE: project and app selectors require the routed daemon");
+            }
             let operation = match GoalScheduleOperation::from_request(operation) {
                 Ok(operation) => operation,
                 Err(error) => return error,
             };
             handle_goal_schedule_for_actor(server, &worker_id, &token, GoalScheduleChange {
-                goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, reason, interval_ms,
+                goal_id, goal_owner, desired, trigger_ms, ttl_seconds, goal_subject, expected_subscription_id, reason, interval_ms,
                 repeat_count, content: content.map(|content| GoalScheduleContent::Inline { content }),
                 operation,
             })

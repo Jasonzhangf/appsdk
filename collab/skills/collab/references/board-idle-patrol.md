@@ -14,7 +14,7 @@ owner 是 core 实现与项目 DAG。
 ## 默认责任与触发
 
 - 每个项目的 Jenny（当前获授权 master）负责本项目 worker 巡检。初始化或恢复本人
-  longhorizon 后，须确保本人常驻项目巡检已 armed；复用有效订阅，不重复创建。
+  longhorizon 后，有可执行项目工作时核对本人项目巡检已 armed；复用有效订阅。
   这条常驻巡检是当前 master 的 `master-idle` 订阅，subject `project-patrol`、目标
   interval `1500000` 毫秒（20-30 分钟窗口，默认 25 分钟）。反复 ensure/renew 复用
   同一订阅，续期其 TTL 与有限出现预算，不并排新建第二份。`900000` 只兼容已存在的旧
@@ -125,6 +125,22 @@ peer 可以取消本人 board idle 巡检，无需先结束任务或取得 maste
 取消状态按任务粒度和当前稳定 owner 持久保存。已取消任务在 peer 获得新任务时仍保持
 取消，只对未取消的新任务启用巡检；ownership 变化不把旧 owner 的取消带给新 owner。
 同稳定名字换会话保留取消状态；`collab context` 恢复身份不重置已取消任务。
+
+### 无可执行项时取消巡检
+
+先核对目标的评估标准、Board 和原日志。还能取证、解阻、派发、实施、复验、合并或
+回收时，推进对应行动项。剩余项全部已验收，或只能等有负责人和可观察恢复信号的外部
+依赖时，在同一轮取消没有可执行项的巡检。
+
+| 巡检归属 | 当前 owner 的动作 | 参数与回执 |
+| --- | --- | --- |
+| 本人未关闭的 Board 任务 | `collab notify cancel --event board-idle --task-id "$task_id" --reason "$reason" --resume-condition "$resume_condition"` | `task_id` 取当前 Board 的本人任务。用 `collab notify status` 核对 `board_patrol.cancelled_tasks`。恢复信号出现后，用 `collab notify subscribe --event board-idle --task-id "$task_id"` 恢复该任务。 |
+| Jenny 的项目巡检 | `collab notify cancel --event master-idle --reason "$reason" --resume-condition "$resume_condition"` | 当前 master 按下节核对项目进度和待办。成功返回原订阅及 `status=cancelled`。记录拒绝的原始原因。项目工作变化可重新启用同一订阅。 |
+| 本人有限 goal 巡检 | `appsdk goal cancel --goal-id "$goal_id" --json` | 从 `appsdk goal list --json` 取本人目标的 `goal_id`。用 `appsdk goal status --goal-id "$goal_id" --json` 核对同一目标状态。后续确需周期时沿原目标和授权重新登记。 |
+
+`reason` 取本轮评估结果。`resume_condition` 写可观察的恢复信号，例如指定依赖
+交回验收证据。把取消回执和恢复条件写入原日志。保留基础收件和等待中的任务。
+任务正式验收或取消时，按任务生命周期关闭对应 deadline。
 
 公开入口（当前源码实现）：
 

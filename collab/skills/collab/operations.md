@@ -1954,9 +1954,11 @@ finishing or closing the last task or a goal never cancels it, so a registered
 peer stays wakeable. There is no command, interface, or alias that closes the
 base `direct-message` lease; per-task `board-idle` cancellation and re-arming
 use the entries in [board-idle-patrol.md](references/board-idle-patrol.md).
-When a finite goal or task patrol has no actionable work, end it through
-its owner lifecycle (`appsdk goal cancel` for a goal, task closure for a
-task-owned schedule); this never controls base direct-message reception.
+When a patrol has no actionable work, its current owner cancels it during
+that cycle using [the exact cancellation entry](references/board-idle-patrol.md#无可执行项时取消巡检).
+Record the receipt and the observable resume condition. Keep waiting tasks
+open and retain direct-message reception. Close task-owned deadlines through
+the task lifecycle after verified completion or cancellation.
 
 Review triggering, reviewer selection, and model routing follow
 `codex-orchestrator`. A missing declared review gate is a failure.

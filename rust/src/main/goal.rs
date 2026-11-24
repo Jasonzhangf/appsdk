@@ -66,7 +66,11 @@ pub(super) fn longhorizon_show(root: &Path, format_json: bool) {
         (Vec::new(), None)
     };
     let role_label = role.label();
-    let charter = role.charter();
+    let charter = context
+        .as_ref()
+        .ok()
+        .and_then(crate::long_horizon_role::effective_peer_charter)
+        .unwrap_or_else(|| role.charter());
     let fleet_rules = role.fleet_rules();
     let patrol = match scope.as_ref() {
         Some(scope) => goal_project_patrol_projection(root, scope),
@@ -692,7 +696,9 @@ where
                 Err(error) => goal_fail(format_json, &error, None),
             };
             let goal_prompt =
-                generate_long_horizon_goal_prompt(&goal_path, &interval_str, scope.role);
+                generate_long_horizon_goal_prompt(
+                    &goal_path, &interval_str, scope.role, scope.effective_peer_charter.as_deref(),
+                );
             let canonical_goal_path = goal_path
                 .canonicalize()
                 .unwrap_or_else(|_| goal_path.clone());
@@ -1577,7 +1583,9 @@ where
                 .or_else(|| record["interval"].as_str())
                 .unwrap_or("10m");
             let content = path_update.as_ref().map(|(path, _)| {
-                generate_long_horizon_goal_prompt(path, effective_interval, scope.role)
+                generate_long_horizon_goal_prompt(
+                    path, effective_interval, scope.role, scope.effective_peer_charter.as_deref(),
+                )
             });
             let edit_result = goal_reconcile_edit(
                 root,
@@ -2019,7 +2027,9 @@ where
                 ));
             }
 
-            let prompt = generate_long_horizon_goal_prompt(&goal_path, &interval_str, scope.role);
+            let prompt = generate_long_horizon_goal_prompt(
+                &goal_path, &interval_str, scope.role, scope.effective_peer_charter.as_deref(),
+            );
             if format_json {
                 println!(
                     "{}",

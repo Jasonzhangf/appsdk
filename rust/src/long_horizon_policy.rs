@@ -4,7 +4,14 @@ pub(crate) fn generate_long_horizon_goal_prompt(
     goal_path: &Path,
     interval_str: &str,
     role: ExecutionRole,
+    effective_peer_charter: Option<&str>,
 ) -> String {
+    let charter = effective_peer_charter.unwrap_or_else(|| match role {
+        ExecutionRole::Master => POLICY.master_charter(),
+        ExecutionRole::Worker => POLICY.worker_charter(),
+        ExecutionRole::ManagedSubagent => POLICY.managed_subagent_charter(),
+        ExecutionRole::Unknown => POLICY.unknown_charter(),
+    });
     format!(
         r#"# 本人长程目标编排提示词（Master / Peer）
 
@@ -50,7 +57,7 @@ THEN: 在原目标或任务记录维护目标、执行计划、实际进度和�
 "#,
         goal_path.display(),
         interval_str,
-        POLICY.worker_charter().trim(),
+        charter.trim(),
         POLICY.fleet_rules().trim(),
         POLICY.notification_rules().trim(),
         project_patrol_brief(role),
@@ -60,7 +67,7 @@ THEN: 在原目标或任务记录维护目标、执行计划、实际进度和�
 
 pub(crate) fn project_patrol_brief(role: ExecutionRole) -> String {
     if role != ExecutionRole::Master {
-        return "## 4. 项目巡检与 CEO 汇报\n\n项目巡检和 CEO 汇总由本项目 master 负责。普通 peer 只维护本人目标，不 arm 项目巡检。".to_string();
+        return "## 4. 项目巡检与 CEO 汇报\n\n项目巡检和 CEO 汇总由本项目 master 负责。当前角色只维护本人职责内已授权的目标和巡检。".to_string();
     }
     r#"## 4. 项目巡检与 CEO 汇报
 
@@ -226,9 +233,9 @@ mod tests {
     #[test]
     fn generated_prompt_uses_the_canonical_role_policy() {
         let prompt =
-            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Master);
+            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Master, None);
 
-        assert!(prompt.contains("普通 peer 按清晰合同执行"));
+        assert!(prompt.contains("你是本项目的 master"));
         assert!(!prompt.contains("只有所有合适 peer 都忙"));
         assert!(!prompt.contains("Master 专属"));
         assert!(prompt.contains("Worker / subworker 处理规则"));
@@ -277,8 +284,8 @@ mod tests {
         assert!(unknown.contains("codex exec --profile gcm"));
         assert!(!unknown.contains("只允许恢复绑定/注册"));
         let worker_prompt =
-            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Worker);
+            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Worker, None);
         assert!(!worker_prompt.contains("默认 arm 已完成"));
-        assert!(worker_prompt.contains("普通 peer 只维护本人目标"));
+        assert!(worker_prompt.contains("当前角色只维护本人职责内已授权的目标和巡检"));
     }
 }

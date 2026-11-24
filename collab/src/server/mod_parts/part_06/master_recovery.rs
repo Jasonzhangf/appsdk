@@ -321,7 +321,7 @@ fn base_role_brief(
     let work_role_execution_rule = workflow_template_rule("work_role_execution_rule");
     let work_role_next_action_rule = workflow_template_rule("work_role_next_action");
     let peer_task_list_rule = workflow_template_rule("peer_task_list_rule");
-    let scoped_dispatch_rule = "For an authorized, bounded subtask within your current role, use a suitable authorized peer when available. Use Codex orchestration for a subagent when no eligible peer is available. Define scope, inputs, output, acceptance and stop conditions; verify the result and retain ownership. Memory and patrol delegate only their own duties. Independent review follows its separate read-only reviewer contract.";
+    let scoped_dispatch_rule = workflow_template_rule("scoped_dispatch_rule");
     if current_master_worker_id(state, Some(route_scope)).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",

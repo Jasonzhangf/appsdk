@@ -1327,9 +1327,8 @@ and its coordination tasks. Legacy managed records are inspection
 inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
-   and test condition, then claim it or accept its invitation. After a manager
-   confirms no suitable authorized peer can take an unassigned goal, or the
-   accepted goal's peer splits its own bounded subwork, give an independent
+   and test condition, then claim it or accept its invitation. When no suitable
+   authorized peer can take the work, give an independent
    `codex exec --profile gcm` worker the same goal, scope, delivery/test
    evidence, and stop conditions. Reuse an existing assigned or registered
    task; describe it if conditions are missing. Do not register a duplicate
@@ -1385,8 +1384,8 @@ Legacy managed-subagent records grant no new production execution authority.
 Registered peer status and thread state use the owning AppServer RPC. Offer
 unassigned long-horizon goals to suitable authorized peers first, and use
 independent `codex exec --profile gcm` workers only when no suitable authorized
-peer can take the goal. A peer may dispatch independent GCM workers directly
-for bounded subwork inside its accepted goal. Legacy records may be inspected
+peer can take the goal. Apply the same eligible-peer check before delegating
+bounded subwork inside an accepted goal. Legacy records may be inspected
 only for diagnosis.
 For registered participants, `collab-mcp` and the `collab` CLI expose the same
 collaboration protocol. Listed `collab_*` tools alone do not prove registration.

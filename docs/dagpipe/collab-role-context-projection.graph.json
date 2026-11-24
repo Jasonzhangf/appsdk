@@ -61,7 +61,7 @@
       "id": "判定身份与职责适用条件",
       "operator": "appsdk.collab_context.classify_role_applicability",
       "operator_version": "1",
-      "description": "按当前typed协作身份判断管理、普通peer编排和执行专长的适用边界。工作角色标签不改变身份或授权；普通peer在明确worker专长下承担有界执行，patrol、memory和architect保持各自固定边界。",
+      "description": "按当前 typed 协作身份判断管理、普通 peer 执行及工作专长；普通 peer 在现有合同内执行与编排简单工作，有合适 architect 时复杂设计由 architect 负责。patrol、memory、architect 和 reviewer 投影各自职责，工作角色标签不改变身份、授权或订阅。",
       "inputs": [
         "角色模板候选"
       ],

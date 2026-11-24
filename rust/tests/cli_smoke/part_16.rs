@@ -683,11 +683,17 @@ case "$1 $2" in
       endpoint) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":false,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
       stale_identity) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","active_task":"stale-route-invite","endpoint_live":true,"identity_valid":false,"suspected_offline":false}],"tasks":[{"id":"stale-route-invite","status":"working","owner":"current-peer","next_step":"continue orchestration"}],"subagents":[]}' ;;
       offline) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":true,"identity_valid":true,"suspected_offline":true}],"tasks":[],"subagents":[]}' ;;
-      missing_worker) printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}' ;;
+      missing_worker|memory) printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}' ;;
     esac
     ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"other-master","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"worker","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ")
+    if [ "${STATUS_VARIANT:-}" = memory ]; then
+      printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"worker"},"role_brief":{"role_task":"Accept only memory summaries and memory patrol duties.","responsibilities":["Reuse the existing authorized schedule."],"next_action":"Validate memory evidence.","workflow_template":{"specialties":[{"target":"role:memory","source":"base"}]}}}'
+    else
+      printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"worker","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
+    fi
+    ;;
   *) exit 64 ;;
 esac
 "#,
@@ -700,6 +706,7 @@ esac
         ("stale_identity", "peer"),
         ("offline", "peer"),
         ("missing_worker", "peer"),
+        ("memory", "peer"),
     ] {
         let result = Command::new(binary())
             .args(["longhorizon", "show", "--json"])
@@ -712,6 +719,12 @@ esac
         assert!(result.status.success(), "variant={variant}");
         let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(payload["role"], expected_role, "variant={variant}");
+        if variant == "memory" {
+            let charter = payload["charter"].as_str().unwrap();
+            assert!(charter.contains("Accept only memory summaries and memory patrol duties"));
+            assert!(charter.contains("Reuse the existing authorized schedule"));
+            assert!(!charter.contains("普通 peer 按清晰合同执行"));
+        }
         if variant == "stale_identity" {
             assert_eq!(payload["assigned"][0]["id"], "stale-route-invite");
             let peer_charter = payload["charter"].as_str().unwrap();

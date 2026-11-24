@@ -3810,19 +3810,12 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
     let mut fixture = AppFixture::new();
     let first_peer = fixture.run_public(&["context"], THREAD_B);
     let peer_keywords = [
-        "patrol",
         "subscription",
-        "scope",
-        "master",
-        "block",
-        "non-overlapping bounded scopes",
-        "close-before-open/sese",
-        "canonical intake and deduplication",
-        "owning project contract",
-        "re-arm",
-        "report channel",
+        "execute your accepted task",
+        "allowed and prohibited scope",
+        "when no eligible peer is available",
+        "observable evaluation criteria",
         "stop conditions",
-        "resume authorized work",
     ];
     assert_role_patrol_mentions("first peer context", &first_peer, "worker", &peer_keywords);
 
@@ -3896,6 +3889,14 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         notification_subscription_count(&fixture, THREAD_B, "master before restoration");
     let peer_subscriptions_before =
         notification_subscription_count(&fixture, THREAD_A, "peer before restoration");
+    let memory = fixture.run_public(&["context", "--work-roles", "memory"], THREAD_A);
+    assert!(memory["role_brief"]["role_task"].as_str().unwrap().contains("memory patrol"));
+    assert_eq!(
+        notification_subscription_count(&fixture, THREAD_A, "memory role selected"),
+        peer_subscriptions_before,
+        "role selection does not arm a new goal subscription"
+    );
+    fixture.run_public(&["context", "--work-roles", ""], THREAD_A);
 
     fixture.restart_daemon();
 

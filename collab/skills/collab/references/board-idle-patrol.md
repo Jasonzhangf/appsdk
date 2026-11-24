@@ -29,10 +29,9 @@ owner 是 core 实现与项目 DAG。
   `collab who`，列出全部 live idle peer（包括没有当前任务的成员）及通道来源；
   第二，按当前优先级和[派单顺序](../SKILL.md#派单顺序与一-peer-一任务)派发 ready 的
   非重叠 P0/P1。适用 architect 的缺陷和任务先交 architect。不得
-  先做实现、debug、merge 或资源清理。Planner/Reviewer 缺位不是等待理由：独立
-  reviewer 先用独立 Codex OAuth/`codex-auto-review`，不可用则改派普通空闲 peer；
-  只有无 idle worker、subagent review 入口真实失效且无其他 peer 时，Jenny 才临时
-  代审并记录独立性缺口。随后核对非 live peer：cold、offline、unknown 不进入派发
+  先做实现、debug、merge 或资源清理。已有可用的独立 reviewer 优先承接。缺位时按
+  [Review 合同](../../codex-orchestrator/references/review.md)派独立只读 Codex worker，
+  记录实际审查者和证据。随后核对非 live peer：cold、offline、unknown 不进入派发
   容量；对未响应 peer 使用最长 15 分钟的有界等待，到期再核对状态。可用者进入派发
   队列；仍不可用者从当前派发队列排除，记录 owner 和恢复条件，继续其他可独立派发
   工作，不因这些 peer 未响应而停工。再检查未解决的 P0/P1、未完成任务或 ready 工作、自有

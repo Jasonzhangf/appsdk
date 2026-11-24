@@ -31,6 +31,7 @@ pub(super) struct GoalScope {
     pub invocation_root: PathBuf,
     pub session_id: Option<String>,
     pub role: ExecutionRole,
+    pub effective_peer_charter: Option<String>,
 }
 
 impl GoalScope {
@@ -587,6 +588,7 @@ pub(super) fn goal_scope_from_context(context: &Value, root: &Path) -> Result<Go
             .or_else(|| context["binding"]["session_id"].as_str())
             .map(str::to_owned),
         role: execution_role(context),
+        effective_peer_charter: crate::long_horizon_role::effective_peer_charter(context),
     })
 }
 

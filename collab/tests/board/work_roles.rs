@@ -1478,13 +1478,9 @@ fn shipped_workflow_asset_rejects_peer_busy_before_gcm_guidance() {
             "peer-busy-before-GCM guidance must be rejected: {text}"
         );
     }
-    for role in ["master", "peer"] {
-        let text = asset["identity_templates"][role].to_string().to_lowercase();
-        assert!(
-            text.contains("no suitable authorized peer can take the work"),
-            "{role} identity template must prefer idle authorized peer capacity: {text}"
-        );
-    }
+    let dispatch = asset["coordination_rules"]["scoped_dispatch_rule"].as_str().unwrap();
+    assert!(dispatch.contains("use a suitable authorized peer when available"));
+    assert!(dispatch.contains("when no eligible peer is available"));
     for (name, text) in [
         (
             "operations.md",
@@ -1534,9 +1530,9 @@ fn shipped_workflow_asset_rejects_peer_busy_before_gcm_guidance() {
             }
             assert!(
                 text.contains(
-                    "a peer may split an accepted goal into non-overlapping bounded scopes and dispatch those scopes directly to independent"
+                    "apply the same eligible-peer check before delegating bounded subwork inside an accepted goal"
                 ),
-                "{name} must preserve direct GCM dispatch for a peer's own bounded subwork"
+                "{name} must apply peer eligibility to bounded subwork"
             );
             assert!(
                 text.contains("only when no suitable authorized peer can take the goal"),
@@ -1576,7 +1572,7 @@ fn context_role_guidance_reaches_master_and_peer_with_latest_dynamic_roles() {
             "{label} role_brief must reject peer-busy-before-GCM guidance: {brief_lower}"
         );
         assert!(
-            brief_lower.contains("no suitable authorized peer can take the work"),
+            brief_lower.contains("when no eligible peer is available"),
             "{label} role_brief must prefer idle, suitable authorized peer capacity: {brief_lower}"
         );
         assert!(

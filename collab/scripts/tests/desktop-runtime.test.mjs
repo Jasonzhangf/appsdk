@@ -187,14 +187,22 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
       const timer=setTimeout(()=>wrapper.kill('SIGTERM'),15000);
       const lines=createInterface({input:wrapper.stdout})[Symbol.asyncIterator]();
       async function rpc(id,method,params){
-        wrapper.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');
+        const idToken=typeof id==='bigint'?id.toString():JSON.stringify(id);
+        wrapper.stdin.write(`{"jsonrpc":"2.0","id":${idToken},"method":${JSON.stringify(method)},"params":${JSON.stringify(params)}}\n`);
         for(;;){const line=await lines.next();assert.ok(!line.done,`${label}: wrapper closed before responding`);
+          if(typeof id==='bigint'){
+            const rawId=/"id"\s*:\s*("[^"]*"|-?\d+|null)\s*[,}]/.exec(line.value)?.[1];
+            if(rawId===undefined)continue;
+            assert.equal(rawId,idToken,`${label}: successful managed response must preserve the integer ID`);
+            return JSON.parse(line.value);
+          }
           const response=JSON.parse(line.value);if(response.id===id)return response;}
       }
       try{
         await rpc('init','initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'enrolled-query',version:'1'}});
         const start=f.calls.length;
-        const response=await rpc('query','tools/call',{name:tool,arguments:tool==='collab_context'?{query:true,project_scope:project,app_scope_id:'appserver-cli'}:{},_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
+        const queryId=tool==='collab_context'&&from===home?9007199254740993n:'query';
+        const response=await rpc(queryId,'tools/call',{name:tool,arguments:tool==='collab_context'?{query:true,project_scope:project,app_scope_id:'appserver-cli'}:{},_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
         const reads=f.calls.slice(start).filter(c=>c.params?.tool==='read_thread'&&c.params.threadId===thread&&c.params.arguments.threadId===thread);
         return {response,reads:reads.length};
       }finally{wrapper.stdin.end();await closed;clearTimeout(timer);}

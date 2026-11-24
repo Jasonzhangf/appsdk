@@ -1830,6 +1830,19 @@ int main(int argc, char **argv) {
 
     thread_local! {
         static TEST_TMUX_BINARY: RefCell<PathBuf> = RefCell::new(PathBuf::from("tmux"));
+        static DETACHED_TEST_SERVER: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn test_server_is_detached(server_pid: u32) -> bool {
+        DETACHED_TEST_SERVER.get() == Some(server_pid)
+    }
+
+    struct DetachedTestServer(Option<u32>);
+
+    impl Drop for DetachedTestServer {
+        fn drop(&mut self) {
+            DETACHED_TEST_SERVER.set(self.0);
+        }
     }
 
     pub(super) fn test_tmux_binary() -> PathBuf {
@@ -2956,7 +2969,7 @@ int main(int argc, char **argv) {
         let codex = tmux.fake_codex();
         start_test_foreground_agent(&tmux, &codex);
         assert!(agent_is_online(&endpoint));
-        let no_attachment = notify(&endpoint, "no-attachment", "never paste");
+        let no_attachment = notify_with_attachment(&endpoint, "no-attachment", "never paste", || false);
         assert!(no_attachment.unwrap_err().starts_with("RECIPIENT_NOT_ONLINE:"));
         assert!(!capture(&endpoint).unwrap().contains("never paste"));
 
@@ -3004,6 +3017,7 @@ int main(int argc, char **argv) {
         let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
         let codex = tmux.fake_codex();
+        let _detached = DetachedTestServer(DETACHED_TEST_SERVER.replace(Some(endpoint.server_pid)));
         start_test_foreground_agent(&tmux, &codex);
         assert!(agent_is_online(&endpoint));
         assert!(iterm2_panes_for_endpoint(&endpoint).unwrap().is_empty());

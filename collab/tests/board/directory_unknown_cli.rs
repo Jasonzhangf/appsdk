@@ -164,7 +164,6 @@ fn msg_returns_existing_success_shape_to_sender_and_recipient() {
         assert_eq!(queried["subject"], "participant-visible");
         assert_eq!(queried["body"], "participant body");
         assert!(queried.get("state").is_some());
-        assert!(queried.get("consumed_by_recv").is_some());
         assert!(queried.get("notification_delivery_failure").is_some());
     }
 }
@@ -351,32 +350,6 @@ fn anonymous_send_unauthenticated_and_inherited_agent_env() {
         msg_pane["from"], "unknown",
         "explicit anonymous send must override inherited agent env"
     );
-
-    // 3. Anonymous send rejects reply obligations
-    let rejected = fixture.command_without_native_facts(&[
-        "sendmessage",
-        "--unknown-sender",
-        "--to",
-        "Bob",
-        "--subject",
-        "Bad reply request",
-        "--reply-required",
-        "Obligation not allowed",
-        "Body text",
-    ]);
-    assert!(
-        !rejected.status.success(),
-        "anonymous send with reply obligation must fail"
-    );
-    let err_msg = format!(
-        "{} {}",
-        String::from_utf8_lossy(&rejected.stdout),
-        String::from_utf8_lossy(&rejected.stderr)
-    );
-    assert!(
-        err_msg.contains("cannot be used with") || err_msg.contains("reply obligation"),
-        "error message must reject reply obligation: {err_msg}"
-    );
 }
 
 #[test]
@@ -525,7 +498,7 @@ fn name_addressed_target_session_follows_same_name_handoff_across_restart_and_re
     let old_id = receipt["msg_id"].as_str().unwrap().to_owned();
     let before = fixture.run_public(&["msg", &old_id], THREAD_B);
     assert_eq!(before["wake_attempts"], 0);
-    assert_eq!(before["consumed_by_recv"], false);
+    assert_eq!(before["state"], "pending");
 
     // Supply an unrelated, expired current message as retention input. The
     // pinned message and its binding above still come from the real CLI. The
@@ -534,7 +507,7 @@ fn name_addressed_target_session_follows_same_name_handoff_across_restart_and_re
         state["msgs"]["m1-1"] = json!({
             "id":"m1-1", "from":"unknown", "to":old_worker,
             "type":"notify", "subject":"expired retention sibling", "body":"old history",
-            "in_reply_to":null, "created_ms":1, "state":"pending",
+            "in_reply_to":null, "created_ms":1, "state":"read",
             "wake_attempt_count":0, "last_wake_attempt_ms":0, "retry_attempted":false
         })
     });
@@ -593,7 +566,7 @@ fn name_addressed_target_session_follows_same_name_handoff_across_restart_and_re
     assert_eq!(followed["body"], ORIGINAL_BODY);
     assert_eq!(followed["to"], new_worker);
     assert_eq!(followed["target_session"], NEXT_SESSION);
-    assert_eq!(followed["consumed_by_recv"], false);
+    assert_eq!(followed["state"], "pending");
 
     // Restart and enable delivery. The pending message must retain the name
     // handoff while the expired sibling remains purged.
@@ -611,7 +584,7 @@ fn name_addressed_target_session_follows_same_name_handoff_across_restart_and_re
     assert_eq!(retained["body"], ORIGINAL_BODY);
     assert_eq!(retained["to"], new_worker);
     assert_eq!(retained["target_session"], NEXT_SESSION);
-    assert_eq!(retained["consumed_by_recv"], false);
+    assert_eq!(retained["state"], "pending");
     assert!(fixture.current_state()["msgs"]["m1-1"].is_null());
 
     let fresh = fixture.command_without_native_facts(&[
@@ -686,39 +659,15 @@ fn name_addressed_target_session_follows_same_name_handoff_across_restart_and_re
         .expect("the current session consumes its ordinary message through recv");
     assert_eq!(current["from"], "unknown");
     assert_eq!(current["body"], FRESH_BODY);
-    let consumed_messages = messages.clone();
-
-    // The durable receipt binds to the current actual carrier. It survives a
-    // daemon restart and replays the same batch without moving or duplicating
-    // either original delivery.
-    let consumed = fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
-    assert!(
-        consumed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&consumed.stderr)
-    );
-    let consumed: Value = serde_json::from_slice(&consumed.stdout).unwrap();
-    assert_eq!(consumed["id"], old_id);
-    assert_eq!(consumed["body"], ORIGINAL_BODY);
-    assert_eq!(consumed["to"], new_worker);
-    assert_eq!(consumed["target_session"], NEXT_SESSION);
-    assert_eq!(consumed["consumed_by_recv"], true);
+    let consumed_state = fixture.current_state();
+    assert_eq!(consumed_state["msgs"][&old_id]["state"], "read");
+    assert_eq!(consumed_state["msgs"][&old_id]["to"], new_worker);
+    assert_eq!(consumed_state["msgs"][&fresh_id]["state"], "read");
 
     fixture.restart_daemon();
-    let receipt_after_restart =
-        fixture.command_public_with_session(&["msg", &old_id], NEXT_SESSION, THREAD_B);
-    assert!(
-        receipt_after_restart.status.success(),
-        "{}",
-        String::from_utf8_lossy(&receipt_after_restart.stderr)
-    );
-    let receipt_after_restart: Value =
-        serde_json::from_slice(&receipt_after_restart.stdout).unwrap();
-    assert_eq!(receipt_after_restart["id"], old_id);
-    assert_eq!(receipt_after_restart["body"], ORIGINAL_BODY);
-    assert_eq!(receipt_after_restart["to"], new_worker);
-    assert_eq!(receipt_after_restart["target_session"], NEXT_SESSION);
-    assert_eq!(receipt_after_restart["consumed_by_recv"], true);
+    let restarted_state = fixture.current_state();
+    assert_eq!(restarted_state["msgs"][&old_id]["state"], "read");
+    assert_eq!(restarted_state["msgs"][&old_id]["to"], new_worker);
 
     let replay = fixture.command_public_with_session(
         &[
@@ -737,8 +686,7 @@ fn name_addressed_target_session_follows_same_name_handoff_across_restart_and_re
         String::from_utf8_lossy(&replay.stderr)
     );
     let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
-    assert_eq!(replay["replayed"], true);
-    assert_eq!(replay["messages"], json!(consumed_messages));
+    assert_eq!(replay["count"], 0, "{replay}");
 
     let repeated = fixture.command_public_with_session(
         &[

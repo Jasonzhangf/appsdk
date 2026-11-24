@@ -44,14 +44,17 @@ fn tmux_identity_presence(server: &Server, state: &State, worker: &WorkerRec) ->
     }
 }
 
-fn desktop_identity_presence(server: &Server, state: &State, worker: &WorkerRec) -> IdentityPresence {
+fn desktop_identity_presence(
+    server: &Server,
+    state: &State,
+    worker: &WorkerRec,
+) -> IdentityPresence {
     let Ok(project) = GlobalState::canonical_project_scope(&server.root) else {
         return IdentityPresence::Missing;
     };
     if state.workers.get(&worker.id).is_some_and(|current| {
         current.token == worker.token && current.transport == worker.transport
-    })
-        && current_worker_binding(state, &project, None, worker).is_some()
+    }) && current_worker_binding(state, &project, None, worker).is_some()
     {
         IdentityPresence::Present
     } else {
@@ -387,7 +390,9 @@ fn rex_maintenance_presence(transport: &SelectedTransport) -> IdentityPresence {
     };
     match runtime.block_on(crate::client::adapters::rex::resolve_target(endpoint)) {
         Ok(()) => IdentityPresence::Present,
-        Err(error) if crate::client::adapters::rex::resolve_error_is_definitively_absent(&error) => {
+        Err(error)
+            if crate::client::adapters::rex::resolve_error_is_definitively_absent(&error) =>
+        {
             IdentityPresence::Missing
         }
         Err(_) => IdentityPresence::Unknown,
@@ -449,8 +454,8 @@ fn thread_status_presence(result: Result<serde_json::Value, String>) -> Identity
             // A resident thread in an error state is not definitively absent, so
             // retain it instead of retiring its control plane.
             Some("systemError") => IdentityPresence::Unknown,
-            Some(_) => IdentityPresence::Present,
-            None => IdentityPresence::Unknown,
+            Some("idle" | "active") => IdentityPresence::Present,
+            _ => IdentityPresence::Unknown,
         },
         Err(error)
             if error.contains("not found")
@@ -503,7 +508,8 @@ mod close_endpoint_fence_tests {
     use super::*;
 
     #[test]
-    fn owner_fence_allows_unrelated_writes_but_rejects_current_token_transport_and_binding_changes() {
+    fn owner_fence_allows_unrelated_writes_but_rejects_current_token_transport_and_binding_changes()
+    {
         let mut state = State::default();
         state.workers.insert(
             "peer".into(),
@@ -571,11 +577,12 @@ pub(crate) fn selected_transport_endpoint_live(
     transport: &SelectedTransport,
 ) -> Option<bool> {
     match transport.kind {
-        TransportKind::DesktopBridge => transport
-            .thread_id
-            .as_deref()
-            .and_then(|thread| (server.appserver_thread_status)(transport, thread).ok())
-            .map(|_| true),
+        TransportKind::AppServer | TransportKind::DesktopBridge => {
+            let thread = transport.thread_id.as_deref()?;
+            endpoint_live_from_presence(thread_status_presence(
+                (server.appserver_thread_status)(transport, thread),
+            ))
+        }
         TransportKind::Tmux => transport.tmux_endpoint.as_ref().and_then(|endpoint| {
             use crate::client::adapters::tmux::{iterm2_panes_for_endpoint, probe, PanePresence};
             match probe(endpoint) {
@@ -586,35 +593,16 @@ pub(crate) fn selected_transport_endpoint_live(
                 Ok(PanePresence::Unknown) | Err(_) => None,
             }
         }),
-        TransportKind::AppServer => transport
-            .thread_id
-            .as_deref()
-            .and_then(|thread| match (server.appserver_thread_status)(transport, thread) {
-                Ok(_) => Some(true),
-                Err(error)
-                    if error.contains("not found")
-                        || error.contains("MISSING")
-                        || error.contains("GONE") =>
-                {
-                    Some(false)
-                }
-                Err(_) => None,
-            }),
-        TransportKind::Dsh => {
-            let (Some(endpoint), Some(runtime_id), Some(agent_id)) = (
-                transport.endpoint.as_deref(),
-                transport.namespace.as_deref(),
-                transport.thread_id.as_deref(),
-            ) else {
-                return None;
-            };
-            match crate::client::adapters::dsh::facts(endpoint, runtime_id, agent_id) {
-                Ok(_) => Some(true),
-                Err(error) if error.is_definitely_absent() => Some(false),
-                Err(_) => None,
-            }
-        }
+        TransportKind::Dsh => endpoint_live_from_presence(dsh_identity_presence(transport)),
         TransportKind::Rex => None,
+    }
+}
+
+fn endpoint_live_from_presence(presence: IdentityPresence) -> Option<bool> {
+    match presence {
+        IdentityPresence::Present => Some(true),
+        IdentityPresence::Missing => Some(false),
+        IdentityPresence::Cold | IdentityPresence::Unknown => None,
     }
 }
 
@@ -628,15 +616,15 @@ pub(crate) fn worker_identity_and_endpoint(
     match transport.kind {
         TransportKind::DesktopBridge => {
             let valid = worker_identity_presence(server, worker) == IdentityPresence::Present;
-            let live = transport.thread_id.as_deref().and_then(|thread| {
-                (server.appserver_thread_status)(&transport, thread).ok().map(|_| true)
-            });
-            (valid, live)
+            (valid, selected_transport_endpoint_live(server, &transport))
         }
         TransportKind::Tmux => {
             let identity_valid =
                 worker_identity_presence(server, worker) == IdentityPresence::Present;
-            (identity_valid, selected_transport_endpoint_live(server, &transport))
+            (
+                identity_valid,
+                selected_transport_endpoint_live(server, &transport),
+            )
         }
         TransportKind::AppServer | TransportKind::Dsh => {
             let identity_valid = if transport.kind == TransportKind::AppServer {
@@ -646,12 +634,7 @@ pub(crate) fn worker_identity_and_endpoint(
                     && transport.namespace.is_some()
                     && transport.thread_id.is_some()
             };
-            let endpoint_live = match worker_identity_presence(server, worker) {
-                IdentityPresence::Present | IdentityPresence::Cold => Some(true),
-                IdentityPresence::Missing => Some(false),
-                IdentityPresence::Unknown => None,
-            };
-            (identity_valid, endpoint_live)
+            (identity_valid, selected_transport_endpoint_live(server, &transport))
         }
         TransportKind::Rex => {
             let identity_valid = transport.rex_endpoint.is_some()
@@ -715,7 +698,10 @@ fn transport_agent_view(
             ),
         };
     }
-    if matches!(transport.kind, TransportKind::AppServer | TransportKind::DesktopBridge) {
+    if matches!(
+        transport.kind,
+        TransportKind::AppServer | TransportKind::DesktopBridge
+    ) {
         let Some(thread_id) = transport.thread_id.as_deref() else {
             return (
                 IdentityPresence::Missing,
@@ -738,8 +724,8 @@ fn transport_agent_view(
                 let identity_presence = match thread_state.as_deref() {
                     Some("notLoaded") => IdentityPresence::Cold,
                     Some("systemError") => IdentityPresence::Missing,
-                    Some(_) => IdentityPresence::Present,
-                    None => IdentityPresence::Unknown,
+                    Some("idle" | "active") => IdentityPresence::Present,
+                    _ => IdentityPresence::Unknown,
                 };
                 (
                     identity_presence,
@@ -793,24 +779,19 @@ fn transport_agent_view(
         };
         return match crate::client::adapters::dsh::facts(endpoint, runtime_id, agent_id) {
             Ok(facts) => {
-                // The gateway's status domain is `running | inactive`: running
-                // is live, anything else is known-but-not-live, which is Cold.
-                let running = facts.status == "running";
-                let presence = if running {
-                    IdentityPresence::Present
-                } else {
-                    IdentityPresence::Cold
-                };
-                let thread_state = match crate::client::adapters::dsh::activity(
-                    endpoint, runtime_id, agent_id,
-                ) {
-                    Ok(activity) if activity.live => match activity.status.as_str() {
-                        "running" => "working",
-                        "inactive" => "idle",
-                        _ => "unknown",
-                    },
-                    _ => "unknown",
-                };
+                let (presence, thread_state) =
+                    match crate::client::adapters::dsh::activity(endpoint, runtime_id, agent_id) {
+                        Ok(activity) if activity.live => (
+                            IdentityPresence::Present,
+                            match activity.status.as_str() {
+                                "running" => "working",
+                                "inactive" => "idle",
+                                _ => "unknown",
+                            },
+                        ),
+                        Ok(_) => (IdentityPresence::Cold, "unknown"),
+                        Err(_) => (IdentityPresence::Unknown, "unknown"),
+                    };
                 let view = serde_json::json!({
                     "transport": "dsh",
                     "runtimeId": facts.runtime_id,
@@ -824,7 +805,7 @@ fn transport_agent_view(
                     serde_json::json!({
                         "thread_state": thread_state,
                         "active_flags": [],
-                        "can_accept_direct_input": running,
+                        "can_accept_direct_input": presence == IdentityPresence::Present,
                         "latest_turn_status": serde_json::Value::Null,
                         "latest_turn_error": serde_json::Value::Null,
                         "transport": "dsh",
@@ -1148,9 +1129,21 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             .cloned();
         (admission, task, subscription)
     };
-    let notification_attempt = match subscription.as_ref().map(|subscription| {
-        attempt_scheduler_notification(server, request_id, &admission.message_id, &subscription.id)
-    }).transpose() { Ok(outcome) => outcome, Err(error) => return Some(error) };
+    let notification_attempt = match subscription
+        .as_ref()
+        .map(|subscription| {
+            attempt_scheduler_notification(
+                server,
+                request_id,
+                &admission.message_id,
+                &subscription.id,
+            )
+        })
+        .transpose()
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return Some(error),
+    };
     if notification_attempt == Some(SchedulerNotificationAttempt::InFlight) {
         return Some(Resp::err_data(
             "scheduler dispatch notification is already in flight; retry with the same request_id",
@@ -1531,9 +1524,16 @@ pub(crate) fn handle_scheduler_dispatch(
             return Resp::err(format!("SCHEDULER_DURABILITY_FAILED: {error}"));
         }
         drop(state);
-        let notification_attempt = match subscription.as_ref().map(|subscription| {
-            attempt_scheduler_notification(server, &request_id, &message_id, &subscription.id)
-        }).transpose() { Ok(outcome) => outcome, Err(error) => return error };
+        let notification_attempt = match subscription
+            .as_ref()
+            .map(|subscription| {
+                attempt_scheduler_notification(server, &request_id, &message_id, &subscription.id)
+            })
+            .transpose()
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return error,
+        };
         if notification_attempt == Some(SchedulerNotificationAttempt::InFlight) {
             return Resp::err_data(
                 "scheduler dispatch notification is already in flight; retry with the same request_id",
@@ -1669,9 +1669,7 @@ fn handle_master_wake_hold(
         );
     }
     if ttl_seconds == 0 || ttl_seconds > MASTER_WAKE_HOLD_MAX_TTL_SECONDS {
-        return Resp::err(
-            "MASTER_WAKE_HOLD_TTL_INVALID: ttl-seconds must be within 1..=604800",
-        );
+        return Resp::err("MASTER_WAKE_HOLD_TTL_INVALID: ttl-seconds must be within 1..=604800");
     }
     let held_ms = now_ms();
     let until_ms = held_ms.saturating_add((ttl_seconds as i64).saturating_mul(1000));
@@ -1731,7 +1729,10 @@ fn handle_master_wake_release(server: &Server, worker_id: String, token: String)
 
 include!("part_07/worker_close.rs");
 
-fn same_selected_endpoint(left: &crate::proto::SelectedTransport, right: &crate::proto::SelectedTransport) -> bool {
+fn same_selected_endpoint(
+    left: &crate::proto::SelectedTransport,
+    right: &crate::proto::SelectedTransport,
+) -> bool {
     left.kind == right.kind
         && left.endpoint == right.endpoint
         && left.namespace == right.namespace
@@ -1748,10 +1749,13 @@ fn rex_worker_status_view(
     let state = server.state.lock().unwrap();
     let valid = rex_identity_presence(server, &state, worker) == IdentityPresence::Present;
     let current_execution = worker.transport.as_ref().is_some_and(|transport| {
-        state.rex_executions.get(&worker.id).is_some_and(|execution| {
-            transport.rex_endpoint.as_ref() == Some(&execution.endpoint)
-                && transport.session_id.as_deref() == Some(execution.agent_session_id.as_str())
-        })
+        state
+            .rex_executions
+            .get(&worker.id)
+            .is_some_and(|execution| {
+                transport.rex_endpoint.as_ref() == Some(&execution.endpoint)
+                    && transport.session_id.as_deref() == Some(execution.agent_session_id.as_str())
+            })
     });
     if valid && current_execution {
         if let Some((presence, view)) = worker_agent_view_in_state(server, &state, worker) {
@@ -1763,7 +1767,12 @@ fn rex_worker_status_view(
             return (presence, view, valid, live);
         }
     }
-    (IdentityPresence::Unknown, serde_json::Value::Null, valid, None)
+    (
+        IdentityPresence::Unknown,
+        serde_json::Value::Null,
+        valid,
+        None,
+    )
 }
 
 fn worker_status_agent_session_id(transport: &crate::proto::SelectedTransport) -> Option<&str> {
@@ -1833,11 +1842,7 @@ fn worker_status_capture(
     .cloned()
     .ok_or_else(|| "WORKER_STATUS_CAPTURE_BINDING_CHANGED".to_owned())?;
     let slot = control
-        .current_for_worker(
-            &route.project_scope_id,
-            &route.app_scope_id,
-            target_id,
-        )?
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, target_id)?
         .ok_or_else(|| "WORKER_STATUS_CAPTURE_NAME_NOT_CURRENT".to_owned())?;
     let active = slot
         .active_binding()
@@ -1860,8 +1865,8 @@ fn worker_status_capture(
     } else {
         crate::proto::WorkerStatusSessionProbe::Unsupported
     };
-    let master_worker_id = current_master_grant(state, Some(&route))
-        .map(|grant| grant.agent_id.as_str().to_owned());
+    let master_worker_id =
+        current_master_grant(state, Some(&route)).map(|grant| grant.agent_id.as_str().to_owned());
     Ok(crate::proto::WorkerStatusCapture {
         project_scope: route.project_scope_id.as_str().to_owned(),
         app_scope_id: route.app_scope_id.as_str().to_owned(),
@@ -1956,10 +1961,7 @@ fn worker_status_session_probe(
         if let Some(presence) = presence {
             let observed_ms = next_status_observation_ms(
                 now,
-                capture
-                    .presence
-                    .as_ref()
-                    .map(|record| record.observed_ms),
+                capture.presence.as_ref().map(|record| record.observed_ms),
             );
             capture.presence = Some(name_state::AgentPresenceRecord {
                 project_scope: capture.project_scope.clone(),
@@ -1977,10 +1979,8 @@ fn worker_status_session_probe(
         }
     }
 
-    capture.missing_fields = name_monitor::missing_status_fields(
-        capture.presence.as_ref(),
-        capture.activity.as_ref(),
-    );
+    capture.missing_fields =
+        name_monitor::missing_status_fields(capture.presence.as_ref(), capture.activity.as_ref());
     capture.session_probe = if applied {
         WorkerStatusSessionProbe::Applied
     } else {
@@ -1996,16 +1996,11 @@ fn commit_worker_status_session_probe(
     probed: &crate::proto::WorkerStatusCapture,
 ) -> Result<(), Resp> {
     let mut state = server.state.lock().unwrap();
-    let current = match worker_status_capture(
-        server,
-        control,
-        &state,
-        &baseline.worker_id,
-        now_ms(),
-    ) {
-        Ok(current) => current,
-        Err(error) => return Err(Resp::err(error)),
-    };
+    let current =
+        match worker_status_capture(server, control, &state, &baseline.worker_id, now_ms()) {
+            Ok(current) => current,
+            Err(error) => return Err(Resp::err(error)),
+        };
     if current.name != baseline.name
         || current.binding_generation != baseline.binding_generation
         || current.agent_session_id != baseline.agent_session_id
@@ -2038,7 +2033,8 @@ fn commit_worker_status_session_probe(
         }
     }
     if !events.is_empty() {
-        if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, control) {
+        if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, control)
+        {
             return Err(Resp::err(format!(
                 "WORKER_STATUS_SESSION_PROBE_DURABILITY_FAILED: {error}"
             )));
@@ -2089,10 +2085,8 @@ fn worker_status_capture_response(
     snapshot["session_probe"] = serde_json::to_value(capture.session_probe)
         .expect("worker status session probe is serializable");
     snapshot["snapshot_collected"] = snapshot_collected.into();
-    let snapshot_unavailable = snapshot
-        .get("snapshot")
-        .and_then(serde_json::Value::as_str)
-        == Some("not_supported");
+    let snapshot_unavailable =
+        snapshot.get("snapshot").and_then(serde_json::Value::as_str) == Some("not_supported");
     snapshot["judgment_status"] = if capture.missing_fields.is_empty() {
         json!("satisfied")
     } else if snapshot_unavailable {
@@ -2190,7 +2184,8 @@ fn handle_worker_status_judgment(
             crate::proto::WorkerStatusJudgmentOutcome::StaleTarget,
             Vec::new(),
             Vec::new(),
-            "the captured holder, session, binding, or selected endpoint is no longer current".into(),
+            "the captured holder, session, binding, or selected endpoint is no longer current"
+                .into(),
         );
     }
     let Some(current_agent_session_id) =
@@ -2426,9 +2421,7 @@ fn handle_worker_status_judgment(
 
     if !events.is_empty() {
         if let Err(error) = server.commit_locked_checked_with_control(state, &events, control) {
-            return Resp::err(format!(
-                "WORKER_STATUS_JUDGMENT_DURABILITY_FAILED: {error}"
-            ));
+            return Resp::err(format!("WORKER_STATUS_JUDGMENT_DURABILITY_FAILED: {error}"));
         }
     }
 
@@ -2438,13 +2431,11 @@ fn handle_worker_status_judgment(
         &capture.agent_session_id,
         &capture.worker_id,
     );
-    let unresolved_fields = name_monitor::missing_status_fields(
-        updated_records.0.as_ref(),
-        updated_records.1.as_ref(),
-    )
-        .into_iter()
-        .filter(|field| !rejected_fields.contains(field))
-        .collect::<Vec<_>>();
+    let unresolved_fields =
+        name_monitor::missing_status_fields(updated_records.0.as_ref(), updated_records.1.as_ref())
+            .into_iter()
+            .filter(|field| !rejected_fields.contains(field))
+            .collect::<Vec<_>>();
     let outcome = if applied_fields.is_empty() && rejected_fields.is_empty() {
         crate::proto::WorkerStatusJudgmentOutcome::Unknown
     } else if applied_fields.is_empty() {
@@ -2468,7 +2459,10 @@ fn handle_worker_status_judgment(
                     .join(", ")
             ));
         }
-        format!("master snapshot judgment incomplete: {}", reasons.join("; "))
+        format!(
+            "master snapshot judgment incomplete: {}",
+            reasons.join("; ")
+        )
     };
     worker_status_judgment_receipt(
         state,
@@ -2488,13 +2482,14 @@ fn handle_worker_snapshot(
     lines: usize,
     capture_terminal: bool,
 ) -> Resp {
-    let control =
-        match crate::server::binding_store::BindingControlStore::new(server.host_paths.state_root())
-            .load()
-        {
-            Ok(control) => control,
-            Err(error) => return Resp::err(error),
-        };
+    let control = match crate::server::binding_store::BindingControlStore::new(
+        server.host_paths.state_root(),
+    )
+    .load()
+    {
+        Ok(control) => control,
+        Err(error) => return Resp::err(error),
+    };
     let state = server.state.lock().unwrap();
     // A waiting peer observes the peer it waits for without disturbing it, so
     // this read is admitted for any authenticated peer of this exact project
@@ -2639,12 +2634,8 @@ mod worker_status_judgment_tests {
     fn stale_activity_update_after_capture_rejects_same_millisecond_native_fact() {
         let (server, root) = peer_tests::test_server();
         assert!(
-            peer_tests::register_synthetic_peer(
-                &server,
-                "status-master",
-                "thread-status-master"
-            )
-            .ok
+            peer_tests::register_synthetic_peer(&server, "status-master", "thread-status-master")
+                .ok
         );
         assert!(
             peer_tests::register_synthetic_peer(&server, "status-peer", "thread-status-peer").ok
@@ -2985,7 +2976,10 @@ mod worker_status_judgment_tests {
         assert_eq!(response.data["snapshot"], "not_collected", "{response:?}");
         assert_eq!(response.data["snapshot_collected"], false, "{response:?}");
         assert_eq!(response.data["session_probe"], "applied", "{response:?}");
-        assert_eq!(response.data["judgment_status"], "satisfied", "{response:?}");
+        assert_eq!(
+            response.data["judgment_status"], "satisfied",
+            "{response:?}"
+        );
         assert_eq!(
             response.data["reason"], "session status capability resolved the current status facts",
             "{response:?}"

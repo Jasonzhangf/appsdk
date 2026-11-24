@@ -193,6 +193,15 @@ fn multiple_open_tasks_follow_current_session_and_preserve_closed_history() {
 fn unavailable_holder_reflows_once_to_jenny_and_board_reads_do_not_write() {
     let (mut fixture, master, peer) = setup();
     publish_and_claim(&fixture, "t8-orphan");
+    let board_notice = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
+    assert!(
+        board_notice["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["subject"] == "board-changed:t8-orphan"),
+        "{board_notice}"
+    );
     let project = fixture
         .project
         .canonicalize()

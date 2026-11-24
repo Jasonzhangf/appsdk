@@ -119,9 +119,7 @@ pub(crate) struct BindingValue {
     legacy_registration_number: Option<u64>,
 }
 
-fn deserialize_legacy_registration_number<'de, D>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error>
+fn deserialize_legacy_registration_number<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

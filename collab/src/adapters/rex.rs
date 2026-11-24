@@ -258,11 +258,16 @@ impl RexObservation {
         }
         self.program_status
             .iter()
-            .filter_map(|record| record.owner.as_ref())
-            .find(|owner| owner.pid == pid && owner.name == name)
-            .cloned()
+            .find(|record| {
+                record.app.as_deref() == Some("codex")
+                    && record
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.pid == pid && owner.name == name)
+            })
+            .and_then(|record| record.owner.clone())
             .ok_or_else(|| {
-                "REX_EXECUTION_UNVERIFIED: program_status owner does not match the Rex foreground"
+                "REX_EXECUTION_UNVERIFIED: Codex program_status owner does not match the Rex foreground"
                     .to_owned()
             })
     }
@@ -1182,7 +1187,11 @@ async fn write_text_until(
     }
 }
 
-async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(), RexError> {
+async fn send_enter_until(
+    endpoint: &RexEndpoint,
+    expected_owner: &RexProgramStatusOwner,
+    deadline: Instant,
+) -> Result<(), RexError> {
     // Rex has queued the text, but the foreground TUI may still be processing it.
     tokio::time::sleep_until(deadline.min(Instant::now() + ENTER_SETTLE_DELAY)).await;
     if Instant::now() >= deadline {
@@ -1190,6 +1199,17 @@ async fn send_enter_until(endpoint: &RexEndpoint, deadline: Instant) -> Result<(
             "send_enter",
             RexInputStage::BeforeWrite,
             "Rex operation deadline elapsed while waiting to submit the queued text",
+        ));
+    }
+    let owner = observe_current_until(endpoint, deadline)
+        .await
+        .map_err(|error| RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string()))?
+        .current_foreground_codex_owner();
+    if owner.as_ref().ok() != Some(expected_owner) {
+        return Err(RexError::unknown(
+            "send_enter",
+            RexInputStage::BeforeWrite,
+            "foreground Codex changed after text was queued",
         ));
     }
     let call = run_cli(
@@ -1260,7 +1280,13 @@ async fn snapshot_until(
 }
 
 pub async fn observe_current(endpoint: &RexEndpoint) -> Result<RexObservation, RexError> {
-    let deadline = Instant::now() + default_timeout()?;
+    observe_current_until(endpoint, Instant::now() + default_timeout()?).await
+}
+
+async fn observe_current_until(
+    endpoint: &RexEndpoint,
+    deadline: Instant,
+) -> Result<RexObservation, RexError> {
     verify_service_until(endpoint, deadline).await?;
     let mut sources = Vec::new();
     let mut source_errors = Vec::new();
@@ -1409,11 +1435,19 @@ pub async fn notify(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
+    let observation = observe_current_until(endpoint, deadline).await?;
+    let owner = observation.current_foreground_codex_owner().map_err(|error| {
+        RexError::known_not_delivered(
+            "notify",
+            RexInputStage::BeforeWrite,
+            format!("RECIPIENT_NOT_ONLINE: {error}"),
+        )
+    })?;
     let receipt = write_text_until(endpoint, text, deadline).await?;
     let text_stage = RexInputStage::WriteQueued {
         bytes_written: receipt.bytes_written,
     };
-    if let Err(error) = send_enter_until(endpoint, deadline).await {
+    if let Err(error) = send_enter_until(endpoint, &owner, deadline).await {
         return Err(RexError {
             operation: "send_key",
             class: error.class,

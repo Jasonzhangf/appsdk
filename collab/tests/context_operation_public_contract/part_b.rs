@@ -1320,8 +1320,12 @@ fn offline_incumbent_name_change_does_not_block_current_messages() {
         .output().unwrap();
     assert!(replayed.status.success(), "{}", String::from_utf8_lossy(&replayed.stderr));
     let replayed: Value = serde_json::from_slice(&replayed.stdout).unwrap();
-    assert_eq!(replayed["replayed"], true);
-    assert_eq!(replayed["messages"], consumed["messages"]);
+    assert_eq!(replayed["messages"], serde_json::json!([]));
+    assert_eq!(
+        fixture.current_state()["msgs"][queued_id]["state"],
+        "read",
+        "a prior receive ID must not replay the consumed batch"
+    );
     let missing = fixture.command(&["context", "--provide",
         r#"{"session_id":"new-session-without-address","thread_id":"new-thread-without-address","namespace":"codex_tui"}"#,
     ], None);
@@ -1824,7 +1828,10 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
     }
     let saved = fs::read_to_string(&state_path).unwrap();
     assert!(!saved.contains("superseded-board-description"));
-    assert!(!saved.contains("superseded-board-progress"));
+    assert!(
+        saved.contains("superseded-board-progress"),
+        "the prior board update must remain in its unread automatic notice until retention"
+    );
     drop(native);
 
     fixture.stop_daemon();
@@ -3239,7 +3246,8 @@ fn session_recovery_no_target_peer_intent_uses_current_carrier() {
         .expect("Bob retains unread mail");
     assert_eq!(unread["body"], message["body"]);
     let receipt = fixture.run_ok(&["msg", message["id"].as_str().unwrap()], Some(&pane));
-    assert_eq!(receipt["consumed_by_recv"], false);
+    assert_eq!(receipt["state"], "pending");
+    assert_eq!(receipt["body"], message["body"]);
     assert_eq!(fixture.current_state()["msgs"][message_id], message);
     assert_eq!(
         payload["result"]["snapshot"]["identity"]["worker_id"], worker,

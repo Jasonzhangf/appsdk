@@ -1,11 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::global_state::{GlobalState, ProjectRegistration, RuntimeBinding, StateError};
 use crate::proto::{
     CommandEnvelope, PeerLifecycleAction, PeerLifecycleClose, PeerLifecycleCreate,
-    PeerLifecyclePhase, PeerLifecycleTarget, PeerLifecycleUpdate, ReplyPolicy, SelectedTransport,
-    TransportKind,
+    PeerLifecyclePhase, PeerLifecycleTarget, PeerLifecycleUpdate, SelectedTransport, TransportKind,
 };
 
 pub fn now_ms() -> i64 {
@@ -300,33 +299,6 @@ pub struct Message {
     pub retry_attempted: bool,
 }
 
-/// One durable reply obligation owned by the daemon. It is keyed by the
-/// original message id and is never mirrored onto [`Message`]. The stable names
-/// let a reply clear the obligation after the same name moves to a new
-/// session; the current worker ids are rebound on that handoff.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplyObligation {
-    pub message_id: String,
-    pub project: String,
-    /// Set only for a cross-project reply; omitted when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_project: Option<String>,
-    /// Authenticated global-role provenance. Only the CEO delivery owner sets
-    /// this; current CEO succession must not depend on message prose or names.
-    #[serde(default)]
-    pub from_ceo: bool,
-    pub from_worker_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_name: Option<String>,
-    pub recipient_worker_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recipient_name: Option<String>,
-    pub policy: ReplyPolicy,
-    pub created_ms: i64,
-    #[serde(default)]
-    pub reminded_idle_episode: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NotificationDeliveryFailure {
     pub message_id: String,
@@ -337,20 +309,6 @@ pub struct NotificationDeliveryFailure {
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_on_reconnect: Option<bool>,
-}
-
-/// Durable identity of one committed receive batch. The receive identity is
-/// caller-owned and persisted with the consumption, so a lost socket response
-/// can replay the exact batch without inventing a second mailbox. Only message
-/// identities are stored; retention still owns message bodies.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ReceiveReceipt {
-    pub receive_id: String,
-    pub worker_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route_scope: Option<crate::scope::RouteScope>,
-    pub message_ids: Vec<String>,
-    pub received_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -652,6 +610,7 @@ struct SubscriptionConsumption {
 fn consume_marked_periodic_goal(
     subscription: &NotificationSubscription,
     occurrence: Option<&NotificationOccurrence>,
+    message_created_ms: Option<i64>,
     message_was_unread: bool,
     consumed_ms: Option<i64>,
 ) -> Option<SubscriptionConsumption> {
@@ -661,7 +620,12 @@ fn consume_marked_periodic_goal(
     let occurrence = occurrence?;
     let current_occurrence = goal_deadline_key(subscription)
         .is_some_and(|(_, _, trigger)| trigger == occurrence.trigger_ms);
-    if subscription.status != "armed"
+    // An expired schedule can still own one unread occurrence issued while it
+    // was armed. The message timestamp at or after the trigger identifies that
+    // live occurrence; an older retained marker cannot reactivate history.
+    let issued_occurrence =
+        message_created_ms.is_some_and(|created_ms| created_ms >= occurrence.trigger_ms);
+    if (subscription.status != "armed" && !(subscription.status == "expired" && issued_occurrence))
         || !message_was_unread
         || occurrence.subscription_id != subscription.id
         || occurrence.consumed_ms.is_some()
@@ -881,7 +845,7 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
             Some(_) | None => ResponsibilityEffect::Safe,
         },
         Event::NotificationOccurrenceIssued { .. } => ResponsibilityEffect::Safe,
-        Event::Acked { .. } | Event::ReceiveCommitted { .. } => ResponsibilityEffect::Safe,
+        Event::Acked { .. } => ResponsibilityEffect::Safe,
         // CEO coordination records are control-plane state; they never add or
         // change business task responsibility.
         Event::CeoGrantSet { .. } | Event::CeoBootstrapSet { .. } => ResponsibilityEffect::Safe,
@@ -1035,13 +999,11 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     }
                 }
             }
-            Event::Acked { ids, .. } | Event::ReceiveCommitted { ids, .. } => {
-                let read_ms = match event {
-                    Event::Acked { consumed_ms, .. } => *consumed_ms,
-                    Event::ReceiveCommitted { receipt, .. } => Some(receipt.received_ms),
-                    _ => None,
-                };
+            Event::Acked { ids, consumed_ms } => {
+                let read_ms = *consumed_ms;
                 for id in ids {
+                    let message_created_ms =
+                        simulated_msgs.get(id).map(|message| message.created_ms);
                     let message_was_unread = simulated_msgs
                         .get(id)
                         .is_some_and(|message| message.state != "read");
@@ -1065,13 +1027,11 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     if let Some(consumed) = consume_marked_periodic_goal(
                         &subscription,
                         simulated_occurrences.get(id),
+                        message_created_ms,
                         message_was_unread,
                         read_ms,
                     ) {
-                        if !matches!(
-                            consumed.status,
-                            SubscriptionConsumptionStatus::Unchanged
-                        ) {
+                        if !matches!(consumed.status, SubscriptionConsumptionStatus::Unchanged) {
                             if let Some(subscription) =
                                 simulated_subscriptions.get_mut(&subscription_id)
                             {
@@ -1616,23 +1576,6 @@ pub enum Event {
         message_id: String,
         target_session: String,
     },
-    /// Durable creation of one reply obligation. Written in the same committed
-    /// batch as the originating `Sent`, so a message never exists without the
-    /// obligation it declared.
-    ReplyObligationSet {
-        obligation: ReplyObligation,
-    },
-    /// Durable removal of an obligation. Only an accepted linked reply emits
-    /// this; consuming or acknowledging the original message never does.
-    ReplyObligationCleared {
-        message_id: String,
-    },
-    /// Idle-reminder bookkeeping: `reminded` is true after a reminder for the
-    /// current idle episode and false again when the worker becomes busy.
-    ReplyObligationReminded {
-        message_id: String,
-        reminded: bool,
-    },
     MailboxNameAddressed {
         message_id: String,
         address: crate::server::name_mailbox::MailboxNameAddress,
@@ -1716,11 +1659,6 @@ pub enum Event {
     WakeBound {
         message_id: String,
         subscription_id: String,
-    },
-    ReceiveCommitted {
-        receipt: ReceiveReceipt,
-        /// Consumption committed in the same current-state batch as the receipt.
-        ids: Vec<String>,
     },
     Delivered {
         ids: Vec<String>,

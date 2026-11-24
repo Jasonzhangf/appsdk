@@ -12,19 +12,6 @@ use super::*;
     }
 
     #[test]
-    fn answered_detection() {
-        let mut st = State::default();
-        st.apply(&Event::Sent {
-            msg: msg("m1", "w2", "request"),
-        });
-        let mut reply = msg("m2", "w1", "reply");
-        reply.in_reply_to = Some("m1".into());
-        st.apply(&Event::Sent { msg: reply });
-        assert!(st.answered("m1"));
-        assert!(!st.answered("m2"));
-    }
-
-    #[test]
     fn request_cooldown_uses_only_recent_live_request() {
         let mut st = State::default();
         let mut request = msg("request", "w2", "request");
@@ -36,6 +23,14 @@ use super::*;
             .recent_live_request("w1", "w2", 500 + REQUEST_COOLDOWN_MS - 1)
             .expect("recent live request blocks a new send");
         assert_eq!(id, "request");
+        let mut reply = msg("reply", "w1", "reply");
+        reply.in_reply_to = Some("request".into());
+        st.apply(&Event::Sent { msg: reply });
+        assert_eq!(
+            st.recent_live_request("w1", "w2", 500 + REQUEST_COOLDOWN_MS - 1)
+                .map(|(id, _)| id.as_str()),
+            Some("request")
+        );
         assert!(st
             .recent_live_request("w1", "w2", 500 + REQUEST_COOLDOWN_MS)
             .is_none());
@@ -73,38 +68,6 @@ use super::*;
         tasks.insert("a".into(), a);
         assert!(wait_cycle(&tasks, "b", "a"));
         assert!(!wait_cycle(&tasks, "c", "a"));
-    }
-
-    #[test]
-    fn latest_reply_supersedes_previous_replies() {
-        let mut st = State::default();
-        st.apply(&Event::Sent {
-            msg: msg("request", "w1", "request"),
-        });
-
-        let mut first = msg("reply-1", "w1", "reply");
-        first.in_reply_to = Some("request".into());
-        first.created_ms = 2;
-        st.apply(&Event::Sent { msg: first });
-        let stale_replies = st.superseded_replies("request");
-
-        let mut latest = msg("reply-2", "w1", "reply");
-        latest.in_reply_to = Some("request".into());
-        latest.created_ms = 3;
-        st.apply(&Event::Sent { msg: latest });
-        st.apply(&Event::Superseded { ids: stale_replies });
-
-        assert!(st.answered("request"));
-        assert_eq!(st.msgs["reply-1"].state, "superseded");
-        assert_eq!(st.msgs["reply-2"].state, "pending");
-        assert_eq!(
-            st.inbox_of("w1")
-                .iter()
-                .filter(|m| m.mtype == "reply")
-                .map(|m| m.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["reply-2"]
-        );
     }
 
     #[test]

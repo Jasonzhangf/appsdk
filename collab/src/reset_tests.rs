@@ -40,75 +40,6 @@ fn assert_current_project_marker(root: &Path) {
 }
 
 #[test]
-fn tree_digest_is_stable_and_content_sensitive() {
-    let root = temp_root("digest");
-    std::fs::create_dir_all(root.join("nested")).unwrap();
-    std::fs::write(root.join("a.jsonl"), b"one\n").unwrap();
-    std::fs::write(root.join("nested/b"), b"two\n").unwrap();
-    let first = tree_digest(&root).unwrap();
-    let second = tree_digest(&root).unwrap();
-    assert_eq!(first, second);
-    std::fs::write(root.join("nested/b"), b"changed\n").unwrap();
-    assert_ne!(first, tree_digest(&root).unwrap());
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn tree_digest_ignores_stale_unix_socket_bytes() {
-    let root = temp_root("digest-socket");
-    std::fs::create_dir_all(root.join("server")).unwrap();
-    std::fs::write(root.join("server/journal.jsonl"), b"one\n").unwrap();
-    let socket = root.join("server/server.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    drop(listener);
-
-    let (files, sockets, bytes, _) = tree_digest(&root).unwrap();
-    assert_eq!(files, 1);
-    assert_eq!(sockets, vec![String::from("server/server.sock")]);
-    assert_eq!(bytes, 4);
-
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn source_verification_requires_the_inspected_socket_inventory() {
-    let entry = RetiredRoot {
-        relative: ".agent-collab".into(),
-        absolute: PathBuf::from("/tmp/source"),
-        staged: None,
-        files: 1,
-        sockets: vec!["server/server.sock".into()],
-        bytes: 4,
-        digest: "fnv1a64:test".into(),
-    };
-
-    assert!(source_matches(&entry, &["server/server.sock".into()]));
-    assert!(!source_matches(&entry, &[]));
-    assert!(archive_matches(&entry, 1, 4, "fnv1a64:test"));
-}
-
-#[test]
-fn tree_digest_rejects_nested_symlinks() {
-    let root = temp_root("digest-symlink");
-    let target = temp_root("digest-symlink-target");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(&target, b"external\n").unwrap();
-    std::os::unix::fs::symlink(&target, root.join("journal.jsonl")).unwrap();
-
-    let error = tree_digest(&root).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(
-        error
-            .to_string()
-            .contains("RESET_CONTROL_TREE_SYMLINK_REJECTED"),
-        "{error}"
-    );
-
-    std::fs::remove_dir_all(root).ok();
-    std::fs::remove_file(target).ok();
-}
-
-#[test]
 fn retire_host_routes_preserves_unrelated_records() {
     let state = temp_root("routes-state");
     let project = temp_root("routes-project");
@@ -205,16 +136,7 @@ fn reset_retires_nonempty_legacy_runtime_files() {
     assert!(!root.join(".agent-collab/server/events.jsonl").exists());
     assert!(!root.join(".agent-collab/server/log.txt").exists());
     assert_current_project_marker(&root);
-    let archives = archive_roots(&state);
-    assert_eq!(archives.len(), 1);
-    assert_eq!(
-        std::fs::read(archives[0].join(".agent-collab/server/events.jsonl")).unwrap(),
-        b"{}\n"
-    );
-    assert_eq!(
-        std::fs::read(archives[0].join(".agent-collab/server/log.txt")).unwrap(),
-        b"old log\n"
-    );
+    assert_no_archive(&state);
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -300,16 +222,7 @@ fn reset_does_not_treat_nonempty_project_state_as_empty_baseline() {
     assert!(!root.join(".agent-collab/runs/stale.jsonl").exists());
     assert!(!root.join(".agent-collab/server/runtimes").exists());
     assert_current_project_marker(&root);
-    let archives = archive_roots(&state);
-    assert_eq!(archives.len(), 1);
-    assert_eq!(
-        std::fs::read(archives[0].join(".agent-collab/runs/stale.jsonl")).unwrap(),
-        b"{}\n"
-    );
-    assert_eq!(
-        std::fs::read(archives[0].join(".agent-collab/server/runtimes/old/journal.jsonl")).unwrap(),
-        b"legacy\n"
-    );
+    assert_no_archive(&state);
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -472,21 +385,12 @@ fn reset_rolls_back_legacy_roots_when_route_rewrite_fails() {
     std::fs::remove_dir_all(state).ok();
 }
 
-fn archive_roots(state: &Path) -> Vec<PathBuf> {
-    let path = state.join("archives");
-    if !path.exists() {
-        return Vec::new();
-    }
-    let mut roots = std::fs::read_dir(path)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect::<Vec<_>>();
-    roots.sort();
-    roots
+fn assert_no_archive(state: &Path) {
+    assert!(!state.join("archives").exists());
 }
 
 #[test]
-fn reset_rejects_a_held_legacy_project_writer_lock_before_archive() {
+fn reset_rejects_a_held_legacy_project_writer_lock_before_removal() {
     use std::os::unix::io::AsRawFd;
 
     let root = temp_root("legacy-lock");
@@ -553,7 +457,7 @@ fn reset_rebuilds_an_uninitialized_project_root() {
 
     assert_current_project_marker(&root);
     assert!(!root.join(".agent-collab/server/journal.jsonl").exists());
-    assert!(archive_roots(&state).is_empty());
+    assert_no_archive(&state);
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -623,14 +527,7 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
     assert_current_project_marker(&root);
     assert!(!root.join(".agent-collab/server/journal.jsonl").exists());
 
-    let first_archives = archive_roots(&state);
-    assert_eq!(first_archives.len(), 1);
-    let original =
-        std::fs::read(first_archives[0].join(".agent-collab/server/journal.jsonl")).unwrap();
-    assert_eq!(
-        original,
-        b"{\"ev\":\"NotificationSubscribed\",\"subscription\":{}}\n"
-    );
+    assert_no_archive(&state);
 
     // Second run is idempotent and does not claim delivery.
     run(
@@ -643,15 +540,11 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
         },
     )
     .unwrap();
-    assert_eq!(archive_roots(&state), first_archives);
-    assert_eq!(
-        std::fs::read(first_archives[0].join(".agent-collab/server/journal.jsonl")).unwrap(),
-        original
-    );
+    assert_no_archive(&state);
     assert_current_project_marker(&root);
 
     // Non-empty runtime artifacts are historical state too. They must be
-    // archived and cleared rather than being accepted as an empty baseline.
+    // removed rather than accepted as an empty baseline.
     seed_legacy_runtime(&root);
     std::fs::write(root.join(".agent-collab/server/journal.jsonl"), b"").unwrap();
     std::fs::write(root.join(".agent-collab/server/events.jsonl"), b"{}\n").unwrap();
@@ -666,22 +559,9 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
         },
     )
     .unwrap();
-    let archives = archive_roots(&state);
-    assert_eq!(archives.len(), 2);
-    let added = archives
-        .iter()
-        .find(|path| !first_archives.contains(path))
-        .unwrap();
-    assert_eq!(
-        std::fs::read(added.join(".agent-collab/server/events.jsonl")).unwrap(),
-        b"{}\n"
-    );
-    assert_eq!(
-        std::fs::read(added.join(".agent-collab/server/log.txt")).unwrap(),
-        b"started\n"
-    );
     assert!(!root.join(".agent-collab/server/events.jsonl").exists());
     assert!(!root.join(".agent-collab/server/log.txt").exists());
+    assert_no_archive(&state);
     assert_current_project_marker(&root);
 
     std::fs::remove_dir_all(root).ok();
@@ -721,21 +601,7 @@ fn reset_retires_stale_project_socket_without_copying_socket_state() {
 
     assert!(!legacy_socket.exists());
     assert!(!root.join(".agent-collab/server/journal.jsonl").exists());
-    let archive_entries = std::fs::read_dir(state.join("archives")).unwrap().count();
-    assert!(archive_entries > 0);
-    let manifest_path = std::fs::read_dir(state.join("archives"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("manifest.json");
-    let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
-    assert_eq!(
-        manifest["retired"][0]["sockets"][0],
-        json!("server/server.sock")
-    );
+    assert_no_archive(&state);
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
@@ -793,7 +659,7 @@ fn reset_level_flags_are_gated_per_level() {
 /// C2: a project that IS the daemon's storage root must be recoverable with
 /// `collab reset --project`. The project level retires that project's business
 /// payload and its resident `.agent-collab/server/` index, leaves every other
-/// project alone, and keeps the host-level audit trail.
+/// project alone, and does not mutate host-level archives.
 #[test]
 fn reset_project_retires_a_legacy_resident_index() {
     let root = temp_root("project-guard");
@@ -868,15 +734,9 @@ fn reset_project_retires_a_legacy_resident_index() {
     assert!(!project.join(".agent-collab/mailbox/old.jsonl").exists());
     assert!(!project.join(".agent-collab/runs/old.jsonl").exists());
     assert_current_project_marker(&project);
-    let archives = archive_roots(&state);
-    let archive_root = archives
-        .iter()
-        .find(|path| **path != state.join("archives/prior"))
-        .unwrap();
-    assert_eq!(archives.len(), 2);
     assert_eq!(
-        std::fs::read(archive_root.join(".agent-collab/server/journal.jsonl")).unwrap(),
-        resident_journal
+        std::fs::read_dir(state.join("archives")).unwrap().count(),
+        1
     );
 
     // Another project is untouched, including its route record.
@@ -894,8 +754,6 @@ fn reset_project_retires_a_legacy_resident_index() {
         json!([kept_route])
     );
 
-    // Unrelated prior archive contents remain intact.
-    assert!(state.join("archives/prior/manifest.json").exists());
     assert_eq!(
         std::fs::read(state.join("archives/prior/manifest.json")).unwrap(),
         b"{}\n"

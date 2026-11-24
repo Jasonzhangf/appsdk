@@ -354,7 +354,10 @@ fn minimal_registration_notice_survives_a_rejected_native_wake() {
             assert_eq!(current["msgs"][id]["wake_attempt_count"], 1);
             break;
         }
-        assert!(Instant::now() < deadline, "no wake attempt was recorded for {id}");
+        assert!(
+            Instant::now() < deadline,
+            "no wake attempt was recorded for {id}"
+        );
         thread::sleep(Duration::from_millis(25));
     }
     fixture
@@ -2360,17 +2363,37 @@ fn waiting_assignment_rework_preserves_schedule_when_old_owner_is_retired() {
         &f7_publish_flags(&["--executor", "Bob", "--reviewer", "Alice"]),
     );
     fixture.run_public(
-        &["board", "claim", "waiting-assignment-schedule", "--expected-revision", "1"],
-        THREAD_C,
-    );
-    fixture.run_public(
-        &["board", "start", "waiting-assignment-schedule", "--expected-revision", "2", "--attempt", "1"],
+        &[
+            "board",
+            "claim",
+            "waiting-assignment-schedule",
+            "--expected-revision",
+            "1",
+        ],
         THREAD_C,
     );
     fixture.run_public(
         &[
-            "task", "deliver", "waiting-assignment-schedule", "--no-candidate",
-            "--evidence", "first delivery before the stable owner retires", "--attempt", "1",
+            "board",
+            "start",
+            "waiting-assignment-schedule",
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_C,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "waiting-assignment-schedule",
+            "--no-candidate",
+            "--evidence",
+            "first delivery before the stable owner retires",
+            "--attempt",
+            "1",
         ],
         THREAD_C,
     );
@@ -2380,7 +2403,9 @@ fn waiting_assignment_rework_preserves_schedule_when_old_owner_is_retired() {
         .into_iter()
         .next()
         .expect("the delivered task has one linked schedule");
-    let subscription_id = subscription["id"].as_str().expect("linked schedule has an id");
+    let subscription_id = subscription["id"]
+        .as_str()
+        .expect("linked schedule has an id");
     let map_path = fixture.host_state.join("identity-map.json");
     let map: Value = serde_json::from_slice(&std::fs::read(&map_path).unwrap()).unwrap();
     let mut bob = map["slots"]
@@ -2400,15 +2425,18 @@ fn waiting_assignment_rework_preserves_schedule_when_old_owner_is_retired() {
     );
     let retired = fixture.current_state();
     assert_eq!(
-        retired["notification_subscriptions"][subscription_id]["status"],
-        "waiting-owner",
+        retired["notification_subscriptions"][subscription_id]["status"], "waiting-owner",
         "{retired}"
     );
 
     let reworked = fixture.run_public(
         &[
-            "task", "review", "waiting-assignment-schedule", "--rework",
-            "--evidence", "reopen after the old owner retired",
+            "task",
+            "review",
+            "waiting-assignment-schedule",
+            "--rework",
+            "--evidence",
+            "reopen after the old owner retired",
         ],
         THREAD_B,
     );
@@ -2435,7 +2463,10 @@ fn waiting_assignment_rework_preserves_schedule_when_old_owner_is_retired() {
     // Load a supported retained identity with absent transport while the
     // ticket still awaits assignment. Explicit goal editing uses its owner.
     fixture.stop_daemon();
-    let bob_worker = bob["current"]["binding"]["agent_id"].as_str().unwrap().to_owned();
+    let bob_worker = bob["current"]["binding"]["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let mut retained_worker = before_retire["workers"][&bob_worker].clone();
     retained_worker.as_object_mut().unwrap().remove("transport");
     bob["current"].as_object_mut().unwrap().remove("transport");
@@ -2447,8 +2478,20 @@ fn waiting_assignment_rework_preserves_schedule_when_old_owner_is_retired() {
     fixture.update_current_state(|state| state["workers"][&bob_worker] = retained_worker);
     let explicitly_edited = fixture.run_public(
         &[
-            "goal", "reconcile", "--goal-id", "task:waiting-assignment-schedule", "--owner", "Bob",
-            "--desired", "active", "--operation", "edit", "--every-ms", "180000", "--repeat", "3",
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "task:waiting-assignment-schedule",
+            "--owner",
+            "Bob",
+            "--desired",
+            "active",
+            "--operation",
+            "edit",
+            "--every-ms",
+            "180000",
+            "--repeat",
+            "3",
         ],
         THREAD_A,
     );

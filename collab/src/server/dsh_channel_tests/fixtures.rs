@@ -12,7 +12,7 @@ fn scratch(name: &str) -> PathBuf {
 /// `respond` receives one parsed request and returns the single reply line, or
 /// `None` to accept the connection and stay silent. `None` is how a hanging
 /// gateway is modelled; the connection is held open until the client gives up.
-struct Gateway {
+pub(crate) struct Gateway {
     socket: PathBuf,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -67,7 +67,7 @@ impl Gateway {
         }
     }
 
-    fn endpoint(&self) -> String {
+    pub(crate) fn endpoint(&self) -> String {
         format!("unix://{}", self.socket.display())
     }
 }
@@ -149,7 +149,7 @@ fn is_wake_enqueue(request: &serde_json::Value) -> bool {
 /// A gateway that answers the real registration challenge and can also serve
 /// wake traffic. The challenge marker and participant identity come from the
 /// actual enqueue request; no private pending record is read.
-fn registration_gateway<W>(
+pub(crate) fn registration_gateway<W>(
     name: &str,
     root: &Path,
     seen: Option<Arc<Mutex<Vec<serde_json::Value>>>>,
@@ -234,7 +234,7 @@ where
     })
 }
 
-fn wake_reply(request: &serde_json::Value) -> Option<String> {
+pub(crate) fn wake_reply(request: &serde_json::Value) -> Option<String> {
     Some(
         serde_json::json!({
             "ok": true,

@@ -74,10 +74,13 @@ fn collect_deadline_occurrences(
             if collected.contains(&id) {
                 continue;
             }
-            let status = fixture.run_ok(&["msg", &id], Some(pane));
-            assert_eq!(
-                status["state"], "read",
-                "{label}: recv must consume occurrence {id}: {status}"
+            let status = fixture.command(&["msg", &id], Some(pane));
+            assert!(
+                !status.status.success()
+                    && String::from_utf8_lossy(&status.stderr).contains("MESSAGE_CONSUMED"),
+                "{label}: recv must consume occurrence {id}: stdout={} stderr={}",
+                String::from_utf8_lossy(&status.stdout),
+                String::from_utf8_lossy(&status.stderr)
             );
             collected.push(id);
         }
@@ -208,7 +211,10 @@ fn late_periodic_goal_read_defers_the_overdue_next_occurrence() {
         ],
         Some(&pane),
     );
-    assert_eq!(deadline_message_ids(&repeated, goal_id), ids);
+    assert!(
+        deadline_message_ids(&repeated, goal_id).is_empty(),
+        "a consumed occurrence must not replay: {repeated}"
+    );
     let status = fixture.run_ok(&["notify", "status"], Some(&pane));
     let observed = find_subscription(&status, subscription_id);
     assert_eq!(observed["trigger_ms"], subscription["trigger_ms"]);
@@ -246,7 +252,7 @@ fn late_periodic_goal_read_defers_the_overdue_next_occurrence() {
 }
 
 #[test]
-fn accepted_periodic_reminder_stays_readable_after_its_schedule_expires() {
+fn accepted_periodic_reminder_can_be_read_once_after_its_schedule_expires() {
     let (mut fixture, pane) = single_pane_fixture("goal-expired-read");
     let registered = fixture.registered_context(&pane, true);
     let owner = registered["name"].as_str().unwrap();
@@ -305,7 +311,10 @@ fn accepted_periodic_reminder_stays_readable_after_its_schedule_expires() {
 
     fixture.restart_daemon();
     let repeated = fixture.run_ok(&args, Some(&pane));
-    assert_eq!(deadline_message_ids(&repeated, goal_id), ids);
+    assert!(
+        deadline_message_ids(&repeated, goal_id).is_empty(),
+        "a consumed expired reminder must not replay after restart: {repeated}"
+    );
     let status = fixture.run_ok(&["notify", "status"], Some(&pane));
     assert_eq!(find_subscription(&status, subscription_id), subscription);
     assert_eq!(native_deadline_occurrences(&fixture, &pane, goal_id), 1);
@@ -431,10 +440,9 @@ fn explicit_periodic_goal_deadline_consumes_three_restarts_and_stops_on_end() {
 
     // Wait past a full interval and prove the ended occurrence emits nothing.
     let before = current_deadline_relations(&fixture, &subscription_id, goal_id);
-    let native_before = native_deadline_occurrences(&fixture, &pane, goal_id);
     assert!(
-        native_before > 0,
-        "native observer must see the consumed goal occurrences"
+        !before.0.is_empty() && !before.1.is_empty(),
+        "ended goal must retain its consumed durable occurrences: {before:?}"
     );
     let crossed = Instant::now() + Duration::from_secs(6);
     while Instant::now() < crossed {
@@ -444,10 +452,6 @@ fn explicit_periodic_goal_deadline_consumes_three_restarts_and_stops_on_end() {
     assert_eq!(
         after, before,
         "an ended periodic goal must not emit another wake: before={before:?} after={after:?}"
-    );
-    assert_eq!(
-        native_deadline_occurrences(&fixture, &pane, goal_id),
-        native_before
     );
     let drained = fixture.run_ok(
         &[

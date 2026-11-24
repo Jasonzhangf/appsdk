@@ -155,11 +155,6 @@ pub(super) fn clear_project(
     for id in messages {
         state.expire_federated_message(&id, now_ms());
     }
-    // Obligations are project-owned control state. A reset removes only this
-    // scope's markers, plus any whose original message was just dropped.
-    state.reply_obligations.retain(|message_id, obligation| {
-        obligation.project != scope && !dropped_messages.contains(message_id)
-    });
     state
         .conversation_defaults
         .retain(|_, default| default.project_scope != scope);
@@ -205,9 +200,6 @@ pub(super) fn clear_project(
     state
         .scheduler_admissions
         .retain(|_, r| !tasks.contains(&r.task_id) && !workers.contains(&r.worker_id));
-    state
-        .receive_receipts
-        .retain(|_, r| !workers.contains(&r.worker_id));
     state
         .notification_subscriptions
         .retain(|_, s| !workers.contains(&s.worker_id));

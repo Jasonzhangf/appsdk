@@ -33,8 +33,8 @@ conflict with it. It is a semantic source, not runtime evidence by itself.
 - Attributes: unread body, current recipient, and current delivery state.
 - Perception: collab send, collab recv, and collab inbox.
 - Must have: unread messages addressed to the stable name.
-- Must not have: consumed body retention, receive replay, reply obligations, or
-  a message archive.
+- Must not have: a queryable consumed body, receive replay, reply obligations,
+  or a message archive. A read row may wait briefly for periodic deletion.
 
 ### Object: notification subscription
 
@@ -87,12 +87,27 @@ acceptance transfer it.
 
 ### Behavior: receive a message
 
-unread name mailbox batch -> one recipient response with deleted message bodies
+unread name mailbox batch -> one recipient response with consumed rows
 
 Unread messages follow the current holder of the recipient name. recv returns
-one batch and removes the consumed bodies and per-message delivery bookkeeping.
-Only a task result or other explicitly required business state may remain at its
-own owner. Reusing a receive identifier does not replay a consumed batch.
+one batch and marks every row read. Read rows are excluded from inbox, recv,
+and body query; the fixed periodic retention owner removes them together with
+delivery bookkeeping. Only a task result or other explicitly required business
+state may remain at its own owner. Reusing a receive identifier does not replay
+a consumed batch.
+
+### Behavior: submit recipient input
+
+confirmed online recipient -> one transport input
+
+Every ordinary message, notification, periodic wake, and board auto-notice must
+prove that the target agent is online before the daemon writes to a shell, pane,
+Rex block, or native thread. Only an explicit Present result from the current
+transport counts. Cold, unknown, offline, missing, or a persisted binding alone
+produces zero transport input. The unread message stays addressed to the name.
+An ordinary message may be submitted after the current holder comes online. A
+periodic wake stays silent and is not replayed. Queueing, subscription acceptance,
+and wake acceptance are not delivery.
 
 ### Behavior: restore after restart
 
@@ -130,6 +145,17 @@ revision, visibility, invitation, acceptance, status, evidence, and review gates
 remain in force. An architect cannot self-grant scope, edit an unrelated task,
 impersonate master authority, or bypass peer acceptance.
 
+### Behavior: current board mutation
+
+authorized actor and current revision -> current board state plus auto notice
+
+The project manager may change current project board state, a peer may change
+its owned or entrusted scope, and an entrusted architect may change the peer
+task plan. Terminal history is immutable and requires a follow-up task. A
+successful mutation commits one unread notice to the other current participant
+and binds it to that participant's current subscription; no separate manual
+message is required.
+
 ## 3. Relations
 
 | Relation | Direction and cardinality | Rule |
@@ -146,7 +172,10 @@ impersonate master authority, or bypass peer acceptance.
 - No reset archive: reset removes the retired control bytes and rebuilds the
   empty baseline.
 - No receive replay or reply obligation: receive IDs are not message history.
-- No consumed mailbox body or message archive.
+- Reply policy inputs are retired; `in_reply_to` remains a plain message
+  correlation only.
+- No queryable consumed mailbox body or message archive; periodic cleanup owns
+  physical deletion.
 - No historical identity replay, journal, or archive lookup.
 - No mandatory task execution-contract DAG, next_contract, or execution_phase
   projection.
@@ -165,7 +194,9 @@ mandatory implementation change must keep one legal and one illegal case:
 | name mailbox | unread message is returned to the current holder | consumed body remains queryable or replayable |
 | restart restoration | current map and durable state restore service | replay changes ownership or consumes a retired message |
 | periodic wake | busy/offline behavior advances only the current schedule | backlog replay or a rearm after expiry |
+| online-only input | a Present recipient receives one transport input | an offline or unknown recipient receives shell, pane, Rex, or thread input |
 | retirement | released name is reusable | released name remains occupied forever |
 | architect authority | entrusted architect edits/dispatches within scope | self-granted architect role edits an unrelated task |
+| current board mutation | manager/peer/architect change current state and the other participant can recv the auto notice | terminal history is rewritten or a manual duplicate is required |
 | minimal task board | board exposes task fields and revision | graph projection becomes required to execute a task |
 

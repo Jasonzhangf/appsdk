@@ -33,8 +33,9 @@ pub(crate) fn current_name_allows_message(
         }))
 }
 
-/// Current mailbox mutation input. Native acceptance is delivery evidence,
-/// not a receive receipt. The baseline grants one wake to the new execution carrier.
+/// Current mailbox mutation input. Native acceptance is delivery evidence.
+/// The baseline grants one wake to the new execution carrier and keeps no
+/// separate receive ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxHandoff {
     pub project_scope: String,

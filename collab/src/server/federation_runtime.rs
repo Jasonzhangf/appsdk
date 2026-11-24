@@ -14,32 +14,6 @@ use crate::proto::{
 
 const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
 
-pub(super) fn accepted_reply_clear_event(
-    state: &State,
-    record: &FederatedOutboundRecord,
-    outcome: &FederationSendOutcome,
-    local_machine: &str,
-) -> Option<Event> {
-    if !matches!(outcome, FederationSendOutcome::Accepted { .. }) {
-        return None;
-    }
-    let reference = record.in_reply_to.as_ref()?;
-    if !reference.machine.eq_ignore_ascii_case(local_machine) {
-        return None;
-    }
-    let original = state.federation.message_for_reference(reference)?;
-    if original.recipient != record.sender
-        || !state
-            .reply_obligations
-            .contains_key(reference.msg_id.as_str())
-    {
-        return None;
-    }
-    Some(Event::ReplyObligationCleared {
-        message_id: reference.msg_id.to_string(),
-    })
-}
-
 pub(super) async fn channel_dispatch(
     manager: Arc<ProjectRuntimeManager>,
     context: Option<ProjectContext>,
@@ -373,7 +347,6 @@ fn local_send(
         body,
         in_reply_to,
         delivery,
-        reply_policy,
         target_session,
         operation_id,
     } = request
@@ -397,7 +370,7 @@ fn local_send(
         }
         _ => None,
     };
-    let (to, destination_context, named_worker) = match named {
+    let (to, destination_context) = match named {
         Some(target) => {
             let address = LocalNameAddress {
                 project: target
@@ -410,11 +383,10 @@ fn local_send(
                 crate::address::format_local_address(&address)
                     .map_err(|error| error.to_string())?,
                 Some(target_context(&target)?),
-                Some(target.worker_id),
             )
         }
         None => match resolved {
-            ResolvedAddress::LocalLegacy(raw) => (raw, None, None),
+            ResolvedAddress::LocalLegacy(raw) => (raw, None),
             _ => return Err("ADDRESS_INVALID".into()),
         },
     };
@@ -427,10 +399,14 @@ fn local_send(
                 .as_ref()
                 .map(|config| config.machine.as_str())
                 .unwrap_or("local");
-            if !reference.machine.eq_ignore_ascii_case(local) {
-                return Err("FEDERATION_REPLY_TARGET_MISMATCH".into());
+            if reference.machine.eq_ignore_ascii_case(local) {
+                Some(reference.msg_id.to_string())
+            } else {
+                Some(
+                    crate::proto::format_collab_ref(&MessageReference::Message(reference))
+                        .map_err(|error| error.to_string())?,
+                )
             }
-            Some(reference.msg_id.to_string())
         }
         None => None,
     };
@@ -449,13 +425,10 @@ fn local_send(
                 worker_id,
                 token,
                 command,
-                to: named_worker.ok_or("ADDRESS_NOT_FOUND")?,
+                to,
                 subject,
                 body,
                 in_reply_to,
-                reply_policy: reply_policy.map(|policy| {
-                    serde_json::to_value(policy).expect("typed reply policy serializes")
-                }),
                 target_session: target_session.map(serde_json::Value::String),
             },
         ));
@@ -473,7 +446,6 @@ fn local_send(
             body,
             in_reply_to,
             delivery,
-            reply_policy,
             target_session,
         },
     ))
@@ -496,7 +468,6 @@ async fn send(
         delivery,
         operation_id,
         in_reply_to,
-        reply_policy,
         target_session,
     } = request.clone()
     else {
@@ -520,6 +491,21 @@ async fn send(
     if !matches!(delivery.as_str(), "immediate" | "queued") {
         return Err("DELIVERY_MODE_INVALID".into());
     }
+    let explicit_channel = matches!(&to, AddressInput::Legacy(address) if address.starts_with("collab-channel:"));
+    let named_destination = if explicit_channel {
+        None
+    } else {
+        let route_manager = manager.clone();
+        let input = to.clone();
+        match blocking(move || resolve(&route_manager, &input)).await? {
+            ResolvedAddress::Remote { machine, target } => Some(FederationEndpoint::Named(
+                QualifiedNameAddress { machine, local: target },
+            )),
+            local => {
+                return blocking(move || local_send(&manager, context, request, local)).await;
+            }
+        }
+    };
     let mut original_origin = None;
     let mut channel = None;
     let mut expected_reply = None;
@@ -562,32 +548,9 @@ async fn send(
         }
         _ => None,
     };
-    let destination = if let Some(destination) = channel_destination {
-        destination
-    } else {
-        let route_manager = manager.clone();
-        let input = to.clone();
-        let resolved = blocking(move || resolve(&route_manager, &input)).await?;
-        match resolved {
-            ResolvedAddress::Remote { machine, target } => {
-                FederationEndpoint::Named(QualifiedNameAddress {
-                    machine,
-                    local: target,
-                })
-            }
-            local => {
-                if expected_reply.as_ref().is_some_and(|expected| {
-                    !expected
-                        .machine()
-                        .eq_ignore_ascii_case(&actor.principal.address.machine)
-                }) {
-                    return Err("FEDERATION_REPLY_TARGET_MISMATCH: an explicit remote reply destination is required".into());
-                }
-                let local_manager = manager.clone();
-                return blocking(move || local_send(&local_manager, context, request, local)).await;
-            }
-        }
-    };
+    let destination = channel_destination
+        .or(named_destination)
+        .ok_or("FEDERATION_CHANNEL_REPLY_REFERENCE_REQUIRED")?;
     if expected_reply
         .as_ref()
         .is_some_and(|expected| !same_endpoint(expected, &destination))
@@ -611,7 +574,6 @@ async fn send(
             operation_id,
             in_reply_to,
             original_origin,
-            reply_policy,
             target_session,
             channel,
             now_ms: now_ms(),
@@ -744,14 +706,9 @@ async fn submit_record_inner(
             .federation
             .outbound_record(&update.origin)
             .ok_or("FEDERATION_OUTBOUND_MISSING")?;
-        let clear_event =
-            accepted_reply_clear_event(&state, &update, &confirmed_outcome, &local_machine);
         let mut events = Vec::new();
         if current.status != FederatedOutboundRecord::STATUS_ACCEPTED {
             events.push(Event::FederationOutboundResulted { record: update });
-        }
-        if let Some(event) = clear_event {
-            events.push(event);
         }
         if !events.is_empty() {
             resulting_server
@@ -807,7 +764,7 @@ pub(super) fn public_response(response: FederationResponse) -> Resp {
             .expect("typed reference serializes");
             Resp::data(
                 json!({ "outcome": "accepted", "accepted": true, "durable": true,
-                "consumed": receipt.consumed, "consumed_by_recv": receipt.consumed,
+                "consumed": receipt.consumed,
                 "state": if receipt.consumed { "read" } else { "pending" },
                 "origin": receipt.origin, "reference": receipt.reference,
                 "origin_ref": origin_ref, "message_ref": message_ref,
@@ -1040,12 +997,7 @@ async fn status(
                 );
                 if matches!(outcome, FederationSendOutcome::Accepted { .. }) {
                     let record = federation::record_with_outcome(&record, &outcome, now_ms());
-                    let clear_event =
-                        accepted_reply_clear_event(&state, &record, &outcome, &local_machine);
-                    let mut events = vec![Event::FederationOutboundResulted { record }];
-                    if let Some(event) = clear_event {
-                        events.push(event);
-                    }
+                    let events = vec![Event::FederationOutboundResulted { record }];
                     result_server
                         .commit_locked_checked(&mut state, &events)
                         .map_err(|error| error.to_string())?;
@@ -1429,7 +1381,6 @@ mod tests {
                 operation_id: Some(origin.operation_id.clone()),
                 in_reply_to: None,
                 original_origin: None,
-                reply_policy: None,
                 target_session: None,
                 channel: None,
                 now_ms: 1,

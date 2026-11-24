@@ -159,7 +159,7 @@ fn test_candidates(thread_id: &str) -> Option<TransportCandidates> {
 // Scope/storage tests start with a committed native owner. Only native
 // admission is a precondition; route reservation and materialization use
 // the real manager owners before any identity is seeded.
-fn committed_native_scope_fixture(
+pub(super) fn committed_native_scope_fixture(
     manager: &ProjectRuntimeManager,
     context: &ProjectContext,
     worker: &str,
@@ -410,7 +410,7 @@ fn runtime_for_registered(
 /// Build the caller command envelope a cross-project send must carry. It uses
 /// the current mapped binding so the server can authenticate the
 /// exact execution carrier; the caller never authorizes itself.
-fn cross_project_command(
+pub(super) fn cross_project_command(
     server: &Server,
     root: &Path,
     worker_id: &str,
@@ -1112,7 +1112,6 @@ fn failed_tmux_notification_keeps_message_unread_without_receive_receipt() {
     assert!(!state
         .notification_delivery_accepted
         .contains_key(&message_id));
-    assert!(state.receive_receipts.is_empty());
     assert_eq!(
         state.notification_delivery_failures[&message_id].error,
         "TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure"
@@ -1207,6 +1206,62 @@ fn live_closure_daemon_send_uses_daemon_identity_without_explicit_source_thread(
     assert!(!state.delivery_source_threads.contains_key(message_id));
     assert_eq!(msg.wake_attempt_count, 1);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn live_closure_does_not_admit_cold_recipient() {
+    let (mut server, root, _) = test_server();
+    let native_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sink_calls = native_calls.clone();
+    with_appserver_notification_sink(&mut server, move |_, _, _, _, _, _| {
+        sink_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(json!({"accepted": true}))
+    });
+    Arc::get_mut(&mut server).unwrap().appserver_thread_status = Arc::new(|_, thread_id| {
+        let status = if thread_id == "thread-target" {
+            "notLoaded"
+        } else {
+            "idle"
+        };
+        Ok(json!({"thread": {"id": thread_id, "status": {"type": status}}}))
+    });
+    for (worker_id, token, thread_id) in [
+        ("requester", "token-requester", "thread-requester"),
+        ("target", "token-target", "thread-target"),
+    ] {
+        register_native_peer(&server, &root, worker_id, token, thread_id, "cold-app");
+    }
+    assert!(handle_notification_subscribe(
+        &server,
+        "target".into(),
+        "token-target".into(),
+        "direct-message".into(),
+        None,
+        None,
+        Vec::new(),
+        None,
+        1,
+        60,
+    )
+    .ok);
+    let response = handle_live_closure_daemon_send(
+        &server,
+        "requester".into(),
+        "token-requester".into(),
+        "target".into(),
+        "daemon_to_peer".into(),
+        "cold-challenge".into(),
+        "cold-challenge".into(),
+        false,
+    );
+    let no_message = server.state.lock().unwrap().msgs.is_empty();
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(native_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        response.error.as_deref(),
+        Some("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE")
+    );
+    assert!(no_message);
 }
 
 #[test]

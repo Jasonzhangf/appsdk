@@ -7,6 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const ONLINE_AGENT_PREFLIGHT: [&str; 4] = [
+    "server.status",
+    "com.superlogical.terminal.process",
+    "com.superlogical.terminal.pwd",
+    "com.superlogical.terminal.program_status",
+];
 
 async fn fixture_guard() -> (
     std::sync::MutexGuard<'static, ()>,
@@ -90,6 +96,21 @@ impl TestEnv {
             .map(|line| serde_json::from_str(line).expect("fixture invocation JSON"))
             .collect()
     }
+
+    fn with_owner(scenario: &str, pid: u32, name: &str) -> Self {
+        let env = Self::new(scenario);
+        std::env::set_var("COLLAB_TEST_REX_OWNER_PID", pid.to_string());
+        std::env::set_var("COLLAB_TEST_REX_OWNER_NAME", name);
+        env
+    }
+
+    fn online_agent(scenario: &str) -> Self {
+        Self::with_owner(scenario, 4242, "codex")
+    }
+
+    fn exited_agent(scenario: &str) -> Self {
+        Self::with_owner(scenario, 4243, "zsh")
+    }
 }
 
 impl Drop for TestEnv {
@@ -98,6 +119,8 @@ impl Drop for TestEnv {
         set_test_timeout(None);
         std::env::remove_var("REXPRIMITIVE_LOG_DIR");
         std::env::remove_var("REXPRIMITIVE_SCENARIO");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_PID");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_NAME");
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -143,7 +166,7 @@ async fn candidate_deadline_is_shared_by_all_verification_steps() {
 #[tokio::test]
 async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
     let _guard = fixture_guard().await;
-    let env = TestEnv::new("normal");
+    let env = TestEnv::online_agent("normal");
     let text = "期限正文\n第二行";
     let receipt = notify(&selected_transport(), text, Some("immediate"))
         .await
@@ -159,13 +182,17 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
     assert_eq!(
         calls.iter().map(method).collect::<Vec<_>>(),
         [
+            ONLINE_AGENT_PREFLIGHT[0],
+            ONLINE_AGENT_PREFLIGHT[1],
+            ONLINE_AGENT_PREFLIGHT[2],
+            ONLINE_AGENT_PREFLIGHT[3],
             "server.status",
             "com.superlogical.terminal.write",
-            "send-key"
+            "send-key",
         ]
     );
-    let write_ns = calls[1]["monotonic_ns"].as_u64().unwrap();
-    let enter_ns = calls[2]["monotonic_ns"].as_u64().unwrap();
+    let write_ns = calls[5]["monotonic_ns"].as_u64().unwrap();
+    let enter_ns = calls[6]["monotonic_ns"].as_u64().unwrap();
     assert!(
         Duration::from_nanos(enter_ns - write_ns) >= Duration::from_millis(100),
         "Enter arrived only {} ms after the text write",
@@ -209,19 +236,66 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
 }
 
 #[tokio::test]
+async fn notify_refuses_input_when_the_rex_block_has_no_current_agent() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::exited_agent("normal");
+    let error = notify(&selected_transport(), "must not enter", Some("immediate"))
+        .await
+        .expect_err("a foreground shell must not receive Agent input");
+    assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
+    assert_eq!(error.stage, RexInputStage::BeforeWrite);
+    assert!(error.detail.contains("RECIPIENT_NOT_ONLINE"));
+    assert!(error.detail.contains("foreground is not Codex"));
+    let calls = env.calls();
+    assert!(
+        calls.iter().any(|call| {
+            method(call) == "com.superlogical.terminal.process"
+                || method(call) == "com.superlogical.terminal.program_status"
+        }),
+        "the adapter must consult Rex current-agent facts: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| {
+            matches!(
+                method(call).as_str(),
+                "com.superlogical.terminal.write" | "send-key"
+            )
+        }),
+        "an offline Agent must receive zero terminal input: {calls:?}"
+    );
+}
+
+#[tokio::test]
 async fn notify_deadline_during_settle_skips_enter() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("normal");
     let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
-    let error = send_enter_until(&endpoint(), deadline).await.unwrap_err();
+    let owner = RexProgramStatusOwner { pid: 4242, name: "codex".into() };
+    let error = send_enter_until(&endpoint(), &owner, deadline).await.unwrap_err();
     assert_eq!(error.class, NotificationDeliveryClass::Unknown);
     assert!(env.calls().is_empty());
 }
 
 #[tokio::test]
+async fn notify_skips_enter_when_the_rex_foreground_changes_after_write() {
+    let _guard = fixture_guard().await;
+    let env = TestEnv::online_agent("agent_exits_after_write");
+    let error = notify(&selected_transport(), "queued text", Some("immediate"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.class, NotificationDeliveryClass::Unknown);
+    assert_eq!(error.stage, RexInputStage::WriteQueued { bytes_written: 11 });
+    assert!(error.detail.contains("foreground Codex changed"));
+    assert_eq!(env.calls().iter().filter(|call| {
+        method(call) == "com.superlogical.terminal.write"
+    }).count(), 1);
+    assert!(!env.calls().iter().any(|call| method(call) == "send-key"));
+}
+
+#[tokio::test]
 async fn failed_enter_preserves_the_queued_write_stage_without_resending() {
     let _guard = fixture_guard().await;
-    let env = TestEnv::new("enter_fail");
+    let env = TestEnv::online_agent("enter_fail");
     let text = "已排队正文";
     let error = notify(&selected_transport(), text, Some("immediate"))
         .await
@@ -520,7 +594,7 @@ async fn write_unknown_and_short_write_never_enter() {
             RexInputStage::WriteQueued { bytes_written: 1 },
         ),
     ] {
-        let env = TestEnv::new(scenario);
+        let env = TestEnv::online_agent(scenario);
         let error = notify(&selected_transport(), "a complete body", Some("immediate"))
             .await
             .expect_err("write outcome must be unknown");
@@ -532,9 +606,17 @@ async fn write_unknown_and_short_write_never_enter() {
         );
         assert_eq!(error.stage, stage);
         let calls = env.calls();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(method(&calls[0]), "server.status");
-        assert_eq!(method(&calls[1]), "com.superlogical.terminal.write");
+        assert_eq!(
+            calls.iter().map(method).collect::<Vec<_>>(),
+            [
+                ONLINE_AGENT_PREFLIGHT[0],
+                ONLINE_AGENT_PREFLIGHT[1],
+                ONLINE_AGENT_PREFLIGHT[2],
+                ONLINE_AGENT_PREFLIGHT[3],
+                "server.status",
+                "com.superlogical.terminal.write",
+            ]
+        );
     }
 }
 
@@ -542,17 +624,27 @@ async fn write_unknown_and_short_write_never_enter() {
 async fn typed_native_rejections_keep_exact_code() {
     let _fixture = fixture_guard().await;
     {
-        let env = TestEnv::new("write_typed_reject");
+        let env = TestEnv::online_agent("write_typed_reject");
         let error = notify(&selected_transport(), "abc", Some("immediate"))
             .await
             .expect_err("typed write rejection");
         assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
         assert_eq!(error.native_code.as_deref(), Some("session_not_found"));
         assert_eq!(error.stage, RexInputStage::BeforeWrite);
-        assert_eq!(env.calls().len(), 2);
+        assert_eq!(
+            env.calls().iter().map(method).collect::<Vec<_>>(),
+            [
+                ONLINE_AGENT_PREFLIGHT[0],
+                ONLINE_AGENT_PREFLIGHT[1],
+                ONLINE_AGENT_PREFLIGHT[2],
+                ONLINE_AGENT_PREFLIGHT[3],
+                "server.status",
+                "com.superlogical.terminal.write",
+            ]
+        );
     }
     {
-        let env = TestEnv::new("enter_typed_reject");
+        let env = TestEnv::online_agent("enter_typed_reject");
         let error = notify(&selected_transport(), "abc", Some("immediate"))
             .await
             .expect_err("typed Enter rejection");
@@ -563,9 +655,13 @@ async fn typed_native_rejections_keep_exact_code() {
         assert_eq!(
             env.calls().iter().map(method).collect::<Vec<_>>(),
             [
+                ONLINE_AGENT_PREFLIGHT[0],
+                ONLINE_AGENT_PREFLIGHT[1],
+                ONLINE_AGENT_PREFLIGHT[2],
+                ONLINE_AGENT_PREFLIGHT[3],
                 "server.status",
                 "com.superlogical.terminal.write",
-                "send-key"
+                "send-key",
             ]
         );
     }
@@ -578,7 +674,7 @@ async fn enter_unknown_and_opaque_failure_never_rewrite_or_retry() {
         ("enter_fail", NotificationDeliveryClass::Unknown),
         ("enter_unknown", NotificationDeliveryClass::Unknown),
     ] {
-        let env = TestEnv::new(scenario);
+        let env = TestEnv::online_agent(scenario);
         let error = notify(&selected_transport(), "a complete body", Some("immediate"))
             .await
             .expect_err("failed Enter must not report successful submission");
@@ -593,9 +689,13 @@ async fn enter_unknown_and_opaque_failure_never_rewrite_or_retry() {
         assert_eq!(
             env.calls().iter().map(method).collect::<Vec<_>>(),
             [
+                ONLINE_AGENT_PREFLIGHT[0],
+                ONLINE_AGENT_PREFLIGHT[1],
+                ONLINE_AGENT_PREFLIGHT[2],
+                ONLINE_AGENT_PREFLIGHT[3],
                 "server.status",
                 "com.superlogical.terminal.write",
-                "send-key"
+                "send-key",
             ]
         );
     }
@@ -616,7 +716,7 @@ async fn queued_mode_is_rejected_before_any_spawn() {
 #[tokio::test]
 async fn allowed_modes_return_rex_receipt_json() {
     let _fixture = fixture_guard().await;
-    let env = TestEnv::new("normal");
+    let env = TestEnv::online_agent("normal");
     for mode in [
         None,
         Some("immediate"),
@@ -637,6 +737,10 @@ async fn allowed_modes_return_rex_receipt_json() {
         assert!(value.get("queued").is_none());
     }
     let expected = [
+        ONLINE_AGENT_PREFLIGHT[0],
+        ONLINE_AGENT_PREFLIGHT[1],
+        ONLINE_AGENT_PREFLIGHT[2],
+        ONLINE_AGENT_PREFLIGHT[3],
         "server.status",
         "com.superlogical.terminal.write",
         "send-key",

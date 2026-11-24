@@ -60,7 +60,7 @@ async fn manager_routes_project_queries_mutations_and_poll_to_one_runtime() {
         from: "sender".into(), worker_id: Some("sender".into()), token: Some("token-sender".into()),
         command: Some(command), to: "recipient".into(), mtype: "notify".into(),
         subject: Some("route-aware message".into()), body: "message must stay in the selected runtime".into(),
-        in_reply_to: None, reply_policy: None, target_session: None, delivery: "immediate".into(),
+        in_reply_to: None, target_session: None, delivery: "immediate".into(),
     });
     assert!(sent.ok, "{sent:?}");
     let id = sent.data["msg_id"].as_str().unwrap().to_owned();

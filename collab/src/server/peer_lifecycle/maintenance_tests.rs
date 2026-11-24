@@ -3,7 +3,7 @@ use crate::server::name_state::{AgentPresence, AgentPresenceRecord};
 use crate::server::peer_tests::{
     promote_master, register_tmux, seed_committed_owner, test_appserver_transport, test_server,
 };
-use crate::server::state::{ReplyObligation, ResponsibilityFence, TaskRec};
+use crate::server::state::{ResponsibilityFence, TaskRec};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -514,22 +514,6 @@ fn exact_fence(worker_id: &str, binding: &RuntimeBinding) -> ResponsibilityFence
         snapshot: state::ResponsibilitySnapshot::default(),
         state: "closing".into(),
         created_ms: 1,
-    }
-}
-
-fn reply_obligation(worker_id: &str, message_id: &str) -> ReplyObligation {
-    ReplyObligation {
-        message_id: message_id.into(),
-        project: "fixture-project".into(),
-        from_project: None,
-        from_ceo: false,
-        from_worker_id: "requester".into(),
-        from_name: None,
-        recipient_worker_id: worker_id.into(),
-        recipient_name: None,
-        policy: crate::proto::ReplyPolicy::Required,
-        created_ms: 1,
-        reminded_idle_episode: false,
     }
 }
 
@@ -1066,32 +1050,6 @@ fn active_subscription_alone_retains_missing_worker() {
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
-}
-
-#[test]
-fn pending_reply_obligation_is_retained() {
-    let (mut server, root) = test_server();
-    install_appserver_status(&mut server);
-    register_appserver(&server, "reply-owner", "thread-missing");
-    let obligation = reply_obligation("reply-owner", "reply-message");
-    server.commit(&[Event::ReplyObligationSet {
-        obligation: obligation.clone(),
-    }]);
-
-    let summary = maintain_definitive_missing(&server, 5_000);
-
-    assert_only_bucket(&summary, "retained", "reply-owner");
-    let retained = entry(&summary, "retained", "reply-owner");
-    assert_eq!(retained["reason"]["kind"], "pending_reply_obligation");
-    assert_eq!(
-        retained["reason"]["message_ids"],
-        json!([obligation.message_id])
-    );
-    let state = server.state.lock().unwrap();
-    assert!(state.workers.contains_key("reply-owner"));
-    assert!(state.reply_obligations.contains_key("reply-message"));
-    drop(state);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

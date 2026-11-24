@@ -40,24 +40,60 @@ fn rex_periodic_deadline_late_recv_advances_once() {
     let context = fixture.context_provide(&receiver);
     let owner = snapshot(&context)["name"].as_str().unwrap();
     let session = Some(receiver.agent_session_id.as_str());
-    let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let clock = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    };
     let first_due = clock() + 3000;
-    let armed = fixture.run_ok(&["goal", "reconcile", "--goal-id", "deadline-storm",
-        "--owner", owner, "--desired", "active", "--at-ms", &first_due.to_string(),
-        "--every-ms", "3000", "--repeat", "3", "--ttl-seconds", "90"], session);
+    let armed = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "deadline-storm",
+            "--owner",
+            owner,
+            "--desired",
+            "active",
+            "--at-ms",
+            &first_due.to_string(),
+            "--every-ms",
+            "3000",
+            "--repeat",
+            "3",
+            "--ttl-seconds",
+            "90",
+        ],
+        session,
+    );
     let id = armed["subscription"]["id"].as_str().unwrap();
     fixture.wait_capture_contains(&receiver, "DEADLINE_REACHED", Duration::from_secs(20));
     std::thread::sleep(Duration::from_millis(3100));
     let before = clock();
     let recv = ["recv", "--receive-id", "late-goal-read"];
     let received = fixture.run_ok(&recv, session);
-    assert!(received.to_string().contains("deadline:goal:deadline-storm"), "{received}");
+    assert!(
+        received
+            .to_string()
+            .contains("deadline:goal:deadline-storm"),
+        "{received}"
+    );
     let replay = fixture.run_ok(&recv, session);
     assert_eq!(received["messages"], replay["messages"]);
     let status = fixture.run_ok(&["notify", "status"], session);
-    let sub = status["subscriptions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
+    let sub = status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id)
+        .unwrap();
     assert_eq!(sub["fired_count"], 1, "{sub}");
-    assert!(sub["trigger_ms"].as_i64().unwrap() >= before + 3000, "{sub}");
+    assert!(
+        sub["trigger_ms"].as_i64().unwrap() >= before + 3000,
+        "{sub}"
+    );
     assert!(fixture.finish().is_empty());
 }
 

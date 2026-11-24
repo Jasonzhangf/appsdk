@@ -71,21 +71,39 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         let workflow = &snapshot["role_brief"]["workflow_template"];
         let brief = &snapshot["role_brief"];
         let responsibilities = brief["responsibilities"].as_array().unwrap();
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("execution plan, evidence-based progress, and action items")
-                && rule.contains("If progress stalls")
-                && rule.contains("If nothing is ready")
-                && rule.contains("owner and resume signal")
-        }), "{label}: task execution cycle is missing");
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("even if worker status is online or busy")
-                && rule.contains("collab worker snapshot <id> --capture --lines 80")
-        }), "{label}: blocked or stalled task requires terminal evidence");
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("Hand the complete contract directly to that peer")
-                && rule.contains("The peer claims it at the current board revision")
-                && rule.contains("Skip routine pings")
-        }), "{label}: direct architect handoff is missing");
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("execution plan, evidence-based progress, and action items")
+                        && rule.contains("If progress stalls")
+                        && rule.contains("If nothing is ready")
+                        && rule.contains("owner and resume signal")
+                }),
+            "{label}: task execution cycle is missing"
+        );
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("even if worker status is online or busy")
+                        && rule.contains("collab worker snapshot <id> --capture --lines 80")
+                }),
+            "{label}: blocked or stalled task requires terminal evidence"
+        );
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("Hand the complete contract directly to that peer")
+                        && rule.contains("The peer claims it at the current board revision")
+                        && rule.contains("Skip routine pings")
+                }),
+            "{label}: direct architect handoff is missing"
+        );
         let handoff_rules: Vec<_> = responsibilities
             .iter()
             .filter_map(Value::as_str)
@@ -96,11 +114,18 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
             .contains("Skip manual ACKs, progress reports, status chasing, idle requests"));
         assert!(handoff_rules[0].contains("an evidenced blocker requiring action"));
         assert!(handoff_rules[0].contains("once to the configured receiver"));
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("task-linked wake every 10 minutes by default (600000 ms)")
-                && rule.contains("Use the cadence specified in the contract when it differs")
-                && rule.contains("On each wake, advance the task")
-        }), "{label}: execution wake guidance is missing");
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("task-linked wake every 10 minutes by default (600000 ms)")
+                        && rule
+                            .contains("Use the cadence specified in the contract when it differs")
+                        && rule.contains("On each wake, advance the task")
+                }),
+            "{label}: execution wake guidance is missing"
+        );
         let context_instruction = brief["communication_recovery"]["steps"][0]
             .as_str()
             .expect("identity recovery instruction");
@@ -119,12 +144,10 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         ] {
             assert!(context_instruction.contains(source), "{label}: {source}");
         }
-        assert!(
-            brief["communication_recovery"]["steps"][1]
-                .as_str()
-                .unwrap()
-                .contains("Never guess or manually fill session_id, thread_id, endpoint or namespace")
-        );
+        assert!(brief["communication_recovery"]["steps"][1]
+            .as_str()
+            .unwrap()
+            .contains("Never guess or manually fill session_id, thread_id, endpoint or namespace"));
         let role_text = brief.to_string();
         for retired_rule in [
             "report routinely",
@@ -1015,7 +1038,10 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
     );
     assert!(
         contains_ci(&text, "including when the worker just registered")
-            && contains_ci(&text, "For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --lines 80`")
+            && contains_ci(
+                &text,
+                "For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --lines 80`"
+            )
             && contains_ci(&text, "Keep other ready work moving during verification"),
         "master role_brief must inspect the bound terminal and keep unrelated work moving: {text}"
     );
@@ -1082,13 +1108,19 @@ fn master_role_brief_defaults_to_independent_review_with_three_condition_excepti
         "master role_brief must route both task intakes to the architect first: {text}"
     );
     assert!(
-        contains_ci(&text, "architect owns planning and acceptance")
+        contains_ci(
+            &text,
+            "architect owns planning, contract updates, direct peer dispatch, and acceptance within the entrusted scope",
+        )
             && contains_ci(&text, "hands implementation to one or more peer executors")
             && contains_ci(&text, "peers implement, verify and return evidence to the architect"),
         "master role_brief must distinguish architect acceptance from peer execution: {text}"
     );
     assert!(
-        contains_ci(&text, "complete written design and execution contract for each peer"),
+        contains_ci(
+            &text,
+            "complete written design and execution contract for each peer"
+        ),
         "master role_brief must require the architect's executable handoff: {text}"
     );
     assert!(
@@ -1163,7 +1195,10 @@ fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
         "patrol role_brief must name the non-live peer states: {text}"
     );
     assert!(
-        contains_ci(&text, "For Rex and Codex TUI/tmux, it requires `collab worker snapshot <id> --lines 80`"),
+        contains_ci(
+            &text,
+            "For Rex and Codex TUI/tmux, it requires `collab worker snapshot <id> --lines 80`"
+        ),
         "patrol role_brief must check for Rex and tmux snapshot evidence: {text}"
     );
     assert!(

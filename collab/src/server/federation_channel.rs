@@ -46,7 +46,6 @@ pub(super) fn prepare_inbound_record(
             operation_id: Some(operation_id),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: Some(channel),
             now_ms: now,
@@ -175,12 +174,11 @@ pub fn validate_channel_reply(
             "a federated channel reply requires a subject",
         ));
     }
-    if request.delivery != "immediate"
-        || request.target_session.is_some()
-        || request.reply_policy.is_some()
-    {
+    if request.delivery != "immediate" || request.target_session.is_some() {
         return Err(federation::FederationError::new(
-            "FEDERATION_CHANNEL_DELIVERY_UNSUPPORTED", "channel replies require immediate delivery without a target session or reply obligation"));
+            "FEDERATION_CHANNEL_DELIVERY_UNSUPPORTED",
+            "channel replies require immediate delivery without a target session",
+        ));
     }
     Ok(ChannelReplyIntent {
         origin: request.origin.clone(),
@@ -231,7 +229,6 @@ pub fn build_reply_events(
         delivery: "immediate".to_owned(),
         in_reply_to: Some(intent.in_reply_to.clone()),
         original_origin: Some(intent.original_origin.clone()),
-        reply_policy: None,
         channel: Some(channel.clone()),
         accepted_ms: now,
     };
@@ -667,7 +664,6 @@ mod tests {
                 operation_id: None,
                 in_reply_to: None,
                 original_origin: None,
-                reply_policy: None,
                 target_session: None,
                 channel: Some(channel.clone()),
                 now_ms: 1,
@@ -705,7 +701,6 @@ mod tests {
             target_session: None,
             in_reply_to: Some(accepted),
             original_origin: Some(record.origin.clone()),
-            reply_policy: None,
             channel: Some(channel),
         };
         let connection = AuthenticatedMachine {

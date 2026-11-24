@@ -860,6 +860,7 @@
                         created_ms: now_ms(),
                         original_status: None,
                         original_owner: None,
+                        inviter_name: None,
                         automatic_source: None,
                     }),
                     ..crate::board::BoardTaskDetails::default()
@@ -1450,8 +1451,6 @@
         assert_eq!(attempt.unwrap(), SchedulerNotificationAttempt::Consumed);
         let state = server.state.lock().unwrap();
         assert_eq!(state.scheduler_admissions["req-consumed-before-wake"].status, "succeeded");
-        assert_eq!(state.receive_receipts["receive-before-wake"].worker_id, "peer");
-        assert_eq!(state.receive_receipts["receive-before-wake"].message_ids, vec!["scheduler-req-consumed-before-wake"]);
         assert_eq!(serde_json::to_value(&state.tasks["task-scheduler-req-consumed-before-wake"]).unwrap(), before_task);
         assert_eq!(serde_json::to_value(&state.subagents["managed-peer"]).unwrap(), before_child);
         assert_eq!(serde_json::to_value(&state.msgs["scheduler-req-consumed-before-wake"]).unwrap(), expected_message);
@@ -1591,7 +1590,6 @@
             state.msgs["scheduler-req-long-poll-success-1"].state,
             "read"
         );
-        assert_eq!(state.receive_receipts["receive-successful-dispatch"].message_ids, vec!["scheduler-req-long-poll-success-1"]);
         assert_eq!(state.tasks["task-scheduler-req-long-poll-success-1"].status, "assigned");
         assert_eq!(state.subagents["managed-peer"].status, "assigned");
         drop(state);
@@ -1662,8 +1660,6 @@
         assert_eq!(serde_json::to_value(&state.tasks["task-scheduler-req-pending-recovery-1"]).unwrap(), before_task);
         assert_eq!(serde_json::to_value(&state.msgs["scheduler-req-pending-recovery-1"]).unwrap(), consumed_message);
         assert_eq!(state.subagents["managed-peer"].status, "assigned");
-        assert_eq!(state.receive_receipts["receive-pending-reservation"].worker_id, "peer");
-        assert_eq!(state.receive_receipts["receive-pending-reservation"].message_ids, vec!["scheduler-req-pending-recovery-1"]);
         assert_eq!(
             state.scheduler_admissions["req-pending-recovery-1"].status,
             "succeeded"

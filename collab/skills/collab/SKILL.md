@@ -34,6 +34,15 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。
 
+### 在线才投递
+
+所有普通消息、通知、周期唤醒和 board 自动通知，只有 daemon 已确认目标 agent
+当前在线时才可写入 shell、pane、Rex block 或原生 thread。在线只认当前 adapter
+明确返回的 Present。cold、unknown、offline、缺失或只有持久化绑定时，daemon
+保持消息未读并产生零终端输入。入队、订阅接受和唤醒接受都不是投递成功。
+普通未读消息在目标上线后沿当前绑定投递；周期唤醒离线静默且不补发。
+board 修改仍先提交，自动通知在目标离线时保持未读。
+
 ### 首次注册与缺项提示
 
 身份注册、恢复、查状态和终端取证只调用 shell 中的 Collab CLI，以及需要时的宿主 CLI
@@ -65,6 +74,15 @@ DSH 的身份来源是 gateway 注入的 `DSH_SESSION_ID`。Desktop 还使用当
 已登记会话断开 iTerm2 时，名字和业务保留，消息在 daemon 排队。
 `IDENTITY_MAP_DECODE_FAILED` 表示当前程序读不懂已保存的身份表；
 补注册字段无法修复它。保留身份表，交由维护者恢复兼容运行版后再试。
+
+如果当前 context 返回 `registered=true` 但当前名字或绑定为空，或返回
+`registered=false`、`requires_identity_update`，不要从历史 projection、route、
+journal、旧 Rex session 或其他 worker 猜名字。保留 `result.requires.fields`
+和 `result.requires.sources`，按字段来源补充当前宿主事实，再在同一项目根重跑
+`collab context`。AppServer 使用当前 `CODEX_SESSION_ID`、`CODEX_THREAD_ID`、
+真实 bridge endpoint 和 namespace；Rex 使用当前 server、session、block 和项目
+cwd；tmux 使用当前 pane/session 事实。字段缺失时直接向宿主维护者报告字段名和获取
+命令。`identity-map.json` 是唯一绑定真源，历史投影不能否决新的 current binding。
 
 ## 关闭门禁：未验证不得关闭
 
@@ -193,7 +211,8 @@ peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任�
 peer 与占用状态由 board 的真实任务视图计算。
 
 项目有适合本任务的 architect 时，Jenny 将 buglist 中已授权的缺陷和项目任务先派给
-architect。Architect 完成详细计划，直接向一个或多个 peer 交执行合同。Peer 实现、
+architect。Architect 完成详细计划，在受托范围内修订任务并直接向一个或多个 eligible
+peer 派发执行合同。Peer 实现、
 验证并直接将结果交回 architect。执行中只为真实阻塞、必要设计决定或约定交接直接联系。
 Architect 按计划及真实行为证据验收，返工也由其交回
 原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。

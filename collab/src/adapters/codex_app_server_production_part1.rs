@@ -636,8 +636,8 @@ pub fn immediate_notify(
     // answers "thread not found" for a thread this connection does not hold.
     // Resume on this connection first so the immediate notification can be
     // delivered, which is the native load step for a persisted thread.
-    let resumed_here = match client.call("thread/resume", json!({"threadId": thread_id.as_str()})) {
-        Ok(_) => true,
+    match client.call("thread/resume", json!({"threadId": thread_id.as_str()})) {
+        Ok(_) => {}
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
         {
@@ -646,36 +646,21 @@ pub fn immediate_notify(
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            false
         }
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) =>
         {
-            false
         }
         // `thread/resume` is not universal across App Server builds; a method
         // that does not exist leaves the existing status-based path intact.
-        Err(AdapterError::CapabilityUnavailable { .. }) => false,
+        Err(AdapterError::CapabilityUnavailable { .. }) => {}
         Err(error) => return Err(error),
     };
     let status = match thread_metadata(&mut client, thread_id.as_str()) {
         Ok(thread) => thread_status_from_metadata(&thread)?,
-        // A cold thread is loaded by the immediate notification itself:
-        // `turn/start` is the native load-and-start call, so a persisted
-        // thread reports a not-loaded status that resolves to Start rather
-        // than an invented queue or a refusal.  A genuinely missing thread
-        // still fails closed below.
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            if resumed_here {
-                return Err(AdapterError::Unknown {
-                    operation: "thread/read",
-                    detail: format!(
-                        "thread {thread_id} was resumed on this connection but still reports not loaded"
-                    ),
-                });
-            }
             "notLoaded".to_string()
         }
         Err(AdapterError::Unknown { operation, detail })
@@ -768,8 +753,8 @@ pub fn queued_notify(
     })?;
     let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
     client.initialize()?;
-    let resumed_here = match client.call("thread/resume", json!({"threadId": thread_id.as_str()})) {
-        Ok(_) => true,
+    match client.call("thread/resume", json!({"threadId": thread_id.as_str()})) {
+        Ok(_) => {}
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
         {
@@ -778,14 +763,12 @@ pub fn queued_notify(
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            false
         }
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) =>
         {
-            false
         }
-        Err(AdapterError::CapabilityUnavailable { .. }) => false,
+        Err(AdapterError::CapabilityUnavailable { .. }) => {}
         Err(error) => return Err(error),
     };
     let status = match thread_metadata(&mut client, thread_id.as_str()) {
@@ -793,14 +776,6 @@ pub fn queued_notify(
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            if resumed_here {
-                return Err(AdapterError::Unknown {
-                    operation: "thread/read",
-                    detail: format!(
-                        "thread {thread_id} was resumed on this connection but still reports not loaded"
-                    ),
-                });
-            }
             "notLoaded".to_string()
         }
         Err(AdapterError::Unknown { operation, detail })

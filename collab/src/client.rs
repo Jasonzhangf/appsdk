@@ -1183,9 +1183,9 @@ fn remaining_ping_timeout(deadline: Instant) -> io::Result<Duration> {
 }
 
 fn remaining_ping_timeout_from(deadline: Instant, now: Instant) -> io::Result<Duration> {
-    let remaining = deadline
-        .checked_duration_since(now)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out"))?;
+    let remaining = deadline.checked_duration_since(now).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::TimedOut, "daemon readiness Ping timed out")
+    })?;
     if remaining < Duration::from_millis(1) {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -2297,7 +2297,6 @@ mod tests {
             subject: Some("subject".into()),
             body: "authoritative mutation".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         };

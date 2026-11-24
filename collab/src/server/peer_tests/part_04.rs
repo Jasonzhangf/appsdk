@@ -1130,11 +1130,10 @@ fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payloa
     std::fs::remove_dir_all(root).ok();
 }
 
-/// The first read and a `receive_id` replay answer from one minimal message
-/// projection. Delivery diagnostics stay in the wake ledger: a recipient that
-/// consumed the durable body must not receive per-message retry bookkeeping.
+/// The first read uses the minimal message projection. Delivery diagnostics
+/// stay in the wake ledger, and a consumed batch is never replayed.
 #[test]
-fn recv_first_read_and_receive_id_replay_share_minimal_message_projection() {
+fn recv_first_read_uses_minimal_projection_without_replay() {
     let (server, root) = test_server();
     server.commit(&[Event::Sent {
         msg: Message {
@@ -1181,18 +1180,17 @@ fn recv_first_read_and_receive_id_replay_share_minimal_message_projection() {
         );
     }
 
-    let replay = poll_messages_with_context(
+    let second = poll_messages_with_context(
         &server,
         "reader",
         None,
         None,
         Some("recv-minimal-projection"),
     )
-    .expect("the committed receive batch must replay");
-    assert_eq!(replay.data["replayed"], true);
-    assert_eq!(
-        replay.data["messages"], first.data["messages"],
-        "a receive_id replay must return the same minimal projection"
+    ;
+    assert!(
+        second.is_none(),
+        "a consumed batch must not be replayed: {second:?}"
     );
 
     std::fs::remove_dir_all(root).ok();

@@ -221,7 +221,11 @@ def session_list() -> None:
     if scenario() in {"session_missing", "service_changed_session_missing"}:
         emit({"sessions": []})
         return
-    emit({"sessions": [{"session_id": SESSION, "label": "fixture"}, {"session_id": OTHER_SESSION, "label": "other"}]})
+    emit({"sessions": [
+        {"session_id": SESSION, "label": "fixture"},
+        {"session_id": OTHER_SESSION, "label": "other"},
+        {"session_id": "rex-session", "label": "notification fixture"},
+    ]})
 
 
 def list_blocks() -> None:
@@ -232,7 +236,13 @@ def list_blocks() -> None:
         emit({"blocks": []})
         return
     creator = "com.other.creator" if scenario() == "non_terminal_block" else TERMINAL
-    blocks = [BLOCK]
+    blocks = [
+        BLOCK,
+        "block:11111111-1111-1111-1111-111111111111",
+        "block:33333333-3333-3333-3333-333333333333",
+        "block:44444444-4444-4444-4444-444444444444",
+        "block:55555555-5555-5555-5555-555555555555",
+    ]
     path = os.environ.get("REXPRIMITIVE_BLOCKS_FILE")
     if path:
         try:
@@ -275,6 +285,9 @@ def write(stdin: str) -> None:
         sys.stderr.write("fixture: write request is malformed\n")
         raise SystemExit(7)
     expected = len(data.encode("utf-8"))
+    if mode == "agent_exits_after_write":
+        with open(os.path.join(log_dir(), "agent-exited"), "w", encoding="utf-8"):
+            pass
     if mode == "write_short":
         emit({"bytes_written": 1})
         return
@@ -313,6 +326,8 @@ def configured_owner() -> tuple[int, str] | None:
 
 def process() -> None:
     owner = configured_owner()
+    if scenario() == "agent_exits_after_write" and os.path.exists(os.path.join(log_dir(), "agent-exited")):
+        owner = (4243, "zsh")
     if owner:
         pid, name = owner
         emit(
@@ -361,7 +376,7 @@ def program_status() -> None:
                     {
                         "id": "agent",
                         "state": "working",
-                        "app": "fixture",
+                        "app": "codex",
                         "msg": "busy",
                         "owner": {"pid": pid, "name": name},
                         "updated_at": "2026-11-12T00:00:00Z",

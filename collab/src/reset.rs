@@ -3,7 +3,7 @@
 //! This is the single offline reset owner. It never claims delivery, review,
 //! install, or communication evidence. The operation is only reachable
 //! with an explicit operator approval string, requires the host daemon to be
-//! down, archives the retired bytes, removes the project-local control plane
+//! down, removes the project-local control plane
 //! plus its stale host route record, and rebuilds the current empty baseline.
 
 use crate::scope::{self, HostPaths, Scope};
@@ -118,18 +118,6 @@ struct RetiredRoot {
     relative: String,
     absolute: PathBuf,
     staged: Option<PathBuf>,
-    files: usize,
-    sockets: Vec<String>,
-    bytes: u64,
-    digest: String,
-}
-
-fn archive_matches(entry: &RetiredRoot, files: usize, bytes: u64, digest: &str) -> bool {
-    files == entry.files && bytes == entry.bytes && digest == entry.digest
-}
-
-fn source_matches(entry: &RetiredRoot, sockets: &[String]) -> bool {
-    sockets == entry.sockets
 }
 
 fn now_ms() -> i64 {
@@ -139,153 +127,6 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn fnv1a64(bytes: &[u8], seed: u64) -> u64 {
-    let mut hash = seed;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-/// Deterministic tree digest for regular files. Unix sockets have no durable
-/// bytes and are returned separately so reset can retire a stale endpoint
-/// without pretending that it copied socket state into the archive.
-fn tree_digest(root: &Path) -> std::io::Result<(usize, Vec<String>, u64, String)> {
-    let root_metadata = std::fs::symlink_metadata(root)?;
-    if root_metadata.file_type().is_symlink() {
-        return Err(control_tree_symlink_error(root));
-    }
-    if !root_metadata.is_dir() {
-        // A single control file is a one-file tree. Its archive is a directory
-        // holding that file, so the digest must describe that same shape: one
-        // file named after the source, hashed as name then content.
-        let name = root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if is_unix_socket(&root_metadata) {
-            return Ok((
-                0,
-                vec![name],
-                0,
-                format!("fnv1a64:{:016x}", 0xcbf29ce484222325_u64),
-            ));
-        }
-        let content = std::fs::read(root)?;
-        let hash = fnv1a64(&content, fnv1a64(name.as_bytes(), 0xcbf29ce484222325_u64));
-        return Ok((
-            1,
-            Vec::new(),
-            root_metadata.len(),
-            format!("fnv1a64:{hash:016x}"),
-        ));
-    }
-    let mut files = Vec::new();
-    collect_files(root, root, &mut files)?;
-    files.sort();
-    let mut count = 0usize;
-    let mut sockets = Vec::new();
-    let mut bytes = 0u64;
-    let mut hash = 0xcbf29ce484222325_u64;
-    for relative in &files {
-        let path = root.join(relative);
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            return Err(control_tree_symlink_error(&path));
-        } else if is_unix_socket(&metadata) {
-            sockets.push(relative.clone());
-            continue;
-        } else {
-            hash = fnv1a64(relative.as_bytes(), hash);
-            let content = std::fs::read(&path)?;
-            hash = fnv1a64(&content, hash);
-        }
-        count += 1;
-        bytes += metadata.len();
-    }
-    Ok((count, sockets, bytes, format!("fnv1a64:{hash:016x}")))
-}
-
-fn is_unix_socket(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    metadata.file_type().is_socket()
-}
-
-fn collect_files(root: &Path, current: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            return Err(control_tree_symlink_error(&path));
-        }
-        if metadata.is_dir() {
-            collect_files(root, &path, out)?;
-        } else {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            out.push(relative.to_string_lossy().into_owned());
-        }
-    }
-    Ok(())
-}
-
-fn control_tree_symlink_error(path: &Path) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!(
-            "RESET_CONTROL_TREE_SYMLINK_REJECTED: {} is a symlink; reset refuses to \
-             create a non-self-contained archive",
-            path.display()
-        ),
-    )
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(destination)?;
-    let source_metadata = std::fs::symlink_metadata(source)?;
-    if source_metadata.file_type().is_symlink() {
-        return Err(control_tree_symlink_error(source));
-    }
-    if !source_metadata.is_dir() {
-        if !is_unix_socket(&source_metadata) {
-            let name = source
-                .file_name()
-                .map(|name| name.to_owned())
-                .unwrap_or_else(|| std::ffi::OsString::from("control-file"));
-            let to = destination.join(name);
-            std::fs::copy(source, &to)?;
-            std::fs::File::open(&to)?.sync_all()?;
-        }
-        sync_dir(destination)?;
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        let metadata = std::fs::symlink_metadata(&from)?;
-        if metadata.file_type().is_symlink() {
-            return Err(control_tree_symlink_error(&from));
-        } else if metadata.is_dir() {
-            copy_tree(&from, &to)?;
-        } else if is_unix_socket(&metadata) {
-            continue;
-        } else {
-            std::fs::copy(&from, &to)?;
-            std::fs::File::open(&to)?.sync_all()?;
-        }
-    }
-    sync_dir(destination)?;
-    Ok(())
-}
-
-fn sync_dir(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
-}
-
 fn reject_unsafe_control_roots(root: &Path) -> anyhow::Result<()> {
     for relative in LEGACY_CONTROL_ROOTS {
         let path = root.join(relative);
@@ -293,7 +134,7 @@ fn reject_unsafe_control_roots(root: &Path) -> anyhow::Result<()> {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 anyhow::bail!(
                     "RESET_CONTROL_ROOT_SYMLINK_REJECTED: {} is a symlink; reset refuses \
-                     to archive or write outside the project root",
+                     to remove or write outside the project root",
                     path.display()
                 );
             }
@@ -311,22 +152,20 @@ fn reject_unsafe_control_roots(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn slugify(root: &Path) -> String {
-    let text = root.to_string_lossy();
-    let mut slug = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-        } else if !slug.ends_with('-') {
-            slug.push('-');
+fn reject_unsafe_control_path(path: &Path) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "RESET_CONTROL_TREE_SYMLINK_REJECTED: {} is a symlink; reset refuses to remove it",
+            path.display()
+        );
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            reject_unsafe_control_path(&entry?.path())?;
         }
     }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "project".to_string()
-    } else {
-        slug.chars().take(80).collect()
-    }
+    Ok(())
 }
 
 struct RouteSnapshot {
@@ -533,77 +372,6 @@ where
     Ok(removed)
 }
 
-/// Archive the retire set, verify byte equality, and write the archive manifest.
-///
-/// Archive first, verify, and only then remove. A failed archive leaves the
-/// retired control plane untouched. Every level shares this step, so the
-/// manifest shape and the durability rules cannot drift between levels.
-fn archive_retired(
-    archive_root: &Path,
-    state_root: &Path,
-    retired: &[RetiredRoot],
-    run_id: &str,
-    project_root: &Path,
-    approval: &str,
-) -> anyhow::Result<()> {
-    std::fs::create_dir_all(archive_root)?;
-    for entry in retired {
-        let destination = archive_root.join(&entry.relative);
-        copy_tree(&entry.absolute, &destination)?;
-        let (files, sockets, bytes, digest) = tree_digest(&destination)?;
-        if !archive_matches(entry, files, bytes, &digest) {
-            anyhow::bail!(
-                "RESET_ARCHIVE_MISMATCH: {} -> {} ({files} files, {} sockets, {bytes} bytes, \
-                 {digest}) does not match the source ({} files, {} sockets, {} bytes, {})",
-                entry.absolute.display(),
-                destination.display(),
-                sockets.len(),
-                entry.files,
-                entry.sockets.len(),
-                entry.bytes,
-                entry.digest
-            );
-        }
-        let source_sockets = tree_digest(&entry.absolute)?.1;
-        if !source_matches(entry, &source_sockets) {
-            anyhow::bail!(
-                "RESET_SOURCE_SOCKET_CHANGED: {} socket inventory changed during archive",
-                entry.absolute.display()
-            );
-        }
-    }
-    let manifest = json!({
-        "schema": "collab-reset/v1",
-        "run_id": run_id,
-        "project_root": project_root,
-        "approval": approval,
-        "retired": retired
-            .iter()
-            .map(|entry| json!({
-                "path": entry.relative,
-                "files": entry.files,
-                "sockets": entry.sockets,
-                "bytes": entry.bytes,
-                "digest": entry.digest,
-            }))
-            .collect::<Vec<_>>(),
-        "delivery_verified": false,
-        "created_ms": now_ms(),
-    });
-    let manifest_path = archive_root.join("manifest.json");
-    std::fs::write(
-        &manifest_path,
-        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
-    )?;
-    std::fs::File::open(&manifest_path)?.sync_all()?;
-    sync_dir(archive_root)?;
-    if let Some(archives_dir) = archive_root.parent() {
-        sync_dir(archives_dir)?;
-    }
-    sync_dir(state_root)?;
-    Ok(())
-}
-
 /// The single reset entry. It authorizes the run, resolves the level, and
 /// dispatches to the level body.
 ///
@@ -717,10 +485,6 @@ fn run_project(
     let held_resident_index = resident_index_root(host_paths)?.is_some_and(|owner| owner == root);
 
     let run_id = format!("reset-{}-{}", now_ms(), std::process::id());
-    let archive_root = host_paths
-        .state_root()
-        .join("archives")
-        .join(format!("{}-{run_id}", slugify(&root)));
     reject_unsafe_control_roots(&root)?;
 
     let mut retired = Vec::new();
@@ -745,29 +509,15 @@ fn run_project(
         if relative == ".agent-collab" && is_current_empty_baseline(&absolute) {
             continue;
         }
-        let (files, sockets, bytes, digest) = tree_digest(&absolute)?;
+        reject_unsafe_control_path(&absolute)?;
         retired.push(RetiredRoot {
             relative: relative.to_string(),
             absolute,
             staged: None,
-            files,
-            sockets,
-            bytes,
-            digest,
         });
     }
 
     let already_reset = retired.is_empty();
-    if !already_reset {
-        archive_retired(
-            &archive_root,
-            host_paths.state_root(),
-            &retired,
-            &run_id,
-            &root,
-            &request.approval,
-        )?;
-    }
 
     let routes_path = host_paths.state_root().join("routes.json");
     let route_snapshot = snapshot_file(routes_path)?;
@@ -809,20 +559,13 @@ fn run_project(
             "approval": request.approval,
             "already_reset": already_reset,
             "held_resident_index": held_resident_index,
-            "archive_root": if already_reset { None } else { Some(archive_root) },
+            "archive": if already_reset { "absent" } else { "removed" },
             "removed_host_routes": removed_routes,
             "removed_stale_host_routes": removed_stale_routes,
             "retired": retired
                 .iter()
-                .map(|entry| json!({
-                    "path": entry.relative,
-                    "files": entry.files,
-                    "sockets": entry.sockets,
-                    "bytes": entry.bytes,
-                    "digest": entry.digest,
-                }))
+                .map(|entry| json!(entry.relative))
                 .collect::<Vec<_>>(),
-            "archive_durable": !already_reset,
             "delivery_verified": false,
             "next": "run collab up, then collab init from this exact project root",
         });
@@ -951,8 +694,8 @@ fn resolve_index_root(
 
 /// The host control-plane entries that level 3 retires.
 ///
-/// Each label is a single path segment: it names the archive directory and it
-/// suffixes the staging path. `archives/` is retained. The project business payload under
+/// Each label is a single path segment: it suffixes the staging path.
+/// The project business payload under
 /// `<storage_root>/.agent-collab/` belongs to `--project`, not here.
 fn host_control_plane_entries(
     state_root: &Path,
@@ -969,6 +712,7 @@ fn host_control_plane_entries(
         ("host-log-txt".to_owned(), state_root.join("log.txt")),
         ("host-identities".to_owned(), state_root.join("identities")),
         ("host-projects".to_owned(), state_root.join("projects")),
+        ("host-archives".to_owned(), state_root.join("archives")),
         (
             "resident-current-state".to_owned(),
             server_dir.join("state.json"),
@@ -987,8 +731,8 @@ fn host_control_plane_entries(
 /// Level 3: rebuild the host control plane.
 ///
 /// It retires the host-side control state and the resident project's current
-/// state, which together are the live index. It keeps existing archives and
-/// the project business payload under
+/// state, which together are the live index. It removes existing archives and
+/// keeps the project business payload under
 /// `<storage_root>/.agent-collab/`, the external service descriptor, and
 /// `~/.collab/runs/` unless `--include-runs` was given.
 fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
@@ -1006,7 +750,6 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
     }
 
     let run_id = format!("reset-{}-{}", now_ms(), std::process::id());
-    let archive_root = state_root.join("archives").join(format!("host-{run_id}"));
     let mut retired = Vec::new();
     for (label, path) in
         host_control_plane_entries(&state_root, &storage_root, request.include_runs)
@@ -1023,29 +766,15 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
                 });
             }
         }
-        let (files, sockets, bytes, digest) = tree_digest(&path)?;
+        reject_unsafe_control_path(&path)?;
         retired.push(RetiredRoot {
             relative: label,
             absolute: path,
             staged: None,
-            files,
-            sockets,
-            bytes,
-            digest,
         });
     }
 
     let already_reset = retired.is_empty();
-    if !already_reset {
-        archive_retired(
-            &archive_root,
-            &state_root,
-            &retired,
-            &run_id,
-            &storage_root,
-            &request.approval,
-        )?;
-    }
 
     let mut record = json!({
         "schema": "collab-reset/v1",
@@ -1058,18 +787,11 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
         "approval": request.approval,
         "already_reset": already_reset,
         "include_runs": request.include_runs,
-        "archive_root": if already_reset { None } else { Some(archive_root) },
+        "archive": if already_reset { "absent" } else { "removed" },
         "retired": retired
             .iter()
-            .map(|entry| json!({
-                "path": entry.relative,
-                "files": entry.files,
-                "sockets": entry.sockets,
-                "bytes": entry.bytes,
-                "digest": entry.digest,
-            }))
+            .map(|entry| json!(entry.relative))
             .collect::<Vec<_>>(),
-        "archive_durable": !already_reset,
         "delivery_verified": false,
         "next": "run collab up; it recreates the host index, identities, and project registry",
     });
@@ -1078,8 +800,8 @@ fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> an
         record["current_state"] = json!("unreadable");
         record["current_state_error"] = json!(state_error);
         record["warning"] = json!(format!(
-            "the resident state at {} could not be read; reset archived it as \
-             evidence and rebuilt the host control plane without it: {state_error}",
+            "the resident state at {} could not be read; reset removed it and \
+             rebuilt the host control plane without it: {state_error}",
             storage_root
                 .join(".agent-collab/server/state.json")
                 .display()

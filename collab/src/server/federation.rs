@@ -21,7 +21,7 @@ use crate::proto::{
     FederatedChannelRef, FederationActor, FederationDestination, FederationEndpoint,
     FederationMessageReceipt, FederationNotificationStatus, FederationPrincipal, FederationPut,
     FederationResponse, LocalNameAddress, MachineName, MessageRef, OriginMessageRef,
-    QualifiedNameAddress, ReplyPolicy,
+    QualifiedNameAddress,
 };
 
 pub use crate::federation::auth::AuthenticatedMachine;
@@ -68,8 +68,6 @@ pub struct FederatedOutboundRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_origin: Option<OriginMessageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_policy: Option<ReplyPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<FederatedChannelRef>,
@@ -104,7 +102,6 @@ impl FederatedOutboundRecord {
             target_session: self.target_session.clone(),
             in_reply_to: self.in_reply_to.clone(),
             original_origin: self.original_origin.clone(),
-            reply_policy: self.reply_policy,
             channel: self.channel.clone(),
         })
     }
@@ -122,7 +119,6 @@ impl FederatedOutboundRecord {
             && self.delivery == other.delivery
             && self.in_reply_to == other.in_reply_to
             && self.original_origin == other.original_origin
-            && self.reply_policy == other.reply_policy
             && self.target_session == other.target_session
             && self.channel == other.channel
     }
@@ -154,8 +150,6 @@ pub struct FederatedMessageMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_origin: Option<OriginMessageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_policy: Option<ReplyPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<FederatedChannelRef>,
     pub accepted_ms: i64,
 }
@@ -180,7 +174,6 @@ impl FederatedMessageMeta {
             && existing_target_session == request.target_session.as_deref()
             && self.in_reply_to == request.in_reply_to
             && self.original_origin == request.original_origin
-            && self.reply_policy == request.reply_policy
             && self.channel == request.channel
     }
 }
@@ -783,7 +776,6 @@ pub struct AddressSendRequest {
     pub operation_id: Option<crate::identity::OperationId>,
     pub in_reply_to: Option<MessageRef>,
     pub original_origin: Option<OriginMessageRef>,
-    pub reply_policy: Option<ReplyPolicy>,
     pub target_session: Option<String>,
     pub channel: Option<FederatedChannelRef>,
     pub now_ms: i64,
@@ -861,7 +853,6 @@ pub fn prepare_outbound(
         delivery: request.delivery,
         in_reply_to: request.in_reply_to,
         original_origin: request.original_origin,
-        reply_policy: request.reply_policy,
         target_session: request.target_session,
         channel: request.channel,
         status: FederatedOutboundRecord::STATUS_PENDING.to_owned(),
@@ -971,7 +962,6 @@ mod federation_message_tests {
             target_session: None,
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             channel: None,
         }
     }
@@ -1003,7 +993,6 @@ mod federation_message_tests {
             delivery: "immediate".to_owned(),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             channel: None,
             accepted_ms: 10,
         }
@@ -1169,7 +1158,6 @@ mod federation_message_tests {
             operation_id: Some(OperationId::new("op-1").unwrap()),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: None,
             now_ms: 5,
@@ -1222,7 +1210,6 @@ mod federation_message_tests {
             operation_id: Some(OperationId::new("op-retry").unwrap()),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: None,
             now_ms: 5,
@@ -1277,7 +1264,6 @@ mod federation_message_tests {
             operation_id: Some(OperationId::new("op-9").unwrap()),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: None,
             now_ms: 5,
@@ -1311,7 +1297,6 @@ mod federation_message_tests {
             operation_id: None,
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: None,
             now_ms: 5,
@@ -1354,7 +1339,6 @@ mod federation_message_tests {
                 delivery: "immediate".to_owned(),
                 in_reply_to: Some(reference.clone()),
                 original_origin: Some(origin("op-1")),
-                reply_policy: None,
                 target_session: None,
                 channel: None,
                 status: FederatedOutboundRecord::STATUS_ACCEPTED.to_owned(),
@@ -1476,7 +1460,6 @@ mod federation_message_tests {
             operation_id: Some(OperationId::new("op-channel-out").unwrap()),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: Some(channel),
             now_ms: 5,
@@ -1502,7 +1485,6 @@ mod federation_message_tests {
             operation_id: Some(OperationId::new("op-channel-no-fact").unwrap()),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: None,
             now_ms: 5,
@@ -1537,7 +1519,6 @@ mod federation_message_tests {
             operation_id: Some(OperationId::new("op-1").unwrap()),
             in_reply_to: None,
             original_origin: None,
-            reply_policy: None,
             target_session: None,
             channel: None,
             now_ms: 5,

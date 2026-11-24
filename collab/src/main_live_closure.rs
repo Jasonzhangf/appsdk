@@ -768,7 +768,6 @@ pub(crate) fn live_closure_probe(
                 subject: challenge.clone(),
                 body: challenge.clone(),
                 in_reply_to: None,
-                reply_policy: None,
                 target_session: None,
             },
             Some(cli_project_context(&target_scope.root)?),
@@ -803,7 +802,6 @@ pub(crate) fn live_closure_probe(
                 body: challenge.clone(),
                 in_reply_to: None,
                 delivery: "immediate".into(),
-                reply_policy: None,
                 target_session: None,
             },
         )?

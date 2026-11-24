@@ -1643,30 +1643,221 @@ fn architect_and_executor_can_handoff_without_master() {
     let executor_name = executor["name"].as_str().unwrap();
     fixture.run_public(
         &[
-            "board", "publish", "architect-parent", "--title", "Authorized design",
-            "--description", "Design delivery", "--delivery-condition", "Design available",
-            "--test-condition", "Accepted design evidence",
+            "board",
+            "publish",
+            "architect-parent",
+            "--title",
+            "Authorized design",
+            "--description",
+            "Design delivery",
+            "--delivery-condition",
+            "Design available",
+            "--test-condition",
+            "Accepted design evidence",
         ],
         THREAD_A,
     );
     let published = fixture.run_public(
         &[
-            "board", "publish", "architect-child", "--parent-task", "architect-parent",
-            "--title", "Implement design", "--description", "Approved execution contract",
-            "--delivery-condition", "Implementation complete", "--test-condition", "Public behavior verified",
-            "--executor", executor_name, "--reviewer", architect_name,
+            "board",
+            "publish",
+            "architect-child",
+            "--parent-task",
+            "architect-parent",
+            "--title",
+            "Implement design",
+            "--description",
+            "Approved execution contract",
+            "--delivery-condition",
+            "Implementation complete",
+            "--test-condition",
+            "Public behavior verified",
+            "--executor",
+            executor_name,
+            "--reviewer",
+            architect_name,
         ],
         THREAD_A,
     );
     let revision = published["task"]["revision"].to_string();
     let claimed = fixture.run_public(
-        &["board", "claim", "architect-child", "--expected-revision", &revision],
+        &[
+            "board",
+            "claim",
+            "architect-child",
+            "--expected-revision",
+            &revision,
+        ],
         THREAD_B,
     );
-    assert_eq!(claimed["task"]["publisher"], architect["identity"]["worker_id"]);
+    assert_eq!(
+        claimed["task"]["publisher"],
+        architect["identity"]["worker_id"]
+    );
     assert_eq!(claimed["task"]["owner"], executor["identity"]["worker_id"]);
     assert_eq!(claimed["task"]["reviewer_name"], architect_name);
     assert_eq!(claimed["task"]["status"], "working");
+}
+
+#[test]
+fn architect_board_authority_is_limited_to_entrusted_scope() {
+    let fixture = AppFixture::new();
+    let architect = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_A);
+    let executor = fixture.run_public(&["context", "--work-roles", "executor"], THREAD_B);
+    let _outsider = fixture.run_public(&["context"], THREAD_C);
+    let architect_name = architect["name"].as_str().unwrap();
+    let executor_name = executor["name"].as_str().unwrap();
+
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "architect-scope-parent",
+            "--title",
+            "Entrusted design",
+            "--description",
+            "Parent design scope",
+            "--delivery-condition",
+            "Scope defined",
+            "--test-condition",
+            "Scope observable",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "architect-scope-child",
+            "--parent-task",
+            "architect-scope-parent",
+            "--title",
+            "Implement entrusted design",
+            "--description",
+            "Initial execution contract",
+            "--delivery-condition",
+            "Implementation complete",
+            "--test-condition",
+            "Public behavior verified",
+            "--executor",
+            executor_name,
+            "--reviewer",
+            architect_name,
+        ],
+        THREAD_C,
+    );
+
+    let revised = fixture.run_public(
+        &[
+            "board",
+            "describe",
+            "architect-scope-child",
+            "--expected-revision",
+            "1",
+            "--title",
+            "Implement revised design",
+            "--description",
+            "Revised execution contract",
+            "--delivery-condition",
+            "Implementation complete",
+            "--test-condition",
+            "Public behavior verified",
+            "--long-horizon-content",
+            "Complete the entrusted implementation and return its public verification evidence",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(revised["task"]["revision"], 2);
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "architect-scope-child",
+            "--to",
+            executor_name,
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["task"]["status"], "invited");
+
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "unrelated-owner-task",
+            "--title",
+            "Unrelated work",
+            "--description",
+            "Outside architect scope",
+            "--delivery-condition",
+            "Independent delivery",
+            "--test-condition",
+            "Independent verification",
+        ],
+        THREAD_C,
+    );
+    let forbidden_describe = fixture.command_public(
+        &[
+            "board",
+            "describe",
+            "unrelated-owner-task",
+            "--expected-revision",
+            "1",
+            "--title",
+            "Unauthorized plan",
+            "--description",
+            "Outside architect scope",
+            "--delivery-condition",
+            "Independent delivery",
+            "--test-condition",
+            "Independent verification",
+        ],
+        THREAD_A,
+    );
+    assert!(!forbidden_describe.status.success());
+    let forbidden_invite = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "unrelated-owner-task",
+            "--to",
+            executor_name,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert!(!forbidden_invite.status.success());
+    assert!(
+        String::from_utf8_lossy(&forbidden_invite.stderr)
+            .contains("BOARD_ARCHITECT_SCOPE_REQUIRED"),
+        "{forbidden_invite:?}"
+    );
+
+    let owner_without_architect_role = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "unrelated-owner-task",
+            "--to",
+            executor_name,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_C,
+    );
+    assert!(!owner_without_architect_role.status.success());
+    assert!(
+        String::from_utf8_lossy(&owner_without_architect_role.stderr)
+            .contains("BOARD_MASTER_REQUIRED")
+            || String::from_utf8_lossy(&owner_without_architect_role.stderr)
+                .contains("BOARD_ARCHITECT_SCOPE_REQUIRED"),
+        "{owner_without_architect_role:?}"
+    );
 }
 
 #[test]
@@ -2541,6 +2732,15 @@ fn board_owner_update_is_versioned_and_peer_tasks_remain_independent() {
     );
     assert_eq!(updated["task"]["status"], "verifying");
     assert!(updated["task"]["revision"].as_u64().unwrap() > revision.parse::<u64>().unwrap());
+    let master_notice = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
+    assert!(
+        master_notice["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["subject"] == "board-changed:peer-own"),
+        "peer board update must auto-notify master: {master_notice}"
+    );
     let stale = fixture.command_public(
         &[
             "board",
@@ -2579,6 +2779,121 @@ fn board_owner_update_is_versioned_and_peer_tasks_remain_independent() {
     );
     assert_eq!(task_after["owner"], peer);
     assert_eq!(task_after["created_by"], peer);
+    let peer_notice = fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+    assert!(
+        peer_notice["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["subject"] == "board-changed:peer-own"),
+        "manager board update must auto-notify task owner: {peer_notice}"
+    );
+}
+
+#[test]
+fn board_auto_notice_to_offline_manager_stays_unread_without_input() {
+    let (mut fixture, master, _peer) = setup();
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "offline-board-change",
+            "--next",
+            "verify offline notice",
+        ],
+        THREAD_B,
+    );
+    let before_notice = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
+    assert!(
+        before_notice["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["subject"] != "board-changed:offline-board-change"),
+        "{before_notice}"
+    );
+
+    let project = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let master_thread = fixture.current_state()["workers"][master.as_str()]["transport"]
+        ["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture.update_current_state(|state| {
+        state["agent_presence"][&project][master.as_str()] = json!({
+            "project_scope": project,
+            "worker_id": master,
+            "session_id": master_thread,
+            "presence": "offline",
+            "reason": "fixture current manager is offline",
+            "observed_ms": 1
+        });
+    });
+    {
+        let mut native = fixture.state.lock().unwrap();
+        let thread = native.get_mut(&master_thread).unwrap();
+        thread.status = "notLoaded".into();
+        thread.reject_as_missing = true;
+    }
+    let input_count = fixture
+        .state
+        .lock()
+        .unwrap()
+        .get(&master_thread)
+        .map(|thread| thread.inputs.len())
+        .unwrap_or(0);
+
+    fixture.run_public(
+        &[
+            "board",
+            "update",
+            "offline-board-change",
+            "--expected-revision",
+            "1",
+            "--status",
+            "verifying",
+            "--next",
+            "verify unread offline notice",
+        ],
+        THREAD_B,
+    );
+    let updated_state = fixture.current_state();
+    let notice_id = updated_state["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|message| {
+            message["subject"] == "board-changed:offline-board-change"
+                && message["to"] == master.as_str()
+        })
+        .and_then(|message| message["id"].as_str())
+        .expect("offline board change creates an unread name-addressed notice")
+        .to_owned();
+    let after_inputs = fixture
+        .state
+        .lock()
+        .unwrap()
+        .get(&master_thread)
+        .map(|thread| thread.inputs.len())
+        .unwrap_or(0);
+    assert_eq!(
+        after_inputs, input_count,
+        "offline manager must receive zero native input"
+    );
+    assert_eq!(updated_state["msgs"][&notice_id]["state"], "pending");
+    assert!(!updated_state["notification_delivery_accepted"]
+        .as_object()
+        .unwrap()
+        .contains_key(&notice_id));
+    assert!(!updated_state["notification_delivery_failures"]
+        .as_object()
+        .unwrap()
+        .contains_key(&notice_id));
 }
 
 #[test]
@@ -3330,7 +3645,11 @@ fn closed_invitation_cannot_transfer_and_master_withdraw_only_clears_metadata() 
             THREAD_B,
         );
         assert!(!forbidden.status.success());
-        assert!(String::from_utf8_lossy(&forbidden.stderr).contains("BOARD_MASTER_REQUIRED"));
+        let forbidden_error = String::from_utf8_lossy(&forbidden.stderr);
+        assert!(
+            forbidden_error.contains("BOARD_MASTER_REQUIRED")
+                || forbidden_error.contains("BOARD_ARCHITECT_SCOPE_REQUIRED")
+        );
         let invited = fixture.run_public(
             &[
                 "board",
@@ -3700,7 +4019,7 @@ fn role_patrol_board_invitation_is_durable_without_serialized_control_state() {
 }
 
 #[test]
-fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
+fn recv_public_consumes_body_without_reply_or_replay() {
     let (fixture, _, peer) = setup();
     let sent = fixture.run_public(
         &[
@@ -3709,7 +4028,6 @@ fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
             &peer,
             "--subject",
             "receipt",
-            "--reply-required",
             "body with records and query_result",
         ],
         THREAD_A,
@@ -3723,7 +4041,7 @@ fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
         .find(|message| message["id"] == id)
         .expect("received original message");
     assert_eq!(message["body"], "body with records and query_result");
-    assert!(!message["reply_obligation"].is_null(), "{message}");
+    assert!(message.get("reply_obligation").is_none(), "{message}");
     for field in [
         "wake_attempt_count",
         "last_wake_attempt_ms",
@@ -3745,22 +4063,38 @@ fn recv_public_replay_keeps_payload_and_reply_without_delivery_diagnostics() {
         ],
         THREAD_A,
     );
-    let replay = fixture.run_public(&["recv", "--receive-id", "minimal-receipt"], THREAD_B);
-    assert_eq!(replay["replayed"], true);
-    assert_eq!(first["messages"], replay["messages"]);
-    let later = fixture.run_public(&["msg", next["msg_id"].as_str().unwrap()], THREAD_B);
-    assert_ne!(
-        later["state"], "read",
-        "replay consumed another batch: {later}"
+    let consumed = fixture.command_public(&["msg", id], THREAD_B);
+    assert!(
+        !consumed.status.success(),
+        "consumed mailbox body must not remain queryable: stdout={} stderr={}",
+        String::from_utf8_lossy(&consumed.stdout),
+        String::from_utf8_lossy(&consumed.stderr)
     );
+    let consumed_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&consumed.stdout),
+        String::from_utf8_lossy(&consumed.stderr)
+    );
+    assert!(
+        consumed_output.contains("MESSAGE_CONSUMED"),
+        "{consumed_output}"
+    );
+    let retained = fixture.current_state();
+    assert_eq!(retained["msgs"][id]["state"], "read");
+    assert!(
+        retained["msgs"][id]["body"].is_string(),
+        "read body remains until periodic retention"
+    );
+
     let second = fixture.run_public(&["recv", "--receive-id", "minimal-next"], THREAD_B);
     assert!(second["messages"]
         .as_array()
         .unwrap()
         .iter()
         .any(|message| message["id"] == next["msg_id"]));
-    let consumed = fixture.run_public(&["msg", next["msg_id"].as_str().unwrap()], THREAD_B);
-    assert_eq!(consumed["consumed_by_recv"], true);
+    let later_consumed =
+        fixture.command_public(&["msg", next["msg_id"].as_str().unwrap()], THREAD_B);
+    assert!(!later_consumed.status.success());
     let empty = fixture.run_public(&["recv"], THREAD_B);
     assert_eq!(empty["count"], 0);
     assert_eq!(empty["messages"], json!([]));
@@ -3910,7 +4244,11 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
             .and_then(|line| serde_json::from_str(line).ok())
             .unwrap_or_else(|| panic!("send failed without a structured receipt: {send_output:?}"));
         assert!(
-            recv_race_has_exact_durable_no_batch_receipt(&receipt),
+            recv_race_has_exact_durable_no_batch_receipt(&receipt)
+                || (receipt["durable"] == true
+                    && receipt["msg_id"].as_str().is_some_and(|id| !id.is_empty())
+                    && receipt["error"]
+                        == "NOTIFICATION_ATTEMPT_STALE: the former transport accepted the notification"),
             "unexpected send failure: {send_output:?}"
         );
         receipt
@@ -3937,9 +4275,14 @@ fn recv_explicit_timeout_waits_and_returns_early_on_arrival() {
         .as_str()
         .is_some_and(|id| !id.is_empty()));
 
-    let read = fixture.run_public(&["msg", sent["msg_id"].as_str().unwrap()], THREAD_B);
-    assert_eq!(read["state"], "read");
-    assert_eq!(read["consumed_by_recv"], true);
+    let read = fixture.command_public(&["msg", sent["msg_id"].as_str().unwrap()], THREAD_B);
+    assert!(!read.status.success());
+    let read_error = format!(
+        "{}{}",
+        String::from_utf8_lossy(&read.stdout),
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(read_error.contains("MESSAGE_CONSUMED"), "{read_error}");
 }
 
 /// Public CLI black box for the accepted pending-close lifecycle: a live master

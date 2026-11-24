@@ -118,7 +118,10 @@ fn unknown_workspace_view(project_root: Option<String>) -> serde_json::Value {
 fn live_idle_capacity_keys(
     server: &Server,
     state: &State,
-) -> (std::collections::BTreeSet<String>, std::collections::BTreeSet<String>) {
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
     let live_idle_subagents = state
         .subagents
         .values()
@@ -201,11 +204,19 @@ fn handle_master_status(server: &Server) -> Resp {
         holder.as_ref().map(|worker| worker.id.as_str()),
         now_ms(),
     );
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
-    let mut master = match master_authority_view_with_endpoint(&state, &control, route_scope.as_ref(), endpoint_live) {
-        Ok(master) => master, Err(error) => return Resp::err(error),
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
+    let mut master = match master_authority_view_with_endpoint(
+        &state,
+        &control,
+        route_scope.as_ref(),
+        endpoint_live,
+    ) {
+        Ok(master) => master,
+        Err(error) => return Resp::err(error),
     };
     if let Some(master_object) = master.as_object_mut() {
         master_object.insert("workspace".into(), workspace);
@@ -245,7 +256,6 @@ pub(crate) fn handle_send(
     )
 }
 
-
 #[cfg(test)]
 #[path = "../workspace_idle_tests.rs"]
 mod workspace_idle_tests;
@@ -264,18 +274,29 @@ fn resolve_send_name_address(
     })?;
     if target.contains('%') {
         let projects = [current_key.clone()];
-        let context = crate::address::AddressContext { local_projects: &projects, ..Default::default() };
-        let resolved = crate::address::resolve_address(&crate::proto::AddressInput::Legacy(target.clone()), &context)
-            .map_err(|error| error.to_string())?;
+        let context = crate::address::AddressContext {
+            local_projects: &projects,
+            ..Default::default()
+        };
+        let resolved = crate::address::resolve_address(
+            &crate::proto::AddressInput::Legacy(target.clone()),
+            &context,
+        )
+        .map_err(|error| error.to_string())?;
         if let crate::address::ResolvedAddress::LocalName(address) = resolved {
             if !address.project.eq_ignore_ascii_case(&current_key) {
                 return Err("CROSS_PROJECT_ADDRESS_UNSUPPORTED: the encoded address is outside the current project".into());
             }
             let resolved = resolve_name_case_insensitive(control, &route, &address.name)?;
-            authoritative_send_binding(state, &route, &resolved.worker_id).map_err(str::to_owned)?;
-            return Ok((resolved.worker_id, Some(name_mailbox::MailboxNameAddress {
-                project_scope: route.project_scope_id.as_str().into(), name: resolved.name,
-            })));
+            authoritative_send_binding(state, &route, &resolved.worker_id)
+                .map_err(str::to_owned)?;
+            return Ok((
+                resolved.worker_id,
+                Some(name_mailbox::MailboxNameAddress {
+                    project_scope: route.project_scope_id.as_str().into(),
+                    name: resolved.name,
+                }),
+            ));
         }
     }
     // `sendmessage`, `default` and channel-inbound routing share one address
@@ -333,7 +354,10 @@ fn validate_channel_envelope_for_inbound(
     envelope: &crate::server::channel_envelope::ChannelEnvelope,
 ) -> Result<(), String> {
     if envelope.source_channel != "qqbot" {
-        return Err("CHANNEL_ENVELOPE_CHANNEL_UNSUPPORTED: only qqbot inbound envelopes are admitted".into());
+        return Err(
+            "CHANNEL_ENVELOPE_CHANNEL_UNSUPPORTED: only qqbot inbound envelopes are admitted"
+                .into(),
+        );
     }
     if envelope.channel_instance.trim().is_empty()
         || envelope.external_user.trim().is_empty()
@@ -351,15 +375,24 @@ fn validate_channel_envelope_for_inbound(
 
 /// A QQ reply is legal only for the original recipient. Stable-name handoff
 /// keeps the right to answer when the same name moves to a new session.
-fn channel_reply_authorized(state: &State, control: &binding_slot::BindingControlSet,
-    route: &RouteScope, original: &Message, from: &str) -> Result<bool, String> {
+fn channel_reply_authorized(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    original: &Message,
+    from: &str,
+) -> Result<bool, String> {
     if original.to == from {
         return Ok(true);
     }
-    let Some(address) = state.mailbox_name_addresses.get(&original.id) else { return Ok(false); };
+    let Some(address) = state.mailbox_name_addresses.get(&original.id) else {
+        return Ok(false);
+    };
     let project = ProjectScopeId::new(&address.project_scope).map_err(|error| error.to_string())?;
-    Ok(control.current_for_name(&project, &route.app_scope_id, &address.name)?
-        .and_then(|slot| slot.active_binding()).is_some_and(|current| current.binding.agent_id.as_str() == from))
+    Ok(control
+        .current_for_name(&project, &route.app_scope_id, &address.name)?
+        .and_then(|slot| slot.active_binding())
+        .is_some_and(|current| current.binding.agent_id.as_str() == from))
 }
 
 /// Commit one typed channel-inbound message and its envelope in the same
@@ -413,11 +446,7 @@ fn handle_channel_inbound_impl(
         || project_key
             .as_deref()
             .is_some_and(|key| intent.address.eq_ignore_ascii_case(key));
-    let local_grant = if is_ceo {
-        st.ceo_grant.clone()
-    } else {
-        None
-    };
+    let local_grant = if is_ceo { st.ceo_grant.clone() } else { None };
     let mut response = channel_inbound_commit_with_state(
         server,
         &mut st,
@@ -458,14 +487,14 @@ pub(crate) fn channel_inbound_commit_with_state(
     let project_key = match canonical_project_key(&server.root) {
         Some(key) => key,
         None => {
-            return Resp::err(
-                "CHANNEL_ROUTE_SCOPE_MISSING: the current project key is unavailable",
-            )
+            return Resp::err("CHANNEL_ROUTE_SCOPE_MISSING: the current project key is unavailable")
         }
     };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     let (worker_id, recipient_address, body_after_address) = if let Some(grant) = ceo_grant {
         let worker_id = match resolve_ceo_holder_from_grant(target_state, &control, &route, grant) {
             Ok(worker_id) => worker_id,
@@ -476,19 +505,22 @@ pub(crate) fn channel_inbound_commit_with_state(
         }
         (worker_id, intent.address.clone(), intent.body.clone())
     } else {
-        let worker_id = if intent.explicit_to && target_state.workers.contains_key(&intent.address) {
+        let worker_id = if intent.explicit_to && target_state.workers.contains_key(&intent.address)
+        {
             intent.address.clone()
         } else {
-            match resolve_address(target_state, &control, &route, &project_key, &intent.address) {
+            match resolve_address(
+                target_state,
+                &control,
+                &route,
+                &project_key,
+                &intent.address,
+            ) {
                 Ok(worker_id) => worker_id,
                 Err(error) => return Resp::err(error),
             }
         };
-        (
-            worker_id,
-            intent.address.clone(),
-            intent.body.clone(),
-        )
+        (worker_id, intent.address.clone(), intent.body.clone())
     };
     let mut envelope = envelope;
     envelope.recipient_address = recipient_address.clone();
@@ -519,14 +551,25 @@ fn channel_inbound_commit_locked(
 ) -> Resp {
     let channel_envelope = Some(envelope);
     if let Err(error) = validate_channel_envelope_for_inbound(
-        channel_envelope.as_ref().expect("channel envelope supplied"),
+        channel_envelope
+            .as_ref()
+            .expect("channel envelope supplied"),
     ) {
         return Resp::err(error);
     }
     let key = crate::server::channel_envelope::platform_event_key(
-        &channel_envelope.as_ref().expect("channel envelope supplied").channel_instance,
-        &channel_envelope.as_ref().expect("channel envelope supplied").external_conversation,
-        &channel_envelope.as_ref().expect("channel envelope supplied").platform_message_id,
+        &channel_envelope
+            .as_ref()
+            .expect("channel envelope supplied")
+            .channel_instance,
+        &channel_envelope
+            .as_ref()
+            .expect("channel envelope supplied")
+            .external_conversation,
+        &channel_envelope
+            .as_ref()
+            .expect("channel envelope supplied")
+            .platform_message_id,
     );
     if let Some(message_id) = st.platform_event_index.get(&key) {
         return Resp::data(json!({
@@ -594,7 +637,12 @@ fn channel_inbound_finish(
     recovery_server: Option<&Arc<Server>>,
     response: &mut Resp,
 ) {
-    if response.data.get("deduplicated").and_then(|value| value.as_bool()) == Some(true) {
+    if response
+        .data
+        .get("deduplicated")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
         return;
     }
     let Some(msg_id) = response
@@ -609,7 +657,8 @@ fn channel_inbound_finish(
     let (subscription, to) = {
         let st = server.state.lock().unwrap();
         (
-            st.wake_bindings.get(&msg_id)
+            st.wake_bindings
+                .get(&msg_id)
                 .and_then(|id| st.notification_subscriptions.get(id))
                 .cloned(),
             st.msgs.get(&msg_id).map(|message| message.to.clone()),
@@ -618,11 +667,11 @@ fn channel_inbound_finish(
     let Some(subscription) = subscription else {
         if let Some(to) = to {
             if let Some(data) = response.data.as_object_mut() {
+                data.insert("notification".into(), json!("mailbox-only-no-subscription"));
                 data.insert(
-                    "notification".into(),
-                    json!("mailbox-only-no-subscription"),
+                    "notification_error".into(),
+                    json!(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR),
                 );
-                data.insert("notification_error".into(), json!(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR));
                 data.insert("failure".into(), json!("notification_subscription_missing"));
                 data.insert("repair_required".into(), json!(true));
                 data.insert("escalation".into(), json!(MAILBOX_ONLY_ESCALATION));
@@ -643,12 +692,7 @@ fn channel_inbound_finish(
         let st = server.state.lock().unwrap();
         notification_method_for_worker(&st, &to.unwrap_or_default())
     };
-    *response = notification_send_response(
-        response.data.clone(),
-        true,
-        method,
-        &notification,
-    );
+    *response = notification_send_response(response.data.clone(), true, method, &notification);
 }
 
 fn handle_authenticated_send_with_app_scope(
@@ -664,7 +708,6 @@ fn handle_authenticated_send_with_app_scope(
     in_reply_to: Option<String>,
     delivery_mode: String,
     app_scope: Option<AppServerId>,
-    reply_policy: Option<crate::proto::ReplyPolicy>,
     target_session: Option<String>,
 ) -> Resp {
     let st = server.state.lock().unwrap();
@@ -696,7 +739,6 @@ fn handle_authenticated_send_with_app_scope(
         delivery_mode,
         false,
         None,
-        reply_policy,
         target_session,
         None,
     )
@@ -716,7 +758,9 @@ pub(crate) fn authenticated_send_admission(
         return Err(Resp::err(format!("worker {} not registered", worker_id)));
     };
     if worker.token != token {
-        return Err(Resp::err("token mismatch: identity does not own this worker_id"));
+        return Err(Resp::err(
+            "token mismatch: identity does not own this worker_id",
+        ));
     }
     let (runtime, registered_scope) = match app_scope {
         Some(context_app_scope) => {
@@ -831,13 +875,10 @@ pub(crate) fn handle_send_with_task(
         managed_subagent_id,
         None,
         None,
-        None,
     )
 }
 
-/// The real ordinary-send owner. `reply_policy` is the only source of a reply
-/// obligation; a linked reply validates and clears the original obligation in
-/// the same committed batch as the reply message.
+/// The real ordinary-send owner. `in_reply_to` is correlation only.
 #[allow(clippy::too_many_arguments)]
 fn handle_send_with_task_policy(
     server: &Server,
@@ -850,7 +891,6 @@ fn handle_send_with_task_policy(
     delivery_mode: String,
     assign_task: bool,
     managed_subagent_id: Option<&str>,
-    reply_policy: Option<crate::proto::ReplyPolicy>,
     target_session: Option<String>,
     channel_envelope: Option<crate::server::channel_envelope::ChannelEnvelope>,
 ) -> Resp {
@@ -866,12 +906,15 @@ fn handle_send_with_task_policy(
             mtype, MSG_TYPES
         ));
     }
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     let mut st = server.state.lock().unwrap();
     let route = match server_route_scope(server, &st) {
-        Ok(Some(route)) => route, Ok(None) => return Resp::err("SEND_BINDING_REJECTED: project route is missing"),
+        Ok(Some(route)) => route,
+        Ok(None) => return Resp::err("SEND_BINDING_REJECTED: project route is missing"),
         Err(error) => return Resp::err(error),
     };
     if let Some(envelope) = channel_envelope.as_ref() {
@@ -896,42 +939,44 @@ fn handle_send_with_task_policy(
     // Resolve and retain the original name under the durable admission lock.
     // A typed QQ reply uses the immutable envelope route and does not require a
     // local worker target; a normal send still resolves through directory facts.
-    let (to, name_address) = if let Some(ref rid) = in_reply_to {
-        let Some(original) = st.msgs.get(rid).cloned() else {
-            return Resp::err(format!("in_reply_to message {} not found", rid));
+    let channel_address = to.starts_with("qqbot://") || (to.trim().is_empty() && in_reply_to.is_some());
+    let channel_reference = if channel_address {
+        in_reply_to
+            .as_deref()
+            .and_then(|id| st.channel_envelopes.get(id).map(|envelope| (id, envelope)))
+    } else {
+        None
+    };
+    let (to, name_address) = if let Some((rid, envelope)) = channel_reference {
+        let Some(original) = st.msgs.get(rid) else {
+            return Resp::err(
+                "CHANNEL_REPLY_ENVELOPE_REQUIRED: original channel message is unavailable",
+            );
         };
-        match st.channel_envelopes.get(rid).cloned() {
-            Some(envelope) => {
-                let authorized = match channel_reply_authorized(&st, &control, &route, &original, &from) {
-                    Ok(authorized) => authorized, Err(error) => return Resp::err(error),
-                };
-                if !authorized {
-                    return Resp::err(
-                        "CHANNEL_REPLY_FORBIDDEN: only the original recipient may reply through the original channel route",
-                    );
-                }
-                if to.trim().is_empty() {
-                    let route = crate::server::channel_envelope::ChannelReplyRoute::from_envelope(&envelope, rid);
-                    let target = route.reply_route.clone();
-                    reply_route = Some(route);
-                    (target, None)
-                } else if to == envelope.reply_route {
-                    let route = crate::server::channel_envelope::ChannelReplyRoute::from_envelope(&envelope, rid);
-                    reply_route = Some(route);
-                    (to, None)
-                } else {
-                    return Resp::err(
-                        "CHANNEL_REPLY_ROUTE_MISMATCH: explicit --to does not match the original channel reply route",
-                    );
-                }
-            }
-            None => match resolve_send_name_address(server, &st, &control, to) {
-                Ok(resolved) => resolved,
-                Err(error) => return Resp::err(error),
-            },
+        let authorized = match channel_reply_authorized(&st, &control, &route, original, &from) {
+            Ok(authorized) => authorized,
+            Err(error) => return Resp::err(error),
+        };
+        if !authorized {
+            return Resp::err(
+                "CHANNEL_REPLY_FORBIDDEN: only the original recipient may reply through the original channel route",
+            );
         }
+        if !to.trim().is_empty() && to != envelope.reply_route {
+            return Resp::err(
+                "CHANNEL_REPLY_ROUTE_MISMATCH: explicit --to does not match the original channel reply route",
+            );
+        }
+        let route = crate::server::channel_envelope::ChannelReplyRoute::from_envelope(envelope, rid);
+        let target = route.reply_route.clone();
+        reply_route = Some(route);
+        (target, None)
+    } else if channel_address {
+        return Resp::err("CHANNEL_REPLY_ENVELOPE_REQUIRED: provide an explicit ordinary recipient or a retained channel message");
     } else if to.trim().is_empty() {
-        return Resp::err("SEND_TARGET_REQUIRED: sendmessage requires --to or a positional address");
+        return Resp::err(
+            "SEND_TARGET_REQUIRED: sendmessage requires --to or a positional address",
+        );
     } else {
         match resolve_send_name_address(server, &st, &control, to) {
             Ok(resolved) => resolved,
@@ -997,23 +1042,6 @@ fn handle_send_with_task_policy(
     }
     // Durable send admission depends on the recipient record and binding.
     // Endpoint failure is reported by the notification owner after enqueue.
-    let mut clear_obligation_id: Option<String> = None;
-    if let Some(ref rid) = in_reply_to {
-        if !st.msgs.contains_key(rid) {
-            return Resp::err(format!("in_reply_to message {} not found", rid));
-        }
-        // Only an existing obligation adds the reply-identity gate. Legacy
-        // linked messages keep their previous behavior.
-        if let Some(obligation) = st.reply_obligations.get(rid) {
-            if body.trim().is_empty() {
-                return Resp::err("REPLY_BODY_REQUIRED: an obligated reply requires a nonempty answer");
-            }
-            if let Err(error) = reply_obligation::validate_reply(&control, &route.app_scope_id, obligation, &from, &to) {
-                return Resp::err(error);
-            }
-            clear_obligation_id = Some(rid.clone());
-        }
-    }
     if mtype == "request" {
         if let Some((existing_id, existing)) = st.recent_live_request(&from, &to, now_ms()) {
             let retry_at = iso(existing.created_ms + state::REQUEST_COOLDOWN_MS);
@@ -1023,10 +1051,6 @@ fn handle_send_with_task_policy(
             ));
         }
     }
-    let superseded_ids = match (mtype.as_str(), in_reply_to.as_deref()) {
-        ("reply", Some(request_id)) => st.superseded_replies(request_id),
-        _ => Vec::new(),
-    };
     let msg = Message {
         id: gen_msg_id(),
         from: from.clone(),
@@ -1054,10 +1078,7 @@ fn handle_send_with_task_policy(
             && m.body == msg.body
             && m.state == "pending"
             && st.mailbox_name_addresses.get(&m.id) == name_address.as_ref()
-            // A different link or reply policy is a different obligation even
-            // when the body is identical.
             && m.in_reply_to == msg.in_reply_to
-            && st.reply_obligations.get(&m.id).map(|o| o.policy) == reply_policy
             && st.target_sessions.get(&m.id) == target_session.as_ref()
     }) {
         let managed_duplicate = assign_task
@@ -1159,43 +1180,6 @@ fn handle_send_with_task_policy(
             route,
         });
     }
-    // The obligation record and the message commit together. The reply-cleared
-    // marker is on the original message id, not this reply.
-    if let Some(policy) = reply_policy {
-        let Some(project) = reply_obligation::resolve_scope(
-            &st,
-            &from,
-            name_address
-                .as_ref()
-                .map(|address| address.project_scope.as_str()),
-        ) else {
-            return Resp::err(
-                "SEND_BINDING_REJECTED: reply obligation project scope is unavailable",
-            );
-        };
-        let recipient_name = match name_address.as_ref() {
-            Some(address) => Some(address.name.clone()),
-            None => match reply_obligation::stable_name(&control, &route.project_scope_id, &route.app_scope_id, &to) {
-                Ok(name) => name, Err(error) => return Resp::err(error),
-            },
-        };
-        let from_name = match reply_obligation::stable_name(&control, &route.project_scope_id, &route.app_scope_id, &from) {
-            Ok(name) => name, Err(error) => return Resp::err(error),
-        };
-        let obligation = reply_obligation::build_obligation(
-            from_name,
-            mid.clone(),
-            project,
-            from.clone(),
-            to.clone(),
-            recipient_name,
-            policy,
-        );
-        events.push(Event::ReplyObligationSet { obligation });
-    }
-    if let Some(message_id) = clear_obligation_id {
-        events.push(Event::ReplyObligationCleared { message_id });
-    }
     if let Some(address) = name_address {
         events.push(Event::MailboxNameAddressed {
             message_id: mid.clone(),
@@ -1217,11 +1201,6 @@ fn handle_send_with_task_policy(
         events.push(Event::WakeBound {
             message_id: mid.clone(),
             subscription_id: subscription.id.clone(),
-        });
-    }
-    if !superseded_ids.is_empty() {
-        events.push(Event::Superseded {
-            ids: superseded_ids,
         });
     }
     if let Err(error) = server.commit_locked_checked(&mut st, &events) {
@@ -1292,11 +1271,11 @@ fn handle_live_closure_daemon_send(
     {
         return Resp::err("COLLAB_LIVE_CLOSURE_PEER_ROUTE_MISMATCH");
     }
-    let Some(recipient) = st.workers.get(&to).cloned() else {
+    if !st.workers.contains_key(&to) {
         return Resp::err(format!("recipient {} not registered", to));
-    };
+    }
     drop(st);
-    if worker_identity_and_endpoint(server, &recipient).1 != Some(true) {
+    if !recipient_online_for_delivery(server, &to) {
         return Resp::err("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE");
     }
     let mut st = server.state.lock().unwrap();
@@ -1372,6 +1351,7 @@ fn handle_live_closure_daemon_send(
 #[derive(Debug)]
 pub(crate) struct CrossProjectCommitted {
     pub(crate) msg_id: String,
+    recipient: String,
     pub(crate) subscription: Option<crate::server::state::NotificationSubscription>,
 }
 
@@ -1393,13 +1373,30 @@ fn commit_cross_project_message(
             "MESSAGE_SUBJECT_REQUIRED: cross-project send requires --subject",
         ));
     }
-    if !st.workers.contains_key(to) {
-        return Err(Resp::err(format!("recipient {} not registered", to)));
+    let route = server_route_scope(server, st)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("NAME_ADDRESS_SCOPE_MISSING: current project route is unavailable"))?;
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .map_err(Resp::err)?;
+    let (recipient, name_address) =
+        resolve_send_name_address(server, st, &control, to.to_owned()).map_err(Resp::err)?;
+    let slot = match &name_address {
+        Some(address) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, &address.name),
+        None => control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &recipient),
+    }
+    .map_err(Resp::err)?
+    .ok_or_else(|| Resp::err(format!("recipient {to} not registered in the current identity map")))?;
+    let binding = authoritative_send_binding(st, &route, &recipient).map_err(Resp::err)?;
+    if !st.workers.contains_key(&recipient)
+        || !slot.active_binding().is_some_and(|current| &current.binding == binding)
+    {
+        return Err(Resp::err("SEND_BINDING_REJECTED: recipient runtime binding is not current"));
     }
     let msg = Message {
         id: gen_msg_id(),
         from: format!("{}@{}", sender_worker_id, source_project),
-        to: to.to_owned(),
+        to: recipient.clone(),
         mtype: "notify".into(),
         subject: Some(subject.to_owned()),
         body: body.to_owned(),
@@ -1412,10 +1409,17 @@ fn commit_cross_project_message(
     };
     let mid = msg.id.clone();
     let subscription = st
-        .matching_subscription(to, "direct-message", None, now_ms())
+        .matching_subscription(&recipient, "direct-message", None, now_ms())
         .cloned();
     let mut events = vec![
         Event::Sent { msg },
+        Event::MailboxNameAddressed {
+            message_id: mid.clone(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: route.project_scope_id.as_str().to_owned(),
+                name: slot.identity_key.name.clone(),
+            },
+        },
         Event::DeliveryMode {
             msg_id: mid.clone(),
             mode: "explicit-notification".into(),
@@ -1429,10 +1433,11 @@ fn commit_cross_project_message(
         });
     }
     server
-        .commit_locked(st, &events)
+        .commit_locked_checked_with_control(st, &events, &control)
         .map_err(|error| Resp::err(format!("CROSS_PROJECT_SEND_DURABILITY_FAILED: {error}")))?;
     Ok(CrossProjectCommitted {
         msg_id: mid,
+        recipient,
         subscription,
     })
 }
@@ -1444,10 +1449,10 @@ fn notify_cross_project_committed(
     server: &Server,
     committed: CrossProjectCommitted,
     sender_worker_id: &str,
-    to: &str,
 ) -> Resp {
     let CrossProjectCommitted {
         msg_id,
+        recipient,
         subscription,
     } = committed;
     let notification = subscription
@@ -1456,25 +1461,31 @@ fn notify_cross_project_committed(
             attempt_notification_detailed_with_at(server, &msg_id, &subscription.id, now_ms())
         })
         .unwrap_or_else(|| {
-            NotificationAttempt::NotAttempted("no notification subscription".into())
+            if recipient_online_for_delivery(server, &recipient) {
+                NotificationAttempt::NotAttempted("no notification subscription".into())
+            } else {
+                NotificationAttempt::NotAttempted(RECIPIENT_NOT_ONLINE.into())
+            }
         });
     notification_send_response(
         json!({
             "msg_id": msg_id,
             "cross_project": true,
             "sender": sender_worker_id,
-            "recipient": to,
+            "recipient": recipient,
         }),
         subscription.is_some(),
         {
             let state = server.state.lock().unwrap();
-            notification_method_for_worker(&state, to)
+            notification_method_for_worker(&state, &recipient)
         },
         &notification,
     )
 }
 
-fn federation_error_response(error: crate::server::federation::FederationError) -> FederationResponse {
+fn federation_error_response(
+    error: crate::server::federation::FederationError,
+) -> FederationResponse {
     FederationResponse::Error {
         code: error.code.to_owned(),
         detail: error.detail,
@@ -1516,12 +1527,8 @@ fn federation_consumption_facts(
         .msgs
         .get(message_id)
         .is_some_and(|message| message.state == "read");
-    let accepted = st
-        .notification_delivery_accepted
-        .contains_key(message_id);
-    let known_not_delivered = st
-        .notification_delivery_failures
-        .contains_key(message_id);
+    let accepted = st.notification_delivery_accepted.contains_key(message_id);
+    let known_not_delivered = st.notification_delivery_failures.contains_key(message_id);
     let attempted = accepted
         || known_not_delivered
         || st.notification_delivery_bindings.contains_key(message_id)
@@ -1540,8 +1547,15 @@ fn federation_receipt_response(
     requester: &crate::proto::FederationActor,
 ) -> FederationResponse {
     let Some(message_id) = st.federation.message_id_for_reference(reference) else {
-        if st.federation.expired_origins.values().any(|expired| &expired.reference == reference) {
-            return FederationResponse::Expired { reference: reference.clone() };
+        if st
+            .federation
+            .expired_origins
+            .values()
+            .any(|expired| &expired.reference == reference)
+        {
+            return FederationResponse::Expired {
+                reference: reference.clone(),
+            };
         }
         return FederationResponse::Error {
             code: "NOT_SEEN".into(),
@@ -1549,8 +1563,7 @@ fn federation_receipt_response(
         };
     };
     let facts = federation_consumption_facts(st, message_id);
-    match crate::server::federation::project_receipt(&st.federation, reference, requester, &facts)
-    {
+    match crate::server::federation::project_receipt(&st.federation, reference, requester, &facts) {
         Ok(mut receipt) => {
             receipt.channel_delivery = channel_delivery::current_result(st, message_id);
             FederationResponse::Message { receipt }
@@ -1573,10 +1586,16 @@ pub(crate) fn resolve_federated_local_recipient(
     let route = server_route_scope(server, state)
         .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error))?
         .ok_or_else(|| {
-            FederationError::new("NAME_ADDRESS_SCOPE_MISSING", "current project route is unavailable")
+            FederationError::new(
+                "NAME_ADDRESS_SCOPE_MISSING",
+                "current project route is unavailable",
+            )
         })?;
     let project_key = canonical_project_key(&server.root).ok_or_else(|| {
-        FederationError::new("NAME_ADDRESS_SCOPE_MISSING", "current project key is unavailable")
+        FederationError::new(
+            "NAME_ADDRESS_SCOPE_MISSING",
+            "current project key is unavailable",
+        )
     })?;
     if !target.project.eq_ignore_ascii_case(&project_key) {
         return Err(FederationError::new(
@@ -1586,21 +1605,18 @@ pub(crate) fn resolve_federated_local_recipient(
     }
     let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
         .load()
-        .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error.to_string()))?;
-    let resolved = crate::server::resolve_named_target(
-        state,
-        &control,
-        &route,
-        &project_key,
-        &target.name,
-    )
-    .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error))?
-    .ok_or_else(|| {
-        FederationError::new(
-            "FEDERATION_LOCAL_NAME_UNRESOLVED",
-            format!("{} in project {}", target.name, target.project),
-        )
-    })?;
+        .map_err(|error| {
+            FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error.to_string())
+        })?;
+    let resolved =
+        crate::server::resolve_named_target(state, &control, &route, &project_key, &target.name)
+            .map_err(|error| FederationError::new("FEDERATION_LOCAL_ROUTE_FAILED", error))?
+            .ok_or_else(|| {
+                FederationError::new(
+                    "FEDERATION_LOCAL_NAME_UNRESOLVED",
+                    format!("{} in project {}", target.name, target.project),
+                )
+            })?;
     if !state.workers.contains_key(&resolved.worker_id) {
         return Err(FederationError::new(
             "FEDERATION_LOCAL_NAME_UNRESOLVED",
@@ -1719,7 +1735,6 @@ pub(crate) fn accept_federated_message(
                 delivery: request.delivery.clone(),
                 in_reply_to: request.in_reply_to.clone(),
                 original_origin: request.original_origin.clone(),
-                reply_policy: request.reply_policy,
                 channel: request.channel.clone(),
                 accepted_ms: now,
             };
@@ -1755,15 +1770,6 @@ pub(crate) fn accept_federated_message(
                     },
                 },
             ];
-            if let Some(policy) = request.reply_policy {
-                events.push(Event::ReplyObligationSet {
-                    obligation: reply_obligation::build_obligation(
-                        None, mid.clone(), recipient.principal.project_scope.as_str().into(),
-                        sender_display.clone(), recipient.worker_id.clone(),
-                        Some(recipient.principal.stable_name.clone()), policy,
-                    ),
-                });
-            }
             if let Some(target_session) = request.target_session.as_ref() {
                 events.push(Event::TargetSessionBound {
                     message_id: mid.clone(),
@@ -1791,10 +1797,10 @@ pub(crate) fn accept_federated_message(
                 server,
                 CrossProjectCommitted {
                     msg_id: mid,
+                    recipient: recipient.worker_id.clone(),
                     subscription,
                 },
                 &sender_display,
-                &recipient.worker_id,
             );
             let st = server.state.lock().unwrap();
             federation_receipt_response(&st, &reference, &request.sender)
@@ -1872,7 +1878,8 @@ pub(crate) fn federated_message_receipt(
 ) -> FederationResponse {
     use crate::server::federation::FederationError;
     let requester_machine = requester.machine().to_owned();
-    if let Err(error) = verify_federation_connection(connection, local_machine, &requester_machine) {
+    if let Err(error) = verify_federation_connection(connection, local_machine, &requester_machine)
+    {
         return federation_error_response(error);
     }
     if &reference.machine != local_machine {
@@ -1885,9 +1892,7 @@ pub(crate) fn federated_message_receipt(
     federation_receipt_response(&st, reference, requester)
 }
 
-/// Target-side handler kept for direct reducer tests. It checks endpoint
-/// reachability outside the state lock and commits the
-/// message under one target guard.
+/// Target-side handler kept for direct reducer tests.
 fn handle_cross_project_send(
     server: &Server,
     sender_worker_id: &str,
@@ -1900,21 +1905,6 @@ fn handle_cross_project_send(
 ) -> Resp {
     if source_project.trim().is_empty() {
         return Resp::err("cross-project send requires a resolved source project");
-    }
-    // Cross-project messages are durable mailbox entries. Identity admission
-    // must not turn endpoint uncertainty or activity into an enqueue failure.
-    // A tmux peer has a valid address even when its runtime identity remains
-    // Unknown; only a definitively dead endpoint blocks enqueue.
-    let recipient_snapshot = {
-        let state = server.state.lock().unwrap();
-        state.workers.get(to).cloned()
-    };
-    if let Some(recipient) = recipient_snapshot {
-        if worker_identity_and_endpoint(server, &recipient).1 == Some(false) {
-            return Resp::err(
-                "cross-project communication requires a reachable target binding on its server-selected transport",
-            );
-        }
     }
     let mut st = server.state.lock().unwrap();
     let committed = match commit_cross_project_message(
@@ -1932,7 +1922,7 @@ fn handle_cross_project_send(
         Err(response) => return response,
     };
     drop(st);
-    notify_cross_project_committed(server, committed, sender_worker_id, to)
+    notify_cross_project_committed(server, committed, sender_worker_id)
 }
 
 #[cfg(test)]
@@ -2229,8 +2219,7 @@ fn handle_task_relocate(
             return Resp::err(format!("task {} not found", task_id));
         }
     }
-    let worktree_path = match declare_task_workspace(&server.root, &server.config, &worktree_path)
-    {
+    let worktree_path = match declare_task_workspace(&server.root, &server.config, &worktree_path) {
         Ok(declared) => declared,
         Err(error) => return Resp::err(error),
     };
@@ -2429,7 +2418,9 @@ fn handle_task_accept_locked(
         ));
     }
     let execution_gate = match control {
-        Some(control) => board_execution_gate_with_control(server, st, control, &worker_id, &task_id),
+        Some(control) => {
+            board_execution_gate_with_control(server, st, control, &worker_id, &task_id)
+        }
         None => board_execution_gate(server, st, &worker_id, &task_id),
     };
     if let Err(error) = execution_gate {
@@ -2465,14 +2456,7 @@ fn handle_task_update(
     next_step: Option<String>,
 ) -> Resp {
     handle_task_update_full(
-        server,
-        worker_id,
-        token,
-        task_id,
-        status,
-        next_step,
-        None,
-        None,
+        server, worker_id, token, task_id, status, next_step, None, None,
     )
 }
 
@@ -2484,12 +2468,11 @@ fn task_owner_unavailable(server: &Server, state: &State, task: &TaskRec) -> boo
         Ok(route) => route,
         Err(_) => return false,
     };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root())
-        .load()
-    {
-        Ok(control) => control,
-        Err(_) => return false,
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(_) => return false,
+        };
     assignment_unavailability(state, &control, task, route.as_ref())
         .ok()
         .flatten()
@@ -2506,19 +2489,23 @@ fn handle_task_update_full(
     blocker_action: Option<String>,
     decision_reason: Option<String>,
 ) -> Resp {
-    let mut st = server.state.lock().unwrap();
-    task_update_locked(
-        server,
-        &mut st,
-        None,
-        worker_id,
-        token,
-        task_id,
-        status,
-        next_step,
-        blocker_action,
-        decision_reason,
-    )
+    let response = {
+        let mut st = server.state.lock().unwrap();
+        task_update_locked(
+            server,
+            &mut st,
+            None,
+            worker_id,
+            token,
+            task_id,
+            status,
+            next_step,
+            blocker_action,
+            decision_reason,
+        )
+    };
+    deliver_board_auto_notice(server, &response);
+    response
 }
 
 fn task_update_locked(
@@ -2560,34 +2547,41 @@ fn task_update_locked(
             decision_reason,
         );
     }
-    let owner_is_actor = match task_owner_gate_maybe_with_control(
-        server, st, control, &task_id, &worker_id,
-    ) {
-        Ok(()) => true,
-        Err(error) if task.owner == worker_id => return error,
-        Err(error) => {
-            if !error.error.as_deref().is_some_and(|reason| reason.starts_with("TASK_OWNER_REQUIRED:")) {
-                return error;
+    let owner_is_actor =
+        match task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id) {
+            Ok(()) => true,
+            Err(error) if task.owner == worker_id => return error,
+            Err(error) => {
+                if !error
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("TASK_OWNER_REQUIRED:"))
+                {
+                    return error;
+                }
+                if board_check_master_or_task_architect_locked(
+                    server, st, control, &task_id, &worker_id,
+                )
+                .is_err()
+                {
+                    return Resp::err("only the task owner may update its lifecycle");
+                }
+                false
             }
-            if board_check_master_locked(server, st, &worker_id).is_err() {
-                return Resp::err("only the task owner may update its lifecycle");
-            }
-            false
-        }
-    };
+        };
     if matches!(task.status.as_str(), "closed" | "cancelled") {
         return Resp::err("TASK_TERMINAL: completed task history cannot be updated");
     }
     let original_status = task.status.clone();
     if owner_is_actor
-        && status.as_deref().is_some_and(|value|matches!(value,"working"|"verifying"|"reviewed"))
+        && status
+            .as_deref()
+            .is_some_and(|value| matches!(value, "working" | "verifying" | "reviewed"))
     {
         let result = match control {
             Some(control) => server_route_scope(server, st)
                 .map_err(Resp::err)
-                .and_then(|route| {
-                    route.ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED"))
-                })
+                .and_then(|route| route.ok_or_else(|| Resp::err("WORK_EXECUTOR_PROJECT_REQUIRED")))
                 .and_then(|route| {
                     work_executor_gate_with_control(st, control, &route, &task_id, &worker_id)
                 }),
@@ -2642,7 +2636,9 @@ fn task_update_locked(
             ));
         }
         if task.status == "blocked" && new_status == "working" {
-            if let Err(error) = board_resume_gate(&st, &worker_id, &task.id) { return error; }
+            if let Err(error) = board_resume_gate(&st, &worker_id, &task.id) {
+                return error;
+            }
         }
         if new_status == "blocked" {
             // A member business block is an application, never an approved
@@ -2667,16 +2663,40 @@ fn task_update_locked(
     }
     task.updated_ms = now_ms();
     let mut events = vec![Event::TaskUpdated { task: task.clone() }];
+    let auto_notice = match board_auto_notice_events(
+        server,
+        st,
+        control,
+        &task,
+        &worker_id,
+        &format!(
+            "status {} -> {}, next: {}",
+            original_status,
+            task.status,
+            task.next_step.as_deref().unwrap_or("unchanged")
+        ),
+    ) {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
+    events.extend(auto_notice.events);
     // A registered merge obligation exists iff the task is still awaiting the
     // merge of an accepted candidate. Any other transition (rework, cancel,
     // legacy merge) ends that obligation in the same transaction.
-    if original_status != task.status && st.task_lifecycle.contains_key(&task_id)
-        && matches!(task.status.as_str(), "working" | "verifying" | "rework" | "cancelled")
+    if original_status != task.status
+        && st.task_lifecycle.contains_key(&task_id)
+        && matches!(
+            task.status.as_str(),
+            "working" | "verifying" | "rework" | "cancelled"
+        )
     {
         let mut record = st.task_lifecycle[&task_id].clone();
         let reviewer = required_work_reviewer(st, &task_id);
         events.extend(invalidate_work_review(st, &task, &mut record, reviewer));
-        events.push(Event::TaskLifecycleUpdated { task_id:task_id.clone(),record });
+        events.push(Event::TaskLifecycleUpdated {
+            task_id: task_id.clone(),
+            record,
+        });
     }
     if original_status != task.status
         && matches!(task.status.as_str(), "working" | "verifying" | "rework")
@@ -2711,7 +2731,8 @@ fn task_update_locked(
         "task": task.id,
         "status": task.status,
         "owner": if owner_is_actor { &worker_id } else { &task.owner },
-        "notification": "none",
+        "notification": if auto_notice.notice.is_some() { "auto-board-change" } else { "none" },
+        "notification_message_id": auto_notice.notice.as_ref().map(|notice| notice.message_id.clone()),
         "next_action": task.next_step,
     }))
 }
@@ -2795,10 +2816,7 @@ fn task_block_decide_locked(
         return Resp::err(format!("task {task_id} not found"));
     };
     let Some(mut request) = st.task_block_requests.get(&task_id).cloned() else {
-        return Resp::err_data(
-            "TASK_BLOCK_REQUEST_NOT_FOUND",
-            json!({"task_id": task_id}),
-        );
+        return Resp::err_data("TASK_BLOCK_REQUEST_NOT_FOUND", json!({"task_id": task_id}));
     };
     if request.requester == worker_id {
         return Resp::err_data(
@@ -2954,8 +2972,11 @@ fn close_task_resources(
         let branch_ref = format!("refs/heads/{branch}");
         if branch_exists(root, &branch_ref)? {
             let main_ref = "refs/heads/main";
-            let merged = run_safe_git(root, &["merge-base", "--is-ancestor", &branch_ref, main_ref])
-                .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
+            let merged = run_safe_git(
+                root,
+                &["merge-base", "--is-ancestor", &branch_ref, main_ref],
+            )
+            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
             let merged = match merged.status.code() {
                 Some(0) => true,
                 Some(1) => false,
@@ -3003,7 +3024,7 @@ fn close_task_resources(
                 root,
                 &["worktree", "remove", &worktree.display().to_string()],
             )
-                .map_err(|e| format!("cannot remove worktree {}: {e}", relative))?;
+            .map_err(|e| format!("cannot remove worktree {}: {e}", relative))?;
             if !removed.status.success() {
                 return Err(format!(
                     "worktree cleanup failed for {}: {}",
@@ -3097,13 +3118,12 @@ fn branch_net_content_present_at_integration_commit(
     else {
         return Ok(false);
     };
-    let main_head = resolve_authoritative_main_head(root)
-        .map_err(|error| {
-            format!(
-                "cannot resolve {main_ref} while checking integration commit {commit}: {}",
-                error.error.unwrap_or_default()
-            )
-        })?;
+    let main_head = resolve_authoritative_main_head(root).map_err(|error| {
+        format!(
+            "cannot resolve {main_ref} while checking integration commit {commit}: {}",
+            error.error.unwrap_or_default()
+        )
+    })?;
     match commit_is_integrated_in_main(root, commit) {
         Ok(true) => {}
         Ok(false) => return Err(format!(
@@ -3115,8 +3135,10 @@ fn branch_net_content_present_at_integration_commit(
         )),
     }
 
-    let merge_bases = run_safe_git(root, &["merge-base", "--all", branch_ref, commit])
-        .map_err(|e| format!("cannot find the common ancestor for {branch_ref} and {commit}: {e}"))?;
+    let merge_bases =
+        run_safe_git(root, &["merge-base", "--all", branch_ref, commit]).map_err(|e| {
+            format!("cannot find the common ancestor for {branch_ref} and {commit}: {e}")
+        })?;
     if !merge_bases.status.success() {
         return Err(format!(
             "cannot find the common ancestor for {branch_ref} and {commit}: {}",
@@ -3285,14 +3307,7 @@ fn handle_task_deliver(
     worktree: Option<String>,
 ) -> Resp {
     handle_task_deliver_with_intent(
-        server,
-        worker_id,
-        token,
-        task_id,
-        evidence,
-        None,
-        worktree,
-        false,
+        server, worker_id, token, task_id, evidence, None, worktree, false,
     )
 }
 
@@ -3375,10 +3390,7 @@ fn handle_task_deliver_with_intent_locked(
         .get(&task_id)
         .is_some_and(|request| request.state == TaskBlockRequestState::Pending)
     {
-        return Resp::err_data(
-            "TASK_BLOCK_PENDING_APPROVAL",
-            json!({"task_id": task_id}),
-        );
+        return Resp::err_data("TASK_BLOCK_PENDING_APPROVAL", json!({"task_id": task_id}));
     }
     let executor = match control {
         Some(control) => server_route_scope(server, st)
@@ -3410,9 +3422,7 @@ fn handle_task_deliver_with_intent_locked(
     };
     let worktree = if no_candidate {
         if worktree.is_some() {
-            return Resp::err(
-                "task deliver --no-candidate cannot be combined with --worktree",
-            );
+            return Resp::err("task deliver --no-candidate cannot be combined with --worktree");
         }
         None
     } else {
@@ -3459,7 +3469,9 @@ fn handle_task_deliver_with_intent_locked(
     let mut review_notice = None;
     let mut reviewer_waiting = None;
     if let Some(name) = required_reviewer.as_deref() {
-        task.next_step = Some(format!("await review by {name}; use collab task review --accept or --rework"));
+        task.next_step = Some(format!(
+            "await review by {name}; use collab task review --accept or --rework"
+        ));
         let route = match server_route_scope(server, &st) {
             Ok(Some(route)) => route,
             _ => return Resp::err("required reviewer project route is not ready"),
@@ -3468,19 +3480,24 @@ fn handle_task_deliver_with_intent_locked(
         let control = match control {
             Some(control) => control,
             None => {
-                loaded = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                    Ok(control) => control,
-                    Err(error) => return Resp::err(error),
-                };
+                loaded =
+                    match binding_store::BindingControlStore::new(server.host_paths.state_root())
+                        .load()
+                    {
+                        Ok(control) => control,
+                        Err(error) => return Resp::err(error),
+                    };
                 &loaded
             }
         };
-        let recipient = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
-            Ok(slot) => slot.and_then(|slot| slot.active_binding()).map(|current| current.binding.agent_id.as_str().to_owned()),
-            Err(error) => return Resp::err(error),
-        };
-        if let Some(recipient) = recipient.filter(|id| st.workers.contains_key(id))
-        {
+        let recipient =
+            match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
+                Ok(slot) => slot
+                    .and_then(|slot| slot.active_binding())
+                    .map(|current| current.binding.agent_id.as_str().to_owned()),
+                Err(error) => return Resp::err(error),
+            };
+        if let Some(recipient) = recipient.filter(|id| st.workers.contains_key(id)) {
             let message_id = gen_msg_id();
             events.push(Event::Sent { msg: Message {
                 id:message_id.clone(),from:worker_id.clone(),to:recipient.clone(),mtype:"request".into(),
@@ -3489,13 +3506,28 @@ fn handle_task_deliver_with_intent_locked(
                 in_reply_to:None,created_ms:now,state:"pending".into(),wake_attempt_count:0,
                 last_wake_attempt_ms:0,retry_attempted:false,
             }});
-            events.push(Event::DeliveryMode { msg_id:message_id.clone(),mode:"explicit-notification".into(),source_thread_id:None });
-            let subscription = st.matching_subscription(&recipient,"direct-message",None,now).cloned();
+            events.push(Event::DeliveryMode {
+                msg_id: message_id.clone(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            });
+            let subscription = st
+                .matching_subscription(&recipient, "direct-message", None, now)
+                .cloned();
             if let Some(subscription) = &subscription {
-                events.push(Event::WakeBound { message_id:message_id.clone(),subscription_id:subscription.id.clone() });
+                events.push(Event::WakeBound {
+                    message_id: message_id.clone(),
+                    subscription_id: subscription.id.clone(),
+                });
             }
-            review_notice = Some((message_id,subscription,notification_method_for_worker(&st,&recipient)));
-        } else { reviewer_waiting = Some(format!("reviewer {name} is currently unavailable")); }
+            review_notice = Some((
+                message_id,
+                subscription,
+                notification_method_for_worker(&st, &recipient),
+            ));
+        } else {
+            reviewer_waiting = Some(format!("reviewer {name} is currently unavailable"));
+        }
     }
     // A completed execute phase releases the slot. Run the same continuation
     // entry so the next queued item for that slot is claimed in this batch.
@@ -3504,13 +3536,17 @@ fn handle_task_deliver_with_intent_locked(
             let loaded;
             let control = match control {
                 Some(control) => Some(control),
-                None => match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                    Ok(control) => {
-                        loaded = control;
-                        Some(&loaded)
+                None => {
+                    match binding_store::BindingControlStore::new(server.host_paths.state_root())
+                        .load()
+                    {
+                        Ok(control) => {
+                            loaded = control;
+                            Some(&loaded)
+                        }
+                        Err(_) => None,
                     }
-                    Err(_) => None,
-                },
+                }
             };
             if let Some(control) = control {
                 events.extend(ticket_continuation_events(
@@ -3522,22 +3558,18 @@ fn handle_task_deliver_with_intent_locked(
                     false,
                 ));
                 events.extend(ticket_dependency_release_events(
-                    &st,
-                    control,
-                    &route,
-                    completed,
-                    &worker_id,
+                    &st, control, &route, completed, &worker_id,
                 ));
             }
         }
     }
     events.extend([
-            Event::TaskUpdated { task: task.clone() },
-            Event::TaskLifecycleUpdated {
-                task_id: task.id.clone(),
-                record: lifecycle,
-            },
-        ]);
+        Event::TaskUpdated { task: task.clone() },
+        Event::TaskLifecycleUpdated {
+            task_id: task.id.clone(),
+            record: lifecycle,
+        },
+    ]);
     let commit = match control {
         Some(control) => server
             .commit_locked_checked_with_control(st, &events, control)
@@ -3586,12 +3618,13 @@ fn finish_task_deliver_notification(
         return response;
     };
     let attempt = match notice.subscription_id.as_deref() {
-        Some(subscription_id) => {
-            attempt_notification_detailed_with_at(server, &notice.message_id, subscription_id, notice.now)
-        }
-        None => {
-            NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into())
-        }
+        Some(subscription_id) => attempt_notification_detailed_with_at(
+            server,
+            &notice.message_id,
+            subscription_id,
+            notice.now,
+        ),
+        None => NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into()),
     };
     notification_send_response(
         response.data,

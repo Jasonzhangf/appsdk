@@ -1,8 +1,6 @@
 use super::*;
 use crate::proto::RexEndpoint;
-use crate::server::state::{
-    Event, NotificationSubscription, ReceiveReceipt, State, WorkerRec,
-};
+use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
 use serde_json::Value;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
@@ -15,6 +13,19 @@ fn rex_transport(
     rex_session: &str,
     block: &str,
 ) -> SelectedTransport {
+    let canonical_session = if rex_session.starts_with("session:") {
+        rex_session.to_owned()
+    } else {
+        "session:11111111-1111-1111-1111-111111111111".to_owned()
+    };
+    let canonical_block = match block {
+        "block-a" => "block:11111111-1111-1111-1111-111111111111",
+        "old-block" => "block:33333333-3333-3333-3333-333333333333",
+        "new-block" => "block:44444444-4444-4444-4444-444444444444",
+        "test-block" => "block:55555555-5555-5555-5555-555555555555",
+        value if value.starts_with("block:") => value,
+        _ => "block:22222222-2222-2222-2222-222222222222",
+    };
     SelectedTransport {
         kind: TransportKind::Rex,
         endpoint: None,
@@ -24,10 +35,10 @@ fn rex_transport(
         tmux_endpoint: None,
         rex_endpoint: Some(RexEndpoint {
             server: server.into(),
-            session_id: rex_session.into(),
-            block_id: block.into(),
-            host_id: Some("host".into()),
-            instance_id: "instance".into(),
+            session_id: canonical_session,
+            block_id: canonical_block.to_owned(),
+            host_id: Some("host-fixture".into()),
+            instance_id: "instance-fixture".into(),
             cwd: "/tmp".into(),
         }),
         capabilities: vec!["send_message_to_block".into()],
@@ -131,7 +142,46 @@ fn register_rex_worker(server: &Server, worker: &str, transport: &SelectedTransp
         subscription.method = "rex".into();
         subscription.target = notification_target(transport).unwrap().into_owned();
     }
+    mark_agent_online(
+        server,
+        worker,
+        transport.session_id.as_deref().unwrap_or(""),
+    );
     subscription_id
+}
+
+fn mark_agent_online(server: &Server, worker: &str, session_id: &str) {
+    let project_scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    server.commit(&[Event::AgentPresenceObserved {
+        presence: crate::server::name_state::AgentPresenceRecord {
+            project_scope,
+            worker_id: worker.into(),
+            session_id: session_id.into(),
+            presence: crate::server::name_state::AgentPresence::Online,
+            reason: "notification test recipient is online".into(),
+            observed_ms: now_ms(),
+        },
+    }]);
+}
+
+fn mark_agent_offline(server: &Server, worker: &str, session_id: &str) {
+    let project_scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    server.commit(&[Event::AgentPresenceObserved {
+        presence: crate::server::name_state::AgentPresenceRecord {
+            project_scope,
+            worker_id: worker.into(),
+            session_id: session_id.into(),
+            presence: crate::server::name_state::AgentPresence::Offline,
+            reason: "notification test recipient is offline".into(),
+            observed_ms: now_ms(),
+        },
+    }]);
 }
 
 fn send_notify(server: &Server, from: &str, to: &str) -> Resp {
@@ -222,8 +272,10 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
 
 struct RexCliFixture {
     dir: std::path::PathBuf,
+    old_blocks_file: Option<std::ffi::OsString>,
     old_log_dir: Option<std::ffi::OsString>,
     old_scenario: Option<std::ffi::OsString>,
+    foreground_env: Option<(Option<std::ffi::OsString>, Option<std::ffi::OsString>)>,
 }
 
 impl RexCliFixture {
@@ -243,15 +295,42 @@ impl RexCliFixture {
         // The full serial suite can delay Python fixture startup on a busy host.
         // Keep the fixture bounded without treating scheduler latency as a Rex timeout.
         crate::client::adapters::rex::set_test_timeout(Some(std::time::Duration::from_secs(15)));
+        let blocks_file = dir.join("blocks.json");
+        std::fs::write(
+            &blocks_file,
+            serde_json::to_vec(&serde_json::json!([
+                "block:11111111-1111-1111-1111-111111111111",
+                "block:22222222-2222-2222-2222-222222222222",
+                "block:33333333-3333-3333-3333-333333333333",
+                "block:44444444-4444-4444-4444-444444444444",
+                "block:55555555-5555-5555-5555-555555555555"
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let old_blocks_file = std::env::var_os("REXPRIMITIVE_BLOCKS_FILE");
         let old_log_dir = std::env::var_os("REXPRIMITIVE_LOG_DIR");
         let old_scenario = std::env::var_os("REXPRIMITIVE_SCENARIO");
+        std::env::set_var("REXPRIMITIVE_BLOCKS_FILE", &blocks_file);
         std::env::set_var("REXPRIMITIVE_LOG_DIR", &dir);
         std::env::set_var("REXPRIMITIVE_SCENARIO", scenario);
         Self {
             dir,
+            old_blocks_file,
             old_log_dir,
             old_scenario,
+            foreground_env: None,
         }
+    }
+
+    fn with_codex_foreground(mut self) -> Self {
+        self.foreground_env = Some((
+            std::env::var_os("COLLAB_TEST_REX_OWNER_PID"),
+            std::env::var_os("COLLAB_TEST_REX_OWNER_NAME"),
+        ));
+        std::env::set_var("COLLAB_TEST_REX_OWNER_PID", "4242");
+        std::env::set_var("COLLAB_TEST_REX_OWNER_NAME", "codex");
+        self
     }
 
     fn calls(&self) -> Vec<Value> {
@@ -269,6 +348,10 @@ impl Drop for RexCliFixture {
     fn drop(&mut self) {
         crate::client::adapters::rex::set_test_cli(None);
         crate::client::adapters::rex::set_test_timeout(None);
+        match self.old_blocks_file.take() {
+            Some(value) => std::env::set_var("REXPRIMITIVE_BLOCKS_FILE", value),
+            None => std::env::remove_var("REXPRIMITIVE_BLOCKS_FILE"),
+        }
         match self.old_log_dir.take() {
             Some(value) => std::env::set_var("REXPRIMITIVE_LOG_DIR", value),
             None => std::env::remove_var("REXPRIMITIVE_LOG_DIR"),
@@ -276,6 +359,17 @@ impl Drop for RexCliFixture {
         match self.old_scenario.take() {
             Some(value) => std::env::set_var("REXPRIMITIVE_SCENARIO", value),
             None => std::env::remove_var("REXPRIMITIVE_SCENARIO"),
+        }
+        if let Some((pid, name)) = self.foreground_env.take() {
+            for (key, previous) in [
+                ("COLLAB_TEST_REX_OWNER_PID", pid),
+                ("COLLAB_TEST_REX_OWNER_NAME", name),
+            ] {
+                match previous {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -287,6 +381,7 @@ fn rex_method(call: &Value) -> String {
         "server.status",
         "session.list",
         "session.list_blocks",
+        "com.superlogical.terminal.process",
         "com.superlogical.terminal.write",
         "send-key",
     ] {
@@ -386,7 +481,6 @@ fn manager_send_to_rex(
                 body: "DETAIL-rex-service-refresh".into(),
                 in_reply_to: None,
                 delivery: "immediate".into(),
-                reply_policy: None,
                 target_session: None,
             },
         )
@@ -411,6 +505,11 @@ fn install_capture_sink(server: &mut Arc<Server>) -> Arc<Mutex<Vec<SelectedTrans
 fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
     let now = now_ms();
     let subscription_id = super::mailbox::default_direct_message_id(worker_id);
+    let project_scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    let session_id = format!("session-{worker_id}");
     server.commit(&[
         Event::Registered {
             worker: WorkerRec {
@@ -453,6 +552,16 @@ fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
                 patrol_last_push_ms: 0,
                 periodic_declared: false,
                 goal_content: None,
+            },
+        },
+        Event::AgentPresenceObserved {
+            presence: crate::server::name_state::AgentPresenceRecord {
+                project_scope,
+                worker_id: worker_id.into(),
+                session_id,
+                presence: crate::server::name_state::AgentPresence::Online,
+                reason: "notification test recipient is online".into(),
+                observed_ms: now,
             },
         },
     ]);
@@ -563,13 +672,6 @@ fn run_late_old_acceptance_interleaving(new_wake_fails: bool) {
         state.wake_bindings["notice"],
         super::mailbox::default_direct_message_id("new")
     );
-    assert!(
-        !state
-            .receive_receipts
-            .values()
-            .any(|receipt| receipt.message_ids.iter().any(|id| id == "notice")),
-        "late acceptance must not create a receive receipt"
-    );
     if new_wake_fails {
         let failure = state
             .notification_delivery_failures
@@ -633,7 +735,10 @@ fn late_acceptance_cannot_replace_evidence_from_a_newer_attempt() {
             Ok(json!({"receipt": "old"}))
         },
     );
-    assert!(matches!(attempt, NotificationAttempt::StaleAccepted), "{attempt:?}");
+    assert!(
+        matches!(attempt, NotificationAttempt::StaleAccepted),
+        "{attempt:?}"
+    );
     let state = server.state.lock().unwrap();
     assert_eq!(
         state.notification_delivery_evidence["notice"],
@@ -920,36 +1025,28 @@ fn periodic_deadline_advances_after_prior_read_is_pruned() {
             .iter()
             .find_map(|(id, bound)| {
                 (bound == &subscription
-                    && state.notification_occurrences.get(id).is_some_and(|occurrence| {
-                        occurrence.trigger_ms == now
-                    }))
+                    && state
+                        .notification_occurrences
+                        .get(id)
+                        .is_some_and(|occurrence| occurrence.trigger_ms == now))
                 .then(|| id.clone())
             })
             .expect("the first occurrence is issued with an occurrence marker")
     };
-    server.commit(&[Event::ReceiveCommitted {
-        receipt: ReceiveReceipt {
-            receive_id: "recv-first".into(),
-            worker_id: "recipient".into(),
-            route_scope: None,
-            message_ids: vec![first_id.clone()],
-            received_ms: now + 1,
-        },
+    server.commit(&[Event::Acked {
         ids: vec![first_id.clone()],
+        consumed_ms: Some(now + 1),
     }]);
-    server.commit(&[Event::ReceiveCommitted {
-        receipt: ReceiveReceipt {
-            receive_id: "recv-first".into(),
-            worker_id: "recipient".into(),
-            route_scope: None,
-            message_ids: vec![first_id.clone()],
-            received_ms: now + 1,
-        },
+    server.commit(&[Event::Acked {
         ids: vec![first_id.clone()],
+        consumed_ms: Some(now + 1),
     }]);
     {
         let state = server.state.lock().unwrap();
-        assert_eq!(state.notification_subscriptions[&subscription].fired_count, 1);
+        assert_eq!(
+            state.notification_subscriptions[&subscription].fired_count,
+            1
+        );
         assert_eq!(
             state.notification_subscriptions[&subscription].trigger_ms,
             Some(second_trigger)
@@ -966,24 +1063,24 @@ fn periodic_deadline_advances_after_prior_read_is_pruned() {
             .iter()
             .find_map(|(id, bound)| {
                 (bound == &subscription
-                    && state.notification_occurrences.get(id).is_some_and(|occurrence| {
-                        occurrence.trigger_ms == second_trigger
-                    }))
+                    && state
+                        .notification_occurrences
+                        .get(id)
+                        .is_some_and(|occurrence| occurrence.trigger_ms == second_trigger))
                 .then(|| id.clone())
             })
             .expect("the next periodic occurrence remains valid");
-        assert_eq!(state.notification_subscriptions[&subscription].fired_count, 1);
+        assert_eq!(
+            state.notification_subscriptions[&subscription].fired_count,
+            1
+        );
         assert!(
             !state.msgs.contains_key(&first_id),
             "the old read occurrence must be removed by the real retention owner"
         );
         id
     };
-    Arc::get_mut(&mut server)
-        .unwrap()
-        .config
-        .retention
-        .ttl_days = 7;
+    Arc::get_mut(&mut server).unwrap().config.retention.ttl_days = 7;
     {
         let reloaded = current_state::load(&server.state_path, false).unwrap();
         assert_eq!(
@@ -1003,7 +1100,10 @@ fn periodic_deadline_advances_after_prior_read_is_pruned() {
     timers::tick_with_idle_at(&server, third_trigger - 1, &|_| false);
     {
         let state = server.state.lock().unwrap();
-        assert_eq!(state.notification_subscriptions[&subscription].fired_count, 2);
+        assert_eq!(
+            state.notification_subscriptions[&subscription].fired_count,
+            2
+        );
         assert_eq!(
             state.notification_subscriptions[&subscription].trigger_ms,
             Some(third_trigger)
@@ -1019,7 +1119,7 @@ fn periodic_deadline_advances_after_prior_read_is_pruned() {
                 .filter(|occurrence| occurrence.subscription_id == subscription)
                 .count(),
             1,
-            "a third occurrence must wait for its own deadline: {:?}",
+            "a consumed occurrence stays for periodic retention cleanup: {:?}",
             state.notification_subscriptions[&subscription]
         );
     }
@@ -1027,28 +1127,21 @@ fn periodic_deadline_advances_after_prior_read_is_pruned() {
 }
 
 #[test]
-fn periodic_deadline_consumption_survives_exact_retention_cutoff() {
+fn periodic_deadline_consumption_marks_occurrence_for_retention() {
     let (mut server, root) = test_server();
     let direct_message = register_and_subscribe(&server, "recipient");
     let now = now_ms();
     let interval = 86_400_000;
     let second_trigger = now + interval;
     let third_trigger = second_trigger + interval;
-    Arc::get_mut(&mut server)
-        .unwrap()
-        .config
-        .retention
-        .ttl_days = 1;
+    Arc::get_mut(&mut server).unwrap().config.retention.ttl_days = 1;
     let assert_consumed_marker = |server: &Arc<Server>, trigger: i64, expected: bool| {
         let state = server.state.lock().unwrap();
         assert_eq!(
-            state
-                .notification_occurrences
-                .values()
-                .any(|occurrence| {
-                    occurrence.subscription_id == "storm-retention-condition"
-                        && occurrence.trigger_ms == trigger
-                }),
+            state.notification_occurrences.values().any(|occurrence| {
+                occurrence.subscription_id == "storm-retention-condition"
+                    && occurrence.trigger_ms == trigger
+            }),
             expected
         );
     };
@@ -1078,19 +1171,15 @@ fn periodic_deadline_consumption_survives_exact_retention_cutoff() {
         timers::tick_with_idle_at(&server, trigger, &|_| false);
         let message_id = {
             let state = server.state.lock().unwrap();
-            state
-                .wake_bindings
-                .iter()
-                .find_map(|(id, bound)| {
-                    (bound == "storm-retention-condition"
-                        && state.notification_occurrences[id].trigger_ms == trigger)
-                        .then(|| id.clone())
-                })
+            state.wake_bindings.iter().find_map(|(id, bound)| {
+                (bound == "storm-retention-condition"
+                    && state.notification_occurrences[id].trigger_ms == trigger)
+                    .then(|| id.clone())
+            })
         }
-            .expect("the due timer issues one marked occurrence");
+        .expect("the due timer issues one marked occurrence");
         assert_eq!(
-            server.state.lock().unwrap().notification_subscriptions
-                ["storm-retention-condition"]
+            server.state.lock().unwrap().notification_subscriptions["storm-retention-condition"]
                 .trigger_ms,
             Some(trigger)
         );
@@ -1116,7 +1205,7 @@ fn periodic_deadline_consumption_survives_exact_retention_cutoff() {
             .filter(|occurrence| occurrence.subscription_id == "storm-retention-condition")
             .count(),
         1,
-        "retention must remove the first consumed occurrence marker"
+        "retention keeps only the current read occurrence until its cleanup window"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1175,7 +1264,13 @@ fn queued_appserver_wake_drains_through_the_existing_timer_once() {
     let (mut server, root) = test_server();
     let subscription_id = register_and_subscribe(&server, "recipient");
     let now = now_ms();
-    queue_message(&server, "recipient", &subscription_id, "queued-appserver", now);
+    queue_message(
+        &server,
+        "recipient",
+        &subscription_id,
+        "queued-appserver",
+        now,
+    );
     server.commit(&[Event::DeliveryMode {
         msg_id: "queued-appserver".into(),
         mode: "queued".into(),
@@ -1220,17 +1315,27 @@ fn queued_appserver_wake_drains_through_the_existing_timer_once() {
 #[test]
 fn dsh_known_non_submission_resumes_once_and_keeps_the_original_message() {
     let (mut server, root) = test_server();
+    let gateway = crate::server::dsh_channel_tests::registration_gateway(
+        "notification-retry",
+        &root,
+        None,
+        crate::server::dsh_channel_tests::wake_reply,
+    );
     let subscription_id = register_and_subscribe(&server, "recipient");
     {
         let mut state = server.state.lock().unwrap();
-        state
+        let transport = state
             .workers
             .get_mut("recipient")
             .unwrap()
             .transport
             .as_mut()
-            .unwrap()
-            .kind = TransportKind::Dsh;
+            .unwrap();
+        transport.kind = TransportKind::Dsh;
+        transport.endpoint = Some(gateway.endpoint());
+        transport.namespace = Some("rt-1".into());
+        transport.session_id = Some("ses-1".into());
+        transport.thread_id = Some("ses-1".into());
         state
             .notification_subscriptions
             .get_mut(&subscription_id)
@@ -1259,7 +1364,10 @@ fn dsh_known_non_submission_resumes_once_and_keeps_the_original_message() {
     });
 
     let first = attempt_notification_detailed_with_at(&server, "dsh-retry", &subscription_id, now);
-    assert!(matches!(first, NotificationAttempt::Rejected(_)), "{first:?}");
+    assert!(
+        matches!(first, NotificationAttempt::Rejected(_)),
+        "{first:?}"
+    );
     {
         let state = server.state.lock().unwrap();
         assert_eq!(state.msgs["dsh-retry"].id, "dsh-retry");
@@ -1269,8 +1377,14 @@ fn dsh_known_non_submission_resumes_once_and_keeps_the_original_message() {
             .get("dsh-retry")
             .expect("typed DSH non-submission is durable");
         assert!(failure.retryable);
-        assert_eq!(failure.failed_ms, state.msgs["dsh-retry"].last_wake_attempt_ms);
-        assert!(notification_reconnect_pending(&state, &state.msgs["dsh-retry"]));
+        assert_eq!(
+            failure.failed_ms,
+            state.msgs["dsh-retry"].last_wake_attempt_ms
+        );
+        assert!(notification_reconnect_pending(
+            &state,
+            &state.msgs["dsh-retry"]
+        ));
     }
 
     timers::tick_with_idle_at(&server, now + 1, &|_| false);
@@ -1286,7 +1400,9 @@ fn dsh_known_non_submission_resumes_once_and_keeps_the_original_message() {
     assert!(state
         .notification_delivery_accepted
         .contains_key("dsh-retry"));
-    assert!(!state.notification_delivery_failures.contains_key("dsh-retry"));
+    assert!(!state
+        .notification_delivery_failures
+        .contains_key("dsh-retry"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1350,6 +1466,7 @@ fn rex_notification_target_is_the_full_service_scoped_terminal_address() {
 #[test]
 fn rex_current_owner_stale_worker_after_replacement_is_not_attempted() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let stale_transport = rex_transport("agent-old", "rex-server", "rex-session", "shared-block");
     register_rex_worker(&server, "old", &stale_transport);
@@ -1367,6 +1484,7 @@ fn rex_current_owner_stale_worker_after_replacement_is_not_attempted() {
 #[test]
 fn rex_current_owner_duplicate_block_current_is_not_attempted() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let first = rex_transport("agent-a", "rex-server", "rex-session", "shared-block");
     let second = rex_transport("agent-b", "rex-server", "rex-session", "shared-block");
@@ -1389,6 +1507,7 @@ fn rex_current_owner_duplicate_block_current_is_not_attempted() {
 #[test]
 fn rex_current_owner_missing_current_is_not_attempted() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let _route = seed_rex_route(&server);
     let cached = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
     register_rex_worker(&server, "a", &cached);
@@ -1404,13 +1523,13 @@ fn rex_current_owner_missing_current_is_not_attempted() {
 #[test]
 fn rex_current_owner_stale_endpoint_is_not_attempted() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let cached = rex_transport("agent-a", "rex-server", "rex-session", "old-block");
     register_rex_worker(&server, "a", &cached);
     let current = rex_transport("agent-a", "rex-server", "rex-session", "new-block");
     seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
     let sink_calls = install_capture_sink(&mut server);
-
     let response = send_notify(&server, "sender", "a");
 
     assert_rex_refusal_with_state(&response, "REX_CURRENT_BINDING_CHANGED", &server);
@@ -1421,12 +1540,12 @@ fn rex_current_owner_stale_endpoint_is_not_attempted() {
 #[test]
 fn rex_current_owner_unique_binding_delivers_and_records_selection() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
     register_rex_worker(&server, "a", &current);
     seed_current_rex_bindings(&server, &route, &[("Alice", "a", &current)]);
     let sink_calls = install_capture_sink(&mut server);
-
     let response = send_notify(&server, "sender", "a");
 
     assert!(response.ok, "{response:?}");
@@ -1519,6 +1638,7 @@ fn retained_identity_without_transport_never_delivers_to_cached_holder() {
 #[test]
 fn rex_current_owner_same_block_on_separate_servers_remains_independent() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let first = rex_transport("agent-a", "rex-server-a", "rex-session", "shared-block");
     let second = rex_transport("agent-b", "rex-server-b", "rex-session", "shared-block");
@@ -1585,6 +1705,7 @@ fn rex_current_owner_refusal_preserves_entire_durable_batch() {
 #[test]
 fn rex_current_owner_busy_publication_queues_the_same_message() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let current = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
     register_rex_worker(&server, "a", &current);
@@ -1617,7 +1738,6 @@ fn rex_current_owner_busy_publication_queues_the_same_message() {
     let before = dispatch(&server, Req::MsgStatus { msg_id: id.into() });
     assert!(before.ok, "{before:?}");
     assert_eq!(before.data["state"], "pending");
-    assert_eq!(before.data["consumed_by_recv"], false);
     assert!(sink_calls.lock().unwrap().is_empty());
     drop(_register_guard);
     drop(_wire_guard);
@@ -1633,7 +1753,6 @@ fn rex_current_owner_busy_publication_queues_the_same_message() {
     let accepted = dispatch(&server, Req::MsgStatus { msg_id: id.into() });
     assert!(accepted.ok, "{accepted:?}");
     assert_eq!(accepted.data["state"], "pending");
-    assert_eq!(accepted.data["consumed_by_recv"], false);
 
     timers::tick_with_idle_at(&server, now_ms() + 2, &|_| true);
     assert_eq!(
@@ -1653,6 +1772,7 @@ fn rex_current_owner_busy_publication_queues_the_same_message() {
 #[test]
 fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let transport = rex_transport("agent-a", "rex-server", "rex-session", "block-a");
     let subscription = register_rex_worker(&server, "a", &transport);
@@ -1685,6 +1805,7 @@ fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
             created_ms: now,
             original_status: Some("pending".into()),
             original_owner: Some("sender".into()),
+            inviter_name: None,
             automatic_source: None,
         });
         server.commit(&[
@@ -1734,6 +1855,7 @@ fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
 #[test]
 fn rex_current_owner_slow_delivery_serializes_replacement() {
     let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let old_transport = rex_transport("agent-old", "rex-server", "rex-session", "shared-block");
     let old_subscription = register_rex_worker(&server, "old", &old_transport);
@@ -1876,6 +1998,7 @@ fn rex_current_owner_outcomes_survive_replacement_and_retry() {
         ("unknown", Some("test sink unknown outcome")),
     ] {
         let (mut server, root) = test_server();
+        let _presence = RexCliFixture::new(&root, "normal");
         let route = seed_rex_route(&server);
         let old_transport = rex_transport("agent-old", "rex-server", "rex-session", "shared-block");
         let new_transport = rex_transport("agent-new", "rex-server", "rex-session", "shared-block");
@@ -1922,7 +2045,6 @@ fn rex_current_owner_outcomes_survive_replacement_and_retry() {
             assert_eq!(message.body, "DETAIL-old", "{label}");
             assert_eq!(message.state, "pending", "{label}");
             assert_eq!(message.wake_attempt_count, 1, "{label}");
-            assert!(state.receive_receipts.is_empty(), "{label}");
             (
                 state
                     .notification_delivery_accepted
@@ -1991,7 +2113,6 @@ fn rex_current_owner_outcomes_survive_replacement_and_retry() {
                 !state.mailbox_name_addresses.contains_key(&message_id),
                 "{label}"
             );
-            assert!(state.receive_receipts.is_empty(), "{label}");
             assert_eq!(
                 state
                     .notification_delivery_accepted
@@ -2034,7 +2155,7 @@ async fn rex_service_generation_change_refreshes_same_block_and_retries_once() {
     Arc::get_mut(&mut server)
         .expect("unique test server")
         .appserver_notification_sink = default_appserver_notification_sink();
-    let fixture = RexCliFixture::new(&root, "service_changed");
+    let fixture = RexCliFixture::new(&root, "service_changed").with_codex_foreground();
     let route = seed_rex_route(&server);
     let stale = rex_transport(
         "agent-a",
@@ -2045,6 +2166,7 @@ async fn rex_service_generation_change_refreshes_same_block_and_retries_once() {
     register_rex_worker(&server, "a", &stale);
     seed_current_rex_bindings(&server, &route, &[("Alice", "a", &stale)]);
     persist_rex_worker_binding(&server, &route, "a", &stale);
+    mark_agent_offline(&server, "a", stale.session_id.as_deref().unwrap());
 
     let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
     let send_root = root.clone();
@@ -2124,6 +2246,39 @@ async fn rex_service_generation_change_refreshes_same_block_and_retries_once() {
             .count()
             >= 3
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rex_routed_send_refuses_non_agent_foreground_with_online_monitor() {
+    let _env_guard = crate::scope::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+    let (mut server, root) = test_server();
+    Arc::get_mut(&mut server).unwrap().appserver_notification_sink =
+        default_appserver_notification_sink();
+    let fixture = RexCliFixture::new(&root, "normal");
+    let route = seed_rex_route(&server);
+    let transport = rex_transport(
+        "agent-a",
+        "unix:///tmp/rex-fixture.sock",
+        "session:11111111-1111-1111-1111-111111111111",
+        "block:22222222-2222-2222-2222-222222222222",
+    );
+    register_rex_worker(&server, "a", &transport);
+    seed_current_rex_bindings(&server, &route, &[("Alice", "a", &transport)]);
+    persist_rex_worker_binding(&server, &route, "a", &transport);
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    let send_root = root.clone();
+    let response = tokio::task::spawn_blocking(move || manager_send_to_rex(&manager, &send_root, "a"))
+        .await.unwrap();
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["notification"], "queued-recipient-offline");
+    let calls = fixture.calls();
+    assert!(calls.iter().any(|call| rex_method(call) == "com.superlogical.terminal.process"));
+    assert!(!calls.iter().any(|call| matches!(
+        rex_method(call).as_str(), "com.superlogical.terminal.write" | "send-key"
+    )));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2318,8 +2473,8 @@ async fn rex_unknown_write_outcome_is_not_retried_by_timer_owner() {
         let state = server.state.lock().unwrap();
         let message = &state.msgs["timer-write-unknown"];
         assert_eq!(message.state, "pending");
-        assert_eq!(message.wake_attempt_count, 2);
-        assert!(message.retry_attempted);
+        assert_eq!(message.wake_attempt_count, 1);
+        assert!(!message.retry_attempted);
         assert!(!state
             .notification_delivery_accepted
             .contains_key("timer-write-unknown"));
@@ -2420,7 +2575,12 @@ async fn rex_status_error_with_service_marker_but_no_typed_change_is_not_recover
             .await
             .unwrap();
 
-    assert!(!response.ok, "{response:?}");
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["notification"], "queued-recipient-offline");
+    assert!(response.data["notification_error"]
+        .as_str()
+        .unwrap()
+        .starts_with("RECIPIENT_NOT_ONLINE:"));
     assert!(
         response.data.get("rex_binding_refresh").is_none(),
         "a non-generation status error must not enter service refresh: {response:?}"
@@ -2432,15 +2592,13 @@ async fn rex_status_error_with_service_marker_but_no_typed_change_is_not_recover
     let message_id = response.data["msg_id"].as_str().unwrap();
     {
         let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
-        let failure = &state.notification_delivery_failures[message_id];
-        assert!(failure.error.contains("REX_SERVICE_CHANGED"), "{failure:?}");
-        assert!(
-            failure.retryable,
-            "before-write failure remains ordinary known-not-delivered: {failure:?}"
-        );
+        assert_eq!(state.msgs[message_id].wake_attempt_count, 0);
+        assert!(!state
+            .notification_delivery_failures
+            .contains_key(message_id));
     }
     let calls = fixture.calls();
+    assert!(calls.iter().any(|call| rex_method(call) == "server.status"));
     assert!(calls
         .iter()
         .all(|call| rex_method(call) != "com.superlogical.terminal.write"));
@@ -2496,17 +2654,31 @@ fn rex_sink_uses_only_the_selected_rex_arm() {
 fn native_notifications_do_not_wait_for_batch_window() {
     for kind in [TransportKind::Dsh, TransportKind::DesktopBridge] {
         let (server, root) = test_server();
+        let gateway = (kind == TransportKind::Dsh).then(|| {
+            crate::server::dsh_channel_tests::registration_gateway(
+                "native-notification",
+                &root,
+                None,
+                crate::server::dsh_channel_tests::wake_reply,
+            )
+        });
         let subscription = register_and_subscribe(&server, "recipient");
         {
             let mut state = server.state.lock().unwrap();
-            state
+            let transport = state
                 .workers
                 .get_mut("recipient")
                 .unwrap()
                 .transport
                 .as_mut()
-                .unwrap()
-                .kind = kind.clone();
+                .unwrap();
+            transport.kind = kind.clone();
+            if let Some(gateway) = &gateway {
+                transport.endpoint = Some(gateway.endpoint());
+                transport.namespace = Some("rt-1".into());
+                transport.session_id = Some("ses-1".into());
+                transport.thread_id = Some("ses-1".into());
+            }
             state
                 .notification_subscriptions
                 .get_mut(&subscription)
@@ -2526,17 +2698,31 @@ fn native_notifications_do_not_wait_for_batch_window() {
 fn native_notifications_do_not_wait_for_previous_consumption() {
     for kind in [TransportKind::Dsh, TransportKind::DesktopBridge] {
         let (server, root) = test_server();
+        let gateway = (kind == TransportKind::Dsh).then(|| {
+            crate::server::dsh_channel_tests::registration_gateway(
+                "native-notification-unconsumed",
+                &root,
+                None,
+                crate::server::dsh_channel_tests::wake_reply,
+            )
+        });
         let subscription = register_and_subscribe(&server, "recipient");
         {
             let mut state = server.state.lock().unwrap();
-            state
+            let transport = state
                 .workers
                 .get_mut("recipient")
                 .unwrap()
                 .transport
                 .as_mut()
-                .unwrap()
-                .kind = kind.clone();
+                .unwrap();
+            transport.kind = kind.clone();
+            if let Some(gateway) = &gateway {
+                transport.endpoint = Some(gateway.endpoint());
+                transport.namespace = Some("rt-1".into());
+                transport.session_id = Some("ses-1".into());
+                transport.thread_id = Some("ses-1".into());
+            }
             state
                 .notification_subscriptions
                 .get_mut(&subscription)
@@ -2751,7 +2937,7 @@ fn automatic_notification_uses_immediate_without_sender_thread() {
 }
 
 #[test]
-fn queued_tmux_wake_drains_through_the_existing_timer_without_consumption() {
+fn queued_tmux_wake_stays_silent_while_recipient_offline() {
     let (mut server, root) = test_server();
     let subscription_id = register_and_subscribe(&server, "recipient");
     let now = now_ms();
@@ -2807,14 +2993,12 @@ fn queued_tmux_wake_drains_through_the_existing_timer_without_consumption() {
     let attempt =
         attempt_notification_detailed_with_at(&server, "deferred-tmux", &subscription_id, now);
     assert!(
-        matches!(attempt, NotificationAttempt::Deferred(_)),
-        "{attempt:?}"
+        matches!(
+            &attempt,
+            NotificationAttempt::NotAttempted(error) if error.starts_with("RECIPIENT_NOT_ONLINE:")
+        ),
+        "an absent pane is offline and must not receive queued input: {attempt:?}"
     );
-    let response =
-        notification_send_response(json!({"msg_id":"deferred-tmux"}), true, "tmux", &attempt);
-    assert!(response.ok);
-    assert_eq!(response.data["notification"], "queued");
-    assert_eq!(response.data["consumed"], false);
     assert!(calls.lock().unwrap().is_empty());
     {
         let state = server.state.lock().unwrap();
@@ -2831,15 +3015,15 @@ fn queued_tmux_wake_drains_through_the_existing_timer_without_consumption() {
         now + server.config.notifications.delay_ms("direct-message"),
         &|_| false,
     );
-    assert_eq!(
-        *calls.lock().unwrap(),
-        vec![DAEMON_LIVE_CLOSURE_MODE.to_string()]
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "the timer must not submit to an offline pane"
     );
     let state = server.state.lock().unwrap();
     assert_eq!(state.delivery_modes["deferred-tmux"], "queued");
     assert_eq!(state.msgs["deferred-tmux"].state, "pending");
-    assert_eq!(state.msgs["deferred-tmux"].wake_attempt_count, 1);
-    assert!(state
+    assert_eq!(state.msgs["deferred-tmux"].wake_attempt_count, 0);
+    assert!(!state
         .notification_delivery_accepted
         .contains_key("deferred-tmux"));
     drop(state);
@@ -2850,10 +3034,89 @@ fn queued_tmux_wake_drains_through_the_existing_timer_without_consumption() {
     );
     assert_eq!(
         calls.lock().unwrap().len(),
-        1,
-        "accepted queued wake must not be submitted again"
+        0,
+        "offline queued wake must stay silent across timer ticks"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn offline_recipient_never_receives_transport_input() {
+    let (mut server, root) = test_server();
+    let submitted = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let submitted = Arc::clone(&submitted);
+        Arc::get_mut(&mut server)
+            .expect("unique test server")
+            .appserver_notification_sink = Arc::new(move |_transport, _, _, message_id, _, _| {
+            submitted.lock().unwrap().push(message_id.to_string());
+            Ok(serde_json::json!({"accepted": true}))
+        });
+    }
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_thread_status = Arc::new(|_, thread_id| {
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": { "type": "systemError" },
+                "canAcceptDirectInput": false
+            }
+        }))
+    });
+    let server = Arc::new(server);
+    let subscription = register_and_subscribe(&server, "offline-peer");
+    {
+        let mut state = server.state.lock().unwrap();
+        let worker = state.workers.get_mut("offline-peer").unwrap();
+        worker.transport = Some(rex_transport(
+            "session-offline-peer",
+            "test-server",
+            "test-session",
+            "test-block",
+        ));
+        state
+            .notification_subscriptions
+            .get_mut(&subscription)
+            .unwrap()
+            .method = "rex".into();
+        state
+            .notification_subscriptions
+            .get_mut(&subscription)
+            .unwrap()
+            .target = "test-session/test-block".into();
+    }
+    mark_agent_offline(&server, "offline-peer", "session-offline-peer");
+    queue_message(
+        &server,
+        "offline-peer",
+        &subscription,
+        "offline-message",
+        now_ms(),
+    );
+
+    let attempt =
+        attempt_notification_detailed_with_at(&server, "offline-message", &subscription, now_ms());
+    assert!(
+        matches!(
+            attempt,
+            NotificationAttempt::NotAttempted(ref error)
+                if error.starts_with("RECIPIENT_NOT_ONLINE:")
+        ),
+        "offline recipient must be refused before transport input: {attempt:?}"
+    );
+    assert!(
+        submitted.lock().unwrap().is_empty(),
+        "an offline agent must never receive shell or thread input"
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["offline-message"].state, "pending");
+    assert_eq!(state.msgs["offline-message"].wake_attempt_count, 0);
+    assert!(!state
+        .notification_delivery_accepted
+        .contains_key("offline-message"));
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]

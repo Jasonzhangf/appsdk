@@ -3,10 +3,9 @@
 //! These exercise current State serialization without reconstructing history.
 
 use crate::ceo::{CeoBootstrapRecord, CeoGrant};
-use crate::proto::{ReplyPolicy, Resp};
+use crate::proto::Resp;
 use crate::server::state::{
-    responsibility_preflight, Event, ReplyObligation, ResponsibilityFence, ResponsibilitySnapshot,
-    State,
+    responsibility_preflight, Event, ResponsibilityFence, ResponsibilitySnapshot, State,
 };
 use crate::server::{peer_tests, ProjectRuntimeManager};
 use serde_json::json;
@@ -88,22 +87,6 @@ fn bootstrap_endpoint_proof_requires_the_approved_server_and_session() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn cross_project_obligation() -> ReplyObligation {
-    ReplyObligation {
-        message_id: "m-1".into(),
-        project: "/tmp/target-project".into(),
-        from_project: Some("/tmp/origin-project".into()),
-        from_ceo: true,
-        from_worker_id: "ceo".into(),
-        from_name: Some("ceo".into()),
-        recipient_worker_id: "master".into(),
-        recipient_name: Some("master".into()),
-        policy: ReplyPolicy::Required,
-        created_ms: 30,
-        reminded_idle_episode: false,
-    }
-}
-
 #[test]
 fn ceo_grant_set_replace_clear_survives_current_state_round_trip() {
     let mut state = State::default();
@@ -150,7 +133,7 @@ fn ceo_grant_set_replace_clear_survives_current_state_round_trip() {
 }
 
 #[test]
-fn ceo_bootstrap_phase_and_cross_project_reply_survive_current_state_round_trip() {
+fn ceo_bootstrap_phase_survives_current_state_round_trip() {
     let mut state = State::default();
     state.apply(&Event::CeoBootstrapSet {
         record: bootstrap("op-1", "prepared"),
@@ -163,41 +146,11 @@ fn ceo_bootstrap_phase_and_cross_project_reply_survive_current_state_round_trip(
             ..bootstrap("op-1", "launched")
         },
     });
-    state.apply(&Event::ReplyObligationSet {
-        obligation: cross_project_obligation(),
-    });
-
     let replayed = current_state_round_trip(&state);
     let record = replayed.ceo_bootstraps.get("op-1").unwrap();
     assert_eq!(record.phase, "launched");
     assert_eq!(record.pane_id.as_deref(), Some("%7"));
     assert_eq!(record.updated_ms, 20);
-    let obligation = replayed.reply_obligations.get("m-1").unwrap();
-    assert_eq!(
-        obligation.from_project.as_deref(),
-        Some("/tmp/origin-project")
-    );
-}
-
-#[test]
-fn legacy_reply_obligation_without_from_project_decodes() {
-    let legacy = serde_json::json!({
-        "message_id": "m-1",
-        "project": "/tmp/target-project",
-        "from_worker_id": "ceo",
-        "recipient_worker_id": "master",
-        "policy": "required",
-        "created_ms": 30
-    });
-    let obligation: ReplyObligation = serde_json::from_value(legacy).unwrap();
-    assert!(obligation.from_project.is_none());
-
-    let wire = serde_json::to_value(&obligation).unwrap();
-    assert!(wire.get("from_project").is_none());
-
-    let mut state = State::default();
-    state.apply(&Event::ReplyObligationSet { obligation });
-    assert!(state.reply_obligations["m-1"].from_project.is_none());
 }
 
 #[test]
@@ -432,10 +385,6 @@ fn ceo_handler_durable_marker_failure_records_progress_without_clearing_receipt(
     assert_eq!(response.data["msg_id"], "m-durable", "{}", response.data);
     assert_eq!(response.data["recorded"], true, "{}", response.data);
     assert_eq!(response.data["revision"], 1, "{}", response.data);
-    assert!(
-        server.state.lock().unwrap().reply_obligations.is_empty(),
-        "recording progress alone must never create or clear a reply obligation"
-    );
 }
 
 #[test]

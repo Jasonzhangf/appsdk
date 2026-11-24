@@ -186,11 +186,20 @@ fn expired_messages_are_removed_and_current_payloads_and_tasks_survive_reload() 
     let old_id = "m-old".to_string();
     let fresh_id = "m-fresh".to_string();
     let task = TaskRec {
-        id: "retained-task".into(), owner: "peer".into(), created_by: "sender".into(),
-        feature_id: Some("current-retention".into()), worktree_path: Some("/task/retention".into()),
-        branch: Some("codex/current-retention".into()), base_commit: Some("retention-base".into()),
-        priority: "p1".into(), status: "working".into(), next_step: Some("continue current task".into()),
-        wait: None, isolation_mode: None, created_ms: now - 100, updated_ms: now - 50,
+        id: "retained-task".into(),
+        owner: "peer".into(),
+        created_by: "sender".into(),
+        feature_id: Some("current-retention".into()),
+        worktree_path: Some("/task/retention".into()),
+        branch: Some("codex/current-retention".into()),
+        base_commit: Some("retention-base".into()),
+        priority: "p1".into(),
+        status: "working".into(),
+        next_step: Some("continue current task".into()),
+        wait: None,
+        isolation_mode: None,
+        created_ms: now - 100,
+        updated_ms: now - 50,
     };
     server.commit(&[
         Event::TaskCreated { task: task.clone() },
@@ -244,8 +253,14 @@ fn expired_messages_are_removed_and_current_payloads_and_tasks_survive_reload() 
     let loaded = current_state::load(&server.state_path, false).unwrap();
     assert!(!loaded.msgs.contains_key(&old_id));
     assert!(!loaded.delivery_source_threads.contains_key(&old_id));
-    assert_eq!(serde_json::to_value(&loaded.msgs[&fresh_id]).unwrap(), serde_json::to_value(fresh).unwrap());
-    assert_eq!(serde_json::to_value(&loaded.tasks[&task.id]).unwrap(), serde_json::to_value(&task).unwrap());
+    assert_eq!(
+        serde_json::to_value(&loaded.msgs[&fresh_id]).unwrap(),
+        serde_json::to_value(fresh).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&loaded.tasks[&task.id]).unwrap(),
+        serde_json::to_value(&task).unwrap()
+    );
     assert_eq!(
         loaded.workers["peer"]
             .transport
@@ -282,6 +297,30 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
 
     server.commit(&[Event::Sent {
         msg: Message {
+            id: "m-old-unread".into(),
+            from: "peer".into(),
+            to: "peer".into(),
+            mtype: "notify".into(),
+            subject: Some("unread".into()),
+            body: "unread".into(),
+            in_reply_to: None,
+            created_ms: now - 8 * 86_400_000,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        },
+    }]);
+    assert_eq!(purge_expired_storage(&server, now), 0);
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .msgs
+        .contains_key("m-old-unread"));
+
+    server.commit(&[Event::Sent {
+        msg: Message {
             id: "m-old-frozen".into(),
             from: "peer".into(),
             to: "peer".into(),
@@ -299,7 +338,9 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
     // Keep the retained messages while seeding an already-pending reset.
     {
         let mut state = server.state.lock().unwrap();
-        state.pending_project_resets.insert(root.display().to_string(), true);
+        state
+            .pending_project_resets
+            .insert(root.display().to_string(), true);
         current_state::save(&server.state_path, &state).unwrap();
     }
     assert_eq!(purge_expired_storage(&server, now), 0);
@@ -309,12 +350,15 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
         .unwrap()
         .msgs
         .contains_key("m-old-frozen"));
-    assert!(current_state::load(&server.state_path, false).unwrap().msgs.contains_key("m-old-frozen"));
+    assert!(current_state::load(&server.state_path, false)
+        .unwrap()
+        .msgs
+        .contains_key("m-old-frozen"));
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn reply_obligation_retains_original_until_correlated_reply_clears_it() {
+fn retention_removes_consumed_body() {
     let (server, root) = test_server();
     let now = now_ms();
     let created_ms = now - 8 * 86_400_000;
@@ -325,7 +369,7 @@ fn reply_obligation_retains_original_until_correlated_reply_clears_it() {
                 from: "sender".into(),
                 to: "recipient".into(),
                 mtype: "notify".into(),
-                subject: Some("reply required".into()),
+                subject: Some("read notification".into()),
                 body: "Original requirement must remain readable".into(),
                 in_reply_to: None,
                 created_ms,
@@ -335,28 +379,10 @@ fn reply_obligation_retains_original_until_correlated_reply_clears_it() {
                 retry_attempted: false,
             },
         },
-        Event::ReplyObligationSet {
-            obligation: state::ReplyObligation {
-                message_id: "retained-reply-request".into(),
-                project: root.display().to_string(),
-                from_project: None,
-                from_ceo: false,
-                from_worker_id: "sender".into(),
-                from_name: None,
-                recipient_worker_id: "recipient".into(),
-                recipient_name: None,
-                policy: crate::proto::ReplyPolicy::Required,
-                created_ms,
-                reminded_idle_episode: false,
-            },
-        },
     ]);
-    assert_eq!(purge_expired_storage(&server, now), 0);
-    assert!(server.state.lock().unwrap().msgs.contains_key("retained-reply-request"));
-    server.commit(&[Event::ReplyObligationCleared {
-        message_id: "retained-reply-request".into(),
-    }]);
     assert_eq!(purge_expired_storage(&server, now), 1);
+    let state = server.state.lock().unwrap();
+    assert!(!state.msgs.contains_key("retained-reply-request"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -502,7 +528,10 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
     register(&server, "peer", "%peer");
     assert!(create_task(&server, "peer", "task", "feature").ok);
     let worktree = candidate_worktree(&root, "task");
-    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    git_ok(
+        &worktree,
+        &["commit", "--allow-empty", "-q", "-m", "candidate"],
+    );
     let candidate = current_head(&worktree);
     assert!(
         handle_task_update(

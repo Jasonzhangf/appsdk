@@ -23,7 +23,7 @@ mod subagent;
 
 use clap::Parser;
 use identity::{Identity, RuntimeIdentity};
-use proto::{ReplyPolicy, Req, Resp, TransportKind};
+use proto::{Req, Resp, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -678,7 +678,6 @@ fn address_send_request(
     body: impl Into<String>,
     in_reply_to: Option<crate::proto::MessageRef>,
     delivery: impl Into<String>,
-    reply_policy: Option<ReplyPolicy>,
     target_session: Option<String>,
 ) -> Req {
     Req::AddressSend {
@@ -692,7 +691,6 @@ fn address_send_request(
         body: body.into(),
         in_reply_to,
         delivery: delivery.into(),
-        reply_policy,
         target_session,
     }
 }
@@ -718,11 +716,10 @@ fn send_cross_project(
         worker_id: ident.worker_id.clone(),
         token: ident.token.clone(),
         command: Some(command),
-        to: target.worker_id.clone(),
+        to: target.address.clone(),
         subject,
         body,
         in_reply_to,
-        reply_policy: None,
         target_session: None,
     };
     let context = cli_project_context(std::path::Path::new(&target.project_root))?;
@@ -1420,7 +1417,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                             subject,
                             body: body.join(" "),
                             in_reply_to: None,
-                            reply_policy: None,
                             target_session: None,
                         },
                         Some(cli_project_context(&target_scope.root)?),
@@ -1450,7 +1446,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Ceo { command } => main_ceo::run(command),
-        Cmd::Snapshot { target_id, lines, capture } => {
+        Cmd::Snapshot {
+            target_id,
+            lines,
+            capture,
+        } => {
             let scope = Scope::resolve()?;
             let ident = me(&scope)?;
             let v: serde_json::Value = call_project(
@@ -1487,7 +1487,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     out(&v);
                     Ok(())
                 }
-                WorkerCmd::Snapshot { target_id, lines, capture } => {
+                WorkerCmd::Snapshot {
+                    target_id,
+                    lines,
+                    capture,
+                } => {
                     let ident = me(&scope)?;
                     let v: serde_json::Value = call_project(
                         &scope,
@@ -1674,8 +1678,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             operation_id,
             delivery,
             channel_envelope,
-            reply_required,
-            reply_on_completion,
             body,
         } => {
             let mut body_words = body;
@@ -1725,9 +1727,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         "ANONYMOUS_REPLY_REJECTED: an anonymous sender cannot use an original channel reply route"
                     );
                 }
-                if reply_required || reply_on_completion {
-                    anyhow::bail!("anonymous send cannot establish reply obligations");
-                }
                 if let Some(raw) = channel_envelope {
                     let envelope: crate::server::channel_envelope::ChannelEnvelope =
                         serde_json::from_str(&raw).map_err(|error| {
@@ -1760,7 +1759,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         body,
                         in_reply_to,
                         delivery,
-                        reply_policy: None,
                         target_session,
                     },
                     Some(cli_project_context(&scope.root)?),
@@ -1769,13 +1767,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 return Ok(());
             }
             let ident = me(&scope)?;
-            let reply_policy = if reply_required {
-                Some(ReplyPolicy::Required)
-            } else if reply_on_completion {
-                Some(ReplyPolicy::OnCompletion)
-            } else {
-                None
-            };
             let reply_input = parse_reply_input(in_reply_to)?;
             if target.eq_ignore_ascii_case("ceo") {
                 let legacy_reply = match reply_input {
@@ -1799,11 +1790,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     // until the shared wire carries a typed-or-legacy reply input.
                     let resolved = resolve_send_target(&scope, &target)?;
                     if let Some(cross) = resolved.cross_project {
-                        if reply_policy.is_some() {
-                            anyhow::bail!(
-                                "SEND_REPLY_POLICY_UNSUPPORTED: cross-project send has no reply obligation; ask the target project's master to assign the work"
-                            );
-                        }
                         if target_session.is_some() {
                             anyhow::bail!(
                                 "SEND_TARGET_SESSION_UNSUPPORTED: cross-project send cannot pin a local session"
@@ -1833,7 +1819,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                             body,
                             in_reply_to: Some(reply),
                             delivery,
-                            reply_policy,
                             target_session,
                         },
                     )?;
@@ -1861,7 +1846,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 body,
                 typed_reply,
                 delivery,
-                reply_policy,
                 target_session,
             );
             let v: serde_json::Value = call_project(&scope, &ident, &request)?;
@@ -2034,7 +2018,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             approve_grant,
             provide,
             query,
-            recover_communication,
         } => {
             // Validate and parse the workflow mutation before any bootstrap or
             // identity write. A malformed spec or conflicting flag must leave
@@ -2074,7 +2057,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 approve_grant.as_deref(),
                 provide.as_deref(),
                 query,
-                recover_communication,
             );
             match result {
                 Ok(value) => {
@@ -2474,7 +2456,6 @@ mod federation_entry_tests {
             "body",
             Some(reply.clone()),
             "immediate",
-            Some(ReplyPolicy::Required),
             Some("session-1".to_owned()),
         );
         let Req::AddressSend {
@@ -2485,7 +2466,6 @@ mod federation_entry_tests {
             body,
             in_reply_to,
             delivery,
-            reply_policy,
             target_session,
             ..
         } = request
@@ -2502,7 +2482,6 @@ mod federation_entry_tests {
         assert_eq!(body, "body");
         assert_eq!(in_reply_to, Some(reply));
         assert_eq!(delivery, "immediate");
-        assert_eq!(reply_policy, Some(ReplyPolicy::Required));
         assert_eq!(target_session, Some("session-1".to_owned()));
     }
 

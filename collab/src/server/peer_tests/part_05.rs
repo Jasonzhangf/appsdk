@@ -317,7 +317,7 @@ fn cross_project_send_queues_to_a_live_tmux_master_without_route_projection() {
 }
 
 #[test]
-fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
+fn cross_project_send_keeps_unread_mail_for_a_missing_tmux_endpoint() {
     let (server, root) = test_server();
     register(&server, "target-master", "%target-master");
     promote_master(&server, "target-master", "user approved target-master");
@@ -338,25 +338,90 @@ fn cross_project_send_rejects_a_definitively_missing_tmux_endpoint() {
         );
     }
 
-    let denied = super::handle_cross_project_send(
+    let response = super::handle_cross_project_send(
         &server,
         "appsdk-master",
         "/tmp/appsdk".into(),
         Some("thread-appsdk-master".into()),
         "target-master",
         "feature",
-        "must reject a dead address",
+        "keep the message for the current name",
         None,
     );
-    assert!(!denied.ok);
-    assert!(
-        denied
-            .error
-            .unwrap_or_default()
-            .contains("reachable target binding"),
-        "the reject must name the dead address, not master authority"
-    );
+    let facts = {
+        let state = server.state.lock().unwrap();
+        state
+            .inbox_of("target-master")
+            .into_iter()
+            .map(|message| {
+                (
+                    message.id.clone(),
+                    message.wake_attempt_count,
+                    state.mailbox_name_addresses.contains_key(&message.id),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     std::fs::remove_dir_all(root).unwrap();
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["notification"], "queued-recipient-offline");
+    assert_eq!(
+        facts,
+        vec![(response.data["msg_id"].as_str().unwrap().to_owned(), 0, true)]
+    );
+}
+
+#[test]
+fn cross_project_send_reports_detached_tmux_offline_without_a_subscription() {
+    crate::client::adapters::tmux::tests::with_detached_foreground_agent(|mut endpoint| {
+        let (mut server, root) = test_server();
+        let sink_calls = Arc::new(AtomicU64::new(0));
+        let called = sink_calls.clone();
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
+            called.fetch_add(1, Ordering::Relaxed);
+            Ok(serde_json::json!({"accepted": true}))
+        });
+        endpoint.codex_session_id = Some("detached-recipient-session".into());
+        endpoint.codex_thread_id = Some("detached-recipient-thread".into());
+        assert!(register_tmux(&server, "recipient", endpoint).ok);
+        server.state.lock().unwrap().notification_subscriptions.clear();
+        let source_root = root.with_extension("source");
+        std::fs::create_dir_all(source_root.join(".agent-collab/server")).unwrap();
+        let app = AppServerId::new("tui-default").unwrap();
+        let source_context = ProjectContext::for_registered_root_with_app(&source_root, app.clone()).unwrap();
+        let target_context = ProjectContext::for_registered_root_with_app(&root, app.clone()).unwrap();
+        let server = Arc::new(server);
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        manager.install_runtime(&ProjectRuntimeManager::route_key(&target_context), server.clone(), None);
+        let source = super::host_route_registry_tests::committed_native_scope_fixture(
+            &manager, &source_context, "source", "token-source", "thread-source",
+        );
+        let command = super::host_route_registry_tests::cross_project_command(
+            &source, &source_root, "source", app.as_str(), "detached-tmux",
+        );
+        let (_, response) = manager.dispatch_sync(
+            Some(target_context),
+            Req::CrossProjectSend {
+                from: "source".into(), from_project: source_root.display().to_string(),
+                worker_id: "source".into(), token: "token-source".into(),
+                command: Some(command), to: "recipient".into(),
+                subject: "detached pane".into(), body: "keep this mail unread".into(),
+                in_reply_to: None, target_session: None,
+            },
+        );
+        let state = server.state.lock().unwrap();
+        let unread = state.inbox_of("recipient");
+        assert_eq!(unread.len(), 1);
+        assert!(state.mailbox_name_addresses.contains_key(&unread[0].id));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(source_root).unwrap();
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data["durable"], true);
+        assert_eq!(response.data["notification"], "queued-recipient-offline");
+        assert_eq!(sink_calls.load(Ordering::Relaxed), 0);
+    });
 }
 
 fn register_appserver(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
@@ -689,7 +754,7 @@ fn daemon_maintenance_replaces_a_persisted_appserver_default_wake_lease() {
 #[test]
 fn explicit_cancelled_default_lease_is_repaired_by_registration() {
     let (server, root) = test_server();
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_online(&server, "peer", "%peer").ok);
 
     server.commit(&[Event::NotificationSuppressed {
         subscription_id: "sub-default-direct-message-peer".into(),
@@ -731,7 +796,7 @@ fn explicit_cancelled_default_lease_is_repaired_by_registration() {
 #[test]
 fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules() {
     let (server, root) = test_server();
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_online(&server, "peer", "%peer").ok);
 
     server.commit(&[Event::NotificationSuppressed {
         subscription_id: "sub-default-direct-message-peer".into(),
@@ -757,7 +822,7 @@ fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules
             "a reason-less legacy cancellation must be recoverable: {events:?}"
         );
     }
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_online(&server, "peer", "%peer").ok);
     let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
     server.commit(&[Event::NameResolutionCommitted {
         project_scope: project_scope.as_str().to_owned(),
@@ -805,7 +870,7 @@ fn historical_cancelled_default_lease_is_rearmed_without_reviving_goal_schedules
 fn pending_unattempted_direct_message_is_recovered_once_and_not_replayed() {
     let (mut server, root) = test_server();
     server.config.notifications.mode = "immediate".into();
-    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    assert!(register_online(&server, "peer", "thread-peer").ok);
     let default_id = "sub-default-direct-message-peer";
     let now = now_ms();
     server.commit(&[Event::NotificationSuppressed {
@@ -1052,7 +1117,7 @@ fn maintenance_tick_refreshes_idle_default_lease_without_recipient_context() {
     }
     let server = Arc::new(server);
 
-    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    assert!(register_online(&server, "peer", "thread-peer").ok);
     let now = now_ms();
     // Seed the daemon-owned default lease as armed but already past expiry.
     // The recipient has no later context, registration, or goal timer.
@@ -1159,7 +1224,7 @@ fn maintenance_tick_refreshes_default_lease_with_timers_disabled() {
     }
     let server = Arc::new(server);
 
-    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    assert!(register_online(&server, "peer", "thread-peer").ok);
     let now = now_ms();
     server.commit(&[Event::NotificationSubscribed {
         subscription: NotificationSubscription {
@@ -1258,7 +1323,7 @@ fn recovered_immediate_direct_message_reaches_automatic_attempt_once() {
     }
     let server = Arc::new(server);
 
-    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    assert!(register_online(&server, "peer", "thread-peer").ok);
     server.commit(&[Event::NotificationSuppressed {
         subscription_id: "sub-default-direct-message-peer".into(),
         status: "cancelled".into(),
@@ -1339,7 +1404,7 @@ fn recovered_immediate_direct_message_reaches_automatic_attempt_once() {
 #[test]
 fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
     let (server, root) = test_server();
-    assert!(register(&server, "peer", "%peer").ok);
+    assert!(register_online(&server, "peer", "%peer").ok);
     let project_scope = GlobalState::canonical_project_scope(&server.root).unwrap();
     server.commit(&[Event::NameResolutionCommitted {
         project_scope: project_scope.as_str().to_owned(),

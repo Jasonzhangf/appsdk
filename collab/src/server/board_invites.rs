@@ -15,18 +15,32 @@ fn current_board_invitation_for_message<'a>(
 }
 
 fn board_unstarted_resources(state: &State, task: &TaskRec) -> Result<(), Resp> {
-    if task.worktree_path.is_some() || task.branch.is_some() || task.base_commit.is_some()
-        || state.worktree_bindings.values().any(|binding| binding.task_id == task.id)
-        || state.task_lifecycle.contains_key(&task.id) || state.cleanup_receipts.contains_key(&task.id)
-        || state.pending_merges.contains_key(&task.id) || task.wait.is_some()
+    if task.worktree_path.is_some()
+        || task.branch.is_some()
+        || task.base_commit.is_some()
+        || state
+            .worktree_bindings
+            .values()
+            .any(|binding| binding.task_id == task.id)
+        || state.task_lifecycle.contains_key(&task.id)
+        || state.cleanup_receipts.contains_key(&task.id)
+        || state.pending_merges.contains_key(&task.id)
+        || task.wait.is_some()
     {
         return Err(Resp::err("BOARD_RESOURCE_OWNER_CONFLICT: unaccepted tasks must have no execution resources or evidence"));
     }
     Ok(())
 }
 
-fn board_invite(server: &Server, actor: String, token: String, id: String, to: String, expected_revision: u64) -> Resp {
-    board_invite_with_selection(server,actor,token,id,to,expected_revision,None,None)
+fn board_invite(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    to: String,
+    expected_revision: u64,
+) -> Resp {
+    board_invite_with_selection(server, actor, token, id, to, expected_revision, None, None)
 }
 
 pub(super) struct PreparedBoardInvitation {
@@ -115,6 +129,7 @@ fn board_task_response_with_control(
 struct PreparedBoardResponse {
     events: Vec<Event>,
     rejected: Option<Resp>,
+    notice: Option<BoardAutoNotice>,
 }
 
 pub(super) fn prepare_board_invitation_locked(
@@ -168,7 +183,13 @@ pub(super) fn prepare_board_invitation_locked(
     }
 
     let to = match control.current_for_name(&route.project_scope_id, &route.app_scope_id, to) {
-        Ok(Some(slot)) => slot.active_binding().unwrap().binding.agent_id.as_str().to_owned(),
+        Ok(Some(slot)) => slot
+            .active_binding()
+            .unwrap()
+            .binding
+            .agent_id
+            .as_str()
+            .to_owned(),
         Ok(None) => to.to_owned(),
         Err(error) => return Err(Resp::err(error)),
     };
@@ -199,6 +220,15 @@ pub(super) fn prepare_board_invitation_locked(
             "BOARD_STALE_BINDING: recipient runtime binding is not current",
         ));
     }
+    let inviter_name = if let Some(actor) = initiator {
+        Some(control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
+            .map_err(Resp::err)?
+            .ok_or_else(|| Resp::err("BOARD_INVITER_NAME_REQUIRED: inviter has no current name"))?
+            .identity_key.name.clone())
+    } else {
+        None
+    };
     let message_id = format!("board-invite-{}-{}", id, details.revision + 1);
     details.invitation = Some(crate::board::BoardInvitation {
         peer_id: to.clone(),
@@ -207,6 +237,7 @@ pub(super) fn prepare_board_invitation_locked(
         created_ms: now,
         original_status: Some(task.status.clone()),
         original_owner: Some(task.owner.clone()),
+        inviter_name,
         automatic_source,
     });
     details.last_response = None;
@@ -256,6 +287,13 @@ pub(super) fn prepare_board_invitation_locked(
             details,
         },
         Event::Sent { msg: message },
+        Event::MailboxNameAddressed {
+            message_id: message_id.clone(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: route.project_scope_id.as_str().to_owned(),
+                name: slot.identity_key.name.clone(),
+            },
+        },
         Event::DeliveryMode {
             msg_id: message_id.clone(),
             mode: "explicit-notification".into(),
@@ -346,7 +384,8 @@ fn stale_automatic_invitation_events(
     }
     details.invitation = None;
     details.revision += 1;
-    details.last_response = Some("automatic invitation invalidated by changed scheduling source".into());
+    details.last_response =
+        Some("automatic invitation invalidated by changed scheduling source".into());
     let now = now_ms();
     let mut events = Vec::new();
     if let Some(mut task) = state.tasks.get(task_id).cloned() {
@@ -371,17 +410,33 @@ fn stale_automatic_invitation_events(
     Ok(events)
 }
 
-fn board_invite_with_selection(server: &Server, actor: String, token: String, id: String, to: String,
-    expected_revision: u64,selection:Option<(String,String)>,long_horizon:Option<crate::board::LongHorizonTaskSpec>) -> Resp {
+fn board_invite_with_selection(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    to: String,
+    expected_revision: u64,
+    selection: Option<(String, String)>,
+    long_horizon: Option<crate::board::LongHorizonTaskSpec>,
+) -> Resp {
     // Resolve the name, binding and task revision under the same reducer lock.
     // Notification delivery happens after the durable invitation is committed.
     let mut state = server.state.lock().unwrap();
-    if let Err(error) = board_check_actor(&state, &actor, &token)
-        .and_then(|()| board_check_master_locked(server, &state, &actor)) { return error; }
-    let route = match server_route_scope(server, &state) { Ok(Some(route)) => route, _ => return Resp::err("project route is not ready") };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
+    let route = match server_route_scope(server, &state) {
+        Ok(Some(route)) => route,
+        _ => return Resp::err("project route is not ready"),
     };
+    if let Err(error) = board_check_actor(&state, &actor, &token).and_then(|()| {
+        board_check_master_or_task_architect_locked(server, &state, Some(&control), &id, &actor)
+    }) {
+        return error;
+    }
     let now = now_ms();
     let prepared = match prepare_board_invitation_locked(
         server,
@@ -400,20 +455,48 @@ fn board_invite_with_selection(server: &Server, actor: String, token: String, id
         Ok(prepared) => prepared,
         Err(error) => return error,
     };
-    if let Err(error) = server.commit_locked_checked_with_control(&mut state, &prepared.events, &control) {
+    if let Err(error) =
+        server.commit_locked_checked_with_control(&mut state, &prepared.events, &control)
+    {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
     let master = current_master_worker_id(&state, Some(&route));
-    let task = match state.tasks.get(&id).map(|task| board_task_view_with_master(&state, &control, task, Some(&actor), master.as_deref(), Some(&route))).transpose() {
-        Ok(task) => task.flatten(), Err(error) => return Resp::err(error),
+    let task = match state
+        .tasks
+        .get(&id)
+        .map(|task| {
+            board_task_view_with_master(
+                &state,
+                &control,
+                task,
+                Some(&actor),
+                master.as_deref(),
+                Some(&route),
+            )
+        })
+        .transpose()
+    {
+        Ok(task) => task.flatten(),
+        Err(error) => return Resp::err(error),
     };
     let data = json!({ "task": task, "msg_id": prepared.message_id, "consumed": false, "goal_schedule": task_goal_receipt(&state, &id) });
     drop(state);
     let attempt = match &prepared.subscription {
-        Some(subscription) => attempt_notification_detailed_with_at(server, &prepared.message_id, &subscription.id, now_ms()),
+        Some(subscription) => attempt_notification_detailed_with_at(
+            server,
+            &prepared.message_id,
+            &subscription.id,
+            now_ms(),
+        ),
         None => NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into()),
     };
-    notification_send_response(data, prepared.subscription.is_some(), prepared.method, &attempt)
+    let response = notification_send_response(
+        data,
+        prepared.subscription.is_some(),
+        prepared.method,
+        &attempt,
+    );
+    response
 }
 
 fn board_invite_current_map(
@@ -427,7 +510,7 @@ fn board_invite_current_map(
 ) -> Resp {
     let outcome = manager.with_current_state_response(server, |control, state| {
         board_current_map_actor_gate(state, &actor, &token, &id)?;
-        board_check_master_locked(server, state, &actor)?;
+        board_check_master_or_task_architect_locked(server, state, Some(control), &id, &actor)?;
         let route = server_route_scope(server, state)
             .map_err(Resp::err)?
             .ok_or_else(|| Resp::err("project route is not ready"))?;
@@ -485,15 +568,33 @@ fn board_invite_current_map(
     }
 }
 
-fn board_respond(server: &Server, actor: String, token: String, id: String, expected_revision: u64, accept: bool, reason: Option<String>) -> Resp {
-    if !accept && reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) { return Resp::err("decline requires a nonempty --reason"); }
+fn board_respond(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+    accept: bool,
+    reason: Option<String>,
+) -> Resp {
+    if !accept
+        && reason
+            .as_deref()
+            .is_none_or(|reason| reason.trim().is_empty())
+    {
+        return Resp::err("decline requires a nonempty --reason");
+    }
     // The authenticated actor and execution binding are the ownership
     // admission facts. Endpoint activity and `who` projection remain separate.
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     let mut state = server.state.lock().unwrap();
-    if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
+    if let Err(error) = board_check_actor(&state, &actor, &token) {
+        return error;
+    }
     let route = match server_route_scope(server, &state) {
         Ok(Some(route)) => route,
         _ => return Resp::err("project route is not ready"),
@@ -519,7 +620,19 @@ fn board_respond(server: &Server, actor: String, token: String, id: String, expe
     if let Some(response) = prepared.rejected {
         return response;
     }
-    board_task_response(server, &state, &id, &actor)
+    let mut response = board_task_response(server, &state, &id, &actor);
+    if let (Some(notice), Some(object)) =
+        (prepared.notice.as_ref(), response.data.as_object_mut())
+    {
+        object.insert("notification".into(), json!("auto-board-change"));
+        object.insert(
+            "notification_message_id".into(),
+            json!(notice.message_id),
+        );
+    }
+    drop(state);
+    deliver_board_auto_notice(server, &response);
+    response
 }
 
 fn board_respond_current_map(
@@ -537,20 +650,40 @@ fn board_respond_current_map(
         let route = server_route_scope(server, state)
             .map_err(Resp::err)?
             .ok_or_else(|| Resp::err("project route is not ready"))?;
-        let prepared =
-            prepare_board_response_locked(state, control, &route, &actor, &id, expected_revision, accept, reason)?;
+        let prepared = prepare_board_response_locked(
+            state,
+            control,
+            &route,
+            &actor,
+            &id,
+            expected_revision,
+            accept,
+            reason,
+        )?;
         server
             .commit_locked_checked_with_control(state, &prepared.events, control)
             .map_err(|error| Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")))?;
         if let Some(response) = prepared.rejected {
             return Ok(BoardManagerOutcome::Reply(response));
         }
-        Ok(BoardManagerOutcome::Reply(board_task_response_with_control(
-            server, state, control, &id, &actor,
-        )))
+        let mut response = board_task_response_with_control(server, state, control, &id, &actor);
+        if let (Some(notice), Some(object)) =
+            (prepared.notice.as_ref(), response.data.as_object_mut())
+        {
+            object.insert("notification".into(), json!("auto-board-change"));
+            object.insert(
+                "notification_message_id".into(),
+                json!(notice.message_id),
+            );
+        }
+        Ok(BoardManagerOutcome::Reply(response))
     });
     match outcome {
-        Ok(outcome) => outcome.finish(server),
+        Ok(outcome) => {
+            let response = outcome.finish(server);
+            deliver_board_auto_notice(server, &response);
+            response
+        }
         Err(response) => response,
     }
 }
@@ -571,22 +704,36 @@ fn board_reassignment_ready(
             ));
         }
     }
-    if let Some(phase) = state.ticket_phases.iter().filter(|phase| {
-        phase.task_id == task.id
-            && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
-            && phase.status != crate::server::ticket_state::TicketPhaseStatus::Revoked
-    }).max_by_key(|phase| phase.batch) {
+    if let Some(phase) = state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.task_id == task.id
+                && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
+                && phase.status != crate::server::ticket_state::TicketPhaseStatus::Revoked
+        })
+        .max_by_key(|phase| phase.batch)
+    {
         let dependency_satisfied = |dependency: &str| {
             state.tasks.get(dependency).is_some_and(|task| {
-                matches!(task.status.as_str(), "delivered" | "accepted" | "merged" | "closed")
+                matches!(
+                    task.status.as_str(),
+                    "delivered" | "accepted" | "merged" | "closed"
+                )
             }) || state.ticket_phases.iter().any(|candidate| {
                 candidate.task_id == dependency
                     && candidate.phase == crate::server::ticket_state::TicketPhaseKind::Execute
                     && candidate.status == crate::server::ticket_state::TicketPhaseStatus::Completed
             })
         };
-        if !phase.depends_on.iter().all(|dependency| dependency_satisfied(dependency)) {
-            return Err(Resp::err("BOARD_DEPENDENCY_UNSATISFIED: task dependencies are incomplete"));
+        if !phase
+            .depends_on
+            .iter()
+            .all(|dependency| dependency_satisfied(dependency))
+        {
+            return Err(Resp::err(
+                "BOARD_DEPENDENCY_UNSATISFIED: task dependencies are incomplete",
+            ));
         }
     }
     board_resume_gate(state, &task.owner, &task.id)
@@ -602,7 +749,11 @@ fn prepare_board_response_locked(
     accept: bool,
     reason: Option<String>,
 ) -> Result<PreparedBoardResponse, Resp> {
-    if !accept && reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) {
+    if !accept
+        && reason
+            .as_deref()
+            .is_none_or(|reason| reason.trim().is_empty())
+    {
         return Err(Resp::err("decline requires a nonempty --reason"));
     }
     let mut details = board_check_revision(state, id, expected_revision)?;
@@ -616,13 +767,16 @@ fn prepare_board_response_locked(
         return Ok(PreparedBoardResponse {
             events: stale_automatic_invitation_events(state, id, &invite)?,
             rejected: Some(Resp::err("BOARD_STALE_AUTOMATIC_INVITATION")),
+            notice: None,
         });
     }
     let Some(mut task) = state.tasks.get(id).cloned() else {
         return Err(Resp::err("task not found"));
     };
     if matches!(task.status.as_str(), "closed" | "cancelled") {
-        return Err(Resp::err("BOARD_TASK_CLOSED: closed tasks cannot accept invitations"));
+        return Err(Resp::err(
+            "BOARD_TASK_CLOSED: closed tasks cannot accept invitations",
+        ));
     }
     let first_invitation = matches!(task.status.as_str(), "pending" | "invited");
     if first_invitation {
@@ -635,7 +789,9 @@ fn prepare_board_response_locked(
             .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
             .map_err(Resp::err)?
             .ok_or_else(|| {
-                Resp::err("BOARD_TARGET_NAME_REQUIRED: named work requires a current recipient name")
+                Resp::err(
+                    "BOARD_TARGET_NAME_REQUIRED: named work requires a current recipient name",
+                )
             })?;
         let current = current_slot.active_binding().ok_or_else(|| {
             Resp::err("BOARD_TARGET_NAME_REQUIRED: named work requires a current recipient name")
@@ -686,117 +842,225 @@ fn prepare_board_response_locked(
                 ));
             }
         }
-        board_reassignment_ready(state, route, &task, &current_slot.identity_key.name, &policy)?;
-        events.push(Event::TaskAssignmentUpdated { assignment: name_state::TaskAssignment {
-            task_id: id.to_owned(), name: current_slot.identity_key.name.clone(), session_id: session.as_str().into(),
-            assignment_revision: state.task_assignment(id).map_or(1, |assignment| assignment.assignment_revision + 1),
-            reflow: None, updated_ms: now_ms(),
-        } });
-            // An invitation accept on an admitted ticket is the compat
-            // "specified receiver" entry. It must leave exactly one current
-            // execute phase owned by the accepting slot.
-            if state.board_details.get(id).is_some_and(|details| details.admitted) {
-                if let Some(phase) = state
-                    .ticket_phases
-                    .iter()
-                    .filter(|phase| {
-                        phase.task_id == id
-                            && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
-                            && phase.status
-                                != crate::server::ticket_state::TicketPhaseStatus::Revoked
-                    })
-                    .max_by_key(|phase| phase.batch)
-                    .cloned()
-                {
-                    if matches!(
-                        phase.status,
-                        crate::server::ticket_state::TicketPhaseStatus::Queued
-                            | crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
-                    ) {
-                        let mut claimed = phase;
-                        claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
-                        claimed.slot_name = Some(current_slot.identity_key.name.clone());
-                        claimed.binding_generation = current_slot.generation;
-                        claimed.attempt_generation = match claimed.attempt_generation.checked_add(1) {
-                            Some(attempt) => attempt,
-                            None => return Err(Resp::err_data(
+        board_reassignment_ready(
+            state,
+            route,
+            &task,
+            &current_slot.identity_key.name,
+            &policy,
+        )?;
+        events.push(Event::TaskAssignmentUpdated {
+            assignment: name_state::TaskAssignment {
+                task_id: id.to_owned(),
+                name: current_slot.identity_key.name.clone(),
+                session_id: session.as_str().into(),
+                assignment_revision: state
+                    .task_assignment(id)
+                    .map_or(1, |assignment| assignment.assignment_revision + 1),
+                reflow: None,
+                updated_ms: now_ms(),
+            },
+        });
+        // An invitation accept on an admitted ticket is the compat
+        // "specified receiver" entry. It must leave exactly one current
+        // execute phase owned by the accepting slot.
+        if state
+            .board_details
+            .get(id)
+            .is_some_and(|details| details.admitted)
+        {
+            if let Some(phase) = state
+                .ticket_phases
+                .iter()
+                .filter(|phase| {
+                    phase.task_id == id
+                        && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
+                        && phase.status != crate::server::ticket_state::TicketPhaseStatus::Revoked
+                })
+                .max_by_key(|phase| phase.batch)
+                .cloned()
+            {
+                if matches!(
+                    phase.status,
+                    crate::server::ticket_state::TicketPhaseStatus::Queued
+                        | crate::server::ticket_state::TicketPhaseStatus::WaitingAssignment
+                ) {
+                    let mut claimed = phase;
+                    claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
+                    claimed.slot_name = Some(current_slot.identity_key.name.clone());
+                    claimed.binding_generation = current_slot.generation;
+                    claimed.attempt_generation = match claimed.attempt_generation.checked_add(1) {
+                        Some(attempt) => attempt,
+                        None => {
+                            return Err(Resp::err_data(
                                 "TICKET_ATTEMPT_EXHAUSTED: cannot allocate a new claim attempt",
                                 json!({"task_id": id, "attempt": claimed.attempt_generation}),
-                            )),
-                        };
-                        claimed.wait_reason = None;
-                        events.push(Event::TicketPhaseRecorded { phase: claimed });
-                    } else if phase.status
-                        == crate::server::ticket_state::TicketPhaseStatus::Claimed
-                        && phase.slot_name.as_deref()
-                            != Some(current_slot.identity_key.name.as_str())
-                    {
-                        let batch = match phase.batch.checked_add(1) {
-                            Some(batch) => batch,
-                            None => return Err(Resp::err_data(
+                            ))
+                        }
+                    };
+                    claimed.wait_reason = None;
+                    events.push(Event::TicketPhaseRecorded { phase: claimed });
+                } else if phase.status == crate::server::ticket_state::TicketPhaseStatus::Claimed
+                    && phase.slot_name.as_deref() != Some(current_slot.identity_key.name.as_str())
+                {
+                    let batch = match phase.batch.checked_add(1) {
+                        Some(batch) => batch,
+                        None => {
+                            return Err(Resp::err_data(
                                 "TICKET_BATCH_EXHAUSTED: cannot allocate a reassignment batch",
                                 json!({"task_id": id, "batch": phase.batch}),
-                            )),
-                        };
-                        let attempt = match phase.attempt_generation.checked_add(1) {
+                            ))
+                        }
+                    };
+                    let attempt =
+                        match phase.attempt_generation.checked_add(1) {
                             Some(attempt) => attempt,
                             None => return Err(Resp::err_data(
                                 "TICKET_ATTEMPT_EXHAUSTED: cannot allocate a reassignment attempt",
                                 json!({"task_id": id, "attempt": phase.attempt_generation}),
                             )),
                         };
-                        let mut revoked = phase.clone();
-                        revoked.status = crate::server::ticket_state::TicketPhaseStatus::Revoked;
-                        let mut claimed = phase;
-                        claimed.batch = batch;
-                        claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
-                        claimed.slot_name = Some(current_slot.identity_key.name.clone());
-                        claimed.binding_generation = current_slot.generation;
-                        claimed.attempt_generation = attempt;
-                        claimed.wait_reason = None;
-                        claimed.result = None;
-                        events.extend([
-                            Event::TicketPhaseRecorded { phase: revoked },
-                            Event::TicketPhaseRecorded { phase: claimed },
-                        ]);
-                    }
+                    let mut revoked = phase.clone();
+                    revoked.status = crate::server::ticket_state::TicketPhaseStatus::Revoked;
+                    let mut claimed = phase;
+                    claimed.batch = batch;
+                    claimed.status = crate::server::ticket_state::TicketPhaseStatus::Claimed;
+                    claimed.slot_name = Some(current_slot.identity_key.name.clone());
+                    claimed.binding_generation = current_slot.generation;
+                    claimed.attempt_generation = attempt;
+                    claimed.wait_reason = None;
+                    claimed.result = None;
+                    events.extend([
+                        Event::TicketPhaseRecorded { phase: revoked },
+                        Event::TicketPhaseRecorded { phase: claimed },
+                    ]);
                 }
             }
-        events.extend(name_resolution::task_resource_owner_events(state, &task, actor));
+        }
+        events.extend(name_resolution::task_resource_owner_events(
+            state, &task, actor,
+        ));
         task.owner = actor.to_owned();
-        if first_invitation { task.status = "working".into(); }
+        if first_invitation {
+            task.status = "working".into();
+        }
         details.last_response = Some(format!("accepted by {actor}"));
     } else {
-        if first_invitation { task.status = "pending".into(); }
+        if first_invitation {
+            task.status = "pending".into();
+        }
         details.last_response = Some(format!("declined by {actor}: {}", reason.unwrap()));
     }
-    task.updated_ms = now_ms(); details.revision += 1; details.invitation = None;
-    events.extend([Event::TaskUpdated { task }, Event::BoardDetailsChanged { task_id: id.to_owned(), details }]);
-    if !accept { events.push(Event::Superseded { ids: vec![invite.message_id] }); }
+    task.updated_ms = now_ms();
+    details.revision += 1;
+    details.invitation = None;
+    let recipient = match invite.inviter_name.as_deref() {
+        Some(name) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, name),
+        None => match current_master_worker_id(state, Some(route)) {
+            Some(master) => control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &master),
+            None => Ok(None),
+        },
+    }
+    .map_err(Resp::err)?
+    .filter(|slot| slot.active_binding().is_some_and(|current| current.binding.agent_id.as_str() != actor));
+    let notice = if let Some(slot) = recipient {
+        let change = if accept { "invitation was accepted" } else { "invitation was declined" };
+        board_auto_notice_events_for_recipient(state, &task, actor, change, route, slot)?
+    } else {
+        BoardAutoNoticeEvents::default()
+    };
+    events.extend([
+        Event::TaskUpdated { task },
+        Event::BoardDetailsChanged {
+            task_id: id.to_owned(),
+            details,
+        },
+    ]);
+    if !accept {
+        events.push(Event::Superseded {
+            ids: vec![invite.message_id],
+        });
+    }
+    events.extend(notice.events);
     Ok(PreparedBoardResponse {
         events,
         rejected: None,
+        notice: notice.notice,
     })
 }
 
-fn board_withdraw(server: &Server, actor: String, token: String, id: String, expected_revision: u64, reason: String) -> Resp {
-    if reason.trim().is_empty() { return Resp::err("withdraw requires a nonempty reason"); }
+fn board_withdraw(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+    reason: String,
+) -> Resp {
+    if reason.trim().is_empty() {
+        return Resp::err("withdraw requires a nonempty reason");
+    }
     let mut state = server.state.lock().unwrap();
-    if let Err(error) = board_check_actor(&state, &actor, &token)
-        .and_then(|()| board_check_master_locked(server, &state, &actor)) { return error; }
-    let mut details = match board_check_revision(&state, &id, expected_revision) { Ok(details) => details, Err(error) => return error };
-    let Some(invite) = details.invitation.take() else { return Resp::err("task has no pending invitation"); };
-    let Some(mut task) = state.tasks.get(&id).cloned() else { return Resp::err("task not found"); };
+    if let Err(error) = board_check_actor(&state, &actor, &token).and_then(|()| {
+        board_check_master_or_task_architect_locked(server, &state, None, &id, &actor)
+    }) {
+        return error;
+    }
+    let mut details = match board_check_revision(&state, &id, expected_revision) {
+        Ok(details) => details,
+        Err(error) => return error,
+    };
+    let Some(invite) = details.invitation.take() else {
+        return Resp::err("task has no pending invitation");
+    };
+    let Some(mut task) = state.tasks.get(&id).cloned() else {
+        return Resp::err("task not found");
+    };
     let mut events = Vec::new();
     if task.status == "invited" {
-        task.status = "pending".into(); task.updated_ms = now_ms();
+        task.status = "pending".into();
+        task.updated_ms = now_ms();
+    }
+    details.revision += 1;
+    details.last_response = Some(format!("withdrawn by {actor}: {reason}"));
+    let notice = match board_auto_notice_events(
+        server,
+        &state,
+        None,
+        &task,
+        &actor,
+        "invitation was withdrawn",
+    ) {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
+    if task.status == "pending" {
         events.push(Event::TaskUpdated { task });
     }
-    details.revision += 1; details.last_response = Some(format!("withdrawn by {actor}: {reason}"));
     events.extend([
-        Event::BoardDetailsChanged { task_id: id.clone(), details },
-        Event::Superseded { ids: vec![invite.message_id] },
+        Event::BoardDetailsChanged {
+            task_id: id.clone(),
+            details,
+        },
+        Event::Superseded {
+            ids: vec![invite.message_id],
+        },
     ]);
-    if let Err(error) = server.commit_locked_checked(&mut state, &events) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    board_task_response(server, &state, &id, &actor)
+    events.extend(notice.events);
+    if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+        return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
+    }
+    let mut response = board_task_response(server, &state, &id, &actor);
+    if let (Some(notice), Some(object)) =
+        (notice.notice.as_ref(), response.data.as_object_mut())
+    {
+        object.insert("notification".into(), json!("auto-board-change"));
+        object.insert(
+            "notification_message_id".into(),
+            json!(notice.message_id),
+        );
+    }
+    drop(state);
+    deliver_board_auto_notice(server, &response);
+    response
 }

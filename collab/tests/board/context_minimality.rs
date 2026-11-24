@@ -83,14 +83,13 @@ fn context_hides_terminal_history_and_keeps_obligations() {
         ],
         THREAD_B,
     );
-    let request = fixture.run_public(
+    fixture.run_public(
         &[
             "sendmessage",
             "--to",
             peer_id,
             "--subject",
             "context-required-reply",
-            "--reply-required",
             "Return actual result",
         ],
         THREAD_A,
@@ -145,11 +144,7 @@ fn context_hides_terminal_history_and_keeps_obligations() {
         .unwrap()
         .iter()
         .any(|t| t["task_id"] == "context-current-task"));
-    assert!(context["pending_reply_obligations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["message_id"] == request["msg_id"]));
+    assert!(context.get("pending_reply_obligations").is_none());
     let peer_merge_tasks: Vec<&str> = context["pending_merges"]
         .as_array()
         .unwrap()
@@ -338,15 +333,13 @@ fn ordinary_peer_context_hides_unrelated_closed_history_and_keeps_obligations() 
         );
     });
 
-    // A peer-owned reply obligation is a real current fact.
-    let request = fixture.run_public(
+    fixture.run_public(
         &[
             "sendmessage",
             "--to",
             peer_id,
             "--subject",
             "context-reply",
-            "--reply-required",
             "Return result",
         ],
         THREAD_A,
@@ -445,14 +438,7 @@ fn ordinary_peer_context_hides_unrelated_closed_history_and_keeps_obligations() 
         "peer received a master merge instruction: {}",
         context["operations"]
     );
-    assert!(
-        context["pending_reply_obligations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|obligation| obligation["message_id"] == request["msg_id"]),
-        "peer lost its reply obligation: {context}"
-    );
+    assert!(context.get("pending_reply_obligations").is_none());
     assert_eq!(
         context["peers"].as_array().unwrap().len(),
         2,

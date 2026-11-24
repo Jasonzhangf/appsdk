@@ -10,8 +10,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-#[path = "support/communication_receiver.rs"]
-mod communication_receiver;
 
 mod native_support {
     #![allow(dead_code)]
@@ -540,132 +538,32 @@ fn register(fixture: &Fixture, worker: &str, token: &str, agent: &str) -> Value 
 }
 
 #[test]
-fn dsh_manual_recovery_uses_independent_canonical_poll_and_reply() {
+fn dsh_manual_recovery_flag_is_retired() {
     let mut fixture = Fixture::new_requiring_enrollment();
     fixture.start_daemon();
-    let registered = register(
+    assert_ok(&register(
         &fixture,
         "manual-dsh-peer",
         "manual-dsh-test-token",
         "agentA",
-    );
-    assert_ok(&registered);
+    ));
     let identity = fixture.dsh_command(&["context"], "agentA");
     assert!(
         identity.status.success(),
         "{}",
         String::from_utf8_lossy(&identity.stderr)
     );
-    fixture.gateway.reject_enqueue.store(true, Ordering::SeqCst);
-    let failed = fixture.dsh_command(
-        &[
-            "sendmessage",
-            "--to",
-            "manual-dsh-peer",
-            "--subject",
-            "dsh-known-failure",
-            "retain the failed original",
-        ],
-        "agentA",
-    );
-    assert!(!failed.status.success());
-    fixture
-        .gateway
-        .reject_enqueue
-        .store(false, Ordering::SeqCst);
     let before = fixture.gateway.enqueue_attempts.load(Ordering::SeqCst);
-    let enrolled =
-        fixture.gateway.register_peer_requests().last().unwrap()["params"]["binding"].clone();
-    let (tx, native) = std::sync::mpsc::channel();
-    *fixture.gateway.receiver.lock().unwrap() = Some(tx);
-    let mut command = fixture.configured_program(&std::env::current_exe().unwrap(), &[]);
-    command
-        .env("DSH_SESSION_ID", "agentA")
-        .env("COLLAB_RECOVERY_RECEIVER_DSH_BINDING", enrolled.to_string());
-    let mut receiver = communication_receiver::ReceivingProcess::start(command, &fixture.binary);
-    let pending = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
-    let pending: Value = serde_json::from_slice(&pending.stdout).unwrap();
-    let communication = &pending["result"]["owner_readback"]["communication"];
-    assert_eq!(communication["state"], "pending", "{communication}");
-    assert_eq!(communication["classification"], "broken");
-    assert!(communication["receive_id"].is_null());
-    let id = communication["message_id"].as_str().unwrap();
-    let input = native.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert_eq!(input["params"]["agentId"], "agentA");
-    assert!(input["params"]["messageId"]
-        .as_str()
-        .unwrap()
-        .ends_with(&format!(":{id}")));
-    let denied = fixture.dsh_command(&["recv", "--timeout", "0"], "agentA");
-    assert!(!denied.status.success());
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("DSH_NATIVE_DELIVERY_OWNED"));
-    receiver.submit(&input);
-    let received = receiver.event("received");
-    assert_eq!(received["receipt"]["receive_id"], format!("recover-{id}"));
-    let reply = receiver.event("replied");
-    let query = fixture.dsh_command(&["context", "--query"], "agentA");
-    assert!(
-        query.status.success(),
-        "{}",
-        String::from_utf8_lossy(&query.stderr)
-    );
-    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
-    assert_eq!(
-        query["result"]["owner_readback"]["communication"]["state"],
-        "recovered"
-    );
-    assert_eq!(
-        query["result"]["owner_readback"]["communication"]["reply_message_id"],
-        reply["receipt"]["msg_id"]
-    );
-    assert_eq!(
-        fixture.gateway.enqueue_attempts.load(Ordering::SeqCst),
-        before + 2
-    );
-    drop(receiver);
-    fixture.finish();
-}
-
-#[test]
-fn dsh_manual_recovery_does_not_repeat_an_uncertain_enqueue() {
-    let mut fixture = Fixture::new_requiring_enrollment();
-    fixture.start_daemon();
-    assert_ok(&register(
-        &fixture,
-        "uncertain-dsh-peer",
-        "uncertain-dsh-test-token",
-        "agentA",
-    ));
-    fixture
-        .gateway
-        .fail_enqueue_read
-        .store(true, Ordering::SeqCst);
-    let failed = fixture.dsh_command(
-        &[
-            "sendmessage",
-            "--to",
-            "uncertain-dsh-peer",
-            "--subject",
-            "dsh-ambiguous-return",
-            "submitted but undecodable response",
-        ],
-        "agentA",
-    );
-    assert!(!failed.status.success());
-    fixture
-        .gateway
-        .fail_enqueue_read
-        .store(false, Ordering::SeqCst);
-    let attempts = fixture.gateway.enqueue_attempts.load(Ordering::SeqCst);
     let response = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
-    let response: Value = serde_json::from_slice(&response.stdout).unwrap();
-    assert_eq!(
-        response["result"]["owner_readback"]["communication"]["state"],
-        "unknown"
-    );
     assert_eq!(
         fixture.gateway.enqueue_attempts.load(Ordering::SeqCst),
-        attempts
+        before
+    );
+    assert!(!response.status.success());
+    assert!(
+        String::from_utf8_lossy(&response.stderr)
+            .contains("unexpected argument '--recover-communication'"),
+        "{response:?}"
     );
     fixture.finish();
 }
@@ -1644,21 +1542,10 @@ fn dsh_context_registers_from_typed_gateway_facts() {
     assert_ok(&ack);
     let status = fixture.dsh_command(&["msg", message_id], "agentA");
     assert!(
-        status.status.success(),
-        "{}",
+        !status.status.success()
+            && String::from_utf8_lossy(&status.stderr).contains("MESSAGE_CONSUMED"),
+        "consumed body must not be queryable: {}",
         String::from_utf8_lossy(&status.stderr)
-    );
-    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
-    assert_eq!(status["answered"], true, "{status}");
-    assert_eq!(status["consumed_by_recv"], true, "{status}");
-    assert_eq!(status["state"], "read", "{status}");
-    assert_eq!(
-        status["wake_transport_evidence"]["queued"], true,
-        "{status}"
-    );
-    assert_eq!(
-        status["wake_transport_evidence"]["consumed"], false,
-        "gateway acceptance alone is not consumption: {status}"
     );
     fixture.finish();
 }
@@ -2168,6 +2055,7 @@ fn dsh_mcp_registers_from_typed_gateway_facts() {
         .configured_program(&binary, &[])
         .env("COLLAB_BIN", &fixture.binary)
         .env("DSH_SESSION_ID", "agentB")
+        .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2738,13 +2626,12 @@ fn dsh_runtime_uuid_change_rebinds_without_agent_recovery() {
         status(&fixture, &fixture.root)["master"]["worker_id"],
         worker
     );
-    // Manual recovery resolves current facts too; no UUID/token arguments.
     let manual = fixture.dsh_command(&["context", "--recover-communication"], "agentA");
-    let manual: Value = serde_json::from_slice(&manual.stdout).unwrap();
-    assert_eq!(manual["result"]["outcome"], "unknown");
-    assert_eq!(
-        manual["result"]["owner_readback"]["communication"]["state"], "unknown",
-        "runtime adoption alone does not establish real receive/reply evidence"
+    assert!(
+        !manual.status.success()
+            && String::from_utf8_lossy(&manual.stderr)
+                .contains("unexpected argument '--recover-communication'"),
+        "{manual:?}"
     );
     assert_eq!(only_identity(&fixture).1["runtime"], restored["runtime"]);
     fixture.finish();

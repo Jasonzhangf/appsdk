@@ -19,7 +19,10 @@ fn append_ceo_operation(operations: &mut serde_json::Value, operation: serde_jso
     let Some(existing) = operations.as_array_mut() else {
         return;
     };
-    if existing.iter().any(|item| item["action"] == operation["action"]) {
+    if existing
+        .iter()
+        .any(|item| item["action"] == operation["action"])
+    {
         return;
     }
     existing.push(operation);
@@ -97,7 +100,7 @@ impl ProjectRuntimeManager {
             let operations = json!([
                 {"action":"ceo-progress","command":"collab ceo progress"},
                 {"action":"ceo-append-task","command":"collab ceo append-task --project <root> --id <id> --title <title> --description <scope> --delivery-condition <delivery> --test-condition <acceptance>"},
-                {"action":"ceo-send","command":"collab ceo send --project <root> --subject <subject> --reply-required <body>"},
+                {"action":"ceo-send","command":"collab ceo send --project <root> --subject <subject> <body>"},
                 {"action":"ceo-bootstrap","command":"collab ceo bootstrap-master --project <root> --approval <user-approval> --tmux-socket <existing-socket> --tmux-session <existing-session>","requires_approval":true}
             ]);
             if let (Some(existing), Some(extra)) =
@@ -162,8 +165,11 @@ impl ProjectRuntimeManager {
                 .map_err(Resp::err)?
                 .ok_or_else(|| Resp::err("CEO_SOURCE_BINDING_REQUIRED"))?;
             authoritative_send_binding(&state, &scope, id).map_err(Resp::err)?;
-            control.current_for_worker(&scope.project_scope_id, &scope.app_scope_id, id).map_err(Resp::err)?
-                .map(|slot| slot.identity_key.name.clone()).ok_or_else(|| Resp::err("CEO_SOURCE_NAME_REQUIRED"))?
+            control
+                .current_for_worker(&scope.project_scope_id, &scope.app_scope_id, id)
+                .map_err(Resp::err)?
+                .map(|slot| slot.identity_key.name.clone())
+                .ok_or_else(|| Resp::err("CEO_SOURCE_NAME_REQUIRED"))?
         };
         Ok((runtime, name))
     }
@@ -197,11 +203,18 @@ impl ProjectRuntimeManager {
         let id = {
             let state = runtime.state.lock().unwrap();
             let control = self.binding_control_store().load().map_err(Resp::err)?;
-            let scope = server_route_scope(&runtime, &state).map_err(Resp::err)?
+            let scope = server_route_scope(&runtime, &state)
+                .map_err(Resp::err)?
                 .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
-            let current = control.current_for_name(&scope.project_scope_id, &scope.app_scope_id, &grant.name).map_err(Resp::err)?
-                .and_then(|slot| slot.active_binding()).ok_or_else(|| Resp::err("CEO_HOLDER_UNAVAILABLE"))?;
-            if !state.workers.contains_key(current.binding.agent_id.as_str()) {
+            let current = control
+                .current_for_name(&scope.project_scope_id, &scope.app_scope_id, &grant.name)
+                .map_err(Resp::err)?
+                .and_then(|slot| slot.active_binding())
+                .ok_or_else(|| Resp::err("CEO_HOLDER_UNAVAILABLE"))?;
+            if !state
+                .workers
+                .contains_key(current.binding.agent_id.as_str())
+            {
                 return Err(Resp::err("CEO_HOLDER_UNAVAILABLE"));
             }
             current.binding.agent_id.as_str().to_owned()
@@ -355,16 +368,18 @@ impl ProjectRuntimeManager {
                     // destination.
                     None => {
                         if current_master_holder(&source, &source.state.lock().unwrap())
-                            .map_err(Resp::err)?.as_deref() != Some(&actor) {
+                            .map_err(Resp::err)?
+                            .as_deref()
+                            != Some(&actor)
+                        {
                             return Err(Resp::err("CEO_REPLY_PROJECT_MASTER_REQUIRED"));
                         }
                         let _ = self.ceo_holder(&grant)?;
                         self.ceo_record_unsolicited_progress(&source, subject, body, urgent)
                     }
-                    // Solicited reply: preserve the existing durable delivery,
-                    // recipient/sender/scope checks, correlation dedup and the
-                    // obligation clear. Progress is added only after the reply
-                    // itself is durable.
+                    // Solicited reply: correlation is data only. The current
+                    // CEO holder remains the destination; the original mailbox
+                    // state does not gate or replay this send.
                     Some(original) => {
                         let (target, to) = self.ceo_holder(&grant)?;
                         let delivered = self.ceo_deliver(
@@ -378,12 +393,18 @@ impl ProjectRuntimeManager {
                             Some(original),
                             None,
                             None,
-                            None,
                         );
                         if current_master_holder(&source, &source.state.lock().unwrap())
-                            .map_err(Resp::err)?.as_deref() == Some(&actor) {
-                            self.attach_solicited_progress(delivered, &source, subject, body, urgent)
-                        } else { delivered }
+                            .map_err(Resp::err)?
+                            .as_deref()
+                            == Some(&actor)
+                        {
+                            self.attach_solicited_progress(
+                                delivered, &source, subject, body, urgent,
+                            )
+                        } else {
+                            delivered
+                        }
                     }
                 }
             }
@@ -396,7 +417,7 @@ impl ProjectRuntimeManager {
                 let grant = self.ceo_grant()?;
                 let (target, to) = self.ceo_holder(&grant)?;
                 self.ceo_deliver(
-                    &source, &actor, &name, &target, &to, subject, body, None, None, None, None,
+                    &source, &actor, &name, &target, &to, subject, body, None, None, None,
                 )
             }
             command => {
@@ -408,16 +429,22 @@ impl ProjectRuntimeManager {
                         subject,
                         body,
                         in_reply_to,
-                        reply_policy,
                     } => {
                         let (target, master) = self.ceo_target_master(&project)?;
                         if let Some(to) = to {
                             let state = target.state.lock().unwrap();
                             let control = self.binding_control_store().load().map_err(Resp::err)?;
-                            let route = server_route_scope(&target, &state).map_err(Resp::err)?
+                            let route = server_route_scope(&target, &state)
+                                .map_err(Resp::err)?
                                 .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
-                            let current_name = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &master)
-                                .map_err(Resp::err)?.map(|slot| slot.identity_key.name.as_str());
+                            let current_name = control
+                                .current_for_worker(
+                                    &route.project_scope_id,
+                                    &route.app_scope_id,
+                                    &master,
+                                )
+                                .map_err(Resp::err)?
+                                .map(|slot| slot.identity_key.name.as_str());
                             if to != master && current_name != Some(to.as_str()) {
                                 return Err(Resp::err("CEO_TARGET_MUST_BE_CURRENT_MASTER"));
                             }
@@ -431,7 +458,6 @@ impl ProjectRuntimeManager {
                             subject,
                             body,
                             in_reply_to,
-                            reply_policy,
                             None,
                             None,
                         )
@@ -444,7 +470,6 @@ impl ProjectRuntimeManager {
                         delivery_condition,
                         test_condition,
                         priority,
-                        reply_policy,
                     } => {
                         if [
                             &id,
@@ -498,7 +523,6 @@ impl ProjectRuntimeManager {
                             format!("Task: {title}"),
                             body,
                             None,
-                            Some(reply_policy.unwrap_or(crate::proto::ReplyPolicy::OnCompletion)),
                             Some((task, details)),
                             None,
                         )
@@ -552,7 +576,6 @@ impl ProjectRuntimeManager {
         subject: String,
         body: String,
         in_reply_to: Option<String>,
-        policy: Option<crate::proto::ReplyPolicy>,
         task: Option<(TaskRec, crate::board::BoardTaskDetails)>,
         handshake_id: Option<String>,
     ) -> Result<Resp, Resp> {
@@ -564,49 +587,16 @@ impl ProjectRuntimeManager {
         let target_name = {
             let state = target.state.lock().unwrap();
             let control = self.binding_control_store().load().map_err(Resp::err)?;
-            let route = server_route_scope(target, &state).map_err(Resp::err)?
+            let route = server_route_scope(target, &state)
+                .map_err(Resp::err)?
                 .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
-            control.current_for_worker(&route.project_scope_id, &route.app_scope_id, to).map_err(Resp::err)?
-                .map(|slot| slot.identity_key.name.clone()).ok_or_else(|| Resp::err("CEO_TARGET_NAME_REQUIRED"))?
+            control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, to)
+                .map_err(Resp::err)?
+                .map(|slot| slot.identity_key.name.clone())
+                .ok_or_else(|| Resp::err("CEO_TARGET_NAME_REQUIRED"))?
         };
         let from = format!("{}@{}", name, source_project);
-        if let Some(id) = in_reply_to.as_deref() {
-            // Resolve global authority before taking either project-state lock.
-            let destination_is_ceo = self.ceo_grant().is_ok_and(|grant| {
-                self.ceo_holder(&grant)
-                    .is_ok_and(|(holder, id)| Arc::ptr_eq(&holder, target) && id == to)
-            });
-            let identical_reply_exists = {
-                let state = target.state.lock().unwrap();
-                state.msgs.values().any(|message| {
-                    message.in_reply_to.as_deref() == Some(id)
-                        && message.from == from
-                        && message.to == to
-                        && message.subject.as_deref() == Some(subject.as_str())
-                        && message.body == body
-                })
-            };
-            let state = source.state.lock().unwrap();
-            let original = state
-                .msgs
-                .get(id)
-                .ok_or_else(|| Resp::err("CEO_REPLY_ORIGINAL_NOT_FOUND"))?;
-            let recipient = original.to == actor
-                || state
-                    .reply_obligations
-                    .get(id)
-                    .is_some_and(|o| o.recipient_name.as_deref() == Some(name));
-            let expected_from = format!("{}@{}", target_name, target_project);
-            let from_ceo = state.reply_obligations.get(id).is_some_and(|o| o.from_ceo);
-            let sender_matches = if from_ceo {
-                destination_is_ceo
-            } else {
-                original.from == expected_from || original.from == format!("{}@{}", to, target_project)
-            };
-            if !recipient || (!sender_matches && !identical_reply_exists) {
-                return Err(Resp::err("CEO_REPLY_SCOPE_OR_RECIPIENT_REJECTED"));
-            }
-        }
         let correlation = in_reply_to.as_ref().or(handshake_id.as_ref());
         let source_thread = {
             let state = source.state.lock().unwrap();
@@ -624,12 +614,23 @@ impl ProjectRuntimeManager {
                 return Err(Resp::err("PROJECT_RESET_PENDING"));
             }
             let control = self.binding_control_store().load().map_err(Resp::err)?;
-            let route = server_route_scope(target, &state).map_err(Resp::err)?
+            let route = server_route_scope(target, &state)
+                .map_err(Resp::err)?
                 .ok_or_else(|| Resp::err("CEO_ROUTE_UNAVAILABLE"))?;
-            let slot = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, to).map_err(Resp::err)?
+            let slot = control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, to)
+                .map_err(Resp::err)?
                 .ok_or_else(|| Resp::err("CEO_TARGET_NAME_REQUIRED"))?;
-            if slot.identity_key.name != target_name { return Err(Resp::err("CEO_TARGET_NAME_CHANGED")); }
-            let target_session = slot.active_binding().unwrap().binding.session_id.as_ref().map(ToString::to_string);
+            if slot.identity_key.name != target_name {
+                return Err(Resp::err("CEO_TARGET_NAME_CHANGED"));
+            }
+            let target_session = slot
+                .active_binding()
+                .unwrap()
+                .binding
+                .session_id
+                .as_ref()
+                .map(ToString::to_string);
             if let Some((new_task, _)) = &task {
                 if state.tasks.contains_key(&new_task.id) {
                     return Err(Resp::err("BOARD_TASK_ALREADY_EXISTS"));
@@ -680,7 +681,9 @@ impl ProjectRuntimeManager {
                 let mut events = Vec::new();
                 let task_id = if let Some((task, details)) = task {
                     let id = task.id.clone();
-                    let session = target_session.clone().ok_or_else(|| Resp::err("CEO_TARGET_SESSION_REQUIRED"))?;
+                    let session = target_session
+                        .clone()
+                        .ok_or_else(|| Resp::err("CEO_TARGET_SESSION_REQUIRED"))?;
                     events.push(Event::TaskCreated { task });
                     events.push(Event::BoardDetailsChanged {
                         task_id: id.clone(),
@@ -708,21 +711,6 @@ impl ProjectRuntimeManager {
                         name: target_name.clone(),
                     },
                 });
-                if let Some(policy) = policy {
-                    let mut obligation = reply_obligation::build_obligation(
-                        Some(name.into()),
-                        mid.clone(),
-                        target_project.clone(),
-                        actor.into(),
-                        to.into(),
-                        Some(target_name.clone()),
-                        policy,
-                    );
-                    obligation.from_name = Some(name.into());
-                    obligation.from_project = Some(source_project.clone());
-                    obligation.from_ceo = true;
-                    events.push(Event::ReplyObligationSet { obligation });
-                }
                 events.push(Event::DeliveryMode {
                     msg_id: mid.clone(),
                     mode: "explicit-notification".into(),
@@ -740,26 +728,6 @@ impl ProjectRuntimeManager {
                 (mid, subscription, task_id, false)
             }
         };
-        if let Some(original) = in_reply_to {
-            let mut state = source.state.lock().unwrap();
-            if state.reply_obligations.contains_key(&original) {
-                if let Err(error) = source.commit_locked_checked(
-                    &mut state,
-                    &[Event::ReplyObligationCleared {
-                        message_id: original,
-                    }],
-                ) {
-                    let mut response = Resp::data(
-                        json!({"msg_id":mid,"durable":true,"reply_marker_cleared":false}),
-                    );
-                    response.ok = false;
-                    response.error = Some(format!(
-                        "CEO_REPLY_MARKER_COMMIT_FAILED: reply is durable; do not resend: {error}"
-                    ));
-                    return Err(response);
-                }
-            }
-        }
         let notification = if deduplicated {
             NotificationAttempt::NotAttempted("identical reply already durable".into())
         } else if let Some(sub) = &subscription {
@@ -1125,8 +1093,7 @@ impl ProjectRuntimeManager {
                 let state = runtime.state.lock().unwrap();
                 let master = current_master_holder(&runtime, &state).map_err(Resp::err)?;
                 let scope = server_route_scope(&runtime, &state).map_err(Resp::err)?;
-                let workspace =
-                    workspace_idle_view(&runtime, &state, master.as_deref(), now_ms());
+                let workspace = workspace_idle_view(&runtime, &state, master.as_deref(), now_ms());
                 // Whether the project's master has an armed project patrol. A
                 // CEO needs this to know if each subordinate manager keeps its
                 // own scope under patrol, without a second cross-project state
@@ -1158,18 +1125,14 @@ impl ProjectRuntimeManager {
                         None,
                         master.as_deref(),
                         scope.as_ref(),
-                    ).map_err(Resp::err)? {
+                    )
+                    .map_err(Resp::err)?
+                    {
                         *counts.entry(view.status.clone()).or_default() += 1;
                         tasks.push(serde_json::to_value(view).expect("board view serializes"));
                     }
                 }
                 tasks.sort_by_key(|t| t["id"].as_str().unwrap_or_default().to_owned());
-                let pending = state
-                    .reply_obligations
-                    .values()
-                    .filter(|o| o.from_ceo)
-                    .cloned()
-                    .collect::<Vec<_>>();
                 let master_patrol = master_patrol
                     .map(|subscription| {
                         json!({
@@ -1180,7 +1143,7 @@ impl ProjectRuntimeManager {
                         })
                     })
                     .unwrap_or_else(|| json!({"armed": false}));
-                projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"workspace":workspace,"patrol":master_patrol,"tasks":tasks,"task_counts":counts,"pending_replies":pending}));
+                projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"workspace":workspace,"patrol":master_patrol,"tasks":tasks,"task_counts":counts,"pending_replies":[]}));
             }
         }
         let operations = self

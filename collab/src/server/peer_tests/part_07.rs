@@ -318,7 +318,7 @@ fn orphan_force_close_refuses_a_cold_owner_because_cold_is_not_dead() {
 
     let owner = server.state.lock().unwrap().workers["owner"].clone();
     assert_eq!(worker_presence(&server, &owner), IdentityPresence::Cold);
-    assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, Some(true)));
+    assert_eq!(worker_identity_and_endpoint(&server, &owner), (true, None));
 
     // A cold thread is not evidence that its owner is dead: the owner may
     // simply be idle on the endpoint, so force close stays refused.

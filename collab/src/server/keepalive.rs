@@ -284,56 +284,6 @@ fn tick_at_with_runtime(server: &Server, recovery_server: Option<&Arc<Server>>, 
             record.unacked = 0;
             record.last_notice_id = None;
             let mut events = Vec::new();
-            // Reply obligations are durable message control state. Keepalive
-            // sends one reminder per pending obligation through the existing
-            // direct-message path. The reminded marker stays on the obligation
-            // itself and is never cleared by elapsed time or by a Working
-            // observation, so a wake caused by the reminder cannot re-arm the
-            // same reminder. Unknown/WaitingUser never reach this block.
-            if agent == AgentState::Waiting && idle_record_ready {
-                let pending: Vec<_> = state
-                    .reply_obligation_view(&worker.id)
-                    .into_iter()
-                    .filter(|obligation| {
-                        obligation["reminded_idle_episode"].as_bool() != Some(true)
-                    })
-                    .collect();
-                if !pending.is_empty() {
-                    let alert_id = super::gen_msg_id();
-                    events.push(Event::Sent {
-                        msg: Message {
-                            id: alert_id.clone(),
-                            from: "collab-server".into(),
-                            to: worker.id.clone(),
-                            mtype: "notify".into(),
-                            subject: Some("reply-pending".into()),
-                            body: reply_reminder_body(&pending),
-                            in_reply_to: None,
-                            created_ms: now,
-                            state: "pending".into(),
-                            wake_attempt_count: 0,
-                            last_wake_attempt_ms: 0,
-                            retry_attempted: false,
-                        },
-                    });
-                    if let Some(subscription) =
-                        state.matching_subscription(&worker.id, "direct-message", None, now)
-                    {
-                        events.push(Event::WakeBound {
-                            message_id: alert_id,
-                            subscription_id: subscription.id.clone(),
-                        });
-                    }
-                    for obligation in &pending {
-                        if let Some(message_id) = obligation["message_id"].as_str() {
-                            events.push(Event::ReplyObligationReminded {
-                                message_id: message_id.to_owned(),
-                                reminded: true,
-                            });
-                        }
-                    }
-                }
-            }
             if idle_signal_due {
                 let signal = if is_live_master {
                     super::state::MasterWakeSignal::MasterIdle {
@@ -738,26 +688,6 @@ fn board_patrol_body(tasks: &[String]) -> String {
         "You are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`, then continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
         tasks.join(", ")
     )
-}
-
-fn reply_reminder_body(obligations: &[serde_json::Value]) -> String {
-    let mut body = String::from(
-        "Reply pending. Read the original message with `collab msg <message_id>` and use its reply entry below. For on_completion, keep this marker until actual completion; ordinary progress must omit --in-reply-to. Do not reply to this reminder.\n",
-    );
-    for obligation in obligations {
-        body.push_str(&format!(
-            "- message_id={} from={} policy={}\n",
-            obligation["message_id"].as_str().unwrap_or(""),
-            obligation["from"].as_str().unwrap_or(""),
-            obligation["policy"].as_str().unwrap_or(""),
-        ));
-        if obligation["from_ceo"].as_bool() == Some(true) {
-            body.push_str("  Reply through `collab ceo reply --subject '<subject>' --in-reply-to '<message_id>' '<actual completed result>'`.\n");
-        } else {
-            body.push_str("  Reply through `collab sendmessage --to '<from>' --subject '<subject>' --in-reply-to '<message_id>' '<your answer>'`.\n");
-        }
-    }
-    body
 }
 
 fn flush_idle_batches_if_ready(server: &Server, now: i64) {
@@ -3441,7 +3371,7 @@ mod tests {
             &server,
             now + 6 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS + 3,
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             server.state.lock().unwrap().board_patrol_notice_ids.len(),
             1
@@ -3531,7 +3461,7 @@ mod tests {
             &server,
             now + 6 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS + 3,
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             server.state.lock().unwrap().board_patrol_notice_ids.len(),
             1
@@ -3860,6 +3790,7 @@ mod tests {
                 created_ms: 1,
                 original_status: None,
                 original_owner: None,
+                inviter_name: None,
                 automatic_source: None,
             });
         drop(state);
@@ -4132,7 +4063,3 @@ mod tests {
         assert_eq!(accumulator.dispatch_gap_delivery_state, "delivered");
     }
 }
-
-#[cfg(test)]
-#[path = "reply_idle_tests.rs"]
-mod reply_idle_tests;

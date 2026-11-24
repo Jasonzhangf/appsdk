@@ -216,6 +216,7 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
         created_ms: 3,
         original_status: Some(status.into()),
         original_owner: Some("old".into()),
+        inviter_name: None,
         automatic_source: None,
     });
     state.worktree_bindings.insert(
@@ -738,10 +739,28 @@ fn explicit_retirement_builds_immediate_idle_invitation_without_waiting() {
             .expect("retirement invitation");
         assert_eq!(invitation.peer_id, "idle");
         assert!(state.tasks["named-work"].owner == "old");
+        assert_eq!(
+            state.inbox_of("idle").iter().filter(|message| {
+                message.subject.as_deref().is_some_and(|subject| subject.contains("named-work"))
+            }).count(),
+            1,
+            "the invitation is the only unread notice for this mutation"
+        );
         assert!(state
             .name_reassignment(route.project_scope_id.as_str(), &name)
             .is_some_and(|schedule| schedule.is_due(base)));
     }
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let old_binding = control
+        .current_for_name(&route.project_scope_id, &route.app_scope_id, &name)
+        .unwrap().unwrap().active_binding().unwrap().binding.clone();
+    store.retire_binding(&old_binding).unwrap();
+    let response = board_respond(
+        &server, "idle".into(), "token-idle".into(), "named-work".into(),
+        2, true, None,
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(server.state.lock().unwrap().tasks["named-work"].owner, "idle");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1210,6 +1229,7 @@ fn pending_reassignment_invitation_does_not_move_the_task_subscription() {
         created_ms: now,
         original_status: Some("working".into()),
         original_owner: Some("old".into()),
+        inviter_name: None,
         automatic_source: None,
     });
     details.revision += 1;
@@ -2236,6 +2256,105 @@ fn master_can_reassign_ownerless_task_and_preserve_status_and_evidence() {
             .as_deref(),
         Some("kept evidence")
     );
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn architect_receives_invitation_response_after_mailbox_retention() {
+    let (server, root, route) = ownerless_fixture("rework");
+    assert!(peer_tests::register_synthetic_peer(&server, "architect", "architect").ok);
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load().unwrap();
+    let name = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "architect")
+        .unwrap().unwrap().identity_key.name.clone();
+    {
+        let mut state = server.state.lock().unwrap();
+        state.tasks.get_mut("named-work").unwrap().created_by = "architect".into();
+        state.apply_checked(&Event::NameWorkRolesUpdated {
+            project_scope: route.project_scope_id.as_str().into(),
+            record: crate::board::NameWorkRoles {
+                name: name.clone(),
+                work_roles: vec!["architect".into()],
+            },
+        }).unwrap();
+    }
+    let architect = current_map_runtime(&server, &route, "architect");
+    let current = current_map_runtime(&server, &route, "current");
+    let architect_context = ProjectContext::for_registered_route(&root, &architect).unwrap();
+    let current_context = ProjectContext::for_registered_route(&root, &current).unwrap();
+    let server = Arc::new(server);
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    manager.install_runtime(&ProjectRuntimeManager::route_key(&current_context), server.clone(), None);
+    let (_, invited) = manager.dispatch_sync(
+        Some(architect_context),
+        Req::Board {
+            worker_id: "architect".into(),
+            token: "token-architect".into(),
+            command: crate::board::BoardCommand::Invite {
+                id: "named-work".into(),
+                to: "current".into(),
+                expected_revision: 1,
+            },
+        },
+    );
+    assert!(invited.ok, "{invited:?}");
+    let invitation_id = invited.data["msg_id"].as_str().unwrap();
+    let (_, read) = dispatch_wire_routed(
+        manager.clone(),
+        Some(current_context.clone()),
+        Req::Poll {
+            worker_id: "current".into(), token: "token-current".into(),
+            timeout_ms: 0, receive_id: None,
+        },
+        tokio::sync::watch::channel(false).1,
+    ).await;
+    assert!(read.ok, "{read:?}");
+    assert!(read.data["messages"].as_array().unwrap().iter().any(|message| {
+        message["id"] == invitation_id
+    }));
+    assert_eq!(purge_expired_storage(&server, now_ms() + 8 * 86_400_000), 1);
+    assert!(!server.state.lock().unwrap().msgs.contains_key(invitation_id));
+    let transport = peer_tests::test_appserver_transport("new-architect");
+    let cwd = root.display().to_string();
+    assert!(peer_tests::seed_committed_owner(
+        &server, "new-architect", "token-new-architect",
+        &transport, &cwd, Some(route.app_scope_id.clone()),
+    ).ok);
+    commit_current_thread_route_for_runtime(
+        &server, &server, "new-architect", &cwd, Some(&route.app_scope_id),
+    ).unwrap();
+    name_mailbox_tests::publish_holder(&server, &name, "new-architect");
+    assert!(handle_notification_subscribe(
+        &server, "new-architect".into(), "token-new-architect".into(),
+        "direct-message".into(), None, None, Vec::new(), None, 1, 60,
+    ).ok);
+    let (_, accepted) = manager.dispatch_sync(
+        Some(current_context),
+        Req::Board {
+            worker_id: "current".into(),
+            token: "token-current".into(),
+            command: crate::board::BoardCommand::Respond {
+                id: "named-work".into(), expected_revision: 2,
+                accept: true, decline: false, reason: None,
+            },
+        },
+    );
+    assert!(accepted.ok, "{accepted:?}");
+    let notice_id = accepted.data["notification_message_id"].as_str().unwrap();
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["named-work"].owner, "current");
+    assert_eq!(state.msgs[notice_id].to, "new-architect");
+    assert_eq!(state.mailbox_name_addresses[notice_id].name, name);
+    assert_eq!(state.msgs[notice_id].wake_attempt_count, 1);
+    assert!(state.notification_delivery_accepted.contains_key(notice_id));
+    for (recipient, expected) in [("new-architect", 1), ("architect", 0), ("master", 0)] {
+        assert_eq!(state.inbox_of(recipient).iter().filter(|message| {
+            message.subject.as_deref() == Some("board-changed:named-work")
+                && message.body.contains("invitation was accepted")
+        }).count(), expected, "unexpected response notices for {recipient}");
+    }
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

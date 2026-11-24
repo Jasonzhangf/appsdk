@@ -89,7 +89,7 @@ fn current_name_restores_missing_business_worker_without_losing_ownership() {
         ],
         THREAD_B,
     );
-    let received = fixture.run_public(
+    fixture.run_public(
         &[
             "recv",
             "--receive-id",
@@ -208,17 +208,6 @@ fn current_name_restores_missing_business_worker_without_losing_ownership() {
         fixture.run_public(&["context"], THREAD_A)["identity"]["worker_id"],
         worker
     );
-    let replayed = fixture.run_public(
-        &[
-            "recv",
-            "--receive-id",
-            "iris-original-receive",
-            "--timeout",
-            "0",
-        ],
-        THREAD_A,
-    );
-    assert_eq!(replayed["messages"], received["messages"]);
     let incoming = fixture.run_public(
         &[
             "recv",

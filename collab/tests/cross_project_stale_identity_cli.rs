@@ -1334,7 +1334,8 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(peer_sent["ok"], true, "{peer_sent}");
     assert_eq!(
         message_count(&fixture, &target_context, &target_id),
-        before + 1
+        before + 1,
+        "online delivery commits the durable target message"
     );
 
     let promoted = run_ok_at(
@@ -1352,10 +1353,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(promoted["master"], target_id, "{promoted}");
 
     let before = message_count(&fixture, &target_context, &target_id);
-    for (field, value) in [
-        ("reply_policy", json!("required")),
-        ("target_session", json!("other-session")),
-    ] {
+    for (field, value) in [("target_session", json!("other-session"))] {
         let mut request = cross_project_request(
             &source_id,
             &source_root,
@@ -1434,7 +1432,6 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
 
     let pending = message_status(&fixture, &target_root, &target_pane, &msg_id);
     assert_eq!(pending["state"], "pending", "{pending}");
-    assert_eq!(pending["consumed_by_recv"], false, "{pending}");
     assert_eq!(pending["to"], target_id, "{pending}");
     assert_eq!(
         pending["subject"], "Cross-project stale identity",
@@ -1450,7 +1447,6 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     let replayed = message_status(&fixture, &target_root, &target_pane, &msg_id);
     assert_eq!(replayed["id"], msg_id, "{replayed}");
     assert_eq!(replayed["state"], "pending", "{replayed}");
-    assert_eq!(replayed["consumed_by_recv"], false, "{replayed}");
     assert_eq!(replayed["to"], target_id, "{replayed}");
     assert_eq!(replayed["subject"], pending["subject"], "{replayed}");
     assert_eq!(replayed["body"], pending["body"], "{replayed}");
@@ -2358,7 +2354,7 @@ fn send_to_ceo_allows_registered_peers_and_correlated_replies() {
         false,
     );
     assert_eq!(replied["durable"], true, "{replied}");
-    let bad_reply = command_at(
+    let foreign_correlation = command_at(
         &fixture,
         &source_root,
         &source_pane,
@@ -2377,7 +2373,11 @@ fn send_to_ceo_allows_registered_peers_and_correlated_replies() {
     )
     .output()
     .unwrap();
-    assert!(!bad_reply.status.success());
+    assert!(
+        foreign_correlation.status.success(),
+        "correlation is data-only; another caller may send its own correlated message: {}",
+        String::from_utf8_lossy(&foreign_correlation.stderr)
+    );
     let inbox = run_ok_at(
         &fixture,
         &ceo_root,
@@ -2397,11 +2397,9 @@ fn send_to_ceo_allows_registered_peers_and_correlated_replies() {
         .any(|message| message["id"] == replied["msg_id"]
             && message["in_reply_to"] == request_id
             && message["body"] == "actual peer result"));
-    assert!(inbox["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|message| message["subject"] != "foreign-reply"));
+    assert!(inbox["messages"].as_array().unwrap().iter().any(|message| {
+        message["subject"] == "foreign-reply" && message["in_reply_to"] == request_id
+    }));
 
     drop(fixture);
     std::fs::remove_dir_all(ceo_root).expect("remove isolated ceo project");

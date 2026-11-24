@@ -39,7 +39,10 @@ fn local_check_rejects_malformed_legacy_identity_fields() {
     map["slots"][0]["current"]["registration_number"] = Value::String("17".into());
     let wrong_type = serde_json::to_vec(&map).unwrap();
     map["slots"][0]["current"]["registration_number"] = Value::from(17);
-    map["slots"][0].as_object_mut().unwrap().remove("display_slot");
+    map["slots"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("display_slot");
     let missing_field = serde_json::to_vec(&map).unwrap();
 
     for (bytes, error) in [

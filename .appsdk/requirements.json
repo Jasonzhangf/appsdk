@@ -674,9 +674,144 @@
         "version": 1
       },
       "version": 25
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "recv应该是一次性打开没看的所有消息,看过以后就丢弃(不用每次删除,就固定一个周期性清理)",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "base_version": 9,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-minimal-mailbox-periodic-v10-20261122",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。recv 一次返回当前全部未读批次，并将该批次置为已读；已读行不再进入 inbox、recv 或消息正文查询。recv 不逐条删除文件；daemon 的固定周期 retention owner 统一删除已读消息正文和逐消息投递簿记。只有任务结果等业务 owner 明确必需的状态可保留在各自业务 owner。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。通知只是触发回读；通知丢失不等于消息丢失。周期唤醒由 daemon 维护当前订阅：busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "recv应该是一次性打开没看的所有消息,看过以后就丢弃(不用每次删除,就固定一个周期性清理)",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。recv 一次返回当前全部未读批次，并将该批次置为已读；已读行不再进入 inbox、recv 或消息正文查询。recv 不逐条删除文件；daemon 的固定周期 retention owner 统一删除已读消息正文和逐消息投递簿记。只有任务结果等业务 owner 明确必需的状态可保留在各自业务 owner。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。通知只是触发回读；通知丢失不等于消息丢失。周期唤醒由 daemon 维护当前订阅：busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。",
+        "version": 10
+      },
+      "version": 26
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "4. 历史投影不影响新绑定,skill要有清晰的指导,缺失绑定也要有清晰的反馈,如何获取信息,如何注册",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "base_version": 6,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-identity-rex-v7-20261122",
+        "requirement_id": "req-collab-identity",
+        "text": "Collab 的身份与绑定唯一真源是 identity-map.json。同一 canonical project 内一个已分配名字最多一个 active current；名字承载持续工作归属，agent sessionID 和端点只是可替换执行载体。注册、恢复、换绑、改名、角色变化和退役由同一个 map owner 原子提交。当前宿主事实（Rex block、tmux session/pane、AppServer thread/socket 或显式 sessionID）只作为输入；缺失或冲突时直接返回 IDENTITY_FACT_REQUIRED，并列出缺什么字段、宿主如何获取该字段、以及用 collab context 重新注册/重试。不得猜测名字、复制他人身份、读取 route/archive/journal 历史、或用第二身份源 fallback。历史投影和旧执行载体不得影响新 current binding。人类明确指定接管既有名字时，一次 map 更新同时替换 target current holder、适用角色和 target 名下工作；旧 holder 不能凭旧记录夺回，source 名下工作保留。人类明确注销普通名字时释放该名字，下一次普通注册可复用；既有任务归属保持不变，直到后续邀请被新 owner 接受。daemon 重启只加载当前 identity map、当前任务、未读 name mailbox 和当前订阅状态；不重放历史操作，不迁移归档，不恢复已消费消息或 reply obligation。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "4. 历史投影不影响新绑定,skill要有清晰的指导,缺失绑定也要有清晰的反馈,如何获取信息,如何注册",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "requirement_id": "req-collab-identity",
+        "status": "active",
+        "text": "Collab 的身份与绑定唯一真源是 identity-map.json。同一 canonical project 内一个已分配名字最多一个 active current；名字承载持续工作归属，agent sessionID 和端点只是可替换执行载体。注册、恢复、换绑、改名、角色变化和退役由同一个 map owner 原子提交。当前宿主事实（Rex block、tmux session/pane、AppServer thread/socket 或显式 sessionID）只作为输入；缺失或冲突时直接返回 IDENTITY_FACT_REQUIRED，并列出缺什么字段、宿主如何获取该字段、以及用 collab context 重新注册/重试。不得猜测名字、复制他人身份、读取 route/archive/journal 历史、或用第二身份源 fallback。历史投影和旧执行载体不得影响新 current binding。人类明确指定接管既有名字时，一次 map 更新同时替换 target current holder、适用角色和 target 名下工作；旧 holder 不能凭旧记录夺回，source 名下工作保留。人类明确注销普通名字时释放该名字，下一次普通注册可复用；既有任务归属保持不变，直到后续邀请被新 owner 接受。daemon 重启只加载当前 identity map、当前任务、未读 name mailbox 和当前订阅状态；不重放历史操作，不迁移归档，不恢复已消费消息或 reply obligation。",
+        "version": 7
+      },
+      "version": 27
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "5. board可以被manager修改,也可以被peer自己更改,只是不能改历史. architect也可以给peer改board",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "base_version": 1,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-board-authority-v2-20261122",
+        "requirement_id": "req-collab-architect-board-authority",
+        "text": "已认证的 manager（项目 master）可以在项目权限内修改当前 board；peer 可以修改本人持有或受托范围内的当前 board；持有 architect 工作角色且任务范围已受托者可以修改该范围内 peer 的当前计划并派发。修改必须携带当前 revision，只作用于当前任务状态和当前计划，不得改写已关闭、已取消或其他历史事实。派发沿用既有可见性、revision、受邀确认、执行准入、状态、证据和 review 门禁。architect 自设工作角色不构成自授 board 权限；不能修改无关项目、应用 scope 或他人目标，不能继承或转授 master/CEO 权限，不能代替 peer 接受、伪造进度或跳过 review。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "5. board可以被manager修改,也可以被peer自己更改,只是不能改历史. architect也可以给peer改board",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "requirement_id": "req-collab-architect-board-authority",
+        "status": "active",
+        "text": "已认证的 manager（项目 master）可以在项目权限内修改当前 board；peer 可以修改本人持有或受托范围内的当前 board；持有 architect 工作角色且任务范围已受托者可以修改该范围内 peer 的当前计划并派发。修改必须携带当前 revision，只作用于当前任务状态和当前计划，不得改写已关闭、已取消或其他历史事实。派发沿用既有可见性、revision、受邀确认、执行准入、状态、证据和 review 门禁。architect 自设工作角色不构成自授 board 权限；不能修改无关项目、应用 scope 或他人目标，不能继承或转授 master/CEO 权限，不能代替 peer 接受、伪造进度或跳过 review。",
+        "version": 2
+      },
+      "version": 28
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "6. 改board自动投递,不需要自己手动发消息",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "base_version": 10,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-board-auto-delivery-v11-20261122",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。recv 一次返回当前全部未读批次，并将该批次置为已读；已读行不再进入 inbox、recv 或消息正文查询。recv 不逐条删除文件；daemon 的固定周期 retention owner 统一删除已读消息正文和逐消息投递簿记。当前 board 的合法修订成功提交后，daemon 在同一事务写入必要的未读通知和投递绑定，并按当前 recipient 的订阅自动投递；调用者不需要另行手动发消息。通知只是触发回读；通知丢失或投递失败不改变已提交 board 事实。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。周期唤醒由 daemon 维护当前订阅：busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "6. 改board自动投递,不需要自己手动发消息",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。recv 一次返回当前全部未读批次，并将该批次置为已读；已读行不再进入 inbox、recv 或消息正文查询。recv 不逐条删除文件；daemon 的固定周期 retention owner 统一删除已读消息正文和逐消息投递簿记。当前 board 的合法修订成功提交后，daemon 在同一事务写入必要的未读通知和投递绑定，并按当前 recipient 的订阅自动投递；调用者不需要另行手动发消息。通知只是触发回读；通知丢失或投递失败不改变已提交 board 事实。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。周期唤醒由 daemon 维护当前订阅：busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。",
+        "version": 11
+      },
+      "version": 29
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "有一个非常严重的问题就是 我们的消息投递在 Agent 不在线的时候是不能投递的 不然的话会把整个 shell 搞得乱七八糟的 这个是一定要严令禁止的\n\n投递的前提是他一定要在线 他不在线 这一段屁话都没有任何意义",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "base_version": 11,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-online-delivery-v12-20261122",
+        "requirement_id": "req-collab-communication-notifications",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。所有普通消息、通知、周期唤醒和 board 自动通知，只有 daemon 已确认目标 agent 当前在线时才可向其 shell、pane、Rex block 或原生 thread 提交输入。在线必须是当前 adapter 明确返回的 Present；cold、unknown、offline、缺失或只有持久化绑定都不得投递，也不得把入队、订阅接受或唤醒接受写成已投递。离线时消息保持按名字寻址的未读状态，不产生任何终端输入；普通未读消息在目标上线后沿当前绑定投递，周期唤醒保持静默且不补发。recv 一次返回当前全部未读批次，并将该批次置为已读；已读行不再进入 inbox、recv 或消息正文查询。recv 不逐条删除文件；daemon 的固定周期 retention owner 统一删除已读消息正文和逐消息投递簿记。当前 board 的合法修订成功提交后，daemon 在同一事务写入必要的未读通知和投递绑定，并按当前 recipient 的订阅自动投递；调用者不需要另行手动发消息，目标离线时通知保持未读且不提交输入。通知只是触发回读；通知丢失或投递失败不改变已提交 board 事实。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "有一个非常严重的问题就是 我们的消息投递在 Agent 不在线的时候是不能投递的 不然的话会把整个 shell 搞得乱七八糟的 这个是一定要严令禁止的\n\n投递的前提是他一定要在线 他不在线 这一段屁话都没有任何意义",
+          "role": "user",
+          "source": "Codex conversation 01a1ecf6-65d9-7703-ad5a-a4b5798e665d"
+        },
+        "requirement_id": "req-collab-communication-notifications",
+        "status": "active",
+        "text": "Collab mailbox 是按收件名字寻址的当前状态数据库。发送只从 identity-map 解析收件名字的 current holder；未读消息按名字保存，名字交接后由当前 holder 读取。所有普通消息、通知、周期唤醒和 board 自动通知，只有 daemon 已确认目标 agent 当前在线时才可向其 shell、pane、Rex block 或原生 thread 提交输入。在线必须是当前 adapter 明确返回的 Present；cold、unknown、offline、缺失或只有持久化绑定都不得投递，也不得把入队、订阅接受或唤醒接受写成已投递。离线时消息保持按名字寻址的未读状态，不产生任何终端输入；普通未读消息在目标上线后沿当前绑定投递，周期唤醒保持静默且不补发。recv 一次返回当前全部未读批次，并将该批次置为已读；已读行不再进入 inbox、recv 或消息正文查询。recv 不逐条删除文件；daemon 的固定周期 retention owner 统一删除已读消息正文和逐消息投递簿记。当前 board 的合法修订成功提交后，daemon 在同一事务写入必要的未读通知和投递绑定，并按当前 recipient 的订阅自动投递；调用者不需要另行手动发消息，目标离线时通知保持未读且不提交输入。通知只是触发回读；通知丢失或投递失败不改变已提交 board 事实。不保留消息 archive、receive replay、reply obligation 或已消费消息历史查询。busy 跳过本轮并按原 interval 顺延一次，不补发、不扣有限次数、不延长 TTL；offline 静默；有限次数临近耗尽才在最后一个可正常发送提醒中附带续签提示；过期前已接受的提醒可在过期后读取一次，但不重新激活订阅。任务订阅跟随当前 task owner，daemon 重启保留内容、剩余次数、节奏和下一触发点，只恢复当前状态，不重建历史。用户未指定的重试、聚合和提醒参数不得臆定。",
+        "version": 12
+      },
+      "version": 30
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 25
+  "version": 30
 }

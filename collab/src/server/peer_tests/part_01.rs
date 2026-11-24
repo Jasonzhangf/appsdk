@@ -1012,6 +1012,37 @@ pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     register_tmux(server, id, fixture_peer_endpoint(server, thread_id))
 }
 
+/// Delivery fixtures must prove the recipient is online. Presence-projection
+/// fixtures keep `register` offline so a killed pane stays observably absent.
+pub(crate) fn register_online(server: &Server, id: &str, thread_id: &str) -> Resp {
+    let response = register(server, id, thread_id);
+    if response.ok {
+        let (project_scope, session_id) = {
+            let state = server.state.lock().unwrap();
+            let worker = &state.workers[id];
+            let transport = worker.transport.as_ref().expect("tmux transport");
+            (
+                GlobalState::canonical_project_scope(&server.root)
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+                transport.session_id.clone().unwrap_or_default(),
+            )
+        };
+        server.commit(&[Event::AgentPresenceObserved {
+            presence: name_state::AgentPresenceRecord {
+                project_scope,
+                worker_id: id.into(),
+                session_id,
+                presence: name_state::AgentPresence::Online,
+                reason: "live peer fixture is online".into(),
+                observed_ms: now_ms(),
+            },
+        }]);
+    }
+    response
+}
+
 fn register_appserver_peer(server: &Server, id: &str, transport: &SelectedTransport) {
     let app = AppServerId::new("tui-default").unwrap();
     let cwd = server.root.display().to_string();
@@ -1218,7 +1249,6 @@ fn authenticated_send(root: &Path, from: &str, to: &str, subject: &str) -> Req {
         subject: Some(subject.into()),
         body: "body".into(),
         in_reply_to: None,
-        reply_policy: None,
         target_session: None,
         delivery: "immediate".into(),
     }

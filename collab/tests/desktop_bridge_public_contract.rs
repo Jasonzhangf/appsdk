@@ -1,7 +1,4 @@
 include!("support/context_operation_fixture.rs");
-#[path = "support/communication_receiver.rs"]
-mod communication_receiver;
-
 struct DesktopBridgeFixture {
     endpoint: String,
     sends: Arc<Mutex<Vec<String>>>,
@@ -101,127 +98,19 @@ impl DesktopBridgeFixture {
 }
 
 #[test]
-fn desktop_manual_recovery_requires_independent_receive_and_reply() {
-    let mut fixture = Fixture::without_tmux("desktop-manual-recovery");
-    let config = fixture.root.join("home/.appsdk");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.toml"),
-        "[timers]\ntick_interval_ms=60000\n",
-    )
-    .unwrap();
-    fixture.restart_daemon();
+fn desktop_manual_recovery_flag_is_retired() {
+    let fixture = Fixture::without_tmux("desktop-manual-recovery-retired");
     let runtime = fixture.host_state.join("runtime/desktop");
     let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
     publish_capability(&fixture, &bridge);
     let registered = desktop_command(&fixture, &["context"]);
     assert!(registered.status.success());
-    let registered: Value = serde_json::from_slice(&registered.stdout).unwrap();
-    let worker = registered["result"]["snapshot"]["identity"]["worker_id"]
-        .as_str()
-        .unwrap();
-    let socket = PathBuf::from(bridge.endpoint.strip_prefix("unix://").unwrap());
-    let offline = socket.with_extension("offline");
-    std::fs::rename(&socket, &offline).unwrap();
-    let refused = desktop_command(
-        &fixture,
-        &[
-            "sendmessage",
-            "--to",
-            worker,
-            "--subject",
-            "desktop-known-failure",
-            "retain current failed message",
-        ],
-    );
-    assert!(!refused.status.success());
-    std::fs::rename(offline, socket).unwrap();
-    let (tx, native) = std::sync::mpsc::channel();
-    *bridge.receiver.lock().unwrap() = Some(tx);
-    let configured = fixture.configured_command(&[], None);
-    let mut command = Command::new(std::env::current_exe().unwrap());
-    command.current_dir(&fixture.root).env_clear();
-    for (key, value) in configured.get_envs() {
-        if let Some(value) = value {
-            command.env(key, value);
-        }
-    }
-    command
-        .env("CODEX_SESSION_ID", "desktop-session")
-        .env("CODEX_THREAD_ID", "desktop-thread")
-        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop");
-    let mut receiver = communication_receiver::ReceivingProcess::start(command, &fixture.binary);
-    let pending = desktop_command(&fixture, &["context", "--recover-communication"]);
-    let pending: Value = serde_json::from_slice(&pending.stdout).unwrap();
-    let communication = &pending["result"]["owner_readback"]["communication"];
-    assert_eq!(communication["state"], "pending", "{communication}");
-    assert!(communication["receive_id"].is_null());
-    let message_id = communication["message_id"].as_str().unwrap();
-    let input = native.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert_eq!(input["thread_id"], "desktop-thread");
-    assert!(input["text"].as_str().unwrap().contains(message_id));
-    let held = desktop_command(&fixture, &["context", "--query"]);
-    let held: Value = serde_json::from_slice(&held.stdout).unwrap();
-    assert_eq!(
-        held["result"]["owner_readback"]["communication"]["state"],
-        "pending"
-    );
-    receiver.submit(&input);
-    receiver.event("received");
-    let reply = receiver.event("replied");
-    let query = desktop_command(&fixture, &["context", "--query"]);
-    assert!(query.status.success());
-    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
-    assert_eq!(
-        query["result"]["owner_readback"]["communication"]["state"],
-        "recovered"
-    );
-    assert_eq!(
-        query["result"]["owner_readback"]["communication"]["reply_message_id"],
-        reply["receipt"]["msg_id"]
-    );
-    assert_eq!(
-        bridge.sends.lock().unwrap().len(),
-        2,
-        "one recovery wake and its ordinary reply wake"
-    );
-}
-
-#[test]
-fn desktop_manual_recovery_does_not_repeat_a_lost_native_response() {
-    let fixture = Fixture::without_tmux("desktop-manual-unknown");
-    let runtime = fixture.host_state.join("runtime/desktop");
-    let bridge = DesktopBridgeFixture::start_at(&fixture.root, &runtime);
-    publish_capability(&fixture, &bridge);
-    let identity = desktop_command(&fixture, &["context"]);
-    assert!(identity.status.success());
-    let identity: Value = serde_json::from_slice(&identity.stdout).unwrap();
-    let worker = identity["result"]["snapshot"]["identity"]["worker_id"]
-        .as_str()
-        .unwrap();
-    bridge.disconnect_send.store(true, Ordering::SeqCst);
-    let failed = desktop_command(
-        &fixture,
-        &[
-            "sendmessage",
-            "--to",
-            worker,
-            "--subject",
-            "desktop-ambiguous-return",
-            "submitted but response lost",
-        ],
-    );
-    assert!(!failed.status.success());
-    bridge.disconnect_send.store(false, Ordering::SeqCst);
-    assert_eq!(bridge.sends.lock().unwrap().len(), 1);
     let before = fixture.current_state();
     let response = desktop_command(&fixture, &["context", "--recover-communication"]);
-    let response: Value = serde_json::from_slice(&response.stdout).unwrap();
-    assert_eq!(
-        response["result"]["owner_readback"]["communication"]["state"],
-        "unknown"
-    );
-    assert_eq!(bridge.sends.lock().unwrap().len(), 1);
+    assert!(!response.status.success());
+    assert!(String::from_utf8_lossy(&response.stderr)
+        .contains("unexpected argument '--recover-communication'"));
+    assert_eq!(bridge.sends.lock().unwrap().len(), 0);
     assert_eq!(fixture.current_state()["msgs"], before["msgs"]);
 }
 
@@ -315,18 +204,15 @@ fn desktop_connect_failure_resumes_after_bridge_and_daemon_restart_without_agent
             "retain this message across bridge downtime",
         ],
     );
-    assert!(!sent.status.success());
-    assert!(String::from_utf8_lossy(&sent.stderr).contains("\"durable\":true"));
+    assert!(sent.status.success());
+    let sent: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    assert_eq!(sent["durable"], true, "{sent}");
     assert!(bridge.sends.lock().unwrap().is_empty());
     let failed = fixture.current_state();
     assert!(failed["notification_delivery_failures"]
         .as_object()
         .unwrap()
-        .values()
-        .any(|failure| failure["retryable"] == true
-            && failure["error"]
-                .as_str()
-                .is_some_and(|error| error.starts_with("DESKTOP_BRIDGE_NOT_SUBMITTED:"))));
+        .is_empty());
     fixture.restart_daemon();
     std::fs::rename(&offline, &socket).unwrap();
     assert!(
@@ -1016,7 +902,14 @@ fn desktop_candidate_mismatch_is_rejected_and_unknown_send_is_not_replayed() {
             "only this never-submitted message may resume",
         ],
     );
-    assert!(!later.status.success());
+    assert!(
+        later.status.success(),
+        "{}",
+        String::from_utf8_lossy(&later.stderr)
+    );
+    let later: Value = serde_json::from_slice(&later.stdout).unwrap();
+    assert_eq!(later["durable"], true, "{later}");
+    assert_eq!(later["notification"], "queued-recipient-offline");
     bridge.disconnect_send.store(false, Ordering::SeqCst);
     std::fs::rename(&offline, &socket).unwrap();
     assert!(wait_until(Duration::from_secs(6), || bridge

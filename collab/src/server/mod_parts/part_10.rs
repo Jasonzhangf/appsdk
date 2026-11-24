@@ -1,7 +1,6 @@
-/// Recipient view of one consumed message. What the reader acts on stays: the
-/// durable body, sender, identity, correlation and reply obligation. Wake
-/// counters, the last attempt time and the retry marker are delivery ledger
-/// state; a successful read must not carry them per message.
+/// Recipient view of one unread message. Wake counters, the last attempt time,
+/// and the retry marker are delivery state; a successful read must not carry
+/// them per message.
 fn received_message_view(state: &State, message: &Message) -> serde_json::Value {
     let mut view = json!({
         "id": message.id,
@@ -13,7 +12,6 @@ fn received_message_view(state: &State, message: &Message) -> serde_json::Value 
         "in_reply_to": message.in_reply_to,
         "created_ms": message.created_ms,
         "state": message.state,
-        "reply_obligation": state.reply_obligations.get(&message.id),
     });
     // Typed channel facts (QQBot sender, immutable reply route, attachments)
     // are projected to the reader who can already read the message; messages
@@ -82,47 +80,6 @@ fn poll_messages_with_state(
         if let Err(error) = crate::identity::validate_id_for_protocol(receive_id) {
             return Some(Resp::err(format!("RECEIVE_IDENTITY_INVALID: {error}")));
         }
-        if let Some(receipt) = st.receive_receipts.get(receive_id).cloned() {
-            if receipt.worker_id != worker_id {
-                return Some(Resp::err(
-                    "RECEIVE_IDENTITY_MISMATCH: receive identity belongs to another actor",
-                ));
-            }
-            if receipt.route_scope != route_scope {
-                return Some(Resp::err(
-                    "RECEIVE_ROUTE_MISMATCH: receive identity belongs to another project route",
-                ));
-            }
-            // The receipt stores identities, not a second copy of the body.
-            // Retention owns message lifetime, so a purged batch reports its
-            // expiry instead of resurrecting or retaining expired payload.
-            let Some(messages) = receipt
-                .message_ids
-                .iter()
-                .map(|id| st.msgs.get(id).cloned())
-                .collect::<Option<Vec<_>>>()
-            else {
-                return Some(Resp::err_data(
-                    "RECEIVE_BATCH_EXPIRED: the committed receive batch is no longer retained",
-                    json!({
-                        "receive_id": receipt.receive_id,
-                        "expired": true,
-                        "count": 0,
-                    }),
-                ));
-            };
-            let messages: Vec<_> = messages
-                .iter()
-                .map(|message| received_message_view(&st, message))
-                .collect();
-            return Some(Resp::data(json!({
-                "messages": messages,
-                "count": receipt.message_ids.len(),
-                "receive_id": receipt.receive_id,
-                "replayed": true,
-                "fetched_at": iso(receipt.received_ms),
-            })));
-        }
     }
     let mut ids = Vec::new();
     for message in st.inbox_of(worker_id) {
@@ -150,29 +107,25 @@ fn poll_messages_with_state(
         return None;
     }
     // recv is an explicit read operation: deliver and consume the same batch
-    // atomically so a successful read cannot leave a new ACK obligation. The
-    // receive receipt commits in the same transaction, so a lost socket
-    // response replays the exact batch instead of stranding it.
+    // atomically. Build the only response projection before commit; the reducer
+    // marks the batch read. The periodic retention owner is the only path that
+    // removes consumed bodies. A receive ID is client trace only.
     let received_ms = now_ms();
-    let mut events = Vec::new();
-    if let Some(receive_id) = receive_id {
-        events.push(Event::ReceiveCommitted {
-            receipt: state::ReceiveReceipt {
-                receive_id: receive_id.to_owned(),
-                worker_id: worker_id.to_owned(),
-                route_scope,
-                message_ids: ids.clone(),
-                received_ms,
-            },
-            ids: ids.clone(),
-        });
-    } else {
-        events.push(Event::Delivered { ids: ids.clone() });
-        events.push(Event::Acked {
+    let messages = ids
+        .iter()
+        .filter_map(|id| {
+            st.msgs
+                .get(id)
+                .map(|message| received_message_view(st, message))
+        })
+        .collect::<Vec<_>>();
+    let mut events = vec![
+        Event::Delivered { ids: ids.clone() },
+        Event::Acked {
             ids: ids.clone(),
             consumed_ms: Some(received_ms),
-        });
-    }
+        },
+    ];
     if let Some(record) = st.keepalives.get(worker_id).cloned() {
         if record.unacked > 0 || record.last_notice_id.is_some() || record.suspected_offline {
             let mut updated = record;
@@ -189,32 +142,10 @@ fn poll_messages_with_state(
     if let Err(error) = server.commit_locked(&mut *st, &events) {
         return Some(Resp::err(format!("RECV_DURABILITY_FAILED: {error}")));
     }
-    // Project from the committed reducer state so the first response and a
-    // receipt replay answer from the same owner. Retention still owns the
-    // body; the receipt keeps only the message identities.
-    let Some(msgs) = ids
-        .iter()
-        .map(|id| st.msgs.get(id).cloned())
-        .collect::<Option<Vec<_>>>()
-    else {
-        return Some(Resp::err_data(
-            "RECEIVE_BATCH_EXPIRED: the committed receive batch is no longer retained",
-            json!({
-                "receive_id": receive_id,
-                "expired": true,
-                "count": 0,
-            }),
-        ));
-    };
-    let msgs: Vec<_> = msgs
-        .iter()
-        .map(|message| received_message_view(&st, message))
-        .collect();
     Some(Resp::data(json!({
-        "messages": msgs,
-        "count": msgs.len(),
+        "messages": messages,
+        "count": messages.len(),
         "receive_id": receive_id,
-        "replayed": false,
         "fetched_at": iso(received_ms),
     })))
 }
@@ -388,26 +319,22 @@ fn task_conflicts(
     feature_id: Option<String>,
     worktree_path: Option<String>,
 ) -> Resp {
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
-    {
-        Ok(control) => control,
-        Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     let st = server.state.lock().unwrap();
     let route_scope = match server_route_scope(server, &st) {
         Ok(route_scope) => route_scope,
         Err(error) => return Resp::err(error),
     };
     let mut conflicts = Vec::new();
-    for task in st
-        .tasks
-        .values()
-        .filter(|task| {
-            task_resource_active(&task.status)
-                && ((feature_id.is_some() && task.feature_id == feature_id)
-                    || (worktree_path.is_some() && task.worktree_path == worktree_path))
-        })
-    {
+    for task in st.tasks.values().filter(|task| {
+        task_resource_active(&task.status)
+            && ((feature_id.is_some() && task.feature_id == feature_id)
+                || (worktree_path.is_some() && task.worktree_path == worktree_path))
+    }) {
         match task_view_with_identity(&st, &control, route_scope.as_ref(), task) {
             Ok(view) => conflicts.push(view),
             Err(error) => return Resp::err(error),
@@ -571,8 +498,16 @@ fn worker_status_summary_with_maps(
                 .is_some_and(|previous| previous.binding.agent_id.as_str() == w.id)
     });
     let Some(role_brief) = role_brief else {
-        let display_name = if displaced_holder { w.id.clone() } else { display_name };
-        let status = if displaced_holder { "unknown" } else { "identity-mismatch" };
+        let display_name = if displaced_holder {
+            w.id.clone()
+        } else {
+            display_name
+        };
+        let status = if displaced_holder {
+            "unknown"
+        } else {
+            "identity-mismatch"
+        };
         return Ok(json!({
             "id": w.id,
             "display_name": display_name,
@@ -606,8 +541,10 @@ fn worker_status_summary_with_maps(
         server_route_scope(server, &state)?
     };
     if let Some(route) = route.as_ref() {
-        if let Some(current) = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &w.id)?
-            .and_then(|slot| slot.active_binding()) {
+        if let Some(current) = control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, &w.id)?
+            .and_then(|slot| slot.active_binding())
+        {
             current_worker.transport = current.transport.clone();
         }
     }
@@ -616,24 +553,33 @@ fn worker_status_summary_with_maps(
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
     let transport = current_transport.unwrap_or(w.transport.as_ref());
-    let (presence, transport_view, identity_valid, endpoint_live) = if current_transport == Some(None) {
-        (IdentityPresence::Unknown, serde_json::Value::Null, true, None)
-    } else {
-        let projected;
-        let worker = if transport == w.transport.as_ref() {
-            w
+    let (presence, transport_view, identity_valid, endpoint_live) =
+        if current_transport == Some(None) {
+            (
+                IdentityPresence::Unknown,
+                serde_json::Value::Null,
+                true,
+                None,
+            )
         } else {
-            projected = WorkerRec { transport: transport.cloned(), ..w.clone() };
-            &projected
+            let projected;
+            let worker = if transport == w.transport.as_ref() {
+                w
+            } else {
+                projected = WorkerRec {
+                    transport: transport.cloned(),
+                    ..w.clone()
+                };
+                &projected
+            };
+            if transport.is_some_and(|transport| transport.kind == TransportKind::Rex) {
+                rex_worker_status_view(server, worker)
+            } else {
+                let (presence, view) = worker_presence_with_view(server, worker);
+                let (valid, endpoint) = worker_identity_and_endpoint(server, worker);
+                (presence, view, valid, endpoint)
+            }
         };
-        if transport.is_some_and(|transport| transport.kind == TransportKind::Rex) {
-            rex_worker_status_view(server, worker)
-        } else {
-            let (presence, view) = worker_presence_with_view(server, worker);
-            let (valid, endpoint) = worker_identity_and_endpoint(server, worker);
-            (presence, view, valid, endpoint)
-        }
-    };
     let thread_state = transport_view
         .get("thread_state")
         .and_then(serde_json::Value::as_str);
@@ -652,12 +598,16 @@ fn worker_status_summary_with_maps(
     let status = if !identity_valid {
         "identity-mismatch"
     } else if endpoint_live == Some(false) {
-        if w.transport.as_ref().and_then(|transport| transport.tmux_endpoint.as_ref()).is_some_and(|endpoint| {
-            matches!(
-                crate::client::adapters::tmux::probe(endpoint),
-                Ok(crate::client::adapters::tmux::PanePresence::Present)
-            )
-        }) {
+        if w.transport
+            .as_ref()
+            .and_then(|transport| transport.tmux_endpoint.as_ref())
+            .is_some_and(|endpoint| {
+                matches!(
+                    crate::client::adapters::tmux::probe(endpoint),
+                    Ok(crate::client::adapters::tmux::PanePresence::Present)
+                )
+            })
+        {
             "offline"
         } else {
             "lost"
@@ -715,27 +665,44 @@ fn worker_status_summary_with_maps(
     }))
 }
 
-fn directory_targets(server: &Server, control: &binding_slot::BindingControlSet) -> Result<Vec<crate::proto::DirectoryTarget>, String> {
+fn directory_targets(
+    server: &Server,
+    control: &binding_slot::BindingControlSet,
+) -> Result<Vec<crate::proto::DirectoryTarget>, String> {
     let route = {
         let st = server.state.lock().unwrap();
         server_route_scope(server, &st)?
     };
-    let Some(route) = route else { return Ok(Vec::new()); };
+    let Some(route) = route else {
+        return Ok(Vec::new());
+    };
     let project_key = canonical_project_key(&server.root);
     let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
-    for slot in control.slots().filter(|slot| slot.identity_key.project_scope == route.project_scope_id
-        && slot.identity_key.app_scope_id == route.app_scope_id) {
-        let Some(current) = slot.active_binding() else { continue; };
+    for slot in control.slots().filter(|slot| {
+        slot.identity_key.project_scope == route.project_scope_id
+            && slot.identity_key.app_scope_id == route.app_scope_id
+    }) {
+        let Some(current) = slot.active_binding() else {
+            continue;
+        };
         let binding = &current.binding;
-        control.current_for_worker(&route.project_scope_id, &route.app_scope_id, binding.agent_id.as_str())?;
+        control.current_for_worker(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            binding.agent_id.as_str(),
+        )?;
         let display_name = slot.identity_key.name.clone();
-        let address = project_key.as_ref().map(|project| format!("{project}.{display_name}"));
-        let transport = current.transport.as_ref().map(|transport| {
-            crate::proto::DirectoryTransport {
-                kind: transport.kind.as_str().to_owned(),
-                namespace: transport.namespace.clone(),
-            }
-        });
+        let address = project_key
+            .as_ref()
+            .map(|project| format!("{project}.{display_name}"));
+        let transport =
+            current
+                .transport
+                .as_ref()
+                .map(|transport| crate::proto::DirectoryTransport {
+                    kind: transport.kind.as_str().to_owned(),
+                    namespace: transport.namespace.clone(),
+                });
         targets.push(crate::proto::DirectoryTarget {
             worker_id: binding.agent_id.as_str().to_owned(),
             display_name,
@@ -809,7 +776,14 @@ fn cross_route_worker_status(
     let project_key = canonical_project_key(std::path::Path::new(project_scope))
         .unwrap_or_else(|| project_scope.to_owned());
     let address = format!("{project_key}.{}", slot.identity_key.name);
-    let (role, work_roles, unacked_notifications, pending_notifications, unacked_keepalives, suspected_offline) = {
+    let (
+        role,
+        work_roles,
+        unacked_notifications,
+        pending_notifications,
+        unacked_keepalives,
+        suspected_offline,
+    ) = {
         let state = server.state.lock().unwrap();
         let is_master = state.global.projects.values().any(|project| {
             project.master_grants.values().any(|grant| {
@@ -836,7 +810,9 @@ fn cross_route_worker_status(
             unacked_notifications,
             pending_notifications,
             keepalive.map(|record| record.unacked).unwrap_or(0),
-            keepalive.map(|record| record.suspected_offline).unwrap_or(false),
+            keepalive
+                .map(|record| record.suspected_offline)
+                .unwrap_or(false),
         )
     };
     let diagnostic = if endpoint_live == Some(false) {
@@ -878,11 +854,14 @@ fn cross_route_worker_status(
 }
 
 fn handle_directory(server: &Server) -> Resp {
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     let targets = match directory_targets(server, &control) {
-        Ok(targets) => targets, Err(error) => return Resp::err(error),
+        Ok(targets) => targets,
+        Err(error) => return Resp::err(error),
     };
     let count = targets.len();
     Resp::data(json!({
@@ -898,15 +877,14 @@ impl ProjectRuntimeManager {
     /// visible, so one stale route cannot hide the whole live directory.
     fn directory_all(&self) -> Resp {
         let control = match self.binding_control_store().load() {
-            Ok(control) => control, Err(error) => return Resp::err(error),
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
         };
         let routes = {
             let routes = self.routes.lock().unwrap();
             routes
                 .iter()
-                .map(|(key, route)| {
-                    (key.clone(), route.root.clone(), route.storage_root.clone())
-                })
+                .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
                 .collect::<Vec<_>>()
         };
         let mut runtimes: Vec<Arc<Server>> = Vec::new();
@@ -914,14 +892,20 @@ impl ProjectRuntimeManager {
         for (key, root, storage_root) in routes {
             match self.ensure_runtime(&key, &root, &storage_root) {
                 Ok(runtime) => {
-                    if !runtimes.iter().any(|existing| Arc::ptr_eq(existing, &runtime)) {
+                    if !runtimes
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, &runtime))
+                    {
                         runtimes.push(runtime);
                     }
                 }
                 Err(error) => errors.push(format!("{}: {error}", key.1)),
             }
         }
-        if !runtimes.iter().any(|existing| Arc::ptr_eq(existing, &self.host)) {
+        if !runtimes
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &self.host))
+        {
             runtimes.push(self.host.clone());
         }
         let mut targets: Vec<crate::proto::DirectoryTarget> = Vec::new();
@@ -944,16 +928,11 @@ impl ProjectRuntimeManager {
             }
         };
         targets.sort_by(|a, b| {
-            (
-                a.project_root.as_deref(),
-                scope_rank(a),
-                &a.worker_id,
-            )
-                .cmp(&(
-                    b.project_root.as_deref(),
-                    scope_rank(b),
-                    &b.worker_id,
-                ))
+            (a.project_root.as_deref(), scope_rank(a), &a.worker_id).cmp(&(
+                b.project_root.as_deref(),
+                scope_rank(b),
+                &b.worker_id,
+            ))
         });
         targets.dedup_by(|a, b| a.project_root == b.project_root && a.worker_id == b.worker_id);
         let mut project_roots: Vec<String> = targets
@@ -1000,18 +979,16 @@ fn handle_default_set(
         return Resp::err("token mismatch: identity does not own this worker_id");
     }
     // Resolve before any mutation: a failed switch must preserve the old target.
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
-    let (resolved_worker, name_address) = match resolve_send_name_address(
-        server,
-        &st,
-        &control,
-        target_address.clone(),
-    ) {
-        Ok(resolved) => resolved,
-        Err(error) => return Resp::err(format!("DEFAULT_TARGET_UNRESOLVED: {error}")),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
+    let (resolved_worker, name_address) =
+        match resolve_send_name_address(server, &st, &control, target_address.clone()) {
+            Ok(resolved) => resolved,
+            Err(error) => return Resp::err(format!("DEFAULT_TARGET_UNRESOLVED: {error}")),
+        };
     // Inbound routing re-resolves the stored address through the same shared
     // owner. A raw worker id has no stable inbound meaning, so it is rejected
     // here instead of persisting a default that later fails.
@@ -1024,10 +1001,13 @@ fn handle_default_set(
         }
     };
     let resolved_target = match name_address {
-        Some(_) if target_address.eq_ignore_ascii_case("ceo")
-            || target_address.eq_ignore_ascii_case(&project_key) =>
+        Some(_)
+            if target_address.eq_ignore_ascii_case("ceo")
+                || target_address.eq_ignore_ascii_case(&project_key) =>
         {
-            Some(crate::address::ResolvedAddress::LocalLegacy(target_address.clone()))
+            Some(crate::address::ResolvedAddress::LocalLegacy(
+                target_address.clone(),
+            ))
         }
         Some(address) => Some(crate::address::ResolvedAddress::LocalName(
             crate::proto::LocalNameAddress {
@@ -1035,11 +1015,9 @@ fn handle_default_set(
                 name: address.name,
             },
         )),
-        None => {
-            return Resp::err(format!(
-                "DEFAULT_TARGET_UNRESOLVED: {target_address} is not a stable name or typed CEO address"
-            ))
-        }
+        None => return Resp::err(format!(
+            "DEFAULT_TARGET_UNRESOLVED: {target_address} is not a stable name or typed CEO address"
+        )),
     };
     if !st.workers.contains_key(&resolved_worker) {
         return Resp::err(format!(
@@ -1075,7 +1053,12 @@ fn handle_default_set(
         revision: revision + 1,
         updated_ms: now_ms(),
     };
-    if let Err(error) = server.commit_locked(&mut st, &[Event::ConversationDefaultSet { default: default.clone() }]) {
+    if let Err(error) = server.commit_locked(
+        &mut st,
+        &[Event::ConversationDefaultSet {
+            default: default.clone(),
+        }],
+    ) {
         return Resp::err(format!("DEFAULT_DURABILITY_FAILED: {error}"));
     }
     Resp::data(json!({ "default": default }))
@@ -1102,9 +1085,16 @@ fn handle_default_show(
 
 fn mutation_blocked_during_project_reset(req: &Req) -> bool {
     match req {
-        Req::Ceo { command, .. } => !matches!(command, crate::ceo::CeoCommand::Status | crate::ceo::CeoCommand::Progress { .. }),
+        Req::Ceo { command, .. } => !matches!(
+            command,
+            crate::ceo::CeoCommand::Status | crate::ceo::CeoCommand::Progress { .. }
+        ),
         Req::UnregisterSelf { .. } | Req::ProjectReset { .. } => false,
-        Req::PeerLifecycle { request } => matches!(request, crate::proto::PeerLifecycleRequest::Update { .. } | crate::proto::PeerLifecycleRequest::Close { .. }),
+        Req::PeerLifecycle { request } => matches!(
+            request,
+            crate::proto::PeerLifecycleRequest::Update { .. }
+                | crate::proto::PeerLifecycleRequest::Close { .. }
+        ),
         Req::BoardShow => false,
         Req::Board { command, .. } => !matches!(command, crate::board::BoardCommand::Show),
         Req::SubagentObserve { .. } => false,
@@ -1191,15 +1181,27 @@ fn subagent_action_mutates(action: &crate::subagent::Action) -> bool {
 /// place that requires the actor's current runtime binding.
 fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
     match req {
-        Req::PeerLifecycle { request: crate::proto::PeerLifecycleRequest::Update { worker_id, token, .. } | crate::proto::PeerLifecycleRequest::Close { worker_id, token, .. } } => Some((worker_id, token)),
+        Req::PeerLifecycle {
+            request:
+                crate::proto::PeerLifecycleRequest::Update {
+                    worker_id, token, ..
+                }
+                | crate::proto::PeerLifecycleRequest::Close {
+                    worker_id, token, ..
+                },
+        } => Some((worker_id, token)),
         Req::Subagent {
             worker_id,
             token,
             command,
             ..
         } if subagent_action_mutates(command) => Some((worker_id, token)),
-        Req::Board { worker_id, token, .. }
-        | Req::WorkRolesSet { worker_id, token, .. }
+        Req::Board {
+            worker_id, token, ..
+        }
+        | Req::WorkRolesSet {
+            worker_id, token, ..
+        }
         | Req::WorkflowTemplateSet {
             worker_id, token, ..
         }
@@ -1342,7 +1344,9 @@ fn validate_wire_runtime_binding(
                     .is_some_and(|worker| worker.token != *token)
             };
             if token_mismatch {
-                return Err(format!("TOKEN_MISMATCH: worker {worker_id} is registered by another token"));
+                return Err(format!(
+                    "TOKEN_MISMATCH: worker {worker_id} is registered by another token"
+                ));
             }
             // A missing local runtime can be admitted only with the existing
             // credential and the current transport's proven anchor.
@@ -1513,19 +1517,22 @@ fn validate_cli_register_rebind(
             "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane".to_owned()
         });
     };
-    let candidate_binding = state.global.lookup_tmux_route(&candidate.endpoint).or_else(|| {
-        state
-            .global
-            .lookup_unique_tmux_pane_route(&candidate.endpoint)
-            .filter(|binding| {
-                binding.agent_id.as_str() == worker_id
-                    && state.workers.get(worker_id).is_some_and(|worker| {
-                        worker.token == token
-                            && selected_transport_for_worker(worker)
-                                .is_some_and(|transport| transport.kind == TransportKind::Tmux)
-                    })
-            })
-    });
+    let candidate_binding = state
+        .global
+        .lookup_tmux_route(&candidate.endpoint)
+        .or_else(|| {
+            state
+                .global
+                .lookup_unique_tmux_pane_route(&candidate.endpoint)
+                .filter(|binding| {
+                    binding.agent_id.as_str() == worker_id
+                        && state.workers.get(worker_id).is_some_and(|worker| {
+                            worker.token == token
+                                && selected_transport_for_worker(worker)
+                                    .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+                        })
+                })
+        });
     let candidate_thread = candidate
         .endpoint
         .codex_thread_id
@@ -1562,8 +1569,7 @@ pub(crate) fn project_route_actor(
     worker_id: &str,
     token: &str,
 ) -> Result<WorkerRec, Resp> {
-    project_route_actor_with_binding(state, context, worker_id, token)
-        .map(|(worker, _)| worker)
+    project_route_actor_with_binding(state, context, worker_id, token).map(|(worker, _)| worker)
 }
 
 pub(crate) fn project_route_actor_with_binding(
@@ -1583,8 +1589,7 @@ pub(crate) fn project_route_actor_for_poll(
     worker_id: &str,
     token: &str,
 ) -> Result<WorkerRec, Resp> {
-    project_route_actor_for(state, context, worker_id, token, true)
-        .map(|(worker, _)| worker)
+    project_route_actor_for(state, context, worker_id, token, true).map(|(worker, _)| worker)
 }
 
 fn project_route_actor_for(

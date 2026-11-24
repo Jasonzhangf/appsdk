@@ -14,7 +14,7 @@ fn message(id: &str, status: &str) -> Message {
 
 // Publish the current carrier first, then apply the existing name effects.
 // Previous identity comes from the map even when business occupancy was released.
-fn publish_holder(server: &Server, name: &str, worker: &str) {
+pub(super) fn publish_holder(server: &Server, name: &str, worker: &str) {
     let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
     let control = store.load().unwrap();
     let binding = control.active_values().find(|value| value.binding.agent_id.as_str() == worker).unwrap().clone();
@@ -67,6 +67,105 @@ fn name_mailbox_address_selects_only_requested_name() { mailbox_name_selection(f
 
 #[test]
 fn name_mailbox_address_survives_released_occupancy() { mailbox_name_selection(true); }
+
+#[test]
+fn board_notice_uses_assignment_name_after_holder_changes() {
+    let (server, root) = peer_tests::test_server();
+    for id in ["manager", "old", "new"] {
+        assert!(peer_tests::register_synthetic_peer(&server, id, id).ok);
+    }
+    peer_tests::promote_master(&server, "manager", "test manager");
+    publish_holder(&server, "Alice", "old");
+    publish_holder(&server, "Alice", "new");
+    let now = now_ms();
+    let task = TaskRec {
+        id: "board-takeover".into(),
+        owner: "old".into(),
+        created_by: "manager".into(),
+        feature_id: None,
+        worktree_path: None,
+        branch: None,
+        base_commit: None,
+        priority: "p2".into(),
+        status: "working".into(),
+        next_step: None,
+        wait: None,
+        isolation_mode: None,
+        created_ms: now,
+        updated_ms: now,
+    };
+    let mut state = server.state.lock().unwrap();
+    state.apply(&Event::TaskCreated { task: task.clone() });
+    state.apply(&Event::BoardDetailsChanged {
+        task_id: task.id.clone(),
+        details: crate::board::BoardTaskDetails {
+            revision: 1,
+            public_visibility: true,
+            ..Default::default()
+        },
+    });
+    state.apply(&Event::TaskAssignmentUpdated {
+        assignment: name_state::TaskAssignment {
+            task_id: task.id.clone(),
+            name: "Alice".into(),
+            session_id: "session-old".into(),
+            assignment_revision: 1,
+            reflow: None,
+            updated_ms: now,
+        },
+    });
+    drop(state);
+    let result = handle_board_command(
+        &server,
+        "manager".into(),
+        "token-manager".into(),
+        BoardCommand::Update {
+            id: task.id,
+            expected_revision: 1,
+            status: None,
+            next: Some("next step changed".into()),
+        },
+    );
+    assert!(result.ok, "{result:?}");
+    let notice_id = result.data["notification_message_id"].as_str().unwrap();
+    let state = server.state.lock().unwrap();
+    let address = state.mailbox_name_addresses.get(notice_id).cloned();
+    let actual_target = state.msgs[notice_id].to.clone();
+    assert_eq!(state.msgs[notice_id].wake_attempt_count, 0);
+    let new_unread = state.inbox_of("new").iter().any(|message| message.id == notice_id);
+    let old_unread = state.inbox_of("old").iter().any(|message| message.id == notice_id);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(actual_target, "new");
+    assert_eq!(address.unwrap().name, "Alice");
+    assert!(new_unread);
+    assert!(!old_unread);
+}
+
+#[test]
+fn plain_send_accepts_correlation_to_an_expired_message() {
+    let (server, root) = peer_tests::test_server();
+    for id in ["sender", "receiver"] {
+        assert!(peer_tests::register_synthetic_peer(&server, id, id).ok);
+    }
+    let sent = handle_send(
+        &server,
+        "sender".into(),
+        "receiver".into(),
+        "notify".into(),
+        Some("correlation".into()),
+        "ordinary message".into(),
+        Some("msg-already-removed".into()),
+        "queued".into(),
+    );
+    let correlation = {
+        let state = server.state.lock().unwrap();
+        state.inbox_of("receiver").first().and_then(|message| message.in_reply_to.clone())
+    };
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(sent.ok, "{sent:?}");
+    assert_eq!(correlation.as_deref(), Some("msg-already-removed"));
+}
 
 #[test]
 fn name_mailbox_source_name_address_is_not_reassigned_to_target_name() {
@@ -481,14 +580,12 @@ fn name_mailbox_new_holder_wake_ignores_old_budget_and_consumes_no_old_subscript
     assert!(received.ok, "{received:?}"); assert_eq!(received.data["count"], 2);
     let state = server.state.lock().unwrap();
     assert_eq!(state.notification_subscriptions["old-timer"].fired_count, 0);
-    assert_eq!(state.receive_receipts["new-read"].worker_id, "new");
     for id in ["pending", "delivered"] {
         assert_eq!(state.msgs[id].wake_attempt_count, 10); assert_eq!(state.msgs[id].state, "read");
         assert!(!state.handoff_wake_pending(&state.msgs[id]));
     }
     let loaded = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(serde_json::to_value(&loaded.msgs).unwrap(), serde_json::to_value(&state.msgs).unwrap());
-    assert_eq!(serde_json::to_value(&loaded.receive_receipts).unwrap(), serde_json::to_value(&state.receive_receipts).unwrap());
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

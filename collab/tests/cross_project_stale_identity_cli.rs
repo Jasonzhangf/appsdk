@@ -1246,6 +1246,49 @@ fn pane_contains_message_id(fixture: &Fixture, pane: &Pane, message_id: &str) ->
     compact.contains(message_id)
 }
 
+fn trace_daemon_tmux_commands(fixture: &Fixture) -> (String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let real = Command::new("/bin/sh")
+        .args(["-c", "command -v tmux"])
+        .output()
+        .unwrap();
+    assert!(real.status.success());
+    let real = String::from_utf8(real.stdout).unwrap();
+    let bin = fixture.root.join("daemon-tmux-trace");
+    std::fs::create_dir(&bin).unwrap();
+    let trace = bin.join("commands");
+    let wrapper = bin.join("tmux");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = -S ]; then printf '%s\\n' \"${{3-}}\" >> {}; fi\nexec {} \"$@\"\n",
+            shell_quote(trace.to_str().unwrap()),
+            shell_quote(real.trim()),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    (path, trace)
+}
+
+fn assert_no_daemon_tmux_input(trace: &Path, prior_commands: usize) -> usize {
+    let commands = std::fs::read_to_string(trace).expect("daemon tmux trace is active");
+    assert!(
+        commands
+            .lines()
+            .skip(prior_commands)
+            .any(|command| matches!(command, "list-panes" | "display-message")),
+        "the private daemon must use the traced tmux entry: {commands}"
+    );
+    assert!(
+        !commands.lines().any(|command| matches!(command, "paste-buffer" | "send-keys")),
+        "offline delivery must submit neither text nor Enter: {commands}"
+    );
+    commands.lines().count()
+}
+
 fn assert_rejected_without_message(
     fixture: &Fixture,
     target_context: &Value,
@@ -1398,6 +1441,8 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         before,
     );
 
+    let (traced_path, trace) = trace_daemon_tmux_commands(&fixture);
+    fixture.restart_daemon_with_env("PATH", &traced_path);
     let stale_workers = workers_at(&fixture, &target_context);
     let stale_target = worker_row(&stale_workers, &target_id);
     // The fixture supplies a registered session in a shell pane, not a live
@@ -1450,9 +1495,9 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         !pane_contains_message_id(&fixture, &target_pane, &msg_id),
         "the existing offline pane must receive no input for {msg_id}"
     );
+    let trace_checkpoint = assert_no_daemon_tmux_input(&trace, 0);
 
-    fixture.stop_daemon();
-    fixture.restart_daemon();
+    fixture.restart_daemon_with_env("PATH", &traced_path);
     let replayed = message_status(&fixture, &target_root, &target_pane, &msg_id);
     assert_eq!(replayed["id"], msg_id, "{replayed}");
     assert_eq!(replayed["state"], "pending", "{replayed}");
@@ -1463,6 +1508,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         !pane_contains_message_id(&fixture, &target_pane, &msg_id),
         "daemon restart must not submit input to the offline pane for {msg_id}"
     );
+    assert_no_daemon_tmux_input(&trace, trace_checkpoint);
 
     let dead_pane = create_session(&fixture, "dead-pane");
     let dead_context = register_context(&fixture, &dead_root, &dead_pane, "dead-context", true);

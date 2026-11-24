@@ -200,6 +200,7 @@ Architect 按计划及真实行为证据验收，返工也由其交回
 为用户执行身份注册、恢复或角色确认后，从 `collab context` 回执反馈当前名字、
 身份和工作角色、基础职责、当前任务与下一步。读取 `result.snapshot.role_brief` 的
 `role_task`、`responsibilities`、`next_action` 和实际任务状态。身份未确认时报告原错和待补事实。
+记忆 agent 和巡检者同时反馈实际周期、订阅状态和回执中的剩余次数。缺少回执时报告未证实已启用。
 
 | 角色 | 基础工作 |
 | --- | --- |
@@ -209,6 +210,12 @@ Architect 按计划及真实行为证据验收，返工也由其交回
 | Reviewer | 在达到 Review 准入时独立核验候选和证据。已有合适 reviewer 优先承担，缺位时按上面的 Codex review 路径派发。 |
 | 记忆 agent（`memory`） | 总结经核实的知识和决策，巡检记忆的准确性、归属与交接缺口。只接记忆总结和记忆巡检。 |
 | 巡检者（`patrol`） | 主要核查 Jenny 的实际执行、派发和回收。从活跃运行入口收集有原始证据的 live runtime bug，沿项目现有 bug 入口去重移交并跟踪。 |
+
+巡检者使用已授权的 30 分钟周期。记忆 agent 使用已授权的记忆巡检周期或记录变更触发，
+当前无统一默认间隔。两者的已授权周期批次默认 100 次，复用有效回执。
+角色恢复只读取或恢复现有身份与订阅。首次自动 arm 发生在包含完整 long-horizon
+内容和周期的 Board 派发提交中，按[长程登记](operations.md#register-the-long-horizon-goal-before-dispatch)
+核对派发和订阅的实际回执。
 
 各角色都可用编排 Skill 处理职责内、已获授权的可拆分子任务，普通 peer 也可以。
 本轮没有合适、有授权且可承接的 peer 时，按 [Codex 编排](../codex-orchestrator/SKILL.md)

@@ -2575,12 +2575,13 @@ async fn rex_status_error_with_service_marker_but_no_typed_change_is_not_recover
             .await
             .unwrap();
 
-    assert!(response.ok, "{response:?}");
-    assert_eq!(response.data["notification"], "queued-recipient-offline");
+    assert!(!response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["notification"], "subscribed-not-sent");
     assert!(response.data["notification_error"]
         .as_str()
         .unwrap()
-        .starts_with("RECIPIENT_NOT_ONLINE:"));
+        .starts_with("REX_NOT_DELIVERED: operation=server.status stage=BeforeWrite"));
     assert!(
         response.data.get("rex_binding_refresh").is_none(),
         "a non-generation status error must not enter service refresh: {response:?}"
@@ -2592,10 +2593,9 @@ async fn rex_status_error_with_service_marker_but_no_typed_change_is_not_recover
     let message_id = response.data["msg_id"].as_str().unwrap();
     {
         let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs[message_id].wake_attempt_count, 0);
-        assert!(!state
-            .notification_delivery_failures
-            .contains_key(message_id));
+        assert_eq!(state.msgs[message_id].state, "pending");
+        assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
+        assert!(state.notification_delivery_failures.contains_key(message_id));
     }
     let calls = fixture.calls();
     assert!(calls.iter().any(|call| rex_method(call) == "server.status"));
@@ -3066,26 +3066,6 @@ fn offline_recipient_never_receives_transport_input() {
     });
     let server = Arc::new(server);
     let subscription = register_and_subscribe(&server, "offline-peer");
-    {
-        let mut state = server.state.lock().unwrap();
-        let worker = state.workers.get_mut("offline-peer").unwrap();
-        worker.transport = Some(rex_transport(
-            "session-offline-peer",
-            "test-server",
-            "test-session",
-            "test-block",
-        ));
-        state
-            .notification_subscriptions
-            .get_mut(&subscription)
-            .unwrap()
-            .method = "rex".into();
-        state
-            .notification_subscriptions
-            .get_mut(&subscription)
-            .unwrap()
-            .target = "test-session/test-block".into();
-    }
     mark_agent_offline(&server, "offline-peer", "session-offline-peer");
     queue_message(
         &server,

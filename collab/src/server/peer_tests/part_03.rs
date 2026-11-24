@@ -667,12 +667,9 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
             id: "managed".into(),
         },
     );
-    assert!(!ready.ok);
-    assert!(ready
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("TMUX_NOTIFICATION_REJECTED:"));
+    assert!(ready.ok, "{ready:?}");
+    assert_eq!(ready.data["notification"]["durable"], true);
+    assert_eq!(ready.data["notification"]["notification"], "queued-recipient-offline");
     assert_eq!(
         server.state.lock().unwrap().subagents["managed"].status,
         "idle"

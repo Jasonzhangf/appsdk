@@ -534,8 +534,9 @@ fn tmux_notification_requests_durable_receive() {
 #[tokio::test]
 async fn tmux_peer_send_then_collab_recv_commits_queryable_consumption() {
     let (mut server, root) = test_server();
-    let tmux = IsolatedTmux::start(&root);
+    let tmux = IsolatedTmux::start_online(&root);
     let endpoints = tmux.endpoints();
+    wait_for_online_fixture(&endpoints[1]);
     assert!(register_tmux(&server, "tmux-a", endpoints[0].clone()).ok);
     assert!(register_tmux(&server, "tmux-b", endpoints[1].clone()).ok);
     server.appserver_notification_sink = default_appserver_notification_sink();
@@ -1295,7 +1296,7 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
 fn explicit_peer_notification_accepts_arbitrary_durable_body() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     let response = handle_send(
         &server,
         "sender".into(),
@@ -1365,7 +1366,7 @@ fn send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery() {
 fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
         Err("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure".into())
     });
@@ -1428,7 +1429,7 @@ fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
 fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_for_sink = Arc::clone(&attempts);
     server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
@@ -1510,7 +1511,7 @@ fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
 fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     let first = handle_send(
         &server,
         "sender".into(),
@@ -1558,7 +1559,7 @@ fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
 fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink =
         Arc::new(|_, _, _, _, _, _| Err("ADAPTER_TIMEOUT: turn/start timed out".into()));
     let first = handle_send(
@@ -1604,7 +1605,7 @@ fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
 fn explicit_retry_is_refused_for_a_decode_failure() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
         Err("ADAPTER_UNKNOWN: decode response: missing result payload".into())
     });
@@ -1654,7 +1655,7 @@ fn daemon_maintenance_replaces_a_stale_default_target_with_current_tmux_route() 
         Ok(serde_json::json!({"text_submitted":true,"enter_submitted":true,"consumed":false}))
     });
     let server = Arc::new(server);
-    assert!(register_public(&server, "peer", "%peer").ok);
+    assert!(register_public_with_presence(&server, "peer", "%peer", true).ok);
     {
         let mut state = server.state.lock().unwrap();
         let mut subscription = state.notification_subscriptions["sub-default-direct-message-peer"].clone();

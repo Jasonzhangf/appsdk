@@ -129,8 +129,8 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 
 const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
-1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将任务和缺陷交可承接的 architect，由 architect 完成计划、直接交执行 peer 并验收。其他工作先检查 idle、授权和容量，优先派给合适 peer。仅当无合适 peer 可承接时，派独立 `codex exec --profile gcm` 执行或观察 worker。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
-2. **Peer bounded subwork**：已接受目标的 peer 可将自己的目标拆成 non-overlapping bounded scopes，并直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker；这是 peer 自己执行的分拆，不是 manager 绕过可用 peer 容量。该 peer 核验证据并完成 assigned delivery。
+1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将任务和缺陷交可承接的 architect，由 architect 完成计划、直接交执行 peer 并验收。其他工作先检查 idle、获授权且合适的 peer 与可用容量。仅当无合适 peer 可承接时，按 Codex 编排合同派独立执行或观察 worker。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
+2. **已接受任务的子任务**：各角色可把职责内的工作拆成互不重叠的范围。先使用合适且已获授权的 peer；无可承接 peer 时按 Codex 编排合同使用独立子 worker。任务 owner 核验证据并完成交付。
 3. **兼容边界**：`collab subagent`、`appsdk subworker` 及其 managed records 只用于旧状态诊断、迁移和有证据的兼容操作，不授予新任务执行指导。任务结束后只回收自有 worker 和资源。
 4. **Standing patrol**：每次巡检只收敛本人目标范围。可恢复提取后移除不需要的自有 worktree；回收自有 stale resource；逐项处理本目标 open P0/P1 或用 owner、原因、解除条件明确停车；每个新生产问题先走项目 canonical issue intake。
 5. **PROTECTED_HOLD**：dirty、active、shared、unknown 资源必须保留并报告。不得删除其他 owner 的资源，不得批量终止进程，不得以 Collab/AppSDK 维护重启共享 daemon、tmux server 或宿主 pane。
@@ -144,15 +144,15 @@ pub(crate) const NOTIFY_RULES: &str = r#"通知处理准则（master 和 peer �
 
 每条通知都带 `P<n> ACTION: <一个动作>`。优先级：
 - P0 人类消息、blocker 上报；`goal:` / `deadline` 唤醒 → 跑 longhorizon show 后排程。
-- P1 `task-keepalive`（继续本人 goal，或记录真实 blocker 与具体方案）、`worker-idle`（按本人目标安排 ready 工作：本人已接受目标的 bounded subwork 可直接并发派独立 `codex exec --profile gcm` 子 worker；只有管理入口派发未分配 ready 工作，才先检查 idle、获授权且合适的 peer 与可用容量，有 ready 工作可承接时优先派给该 peer，仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`）、`worker-unresponsive`（读取现有事实后恢复或明确停车）、旧 managed 兼容状态（只做诊断/迁移，不启动新 managed 任务）、`release`（恢复等待该资源的任务）。
+- P1 `task-keepalive`（继续本人 goal，或记录真实 blocker 与具体方案）、`worker-idle`（处理职责内 ready 工作；需派发时先检查合适且获授权的 peer 和可用容量，仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`）、`worker-unresponsive`（读取现有事实后恢复或明确停车）、旧 managed 兼容状态（只做诊断/迁移，不启动新 managed 任务）、`release`（恢复等待该资源的任务）。
 - P2 回执类（delivery recorded、cleanup receipt）：记下就继续干，不要被打断，也不要当成新任务。
 
 高优先级是抢占，不是取消：处理完仍要回到原任务。不要用通知回复通知。"#;
 
-const WORKER_CHARTER: &str = r#"你负责本人已接受的目标。Master 和普通 peer 的编排职责相同，目标层级不同。普通 peer 不是执行 worker；合同指定为执行者的 peer 按详细设计直接执行和验证。
+const WORKER_CHARTER: &str = r#"普通 peer 按清晰合同执行、验证并交付已接受的任务。可自行分析和编排简单问题。复杂问题有可承接 architect 时，由 architect 设计，再由 peer 执行。
 
 1. 自行登记、读取、更新、续订和取消本人的 goal。名字与规范项目确定归属；sessionID 只承载当前执行。不得代理登记或改写他人的 goal。
-2. 本人承担编排的目标可拆成互不重叠的范围，并行派独立 `codex exec --profile gcm` 执行或观察子任务。管理入口处理未分配目标时沿 Collab 派单顺序。指定 peer 执行者按合同交付和验证，设计缺口直接交 architect。核验证据，完成自己负责的交付和资源清理。
+2. 职责内的子任务可拆成互不重叠的范围。无合适 peer 可承接时按 Codex 编排合同派独立子 worker。核验子任务证据，完成自己负责的交付和资源清理。
 3. 对 master 的合作请求按当前所有权和产能明确接受、协商或拒绝，不静默忽略。
 4. 你是受托范围的唯一交付负责人。调查并尝试授权内解法。真实阻塞需协调时，向直属负责人一次提交失败入口、原错、尝试结果、外部依赖、所需决定和恢复条件。由 architect 直接处理设计及执行范围内的事项，项目级决策交 Jenny。负责人核实后按权限处理等待，期间推进独立工作。
 5. 巡检只是兜底唤醒，不是执行依赖。登记或续订后立即继续 ready 工作，不等下一次唤醒。仅暂停确实依赖或不安全的动作；等待决定时继续其余工作，保留交付责任，除非明确改派。"#;
@@ -228,7 +228,7 @@ mod tests {
         let prompt =
             generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Master);
 
-        assert!(prompt.contains("peer 不是执行 worker"));
+        assert!(prompt.contains("普通 peer 按清晰合同执行"));
         assert!(!prompt.contains("只有所有合适 peer 都忙"));
         assert!(!prompt.contains("Master 专属"));
         assert!(prompt.contains("Worker / subworker 处理规则"));

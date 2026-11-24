@@ -3012,6 +3012,15 @@ int main(int argc, char **argv) {
         fixture.record_start_id(fixture.pid().unwrap());
     }
 
+    pub(crate) fn foreground_agent_command(root: &Path) -> String {
+        let fixture = CodexFixture::compile(root);
+        format!(
+            "exec {} {}-$$",
+            shell_quote(&fixture.executable.to_string_lossy()),
+            shell_quote(&fixture.pid_file.to_string_lossy()),
+        )
+    }
+
     pub(crate) fn with_detached_foreground_agent(test: impl FnOnce(TmuxEndpoint)) {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let tmux = IsolatedTmux::start();

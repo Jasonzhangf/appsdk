@@ -156,6 +156,24 @@ fn test_candidates(thread_id: &str) -> Option<TransportCandidates> {
     test_candidates_at(thread_id, &root)
 }
 
+fn online_candidates(
+    tmux: &super::peer_tests::IsolatedTmux,
+    cwd: &Path,
+    thread_id: &str,
+) -> Option<TransportCandidates> {
+    let mut endpoint = tmux.endpoints().remove(0);
+    super::peer_tests::wait_for_online_fixture(&endpoint);
+    endpoint.codex_session_id = Some(format!("session-{thread_id}"));
+    endpoint.codex_thread_id = Some(thread_id.to_owned());
+    Some(TransportCandidates {
+        tmux: Some(crate::proto::TmuxCandidate {
+            endpoint,
+            cwd: cwd.display().to_string(),
+        }),
+        ..TransportCandidates::default()
+    })
+}
+
 // Scope/storage tests start with a committed native owner. Only native
 // admission is a precondition; route reservation and materialization use
 // the real manager owners before any identity is seeded.
@@ -961,6 +979,7 @@ fn registration_reuses_the_registered_tmux_pane_identity() {
 #[test]
 fn tmux_notification_acceptance_stays_pending_and_unread() {
     let (server, root, _) = test_server();
+    let tmux = super::peer_tests::IsolatedTmux::start_online(&root);
     let app_scope = AppServerId::new("app-a").unwrap();
     let registered = seed_published_registration_fixture(
         &server,
@@ -968,7 +987,7 @@ fn tmux_notification_acceptance_stays_pending_and_unread() {
         "token-1".into(),
         root.display().to_string(),
         Some(app_scope),
-        test_candidates("thread-1"),
+        online_candidates(&tmux, &root, "thread-1"),
     );
     assert!(registered.ok, "{registered:?}");
     let subscribed = handle_notification_subscribe(
@@ -1041,13 +1060,14 @@ fn tmux_notification_acceptance_stays_pending_and_unread() {
 #[test]
 fn failed_tmux_notification_keeps_message_unread_without_receive_receipt() {
     let (mut server, root, _) = test_server();
+    let tmux = super::peer_tests::IsolatedTmux::start_online(&root);
     let registered = seed_published_registration_fixture(
         &server,
         "worker-1".into(),
         "token-1".into(),
         root.display().to_string(),
         Some(AppServerId::new("app-a").unwrap()),
-        test_candidates("thread-1"),
+        online_candidates(&tmux, &root, "thread-1"),
     );
     assert!(registered.ok, "{registered:?}");
     let subscribed = handle_notification_subscribe(

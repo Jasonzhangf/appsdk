@@ -684,7 +684,7 @@ fn daemon_maintenance_replaces_a_persisted_appserver_default_wake_lease() {
     let (mut server, root) = test_server();
     let mut server = Arc::new(server);
     assert!(register_public(&server, "sender", "thread-sender").ok);
-    assert!(register_public(&server, "recipient", "thread-recipient").ok);
+    assert!(register_public_with_presence(&server, "recipient", "thread-recipient", true).ok);
     {
         let mut state = server.state.lock().unwrap();
         server

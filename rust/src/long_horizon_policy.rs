@@ -47,7 +47,7 @@ THEN: 在原目标或任务记录维护目标、执行计划、实际进度和�
 
 ## 6. 目标阻塞与项目仲裁
 - 只处理与本人目标有真实依赖的阻塞项；当前视图来自 `appsdk longhorizon show`，不另跑固定状态查询。项目范围的跨 owner 仲裁仍由 master 负责。
-- **阻塞须有证据并交给对应 owner**：peer 是受托范围的唯一交付负责人，派单或求助不转移责任。先调查、核实子 agent 限制并尝试已有授权内的解法；事实、接口和依赖问题交给负责该事实的 peer，架构、需求解释和设计取舍先交总设计师，范围、优先级、资源与跨 peer 冲突交 master，只有用户独占事实、新授权或硬约束变化才问用户。及时提交任务与受影响验收、真实失败入口和原错/证据路径、已尝试动作及结果、其他授权内路径为何不可行、外部依赖、所需决定和恢复条件。事实与假设分开；求助不要求先证明根因。待核实的阻塞不是停工批准，只暂停确实依赖或不安全的动作，继续其余工作，不等待别人替自己解决。
+- **阻塞须有证据并交给对应 owner**：peer 是受托范围的唯一交付负责人，派单或求助不转移责任。先调查、核实子 agent 限制并尝试已有授权内的解法。派单任务中的必要技术、设计和验收问题交派单 architect。无派单 architect、Jenny 直接派单、需要项目授权或跨任务协调时，交本项目 Jenny。内部任务不调用用户询问工具。只有用户独占事实、新授权或硬约束变化需要用户决定时，由获授权的负责人沿汇报链处理。用户明确指定 peer 直接沟通时按指定范围执行。及时提交任务与受影响验收、真实失败入口和原错/证据路径、已尝试动作及结果、其他授权内路径为何不可行、外部依赖、所需决定和恢复条件。事实与假设分开；求助不要求先证明根因。待核实的阻塞不是停工批准，只暂停确实依赖或不安全的动作，继续其余工作，不等待别人替自己解决。
 - **负责人先取证再处理**：执行者阻塞或停滞时，有 Rex/tmux 绑定就运行 `collab worker snapshot <id> --capture --lines 80` 查看原终端，即使状态显示 online 或 busy。核对实际失败证据、权限、替代路径和影响。只有真实外部依赖或未覆盖决定才按权限确认等待，记录负责人和恢复条件。架构任务中的设计决定、解阻和结果交回由 architect 与 peer 直接协调。项目级决定交 Jenny。
 - **AppSDK 框架缺陷**：按实际影响定级并经 canonical intake 判重登记，不能 hack 规避；缺陷报告本身不证明整个目标阻塞。继续未受影响工作，跨 owner 决策按上述路由与核实规则处理。
 - 缺陷验收后由当前 owner 记录解决及证据，再走既有关闭入口 `appsdk bug close <id> -m "Solution: ..."`。
@@ -136,7 +136,7 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 
 const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
-1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将任务和缺陷交可承接的 architect，由 architect 完成计划、直接交执行 peer 并验收。其他工作先检查 idle、获授权且合适的 peer 与可用容量。仅当无合适 peer 可承接时，按 Codex 编排合同派独立执行或观察 worker。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
+1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将需要规划的任务和缺陷交可承接的 architect，由 architect 设计、直接交执行 peer 并验收。无可承接 architect 且需要新计划时，Jenny 按独立 Plan 合同启动只读 `codex exec --profile oauth --model gpt-6.2-sol`（medium），读取并验收落盘的 `plan.md`。已有有效计划直接复用。有合适的执行 peer 时由 Jenny 或受托 architect 派发；无可用执行 peer 时按 Codex 编排合同派独立 GCM worker，并传已验收计划与明确执行合同。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
 2. **已接受任务的子任务**：各角色可把职责内的工作拆成互不重叠的范围。先使用合适且已获授权的 peer；无可承接 peer 时按 Codex 编排合同使用独立子 worker。任务 owner 核验证据并完成交付。
 3. **兼容边界**：`collab subagent`、`appsdk subworker` 及其 managed records 只用于旧状态诊断、迁移和有证据的兼容操作，不授予新任务执行指导。任务结束后只回收自有 worker 和资源。
 4. **Standing patrol**：每次巡检只收敛本人目标范围。可恢复提取后移除不需要的自有 worktree；回收自有 stale resource；逐项处理本目标 open P0/P1 或用 owner、原因、解除条件明确停车；每个新生产问题先走项目 canonical issue intake。
@@ -252,6 +252,8 @@ mod tests {
         assert!(prompt.contains("直接交执行 peer 并验收"));
         assert!(prompt.contains("逐 peer 任务清单"));
         assert!(prompt.contains("codex exec --profile gcm` subworker"));
+        assert!(prompt.contains("codex exec --profile oauth --model gpt-6.2-sol"));
+        assert!(prompt.contains("内部任务不调用用户询问工具"));
         assert!(prompt.contains("--event master-idle"));
         assert!(prompt.contains("collab ceo reply"));
         assert!(prompt.contains("无 CEO 时明确走无上游分支"));

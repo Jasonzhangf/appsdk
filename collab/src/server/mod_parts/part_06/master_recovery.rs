@@ -294,7 +294,7 @@ fn communication_recovery_brief() -> serde_json::Value {
         "steps": [
             "In the original agent session and project root, run `collab context` first in that session's shell. Use the Collab Skill's recovery table for any exact missing facts. Do not use Computer Use, CUA, GUI, another agent session, or Rex layout commands for identity recovery.",
             "If context returns missing_facts, preserve result.requires.fields and result.requires.sources for the host maintainer. Never guess or manually fill session_id, thread_id, endpoint or namespace. Pause only identity-dependent actions and rerun `collab context` from the same shell once the host provides the required facts.",
-            "If context fails, preserve the exact error and report through a healthy peer or the human. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
+            "If context fails, preserve the exact error. For assigned work, report through an already authorized channel to the dispatching architect or project Jenny. For a direct user recovery request, report the specific gap to the requester. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
         ],
         "close_only_when": [
             "the same native target produces a result item",
@@ -416,7 +416,6 @@ fn base_role_brief(
         serde_json::Value::String(scoped_dispatch_rule.to_owned()),
         serde_json::Value::String(work_role_next_action_rule.to_owned()),
         serde_json::Value::String(collaboration_reply_rule.to_owned()),
-        serde_json::Value::String("Answer the user for a direct user question or reporting request, a decision only the user can make, or a material exception affecting the user.".to_owned()),
         serde_json::Value::String("Collab/AppSDK and tmux have independent lifecycles. Do not run broad process kills or perform daemon or tmux lifecycle actions. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.".to_owned()),
         serde_json::Value::String("Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.".to_owned()),
         serde_json::Value::String("You are the sole delivery owner for your accepted scope. Delegation or asking for help does not transfer responsibility. Investigate failures, verify subworker limitations at the real entry, and pursue authorized remedies or another executor; do not wait for master or others to solve your task, exceed authority or repeat unchanged failures.".to_owned()),

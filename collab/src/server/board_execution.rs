@@ -519,6 +519,23 @@ fn board_start_locked(
     response
 }
 
+fn current_execute_phase<'a>(
+    state: &'a State,
+    task_id: &str,
+) -> Option<&'a crate::server::ticket_state::TicketPhaseRecord> {
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+
+    state
+        .ticket_phases
+        .iter()
+        .filter(|phase| {
+            phase.task_id == task_id
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.status != TicketPhaseStatus::Revoked
+        })
+        .max_by_key(|phase| phase.batch)
+}
+
 fn board_ticket_result_event(
     server: &Server,
     state: &State,
@@ -554,16 +571,7 @@ fn board_ticket_result_event(
         }
     }
 
-    let Some(phase) = state
-        .ticket_phases
-        .iter()
-        .filter(|phase| {
-            phase.task_id == task_id
-                && phase.phase == TicketPhaseKind::Execute
-                && phase.status != TicketPhaseStatus::Revoked
-        })
-        .max_by_key(|phase| phase.batch)
-    else {
+    let Some(phase) = current_execute_phase(state, task_id) else {
         if admitted_public {
             return Err(Resp::err_data(
                 "TICKET_PHASE_MISSING: admitted public ticket has no execute phase record",

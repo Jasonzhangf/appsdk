@@ -147,11 +147,13 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         }
         for route in [
             "Make ordinary technical decisions autonomously",
-            "factual questions to the owning peer",
-            "design questions to the designer",
-            "scope, resources and conflicts to the current master",
-            "user-exclusive facts, genuinely new authorization or explicit hard-constraint changes",
-            "Reuse existing user authorization without asking again",
+            "technical, design and acceptance questions to the dispatching architect",
+            "project Jenny for direct Jenny assignments, absent architect",
+            "Do not call request_user_input, AskUserQuestion or equivalent for internal work",
+            "Only the authorized reporting owner escalates",
+            "Reuse existing authorization",
+            "Never use Computer Use, CUA or GUI for Collab",
+            "OAuth gpt-6.2-sol medium Planner",
         ] {
             assert!(
                 responsibilities

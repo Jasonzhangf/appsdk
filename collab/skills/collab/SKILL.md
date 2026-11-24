@@ -1,15 +1,16 @@
 ---
 name: collab
-description: "Collab peer/Jenny 身份注册、恢复、状态和协作。恢复时原 agent 会话直接运行 collab context，禁止 Computer Use/CUA/GUI。已注册 peer 执行协作，master 权限另需明确授权。"
+description: "Collab peer/Jenny 身份、任务交付和协作。原 agent 会话使用 Collab CLI，禁止 Computer Use/CUA/GUI。已注册 peer 执行协作，master 权限另需明确授权。"
 ---
 
 # Collab
 
-用户要求恢复 Collab peer 或 Jenny/master 时，当前 agent 的第一个恢复动作是在目标项目根
-用自己的 shell 运行 `collab context`。已明确授权接替指定名字或角色时，按下方恢复表
-加对应参数。禁止调用 Computer Use、CUA 或任何 GUI 来识别宿主、检查工具、打开或切换
-Rex/终端窗口、取字段或执行命令。原会话没有 shell 或没有 `collab` 时，报告具体缺口，
-等待原宿主提供入口。
+Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的 shell 中执行。
+收到唤醒或上下文压缩后同样适用。已验证绑定可直接复用。用户要求恢复、当前身份未知
+或明确绑定异常时，在实际项目运行 `collab context`。授权接替时只按恢复表补参数。
+禁止用 Computer Use、CUA 或 GUI 找工具、打开终端、读日志或代跑 CLI。
+原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿已有获授权通道向派单 architect
+或 Jenny 报告缺失入口及恢复条件，继续能独立完成的工作。
 
 本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
 不整篇加载；手册与本入口属于同一个 Skill。
@@ -58,8 +59,9 @@ board 修改仍先提交，自动通知在目标离线时保持未读。
 
 board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关闭前逐项核对：
 
-1. `completion_missing` 必须为空。仍含 `review`、`integration`、`manual_termination`、
-   `cleanup` 或其他未完成项时不得关闭。
+1. 按[任务交付生命周期](operations.md#任务交付生命周期)完成交付、适用审查和集成。
+   核对清理范围后执行正常 `task close`。成功关闭后才要求 `completion_missing=[]`
+   及 `delivery_complete=true`。如果还有 `cleanup`，跟进同一任务的清理回执。
 2. 代码任务必须有真实入口或公开接口的黑盒证据；单测、build、候选分支、review PASS
    或 merge 分别只证明对应范围，不能替代运行验收。
 3. 代码候选只有在对应 owner 已 merge、push 并核对远端后，才能走 integration/close；
@@ -174,7 +176,8 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
 默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，
 不得跳过 idle 列表直接新开 Desktop peer；没有可承接 peer 时沿已有独立 worker 路由，
-直接派 `codex exec --profile gcm` execution/observation worker 推进。
+按[无可用执行 peer 时的派单](operations.md#无可用执行-peer-时的派单)取得或复用已验收计划，
+再派独立 `codex exec --profile gcm` execution/observation worker 推进。
 
 同一 peer 一次只持有一个未完成实现或主责任务。manager 不把多个并发实现任务叠给同一
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
@@ -187,6 +190,16 @@ peer 派发执行合同。Peer 实现、
 Architect 按计划及真实行为证据验收，返工也由其交回
 原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。
 只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
+
+已注册 peer 在执行派单时先查原合同、证据和现有授权，自行处理范围内的常规决定。
+仍需答复时，技术、设计和验收问题发给派单 architect。Jenny 直接派单、没有派单
+architect，或问题需要项目授权和跨任务协调时，发给本项目 Jenny。接收者取当前任务
+合同与 Board，用 `collab list` 核对项目限定地址。以
+`collab send --to '<project.name>' --subject 'blocker:<task-id>' --content '<原错、影响、尝试、所需决定、恢复条件>'`
+发给该负责人，只暂停依赖答案的步骤。内部任务不调用
+`request_user_input`、`AskUserQuestion` 或同类用户询问工具。必须由用户决定时，
+由派单 architect 转 Jenny，再由获授权的负责人按既有链路向用户汇总。用户明确指定
+peer 直接沟通时按指定范围执行。
 
 任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
 已有可用的独立 reviewer 优先承接。没有可用 reviewer 时，按 [Review 合同](../codex-orchestrator/references/review.md)

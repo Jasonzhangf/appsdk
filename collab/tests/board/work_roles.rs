@@ -2251,7 +2251,7 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
         "direct-rework",
         &["--executor", "Alice", "--reviewer", "Bob"],
     );
-    fixture.run_public(
+    let first_claim = fixture.run_public(
         &[
             "board",
             "claim",
@@ -2261,15 +2261,20 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
         ],
         THREAD_B,
     );
+    let first_revision = first_claim["task"]["revision"].as_u64().unwrap().to_string();
+    let first_attempt = first_claim["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
     fixture.run_public(
         &[
             "board",
             "start",
             "direct-rework",
             "--expected-revision",
-            "2",
+            &first_revision,
             "--attempt",
-            "1",
+            &first_attempt,
         ],
         THREAD_B,
     );
@@ -2282,7 +2287,7 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
             "--evidence",
             "first report",
             "--attempt",
-            "1",
+            &first_attempt,
         ],
         THREAD_B,
     );
@@ -2302,10 +2307,13 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
     assert_eq!(changed["status"], "rework");
 
     let changed_board = fixture.run_public(&["board", "show"], THREAD_B);
-    let changed_revision = task(&changed_board, "direct-rework")["revision"]
+    let changed_task = task(&changed_board, "direct-rework");
+    let changed_revision = changed_task["revision"].as_u64().unwrap().to_string();
+    assert_eq!(changed_task["execute"]["status"], "claimed");
+    let changed_attempt = changed_task["execute"]["attempt_generation"]
         .as_u64()
-        .unwrap()
-        .to_string();
+        .unwrap();
+    assert_eq!(changed_attempt, 2);
     fixture.run_public(
         &[
             "board",
@@ -2314,10 +2322,25 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
             "--expected-revision",
             &changed_revision,
             "--attempt",
-            "2",
+            &changed_attempt.to_string(),
         ],
         THREAD_B,
     );
+    let stale = rejected(
+        &fixture,
+        &[
+            "task",
+            "deliver",
+            "direct-rework",
+            "--no-candidate",
+            "--evidence",
+            "late first report",
+            "--attempt",
+            &first_attempt,
+        ],
+        THREAD_B,
+    );
+    assert!(stale.contains("TICKET_STALE_ATTEMPT"), "{stale}");
     fixture.run_public(
         &[
             "task",
@@ -2327,7 +2350,7 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
             "--evidence",
             "corrected report",
             "--attempt",
-            "2",
+            &changed_attempt.to_string(),
         ],
         THREAD_B,
     );
@@ -2348,6 +2371,7 @@ fn direct_rework_reopens_admitted_execute_phase_for_redelivery() {
     let history = fixture.run_public(&["task", "status", "direct-rework"], THREAD_B);
     assert_eq!(history["status"], "closed");
     assert_eq!(history["delivery_complete"], true);
+    assert_eq!(history["completion_missing"], json!([]));
 }
 
 #[test]
@@ -2597,7 +2621,6 @@ fn board_claim_advances_the_admitted_execute_phase_once() {
     );
     assert_eq!(claimed["task"]["status"], "working");
     assert_eq!(claimed["task"]["revision"], 2);
-
     let persisted = fixture.current_state();
     let phase = persisted["ticket_phases"]
         .as_array()
@@ -2659,6 +2682,24 @@ fn ticket_start_and_result_require_the_current_claimed_attempt() {
     );
     assert_eq!(claimed["task"]["status"], "working");
     assert_eq!(claimed["task"]["revision"], 2);
+
+    let claimed_execute = &claimed["task"]["execute"];
+    assert_eq!(claimed_execute["status"], "claimed");
+    assert_eq!(claimed_execute["attempt_generation"], 1);
+    assert_eq!(claimed["task"]["admitted"], true);
+    let board = fixture.run_public(&["board", "show"], thread);
+    let current = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "ticket-lifecycle")
+        .unwrap();
+    assert_eq!(current["execute"], *claimed_execute);
+    let revision = current["revision"].as_u64().unwrap().to_string();
+    let attempt = current["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
 
     // Only the claim owner may start the claimed ticket.
     let not_owner = rejected(
@@ -2726,17 +2767,18 @@ fn ticket_start_and_result_require_the_current_claimed_attempt() {
 
     let started = fixture.run_public(
         &[
-            "board",
+            "task",
             "start",
             "ticket-lifecycle",
             "--expected-revision",
-            "2",
+            &revision,
             "--attempt",
-            "1",
+            &attempt,
         ],
         thread,
     );
     assert_eq!(started["task"]["status"], "working");
+    assert_eq!(started["task"]["execute"]["status"], "running");
     let phase_after_start = fixture.current_state()["ticket_phases"]
         .as_array()
         .unwrap()
@@ -2779,7 +2821,7 @@ fn ticket_start_and_result_require_the_current_claimed_attempt() {
             "--evidence",
             "real evidence",
             "--attempt",
-            "1",
+            &attempt,
             "--no-candidate",
         ],
         thread,
@@ -2829,6 +2871,16 @@ fn legacy_task_register_delivery_still_succeeds_without_attempt() {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["task", "register", "legacy-register"], THREAD_A);
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    if let Some(row) = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "legacy-register")
+    {
+        assert_ne!(row["admitted"], true);
+        assert!(row.get("execute").is_none());
+    }
     let delivered = fixture.run_public(
         &[
             "task",
@@ -2906,6 +2958,11 @@ fn admitted_ticket_missing_execute_phase_is_rejected_not_treated_as_legacy() {
             .expect("phase records persist");
         phases.retain(|phase| phase["task_id"] != "ticket-missing-phase");
     });
+
+    let board = fixture.run_public(&["board", "show"], thread);
+    let missing = task(&board, "ticket-missing-phase");
+    assert_eq!(missing["admitted"], true);
+    assert!(missing.get("execute").is_none());
 
     let rejected = rejected(
         &fixture,
@@ -3747,7 +3804,11 @@ fn rework_stale_running_attempt_reclaims_from_public_claim() {
     assert_eq!(phase["binding_generation"], old_generation);
     assert_eq!(phase["attempt_generation"], 2);
 
-    let revision = drifted["board_details"]["rework-stale-running"]["revision"]
+    let board = fixture.run_public(&["board", "show"], owner_thread);
+    let stale_task = task(&board, "rework-stale-running");
+    assert_eq!(stale_task["execute"]["status"], "claimed");
+    assert_eq!(stale_task["execute"]["attempt_generation"], Value::Null);
+    let revision = stale_task["revision"]
         .as_u64()
         .expect("board details revision")
         .to_string();
@@ -3784,6 +3845,10 @@ fn rework_stale_running_attempt_reclaims_from_public_claim() {
     );
     assert_eq!(claimed["task"]["status"], "working");
 
+    let attempt = claimed["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .expect("new attempt from reclaim receipt")
+        .to_string();
     let recovered = fixture.current_state();
     let newest = recovered["ticket_phases"]
         .as_array()
@@ -3796,7 +3861,7 @@ fn rework_stale_running_attempt_reclaims_from_public_claim() {
     assert_eq!(newest["binding_generation"], old_generation + 1);
     assert_eq!(newest["attempt_generation"], 3);
 
-    let recovered_revision = recovered["board_details"]["rework-stale-running"]["revision"]
+    let recovered_revision = claimed["task"]["revision"]
         .as_u64()
         .expect("recovered board details revision")
         .to_string();
@@ -3828,7 +3893,7 @@ fn rework_stale_running_attempt_reclaims_from_public_claim() {
             "--expected-revision",
             recovered_revision.as_str(),
             "--attempt",
-            "3",
+            &attempt,
         ],
         owner_thread,
     );
@@ -3842,7 +3907,7 @@ fn rework_stale_running_attempt_reclaims_from_public_claim() {
             "--evidence",
             "rework stale running recovery",
             "--attempt",
-            "3",
+            &attempt,
             "--no-candidate",
         ],
         owner_thread,
@@ -5010,6 +5075,16 @@ fn claimed_executor_reassignment_lets_new_slot_start_and_deliver() {
         THREAD_C,
     );
     assert_eq!(accepted["task"]["owner"], carol_worker);
+    assert_eq!(accepted["task"]["execute"]["status"], "claimed");
+    let new_attempt = accepted["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .expect("acceptance exposes the current execute attempt");
+    let owner_board = fixture.run_public(&["board", "show"], THREAD_C);
+    assert_eq!(task(&owner_board, id)["execute"], accepted["task"]["execute"]);
+    let previous_owner_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let previous_owner_row = task(&previous_owner_board, id);
+    assert!(previous_owner_row.get("execute").is_none());
+    assert!(previous_owner_row.get("admitted").is_none());
 
     let duplicate_accept = fixture.command_public(
         &[
@@ -5087,9 +5162,8 @@ fn claimed_executor_reassignment_lets_new_slot_start_and_deliver() {
         .max_by_key(|phase| phase["batch"].as_u64().unwrap_or_default())
         .cloned()
         .expect("accept must leave a current execute phase");
-    let new_attempt = new_phase["attempt_generation"]
-        .as_u64()
-        .expect("the current execute attempt is visible");
+    assert_eq!(reaccepted["task"]["execute"], accepted["task"]["execute"]);
+    assert_eq!(new_phase["attempt_generation"], json!(new_attempt));
     let carol_generation = slot_generation(&fixture, &carol_worker);
 
     let revision = reaccepted["task"]["revision"]

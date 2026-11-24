@@ -25,8 +25,9 @@ specialties 模板卡只含 target、source、base_version、revision；master �
 
 新 peer 或角色变化只触发对受影响职责、依赖和交接的处理。只有实际任务需要时才改
 模板或分工策略。普通注册不要求先设置专长，不要求例行写规则或向用户汇报。
-需要用户决定、产生重要结果或用户要求汇报时，再报告变化和下一步。已有授权内直接
-推进；超出授权、改变显式硬约束或缺少关键事实时，只确认受影响部分。
+内部任务的必要确认沿[角色分工](SKILL.md#task-routing-and-role-responsibilities)交派单
+architect 或 Jenny。已有授权内直接推进，只暂停受影响的步骤。需要用户决定时，由获
+授权的负责人沿汇报链处理。
 更新正在执行的任务时，必须显式落实交接。
 
 ### 完整派单与交回
@@ -64,6 +65,23 @@ collab board respond <task-id> --accept --expected-revision <revision>
 未指定执行者时，dispatch 在同一专长匹配层级内优先选择没有未结任务和待接邀请的
 peer，再按稳定名字排序。指定执行者保持硬约束；邀请不等于接单。无已授权 ready
 工作时保留直接收件，不制造任务、角色或定时巡检来填满 peer。
+
+### 无可用执行 peer 时的派单
+
+Jenny 先核对当前 Board 的执行容量、任务权限和依赖。需要新规划或关键方案变更时，
+有可承接 architect 就交其完成详细计划。Jenny 或受托 architect 核对计划后安排执行。
+无可承接 architect 时，Jenny 按 Codex 编排的独立 Plan 合同启动新的只读 Planner。
+本派发分支使用 `codex exec --profile oauth --model gpt-6.2-sol -c 'model_reasoning_effort="medium"'`。
+沿 Plan 合同传入真实工作目录、用户需求、约束、任务与 DAG 路径及现有证据，
+用 `--sandbox read-only --ephemeral --output-last-message "$plan_run/plan.md"` 保存完整计划。
+`plan_run` 是本任务已确认的记录目录。Planner 不继承当前对话，和执行者、Reviewer 分离。
+
+Jenny 读取 `plan.md`，确认目标、边界、依赖、行动项和可观察验收。计划缺必要事实
+时交实际 owner 补齐，待受影响项 READY 后才派执行。已有有效计划可直接复用。
+有合适执行 peer 时派 peer。无可用执行 peer 时，由 Jenny 或受托 architect 用
+独立 `codex exec --profile gcm` 执行 worker，传可访问的计划与执行合同路径，
+写入执行 owner、允许写入范围、具体产物、验证、交回和停止条件。计划或执行入口失败
+时保留原错，只暂停实际依赖的步骤。
 
 接单和任务状态用任务板回执。执行、验证、适用审查和收口由合同指定的 owner 自主推进。
 peer 将执行细节留在本人任务记录。Jenny 只按需看 board 状态、交付证据和待处理事项，
@@ -259,7 +277,8 @@ daemon 不判断正文是否完成，也不保存回复义务。
 不对提醒本身回“收到”。daemon 仅追踪待回复标记，不替 agent 生成业务答复或判定任务完成。
 
 peer 向原请求方答复具体请求，按合同向指定接收人交付任务。执行细节由 peer 自持。
-用户直接提问、明确要求报告、必须由用户决定或影响用户的重大异常时，才向用户说明。
+回复用户直接提出的问题和向用户发起确认是两个动作。执行派单时，必须由用户决定的
+事项或重大异常先交派单 architect 或 Jenny，由负责人按既有链路汇报。
 
 ## 工作角色与用户指定分工
 
@@ -488,9 +507,8 @@ master 和 peer 的编排功能相同，区别是目标层级：master 管理项
 指定直接执行时，peer 在合同边界内执行。注册与恢复说明目标层级和职责，不用任务
 类型反推协作身份。
 
-常规技术选择在授权内自行决定。事实问所属 peer，设计问设计师，范围、资源和协作
-冲突问 master。只有人类专属事实、未覆盖授权或显式硬约束变化才询问用户。复用已有
-授权；等待必要答复时只暂停受影响工作，不把内部疑问转成人类审批。
+常规技术选择在授权内自行决定。必要确认、升级对象和用户询问工具的边界沿
+[Skill 入口的角色分工](SKILL.md#task-routing-and-role-responsibilities)。
 
 Choose the receiver by task kind, not by idle capacity or expected duration. A
 fixed command that runs for hours is still bounded work. A goal that needs
@@ -1187,7 +1205,8 @@ collab board publish <task-id> --title <t> --description <d> \
 collab board claim <task-id> --expected-revision <observed>
 ```
 
-Claim starts one pending task in the caller's own identity. A peer may claim
+Claim assigns one pending task to the caller and reserves its Execute attempt.
+Start that attempt separately using the [delivery lifecycle](#任务交付生命周期). A peer may claim
 its own publication or another authorized task. Read the current revision from
 `board show`. Claim atomically checks that the task is still pending and that
 the caller can start execution; it records the actual executor as owner. A
@@ -1764,8 +1783,8 @@ for architect assignments.
 - Where a suitable architect is assigned, route buglist items and project tasks
   to the architect first. The architect plans, hands the implementation to
   authorized peers, and accepts their results. Reuse the original board task
-  and its scope. When all suitable architects are busy, queue the intake and
-  keep unrelated ready work moving.
+  and its scope. If no suitable architect can take necessary new planning,
+  follow [the independent planning and dispatch route](#无可用执行-peer-时的派单).
 - For work without an applicable architect assignment, use the existing
   peer and independent-worker routing. Apply explicit user instructions about
   who plans, executes and accepts the task. Record decisions, evidence and
@@ -1851,20 +1870,54 @@ its own worktree and file scope. Independent peers may decline an invite to
 protect their current task. Wait for evidence summaries, verify them, then
 integrate. Chat tone is not completion.
 
-Delivery and review are not lifecycle endpoints. `task deliver --no-candidate`
-explicitly classifies read-only work with no code candidate. When review
-accepts it, the typed disposition is `no_merge_required`; no pending merge or
-merge wake is created, and the owner can close normally after owned cleanup.
-`task integrated` is not applicable to this delivery kind.
-Read-only work still needs the requested result, applicable acceptance evidence,
-real mailbox consumption, owned-resource cleanup, and normal task close.
-An ACK, summary, dispatch receipt, or `--no-candidate` flag alone is not completion.
+### 任务交付生命周期
+
+在原 agent 会话、实际项目中执行。产品上的构建、真实入口验收、独立 Review、
+Git 集成和上线依产品合同进行。下表记录同一任务在 Collab 的状态。省略的主语
+为本行执行身份。任务 ID 取现有合同/Board，证据引用实际结果及可读路径。
+
+| 当前状态 | 执行者与命令 | 成功回执与下一步 |
+|---|---|---|
+| 已授权，有目标、行动项和验收 | 派单 owner 复用已有任务或按[完整派单与交回](#完整派单与交回)发布，填写交付、测试和必要 reviewer；按权限定向邀请或允许合适执行者认领 | `pending` 或邀请待答。邀请保留原 owner，长程派单从目标文档填写实际内容和周期 |
+| 本人可认领或是被邀请者 | 执行 peer 用 `collab board claim <id> --expected-revision <revision>`，或 `collab board respond <id> --accept --expected-revision <revision>`；revision 来自当前 Board 对应行 | `task.owner_name` 是本人；公开 ticket 的 `task.execute.status=claimed`。保存回执中的新 `task.revision` 和 `task.execute.attempt_generation` |
+| 本人 Execute 为 `claimed`，实际准备执行 | `collab task start <id> --expected-revision <当前 task.revision> --attempt <task.execute.attempt_generation>` | `task.execute.status=running`。Board 业务状态 `working` 本身不表示已 start |
+| 本人 Execute 为 `running`，产物和验收证据就绪 | 代码：`collab task deliver <id> --attempt <当前 attempt> --worktree '<已登记的绝对路径>' --evidence '<候选、验收及证据路径>'`。无代码候选的只读交付：`collab task deliver <id> --attempt <当前 attempt> --no-candidate --evidence '<结果、核对方法和证据路径>'` | `status=delivered`。查看 `collab task status <id>` 的 `delivery.kind`（`code` / `read_only`），接下去由 reviewer 验收 |
+| `delivered` | 指定 reviewer 的当前持有者读原合同和候选，执行审查后用 `collab task review <id> --accept --evidence '<实际验收结果>'` 或 `collab task review <id> --rework --evidence '<finding、证据和复验条件>'`。独立 reviewer 无注册权限时，由按合同有权限的记账人记录真实独立结论；已有必需 reviewer 时先走经授权的改派 | `accepted` 或 `rework`。返工时读取 Board 的新 Execute 状态，按可认领阶段及同一 start/deliver 路径推进；旧尝试不能再次提交 |
+| `accepted`，`read_only` | 当前 owner 或 Jenny 核对交付、消费（合同要求时）和自有资源，进入正常 close | `disposition=no_merge_required`。直接清理并关闭 |
+| `accepted`，`code` | 集成人完成 Git 合并、推送并核对远端 main 后，Jenny 对其 pending merge 执行 `collab task integrated <id> --commit <Git 合入回执中的实际提交> --evidence '<远端合入和验收证据>'`；无 master 待集成义务时，按合同获授权的 owner 可登记 | `status=merged`。以本地 main 可达性和已登记分支的祖先或净内容证明登记已发生的集成；远端、发布和上线证据由产品交付 owner 提供 |
+| `merged` 或已验收的 `no_merge_required` | 当前 owner 或 Jenny 核对任务资源归属，释放自有临时资源，执行 `collab task close <id>`；保全仍需使用的成果和证据 | `status=closed`，清理回执为 `verified`，并由 `collab task status <id>` 确认 `delivery_complete=true`、`completion_missing=[]`。`close` 作为关闭前的待办是正常的 |
+
+当前执行者用 `collab board show` 的 `tasks[]` 对应 ID 行恢复 `revision` 和 `execute`。
+代码工作树从 `collab task status <id>` 的 `worktree` 复制，必须与已登记值一致。
+尚未登记时，由 owner 按执行合同先确认独占工作树与真实分支，执行
+`collab task relocate <id> --worktree '<已确认工作树绝对路径>' --branch '<该树分支>'`。
+工作树和分支取自任务合同、`git rev-parse --show-toplevel` 和 `git branch --show-current`。
+从 relocate 回执核对注册结果，再交付。
+以当前 Board/认领回执为准。只有当前绑定持有 `claimed` 或 `running` 时才返回数字
+`attempt_generation`，其他阶段或绑定不匹配时为 null。任务行没有 `execute` 时，
+`admitted=true` 表示缺相，`admitted=false` 表示尚未准入的旧合同。
+已知不经过 Board 准入的旧任务（如直接 `task register`）按原合同交付，省略
+`--attempt` 和 `task start`。旧 daemon 若连 `admitted` 字段也无，先复用仍有效的
+原始回执或拒绝提供的 `current_attempt`，在缺少必要事实时交 Jenny 核对版本与归属，
+保留任务及证据。仅字段缺失无法判定任务是旧合同。
+
+| 拒绝或待办 | 恢复动作 |
+|---|---|
+| `BOARD_STALE_REVISION`、`TICKET_ATTEMPT_REQUIRED`、`TICKET_STALE_ATTEMPT` | 刷新 Board 对应行，核对当前 owner、revision 与 attempt。只在仍由本人持有、阶段匹配时执行下一步 |
+| `TICKET_PHASE_NOT_RUNNING` | 当前阶段是本人 `claimed` 时提交 start 再交付；`queued` 时依认领条件接单；`waiting_assignment` 交派单 owner；已 `completed` 或结果未知时先查 Task 状态，复用已有交付回执 |
+| `TICKET_STALE_BINDING` 或实名绑定不一致 | 从原会话恢复 `collab context`；重读 Board，按同名持有者的合法重新认领路径取得新 attempt。归属冲突交 Jenny |
+| 当前 `execute.status` 为 `claimed` / `running` 但 `attempt_generation=null` | 先核对自己仍是当前同名 owner。若符合旧绑定重新认领条件，用 `collab board claim <id> --expected-revision <当前 revision>`，从新回执取得 attempt。认领被拒或归属不符时保留状态并交派单 owner 处理 |
+| `TICKET_PHASE_MISSING` | 交 Jenny 检查已准入、本人已接的 `working` 任务。满足现有修复门禁时由 Jenny 用 `collab board backfill-execute <id> --expected-revision <revision>`。`--admit-legacy` 是另有授权的显式旧任务准入，仅用于有稳定 owner 的公开旧 `working` / `rework` 记录 |
+| `review`、`integration`、`TASK_MERGE_PENDING` | 分别交当前 reviewer 或集成人，依据上表处理。同一任务继续等待对应回执，独立任务照常推进 |
+| `TASK_INTEGRATION_COMMIT_MISMATCH` | 保留 `accepted` 和 pending merge。集成人用回执中的 `branch` / `detail` 核对实际 Git 合并、当地 main 和任务分支，修正后提交真实集成回执 |
+| 正常 close 拒绝或清理尚未验证 | 查看 `collab task status <id>`、实际工作树和原错；由资源 owner 解除冲突。已关闭的兼容记录欠清理时才用 `collab task finalize-cleanup <id> [--commit <已记录的集成提交>]`。人工终止保留 `manual_termination`，不能计作完整交付 |
 
 For code delivery, review acceptance creates the applicable daemon-owned
 pending merge and notifies the current master. The obligation is durable and
 appears in `collab context`, `collab status --all` (`pending_merges`),
-`appsdk longhorizon show` (待合并), and master idle wake text. The exact
-delivered candidate must be reachable from `refs/heads/main`; `task close`
+`appsdk longhorizon show` (待合并), and master idle wake text. A declared
+Git branch must be reachable from `refs/heads/main` or its net changes must
+be present in the supplied main-reachable squash/rebase receipt. `task close`
 fails with `TASK_MERGE_PENDING` while the applicable master obligation remains.
 Never infer read-only work from a missing candidate. Never rely on remembering
 a merge from a message.

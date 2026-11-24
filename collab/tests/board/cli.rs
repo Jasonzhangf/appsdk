@@ -4541,12 +4541,27 @@ fn public_f9_branch_only_task_cleanup_must_survive_cancel() {
 }
 
 #[test]
-fn public_f8_unrelated_integration_commit_must_not_delete_unmerged_task_resources() {
+fn public_f8_integration_proves_task_work_before_resolving_pending_merge() {
+    assert_public_task_integration_landing(false);
+}
+
+#[test]
+fn public_f8_squash_proves_task_content_before_resolving_pending_merge() {
+    assert_public_task_integration_landing(true);
+}
+
+fn assert_public_task_integration_landing(squash: bool) {
     let mut fixture = AppFixture::new();
     let base = configure_fixture_worktree_base(&mut fixture);
     let project = fixture.project.canonicalize().unwrap();
     let base_commit = init_fixture_git_main(&project);
-    fixture.run_public(&["context"], THREAD_A);
+    let executor = fixture.run_public(&["context"], THREAD_A);
+    let executor_name = executor["name"].as_str().unwrap();
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(
+        &["master", "promote", "--approval", "integration proof fixture"],
+        THREAD_B,
+    );
 
     let task_id = "public-entry-f8";
     let branch = "codex/f8-resource";
@@ -4624,10 +4639,42 @@ fn public_f8_unrelated_integration_commit_must_not_delete_unmerged_task_resource
         "the task worktree must start clean"
     );
 
+    let published = fixture.run_public(
+        &[
+            "board",
+            "publish",
+            task_id,
+            "--title",
+            "Deliver owned task work",
+            "--description",
+            "Integrate the scoped code candidate",
+            "--delivery-condition",
+            "Task changes are present on main",
+            "--test-condition",
+            "Integration and owned cleanup receipts agree",
+            "--executor",
+            executor_name,
+        ],
+        THREAD_B,
+    );
+    let revision = published["task"]["revision"].as_u64().unwrap().to_string();
+    let claimed = fixture.run_public(
+        &["board", "claim", task_id, "--expected-revision", &revision],
+        THREAD_A,
+    );
+    let revision = claimed["task"]["revision"].as_u64().unwrap().to_string();
+    let attempt = claimed["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &["task", "start", task_id, "--expected-revision", &revision, "--attempt", &attempt],
+        THREAD_A,
+    );
     let registered = fixture.run_public(
         &[
             "task",
-            "register",
+            "relocate",
             task_id,
             "--worktree",
             worktree.to_str().unwrap(),
@@ -4635,19 +4682,21 @@ fn public_f8_unrelated_integration_commit_must_not_delete_unmerged_task_resource
             branch,
             "--base-commit",
             &base_commit,
-            "--priority",
-            "p1",
         ],
         THREAD_A,
     );
-    assert_eq!(registered["cleanup"], "pending");
+    assert_eq!(registered["relocated"], true);
+    let status = fixture.run_public(&["task", "status", task_id], THREAD_A);
+    let registered_worktree = status["worktree"].as_str().unwrap();
     fixture.run_public(
         &[
             "task",
             "deliver",
             task_id,
+            "--attempt",
+            &attempt,
             "--worktree",
-            worktree.to_str().unwrap(),
+            registered_worktree,
             "--evidence",
             "public F8 candidate delivered",
         ],
@@ -4662,10 +4711,11 @@ fn public_f8_unrelated_integration_commit_must_not_delete_unmerged_task_resource
             "--evidence",
             "public F8 candidate reviewed",
         ],
-        THREAD_A,
+        THREAD_B,
     );
     assert_eq!(reviewed["status"], "accepted");
-    let integrated = fixture.run_public(
+    assert_eq!(reviewed["merge_pending"], true);
+    let mismatched = fixture.command_public(
         &[
             "task",
             "integrated",
@@ -4675,28 +4725,113 @@ fn public_f8_unrelated_integration_commit_must_not_delete_unmerged_task_resource
             "--evidence",
             "unrelated main-reachable integration receipt",
         ],
-        THREAD_A,
+        THREAD_B,
     );
+    let (success, mismatch) = parse_public_response(mismatched);
+    assert!(!success, "{mismatch}");
+    assert_eq!(mismatch["error"], "TASK_INTEGRATION_COMMIT_MISMATCH");
+    assert_eq!(
+        fixture.current_state()["tasks"][task_id]["status"],
+        "accepted"
+    );
+    assert!(fixture.current_state()["pending_merges"][task_id].is_object());
+    assert!(fixture_branch_exists(&project, branch));
+    assert!(worktree.exists());
+
+    if !squash {
+        for declared_branch in ["main~0", branch] {
+            fixture.run_public(
+                &[
+                    "task",
+                    "relocate",
+                    task_id,
+                    "--worktree",
+                    registered_worktree,
+                    "--branch",
+                    declared_branch,
+                ],
+                THREAD_A,
+            );
+            if declared_branch == "main~0" {
+                let (success, invalid_branch) = parse_public_response(fixture.command_public(
+                    &[
+                        "task",
+                        "integrated",
+                        task_id,
+                        "--commit",
+                        &unrelated_main_commit,
+                        "--evidence",
+                        "invalid branch declaration",
+                    ],
+                    THREAD_B,
+                ));
+                assert!(!success, "{invalid_branch}");
+                assert_eq!(invalid_branch["error"], "TASK_INTEGRATION_COMMIT_MISMATCH");
+                assert!(fixture.current_state()["pending_merges"][task_id].is_object());
+            }
+        }
+    }
+
+    let merge_mode = if squash { "--squash" } else { "--no-edit" };
+    fixture_git_ok(
+        &project,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "merge",
+            merge_mode,
+            branch,
+        ],
+    );
+    if squash {
+        fixture_git_ok(
+            &project,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "squash owned task",
+            ],
+        );
+        assert!(
+            !fixture_git(&project, &["merge-base", "--is-ancestor", branch, "main"])
+                .status
+                .success()
+        );
+    }
+    let merge_commit = fixture_git_trim(&fixture_git_ok(&project, &["rev-parse", "HEAD"]));
+    let integration_args = [
+        "task",
+        "integrated",
+        task_id,
+        "--commit",
+        &merge_commit,
+        "--evidence",
+        "merged task branch onto main",
+    ];
+    let (success, refusal) = parse_public_response(fixture.command_public(&integration_args, THREAD_A));
+    assert!(!success, "{refusal}");
+    assert_eq!(refusal["error"], "TASK_MERGE_PENDING");
+    assert!(fixture.current_state()["pending_merges"][task_id].is_object());
+    let integrated = fixture.run_public(&integration_args, THREAD_B);
     assert_eq!(integrated["status"], "merged");
+    assert!(fixture.current_state()["pending_merges"][task_id].is_null());
     assert_eq!(
         fixture.run_public(&["task", "status", task_id], THREAD_A)["cleanup"]["status"],
         "pending"
     );
 
-    let close = fixture.command_public(&["task", "close", task_id], THREAD_A);
-    let close_succeeded = close.status.success();
+    let close = fixture.run_public(&["task", "close", task_id], THREAD_A);
     let status_after = fixture.run_public(&["task", "status", task_id], THREAD_A);
-    let branch_survived = fixture_branch_exists(&project, branch);
-    let worktree_survived = worktree.exists();
-    let cleanup_not_verified = status_after["cleanup"]["status"] != "verified";
-    assert!(
-        !close_succeeded
-            && status_after["status"] != "closed"
-            && cleanup_not_verified
-            && branch_survived
-            && worktree_survived,
-        "F8 RED/GREEN: an unrelated main-reachable commit must not authorize deletion of the unmerged task branch or clean worktree. close_succeeded={close_succeeded} status_after={status_after} cleanup_not_verified={cleanup_not_verified} branch_survived={branch_survived} worktree_survived={worktree_survived} stdout={} stderr={}",
-        String::from_utf8_lossy(&close.stdout),
-        String::from_utf8_lossy(&close.stderr)
-    );
+    assert_eq!(close["cleanup"]["result"], "verified");
+    assert_eq!(status_after["status"], "closed");
+    assert_eq!(status_after["delivery_complete"], true);
+    assert_eq!(status_after["completion_missing"], json!([]));
+    assert!(!fixture_branch_exists(&project, branch));
+    assert!(!worktree.exists());
 }

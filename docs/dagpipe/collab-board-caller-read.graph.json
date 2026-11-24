@@ -30,7 +30,7 @@
       "id": "读取任务真源与责任投影",
       "operator": "appsdk.collab_board_read.read_board",
       "operator_version": "1",
-      "description": "读取 TaskRec、名字占用投影、当前 sessionID 和既有调度回流原因。整个过程不改变 owner、状态、资源、证据、revision、journal、route 或 subscription。",
+      "description": "读取 TaskRec、名字占用投影、当前 sessionID 和既有调度回流原因。向当前执行者投影任务准入标记及最新非撤销 Execute 状态，仅当前绑定持有 claimed 或 running 时提供可用 attempt。整个过程不改变 owner、状态、资源、证据、revision、journal、route 或 subscription。",
       "inputs": ["current_actor"],
       "output": {"id": "board_snapshot", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

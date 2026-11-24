@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-merge-pending",
   "version": "0.2.0",
-  "description": "One accepted delivery review enters one task lifecycle result. The reviewed delivery is classified explicitly as code or read-only. Code delivery records the owner's integration declaration and must prove either branch ancestry from refs/heads/main or, for a non-ancestor branch, a main-reachable integration receipt whose unique common ancestor and non-empty net changed paths have identical Git tree content in that receipt. This is net-content cleanup proof, not exact candidate provenance or integration causality. Read-only delivery records a typed no_merge_required terminal and does not fabricate integration evidence. Both dispositions pass the normal owned-resource cleanup gate before close. Rework and force-close are separate lifecycle attempts and are not back edges in this SESE graph.",
+  "description": "One accepted delivery review enters one task lifecycle result. Classify the reviewed delivery as code or read-only. Every code integration receipt must be reachable from refs/heads/main. A declared local Git branch also requires either ancestry from main or an equivalent net-content proof at the receipt, based on a unique common ancestor and nonempty changed paths. Branchless and LayerFS tasks use the reachability rule. Read-only delivery records no_merge_required. Both paths pass owned-resource cleanup before normal close. Rework and force-close are separate lifecycle attempts.",
   "inputs": [
     {
       "id": "task_review_accept",
@@ -23,6 +23,7 @@
       "id": "validate_delivery_disposition",
       "operator": "appsdk.collab_task.validate_delivery_disposition",
       "operator_version": "1",
+      "description": "For code, prove the receipt is reachable from main. A declared local Git branch must also be an ancestor of main or have matching net changes at the receipt. Only then record merged and resolve the pending obligation. Branchless and LayerFS tasks keep the main-reachability rule. Refusal preserves accepted state and the pending merge.",
       "inputs": ["classified_delivery"],
       "output": {"id": "validated_disposition", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

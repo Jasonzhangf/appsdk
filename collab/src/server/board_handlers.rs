@@ -148,16 +148,16 @@ fn board_task_view_with_master(
         state.delivery_completion_projection(&task.id);
     let assignment = state.task_assignment(&task.id);
     let historical = matches!(task.status.as_str(), "closed" | "cancelled");
-    let current = match assignment.zip(route) {
+    let slot = match assignment.zip(route) {
         Some((assignment, route)) => control
             .current_for_name(
                 &route.project_scope_id,
                 &route.app_scope_id,
                 &assignment.name,
-            )?
-            .and_then(|slot| slot.active_binding()),
+            )?,
         None => None,
     };
+    let current = slot.and_then(|slot| slot.active_binding());
     let current_owner = if historical {
         Some(task.owner.as_str())
     } else if assignment.is_some() {
@@ -173,6 +173,26 @@ fn board_task_view_with_master(
     if !details.public_visibility && !private_owner && !master_view {
         return Ok(None);
     }
+    let execution_slot = slot.filter(|_| {
+        !historical
+            && details.public_visibility
+            && current.is_some_and(|binding| viewer == Some(binding.binding.agent_id.as_str()))
+    });
+    let execute = execution_slot.and_then(|slot| {
+        use crate::server::ticket_state::TicketPhaseStatus;
+
+        current_execute_phase(state, &task.id).map(|phase| {
+            let usable_attempt = matches!(
+                phase.status,
+                TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+            ) && phase.slot_name.as_deref() == Some(slot.identity_key.name.as_str())
+                && phase.binding_generation == slot.generation;
+            crate::board::BoardExecuteView {
+                status: phase.status,
+                attempt_generation: usable_attempt.then_some(phase.attempt_generation),
+            }
+        })
+    });
     let reassignment_reason =
         assignment_unavailability(state, control, task, route)?.map(str::to_owned);
     let owner = if reassignment_reason.is_some() {
@@ -195,6 +215,8 @@ fn board_task_view_with_master(
         test_condition: details.test_condition.clone(),
         long_horizon: details.long_horizon.clone(),
         revision: details.revision,
+        admitted: execution_slot.map(|_| details.admitted),
+        execute,
         owner_display_name: if owner.is_empty() {
             String::new()
         } else if let Some(assignment) =

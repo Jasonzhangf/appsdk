@@ -885,6 +885,37 @@ fn close_task_resources_rejects_partial_squash_content() {
 }
 
 #[test]
+fn close_task_resources_accepts_deleted_path_below_a_gitlink() {
+    let root = cleanup_git_repo("gitlink-deleted-path");
+    std::fs::create_dir(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/local.txt"), "local\n").unwrap();
+    git_ok(&root, &["add", "nested/local.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "nested file"]);
+    let worktree = cleanup_git_worktree(&root, "feature", "gitlink-deleted-path");
+    git_ok(&worktree, &["rm", "nested/local.txt"]);
+    git_ok(&worktree, &["commit", "-q", "-m", "delete nested file"]);
+
+    git_ok(&root, &["rm", "nested/local.txt"]);
+    // A submodule's commit can be absent from the superproject object store.
+    git_ok(
+        &root,
+        &["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,nested"],
+    );
+    git_ok(&root, &["commit", "-q", "-m", "replace directory with gitlink"]);
+    let integration = rev_parse(&root, "refs/heads/main");
+    close_task_resources(
+        &root,
+        &crate::config::Config::default(),
+        Some("playground/gitlink-deleted-path"),
+        Some("feature"),
+        Some(&integration),
+    )
+    .unwrap();
+    assert!(!worktree.exists());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn close_task_resources_rejects_branch_content_added_after_integration() {
     let root = cleanup_git_repo("later-content");
     let branch = "feature";

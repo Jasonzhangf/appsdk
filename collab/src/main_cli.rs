@@ -175,10 +175,10 @@ pub(crate) enum TaskCmd {
         id: String,
         #[arg(long)]
         evidence: String,
-        /// Required when completing a claimed ticket phase; rejects stale attempts.
+        /// Current running Execute attempt from Board. Required for admitted tickets.
         #[arg(long)]
         attempt: Option<u64>,
-        /// Legacy compatibility option; task delivery does not require a Git candidate.
+        /// Explicitly record a read-only delivery with no code candidate.
         #[arg(long)]
         no_candidate: bool,
         #[arg(long)]
@@ -194,7 +194,7 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         evidence: String,
     },
-    /// Legacy compatibility entry; Collab does not manage Git integration.
+    /// Record a completed code integration using a commit reachable from local main.
     #[command(hide = true)]
     Integrated {
         id: String,

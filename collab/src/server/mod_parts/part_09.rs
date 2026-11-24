@@ -302,6 +302,60 @@ struct ValidatedTaskIntegration {
     review_subject_revision: u64,
 }
 
+fn prove_task_integration(root: &Path, task: &TaskRec, commit: &str) -> Result<(), Resp> {
+    let repo = open_git_repository(root)?;
+    let main = resolve_main_commit(&repo)?;
+    let receipt = resolve_integration_commit(&repo, commit)?;
+    if !integration_commit_reachable(&main, receipt)? {
+        return Err(Resp::err_data(
+            "TASK_INTEGRATION_COMMIT_MISMATCH",
+            json!({
+                "provided": commit,
+                "main_head": main.id.to_string(),
+                "expected": format!("commit already reachable from refs/heads/main (main tip {})", main.id),
+            }),
+        ));
+    }
+    if let Some(branch) = task.branch.as_deref().filter(|_| {
+        !task.worktree_path.as_deref().is_some_and(is_layerfs_workspace)
+    }) {
+        prove_declared_branch_landing(&main, &format!("refs/heads/{branch}"), || Ok(receipt))
+            .map_err(|detail| Resp::err_data(
+                "TASK_INTEGRATION_COMMIT_MISMATCH",
+                json!({
+                    "task_id": task.id,
+                    "branch": branch,
+                    "provided": commit,
+                    "main_head": main.id.to_string(),
+                    "detail": detail,
+                    "expected": "the declared branch is on refs/heads/main or its net changes are present at the supplied integration commit",
+                }),
+            ))?;
+    }
+    Ok(())
+}
+
+fn check_task_integration_subject(
+    first: &ValidatedTaskIntegration,
+    current: &ValidatedTaskIntegration,
+) -> Result<(), Resp> {
+    if current.review_subject_revision != first.review_subject_revision
+        || current.task.branch != first.task.branch
+        || current.task.worktree_path != first.task.worktree_path
+    {
+        return Err(Resp::err_data(
+            "TASK_INTEGRATION_SUBJECT_CHANGED",
+            json!({
+                "task_id": current.task.id,
+                "expected_review_subject_revision": first.review_subject_revision,
+                "current_review_subject_revision": current.review_subject_revision,
+                "rule": "the reviewed delivery or its worktree/branch changed during Git proof; inspect the current accepted subject before recording integration",
+            }),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_task_integration(
     server: &Server,
     state: &State,
@@ -399,12 +453,12 @@ fn handle_task_integrated_prepared(
     evidence: &str,
     control: Option<&binding_slot::BindingControlSet>,
 ) -> Resp {
-    let first_review_subject_revision = {
+    let first = {
         let st = server.state.lock().unwrap();
         match validate_task_integration(
             server, &st, control, &worker_id, &token, &task_id, commit, evidence,
         ) {
-            Ok(validated) => validated.review_subject_revision,
+            Ok(validated) => validated,
             Err(error) => return error,
         }
     };
@@ -412,25 +466,8 @@ fn handle_task_integrated_prepared(
     #[cfg(debug_assertions)]
     held_integration_resolution_test_seam(&server.root);
 
-    let head = match resolve_authoritative_main_head(&server.root) {
-        Ok(head) => head,
-        Err(error) => return error,
-    };
-    let integrated = match commit_is_integrated_in_main(&server.root, commit) {
-        Ok(integrated) => integrated,
-        Err(error) => return error,
-    };
-    if !integrated {
-        return Resp::err_data(
-            "TASK_INTEGRATION_COMMIT_MISMATCH",
-            json!({
-                "provided": commit,
-                "main_head": head,
-                "expected": format!(
-                    "commit already reachable from refs/heads/main (main tip {head})"
-                ),
-            }),
-        );
+    if let Err(error) = prove_task_integration(&server.root, &first.task, commit) {
+        return error;
     }
 
     let mut st = server.state.lock().unwrap();
@@ -440,16 +477,8 @@ fn handle_task_integrated_prepared(
         Ok(validated) => validated,
         Err(error) => return error,
     };
-    if current.review_subject_revision != first_review_subject_revision {
-        return Resp::err_data(
-            "TASK_INTEGRATION_SUBJECT_CHANGED",
-            json!({
-                "task_id": task_id,
-                "expected_review_subject_revision": first_review_subject_revision,
-                "current_review_subject_revision": current.review_subject_revision,
-                "rule": "the reviewed delivery changed while the supplied commit was being proved; rework and re-deliver before applying this integration request",
-            }),
-        );
+    if let Err(error) = check_task_integration_subject(&first, &current) {
+        return error;
     }
 
     commit_task_integration_locked(
@@ -539,7 +568,7 @@ fn handle_task_integrated_current_map(
 ) -> Resp {
     let commit = commit.trim().to_owned();
     let evidence = evidence.trim().to_owned();
-    let first_review_subject_revision = match manager.with_current_task_state_response(
+    let first = match manager.with_current_task_state_response(
         server,
         context,
         &worker_id,
@@ -555,35 +584,17 @@ fn handle_task_integrated_current_map(
                 &commit,
                 &evidence,
             )
-            .map(|validated| validated.review_subject_revision)
         },
     ) {
-        Ok(revision) => revision,
+        Ok(validated) => validated,
         Err(response) => return response,
     };
 
     #[cfg(debug_assertions)]
     held_integration_resolution_test_seam(&server.root);
 
-    let head = match resolve_authoritative_main_head(&server.root) {
-        Ok(head) => head,
-        Err(error) => return error,
-    };
-    match commit_is_integrated_in_main(&server.root, &commit) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Resp::err_data(
-                "TASK_INTEGRATION_COMMIT_MISMATCH",
-                json!({
-                    "provided": commit,
-                    "main_head": head,
-                    "expected": format!(
-                        "commit already reachable from refs/heads/main (main tip {head})"
-                    ),
-                }),
-            )
-        }
-        Err(error) => return error,
+    if let Err(error) = prove_task_integration(&server.root, &first.task, &commit) {
+        return error;
     }
 
     match manager.with_current_task_state_response(
@@ -602,17 +613,7 @@ fn handle_task_integrated_current_map(
                 &commit,
                 &evidence,
             )?;
-            if current.review_subject_revision != first_review_subject_revision {
-                return Err(Resp::err_data(
-                    "TASK_INTEGRATION_SUBJECT_CHANGED",
-                    json!({
-                        "task_id": task_id,
-                        "expected_review_subject_revision": first_review_subject_revision,
-                        "current_review_subject_revision": current.review_subject_revision,
-                        "rule": "the reviewed delivery changed while the supplied commit was being proved; rework and re-deliver before applying this integration request",
-                    }),
-                ));
-            }
+            check_task_integration_subject(&first, &current)?;
             Ok(commit_task_integration_locked(
                 server,
                 state,

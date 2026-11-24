@@ -82,6 +82,7 @@
       "id": "输出本批唯一流转结果",
       "operator": "collab.ticket_design.emit_result",
       "operator_version": "1",
+      "description": "认领、接受邀请及实际开始后的回执复用任务板当前执行者视图，给出提交后的任务 revision 及可用的 Execute attempt。返工后从同一任务板视图读取新 attempt。读取与回执不推进阶段。",
       "inputs": ["已持久化流转结果"],
       "output": {"id": "工单流转结果", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

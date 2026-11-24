@@ -405,6 +405,10 @@ pub struct BoardTaskView {
     pub test_condition: String,
     pub long_horizon: Option<LongHorizonTaskSpec>,
     pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execute: Option<BoardExecuteView>,
     pub owner: String,
     pub owner_display_name: String,
     pub owner_name: Option<String>,
@@ -437,6 +441,12 @@ pub struct BoardTaskView {
     pub integration_commit: Option<String>,
     pub cleanup_status: String,
     pub blocking_task: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BoardExecuteView {
+    pub status: crate::server::ticket_state::TicketPhaseStatus,
+    pub attempt_generation: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]

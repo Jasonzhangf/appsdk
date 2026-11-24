@@ -31,10 +31,29 @@ collab context
 不能否决本次有效注册或用户授权。没有映射时按本次真实事实注册新的当前载体。
 缺事实、坏文件、不可用服务和写入失败都返回原错，不合成恢复成功。
 
-AppServer 首次注册或真实换端点时可补本次事实：
+先看 `collab status --check` 和原始错误。`caller_context_required` 表示 daemon
+已可查询，但当前会话还没有通过身份检查，可以继续执行 `collab context`。
+如果 daemon 读不到版本、版本不一致，或回包包含
+`invalid project context envelope`，先交维护者确认新版 daemon 已接管。
+协议解码失败发生在注册字段校验之前，重填身份字段无法解决。
+
+`collab context` 返回 `missing_facts` 时，只补 `result.requires.fields`
+列出的字段。先按 `result.requires.sources` 查询当前宿主。同样的信息如果已经
+由宿主注入，直接重跑 `collab context`。各宿主的取值命令见
+[宿主注册所需信息](../operations.md#宿主注册所需信息)。
+
+| 字段 | 从哪里取 |
+| --- | --- |
+| `session_id` | 当前 agent shell 的 `CODEX_SESSION_ID`。DSH 走独立路径，由 gateway 注入 `DSH_SESSION_ID` 并核实。 |
+| `thread_id` | 当前 Codex shell 的 `CODEX_THREAD_ID`。Rex 和 tmux 注册按各自宿主步骤取值。 |
+| `endpoint` | 直连 AppServer 时取当前宿主注入的 `COLLAB_APPSERVER_SOCKET` 或 `CODEX_APP_SERVER_SOCKET`。若值为绝对 socket 路径，加 `unix://` 前缀。标准 Desktop 由 CLI 请求 bridge 能力，通常无需填此字段。 |
+| `namespace` | 直连 AppServer 时由当前宿主标记派生。Codex Desktop 为 `codex_app`，Codex CLI/TUI 为 `codex_tui`。非标准集成使用宿主明确提供的 `COLLAB_APPSERVER_NAMESPACE`。 |
+
+例如，非标准直连 AppServer 的回执若只要求 `endpoint`，且当前宿主已给出
+该 socket，就提交一个只含该字段的 JSON 对象：
 
 ```sh
-collab context --provide '{"session_id":"<当前 agent sessionID>","thread_id":"<当前 native thread ID>","endpoint":"<当前 AppServer endpoint>","namespace":"codex_tui"}'
+collab context --provide '{"endpoint":"unix:///实际宿主提供的绝对路径.sock"}'
 ```
 
 不能把 agent sessionID、native thread ID 和 tmux `$N` 互相替代。
@@ -51,12 +70,20 @@ daemon 确认身份丢失后的十五分钟只约束自动重派。等待期内 
 
 已有合法角色随名字及唯一当前绑定自动恢复。新的 master 授权需要本次人类明确指令。
 普通 peer 恢复保持其当前合法角色。项目 master 统一使用 Jenny 名字。
+在要接替的 agent 会话中、从项目根目录执行。项目由当前 cwd 选定，app scope
+沿当前宿主配置。普通注册和续接先直接用 `collab context`。
 
 ```sh
 collab context --approve-grant '{"action":"restore_master","authorization":"<本次用户授权>"}'
 collab context --approve-grant '{"action":"restore_peer","authorization":"<本次用户授权>"}'
 collab context --approve-grant '{"action":"restore_name","requested_name":"Alice","authorization":"<本次用户授权>"}'
 ```
+
+`action` 按用户本次指令选择。接回 Jenny/master 用 `restore_master`，
+daemon 会选 Jenny，无需 `requested_name`。`restore_name` 的
+`requested_name` 填用户本次明确指定的名字。把 `authorization` 的占位文本
+替换成用户本次明确授权的原话，例如“我授权当前 AppSDK 会话接管 Jenny/master”。
+没有这项授权时沿普通注册继续。授权 JSON 不需要填写 session、thread 或 socket。
 
 授权作用于本次 map 选定的当前对象。不要提交旧 `target_identity`、incumbent fence、
 digest、generation、时间戳、裁决请求或旧完整 approval。旧身份准入和 grant

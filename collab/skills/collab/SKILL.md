@@ -64,6 +64,8 @@ DSH 的身份来源是 gateway 注入的 `DSH_SESSION_ID`。Desktop 还使用当
 缺必需事实时，保留宿主命令原错或 `missing_facts` 的 `result.requires.fields` 和
 `result.requires.sources`，指出哪个宿主须补传哪个字段。禁止猜填字段、借用其他
 会话或改用 GUI。继续能独立推进的工作，宿主补齐后在原会话重试。
+直连字段的取值和 JSON 示例，以及 Jenny/master 授权字段，见
+[注册与身份恢复](references/stable-name-recovery.md#正常恢复)。
 
 若返回 `DAEMON_UNAVAILABLE`，按[正式服务恢复步骤](operations.md#全局-daemon-与默认身份恢复)
 检查启动状态与首个错误。

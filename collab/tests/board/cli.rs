@@ -3890,7 +3890,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
     let trigger = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() + 3_600_000)
+        .as_millis() + 1_500)
         .to_string();
     let authorized_batch = fixture.run_public(
         &[
@@ -3910,11 +3910,22 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         json!([batch["id"], batch["status"], batch["interval_ms"],
             batch["trigger_ms"], batch["repeat_count"], batch["fired_count"]])
     };
-    let batch_before = read_batch(&fixture);
+    let receive_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let batch_before = loop {
+        fixture.run_public(&["recv", "--timeout", "3"], THREAD_A);
+        let batch = read_batch(&fixture);
+        if batch[5] == 1 {
+            break batch;
+        }
+        assert!(
+            std::time::Instant::now() < receive_deadline,
+            "the authorized periodic batch did not advance: {batch}"
+        );
+    };
     assert_eq!(batch_before[1], "armed");
     assert_eq!(batch_before[2], 1800000);
+    assert!(batch_before[3].as_i64().unwrap() > trigger.parse::<i64>().unwrap());
     assert_eq!(batch_before[4], 3);
-    assert_eq!(batch_before[5], 0);
     let peer_subscriptions_before =
         notification_subscription_count(&fixture, THREAD_A, "peer before restoration");
     let memory = fixture.run_public(&["context", "--work-roles", "memory"], THREAD_A);

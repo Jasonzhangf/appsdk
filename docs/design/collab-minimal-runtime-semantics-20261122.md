@@ -199,4 +199,3 @@ mandatory implementation change must keep one legal and one illegal case:
 | architect authority | entrusted architect edits/dispatches within scope | self-granted architect role edits an unrelated task |
 | current board mutation | manager/peer/architect change current state and the other participant can recv the auto notice | terminal history is rewritten or a manual duplicate is required |
 | minimal task board | board exposes task fields and revision | graph projection becomes required to execute a task |
-

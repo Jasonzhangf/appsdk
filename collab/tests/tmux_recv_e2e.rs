@@ -122,7 +122,7 @@ fn wait_for_pane_message(fixture: &Fixture, pane: &Pane, message_id: &str) {
 }
 
 #[test]
-fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
+fn collab_recv_cli_subprocess_consumes_durable_mail_over_isolated_daemon() {
     let root = unique_root();
     let host_state = root.join("h");
     let tmux_socket = root.join("t.sock");
@@ -361,6 +361,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     );
     assert_eq!(received["count"], 1);
     assert_eq!(received["messages"][0]["id"], message_id);
+    assert_eq!(received["messages"][0]["body"], "persist before consume");
     assert_eq!(received["receive_id"], "tmux-e2e-receive-1");
 
     fixture.assert_message_consumed(&message_id, &sender);
@@ -393,6 +394,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         Some(&receiver),
     );
     assert_eq!(recv["messages"][0]["id"], queued_id);
+    assert_eq!(recv["messages"][0]["body"], "consume queued body");
     fixture.assert_message_consumed(queued_id, &sender);
 
     // Register an owned task and leave one durable message unread so the
@@ -575,7 +577,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
             .as_array()
             .expect("recv returns messages")
             .iter()
-            .any(|message| message["id"] == after_goal_id),
+            .any(|message| message["id"] == after_goal_id && message["body"] == "owned pane body"),
         "the same message id must be receivable after the finite goal ended: {after_goal_recv}"
     );
     fixture.assert_message_consumed(&after_goal_id, &sender);

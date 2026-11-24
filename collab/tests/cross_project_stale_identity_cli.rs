@@ -665,26 +665,9 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let reminder = reminder.unwrap();
     let message_id = reminder["id"].as_str().unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), || {
-            let captured = Command::new("tmux")
-                .args([
-                    "-S",
-                    fixture.tmux_socket.to_str().unwrap(),
-                    "capture-pane",
-                    "-p",
-                    "-t",
-                    &peer_pane.pane_id,
-                    "-S",
-                    "-4096",
-                ])
-                .output()
-                .unwrap();
-            let compact: String = String::from_utf8_lossy(&captured.stdout)
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            compact.contains(message_id)
-        }),
+        wait_until(Duration::from_secs(10), || pane_contains_message_id(
+            &fixture, &peer_pane, message_id
+        )),
         "exact reminder was not observed in the real target pane"
     );
     let received = run_ok_at(
@@ -1250,6 +1233,19 @@ fn message_status(
     run_ok_at(fixture, target_root, target_pane, &["msg", msg_id], false)
 }
 
+fn pane_contains_message_id(fixture: &Fixture, pane: &Pane, message_id: &str) -> bool {
+    let captured = tmux(
+        &fixture.tmux_socket,
+        &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
+    );
+    assert!(captured.status.success(), "{captured:?}");
+    let compact: String = String::from_utf8_lossy(&captured.stdout)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact.contains(message_id)
+}
+
 fn assert_rejected_without_message(
     fixture: &Fixture,
     target_context: &Value,
@@ -1450,6 +1446,10 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         pending["body"], "durable message through a live tmux endpoint",
         "{pending}"
     );
+    assert!(
+        !pane_contains_message_id(&fixture, &target_pane, &msg_id),
+        "the existing offline pane must receive no input for {msg_id}"
+    );
 
     fixture.stop_daemon();
     fixture.restart_daemon();
@@ -1459,6 +1459,10 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(replayed["to"], target_id, "{replayed}");
     assert_eq!(replayed["subject"], pending["subject"], "{replayed}");
     assert_eq!(replayed["body"], pending["body"], "{replayed}");
+    assert!(
+        !pane_contains_message_id(&fixture, &target_pane, &msg_id),
+        "daemon restart must not submit input to the offline pane for {msg_id}"
+    );
 
     let dead_pane = create_session(&fixture, "dead-pane");
     let dead_context = register_context(&fixture, &dead_root, &dead_pane, "dead-context", true);

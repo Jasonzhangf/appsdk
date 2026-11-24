@@ -54,18 +54,28 @@ fn initial_tmux_registers_once_without_participant_return() {
     let (fixture, pane) = Fixture::isolated("gate-no-return");
     let response = fixture.context(Some("gate-no-return"), Some(&pane));
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
-    let patrol_contract = "For your own ongoing long-horizon goals, create and maintain finite patrol tasks and subscriptions. On each new master assignment, evaluate the goal, dependencies, blockers, priorities and resources, and update existing patrol scope as part of that assessment; add only missing scope and retire obsolete owned scope without duplicating timers. Subscription housekeeping does not gate ready authorized work.";
-    let closes_idle_patrol = |snapshot: &Value| {
+    let resumes_owned_work = |snapshot: &Value| {
         snapshot["role_brief"]["responsibilities"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(Value::as_str)
             .any(|rule| {
-                rule.contains("no authorized next action remains")
-                    && rule.contains("resume authorized work")
-                    && rule.contains("Close unused owned patrol tasks and timed subscriptions")
-                    && rule.contains("keep direct-message reception")
+                rule.contains("resume and drive your own authorized work immediately")
+                    && rule.contains("no authorized next action remains")
+                    && rule.contains("direct-message reception without idle-looping")
+            })
+    };
+    let evaluates_goals = |snapshot: &Value| {
+        snapshot["role_brief"]["responsibilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|rule| {
+                rule.contains("observable evaluation criteria")
+                    && rule.contains("at least one linked action item")
+                    && rule.contains("pass condition, and completion evidence")
             })
     };
     let owns_goal = |snapshot: &Value| {
@@ -85,12 +95,8 @@ fn initial_tmux_registers_once_without_participant_return() {
         owns_goal(first),
         "registration must explain stable goal ownership and delegated activation: {response}"
     );
-    assert!(closes_idle_patrol(first), "{response}");
-    assert!(first["role_brief"]["responsibilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|rule| rule == patrol_contract));
+    assert!(resumes_owned_work(first), "{response}");
+    assert!(evaluates_goals(first), "{response}");
     let first_slot = registered_slot(&fixture, first);
     let first_credential = credential(&fixture, first);
     assert_eq!(
@@ -107,12 +113,8 @@ fn initial_tmux_registers_once_without_participant_return() {
     assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
     let current = &restored["result"]["snapshot"];
     assert!(owns_goal(current));
-    assert!(closes_idle_patrol(current));
-    assert!(current["role_brief"]["responsibilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|rule| rule == patrol_contract));
+    assert!(resumes_owned_work(current), "{restored}");
+    assert!(evaluates_goals(current), "{restored}");
     assert_eq!(current["identity"], first["identity"]);
     assert_eq!(current["binding"], first["binding"]);
     assert_eq!(current["master"], first["master"]);

@@ -578,10 +578,10 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    assert!(ordinary_role_task.contains("long-horizon"));
-    assert!(ordinary_role_task.contains("orchestrator"));
-    assert!(ordinary_responsibilities.contains("codex exec --profile gcm"));
-    assert!(ordinary_responsibilities.contains("verify subworker evidence"));
+    assert!(ordinary_role_task.contains("Execute your accepted task as an ordinary peer"));
+    assert!(ordinary_responsibilities.contains("orchestrate straightforward work"));
+    assert!(ordinary_responsibilities.contains("route design to that architect"));
+    assert!(ordinary_responsibilities.contains("verify the result and retain ownership"));
     assert_eq!(registered["role_brief"]["goal_level"], "delegated_goal");
     assert_eq!(registered["identity"]["role"], "worker");
     assert!(!ordinary_responsibilities.contains("saturate every live present peer first"));
@@ -626,17 +626,10 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    assert!(master_responsibilities.contains("long-horizon goals"));
-    assert!(master_responsibilities.contains("no suitable authorized peer can take the work"));
-    assert!(master_responsibilities.contains("bounded subagent tasks"));
-    assert!(master_responsibilities.contains("no authorized next action remains"));
-    assert!(
-        master_responsibilities.contains("close unused owned patrol tasks and timed subscriptions")
-    );
-    assert!(master_responsibilities.contains("keep direct-message reception"));
-    assert!(master_responsibilities.contains("never to itself"));
-    assert!(master_responsibilities.contains("codex exec --profile gcm"));
-    assert!(master_responsibilities.contains("no inherited master authority"));
+    assert!(master_responsibilities.contains("own this project's worker patrol"));
+    assert!(master_responsibilities.contains("reusing a valid subscription"));
+    assert!(master_responsibilities.contains("sole accountable master"));
+    assert!(master_responsibilities.contains("manage dispatch, priorities and cross-task dependencies"));
     assert!(!master_responsibilities.contains("saturate every live present peer first"));
     let next_action = context["role_brief"]["next_action"]
         .as_str()
@@ -656,12 +649,6 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         "{next_action}"
     );
     assert!(
-        next_action_lower.contains(
-            "retain the goal and route the remaining bounded work through the existing independent"
-        ),
-        "{next_action}"
-    );
-    assert!(
         next_action_lower.contains("codex exec --profile gcm"),
         "{next_action}"
     );
@@ -677,10 +664,6 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         next_action_lower.contains(
             "reusing a valid patrol batch and renewing it only per the applicable duties"
         ),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains("do not re-register or reset it per round"),
         "{next_action}"
     );
     // The fixture runner provides a reachable pane, but no confirmed agent.
@@ -932,9 +915,14 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
     );
     assert!(
         !rejected.status.success(),
-        "a cleared holder must lose master-only invitation authority"
+        "a cleared holder without the architect role must lose invitation authority"
     );
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("BOARD_MASTER_REQUIRED"));
+    let error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        error.contains("BOARD_ARCHITECT_SCOPE_REQUIRED")
+            && error.contains("does not hold the architect role"),
+        "{error}"
+    );
 }
 
 /// B04: a blank approval is not authorization. Both promote and clear must

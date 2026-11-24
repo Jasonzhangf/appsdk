@@ -31,11 +31,39 @@ collab context
 不能否决本次有效注册或用户授权。没有映射时按本次真实事实注册新的当前载体。
 缺事实、坏文件、不可用服务和写入失败都返回原错，不合成恢复成功。
 
-先看 `collab status --check` 和原始错误。`caller_context_required` 表示 daemon
-已可查询，但当前会话还没有通过身份检查，可以继续执行 `collab context`。
-如果 daemon 读不到版本、版本不一致，或回包包含
-`invalid project context envelope`，先交维护者确认新版 daemon 已接管。
-协议解码失败发生在注册字段校验之前，重填身份字段无法解决。
+恢复请求在原 agent 会话执行。使用该会话已提供的 shell，工作目录设为目标项目根。
+以下每行以用户意图或实际回执为触发条件。任何分支都禁止 Computer Use、CUA、
+桌面或浏览器控制，也禁止用这些工具寻找可执行的终端。
+
+| 触发条件 | 命令、参数和继续条件 |
+| --- | --- |
+| 用户要求首次注册或恢复自己的普通 peer | `collab context`，无参数。已有合法角色随当前名字恢复。若与用户指定角色不符，报告实际角色，等待明确的角色操作授权。 |
+| 用户明确授权接替 Jenny、指定名字或角色 | 用[授权表](#当前授权与角色)给 `collab context` 加 `--approve-grant '<JSON>'`。 |
+| 用户只要求查看本会话当前身份 | `collab context --query`，无其他参数。缺映射时报告原结果，等待注册指令。 |
+| `completed` 且 `result.snapshot.registered=true`，名字、角色、绑定均有效 | 从该 snapshot 读取当前身份、项目、master 和订阅，结束身份恢复。投递仍以实际消费回执验收。 |
+| `missing_facts` 或 `requires_identity_update` | 只读 `result.requires.fields` 和 `result.requires.sources`，按下方宿主表查对应字段。若回执仅提供旧式快照，读取 `requires_identity_update.required_fields` 和 `field_descriptions`。 |
+| `scope_required` | 从 `result.requires.sources.target_app_scope_ids` 读取候选。仅在目标 scope 由本次授权明确指定时，按 `result.requires.repair_invocation` 用 `--project`、`--app-scope` 和原授权 JSON 重试。否则交授权者选定。 |
+| `DAEMON_UNAVAILABLE`、版本读不到或出现 `invalid project context envelope` | `collab status --check`。记录 daemon 状态、版本及原错，交服务 owner。若回执仅为 `caller_context_required`，在原会话继续 `collab context`。 |
+| `IDENTITY_MAP_DECODE_FAILED`、参数冲突、空绑定、其他非成功结果 | 保存原错、原项目和受影响动作，交对应 owner。原会话不换工具猜测或重试；有新事实或修复回执后按对应行继续。 |
+| 无原会话 shell 或 `collab` 不可执行 | 报告原宿主缺少的入口或命令错误。等待原宿主恢复。 |
+
+按回执做宿主诊断。宿主类型由当前宿主声明和 context 缺项确定：
+
+| 已有证据 | 允许的只读检查和处理 |
+| --- | --- |
+| 当前确认为 Rex，且 context 缺 Rex server、session 或 block | 在原 block 执行 `rex whoami --json --autostart=false`。若 `rex` 不在 PATH，用[已安装的 Rex CLI 路径](../operations.md#rex-中的-codex)。用 JSON 的 `endpoint` 核对 server，当前环境的 `REX_SESSION` 和 `REX_BLOCK` 核对位置。若命令不可用、缺 `CODEX_SESSION_ID` 或返回 `REX_EXECUTION_CALLER_MISMATCH`，交当前宿主修复。`rex whoami` 只用于诊断位置。禁止改名、split、新建或切换 block。 |
+| 当前确认为 tmux，context 缺当前 pane 事实 | 仅在 `TMUX_PANE` 已由本会话注入时执行 `tmux display-message -p -t "$TMUX_PANE" '#{session_id} #{pane_id} #{pane_tty}'`。遇到 `TMUX_OBSERVATION_CAPABILITY_MISSING` 或 `TMUX_ITERM2_PANE_REQUIRED`，交宿主维护者；由 daemon 验证现有接入。 |
+| Desktop 回报 `DESKTOP_BRIDGE_SESSION_REQUIRED`、`DESKTOP_BRIDGE_THREAD_REQUIRED` 或其他 bridge 缺项 | 在当前 Desktop shell 核对 `CODEX_SESSION_ID`、`CODEX_THREAD_ID` 是否由宿主提供。缺值或能力交 Desktop 宿主补齐。标准 Desktop 由 `collab context` 自动取得 bridge 能力。 |
+| DSH context 返回 session 或 gateway 缺项 | 在原 DSH shell 核对 `DSH_SESSION_ID`。由 gateway 核实当前会话和项目，缺控制能力交 DSH 宿主。 |
+| 已知为直连 AppServer 且回执明确请求字段 | 按下表从当前宿主取值并用 `--provide` 提交。参数只包含回执要求且已核实的字段。 |
+
+宿主补齐事实后，回到发生错误的原会话执行 `collab context`。恢复后的工作交接另走
+[Board 操作](../operations.md#public-task-board-and-read-only-dashboard)。例如“恢复 peer、向 Jenny 报空闲、接替 Carol 的工作”，
+先恢复当前 peer。从成功快照确认当前 master 和任务，只有在已获发送授权且快照表明确实
+空闲时，才用 `collab send --to '<当前项目>.Jenny' --subject '空闲' --content '<实际状态>'`。
+收到发给自己的任务邀请时，从当前 Board 视图取 `id` 和 `revision`，执行
+`collab board respond '<id>' --accept --expected-revision <revision>`。接替工作采用任务
+邀请或当前任务已有的认领入口，保留自己的身份。
 
 `collab context` 返回 `missing_facts` 时，只补 `result.requires.fields`
 列出的字段。先按 `result.requires.sources` 查询当前宿主。同样的信息如果已经

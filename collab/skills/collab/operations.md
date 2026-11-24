@@ -404,7 +404,7 @@ master 与 peer 均可管理本人的 longhorizon goal。项目master派单时�
 不处理重复档案、旧 route 或旧身份清理。已有用户恢复/替换意图先于历史身份校验；
 同一 session 的后提交绑定收敛旧绑定，不让历史歧义成为 agent 的决策分支。
 准确命令、最小授权 JSON 与结果读取见
-[恢复操作](references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理)。
+[恢复操作表](references/stable-name-recovery.md#正常恢复)。
 
 Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
 
@@ -498,31 +498,10 @@ fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
 closure is a long-horizon goal.
 
-- `master` and ordinary peers primarily own long-horizon goals and orchestrate
-  planning, task dispatch, resource management, project acceptance and delivery.
-  Prefer assigning code implementation to subagents rather than writing it
-  directly. Registration and recovery must explain these roles and recommend
-  scheduled patrols for each role's own goals, risks and resources.
-- `master` audits, dispatches, verifies, and integrates. It offers each
-  long-horizon goal through the public board to a suitable, consenting peer.
-  Check idle, suitable authorized peers and available capacity first. Only when
-  no suitable authorized peer can take the goal, retain it and split bounded
-  work to independent `codex exec --profile gcm` workers. A peer may split an
-  accepted goal into non-overlapping bounded scopes and dispatch those scopes
-  directly to independent `codex exec --profile gcm` workers; this is the
-  peer's own execution split, not a manager bypass of eligible peer capacity.
-  Master retains project coordination, cross-peer dependencies, final
-  integration, and the delivery owner's ordinary scope.
-- An ordinary peer keeps the code-compatible wire role `worker` and derivation
-  `peer`. It is the long-horizon orchestrator for an accepted goal: split and
-  plan its bounded subwork, then dispatch those scopes directly to independent
-  `codex exec --profile gcm` execution or observation workers when it has no
-  explicit execution specialty. This is the peer's own execution split, not a
-  manager bypass of eligible peer capacity. Verify evidence, resolve blockers,
-  integrate assigned work, close owned resources, and report to the sender. It
-  does not inherit master authority.
-  An explicit `worker` or `executor` specialty, or an assignment that names this
-  peer as the bounded executor, permits direct in-contract execution.
+- Use the [role duties and dispatch order](SKILL.md#task-routing-and-role-responsibilities).
+  The manager coordinates the project, and an ordinary peer executes the
+  accepted written contract with wire role `worker` and derivation `peer`.
+  An entrusted architect handles design, bounded execution handoff and review.
 - `patrol`, `memory`, and `architect` are work specialties, not new identity
   authority. Patrol performs its authorized standing inspection and reports
   evidenced findings, but does not take temporary implementation dispatch.
@@ -2170,20 +2149,9 @@ transport failure keep their original error and non-zero exit; unapproved
 automatic resolution cannot bypass them. A communication diagnostic can await
 a participant return; ordinary identity restoration does not.
 
-For a missing current binding, report the exact missing field and source, then
-use the supported context entry after the host supplies it:
-
-\`\`\`sh
-pwd -P
-printf '%s\\n' "$CODEX_SESSION_ID" "$CODEX_THREAD_ID"
-collab context --provide '{"session_id":"<current>","thread_id":"<current>","endpoint":"<current bridge>","namespace":"codex_app"}'
-\`\`\`
-
-For Rex, obtain the current server/session/block from the installed Rex host
-CLI in the existing project pane and provide only those current facts. Never
-select a name from an old projection. A successful result must show the actual
-current name and `registered=true`; a missing-facts result is a repair request,
-not a restored identity.
+For a missing current binding, use the
+[recovery operation table](references/stable-name-recovery.md#正常恢复) to select
+the host check and supply only the fields required by the current result.
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
@@ -2213,7 +2181,9 @@ subscription, as part of bootstrap.
 
 ## 宿主注册所需信息
 
-工作目录设为目标项目根。用当前 agent 原会话的 shell，只执行适用的取值命令。
+先在目标项目根、当前 agent 原会话的 shell 执行 `collab context`。只有回执指出
+缺少当前宿主事实时，才按[恢复操作表](references/stable-name-recovery.md#正常恢复)
+执行本节对应取值命令。已成功注册时直接使用回执。
 DSH 即使运行于 Rex 或 tmux 内，也优先使用 DSH 的身份来源。
 禁止用 Computer Use、CUA 或 GUI 取值、发命令或关闭界面。保留原终端，
 不 split、不新建 pane、tab 或窗口，不为取值改名。

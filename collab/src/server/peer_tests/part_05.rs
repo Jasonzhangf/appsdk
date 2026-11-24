@@ -117,9 +117,9 @@ fn role_contract_is_identical_across_context_workers_and_status() {
         }
         match expected_role {
             "master" => {
-                assert!(role_task.contains("long-horizon"));
-                assert!(role_task.contains("bounded"));
-                assert!(role_task.contains("orchestrator"));
+                assert!(role_task.contains("accountable manager"));
+                assert!(role_task.contains("authorized peer capacity"));
+                assert!(role_task.contains("temporary files"));
                 let next_action = context.data["role_brief"]["next_action"]
                     .as_str()
                     .expect("role next action is explicit")
@@ -131,9 +131,9 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 assert!(responsibilities.contains("codex exec --profile gcm"));
             }
             "worker" => {
-                assert!(role_task.contains("long-horizon"));
-                assert!(role_task.contains("orchestrator"));
-                assert!(responsibilities.contains("codex exec --profile gcm"));
+                assert!(role_task.contains("execute your accepted task"));
+                assert!(responsibilities.contains("allowed and prohibited scope"));
+                assert!(responsibilities.contains("when no eligible peer is available"));
                 assert_eq!(
                     context.data["role_brief"]["authority"],
                     serde_json::json!({
@@ -1579,6 +1579,27 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
             })
             .expect("worker stable name")
     };
+    for (specialty, duty) in [
+        ("architect", "Lead overall debug design"),
+        ("memory", "Accept only memory summaries and memory patrol"),
+        ("patrol", "Collect live runtime bugs"),
+        ("reviewer", "Independently review assigned work"),
+    ] {
+        server.commit(&[Event::NameWorkRolesUpdated {
+            project_scope: project_scope.clone(),
+            record: crate::board::NameWorkRoles {
+                name: worker_name.clone(),
+                work_roles: vec![specialty.into()],
+            },
+        }]);
+        let context = handle_context(&server, "worker".into(), "token-worker".into());
+        let brief = &context.data["role_brief"];
+        assert!(context.ok, "{context:?}");
+        assert_eq!(brief["role"], "worker");
+        let role_task = brief["role_task"].as_str().expect("specialty role task");
+        assert!(role_task.contains(duty), "{brief}");
+        assert!(!role_task.contains("as an ordinary peer"), "{brief}");
+    }
     let spec = |role_task: &str,
                 responsibility: &str,
                 next_action: &str,
@@ -1690,7 +1711,7 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
         role_task.contains("Master-named specialty task"),
         "a specialty named master cannot replace identity: {role_task}"
     );
-    assert_eq!(brief["orchestration_function"], "goal_orchestrator");
+    assert!(brief.get("orchestration_function").is_none());
     assert!(
         role_task.find("role:designer:").unwrap() < role_task.find("role:reviewer:").unwrap(),
         "specialty text follows the current role order: {role_task}"
@@ -1723,7 +1744,7 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
         "{next_action}"
     );
     assert!(
-        responsibilities.iter().any(|line| line.as_str().is_some_and(|text| text.contains("codex exec --profile gcm"))),
+        responsibilities.iter().any(|line| line.as_str().is_some_and(|text| text.contains("when no eligible peer is available"))),
         "common execution constraints remain independent of editable next_action"
     );
     let completion = brief["completion_action"]

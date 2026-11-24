@@ -350,10 +350,16 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         accepted_context.data["role_brief"]["next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("Act as the accepted goal's long-horizon orchestrator"),
+            .contains("Execute the accepted task"),
         "{}",
         accepted_context.data["role_brief"]
     );
+    assert!(!accepted_context.data["role_brief"]["responsibilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|duty| duty.contains("dispatch bounded execution")));
 
     std::fs::remove_dir_all(root).ok();
 }

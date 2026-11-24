@@ -183,6 +183,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     let sender = pane(sender_pane_id.trim());
     let receiver = pane(receiver_pane_id.trim());
 
+    fixture.start_codex_pane_runner(&receiver);
     fixture.start_daemon();
     fixture.registered_context_with_originator(&sender, true, "Codex future host");
     let unknown_host =
@@ -362,9 +363,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     assert_eq!(received["messages"][0]["id"], message_id);
     assert_eq!(received["receive_id"], "tmux-e2e-receive-1");
 
-    let status = fixture.run_ok(&["msg", &message_id], Some(&sender));
-    assert_eq!(status["consumed_by_recv"], true);
-    assert_eq!(status["state"], "read");
+    fixture.assert_message_consumed(&message_id, &sender);
     assert_eq!(sender_context["identity"]["worker_id"], sender_id);
     assert_eq!(receiver_context["identity"]["worker_id"], receiver_id);
 
@@ -394,9 +393,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
         Some(&receiver),
     );
     assert_eq!(recv["messages"][0]["id"], queued_id);
-    let consumed = fixture.run_ok(&["msg", queued_id], Some(&sender));
-    assert_eq!(consumed["state"], "read");
-    assert_eq!(consumed["consumed_by_recv"], true);
+    fixture.assert_message_consumed(queued_id, &sender);
 
     // Register an owned task and leave one durable message unread so the
     // restart proves tasks and mailbox survive, not only the identity.
@@ -581,10 +578,7 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
             .any(|message| message["id"] == after_goal_id),
         "the same message id must be receivable after the finite goal ended: {after_goal_recv}"
     );
-    assert_eq!(
-        fixture.run_ok(&["msg", &after_goal_id], Some(&sender))["consumed_by_recv"],
-        true
-    );
+    fixture.assert_message_consumed(&after_goal_id, &sender);
     let after_goal_status = fixture.run_ok(&["notify", "status"], Some(&receiver));
     assert!(
         after_goal_status["subscriptions"]
@@ -888,8 +882,7 @@ fn context_requires_current_credential_then_recovers_master_in_the_same_live_pan
             .any(|message| message["id"] == message_id),
         "the receive must contain the sent message"
     );
-    let status = fixture.run_ok(&["msg", message_id], Some(&new));
-    assert_eq!(status["consumed_by_recv"], true);
+    fixture.assert_message_consumed(message_id, &new);
 }
 
 /// A later agent session in the same live pane and the same exact invocation

@@ -74,14 +74,7 @@ fn collect_deadline_occurrences(
             if collected.contains(&id) {
                 continue;
             }
-            let status = fixture.command(&["msg", &id], Some(pane));
-            assert!(
-                !status.status.success()
-                    && String::from_utf8_lossy(&status.stderr).contains("MESSAGE_CONSUMED"),
-                "{label}: recv must consume occurrence {id}: stdout={} stderr={}",
-                String::from_utf8_lossy(&status.stdout),
-                String::from_utf8_lossy(&status.stderr)
-            );
+            fixture.assert_message_consumed(&id, pane);
             collected.push(id);
         }
         if collected.len() < needed {
@@ -142,6 +135,7 @@ fn find_subscription<'a>(status: &'a Value, subscription_id: &str) -> &'a Value 
 #[test]
 fn late_periodic_goal_read_defers_the_overdue_next_occurrence() {
     let (fixture, pane) = single_pane_fixture("goal-late-read-cadence");
+    fixture.start_codex_pane_runner(&pane);
     let registered = fixture.registered_context(&pane, true);
     let owner = registered["name"].as_str().unwrap();
     let goal_id = "goal-late-read-cadence";
@@ -254,6 +248,7 @@ fn late_periodic_goal_read_defers_the_overdue_next_occurrence() {
 #[test]
 fn accepted_periodic_reminder_can_be_read_once_after_its_schedule_expires() {
     let (mut fixture, pane) = single_pane_fixture("goal-expired-read");
+    fixture.start_codex_pane_runner(&pane);
     let registered = fixture.registered_context(&pane, true);
     let owner = registered["name"].as_str().unwrap();
     let goal_id = "goal-expired-read";

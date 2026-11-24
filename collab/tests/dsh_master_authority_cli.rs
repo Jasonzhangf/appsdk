@@ -149,6 +149,11 @@ impl Gateway {
                         "cwd":root,
                         "status":"running"
                     }})
+                } else if method == "agent-get" && known {
+                    json!({"ok":true,"result":{
+                        "ok":true,"runtimeId":runtime_id,
+                        "result":{"agent":{"agentId":agent_id,"status":"running","live":true}}
+                    }})
                 } else if method == "register-peer" && known {
                     thread_requests.lock().unwrap().push(request.clone());
                     let mode = *thread_mode.lock().unwrap();

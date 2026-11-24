@@ -554,6 +554,7 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         false,
     );
     let peer_pane = create_session(&fixture, "goal-peer");
+    fixture.start_codex_pane_runner(&peer_pane);
     let peer = register_context(&fixture, &root, &peer_pane, "goal-peer", false);
     let (peer_id, _) = identity(&peer);
     let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
@@ -1333,9 +1334,13 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     );
     assert_eq!(peer_sent["ok"], true, "{peer_sent}");
     assert_eq!(
+        peer_sent["notification"], "queued-recipient-offline",
+        "{peer_sent}"
+    );
+    assert_eq!(
         message_count(&fixture, &target_context, &target_id),
         before + 1,
-        "online delivery commits the durable target message"
+        "offline transport still commits the durable target message"
     );
 
     let promoted = run_ok_at(
@@ -1425,6 +1430,10 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(delivered["sender"], source_id, "{delivered}");
     assert_eq!(delivered["recipient"], target_id, "{delivered}");
     assert_eq!(delivered["consumed"], false, "{delivered}");
+    assert_eq!(
+        delivered["notification"], "queued-recipient-offline",
+        "{delivered}"
+    );
     let msg_id = delivered["msg_id"]
         .as_str()
         .expect("durable message id")
@@ -1504,7 +1513,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     let dead_row = worker_row(&workers_at(&fixture, &dead_context), &dead_id);
     assert_eq!(dead_row["endpoint_live"], false, "{dead_row}");
 
-    let dead_rejected = wire_request(
+    let dead_queued = wire_request(
         &fixture.host_state.join("server.sock"),
         &cross_project_request(
             &source_id,
@@ -1512,18 +1521,22 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
             &credentials,
             &dead_id,
             &dead_context,
-            "Reject dead endpoint",
-            "this message must not commit",
+            "Queue for disconnected endpoint",
+            "the registered name keeps this message unread",
             false,
         ),
     );
-    assert_rejected_without_message(
-        &fixture,
-        &dead_context,
-        &dead_id,
-        &dead_rejected,
-        "requires a reachable target binding",
-        before,
+    assert_eq!(dead_queued["ok"], true, "{dead_queued}");
+    assert_eq!(dead_queued["durable"], true, "{dead_queued}");
+    assert_eq!(
+        dead_queued["notification"], "queued-recipient-offline",
+        "{dead_queued}"
+    );
+    assert_eq!(dead_queued["consumed"], false, "{dead_queued}");
+    assert_eq!(
+        message_count(&fixture, &dead_context, &dead_id),
+        before + 1,
+        "a missing transport must retain unread mail for the registered name"
     );
 
     fixture.stop_daemon();

@@ -13,7 +13,7 @@ pub(crate) fn generate_long_horizon_goal_prompt(
 **执行边界**: `/goal` 和实现文档都不得声明 token、时间、上下文或轮次预算；只以目标文档中的完成条件和证据判断是否结束。
 
 RUN: `appsdk longhorizon show`
-THEN: 在原目标或任务记录维护目标、执行计划、实际进度和行动项。逐项关联验收或缺口，并写明负责人、动作、产物和完成证据。每次唤醒复核前次未清项并执行可做工作。
+THEN: 在原目标或任务记录维护目标、执行计划、实际进度和行动项。每项目标都关联可观察的评估标准和至少一项行动。行动项写明负责人、动作、产物、通过条件和完成证据。每次唤醒复核前次未清项并执行可做工作。
 无进展时记录卡点和已试路径，安排下一项核实、解阻或执行。无可执行行动项时核对剩余验收，补齐漏项、记录等待对象及恢复信号，或凭验收证据收口。其他独立工作继续。
 巡检只是兜底唤醒，不是执行依赖。登记或续订后立即继续当前可执行工作；不得以“等下一次唤醒”结束尚能推进的任务。未来 deadline、未收到唤醒或巡检服务不可用，都不阻塞已有授权内的工作。
 
@@ -67,7 +67,7 @@ pub(crate) fn project_patrol_brief(role: ExecutionRole) -> String {
 （仅本项目 master / Jenny 适用；普通 peer 不 arm 项目巡检。）
 
 - **核对巡检回执**：`--event master-idle` 项目巡检沿已安装 Collab Skill 的 `project-patrol` 合同，复用有效订阅。以实际 `patrol_armed` 与 `patrol_subscription_id` 核对启动状态。
-- **每次巡检处理有证据的缺口**：核对 worker 状态、未关闭任务归属、订阅取消状态和上轮行动项结果。自动唤醒只针对满足条件的 idle 任务持有者。有任务阻塞或停滞时按上面的取证规则处理。把缺口绑定到原任务上的负责人、动作和复验条件，跟踪结果。
+- **每次巡检对照评估标准**：比较当前证据与上轮结果，逐项注明通过、缺口或无法核实。核对 worker 状态、未关闭任务归属、订阅取消状态和上轮行动项结果。自动唤醒只针对满足条件的 idle 任务持有者。有任务阻塞或停滞时按上面的取证规则处理。将缺口与待核实项关联到原任务的负责人、动作、复验标准或恢复信号。
 - **维护逐 peer 任务清单并按可用性派发**：在项目现有 goal/task notes 记录每个 peer 的 goal、当前工作、变化、证据源与时间、剩余缺口和下一动作；每轮被动更新，包括无任务 peer，不把它当 board 或 live 状态。把已授权长程目标交给确认可用且无任务的 peer，跟踪接受与执行；peer 不可达、未知或不可用时保留该长程目标，把 ready 一次性执行或观察派给独立 `codex exec --profile gcm` subworker。未知不是 idle；无 ready 工作不发明任务。
 - **不 rearm 已取消任务**：peer 可取消其本人任务的 board 巡检，取消只停该任务的巡检，保留任务、direct-message 和其他订阅。巡检不得重新 arm 已被 peer 取消的任务；本人明确恢复后才恢复。
 - **有 CEO 时回报实质进度**：`collab ceo reply --subject "<项目进度>" <正文>`，正文必须含目标、已验收结果、剩余工作、有证据的阻塞和下一动作，不写无证据心跳，不按正文关键词猜测紧急程度。
@@ -235,6 +235,7 @@ mod tests {
         assert!(prompt.contains("通知处理准则"));
         assert!(prompt.contains("项目巡检与 CEO 汇报"));
         assert!(prompt.contains("目标、执行计划、实际进度和行动项"));
+        assert!(prompt.contains("每项目标都关联可观察的评估标准和至少一项行动"));
         assert!(prompt.contains("无可执行行动项时核对剩余验收"));
         assert!(prompt.contains("worker snapshot <id> --capture --lines 80"));
         assert!(prompt.contains("直接交执行 peer 并验收"));

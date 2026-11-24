@@ -113,6 +113,9 @@ mod tests {
     const LOCK_CHILD_ENV: &str = "APPSDK_PLATFORM_LOCK_CHILD";
     const LOCK_READY_ENV: &str = "APPSDK_PLATFORM_LOCK_READY";
     const LOCK_RELEASE_ENV: &str = "APPSDK_PLATFORM_LOCK_RELEASE";
+    // The child can briefly inherit the open file description between fork
+    // and exec even though the descriptor is close-on-exec.
+    static LOCK_TEST_CHILD_SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -127,6 +130,7 @@ mod tests {
 
     #[test]
     fn try_lock_is_nonblocking_and_releases_on_close() {
+        let _guard = LOCK_TEST_CHILD_SPAWN.lock().unwrap();
         let root = temp_root("lock-release");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("lock");
@@ -179,6 +183,7 @@ mod tests {
 
     #[test]
     fn try_lock_conflicts_across_processes() {
+        let _guard = LOCK_TEST_CHILD_SPAWN.lock().unwrap();
         let root = temp_root("lock-process");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("lock");

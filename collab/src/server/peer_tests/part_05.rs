@@ -79,6 +79,8 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             .to_lowercase();
         if expected_role != "managed-subagent" {
             assert!(!responsibilities.is_empty());
+            assert!(responsibilities.contains("observable evaluation criteria"));
+            assert!(responsibilities.contains("at least one linked action item"));
             let workflow = &context.data["role_brief"]["workflow_template"];
             assert_eq!(workflow["base_version"], serde_json::json!(1), "{workflow}");
             assert_eq!(

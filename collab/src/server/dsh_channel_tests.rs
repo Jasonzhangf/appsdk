@@ -935,6 +935,35 @@ fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
 }
 
 #[test]
+fn dsh_delivery_sink_uses_current_liveness_before_enqueue() {
+    for (status, live) in [("inactive", Some(true)), ("running", Some(false)), ("running", None)] {
+        let enqueues = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = enqueues.clone();
+        let gateway = Gateway::start("wake-liveness", move |request| {
+            match request["method"].as_str() {
+                Some("agent-get") => live.map(|live| serde_json::json!({
+                    "ok": true,
+                    "result": {"ok": true, "runtimeId": "rt-1",
+                        "result": {"agent": {"agentId": "ses-1", "status": status, "live": live}}}
+                }).to_string()),
+                Some("enqueue") => {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    wake_reply(&request)
+                }
+                _ => None,
+            }
+        });
+        let sink = default_appserver_notification_sink();
+        let result = sink(
+            &dsh_transport(&gateway.socket), None, "hello", "m1759420000000-1", false, "immediate",
+        );
+        let expected = usize::from(live == Some(true));
+        assert_eq!(result.is_ok(), expected == 1, "{result:?}");
+        assert_eq!(enqueues.load(std::sync::atomic::Ordering::Relaxed), expected);
+    }
+}
+
+#[test]
 fn a_replayed_dsh_wake_reuses_the_same_gateway_message_id() {
     // The gateway folds every `enqueue` on `messageId`. collab replays its own
     // wakes (`daemon-live-closure`, `restart-replay-pending`), so a replay of
@@ -1093,7 +1122,11 @@ fn a_dsh_wake_never_reaches_the_tmux_sink() {
     // The pre-existing sink was `if kind != AppServer`, which sent a new kind
     // into the tmux sink and failed with "Collab notifications require tmux".
     let root = scratch("sink-route");
-    let gateway = Gateway::start("sink-route", |request| wake_reply(&request));
+    let gateway = Gateway::start("sink-route", |request| match request["method"].as_str() {
+        Some("agent-get") => Some(online_reply(&request)),
+        Some("enqueue") => wake_reply(&request),
+        _ => None,
+    });
     let transport = dsh_transport(&gateway.socket);
     let receipt = (default_appserver_notification_sink())(
         &transport,
@@ -1116,6 +1149,11 @@ fn a_dsh_wake_forwards_the_sink_mode_it_was_given() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let observer = Arc::clone(&seen);
     let gateway = Gateway::start("sink-mode", move |request| {
+        match request["method"].as_str() {
+            Some("agent-get") => return Some(online_reply(&request)),
+            Some("enqueue") => {}
+            _ => return None,
+        }
         observer.lock().unwrap().push(
             request
                 .pointer("/params/mode")

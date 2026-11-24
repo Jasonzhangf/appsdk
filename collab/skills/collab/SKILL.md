@@ -1,11 +1,15 @@
 ---
 name: collab
-description: "未注册调用者可只读查询项目通信目录与匿名发送自通知；已注册 peer 执行协作协议与任务分工；master 权限需另行授权。未注册无需遵守 peer 协作规程。"
+description: "Collab peer/Jenny 身份注册、恢复、状态和协作。恢复时原 agent 会话直接运行 collab context，禁止 Computer Use/CUA/GUI。已注册 peer 执行协作，master 权限另需明确授权。"
 ---
 
 # Collab
 
-Collab 操作用 shell CLI 或专用 MCP。禁止用 Computer Use、CUA 或 GUI 工具操作 Collab。
+用户要求恢复 Collab peer 或 Jenny/master 时，当前 agent 的第一个恢复动作是在目标项目根
+用自己的 shell 运行 `collab context`。已明确授权接替指定名字或角色时，按下方恢复表
+加对应参数。禁止调用 Computer Use、CUA 或任何 GUI 来识别宿主、检查工具、打开或切换
+Rex/终端窗口、取字段或执行命令。原会话没有 shell 或没有 `collab` 时，报告具体缺口，
+等待原宿主提供入口。
 
 本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
 不整篇加载；手册与本入口属于同一个 Skill。
@@ -34,37 +38,21 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。
 
-### 首次注册与缺项提示
+### 在线才投递
 
-身份注册、恢复、查状态和终端取证只调用 shell 中的 Collab CLI，以及需要时的宿主 CLI
-或专用 MCP。禁止调用 Computer Use、CUA、桌面或浏览器控制工具，包括用它们切换、
-停止或关闭界面。禁止向 GUI 终端注入命令。Rex 身份恢复禁止 split、新建 pane、tab、
-窗口、改名或借用其他 block、会话。
+所有普通消息、通知、周期唤醒和 board 自动通知，只有 daemon 已确认目标 agent
+当前在线时才可写入 shell、pane、Rex block 或原生 thread。在线只认当前 adapter
+明确返回的 Present。cold、unknown、offline、缺失或只有持久化绑定时，daemon
+保持消息未读并产生零终端输入。入队、订阅接受和唤醒接受都不是投递成功。
+普通未读消息在目标上线后沿当前绑定投递；周期唤醒离线静默且不补发。
+board 修改仍先提交，自动通知在目标离线时保持未读。
 
-用当前 agent 自己会话的 shell 命令工具，工作目录设为当前项目根。按
-[宿主注册所需信息](operations.md#宿主注册所需信息)运行对应的取值命令，然后执行：
+### 身份恢复
 
-```sh
-pwd -P
-collab context
-```
-
-Rex 和 tmux 只提供终端位置，Codex 提供当前 agent 的 `CODEX_SESSION_ID`。
-DSH 的身份来源是 gateway 注入的 `DSH_SESSION_ID`。Desktop 还使用当前
-`CODEX_THREAD_ID` 及原生 bridge。成功时核对 `registered: true` 和自己的名字。
-缺必需事实时，保留宿主命令原错或 `missing_facts` 的 `result.requires.fields` 和
-`result.requires.sources`，指出哪个宿主须补传哪个字段。禁止猜填字段、借用其他
-会话或改用 GUI。继续能独立推进的工作，宿主补齐后在原会话重试。
-
-若返回 `DAEMON_UNAVAILABLE`，按[正式服务恢复步骤](operations.md#全局-daemon-与默认身份恢复)
-检查启动状态与首个错误。
-`TMUX_OBSERVATION_CAPABILITY_MISSING` 表示 daemon 缺少可核实的 tmux 机器端点。
-把原错误交给宿主维护者。端点就绪后，从同一会话重跑 `collab context`。
-`TMUX_ITERM2_PANE_REQUIRED` 表示新 tmux 会话缺当前 iTerm2 接入。在宿主维护者
-将原 session 接入 iTerm2 后从原 agent 会话重试。daemon 核实 pane 所连的 session ID。
-已登记会话断开 iTerm2 时，名字和业务保留，消息在 daemon 排队。
-`IDENTITY_MAP_DECODE_FAILED` 表示当前程序读不懂已保存的身份表；
-补注册字段无法修复它。保留身份表，交由维护者恢复兼容运行版后再试。
+按[恢复操作表](references/stable-name-recovery.md#正常恢复)根据原始回执选择下一条命令。
+恢复动作留在同一个 agent 会话。先跑 context，再按缺项进入对应宿主的只读诊断。
+禁止先派子 agent、搜索历史身份、调用其他 context 工具碰运气，或使用
+`rex session rename`、新建窗口、切换 block、重启 daemon 来修复身份。
 
 ## 关闭门禁：未验证不得关闭
 
@@ -175,7 +163,7 @@ master 按[派单顺序](#派单顺序与一-peer-一任务)选择本阶段的�
 
 ### 派单顺序与一 peer 一任务
 
-manager（master 与各层 peer）每轮派单先查看 board 的当前项目成员与容量，列出全部
+manager（master 与任务合同明确受托派发的人）每轮派单先查看 board 的当前项目成员与容量，列出全部
 idle peer，包括没有当前任务的成员，并显式显示各自通道来源（Codex TUI、DSH、Codex
 Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
 `identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
@@ -193,27 +181,54 @@ peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任�
 peer 与占用状态由 board 的真实任务视图计算。
 
 项目有适合本任务的 architect 时，Jenny 将 buglist 中已授权的缺陷和项目任务先派给
-architect。Architect 完成详细计划，直接向一个或多个 peer 交执行合同。Peer 实现、
+architect。Architect 完成详细计划，在受托范围内修订任务并直接向一个或多个 eligible
+peer 派发执行合同。Peer 实现、
 验证并直接将结果交回 architect。执行中只为真实阻塞、必要设计决定或约定交接直接联系。
 Architect 按计划及真实行为证据验收，返工也由其交回
 原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。
 只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
 
 任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
-独立 reviewer 默认使用独立 Codex 编排的独立 reviewer（`codex-auto-review`/独立
-Codex OAuth 会话）；独立 reviewer 入口不可用时，改用普通空闲 peer 承接 review，
-若仍有 reviewer 空闲就让它 review。每个任务默认用自己的独立 reviewer 验收；
+已有可用的独立 reviewer 优先承接。没有可用 reviewer 时，按 [Review 合同](../codex-orchestrator/references/review.md)
+派独立只读 Codex review worker。提供候选、验收证据和明确范围。
 发布时多个问题统一给 reviewer 做架构 review。master（Jenny）不是默认 review 对象，
 不承担常规评审。角色缺位时按[负责人承接规则](../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进)
 改派，并更新原 board 与合同。极端条件下的 master 临时代审、实际审查者与独立性
 缺口记录均由该规则和现有 Review 合同统一维护。角色缺位本身不得成为停工理由；
 负责人继续解阻、派发和推进其他可执行工作。
 
-普通 peer 是受托子目标的编排者，wire role `worker` 不改变该身份。只有当前有效
-工作角色明确为 `worker`/`executor`，或任务合同明确指定直接执行时，peer 才在合同
-边界内直接执行，不得仅因 peer 身份强制先派子 worker。`patrol` 承担独立常驻检查，
-不接收 manager/master 的临时开发派单；`memory` 提炼事实和经验并修正失效结论；
-`architect` 产出计划和 review 文件。默认职责正文由源码
+为用户执行身份注册、恢复或角色确认后，从 `collab context` 回执反馈当前名字、
+身份和工作角色、基础职责、当前任务与下一步。读取 `result.snapshot.role_brief` 的
+`role_task`、`responsibilities`、`next_action` 和实际任务状态。身份未确认时报告原错和待补事实。
+记忆 agent 和巡检者同时反馈实际周期、订阅状态和回执中的剩余次数。缺少回执时报告未证实已启用。
+
+| 角色 | 基础工作 |
+| --- | --- |
+| Manager（项目 master 为 Jenny） | 管优先级、依赖、派发、验收和回收。核对每项 ready 工作是否发给有能力、有授权且有容量的人，确认接单和实际推进。核对用过的 worktree、临时文件和运行资源是否已按 owner 回收或有明确保留原因。 |
+| Architect | 优先承接 debug 的总体设计、根因分析及 feature 的方案与计划。写清步骤、边界、依赖、验收和停止条件后派给 peer。审查并验收 peer 的结果。Architect 亲自实现时另派 reviewer。 |
+| 普通 peer | 执行已接受的任务。派单方提供可执行计划、范围、允许与禁止动作、产物、验收及回交人。Peer 可自行分析和编排范围清楚的简单问题。复杂问题有可承接 architect 时，交 architect 设计，再由 peer 实施。设计缺口或证据与计划冲突时交回 architect 或派单方。 |
+| Reviewer | 在达到 Review 准入时独立核验候选和证据。已有合适 reviewer 优先承担，缺位时按上面的 Codex review 路径派发。 |
+| 记忆 agent（`memory`） | 总结经核实的知识和决策，巡检记忆的准确性、归属与交接缺口。只接记忆总结和记忆巡检。 |
+| 巡检者（`patrol`） | 主要核查 Jenny 的实际执行、派发和回收。从活跃运行入口收集有原始证据的 live runtime bug，沿项目现有 bug 入口去重移交并跟踪。 |
+
+巡检者使用已授权的 30 分钟周期。记忆 agent 使用已授权的记忆巡检周期或记录变更触发，
+当前无统一默认间隔。两者的已授权周期批次默认 100 次，复用有效回执。
+角色恢复只读取或恢复现有身份与订阅。首次自动 arm 发生在包含完整 long-horizon
+内容和周期的 Board 派发提交中，按[长程登记](operations.md#register-the-long-horizon-goal-before-dispatch)
+核对派发和订阅的实际回执。
+
+每个目标都在原记录中写明可核对的评估标准，并至少关联一项行动。行动项写清负责人、
+具体动作、产物、通过条件和完成证据。巡检把每项检查关联到目标标准和上轮证据，
+记下本轮是通过、发现缺口、还是无法核实。缺口和待核实项各自有负责人、下一动作和
+复验标准或恢复信号。已有行动项就更新原记录，符合标准的例行检查仅留下必要证据。
+
+各角色都可用编排 Skill 处理职责内、已获授权的可拆分子任务，普通 peer 也可以。
+本轮没有合适、有授权且可承接的 peer 时，按 [Codex 编排](../codex-orchestrator/SKILL.md)
+调用子 agent 承担清楚限定的子任务。派发者明确范围、输入、产物、验收和停止条件，
+保留原任务责任并核验结果。记忆 agent 和巡检者只能拆各自职责内的工作，独立 Review
+仍走 Review 合同的独立只读入口。
+
+默认职责正文由源码
 [workflow-templates.json](references/workflow-templates.json) 编译，`collab context`
 只按当前身份、角色、精确 override 和任务边界投影；本入口不复制默认正文。
 

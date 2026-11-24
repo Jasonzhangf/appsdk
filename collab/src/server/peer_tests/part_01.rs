@@ -17,6 +17,11 @@ impl IsolatedTmux {
         Self::start_with_spare_pane(root, false, "sleep 60")
     }
 
+    pub(super) fn start_online(root: &Path) -> Self {
+        let command = crate::client::adapters::tmux::tests::foreground_agent_command(root);
+        Self::start_with_spare_pane(root, true, &command)
+    }
+
     pub(super) fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool, pane_command: &str) -> Self {
         static SOCKET_SEQ: AtomicU64 = AtomicU64::new(0);
         let socket = std::env::temp_dir().join(format!(
@@ -317,6 +322,7 @@ fn with_tmux<R>(run: impl FnOnce(&mut Command) -> R) -> R {
 
 thread_local! {
     static REGISTERED_TEST_TMUX: RefCell<Option<(IsolatedTmux, usize)>> = const { RefCell::new(None) };
+    static ONLINE_TEST_TMUX: RefCell<Option<(IsolatedTmux, usize)>> = const { RefCell::new(None) };
 }
 
 impl Drop for IsolatedTmux {
@@ -977,11 +983,20 @@ fn test_tmux_transport(thread_id: &str) -> SelectedTransport {
 }
 
 fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::TmuxEndpoint {
+    fixture_peer_endpoint_with_presence(server, thread_id, false)
+}
+
+fn fixture_peer_endpoint_with_presence(
+    server: &Server,
+    thread_id: &str,
+    online: bool,
+) -> crate::proto::TmuxEndpoint {
     let thread_id = thread_id
         .strip_prefix('%')
         .map(|legacy_fixture| format!("thread-{legacy_fixture}"))
         .unwrap_or_else(|| thread_id.to_string());
-    let mut endpoint = REGISTERED_TEST_TMUX.with(|fixture| {
+    let fixture = if online { &ONLINE_TEST_TMUX } else { &REGISTERED_TEST_TMUX };
+    let mut endpoint = fixture.with(|fixture| {
         let mut fixture = fixture.borrow_mut();
         // A test can create multiple owned roots. The participant script and
         // pane cwd belong to one root and must not outlive its fixture.
@@ -991,8 +1006,14 @@ fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::Tmux
         {
             *fixture = None;
         }
-        let (tmux, endpoint_index) =
-            fixture.get_or_insert_with(|| (IsolatedTmux::start(&server.root), 0));
+        let (tmux, endpoint_index) = fixture.get_or_insert_with(|| {
+            let tmux = if online {
+                IsolatedTmux::start_online(&server.root)
+            } else {
+                IsolatedTmux::start(&server.root)
+            };
+            (tmux, 0)
+        });
         let endpoint = if *endpoint_index == 0 {
             tmux.endpoints().remove(0)
         } else {
@@ -1003,7 +1024,18 @@ fn fixture_peer_endpoint(server: &Server, thread_id: &str) -> crate::proto::Tmux
     });
     endpoint.codex_session_id = Some(format!("session-{thread_id}"));
     endpoint.codex_thread_id = Some(thread_id);
+    if online {
+        wait_for_online_fixture(&endpoint);
+    }
     endpoint
+}
+
+pub(super) fn wait_for_online_fixture(endpoint: &crate::proto::TmuxEndpoint) {
+    let deadline = std::time::Instant::now() + FIXTURE_PANE_READY_TIMEOUT;
+    while !crate::client::adapters::tmux::agent_is_online(endpoint) {
+        assert!(std::time::Instant::now() < deadline, "test Codex foreground unavailable: {endpoint:?}");
+        std::thread::sleep(FIXTURE_PANE_READY_POLL);
+    }
 }
 
 /// Prior-state fixture for task, notification and readback tests. Explicit
@@ -1012,7 +1044,40 @@ pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     register_tmux(server, id, fixture_peer_endpoint(server, thread_id))
 }
 
-fn register_appserver_peer(server: &Server, id: &str, transport: &SelectedTransport) {
+/// Delivery fixtures must prove the recipient is online. Presence-projection
+/// fixtures keep `register` offline so a killed pane stays observably absent.
+pub(crate) fn register_online(server: &Server, id: &str, thread_id: &str) -> Resp {
+    let response = register_tmux(
+        server, id, fixture_peer_endpoint_with_presence(server, thread_id, true),
+    );
+    if response.ok {
+        let (project_scope, session_id) = {
+            let state = server.state.lock().unwrap();
+            let worker = &state.workers[id];
+            let transport = worker.transport.as_ref().expect("tmux transport");
+            (
+                GlobalState::canonical_project_scope(&server.root)
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+                transport.session_id.clone().unwrap_or_default(),
+            )
+        };
+        server.commit(&[Event::AgentPresenceObserved {
+            presence: name_state::AgentPresenceRecord {
+                project_scope,
+                worker_id: id.into(),
+                session_id,
+                presence: name_state::AgentPresence::Online,
+                reason: "live peer fixture is online".into(),
+                observed_ms: now_ms(),
+            },
+        }]);
+    }
+    response
+}
+
+pub(super) fn register_appserver_peer(server: &Server, id: &str, transport: &SelectedTransport) {
     let app = AppServerId::new("tui-default").unwrap();
     let cwd = server.root.display().to_string();
     let response = seed_committed_owner(
@@ -1049,6 +1114,15 @@ pub(crate) fn register_synthetic_peer(server: &Server, id: &str, thread_id: &str
 }
 
 fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
+    register_public_with_presence(server, id, thread_id, false)
+}
+
+fn register_public_with_presence(
+    server: &Arc<Server>,
+    id: &str,
+    thread_id: &str,
+    online: bool,
+) -> Resp {
     let app = AppServerId::new("tui-default").unwrap();
     let prior = server
         .state
@@ -1063,7 +1137,7 @@ fn register_public(server: &Arc<Server>, id: &str, thread_id: &str) -> Resp {
     let mut endpoint = prior
         .as_ref()
         .and_then(|binding| binding.tmux_endpoint.clone())
-        .unwrap_or_else(|| fixture_peer_endpoint(server, thread_id));
+        .unwrap_or_else(|| fixture_peer_endpoint_with_presence(server, thread_id, online));
     endpoint.codex_session_id = Some(format!("session-{thread_id}"));
     endpoint.codex_thread_id = Some(thread_id.into());
     let context = match prior {
@@ -1218,7 +1292,6 @@ fn authenticated_send(root: &Path, from: &str, to: &str, subject: &str) -> Req {
         subject: Some(subject.into()),
         body: "body".into(),
         in_reply_to: None,
-        reply_policy: None,
         target_session: None,
         delivery: "immediate".into(),
     }

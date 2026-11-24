@@ -309,16 +309,20 @@ fn sdk_goal_subscribe_consumes_a_real_deadline_and_cancel_stops_it() {
             write_json(&evidence, "recv-deadline.json", &received);
         }
         for id in ids {
-            let status = fixture.run_ok(&["msg", &id], Some(&pane));
+            let message = received["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["id"] == id)
+                .expect("received deadline occurrence");
             assert!(
-                status["body"]
+                message["body"]
                     .as_str()
                     .unwrap()
                     .contains("sdk-goal-blackbox.md"),
-                "the full generated goal prompt must reach the peer: {status}"
+                "the full generated goal prompt must reach the peer: {message}"
             );
-            write_json(&evidence, &format!("msg-{id}.json"), &status);
-            assert_eq!(status["state"], "read", "recv must consume {id}: {status}");
+            fixture.assert_message_consumed(&id, &pane);
             consumed.push(id);
         }
         if consumed.is_empty() {

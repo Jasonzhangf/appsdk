@@ -105,14 +105,35 @@ pub(crate) fn board_patrol_owned_unclosed_task_ids(
 /// Resolve the stable owner only when this worker is the current carrier.
 ///
 /// Only the current map carrier may patrol work held by this name.
-pub(crate) fn board_patrol_current_owner_key(state: &State, control: &binding_slot::BindingControlSet,
-    route: Option<&RouteScope>, worker_id: &str) -> Result<Option<String>, String> {
-    let Some(worker) = state.workers.get(worker_id) else { return Ok(None); };
-    let Some(route) = route else { return Ok(None); };
-    let Some(slot) = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)? else { return Ok(None); };
+pub(crate) fn board_patrol_current_owner_key(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
+    worker_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(worker) = state.workers.get(worker_id) else {
+        return Ok(None);
+    };
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    let Some(slot) =
+        control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)?
+    else {
+        return Ok(None);
+    };
     let current = slot.active_binding().unwrap();
-    let matches = worker.transport.as_ref().and_then(|transport| transport.session_id.as_deref())
-        .is_none_or(|session| current.binding.session_id.as_ref().is_some_and(|current| current.as_str() == session));
+    let matches = worker
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.session_id.as_deref())
+        .is_none_or(|session| {
+            current
+                .binding
+                .session_id
+                .as_ref()
+                .is_some_and(|current| current.as_str() == session)
+        });
     Ok(matches.then(|| slot.identity_key.name.clone()))
 }
 
@@ -126,7 +147,9 @@ pub(crate) fn board_patrol_eligible_task_ids(
     route: Option<&RouteScope>,
     worker_id: &str,
 ) -> Result<Option<Vec<String>>, String> {
-    let Some(owner_key) = board_patrol_current_owner_key(state, control, route, worker_id)? else { return Ok(None); };
+    let Some(owner_key) = board_patrol_current_owner_key(state, control, route, worker_id)? else {
+        return Ok(None);
+    };
     let owned = board_patrol_owned_unclosed_task_ids(state, worker_id, &owner_key);
     Ok(Some(crate::board_patrol_policy::eligible_patrol_task_ids(
         &owned,
@@ -296,77 +319,6 @@ impl State {
         }
     }
 
-    /// Move unsettled obligations that reference `name` in `project_scope` to
-    /// the current carrier `worker_id`. The stable name keeps the obligation
-    /// answerable across a session change; the old carrier loses it.
-    fn rebind_reply_obligations_for_name(
-        &mut self,
-        project_scope: &str,
-        name: &str,
-        worker_id: &str,
-    ) {
-        for obligation in self.reply_obligations.values_mut() {
-            if obligation.project != project_scope {
-                continue;
-            }
-            // Reset the idle reminder only on a real carrier change; an
-            // unchanged name resolution must not recreate a reminder window.
-            if obligation.from_name.as_deref() == Some(name)
-                && obligation
-                    .from_project
-                    .as_deref()
-                    .is_none_or(|source| source == project_scope)
-                && obligation.from_worker_id != worker_id
-            {
-                obligation.from_worker_id = worker_id.to_owned();
-            }
-            if obligation.recipient_name.as_deref() == Some(name)
-                && obligation.recipient_worker_id != worker_id
-            {
-                obligation.recipient_worker_id = worker_id.to_owned();
-                obligation.reminded_idle_episode = false;
-            }
-        }
-    }
-
-    /// Unsettled obligations owned by the current carrier `worker`. `worker`
-    /// is a worker id; the rebinding above keeps the
-    /// recipient id current for both, so a name that moved to a new session
-    /// still answers and the old carrier no longer does.
-    pub fn pending_reply_obligations(&self, worker: &str) -> Vec<ReplyObligation> {
-        let mut obligations: Vec<ReplyObligation> = self
-            .reply_obligations
-            .values()
-            .filter(|obligation| obligation.recipient_worker_id == worker)
-            .cloned()
-            .collect();
-        obligations.sort_by(|a, b| {
-            (a.created_ms, a.message_id.as_str()).cmp(&(b.created_ms, b.message_id.as_str()))
-        });
-        obligations
-    }
-
-    /// Read-only view of the pending replies owed by `worker`. `from` is the
-    /// current carrier of the original sender, which is exactly the worker a
-    /// linked reply must target.
-    pub fn reply_obligation_view(&self, worker: &str) -> Vec<serde_json::Value> {
-        self.pending_reply_obligations(worker)
-            .into_iter()
-            .map(|obligation| {
-                serde_json::json!({
-                    "message_id": obligation.message_id,
-                    "from": obligation.from_worker_id,
-                    "from_name": obligation.from_name,
-                    "from_project": obligation.from_project,
-                    "from_ceo": obligation.from_ceo,
-                    "project": obligation.project,
-                    "policy": obligation.policy.as_str(),
-                    "created_ms": obligation.created_ms,
-                    "reminded_idle_episode": obligation.reminded_idle_episode,
-                })
-            })
-            .collect()
-    }
 
     #[cfg(test)]
     pub fn apply(&mut self, ev: &Event) {
@@ -390,11 +342,6 @@ impl State {
                     handoff.occupancy_revision,
                 );
                 self.apply_mailbox_handoff(handoff);
-                self.rebind_reply_obligations_for_name(
-                    &handoff.project_scope,
-                    &handoff.name,
-                    &handoff.recipient,
-                );
             }
             Event::ProjectResetStarted {
                 project_scope,
@@ -492,21 +439,34 @@ impl State {
                 if self.platform_event_index.contains_key(idempotency_key) {
                     return Ok(());
                 }
-                self.platform_event_index
-                    .insert(idempotency_key.clone(), crate::server::channel_envelope::PlatformEventTarget::LocalMessage(message_id.clone()));
+                self.platform_event_index.insert(
+                    idempotency_key.clone(),
+                    crate::server::channel_envelope::PlatformEventTarget::LocalMessage(
+                        message_id.clone(),
+                    ),
+                );
                 self.channel_envelopes
                     .insert(message_id.clone(), envelope.clone());
             }
-            Event::FederatedChannelInboundRecorded { origin, inbound_id, idempotency_key, envelope } => {
-                let target = crate::server::channel_envelope::PlatformEventTarget::FederatedOrigin(origin.clone());
+            Event::FederatedChannelInboundRecorded {
+                origin,
+                inbound_id,
+                idempotency_key,
+                envelope,
+            } => {
+                let target = crate::server::channel_envelope::PlatformEventTarget::FederatedOrigin(
+                    origin.clone(),
+                );
                 if let Some(existing) = self.platform_event_index.get(idempotency_key) {
                     if existing != &target {
                         return Err("CHANNEL_EVENT_CONFLICT: platform event already has another destination".into());
                     }
                     return Ok(());
                 }
-                self.platform_event_index.insert(idempotency_key.clone(), target);
-                self.channel_envelopes.insert(inbound_id.clone(), envelope.clone());
+                self.platform_event_index
+                    .insert(idempotency_key.clone(), target);
+                self.channel_envelopes
+                    .insert(inbound_id.clone(), envelope.clone());
             }
             Event::ChannelReplyRouteBound { message_id, route } => {
                 self.channel_reply_routes
@@ -717,21 +677,6 @@ impl State {
                 self.target_sessions
                     .insert(message_id.clone(), target_session.clone());
             }
-            Event::ReplyObligationSet { obligation } => {
-                self.reply_obligations
-                    .insert(obligation.message_id.clone(), obligation.clone());
-            }
-            Event::ReplyObligationCleared { message_id } => {
-                self.reply_obligations.remove(message_id);
-            }
-            Event::ReplyObligationReminded {
-                message_id,
-                reminded,
-            } => {
-                if let Some(obligation) = self.reply_obligations.get_mut(message_id) {
-                    obligation.reminded_idle_episode = *reminded;
-                }
-            }
             Event::DeliveryMode {
                 msg_id,
                 mode,
@@ -757,12 +702,18 @@ impl State {
                     }
                 }
             }
-            Event::NotificationDeliverySelected { message_id, selected_binding } => {
-                match selected_binding {
-                    Some(binding) => { self.notification_delivery_bindings.insert(message_id.clone(), binding.clone()); }
-                    None => { self.notification_delivery_bindings.remove(message_id); }
+            Event::NotificationDeliverySelected {
+                message_id,
+                selected_binding,
+            } => match selected_binding {
+                Some(binding) => {
+                    self.notification_delivery_bindings
+                        .insert(message_id.clone(), binding.clone());
                 }
-            }
+                None => {
+                    self.notification_delivery_bindings.remove(message_id);
+                }
+            },
             Event::NotificationDeliveryFailed {
                 message_id,
                 operation,
@@ -984,15 +935,6 @@ impl State {
                 self.wake_bindings
                     .insert(message_id.clone(), subscription_id.clone());
             }
-            Event::ReceiveCommitted { receipt, ids } => {
-                self.receive_receipts
-                    .insert(receipt.receive_id.clone(), receipt.clone());
-                self.apply_checked(&Event::Delivered { ids: ids.clone() })?;
-                self.apply_checked(&Event::Acked {
-                    ids: ids.clone(),
-                    consumed_ms: Some(receipt.received_ms),
-                })?;
-            }
             Event::Delivered { ids } => {
                 for id in ids {
                     if let Some(m) = self.msgs.get_mut(id) {
@@ -1009,10 +951,7 @@ impl State {
                                 self.msgs.get(id).is_some_and(|message| {
                                     message.from == "collab-server"
                                         && message.to == subscription.worker_id
-                                        && has_current_master_grant(
-                                            self,
-                                            &subscription.worker_id,
-                                        )
+                                        && has_current_master_grant(self, &subscription.worker_id)
                                 })
                             })
                     })
@@ -1024,6 +963,7 @@ impl State {
             }
             Event::Acked { ids, consumed_ms } => {
                 for id in ids {
+                    let message_created_ms = self.msgs.get(id).map(|message| message.created_ms);
                     let message_was_unread = self
                         .msgs
                         .get(id)
@@ -1031,63 +971,70 @@ impl State {
                     if let Some(m) = self.msgs.get_mut(id) {
                         m.state = "read".into();
                     }
-                    let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
-                        continue;
-                    };
-                    let Some(subscription) = self.notification_subscriptions.get(&subscription_id)
-                    else {
-                        continue;
-                    };
-                    let consumes_on_read = subscription.event != "direct-message"
-                        || subscription.trigger_ms.is_some()
-                        || !subscription.trigger_times_ms.is_empty()
-                        || subscription.interval_ms.is_some();
-                    if !consumes_on_read {
-                        continue;
-                    }
-                    if let Some(consumed) = consume_marked_periodic_goal(
-                        subscription,
-                        self.notification_occurrences.get(id),
-                        message_was_unread,
-                        *consumed_ms,
-                    ) {
-                        if matches!(
-                            consumed.status,
-                            SubscriptionConsumptionStatus::Unchanged
+                    'subscription: {
+                        let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
+                            break 'subscription;
+                        };
+                        let Some(subscription) =
+                            self.notification_subscriptions.get(&subscription_id)
+                        else {
+                            break 'subscription;
+                        };
+                        let consumes_on_read = subscription.event != "direct-message"
+                            || subscription.trigger_ms.is_some()
+                            || !subscription.trigger_times_ms.is_empty()
+                            || subscription.interval_ms.is_some();
+                        if !consumes_on_read {
+                            break 'subscription;
+                        }
+                        if let Some(consumed) = consume_marked_periodic_goal(
+                            subscription,
+                            self.notification_occurrences.get(id),
+                            message_created_ms,
+                            message_was_unread,
+                            *consumed_ms,
                         ) {
-                            continue;
+                            if matches!(consumed.status, SubscriptionConsumptionStatus::Unchanged) {
+                                break 'subscription;
+                            }
+                            let read_time = subscription_read_time(
+                                subscription,
+                                self.msgs.get(id),
+                                *consumed_ms,
+                            );
+                            self.consume_notification(&subscription_id, read_time);
+                            if let Some(occurrence) = self.notification_occurrences.get_mut(id) {
+                                occurrence.consumed_ms = *consumed_ms;
+                            }
+                            break 'subscription;
                         }
-                        let read_time =
-                            subscription_read_time(subscription, self.msgs.get(id), *consumed_ms);
-                        self.consume_notification(&subscription_id, read_time);
-                        if let Some(occurrence) =
-                            self.notification_occurrences.get_mut(id)
-                        {
-                            occurrence.consumed_ms = *consumed_ms;
+                        let fired_count = subscription.fired_count;
+                        let read_count = self
+                            .wake_bindings
+                            .iter()
+                            .filter(|(_, bound)| *bound == &subscription_id)
+                            .filter(|(message_id, _)| {
+                                self.msgs
+                                    .get(*message_id)
+                                    .is_some_and(|message| message.state == "read")
+                            })
+                            .count() as u32;
+                        // recv records Delivered + Acked without a separate
+                        // NotificationConsumed event. Compare durable read
+                        // occurrences with the cursor so timer delivery, which
+                        // already records NotificationConsumed, remains idempotent.
+                        if read_count > fired_count {
+                            let read_time = subscription_read_time(
+                                subscription,
+                                self.msgs.get(id),
+                                *consumed_ms,
+                            );
+                            self.consume_notification(&subscription_id, read_time);
                         }
-                        continue;
                     }
-                    let fired_count = subscription.fired_count;
-                    let read_count = self
-                        .wake_bindings
-                        .iter()
-                        .filter(|(_, bound)| *bound == &subscription_id)
-                        .filter(|(message_id, _)| {
-                            self.msgs
-                                .get(*message_id)
-                                .is_some_and(|message| message.state == "read")
-                        })
-                        .count() as u32;
-                    // recv records Delivered + Acked without a separate
-                    // NotificationConsumed event. Compare durable read
-                    // occurrences with the cursor so timer delivery, which
-                    // already records NotificationConsumed, remains idempotent.
-                    if read_count > fired_count {
-                        let read_time = subscription_read_time(
-                            subscription, self.msgs.get(id), *consumed_ms,
-                        );
-                        self.consume_notification(&subscription_id, read_time);
-                    }
+                    // recv is the mailbox's only read projection. The read row
+                    // stays invisible to inbox and msg until the periodic
+                    // retention owner removes it.
                 }
             }
             Event::Superseded { ids } => {
@@ -1181,11 +1128,6 @@ impl State {
                 assignments,
             } => {
                 self.apply_name_resolution(project_scope, occupancy, assignments)?;
-                self.rebind_reply_obligations_for_name(
-                    project_scope,
-                    &occupancy.name,
-                    &occupancy.worker_id,
-                );
             }
             Event::NameOccupancyRevisionRetained {
                 project_scope,
@@ -1269,20 +1211,27 @@ impl State {
                 self.apply_agent_activity(activity)?;
             }
             Event::RexExecutionObserved { worker_id, record } => {
-                let matches = self.workers.get(worker_id)
+                let matches = self
+                    .workers
+                    .get(worker_id)
                     .and_then(|worker| worker.transport.as_ref())
-                    .is_some_and(|transport| transport.rex_endpoint.as_ref() == Some(&record.endpoint)
-                        && transport.session_id.as_deref() == Some(record.agent_session_id.as_str()));
+                    .is_some_and(|transport| {
+                        transport.rex_endpoint.as_ref() == Some(&record.endpoint)
+                            && transport.session_id.as_deref()
+                                == Some(record.agent_session_id.as_str())
+                    });
                 if !matches || record.owner.pid == 0 || record.owner.name.trim().is_empty() {
                     return Err("REX_EXECUTION_TARGET_MISMATCH".into());
                 }
-                self.rex_executions.insert(worker_id.clone(), record.clone());
+                self.rex_executions
+                    .insert(worker_id.clone(), record.clone());
             }
             Event::TmuxExecutionObserved { worker_id, record } => {
                 if !record.matches_state(self, worker_id) {
                     return Err("TMUX_EXECUTION_TARGET_MISMATCH".into());
                 }
-                self.tmux_executions.insert(worker_id.clone(), record.clone());
+                self.tmux_executions
+                    .insert(worker_id.clone(), record.clone());
             }
             Event::SchedulerAdmission { admission } => {
                 self.scheduler_admissions
@@ -1727,13 +1676,6 @@ impl State {
             .any(|admission| admission.message_id == message_id && admission.status == "failed")
     }
 
-    /// True when some other message is a reply to `msg`.
-    pub fn answered(&self, msg_id: &str) -> bool {
-        self.msgs
-            .values()
-            .any(|m| m.in_reply_to.as_deref() == Some(msg_id))
-    }
-
     /// One live request per direction during the cooldown window.
     pub fn recent_live_request(
         &self,
@@ -1746,33 +1688,8 @@ impl State {
                 && m.to == to
                 && m.mtype == "request"
                 && m.state != "read"
-                && !self.answered(&m.id)
                 && now_ms - m.created_ms < REQUEST_COOLDOWN_MS
         })
-    }
-
-    /// Retained earlier replies stay queryable; only the newest one is active.
-    pub fn superseded_replies(&self, request_id: &str) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .msgs
-            .values()
-            .filter(|m| {
-                m.mtype == "reply"
-                    && m.in_reply_to.as_deref() == Some(request_id)
-                    && m.state != "superseded"
-            })
-            .map(|m| m.id.clone())
-            .collect();
-        ids.sort_by(|a, b| {
-            let rank = |id: &str| {
-                self.msgs
-                    .get(id)
-                    .map(|m| (m.created_ms, m.id.clone()))
-                    .unwrap_or_default()
-            };
-            rank(a).cmp(&rank(b))
-        });
-        ids
     }
 
     pub fn matching_subscription(
@@ -1795,40 +1712,6 @@ fn master_wake_snapshot_required(
     accumulator.generation > 0
         || (!accumulator.delivery_state.is_empty() && accumulator.delivery_state != "clean")
         || accumulator.wake_hold.is_some()
-}
-
-#[cfg(test)]
-mod ceo_reply_scope_tests {
-    use super::*;
-
-    #[test]
-    fn cross_project_name_handoff_does_not_rebind_foreign_sender() {
-        let mut state = State::default();
-        state.reply_obligations.insert(
-            "request".into(),
-            crate::server::state::ReplyObligation {
-                message_id: "request".into(),
-                project: "/target".into(),
-                from_project: Some("/ceo".into()),
-                from_ceo: true,
-                from_worker_id: "ceo-worker".into(),
-                from_name: Some("SameName".into()),
-                recipient_worker_id: "old-master".into(),
-                recipient_name: Some("SameName".into()),
-                policy: crate::proto::ReplyPolicy::Required,
-                created_ms: 1,
-                reminded_idle_episode: true,
-            },
-        );
-        state.rebind_reply_obligations_for_name("/target", "SameName", "new-master");
-        let obligation = &state.reply_obligations["request"];
-        assert_eq!(
-            obligation.from_worker_id, "ceo-worker",
-            "a recipient-project name cannot own the foreign sender"
-        );
-        assert_eq!(obligation.recipient_worker_id, "new-master");
-        assert!(!obligation.reminded_idle_episode);
-    }
 }
 
 #[cfg(test)]
@@ -2158,7 +2041,10 @@ mod ceo_report_state_wiring_tests {
         cleared_grant.apply(&progress("project-after-revoke", "retained"));
         let current = current_state_round_trip(&cleared_grant);
         assert!(current.ceo_grant.is_none());
-        assert!(current.ceo_report_state.pending_revision("project-after-revoke").is_some());
+        assert!(current
+            .ceo_report_state
+            .pending_revision("project-after-revoke")
+            .is_some());
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use crate::ceo::CeoCommand;
 use crate::identity::Identity;
 use crate::main_cli::CeoCmd;
-use crate::proto::{ReplyPolicy, Req};
+use crate::proto::Req;
 use crate::scope::Scope;
 use serde_json::Value;
 use std::os::unix::fs::FileTypeExt;
@@ -45,8 +45,6 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
             to,
             subject,
             in_reply_to,
-            reply_required,
-            reply_on_completion,
             body,
         } => {
             let project = canonical_existing("project", &project)?;
@@ -60,7 +58,6 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
                     subject,
                     body,
                     in_reply_to,
-                    reply_policy: reply_policy(reply_required, reply_on_completion),
                 },
             )
         }
@@ -72,8 +69,6 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
             delivery_condition,
             test_condition,
             priority,
-            reply_required,
-            reply_on_completion,
         } => {
             let project = canonical_existing("project", &project)?;
             emit_ceo(
@@ -86,10 +81,6 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
                     delivery_condition,
                     test_condition,
                     priority,
-                    reply_policy: Some(
-                        reply_policy(reply_required, reply_on_completion)
-                            .unwrap_or(ReplyPolicy::OnCompletion),
-                    ),
                 },
             )
         }
@@ -229,16 +220,6 @@ fn emit_value(value: Value) -> anyhow::Result<()> {
         std::process::exit(2);
     }
     Ok(())
-}
-
-fn reply_policy(required: bool, on_completion: bool) -> Option<ReplyPolicy> {
-    if required {
-        Some(ReplyPolicy::Required)
-    } else if on_completion {
-        Some(ReplyPolicy::OnCompletion)
-    } else {
-        None
-    }
 }
 
 fn required_text(label: &str, value: String) -> anyhow::Result<String> {

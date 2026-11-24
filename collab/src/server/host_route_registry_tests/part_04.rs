@@ -119,7 +119,6 @@
                 subject: "cross-project".into(),
                 body: "must remain outside resident reducer".into(),
                 in_reply_to: None,
-                reply_policy: None,
                 target_session: None,
             },
         )

@@ -15,7 +15,6 @@ fn test_anonymous_send_succeeds_with_unknown_from() {
             subject: Some("test-anonymous".into()),
             body: "anonymous body".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -30,7 +29,7 @@ fn test_anonymous_send_succeeds_with_unknown_from() {
 }
 
 #[test]
-fn test_anonymous_send_rejects_command_envelope_and_reply_obligations() {
+fn test_anonymous_send_rejects_command_envelope_and_partial_credentials() {
     let (server, root) = test_server();
     register(&server, "receiver", "%receiver");
     let server_arc = Arc::new(server);
@@ -48,7 +47,6 @@ fn test_anonymous_send_rejects_command_envelope_and_reply_obligations() {
             subject: Some("envelope-test".into()),
             body: "should fail".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -60,32 +58,7 @@ fn test_anonymous_send_rejects_command_envelope_and_reply_obligations() {
         .unwrap()
         .contains("ANONYMOUS_SEND_REJECTED"));
 
-    // 2. Requesting reply obligation
-    let resp_reply = dispatch(
-        &server_arc,
-        Req::Send {
-            from: "unknown".into(),
-            worker_id: None,
-            token: None,
-            command: None,
-            to: "receiver".into(),
-            mtype: "notify".into(),
-            subject: Some("reply-test".into()),
-            body: "should fail".into(),
-            in_reply_to: None,
-            reply_policy: Some(crate::proto::ReplyPolicy::Required),
-            target_session: None,
-            delivery: "immediate".into(),
-        },
-    );
-    assert!(!resp_reply.ok);
-    assert!(resp_reply
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("ANONYMOUS_SEND_REJECTED"));
-
-    // 3. Partial credentials: only worker_id
+    // 2. Partial credentials: only worker_id
     let resp_partial = dispatch(
         &server_arc,
         Req::Send {
@@ -98,7 +71,6 @@ fn test_anonymous_send_rejects_command_envelope_and_reply_obligations() {
             subject: Some("partial-cred".into()),
             body: "should fail".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -209,7 +181,6 @@ fn test_target_session_constraint_enforcement() {
             subject: Some("session-mismatch-test".into()),
             body: "should fail at binding".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: Some("different-session-xyz".into()),
             delivery: "immediate".into(),
         },
@@ -234,7 +205,6 @@ fn test_target_session_constraint_enforcement() {
             subject: Some("session-match-test".into()),
             body: "should succeed".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: Some(target_session_id.clone()),
             delivery: "immediate".into(),
         },
@@ -345,7 +315,6 @@ fn red_test_target_session_queued_batch_and_poll_recv_isolation() {
             subject: Some("target-msg-1".into()),
             body: "content-pinned-to-session-1".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: Some("session-1".into()),
             delivery: "queued".into(),
         },
@@ -374,7 +343,6 @@ fn red_test_target_session_queued_batch_and_poll_recv_isolation() {
             subject: Some("normal-msg-2".into()),
             body: "content-normal-for-session-2".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "queued".into(),
         },
@@ -468,9 +436,15 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
         capabilities: vec!["send_message_to_pane".into()],
         self_check: "fixture".into(),
     };
+    let dsh_gateway = crate::server::dsh_channel_tests::registration_gateway(
+        "anonymous-mixed-dsh",
+        &root,
+        None,
+        crate::server::dsh_channel_tests::wake_reply,
+    );
     let dsh_trans = SelectedTransport {
         kind: TransportKind::Dsh,
-        endpoint: Some("/tmp/fake-dsh.sock".into()),
+        endpoint: Some(dsh_gateway.endpoint()),
         namespace: Some("dsh-namespace".into()),
         session_id: Some("session-dsh".into()),
         thread_id: Some("thread-dsh".into()),
@@ -491,13 +465,31 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
         self_check: "fixture".into(),
     };
 
-    seed_committed_owner(
-        &server,
-        "worker-tmux",
-        "token-tmux",
-        &tmux_trans,
-        &cwd,
-        Some(app.clone()),
+    register(&server, "worker-tmux", "worker-tmux");
+    kill_registered_worker_pane(&server, "worker-tmux");
+    let online_workers = [
+        ("worker-tmux", "session-tmux"),
+        ("worker-dsh", "session-dsh"),
+        ("worker-desktop", "session-desktop"),
+    ];
+    let project_scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    server.commit(
+        &online_workers
+            .into_iter()
+            .map(|(worker_id, session_id)| Event::AgentPresenceObserved {
+                presence: name_state::AgentPresenceRecord {
+                    project_scope: project_scope.clone(),
+                    worker_id: worker_id.into(),
+                    session_id: session_id.into(),
+                    presence: name_state::AgentPresence::Online,
+                    reason: "mixed-route fixture is online".into(),
+                    observed_ms: now_ms(),
+                },
+            })
+            .collect::<Vec<_>>(),
     );
     seed_committed_owner(
         &server,
@@ -568,7 +560,6 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
                 subject: Some(format!("msg-for-{to_worker}")),
                 body: format!("hello-{to_worker}"),
                 in_reply_to: None,
-                reply_policy: None,
                 target_session: None,
                 delivery: "immediate".into(),
             },
@@ -587,17 +578,11 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
         assert_eq!(m.to, to_worker);
     }
 
-    // 3. Verify the selected sink receives each target's transport. This unit
-    // seam checks mixed routes, not external adaptor I/O; public CLI fixtures
-    // cover real native and gateway consumers separately.
+    // 3. Verify the selected sink receives every currently online target.
+    // The tmux fixture names an absent pane, so its durable message must stay
+    // queued instead of receiving terminal input.
     let deliveries = delivered.lock().unwrap().clone();
-    assert_eq!(deliveries.len(), 3, "expected 3 deliveries: {deliveries:?}");
-    assert!(
-        deliveries
-            .iter()
-            .any(|d| d.0 == TransportKind::Tmux && d.2.contains("msg-for-worker-tmux")),
-        "tmux delivery missing: {deliveries:?}"
-    );
+    assert_eq!(deliveries.len(), 2, "expected online deliveries: {deliveries:?}");
     assert!(
         deliveries
             .iter()
@@ -616,6 +601,20 @@ fn test_anonymous_send_keeps_mixed_target_routes_and_directory_namespaces() {
         let st = server_arc.state.lock().unwrap();
         assert!(!st.workers.contains_key("unknown"));
         assert!(!st.tasks.values().any(|t| t.owner == "unknown"));
+        let tmux_message = st
+            .msgs
+            .values()
+            .find(|message| {
+                message.to == "worker-tmux"
+                    && message
+                        .subject
+                        .as_deref()
+                        .is_some_and(|subject| subject.contains("msg-for-worker-tmux"))
+            })
+            .expect("offline tmux message remains durable");
+        assert_eq!(tmux_message.state, "pending");
+        assert_eq!(tmux_message.wake_attempt_count, 0);
+        assert!(!st.notification_delivery_accepted.contains_key(&tmux_message.id));
     }
 
     std::fs::remove_dir_all(root).ok();

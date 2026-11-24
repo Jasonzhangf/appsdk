@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 #[path = "daemon_readiness.rs"]
 mod daemon_readiness;
+#[path = "codex_pane_interpreter.rs"]
+mod codex_pane_interpreter;
 
 /// Fixture roots live under `/var/tmp` so the AF_UNIX socket stays inside
 /// `SUN_LEN`. The macOS default temp dir is long enough to make every daemon
@@ -26,6 +28,16 @@ pub static TMUX_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub const ROUTES_FILE: &str = "routes.json";
 pub const HOST_LOG: &str = "log.txt";
+
+pub fn assert_consumed_message_lookup(output: &Output, message_id: &str) {
+    assert!(
+        !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("MESSAGE_CONSUMED"),
+        "recv must consume {message_id}: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 fn pane_cli_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/pane_cli.py")
@@ -234,14 +246,28 @@ impl Fixture {
     }
 
     pub fn start_pane_runner_on_socket(&self, socket: &Path, pane_id: &str, initial_command: &str) {
+        self.start_pane_runner_with_interpreter(socket, pane_id, initial_command, "python3");
+    }
+
+    pub fn start_codex_pane_runner(&self, pane: &Pane) {
+        let interpreter = format!("exec {}", codex_pane_interpreter::command(&self.root));
+        self.start_pane_runner_with_interpreter(&self.tmux_socket, &pane.pane_id, "", &interpreter);
+    }
+
+    fn start_pane_runner_with_interpreter(
+        &self,
+        socket: &Path,
+        pane_id: &str,
+        initial_command: &str,
+        interpreter: &str,
+    ) {
         let ready = self.root.join(format!(
             "pane-runner-{}.ready",
             pane_id.trim_start_matches('%')
         ));
         std::fs::remove_file(&ready).ok();
         let command = format!(
-            "{} {} runner --socket {} --pane-id {} --root {} --initial-command {}",
-            shell_quote("python3"),
+            "{interpreter} {} runner --socket {} --pane-id {} --root {} --initial-command {}",
             shell_quote(&pane_cli_script().to_string_lossy()),
             shell_quote(&socket.to_string_lossy()),
             shell_quote(pane_id),

@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 #[path = "daemon_readiness.rs"]
 mod daemon_readiness;
+#[path = "codex_pane_interpreter.rs"]
+mod codex_pane_interpreter;
 
 /// The single binary-selection seam for this consumer fixture. `cargo test`
 /// builds and runs the debug binary by default; a canonical installed binary
@@ -246,10 +248,18 @@ impl Fixture {
         if std::fs::read_to_string(&ready).is_ok_and(|stored| stored.trim() == pid.trim()) {
             return;
         }
+        self.start_pane_runner(pane, "python3");
+    }
+
+    fn start_pane_runner(&self, pane: &Pane, interpreter: &str) {
+        let ready = self.root.join(format!(
+            "pane-runner-{}.ready",
+            pane.pane_id.trim_start_matches('%')
+        ));
         let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
         let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/pane_cli.py");
         let start = format!(
-            "exec python3 {} runner --socket {} --pane-id {} --root {}",
+            "exec {interpreter} {} runner --socket {} --pane-id {} --root {}",
             quote(&helper.to_string_lossy()),
             quote(&self.tmux_socket.to_string_lossy()),
             quote(&pane.pane_id),
@@ -265,6 +275,32 @@ impl Fixture {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(ready.exists(), "test-owned pane runner did not start");
+    }
+
+    fn start_codex_pane_runner(&self, pane: &Pane) {
+        self.start_pane_runner(pane, &codex_pane_interpreter::command(&self.root));
+        let foreground = tmux(
+            &self.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &pane.pane_id,
+                "#{pane_current_command}",
+            ],
+        );
+        assert_eq!(String::from_utf8_lossy(&foreground.stdout).trim(), "codex");
+    }
+
+    fn assert_message_consumed(&self, message_id: &str, pane: &Pane) {
+        let status = self.command(&["msg", message_id], Some(pane));
+        assert!(
+            !status.status.success()
+                && String::from_utf8_lossy(&status.stderr).contains("MESSAGE_CONSUMED"),
+            "recv must consume {message_id}: stdout={} stderr={}",
+            String::from_utf8_lossy(&status.stdout),
+            String::from_utf8_lossy(&status.stderr)
+        );
     }
 
     fn run_ok(&self, args: &[&str], pane: Option<&Pane>) -> Value {

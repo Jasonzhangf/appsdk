@@ -923,12 +923,10 @@
             notification_action("idle", None).unwrap(),
             NotificationAction::Start
         );
-        // A cold thread is loaded by `turn/start`, which is the native
-        // load-and-start call, so notLoaded resolves to Start.
-        assert_eq!(
-            notification_action("notLoaded", None).unwrap(),
-            NotificationAction::Start
-        );
+        for action in [notification_action, queued_notification_action] {
+            assert!(action("notLoaded", None)
+                .unwrap_err().to_string().contains("RECIPIENT_NOT_ONLINE"));
+        }
         for status in ["systemError", "unknown", ""] {
             let error = notification_action(status, None).unwrap_err();
             assert!(

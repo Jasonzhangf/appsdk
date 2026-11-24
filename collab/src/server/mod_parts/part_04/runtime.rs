@@ -21,7 +21,8 @@ fn load_runtime_state(
 
 impl ProjectRuntimeManager {
     pub(crate) fn with_tmux_monitor_state<R>(
-        &self, runtime: &Server,
+        &self,
+        runtime: &Server,
         operation: impl FnOnce(&binding_slot::BindingControlSet, &mut State) -> Result<R, String>,
     ) -> Result<R, String> {
         self.with_current_state(runtime, operation)
@@ -103,8 +104,12 @@ impl ProjectRuntimeManager {
         let key = Self::route_key(context);
         let project_root = Path::new(&context.canonical_root);
         let reservation = select_central_runtime_storage(
-            &self.host.host_paths, &self.route_file, &key, Some(&self.register_gate),
-        ).map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
+            &self.host.host_paths,
+            &self.route_file,
+            &key,
+            Some(&self.register_gate),
+        )
+        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
         let pending = self
             .routes
             .lock()
@@ -112,7 +117,11 @@ impl ProjectRuntimeManager {
             .get(&key)
             .map(|route| (route.root.clone(), route.storage_root.clone()));
         if pending.is_some() {
-            self.routes.lock().unwrap().entry(key).and_modify(|route| route.storage_root = reservation);
+            self.routes
+                .lock()
+                .unwrap()
+                .entry(key)
+                .and_modify(|route| route.storage_root = reservation);
             return Ok(());
         }
         self.append_route_record(context, &reservation)?;
@@ -423,7 +432,6 @@ impl ProjectRuntimeManager {
             subject,
             body,
             in_reply_to,
-            reply_policy,
             target_session,
         } = req
         else {
@@ -433,8 +441,8 @@ impl ProjectRuntimeManager {
             Ok(runtime) => runtime,
             Err(error) => return (self.host.clone(), Resp::err(error)),
         };
-        if reply_policy.is_some() || target_session.is_some() {
-            return (target, Resp::err("CROSS_PROJECT_OPTION_UNSUPPORTED: reply_policy and target_session are not supported"));
+        if target_session.is_some() {
+            return (target, Resp::err("CROSS_PROJECT_OPTION_UNSUPPORTED: target_session is not supported"));
         }
         let Some(command) = command else {
             return (
@@ -456,25 +464,6 @@ impl ProjectRuntimeManager {
             Ok(source) => source,
             Err(error) => return (target, Resp::err(error)),
         };
-        // Cross-project authorization and commit must be one linearized
-        // boundary. The endpoint probe is the only fallible observation that
-        // may block, so it runs before the state locks; reachability is not an
-        // authorization input and a later probe result never revokes a durable
-        // message.
-        let recipient_snapshot = {
-            let target_state = target.state.lock().unwrap();
-            target_state.workers.get(&to).cloned()
-        };
-        if let Some(recipient) = recipient_snapshot {
-            if worker_identity_and_endpoint(&*target, &recipient).1 == Some(false) {
-                return (
-                    target,
-                    Resp::err(
-                        "cross-project communication requires a reachable target binding on its server-selected transport",
-                    ),
-                );
-            }
-        }
         if Arc::ptr_eq(&source, &target) {
             return (
                 target,
@@ -536,7 +525,7 @@ impl ProjectRuntimeManager {
         };
         drop(host_state);
         let response = match committed {
-            Ok(committed) => notify_cross_project_committed(&*target, committed, &worker_id, &to),
+            Ok(committed) => notify_cross_project_committed(&target, committed, &worker_id),
             Err(response) => response,
         };
         (target, response)
@@ -553,10 +542,7 @@ impl ProjectRuntimeManager {
     /// Locate the one runtime named by a host CEO grant. The route record
     /// already knows the canonical root and storage; opening it never changes
     /// the grant or the caller's workspace.
-    fn runtime_for_ceo_grant(
-        &self,
-        grant: &crate::ceo::CeoGrant,
-    ) -> Result<Arc<Server>, String> {
+    fn runtime_for_ceo_grant(&self, grant: &crate::ceo::CeoGrant) -> Result<Arc<Server>, String> {
         let workspace = std::fs::canonicalize(&grant.workspace).map_err(|error| {
             format!("CEO_WORKSPACE_UNAVAILABLE: canonicalize grant workspace: {error}")
         })?;
@@ -1076,11 +1062,8 @@ impl ProjectRuntimeManager {
         if let Err(response) = admission {
             return response;
         }
-        let declared = match declare_task_workspace(
-            &runtime.root,
-            &runtime.config,
-            &worktree_path,
-        ) {
+        let declared = match declare_task_workspace(&runtime.root, &runtime.config, &worktree_path)
+        {
             Ok(declared) => declared,
             Err(error) => return Resp::err(error),
         };
@@ -1120,7 +1103,7 @@ impl ProjectRuntimeManager {
         blocker_action: Option<String>,
         decision_reason: Option<String>,
     ) -> Result<Resp, Resp> {
-        self.with_current_task_state_response(
+        let response = self.with_current_task_state_response(
             runtime,
             context,
             &worker_id,
@@ -1139,7 +1122,9 @@ impl ProjectRuntimeManager {
                     decision_reason.clone(),
                 ))
             },
-        )
+        )?;
+        deliver_board_auto_notice(runtime, &response);
+        Ok(response)
     }
 
     fn dispatch_task_accept_current(
@@ -1273,7 +1258,11 @@ impl ProjectRuntimeManager {
                 Ok((response, pending_wake))
             },
         )?;
-        Ok(finish_task_review_notification(runtime, response, pending_wake))
+        Ok(finish_task_review_notification(
+            runtime,
+            response,
+            pending_wake,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1351,10 +1340,11 @@ impl ProjectRuntimeManager {
     ) -> (Arc<Server>, Resp) {
         let _identity = (matches!(&req, Req::Register { .. }) && outer_binding.is_none())
             .then(|| self.identity_gate.lock().unwrap());
-        let decorate=matches!(&req,Req::Context {..}|Req::IdentityContext {..});
-        let workspace_reset=matches!(&req,Req::ProjectReset{..});
-        let context=project_context.clone();
-        let (runtime,mut response)=self.dispatch_sync_with_register_binding_inner(project_context,req,outer_binding);
+        let decorate = matches!(&req, Req::Context { .. } | Req::IdentityContext { .. });
+        let workspace_reset = matches!(&req, Req::ProjectReset { .. });
+        let context = project_context.clone();
+        let (runtime, mut response) =
+            self.dispatch_sync_with_register_binding_inner(project_context, req, outer_binding);
         self.recover_rex_notification_after_service_change(
             &runtime,
             context.as_ref(),
@@ -1362,15 +1352,15 @@ impl ProjectRuntimeManager {
             false,
         );
         if workspace_reset && response.ok {
-            if let Err(error)=self.reconcile_ceo_workspace_reset(context.as_ref()) {
-                response.ok=false;
+            if let Err(error) = self.reconcile_ceo_workspace_reset(context.as_ref()) {
+                response.ok = false;
                 response.error=Some(format!("{}CEO_AUTHORITY_CLEANUP_FAILED: the project effect may already be committed; do not replay it: {}",response.error.as_ref().map(|e|format!("{e}; ")).unwrap_or_default(),error.error.unwrap_or_default()));
             }
         }
         if decorate && response.ok {
-            self.decorate_ceo_context(context.as_ref(),&mut response.data);
+            self.decorate_ceo_context(context.as_ref(), &mut response.data);
         }
-        (runtime,response)
+        (runtime, response)
     }
 
     fn dispatch_sync_with_register_binding_inner(
@@ -1380,7 +1370,12 @@ impl ProjectRuntimeManager {
         outer_binding: Option<&RegisterOuterBinding>,
     ) -> (Arc<Server>, Resp) {
         let Some(mut context) = project_context else {
-            if let Req::Ceo { worker_id, token, command } = req {
+            if let Req::Ceo {
+                worker_id,
+                token,
+                command,
+            } = req
+            {
                 return self.dispatch_ceo(None, worker_id, token, command);
             }
             if matches!(req, Req::Ping) {
@@ -1421,8 +1416,7 @@ impl ProjectRuntimeManager {
                             .as_deref()
                             .is_some_and(|key| intent.address.eq_ignore_ascii_case(key));
                     if is_ceo {
-                        if let Err(error) =
-                            validate_request_context(&caller, &req, Some(&context))
+                        if let Err(error) = validate_request_context(&caller, &req, Some(&context))
                         {
                             return (caller, Resp::err(error));
                         }
@@ -1437,29 +1431,70 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-        if let Req::GoalScheduleReconcile { worker_id, token, goal_id, goal_owner, project, app, content,
-            desired, trigger_ms, ttl_seconds, interval_ms, repeat_count, goal_subject, reason, operation } = &req {
+        if let Req::GoalScheduleReconcile {
+            worker_id,
+            token,
+            goal_id,
+            goal_owner,
+            project,
+            app,
+            content,
+            desired,
+            trigger_ms,
+            ttl_seconds,
+            interval_ms,
+            repeat_count,
+            goal_subject,
+            reason,
+            operation,
+        } = &req
+        {
             let operation = match GoalScheduleOperation::from_request(operation.clone()) {
                 Ok(operation) => operation,
                 Err(error) => return (self.host.clone(), error),
             };
-            return self.dispatch_goal_schedule(&context, &req, worker_id, token, project.as_deref(), app.as_deref(), GoalScheduleChange {
-                goal_id: goal_id.clone(), goal_owner: goal_owner.clone(), desired: desired.clone(),
-                trigger_ms: *trigger_ms, ttl_seconds: *ttl_seconds, interval_ms: *interval_ms,
-                repeat_count: *repeat_count, goal_subject: goal_subject.clone(), reason: reason.clone(),
-                content: content.clone().map(|content| GoalScheduleContent::Inline { content }),
-                operation,
-            });
+            return self.dispatch_goal_schedule(
+                &context,
+                &req,
+                worker_id,
+                token,
+                project.as_deref(),
+                app.as_deref(),
+                GoalScheduleChange {
+                    goal_id: goal_id.clone(),
+                    goal_owner: goal_owner.clone(),
+                    desired: desired.clone(),
+                    trigger_ms: *trigger_ms,
+                    ttl_seconds: *ttl_seconds,
+                    interval_ms: *interval_ms,
+                    repeat_count: *repeat_count,
+                    goal_subject: goal_subject.clone(),
+                    reason: reason.clone(),
+                    content: content
+                        .clone()
+                        .map(|content| GoalScheduleContent::Inline { content }),
+                    operation,
+                },
+            );
         }
-        if let Req::Ceo {worker_id,token,command} = req {
-            return self.dispatch_ceo(Some(context),worker_id,token,command);
+        if let Req::Ceo {
+            worker_id,
+            token,
+            command,
+        } = req
+        {
+            return self.dispatch_ceo(Some(context), worker_id, token, command);
         }
-        if matches!(&req, Req::MasterPromote { .. } | Req::MasterClear { .. } | Req::MasterDelegate { .. }) {
+        if matches!(
+            &req,
+            Req::MasterPromote { .. } | Req::MasterClear { .. } | Req::MasterDelegate { .. }
+        ) {
             if let Err(error) = self.recover_pending_effects_for_scope(&context) {
                 return (self.host.clone(), Resp::err(error));
             }
             let runtime = match self.select_runtime(&context) {
-                Ok(runtime) => runtime, Err(error) => return (self.host.clone(), Resp::err(error)),
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
             };
             let response = self.change_mapped_role(&runtime, &context, &req);
             return (runtime, response);
@@ -1477,12 +1512,25 @@ impl ProjectRuntimeManager {
             let response = self.retire_mapped_self(&runtime, &context, worker_id, token);
             return (runtime, response);
         }
-        if let Req::WorkerClose { worker_id, token, target_id, reason } = &req {
+        if let Req::WorkerClose {
+            worker_id,
+            token,
+            target_id,
+            reason,
+        } = &req
+        {
             let runtime = match self.select_runtime(&context) {
-                Ok(runtime) => runtime, Err(error) => return (self.host.clone(), Resp::err(error)),
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
             };
             let _register = self.register_gate.lock().unwrap();
-            let response = handle_worker_close(&runtime, worker_id.clone(), token.clone(), target_id.clone(), reason.clone());
+            let response = handle_worker_close(
+                &runtime,
+                worker_id.clone(),
+                token.clone(),
+                target_id.clone(),
+                reason.clone(),
+            );
             return (runtime, response);
         }
         if let Req::PeerLifecycle { ref request } = req {
@@ -1502,9 +1550,12 @@ impl ProjectRuntimeManager {
             };
             let response = match validate_request_context(&runtime, &req, Some(&context)) {
                 Ok(()) => {
-                    let Req::PeerLifecycle { request } = req else { unreachable!() };
-                    let _register = matches!(&request, crate::proto::PeerLifecycleRequest::Close { .. })
-                        .then(|| self.register_gate.lock().unwrap());
+                    let Req::PeerLifecycle { request } = req else {
+                        unreachable!()
+                    };
+                    let _register =
+                        matches!(&request, crate::proto::PeerLifecycleRequest::Close { .. })
+                            .then(|| self.register_gate.lock().unwrap());
                     peer_lifecycle::handle(&runtime, Some(&context), request, Some(self))
                 }
                 Err(error) => peer_lifecycle::unavailable(request, &error, true),
@@ -1529,27 +1580,29 @@ impl ProjectRuntimeManager {
                 project_scope_id: context.project_scope.clone(),
                 app_scope_id: context.app_scope_id.clone(),
             };
-            let response = self.with_current_state(&runtime, |control, state| {
-                let (_, authorized_binding) =
-                    match project_route_actor_with_binding(state, &context, worker_id, token) {
-                        Ok(authorized) => authorized,
-                        Err(response) => return Ok(response),
-                    };
-                let mut inbox = Vec::new();
-                for message in state.inbox_of(worker_id) {
-                    if name_mailbox::current_name_allows_message(
-                        state,
-                        control,
-                        &scope,
-                        worker_id,
-                        &authorized_binding,
-                        message,
-                    )? {
-                        inbox.push(message);
+            let response = self
+                .with_current_state(&runtime, |control, state| {
+                    let (_, authorized_binding) =
+                        match project_route_actor_with_binding(state, &context, worker_id, token) {
+                            Ok(authorized) => authorized,
+                            Err(response) => return Ok(response),
+                        };
+                    let mut inbox = Vec::new();
+                    for message in state.inbox_of(worker_id) {
+                        if name_mailbox::current_name_allows_message(
+                            state,
+                            control,
+                            &scope,
+                            worker_id,
+                            &authorized_binding,
+                            message,
+                        )? {
+                            inbox.push(message);
+                        }
                     }
-                }
-                Ok(inbox_projection(state, inbox))
-            }).unwrap_or_else(Resp::err);
+                    Ok(inbox_projection(state, inbox))
+                })
+                .unwrap_or_else(Resp::err);
             return (runtime, response);
         }
         if let Req::Ack {
@@ -1601,14 +1654,7 @@ impl ProjectRuntimeManager {
             let response = self
                 .with_current_state(&runtime, |control, state| {
                     Ok(handle_worker_status_judgment(
-                        &runtime,
-                        state,
-                        control,
-                        worker_id,
-                        token,
-                        capture,
-                        *presence,
-                        *activity,
+                        &runtime, state, control, worker_id, token, capture, *presence, *activity,
                         basis,
                     ))
                 })
@@ -1631,7 +1677,11 @@ impl ProjectRuntimeManager {
         }
 
         let current_runtime = {
-            self.routes.lock().unwrap().get(&key).and_then(|route| route.runtime.clone())
+            self.routes
+                .lock()
+                .unwrap()
+                .get(&key)
+                .and_then(|route| route.runtime.clone())
         };
         if let Some(runtime) = current_runtime {
             let mut register_effect_id = None;
@@ -1645,21 +1695,18 @@ impl ProjectRuntimeManager {
                 register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
-            let response = if let Err(error) = validate_request_context(
-                &runtime,
-                &req,
-                Some(&context),
-            ) {
-                Resp::err(error)
-            } else {
-                self.dispatch_with_current_map_bound(
-                    &runtime,
-                    req,
-                    Some(context.clone()),
-                    register_binding,
-                    Some(&mut register_control_first),
-                )
-            };
+            let response =
+                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
+                    Resp::err(error)
+                } else {
+                    self.dispatch_with_current_map_bound(
+                        &runtime,
+                        req,
+                        Some(context.clone()),
+                        register_binding,
+                        Some(&mut register_control_first),
+                    )
+                };
             drop(register_control_first);
             let (runtime, response) = self.finalize_registration(
                 runtime,
@@ -1695,21 +1742,18 @@ impl ProjectRuntimeManager {
                 register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
-            let response = if let Err(error) = validate_request_context(
-                &runtime,
-                &req,
-                Some(&context),
-            ) {
-                Resp::err(error)
-            } else {
-                self.dispatch_with_current_map_bound(
-                    &runtime,
-                    req,
-                    Some(context.clone()),
-                    register_binding,
-                    Some(&mut register_control_first),
-                )
-            };
+            let response =
+                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
+                    Resp::err(error)
+                } else {
+                    self.dispatch_with_current_map_bound(
+                        &runtime,
+                        req,
+                        Some(context.clone()),
+                        register_binding,
+                        Some(&mut register_control_first),
+                    )
+                };
             drop(register_control_first);
             let (runtime, response) = self.finalize_registration(
                 runtime,
@@ -1750,21 +1794,18 @@ impl ProjectRuntimeManager {
                 register_binding.and_then(|binding| binding.name_intent().cloned()),
                 &mut register_effect_id,
             );
-            let response = if let Err(error) = validate_request_context(
-                &self.host,
-                &req,
-                Some(&context),
-            ) {
-                Resp::err(error)
-            } else {
-                self.dispatch_with_current_map_bound(
-                    &self.host,
-                    req,
-                    Some(context.clone()),
-                    register_binding,
-                    Some(&mut register_control_first),
-                )
-            };
+            let response =
+                if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
+                    Resp::err(error)
+                } else {
+                    self.dispatch_with_current_map_bound(
+                        &self.host,
+                        req,
+                        Some(context.clone()),
+                        register_binding,
+                        Some(&mut register_control_first),
+                    )
+                };
             drop(register_control_first);
             if !response.ok {
                 return (self.host.clone(), response);
@@ -1819,17 +1860,15 @@ impl ProjectRuntimeManager {
         let mut register_control_first = self.register_control_first_hook(
             &runtime,
             register_binding.and_then(|binding| binding.identity_facts().cloned()),
-            register_binding.and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
+            register_binding
+                .and_then(|binding| binding.name_tmux_session_name().map(str::to_owned)),
             register_binding.and_then(|binding| binding.name_pane_anchor().cloned()),
             register_binding.and_then(|binding| binding.rex_recovery().cloned()),
             register_binding.and_then(|binding| binding.name_intent().cloned()),
             &mut register_effect_id,
         );
-        let response = if let Err(error) = validate_request_context(
-            &runtime,
-            &req,
-            Some(&context),
-        ) {
+        let response = if let Err(error) = validate_request_context(&runtime, &req, Some(&context))
+        {
             Resp::err(error)
         } else {
             self.dispatch_with_current_map_bound(
@@ -1900,15 +1939,15 @@ fn authenticate_and_commit_cross_project(
         native_thread_id: binding.native_thread_id.clone(),
     };
     if let Err(error) = command.validate_for(&runtime_identity, &registered_scope) {
-        return Err(Resp::err(format!("CROSS_PROJECT_BINDING_REJECTED: {error}")));
+        return Err(Resp::err(format!(
+            "CROSS_PROJECT_BINDING_REJECTED: {error}"
+        )));
     }
     let source_thread_id = source_state
         .workers
         .get(worker_id)
         .and_then(selected_transport_for_worker)
-        .and_then(|transport| {
-            notification_target(&transport).map(|target| target.into_owned())
-        });
+        .and_then(|transport| notification_target(&transport).map(|target| target.into_owned()));
     let source_project = source.root.to_string_lossy().into_owned();
     commit_cross_project_message(
         target,

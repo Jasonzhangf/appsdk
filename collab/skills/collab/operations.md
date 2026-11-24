@@ -10,9 +10,9 @@ Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独�
 安装产物；宿主入口链接到该安装目录。流程模板属于本 Skill 的资源，不是另一个 Skill。
 
 标准流程唯一资源为 [workflow-templates.json](references/workflow-templates.json)，
-基础版本为 1；身份流程和默认专长均从该源码资产编译。普通 peer 管理受托子目标，
-优先将有界执行交给独立 worker；明确 `worker`/`executor` 专长或任务合同指定直接
-执行时，该 peer 在合同边界内执行。peer、reviewer 和设计师均按
+基础版本为 1；身份流程和默认专长均从该源码资产编译。普通 peer 按合同执行并可
+编排职责内的简单工作。复杂问题有合适 architect 可承接时，由 architect 设计。
+职责内的有界子任务先选合适的授权 peer，无可承接者再用 Codex 编排。peer、reviewer 和设计师均按
 [完整派单与交回](#完整派单与交回)交付给合同指定的接收人。
 
 执行以本次 `collab context` 的 `role_brief` 为准：有效流程正文只在 `role_task`、
@@ -167,7 +167,10 @@ daemon 已为真实角色和模板变化通知相关 peer，不再要求 master 
 worktree 中修改，但不要为查身份或发消息切到 `~`、临时目录或收件人的项目。
 已关联的同项目 worktree 可由 Collab 解析；目录不确定时，回到已知注册项目根目录。
 已有身份和收件人时直接发送，不先重跑 context、收件或通信恢复。
-发送不等待对方空闲、上一条消息消费或回复；不要先轮询消息状态再发送下一条。
+发送不等待对方空闲、上一条消息消费或回复，但 daemon 必须先确认目标 agent
+当前在线。只有 Present 才写入 shell、pane、Rex block 或原生 thread；
+cold、unknown、offline、缺失或只有持久化绑定时保持未读并产生零终端输入。
+不要先轮询消息状态再发送下一条。入队、订阅接受和唤醒接受都不是投递成功。
 daemon、DSH gateway 和 Desktop bridge 立即提交新消息，接受、消费与回复分别记录。
 `collab context`、`collab inbox`、`collab directory` 和 `collab sendmessage` 都是公开 CLI，
 不是私有命令。内部控制协议与公开 CLI 的边界不同，不要把 shell 调用本身视为违规。
@@ -231,18 +234,15 @@ Alice 等收件人不存在。若 `resolve-agent` 错误列出自己的 session 
 只有新的 action 或明确追问才开启新一轮请求，避免无意义互答。
 系统提醒本身不是请求方；它引用原消息时回复该原消息的发送者，不向 `collab-server` 代答。
 
-普通投递使用以下参数；两个回复选项互斥，不带选项默认不建立 daemon 回复标记：
+普通投递使用以下参数；`in_reply_to` 只做消息关联，daemon 不建立回复状态：
 
 ```sh
-collab send --to '<接收者>' --subject '<问题>' --reply-required --content '<需要答复的问题或action>'
-collab send --to '<接收者>' --subject '<任务>' --reply-on-completion --content '<已确认范围与交付要求>'
+collab send --to '<接收者>' --subject '<任务>' --content '<已确认范围与交付要求>'
 collab send --to '<原消息from>' --subject '<结果>' --in-reply-to '<原消息ID>' --content '<实际答复>'
 ```
 
-选项放在位置正文之前。结果回复不附加回复要求；消费、ACK 或对用户汇报不清标记，
-真正关联回复的成功入队才清标记。中途若确有需要上报的阻塞或变更，使用不带
-`--in-reply-to` 的消息，保留完成后回复义务。daemon 不判断正文是否真的完成。
-这些参数属于项目内发送；跨项目发送暂不支持回复标记。
+选项放在位置正文之前。需要中途上报阻塞或变更时，使用不带 `--in-reply-to` 的新消息。
+daemon 不判断正文是否完成，也不保存回复义务。
 
 外部通道消息不能按普通 `collab send --in-reply-to` 当作已经回复用户。消息视图出现
 `channel`（例如 `channel.source_channel = "qqbot"`）或主题为 `QQBot` 时，实际回复走
@@ -266,9 +266,8 @@ peer 向原请求方答复具体请求，按合同向指定接收人交付任务
 工作角色是稳定名字的专长，例如 `designer`、`reviewer`。同一 peer 可有多个专长。
 它们不改变 master/peer 职责，也不增加项目权限。省略 `--work-roles` 保留原值，
 明确传空字符串清空。当前 master 可按用户指令为其他稳定名字设置角色。
-普通 peer 未带明确执行或固定专长时，保持受托目标编排职责。`worker`/`executor`
-只在已接受合同内执行；`patrol` 承担独立常驻检查，不接收 manager/master 的临时
-开发派单；`memory` 提炼事实和经验并修正失效结论；`architect` 按
+普通 peer 在已接受合同内执行；`patrol` 核查 Jenny 的执行并收集 live runtime bug；
+`memory` 只做记忆总结和记忆巡检；`architect` 按
 [文件交接合同](#设计规划与审查角色的文件交接合同)产出架构计划及代码准入文件。
 具体职责正文以当前 `collab context` 的 `role_brief` 为准。
 
@@ -404,7 +403,7 @@ master 与 peer 均可管理本人的 longhorizon goal。项目master派单时�
 不处理重复档案、旧 route 或旧身份清理。已有用户恢复/替换意图先于历史身份校验；
 同一 session 的后提交绑定收敛旧绑定，不让历史歧义成为 agent 的决策分支。
 准确命令、最小授权 JSON 与结果读取见
-[恢复操作](references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理)。
+[恢复操作表](references/stable-name-recovery.md#正常恢复)。
 
 Collab 只有一个全局、由用户管理的 daemon。agent 不启动、关闭或重启它，也不为身份恢复申请维护窗口。用户维护命令、参数和凭据不属于 agent 接口。
 
@@ -498,37 +497,18 @@ fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
 closure is a long-horizon goal.
 
-- `master` and ordinary peers primarily own long-horizon goals and orchestrate
-  planning, task dispatch, resource management, project acceptance and delivery.
-  Prefer assigning code implementation to subagents rather than writing it
-  directly. Registration and recovery must explain these roles and recommend
-  scheduled patrols for each role's own goals, risks and resources.
-- `master` audits, dispatches, verifies, and integrates. It offers each
-  long-horizon goal through the public board to a suitable, consenting peer.
-  Check idle, suitable authorized peers and available capacity first. Only when
-  no suitable authorized peer can take the goal, retain it and split bounded
-  work to independent `codex exec --profile gcm` workers. A peer may split an
-  accepted goal into non-overlapping bounded scopes and dispatch those scopes
-  directly to independent `codex exec --profile gcm` workers; this is the
-  peer's own execution split, not a manager bypass of eligible peer capacity.
-  Master retains project coordination, cross-peer dependencies, final
-  integration, and the delivery owner's ordinary scope.
-- An ordinary peer keeps the code-compatible wire role `worker` and derivation
-  `peer`. It is the long-horizon orchestrator for an accepted goal: split and
-  plan its bounded subwork, then dispatch those scopes directly to independent
-  `codex exec --profile gcm` execution or observation workers when it has no
-  explicit execution specialty. This is the peer's own execution split, not a
-  manager bypass of eligible peer capacity. Verify evidence, resolve blockers,
-  integrate assigned work, close owned resources, and report to the sender. It
-  does not inherit master authority.
-  An explicit `worker` or `executor` specialty, or an assignment that names this
-  peer as the bounded executor, permits direct in-contract execution.
+- Use the [role duties and dispatch order](SKILL.md#task-routing-and-role-responsibilities).
+  The manager coordinates the project, and an ordinary peer executes the
+  accepted written contract with wire role `worker` and derivation `peer`.
+  An entrusted architect handles design, bounded execution handoff and review.
 - `patrol`, `memory`, and `architect` are work specialties, not new identity
   authority. Patrol performs its authorized standing inspection and reports
   evidenced findings, but does not take temporary implementation dispatch.
   Memory refines source-backed facts and corrects stale conclusions through the
-  owning memory entry. Architect plans the work and reviews the peer's completed
-  implementation under the file handoff contract above.
+  owning memory entry. Architect plans the work, updates the entrusted task
+  contract, dispatches an eligible peer, and reviews the completed
+  implementation under the file handoff contract above. This authority is
+  limited to the task scope entrusted to that architect.
 - A managed-subagent record is legacy compatibility state. It preserves
   existing facts for diagnosis and grants no new production
   execution authority.
@@ -1265,8 +1245,9 @@ owner updates progress on its own task with a current revision:
 collab board update <task-id> --expected-revision <observed> --status <s> [--next <step>]
 ```
 
-The master withdraws an unaccepted invitation with its observed revision and a
-reason; withdrawal never reclaims peer-owned execution:
+The master, or an architect within its entrusted task scope, withdraws an
+unaccepted invitation with its observed revision and a reason; withdrawal never
+reclaims peer-owned execution:
 
 ```sh
 collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
@@ -1316,8 +1297,11 @@ They do not receive new public assignments. Preserve their historical privacy
 and visibility semantics; do not create or bind another child from current
 work. New bounded execution or observation uses an independent GCM worker.
 
-An owner edits the descriptive part of its own independent task without
-changing lifecycle. Every flag is required and the revision is checked:
+The current task owner, project manager, or entrusted architect edits the
+descriptive part of an existing non-terminal task without changing history.
+Every flag is required and the revision is checked. The daemon commits one
+automatic unread notice for the other current participant; the caller does not
+send a duplicate manual message:
 
 ```sh
 collab board describe <task-id> --expected-revision <observed> --title <t> \
@@ -1342,9 +1326,8 @@ and its coordination tasks. Legacy managed records are inspection
 inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
-   and test condition, then claim it or accept its invitation. After a manager
-   confirms no suitable authorized peer can take an unassigned goal, or the
-   accepted goal's peer splits its own bounded subwork, give an independent
+   and test condition, then claim it or accept its invitation. When no suitable
+   authorized peer can take the work, give an independent
    `codex exec --profile gcm` worker the same goal, scope, delivery/test
    evidence, and stop conditions. Reuse an existing assigned or registered
    task; describe it if conditions are missing. Do not register a duplicate
@@ -1384,9 +1367,10 @@ inputs only.
    transports. DSH receives full messages natively through its gateway and acts
    directly on them.
 
-These are agent actions within an activation. The board does not automatically
-claim, execute, or resume work. A peer holding an unclosed, uncancelled board
-task receives a board-idle wake on fresh `online`+`idle` under
+These are agent actions within an activation. Current board mutations commit an
+automatic notice to the other current participant, but the board does not
+automatically claim, execute, or resume work. A peer holding an unclosed,
+uncancelled board task receives a board-idle wake on fresh online+idle under
 [board-idle-patrol.md](references/board-idle-patrol.md), through the realtime
 event when connected and the 15-minute check otherwise. A peer with no unclosed
 task or with its patrol cancelled is not polled. Do not invent a polling
@@ -1399,8 +1383,8 @@ Legacy managed-subagent records grant no new production execution authority.
 Registered peer status and thread state use the owning AppServer RPC. Offer
 unassigned long-horizon goals to suitable authorized peers first, and use
 independent `codex exec --profile gcm` workers only when no suitable authorized
-peer can take the goal. A peer may dispatch independent GCM workers directly
-for bounded subwork inside its accepted goal. Legacy records may be inspected
+peer can take the goal. Apply the same eligible-peer check before delegating
+bounded subwork inside an accepted goal. Legacy records may be inspected
 only for diagnosis.
 For registered participants, `collab-mcp` and the `collab` CLI expose the same
 collaboration protocol. Listed `collab_*` tools alone do not prove registration.
@@ -1549,12 +1533,11 @@ CEO 在自己的 workspace 调用下列入口。目标由 daemon 解析为该项
 新请求不取消 master 原有任务，不改已有 owner、scope、固定执行者或必需 reviewer。
 
 ```sh
-collab ceo send --project '<目标项目根目录>' --subject '<主题>' --reply-required '<需要实际执行或回答的正文>'
-collab ceo send --project '<目标项目根目录>' --subject '<主题>' --reply-on-completion '<完成后交回的要求>'
+collab ceo send --project '<目标项目根目录>' --subject '<主题>' '<需要实际执行或回答的正文>'
 collab ceo append-task --project '<目标项目根目录>' --id '<任务ID>' --title '<标题>' --description '<范围与授权>' --delivery-condition '<交付条件>' --test-condition '<验收条件>'
 ```
 
-append-task 追加到目标项目现有 board，由当前 master 负责，并默认要求完成后回复。
+append-task 追加到目标项目现有 board，由当前 master 负责。board 修订自动写未读通知；
 不要另建 CEO 业务任务表，也不要把发送消息当作任务板已写入。回执只证明其实际字段：
 持久入队、通知提交、master 已安排、交付和回报各自分开。
 
@@ -1567,18 +1550,16 @@ collab ceo reply --subject '<主题>' '<普通进度或具体阻塞>'
 collab ceo reply --subject '<完成主题>' --in-reply-to '<原请求ID>' '<实际交付与证据>'
 ```
 
-普通进度不带原请求引用，保留完成后回复义务。CEO 经用户批准换人后，原请求的完成
-回复仍用原请求 ID，`ceo reply` 将结果交给现任 CEO，不手工改历史发送者或回复标记。
-真正完成后才以原请求 ID 回复；daemon
-在正确 master 的回信持久送达后清除精确原标记。收到 pending-reply idle 提醒时处理
-原请求，不回复提醒本身。回交后继续自己的任务；无可执行工作时按既有流程交回/申请
+普通进度不带原请求引用。CEO 经用户批准换人后，完成结果仍用原请求 ID 关联，
+`ceo reply` 将结果交给现任 CEO，不手工改历史发送者。真正完成后才以原请求 ID
+回复。回交后继续自己的任务；无可执行工作时按既有流程交回/申请
 idle。项目 master 不因全局 CEO 存在而放弃本项目交付责任。
 
 Jenny 巡检向 CEO 上报本项目实质进度时使用同一 `collab ceo reply` 入口，可用
 `--urgent` 标记明确紧急。`--urgent` 是唯一 typed 紧急入口，可立即穿透限流与安静
 窗口；正文关键词、普通 P1 阻塞或 ACK 不升级紧急。不带 `--in-reply-to` 的普通进度
-走非紧急汇总，与带 `--in-reply-to` 的请求回复（保留真实投递与回复义务语义）区别
-处理。CEO 按项目与实质业务进展去重：重复回报没有实质变化时
+走非紧急汇总，与带 `--in-reply-to` 的请求关联回复区别处理。CEO 按项目与实质业务
+进展去重：重复回报没有实质变化时
 不重复唤醒，也不产生用户报告。非紧急汇报默认每小时最多一次，安静窗口默认
 `Asia/Shanghai` 每日 `[00:00, 08:00)`（固定 UTC+8，无夏令时）；窗口内继续接收、去重
 并累计，08:00 后合并为一次，不逐条补发。安静窗口由全局 `[ceo_report]` typed 配置
@@ -1679,8 +1660,8 @@ identity. Ordinary messages do not consult master or CEO grants for sender eligi
 接收者读取完整原消息并执行已授权动作。消息本身不产生任务或管理授权。非 DSH 宿主用 `collab recv`；
 DSH 直接处理 gateway 已投递的正文，不再 Poll/ACK。回信仍在自己的项目执行统一
 `collab send --to '<原发送者地址>' --subject '<主题>' --content '<实际结果>' --in-reply-to '<原消息ID>'`。
-原消息参与者和回复义务仍由原 owner 校验。持久入队、宿主投递、接收消费和
-实际回信分别核实，发送成功不能证明对方已经执行。
+原消息 ID 只用于关联回信。持久入队、宿主投递、接收消费和实际回信分别核实，
+发送成功不能证明对方已经执行。
 
 可直接给 agent 的下一步提示词：
 
@@ -1855,14 +1836,14 @@ through the [non-live peer procedure](references/board-idle-patrol.md#非-live-p
 Use durable Collab state and the selected binding's status source to choose the
 next action. For an AppServer binding, query native thread state. A tmux pane is
 address proof only and never proves the agent is alive or `Present`; its agent
-liveness stays unknown. Transport status cannot establish message consumption
-without the receive receipt. A tmux screen cannot establish task completion,
+liveness stays unknown. Transport status cannot establish message consumption.
+A tmux screen cannot establish task completion,
 peer consumption, or Codex turn state. Do not infer those facts or restart a
 shared runtime from a pane probe.
 
 Master keeps project dispatch, integration and final delivery accountability.
-Architect owns planning and task acceptance when assigned. Use a board
-invitation for a long-horizon peer goal. Use an
+Architect owns planning, contract updates, peer dispatch, and task acceptance
+for its entrusted scope. Use a board invitation for a long-horizon peer goal. Use an
 independent `codex exec --profile gcm` worker for bounded execution or
 observation. Legacy managed-subagent records grant no new execution authority
 and fail closed for unsupported thread creation. Give each peer and GCM worker
@@ -2166,6 +2147,10 @@ transport failure keep their original error and non-zero exit; unapproved
 automatic resolution cannot bypass them. A communication diagnostic can await
 a participant return; ordinary identity restoration does not.
 
+For a missing current binding, use the
+[recovery operation table](references/stable-name-recovery.md#正常恢复) to select
+the host check and supply only the fields required by the current result.
+
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
 （`dagpipe graph validate`）。
@@ -2194,7 +2179,9 @@ subscription, as part of bootstrap.
 
 ## 宿主注册所需信息
 
-工作目录设为目标项目根。用当前 agent 原会话的 shell，只执行适用的取值命令。
+先在目标项目根、当前 agent 原会话的 shell 执行 `collab context`。只有回执指出
+缺少当前宿主事实时，才按[恢复操作表](references/stable-name-recovery.md#正常恢复)
+执行本节对应取值命令。已成功注册时直接使用回执。
 DSH 即使运行于 Rex 或 tmux 内，也优先使用 DSH 的身份来源。
 禁止用 Computer Use、CUA 或 GUI 取值、发命令或关闭界面。保留原终端，
 不 split、不新建 pane、tab 或窗口，不为取值改名。
@@ -2304,14 +2291,8 @@ CLI 自动提交本次宿主事实，daemon 核实后绑定。默认注册为 pe
 重试。当前会话无法取得身份时，继续无需该身份的已授权工作。
 
 DSH 在 tmux 中运行时仍使用 gateway session 识别当前执行者。pane 只定位观测。
-普通身份恢复读取持久身份与绑定，
-不要求通信可达。显式 `--recover-communication` 先按当前精确绑定的真实投递与接收
-证据分类：健康返回 `not_needed`，未知返回 `unknown`，只有明确不通才通过普通 Send
-向自己发一条 `communication-recovery`。独立接收方实际 recv（DSH 走 canonical Poll）
-并发送关联的普通认证 reply 后，query 才能投影 `recovered`。仅 adaptor 接受仍为
-`pending`；query 不收件、不回信、不重发，重复手动调用复用当前 pending 交换。
-回复本身的普通通知不触发再回复。通信失败不撤销身份、角色或当前任务归属。
-身份恢复后可单独检查通信。DSH 首次注册先运行 `collab context`，CLI 自动查询真实
+普通身份恢复读取当前 identity-map 和绑定，不要求通信回放或回复验证。
+DSH 首次注册先运行 `collab context`，CLI 自动查询真实
 gateway 能力。缺控制声明属于 gateway 集成缺口，应保留明确错误，不让 agent
 查文件、猜 ids 或手工补值；显式 `--provide` 仍须来自真实能力。详见 AppServer runtime
 registration 与 DSH 段的验证规则。

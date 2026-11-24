@@ -1,11 +1,18 @@
 use crate::board::{BoardCommand, BoardMemberView, BoardTaskDetails, BoardTaskView};
 
 fn board_public_task(state: &State, task_id: &str) -> bool {
-    state.board_details.get(task_id).is_some_and(|details| details.public_visibility)
+    state
+        .board_details
+        .get(task_id)
+        .is_some_and(|details| details.public_visibility)
 }
 
 fn board_parent_for_actor<'a>(state: &'a State, actor: &str) -> Option<&'a str> {
-    state.subagents.values().find(|record| record.peer == actor).map(|record| record.parent.as_str())
+    state
+        .subagents
+        .values()
+        .find(|record| record.peer == actor)
+        .map(|record| record.parent.as_str())
 }
 
 fn board_external_actor(state: &State, actor: &str) -> String {
@@ -13,25 +20,43 @@ fn board_external_actor(state: &State, actor: &str) -> String {
 }
 
 #[cfg(test)]
-fn board_task_view(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec) -> Result<Option<BoardTaskView>, String> {
+fn board_task_view(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    task: &TaskRec,
+) -> Result<Option<BoardTaskView>, String> {
     board_task_view_for(state, control, task, None)
 }
 
 #[cfg(test)]
-fn board_task_view_for(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, viewer: Option<&str>) -> Result<Option<BoardTaskView>, String> {
+fn board_task_view_for(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    task: &TaskRec,
+    viewer: Option<&str>,
+) -> Result<Option<BoardTaskView>, String> {
     let master = current_master_worker_id(state, None);
     let route = state.workers.get(&task.owner).and_then(|worker| {
         let project = GlobalState::canonical_project_scope(Path::new(&worker.cwd)).ok()?;
         current_worker_binding(state, &project, None, worker).map(|binding| binding.route_scope())
     });
-    board_task_view_with_master(state, control, task, viewer, master.as_deref(), route.as_ref())
+    board_task_view_with_master(
+        state,
+        control,
+        task,
+        viewer,
+        master.as_deref(),
+        route.as_ref(),
+    )
 }
 
 fn board_task_visible(state: &State, task: &TaskRec, viewer: Option<&str>) -> bool {
-    let Some(details) = state.board_details.get(&task.id) else { return false; };
+    let Some(details) = state.board_details.get(&task.id) else {
+        return false;
+    };
     if let Some(viewer) = viewer {
-        let private_owner = viewer == task.owner
-            || board_parent_for_actor(state, &task.owner) == Some(viewer);
+        let private_owner =
+            viewer == task.owner || board_parent_for_actor(state, &task.owner) == Some(viewer);
         if !details.public_visibility && !private_owner {
             return false;
         }
@@ -43,47 +68,113 @@ fn board_task_visible(state: &State, task: &TaskRec, viewer: Option<&str>) -> bo
 
 // Shared typed availability decision. Views and scheduling must use the same
 // current occupancy, presence and binding facts, never a projected board row.
-fn assignment_unavailability(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, route: Option<&RouteScope>) -> Result<Option<&'static str>, String> {
-    if matches!(task.status.as_str(), "closed" | "cancelled") { return Ok(None); }
+fn assignment_unavailability(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    task: &TaskRec,
+    route: Option<&RouteScope>,
+) -> Result<Option<&'static str>, String> {
+    if matches!(task.status.as_str(), "closed" | "cancelled") {
+        return Ok(None);
+    }
     let assignment = state.task_assignment(&task.id);
     let current = match assignment.zip(route) {
-        Some((assignment, route)) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, &assignment.name)?
-            .and_then(|slot| slot.active_binding()), None => None,
+        Some((assignment, route)) => control
+            .current_for_name(
+                &route.project_scope_id,
+                &route.app_scope_id,
+                &assignment.name,
+            )?
+            .and_then(|slot| slot.active_binding()),
+        None => None,
     };
-    if assignment.is_some() && current.is_none() { return Ok(Some("name_unoccupied")); }
+    if assignment.is_some() && current.is_none() {
+        return Ok(Some("name_unoccupied"));
+    }
     if current.zip(route).is_some_and(|(current, route)| {
-        state.agent_presence(route.project_scope_id.as_str(), current.binding.agent_id.as_str())
-            .is_some_and(|presence| current.binding.session_id.as_ref().is_some_and(|session| session.as_str() == presence.session_id)
-                && presence.presence == name_state::AgentPresence::Offline)
-    }) { return Ok(Some("owner_offline")); }
-    let owner = current.map_or(task.owner.as_str(), |current| current.binding.agent_id.as_str());
-    if route.and_then(|route| state.workers.get(owner).and_then(|worker|
-        current_worker_binding(state, &route.project_scope_id, Some(&route.app_scope_id), worker))).is_none() {
+        state
+            .agent_presence(
+                route.project_scope_id.as_str(),
+                current.binding.agent_id.as_str(),
+            )
+            .is_some_and(|presence| {
+                current
+                    .binding
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|session| session.as_str() == presence.session_id)
+                    && presence.presence == name_state::AgentPresence::Offline
+            })
+    }) {
+        return Ok(Some("owner_offline"));
+    }
+    let owner = current.map_or(task.owner.as_str(), |current| {
+        current.binding.agent_id.as_str()
+    });
+    if route
+        .and_then(|route| {
+            state.workers.get(owner).and_then(|worker| {
+                current_worker_binding(
+                    state,
+                    &route.project_scope_id,
+                    Some(&route.app_scope_id),
+                    worker,
+                )
+            })
+        })
+        .is_none()
+    {
         return Ok(Some("owner_binding_missing"));
     }
     Ok(None)
 }
 
-fn board_task_view_with_master(state: &State, control: &binding_slot::BindingControlSet, task: &TaskRec, viewer: Option<&str>, master: Option<&str>, route: Option<&RouteScope>) -> Result<Option<BoardTaskView>, String> {
-    let Some(details) = state.board_details.get(&task.id) else { return Ok(None); };
+fn board_task_view_with_master(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    task: &TaskRec,
+    viewer: Option<&str>,
+    master: Option<&str>,
+    route: Option<&RouteScope>,
+) -> Result<Option<BoardTaskView>, String> {
+    let Some(details) = state.board_details.get(&task.id) else {
+        return Ok(None);
+    };
     let master_view = viewer.is_some_and(|viewer| Some(viewer) == master);
     let lifecycle = state.task_lifecycle.get(&task.id);
     let cleanup = state.cleanup_receipts.get(&task.id);
-    let policy=state.effective_work_policy(&task.id);
-    let (completion_delivery_complete,completion_missing)=state.delivery_completion_projection(&task.id);
+    let policy = state.effective_work_policy(&task.id);
+    let (completion_delivery_complete, completion_missing) =
+        state.delivery_completion_projection(&task.id);
     let assignment = state.task_assignment(&task.id);
     let historical = matches!(task.status.as_str(), "closed" | "cancelled");
     let current = match assignment.zip(route) {
-        Some((assignment, route)) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, &assignment.name)?
-            .and_then(|slot| slot.active_binding()), None => None,
+        Some((assignment, route)) => control
+            .current_for_name(
+                &route.project_scope_id,
+                &route.app_scope_id,
+                &assignment.name,
+            )?
+            .and_then(|slot| slot.active_binding()),
+        None => None,
     };
-    let current_owner = if historical { Some(task.owner.as_str()) }
-        else if assignment.is_some() { current.map(|current| current.binding.agent_id.as_str()) }
-        else { Some(task.owner.as_str()) };
-    let private_owner = viewer.is_some_and(|viewer| current_owner.is_some_and(|owner|
-        viewer == owner || board_parent_for_actor(state, owner) == Some(viewer)));
-    if !details.public_visibility && !private_owner && !master_view { return Ok(None); }
-    let reassignment_reason = assignment_unavailability(state, control, task, route)?.map(str::to_owned);
+    let current_owner = if historical {
+        Some(task.owner.as_str())
+    } else if assignment.is_some() {
+        current.map(|current| current.binding.agent_id.as_str())
+    } else {
+        Some(task.owner.as_str())
+    };
+    let private_owner = viewer.is_some_and(|viewer| {
+        current_owner.is_some_and(|owner| {
+            viewer == owner || board_parent_for_actor(state, owner) == Some(viewer)
+        })
+    });
+    if !details.public_visibility && !private_owner && !master_view {
+        return Ok(None);
+    }
+    let reassignment_reason =
+        assignment_unavailability(state, control, task, route)?.map(str::to_owned);
     let owner = if reassignment_reason.is_some() {
         String::new()
     } else if details.public_visibility {
@@ -104,13 +195,23 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         test_condition: details.test_condition.clone(),
         long_horizon: details.long_horizon.clone(),
         revision: details.revision,
-        owner_display_name: if owner.is_empty() { String::new() }
-            else if let Some(assignment) = assignment.filter(|_| current_owner == Some(owner.as_str())) { assignment.name.clone() }
-            else { worker_display_name(control, route, &owner)? },
+        owner_display_name: if owner.is_empty() {
+            String::new()
+        } else if let Some(assignment) =
+            assignment.filter(|_| current_owner == Some(owner.as_str()))
+        {
+            assignment.name.clone()
+        } else {
+            worker_display_name(control, route, &owner)?
+        },
         owner_name: assignment.map(|assignment| assignment.name.clone()),
-        owner_session_id: if historical { assignment.map(|assignment| assignment.session_id.clone()) }
-            else if owner.is_empty() { None }
-            else { current.and_then(|current| current.binding.session_id.as_ref().map(ToString::to_string)) },
+        owner_session_id: if historical {
+            assignment.map(|assignment| assignment.session_id.clone())
+        } else if owner.is_empty() {
+            None
+        } else {
+            current.and_then(|current| current.binding.session_id.as_ref().map(ToString::to_string))
+        },
         needs_reassignment: reassignment_reason.is_some(),
         reassignment_reason,
         publisher_display_name: worker_display_name(control, route, &publisher)?,
@@ -119,81 +220,126 @@ fn board_task_view_with_master(state: &State, control: &binding_slot::BindingCon
         priority: task.priority.clone(),
         status: task.status.clone(),
         next_step: task.next_step.clone(),
-        work_kind:policy.work_kind,
-        parent_task_id:details.parent_task_id.clone(),
-        child_work_policies:details.child_work_policies.clone(),
-        preferred_roles:policy.preferred_roles.unwrap_or_default(),
-        executor_name:policy.executor_name,
-        reviewer_name:policy.reviewer_name,
-        dispatch_selection:details.dispatch_selection.clone(),
-        dispatch_reason:details.dispatch_reason.clone(),
-        review_subject_revision:lifecycle.map_or(0,|record|record.review_subject_revision),
-        reviewed_subject_revision:lifecycle.and_then(|record|record.reviewed_subject_revision),
-        actual_reviewer_name:lifecycle.and_then(|record|record.reviewer_name.clone()),
+        work_kind: policy.work_kind,
+        parent_task_id: details.parent_task_id.clone(),
+        child_work_policies: details.child_work_policies.clone(),
+        preferred_roles: policy.preferred_roles.unwrap_or_default(),
+        executor_name: policy.executor_name,
+        reviewer_name: policy.reviewer_name,
+        dispatch_selection: details.dispatch_selection.clone(),
+        dispatch_reason: details.dispatch_reason.clone(),
+        review_subject_revision: lifecycle.map_or(0, |record| record.review_subject_revision),
+        reviewed_subject_revision: lifecycle.and_then(|record| record.reviewed_subject_revision),
+        actual_reviewer_name: lifecycle.and_then(|record| record.reviewer_name.clone()),
         completion_delivery_complete,
         completion_missing,
-        invited_peer: details.invitation.as_ref().map(|invite| invite.peer_id.clone()),
+        invited_peer: details
+            .invitation
+            .as_ref()
+            .map(|invite| invite.peer_id.clone()),
         last_response: details.last_response.clone(),
         updated_at: iso(task.updated_ms),
         delivery_evidence: lifecycle.and_then(|record| record.delivery_evidence.clone()),
         review_evidence: lifecycle.and_then(|record| record.review_evidence.clone()),
         integration_commit: lifecycle.and_then(|record| record.integration_commit.clone()),
-        cleanup_status: if !task.has_owned_resources() { "not_required" }
-            else if cleanup.is_some_and(|receipt| receipt.verification == CleanupVerification::Verified) { "verified" }
-            else if cleanup.is_some() { "unverified" } else { "pending" }.into(),
+        cleanup_status: if !task.has_owned_resources() {
+            "not_required"
+        } else if cleanup
+            .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified)
+        {
+            "verified"
+        } else if cleanup.is_some() {
+            "unverified"
+        } else {
+            "pending"
+        }
+        .into(),
         blocking_task: task.wait.as_ref().map(|wait| {
-            if board_public_task(state, &wait.waiting_for) { wait.waiting_for.clone() }
-            else { "内部依赖".into() }
+            if board_public_task(state, &wait.waiting_for) {
+                wait.waiting_for.clone()
+            } else {
+                "内部依赖".into()
+            }
         }),
     }))
 }
 
 fn board_task_response(server: &Server, state: &State, task_id: &str, viewer: &str) -> Resp {
-    let route = match server_route_scope(server, state) { Ok(route) => route, Err(error) => return Resp::err(error) };
-    let master = current_master_worker_id(state, route.as_ref());
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
+    let route = match server_route_scope(server, state) {
+        Ok(route) => route,
+        Err(error) => return Resp::err(error),
     };
-    let result = state.tasks.get(task_id).map(|task| board_task_view_with_master(state, &control, task, Some(viewer), master.as_deref(), route.as_ref())).transpose();
+    let master = current_master_worker_id(state, route.as_ref());
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
+    let result = state
+        .tasks
+        .get(task_id)
+        .map(|task| {
+            board_task_view_with_master(
+                state,
+                &control,
+                task,
+                Some(viewer),
+                master.as_deref(),
+                route.as_ref(),
+            )
+        })
+        .transpose();
     match result {
-        Ok(Some(Some(task))) => Resp::data(json!({ "task": task, "notification": "none", "goal_schedule": task_goal_receipt(state, task_id) })),
+        Ok(Some(Some(task))) => Resp::data(
+            json!({ "task": task, "notification": "none", "goal_schedule": task_goal_receipt(state, task_id) }),
+        ),
         Ok(_) => Resp::err("BOARD_TASK_NOT_PUBLIC: task does not belong to the public task board"),
         Err(error) => Resp::err(error),
     }
 }
 
 fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control, Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     // Native observations run outside the reducer lock. They never determine
     // task owner, status, or the persisted invitation reservation.
     let candidates: Vec<_> = {
         let state = server.state.lock().unwrap();
-        state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)).cloned().collect()
+        state
+            .workers
+            .values()
+            .filter(|worker| !is_managed_subagent(&state, &worker.id))
+            .cloned()
+            .collect()
     };
-    let observations: std::collections::HashMap<_, _> = candidates.into_iter().map(|worker| {
-        let (status, endpoint_live) = if selected_transport_for_worker(&worker)
-            .is_some_and(|transport| transport.kind == TransportKind::Tmux)
-        {
-            let (identity_valid, endpoint_live) = worker_identity_and_endpoint(server, &worker);
-            let status = match (identity_valid, endpoint_live) {
-                (false, _) | (_, Some(false)) => "offline",
-                (true, Some(true)) | (true, None) => "unknown",
+    let observations: std::collections::HashMap<_, _> = candidates
+        .into_iter()
+        .map(|worker| {
+            let (status, endpoint_live) = if selected_transport_for_worker(&worker)
+                .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+            {
+                let (identity_valid, endpoint_live) = worker_identity_and_endpoint(server, &worker);
+                let status = match (identity_valid, endpoint_live) {
+                    (false, _) | (_, Some(false)) => "offline",
+                    (true, Some(true)) | (true, None) => "unknown",
+                };
+                (status, endpoint_live)
+            } else {
+                // Preserve the activity owner's resumable/cold distinction on
+                // other transports; only tmux presence became identity-only.
+                match worker_presence(server, &worker) {
+                    IdentityPresence::Present => ("online", Some(true)),
+                    IdentityPresence::Cold => ("cold", None),
+                    IdentityPresence::Missing => ("offline", Some(false)),
+                    IdentityPresence::Unknown => ("unknown", None),
+                }
             };
-            (status, endpoint_live)
-        } else {
-            // Preserve the activity owner's resumable/cold distinction on
-            // other transports; only tmux presence became identity-only.
-            match worker_presence(server, &worker) {
-                IdentityPresence::Present => ("online", Some(true)),
-                IdentityPresence::Cold => ("cold", Some(true)),
-                IdentityPresence::Missing => ("offline", Some(false)),
-                IdentityPresence::Unknown => ("unknown", None),
-            }
-        };
-        (worker.id, (status, endpoint_live))
-    }).collect();
+            (worker.id, (status, endpoint_live))
+        })
+        .collect();
     let state = server.state.lock().unwrap();
     let route = match server_route_scope(server, &state) {
         Ok(route) => route,
@@ -207,8 +353,14 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         .as_deref()
         .and_then(|id| observations.get(id))
         .and_then(|(_, endpoint_live)| *endpoint_live);
-    let authority = match master_authority_view_with_endpoint(&state, &control, route.as_ref(), endpoint_live) {
-        Ok(authority) => authority, Err(error) => return Resp::err(error),
+    let authority = match master_authority_view_with_endpoint(
+        &state,
+        &control,
+        route.as_ref(),
+        endpoint_live,
+    ) {
+        Ok(authority) => authority,
+        Err(error) => return Resp::err(error),
     };
     let projected_master_wake = project_master_wake_idle_capacity(server, &state);
     let mut authority = authority;
@@ -220,21 +372,41 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
     let mut tasks = Vec::new();
-    for task in state.tasks.values().filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled")) {
-        match board_task_view_with_master(&state, &control, task, viewer, master.as_deref(), route.as_ref()) {
-            Ok(Some(task)) => tasks.push(task), Ok(None) => {}, Err(error) => return Resp::err(error),
+    for task in state
+        .tasks
+        .values()
+        .filter(|task| !matches!(task.status.as_str(), "closed" | "cancelled"))
+    {
+        match board_task_view_with_master(
+            &state,
+            &control,
+            task,
+            viewer,
+            master.as_deref(),
+            route.as_ref(),
+        ) {
+            Ok(Some(task)) => tasks.push(task),
+            Ok(None) => {}
+            Err(error) => return Resp::err(error),
         }
     }
     tasks.sort_by(|left, right| left.id.cmp(&right.id));
     // Resolve responsibility from the same assignment/current relation as the
     // task row. A carrier taking another name does not take its source work.
     let mut responsibilities = Vec::new();
-    for task in state.tasks.values().filter(|task| board_execution_responsibility(&task.status)) {
+    for task in state
+        .tasks
+        .values()
+        .filter(|task| board_execution_responsibility(&task.status))
+    {
         let owner = match state.task_assignment(&task.id).zip(route.as_ref()) {
             Some((assignment, route)) => match control.current_for_name(
-                &route.project_scope_id, &route.app_scope_id, &assignment.name,
+                &route.project_scope_id,
+                &route.app_scope_id,
+                &assignment.name,
             ) {
-                Ok(slot) => slot.and_then(|slot| slot.active_binding())
+                Ok(slot) => slot
+                    .and_then(|slot| slot.active_binding())
                     .map(|current| current.binding.agent_id.as_str()),
                 Err(error) => return Resp::err(error),
             },
@@ -243,7 +415,11 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         responsibilities.push((task, owner));
     }
     let mut workers = Vec::new();
-    for worker in state.workers.values().filter(|worker| !is_managed_subagent(&state, &worker.id)) {
+    for worker in state
+        .workers
+        .values()
+        .filter(|worker| !is_managed_subagent(&state, &worker.id))
+    {
         let slot = match route.as_ref() {
             Some(route) => match control.current_for_worker(
                 &route.project_scope_id,
@@ -261,13 +437,22 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
         // invented from the raw worker ID.
         let (identity_status, display_name, role, work_roles) = match slot {
             Some(slot) => {
-                let work_roles = match worker_work_roles(&state, &control, route.as_ref(), &worker.id) {
-                    Ok(roles) => roles, Err(error) => return Resp::err(error),
-                };
+                let work_roles =
+                    match worker_work_roles(&state, &control, route.as_ref(), &worker.id) {
+                        Ok(roles) => roles,
+                        Err(error) => return Resp::err(error),
+                    };
                 (
                     "mapped".to_string(),
                     Some(slot.identity_key.name.clone()),
-                    Some(if master.as_deref() == Some(worker.id.as_str()) { "master" } else { "peer" }.to_string()),
+                    Some(
+                        if master.as_deref() == Some(worker.id.as_str()) {
+                            "master"
+                        } else {
+                            "peer"
+                        }
+                        .to_string(),
+                    ),
                     work_roles,
                 )
             }
@@ -305,13 +490,17 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             Vec::new()
         };
         subscription_ids.sort();
-        let mut task_ids: Vec<_> = responsibilities.iter().filter(|(task, owner)| {
-            (owner.is_some_and(|owner| owner == worker.id)
+        let mut task_ids: Vec<_> = responsibilities
+            .iter()
+            .filter(|(task, owner)| {
+                (owner.is_some_and(|owner| owner == worker.id)
                 // Preserve the existing unmapped custody view for the
                 // master. Unoccupied named work also remains in tasks.
                 || (owner.is_none() && identity_status == "unmapped" && task.owner == worker.id))
-                && (visible_responsibility || board_public_task(&state, &task.id))
-        }).map(|(task, _)| task.id.clone()).collect();
+                    && (visible_responsibility || board_public_task(&state, &task.id))
+            })
+            .map(|(task, _)| task.id.clone())
+            .collect();
         task_ids.sort();
         workers.push(BoardMemberView {
             id: worker.id.clone(),
@@ -319,11 +508,19 @@ fn handle_board_show(server: &Server, viewer: Option<&str>) -> Resp {
             display_name,
             role,
             work_roles,
-            status: observations.get(&worker.id).map(|(status, _)| *status).unwrap_or("unknown").into(),
+            status: observations
+                .get(&worker.id)
+                .map(|(status, _)| *status)
+                .unwrap_or("unknown")
+                .into(),
             task_ids,
             resource_task_ids,
             subscription_ids,
-            invitation_ids: tasks.iter().filter(|task| task.invited_peer.as_deref() == Some(worker.id.as_str())).map(|task| task.id.clone()).collect(),
+            invitation_ids: tasks
+                .iter()
+                .filter(|task| task.invited_peer.as_deref() == Some(worker.id.as_str()))
+                .map(|task| task.id.clone())
+                .collect(),
         });
     }
     workers.sort_by(|left, right| left.id.cmp(&right.id));
@@ -350,13 +547,20 @@ fn board_execution_slot_occupied(status: &str) -> bool {
 /// One execution-capacity predicate for dispatch, invite, claim, acceptance,
 /// and blocked resume. Blocked/waiting remain durable responsibilities in
 /// keepalive/resource projections, but they do not consume the next slot.
-pub(crate) fn board_peer_has_execution_reservation(state: &State, peer: &str, except_task: Option<&str>) -> bool {
+pub(crate) fn board_peer_has_execution_reservation(
+    state: &State,
+    peer: &str,
+    except_task: Option<&str>,
+) -> bool {
     state.tasks.values().any(|task| {
-        Some(task.id.as_str()) != except_task && (
-            (task.owner == peer && board_execution_slot_occupied(&task.status))
-            || (task.status == "invited" && state.board_details.get(&task.id)
-                .and_then(|details| details.invitation.as_ref()).is_some_and(|invite| invite.peer_id == peer))
-        )
+        Some(task.id.as_str()) != except_task
+            && ((task.owner == peer && board_execution_slot_occupied(&task.status))
+                || (task.status == "invited"
+                    && state
+                        .board_details
+                        .get(&task.id)
+                        .and_then(|details| details.invitation.as_ref())
+                        .is_some_and(|invite| invite.peer_id == peer)))
     })
 }
 
@@ -369,24 +573,37 @@ fn board_named_execution_reserved(
     let invitation_reserved = state.tasks.values().any(|task| {
         task.id != except_task
             && !matches!(task.status.as_str(), "closed" | "cancelled")
-            && state.board_details.get(&task.id)
+            && state
+                .board_details
+                .get(&task.id)
                 .and_then(|details| details.invitation.as_ref())
                 .is_some_and(|invite| invite.peer_id == peer)
     });
     let executing = state.ticket_phases.iter().any(|phase| {
         phase.task_id != except_task
             && phase.slot_name.as_deref() == Some(slot_name)
-            && matches!(phase.status,
-                ticket_state::TicketPhaseStatus::Claimed | ticket_state::TicketPhaseStatus::Running)
+            && matches!(
+                phase.status,
+                ticket_state::TicketPhaseStatus::Claimed | ticket_state::TicketPhaseStatus::Running
+            )
     });
     invitation_reserved || executing
 }
 
-fn board_check_revision(state: &State, task_id: &str, expected: u64) -> Result<BoardTaskDetails, Resp> {
-    let details = state.board_details.get(task_id)
+fn board_check_revision(
+    state: &State,
+    task_id: &str,
+    expected: u64,
+) -> Result<BoardTaskDetails, Resp> {
+    let details = state
+        .board_details
+        .get(task_id)
         .ok_or_else(|| Resp::err("BOARD_TASK_NOT_FOUND: no described task with this id"))?;
     if details.revision != expected {
-        return Err(Resp::err_data("BOARD_STALE_REVISION: reread the board before updating", json!({ "task_id": task_id, "expected_revision": expected, "current_revision": details.revision })));
+        return Err(Resp::err_data(
+            "BOARD_STALE_REVISION: reread the board before updating",
+            json!({ "task_id": task_id, "expected_revision": expected, "current_revision": details.revision }),
+        ));
     }
     Ok(details.clone())
 }
@@ -540,7 +757,11 @@ pub(super) fn legacy_admission_eligibility(
             json!({"task_id": task.id}),
         ));
     }
-    if state.ticket_phases.iter().any(|phase| phase.task_id == task.id) {
+    if state
+        .ticket_phases
+        .iter()
+        .any(|phase| phase.task_id == task.id)
+    {
         return Err(Resp::err_data(
             "TICKET_ADMISSION_PHASE_CONFLICT: an unadmitted ticket must have no phase history",
             json!({"task_id": task.id}),
@@ -629,26 +850,36 @@ fn board_admit_legacy_locked(
     let mut admitted = details.clone();
     admitted.admitted = true;
     admitted.revision = revision;
+    let auto_notice = match board_auto_notice_events(server, state, None, task, actor, "legacy ticket was admitted") {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
+    let mut events = vec![
+        Event::BoardDetailsChanged {
+            task_id: id.to_owned(),
+            details: admitted,
+        },
+        Event::TicketPhaseRecorded { phase },
+    ];
+    events.extend(auto_notice.events.clone());
     if let Err(error) = server.commit_locked_checked(
         state,
-        &[
-            Event::BoardDetailsChanged {
-                task_id: id.to_owned(),
-                details: admitted,
-            },
-            Event::TicketPhaseRecorded { phase },
-        ],
+        &events,
     ) {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
     let mut response = board_task_response(server, state, id, actor);
     if let Some(object) = response.data.as_object_mut() {
         object.insert("ticket".into(), ticket_projection(state, id));
+        if let Some(notice) = auto_notice.notice.as_ref() {
+            object.insert("notification".into(), json!("auto-board-change"));
+            object.insert("notification_message_id".into(), json!(notice.message_id));
+        }
     }
     response
 }
 
-fn board_backfill_execute(
+fn board_backfill_execute_locked(
     server: &Server,
     actor: String,
     token: String,
@@ -656,9 +887,7 @@ fn board_backfill_execute(
     expected_revision: u64,
     admit_legacy: bool,
 ) -> Resp {
-    use crate::server::ticket_state::{
-        TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus,
-    };
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
 
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token) {
@@ -771,16 +1000,46 @@ fn board_backfill_execute(
         wait_reason: None,
         result: None,
     };
-    if let Err(error) = server.commit_locked_checked(
-        &mut state,
-        &[Event::TicketPhaseRecorded { phase }],
-    ) {
+    let Some(task) = state.tasks.get(&id).cloned() else {
+        return Resp::err("task not found");
+    };
+    let auto_notice = match board_auto_notice_events(server, &state, None, &task, &actor, "execute phase was repaired") {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
+    let mut events = vec![Event::TicketPhaseRecorded { phase }];
+    events.extend(auto_notice.events.clone());
+    if let Err(error) = server.commit_locked_checked(&mut state, &events) {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
     let mut response = board_task_response(server, &state, &id, &actor);
     if let Some(object) = response.data.as_object_mut() {
         object.insert("ticket".into(), ticket_projection(&state, &id));
+        if let Some(notice) = auto_notice.notice.as_ref() {
+            object.insert("notification".into(), json!("auto-board-change"));
+            object.insert("notification_message_id".into(), json!(notice.message_id));
+        }
     }
+    response
+}
+
+fn board_backfill_execute(
+    server: &Server,
+    actor: String,
+    token: String,
+    id: String,
+    expected_revision: u64,
+    admit_legacy: bool,
+) -> Resp {
+    let response = board_backfill_execute_locked(
+        server,
+        actor,
+        token,
+        id,
+        expected_revision,
+        admit_legacy,
+    );
+    deliver_board_auto_notice(server, &response);
     response
 }
 
@@ -819,9 +1078,235 @@ fn board_task_owner_admission(
 fn board_check_master_locked(server: &Server, state: &State, actor: &str) -> Result<(), Resp> {
     let route = server_route_scope(server, state).map_err(Resp::err)?;
     if current_master_worker_id(state, route.as_ref()).as_deref() != Some(actor) {
-        return Err(Resp::err("BOARD_MASTER_REQUIRED: only the current project master may invite or withdraw"));
+        return Err(Resp::err(
+            "BOARD_MASTER_REQUIRED: only the current project master may invite or withdraw",
+        ));
     }
     Ok(())
+}
+
+fn board_check_task_architect_locked(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("project route is not ready"))?;
+    let loaded;
+    let control = match control {
+        Some(control) => control,
+        None => {
+            loaded = binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .map_err(Resp::err)?;
+            &loaded
+        }
+    };
+    let Some(slot) = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
+        .map_err(Resp::err)?
+    else {
+        return Err(Resp::err(
+            "BOARD_ARCHITECT_SCOPE_REQUIRED: the caller has no current project name",
+        ));
+    };
+    let architect_name = slot.identity_key.name.clone();
+    if !state
+        .name_work_roles(route.project_scope_id.as_str(), &architect_name)
+        .iter()
+        .any(|role| role == "architect")
+    {
+        return Err(Resp::err(
+            "BOARD_ARCHITECT_SCOPE_REQUIRED: the caller does not hold the architect role",
+        ));
+    }
+
+    let mut current_id = task_id.to_owned();
+    for _ in 0..=state.tasks.len() {
+        let Some(task) = state.tasks.get(&current_id) else {
+            break;
+        };
+        let details = state.board_details.get(&current_id);
+        let assignment_entrusted = state
+            .task_assignment(&current_id)
+            .is_some_and(|assignment| assignment.name == architect_name);
+        let policy_entrusted = details.is_some_and(|_| {
+            let policy = state.effective_work_policy(&current_id);
+            policy.executor_name.as_deref() == Some(architect_name.as_str())
+                || policy.reviewer_name.as_deref() == Some(architect_name.as_str())
+        });
+        if task.created_by == actor || assignment_entrusted || policy_entrusted {
+            return Ok(());
+        }
+        let Some(parent) = details.and_then(|details| details.parent_task_id.clone()) else {
+            break;
+        };
+        current_id = parent;
+    }
+    Err(Resp::err(
+        "BOARD_ARCHITECT_SCOPE_REQUIRED: architect authority is not entrusted for this task",
+    ))
+}
+
+fn board_check_master_or_task_architect_locked(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    if board_check_master_locked(server, state, actor).is_ok() {
+        return Ok(());
+    }
+    board_check_task_architect_locked(server, state, control, task_id, actor)
+}
+
+#[derive(Debug, Clone)]
+struct BoardAutoNotice {
+    message_id: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BoardAutoNoticeEvents {
+    notice: Option<BoardAutoNotice>,
+    events: Vec<Event>,
+}
+
+/// Current board changes already carry their coordination effect. Commit one
+/// unread notice for the other current participant so callers never need a
+/// separate manual send.
+fn board_auto_notice_events_for_recipient(
+    state: &State,
+    task: &TaskRec,
+    actor: &str,
+    change: &str,
+    route: &RouteScope,
+    slot: &binding_slot::IdentityBindingSlot,
+) -> Result<BoardAutoNoticeEvents, Resp> {
+    let current = slot.active_binding().ok_or_else(|| {
+        Resp::err("BOARD_NOTICE_RECIPIENT_UNRESOLVED: name has no current holder")
+    })?;
+    let to = current.binding.agent_id.as_str();
+    if !state.workers.contains_key(to) {
+        return Err(Resp::err("BOARD_NOTICE_RECIPIENT_UNRESOLVED: current holder is not registered"));
+    }
+    let now = now_ms();
+    let message_id = format!("board-change-{}-{}", task.id, gen_msg_id());
+    let message = Message {
+        id: message_id.clone(),
+        from: actor.to_owned(),
+        to: to.to_owned(),
+        mtype: "notification".into(),
+        subject: Some(format!("board-changed:{}", task.id)),
+        body: format!(
+            "Task {} changed. {change} Read the current board revision with collab board show before acting.",
+            task.id
+        ),
+        in_reply_to: None,
+        created_ms: now,
+        state: "pending".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+        retry_attempted: false,
+    };
+    let subscription = state
+        .matching_subscription(to, "direct-message", None, now)
+        .cloned();
+    let mut events = vec![
+        Event::Sent { msg: message },
+        Event::MailboxNameAddressed {
+            message_id: message_id.clone(),
+            address: name_mailbox::MailboxNameAddress {
+                project_scope: route.project_scope_id.as_str().to_owned(),
+                name: slot.identity_key.name.clone(),
+            },
+        },
+        Event::DeliveryMode {
+            msg_id: message_id.clone(),
+            mode: "explicit-notification".into(),
+            source_thread_id: None,
+        },
+    ];
+    if let Some(subscription) = &subscription {
+        events.push(Event::WakeBound {
+            message_id: message_id.clone(),
+            subscription_id: subscription.id.clone(),
+        });
+    }
+    Ok(BoardAutoNoticeEvents {
+        notice: Some(BoardAutoNotice { message_id }),
+        events,
+    })
+}
+
+fn board_auto_notice_events(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    task: &TaskRec,
+    actor: &str,
+    change: &str,
+) -> Result<BoardAutoNoticeEvents, Resp> {
+    let route = server_route_scope(server, state)
+        .map_err(Resp::err)?
+        .ok_or_else(|| Resp::err("BOARD_NOTICE_RECIPIENT_UNRESOLVED: current project route is missing"))?;
+    let loaded;
+    let control = if let Some(control) = control {
+        control
+    } else {
+        loaded = binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .map_err(Resp::err)?;
+        &loaded
+    };
+    board_auto_notice_events_current(state, control, &route, task, actor, change)
+}
+
+fn board_auto_notice_events_current(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    task: &TaskRec,
+    actor: &str,
+    change: &str,
+) -> Result<BoardAutoNoticeEvents, Resp> {
+    let owner_slot = match state.task_assignment(&task.id) {
+        Some(assignment) => control.current_for_name(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &assignment.name,
+        ),
+        None => control.current_for_worker(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &task.owner,
+        ),
+    }
+    .map_err(Resp::err)?;
+    let Some(owner_slot) = owner_slot else {
+        // Work can remain assigned to a released name until reassignment.
+        return Ok(BoardAutoNoticeEvents::default());
+    };
+    let owner_is_actor = owner_slot.active_binding()
+        .is_some_and(|current| current.binding.agent_id.as_str() == actor);
+    let recipient = if owner_is_actor {
+        let Some(master) = current_master_worker_id(state, Some(route)).filter(|master| master != actor) else {
+            return Ok(BoardAutoNoticeEvents::default());
+        };
+        let Some(master_slot) = control
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, &master)
+            .map_err(Resp::err)?
+        else {
+            return Ok(BoardAutoNoticeEvents::default());
+        };
+        master_slot
+    } else {
+        owner_slot
+    };
+    board_auto_notice_events_for_recipient(state, task, actor, change, route, recipient)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -846,9 +1331,11 @@ fn board_describe_locked(
         return Resp::err("task not found");
     };
     if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err()
-        && board_check_master_locked(server, state, &actor).is_err()
+        && board_check_master_or_task_architect_locked(server, state, control, &id, &actor).is_err()
     {
-        return Resp::err("only the current task owner or current master may describe it");
+        return Resp::err(
+            "only the current task owner, current master, or entrusted architect may describe it",
+        );
     }
     let Some(mut details) = state.board_details.get(&id).cloned() else {
         return Resp::err("task description record missing");
@@ -908,6 +1395,17 @@ fn board_describe_locked(
     details.public_visibility |= !is_managed_subagent(state, &actor);
     details.revision += 1;
     task.updated_ms = now_ms();
+    let auto_notice = match board_auto_notice_events(
+        server,
+        state,
+        control,
+        &task,
+        &actor,
+        &format!("description revision is now {}", details.revision),
+    ) {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
     events.extend([
         Event::TaskUpdated { task },
         Event::BoardDetailsChanged {
@@ -915,6 +1413,7 @@ fn board_describe_locked(
             details,
         },
     ]);
+    events.extend(auto_notice.events);
     if let Some(event) = ticket_rework_phase_event(server, state, &id) {
         events.push(event);
     }
@@ -931,7 +1430,56 @@ fn board_describe_locked(
     if let Err(error) = commit {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
-    board_task_response(server, state, &id, &actor)
+    let mut response = board_task_response(server, state, &id, &actor);
+    if let (Some(notice), Some(object)) =
+        (auto_notice.notice.as_ref(), response.data.as_object_mut())
+    {
+        object.insert("notification".into(), json!("auto-board-change"));
+        object.insert("notification_message_id".into(), json!(notice.message_id));
+    }
+    response
+}
+
+fn deliver_board_auto_notice(server: &Server, response: &Resp) {
+    let Some(message_id) = response
+        .data
+        .get("notification_message_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let subscription_id = server
+        .state
+        .lock()
+        .unwrap()
+        .wake_bindings
+        .get(message_id)
+        .cloned();
+    if let Some(subscription_id) = subscription_id {
+        let _ =
+            attempt_notification_detailed_with_at(server, message_id, &subscription_id, now_ms());
+    }
+}
+
+fn board_update_response(
+    server: &Server,
+    state: &State,
+    id: &str,
+    actor: &str,
+    result: Resp,
+) -> Resp {
+    if !result.ok {
+        return result;
+    }
+    let mut response = board_task_response(server, state, id, actor);
+    if let Some(object) = response.data.as_object_mut() {
+        for field in ["block_request", "notification", "notification_message_id"] {
+            if let Some(value) = result.data.get(field) {
+                object.insert(field.into(), value.clone());
+            }
+        }
+    }
+    response
 }
 
 fn dispatch_board_command_current_map(
@@ -995,7 +1543,7 @@ fn dispatch_board_command_current_map(
                     "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
                 );
             };
-            manager
+            let response = manager
                 .with_current_task_state_response(
                     server,
                     context,
@@ -1015,7 +1563,9 @@ fn dispatch_board_command_current_map(
                         ))
                     },
                 )
-                .unwrap_or_else(|error| error)
+                .unwrap_or_else(|error| error);
+            deliver_board_auto_notice(server, &response);
+            response
         }
         BoardCommand::Update {
             id,
@@ -1028,7 +1578,7 @@ fn dispatch_board_command_current_map(
                     "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
                 );
             };
-            manager
+            let response = manager
                 .with_current_task_state_response(
                     server,
                     context,
@@ -1052,20 +1602,12 @@ fn dispatch_board_command_current_map(
                             None,
                             None,
                         );
-                        if !result.ok {
-                            return Ok(result);
-                        }
-                        let block_request = result.data.get("block_request").cloned();
-                        let mut response = board_task_response(server, state, id, &actor);
-                        if let (Some(request), Some(object)) =
-                            (block_request, response.data.as_object_mut())
-                        {
-                            object.insert("block_request".into(), request);
-                        }
-                        Ok(response)
+                        Ok(board_update_response(server, state, id, &actor, result))
                     },
                 )
-                .unwrap_or_else(|error| error)
+                .unwrap_or_else(|error| error);
+            deliver_board_auto_notice(server, &response);
+            response
         }
         BoardCommand::Describe {
             id,
@@ -1081,7 +1623,7 @@ fn dispatch_board_command_current_map(
                     "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
                 );
             };
-            manager
+            let response = manager
                 .with_current_task_state_response(
                     server,
                     context,
@@ -1105,7 +1647,9 @@ fn dispatch_board_command_current_map(
                         ))
                     },
                 )
-                .unwrap_or_else(|error| error)
+                .unwrap_or_else(|error| error);
+            deliver_board_auto_notice(server, &response);
+            response
         }
         BoardCommand::DeclineAssigned {
             id,
@@ -1117,7 +1661,7 @@ fn dispatch_board_command_current_map(
                     "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
                 );
             };
-            manager
+            let response = manager
                 .with_current_task_state_response(
                     server,
                     context,
@@ -1137,7 +1681,9 @@ fn dispatch_board_command_current_map(
                         ))
                     },
                 )
-                .unwrap_or_else(|error| error)
+                .unwrap_or_else(|error| error);
+            deliver_board_auto_notice(server, &response);
+            response
         }
         BoardCommand::Policy {
             scope,
@@ -1168,7 +1714,7 @@ fn dispatch_board_command_current_map(
                     "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
                 );
             };
-            manager
+            let response = manager
                 .with_current_task_state_response(
                     server,
                     context,
@@ -1191,24 +1737,37 @@ fn dispatch_board_command_current_map(
                         ))
                     },
                 )
-                .unwrap_or_else(|error| error)
+                .unwrap_or_else(|error| error);
+            deliver_board_auto_notice(server, &response);
+            response
         }
         _ => Resp::err("BOARD_CURRENT_MAP_DISPATCH_INVALID"),
     }
 }
 
-fn handle_board_command(server: &Server, actor: String, token: String, command: BoardCommand) -> Resp {
+fn handle_board_command(
+    server: &Server,
+    actor: String,
+    token: String,
+    command: BoardCommand,
+) -> Resp {
     {
         let state = server.state.lock().unwrap();
-        if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
+        if let Err(error) = board_check_actor(&state, &actor, &token) {
+            return error;
+        }
         let task_id = match &command {
             BoardCommand::Show | BoardCommand::Publish { .. } => None,
-            BoardCommand::Policy {id,..} => id.as_ref(),
-            BoardCommand::Claim { id, .. } | BoardCommand::Start { id, .. }
+            BoardCommand::Policy { id, .. } => id.as_ref(),
+            BoardCommand::Claim { id, .. }
+            | BoardCommand::Start { id, .. }
             | BoardCommand::Update { id, .. }
-            | BoardCommand::Describe { id, .. } | BoardCommand::Invite { id, .. }
-            | BoardCommand::Respond { id, .. } | BoardCommand::DeclineAssigned { id, .. }
-            | BoardCommand::Withdraw { id, .. } | BoardCommand::Dispatch {id,..}
+            | BoardCommand::Describe { id, .. }
+            | BoardCommand::Invite { id, .. }
+            | BoardCommand::Respond { id, .. }
+            | BoardCommand::DeclineAssigned { id, .. }
+            | BoardCommand::Withdraw { id, .. }
+            | BoardCommand::Dispatch { id, .. }
             | BoardCommand::BackfillExecute { id, .. } => Some(id),
         };
         // Check visibility before reporting revision or lifecycle facts.
@@ -1220,55 +1779,130 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
     }
     match command {
         BoardCommand::Show => handle_board_show(server, Some(&actor)),
-        BoardCommand::Publish { id, title, description, delivery_condition, test_condition, priority,
-            work_kind,parent_task,prefer_role,executor,reviewer,depends_on,long_horizon } => {
+        BoardCommand::Publish {
+            id,
+            title,
+            description,
+            delivery_condition,
+            test_condition,
+            priority,
+            work_kind,
+            parent_task,
+            prefer_role,
+            executor,
+            reviewer,
+            depends_on,
+            long_horizon,
+        } => {
             let long_horizon = match long_horizon.merge(None) {
-                Ok(spec) => spec, Err(error) => return Resp::err(error),
+                Ok(spec) => spec,
+                Err(error) => return Resp::err(error),
             };
-            if [&id, &title, &description, &delivery_condition, &test_condition].iter().any(|text| text.trim().is_empty()) {
+            if [
+                &id,
+                &title,
+                &description,
+                &delivery_condition,
+                &test_condition,
+            ]
+            .iter()
+            .any(|text| text.trim().is_empty())
+            {
                 return Resp::err("BOARD_DESCRIPTION_REQUIRED: provide task id, title, description, delivery condition and test condition");
             }
             if !["p0", "p1", "p2", "p3", "p4"].contains(&priority.as_str()) {
                 return Resp::err("invalid priority; expected p0, p1, p2, p3 or p4");
             }
             let mut state = server.state.lock().unwrap();
-            if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-            if state.tasks.contains_key(&id) { return Resp::err("task id already exists"); }
+            if let Err(error) = board_check_actor(&state, &actor, &token) {
+                return error;
+            }
+            if state.tasks.contains_key(&id) {
+                return Resp::err("task id already exists");
+            }
             if long_horizon.is_some() {
-                if let Err(error) = board_check_master_locked(server, &state, &actor) { return error; }
-            }
-            if let Some(parent)=parent_task.as_deref() {
-                let Some(task)=state.tasks.get(parent) else {return Resp::err("WORK_PARENT_NOT_FOUND");};
-                if !board_task_visible(&state,task,Some(&actor)) {return Resp::err("BOARD_PRIVATE_TASK");}
-                if parent==id {return Resp::err("WORK_PARENT_CYCLE");}
-            }
-            for dep in depends_on.iter() {
-                if dep == &id { return Resp::err("BOARD_TICKET_SELF_DEPENDENCY: a ticket cannot depend on itself"); }
-                if !state.tasks.contains_key(dep) {
-                    return Resp::err_data("BOARD_TICKET_DEPENDENCY_NOT_FOUND: dependency task does not exist", json!({"task_id": id, "depends_on": dep}));
+                if let Err(error) = board_check_master_locked(server, &state, &actor) {
+                    return error;
                 }
             }
-            let explicit=match parse_work_policy(work_kind,prefer_role,executor,reviewer,false,false,false) {
-                Ok(policy)=>policy,Err(error)=>return error,
+            if let Some(parent) = parent_task.as_deref() {
+                let Some(task) = state.tasks.get(parent) else {
+                    return Resp::err("WORK_PARENT_NOT_FOUND");
+                };
+                if !board_task_visible(&state, task, Some(&actor)) {
+                    return Resp::err("BOARD_PRIVATE_TASK");
+                }
+                if parent == id {
+                    return Resp::err("WORK_PARENT_CYCLE");
+                }
+            }
+            for dep in depends_on.iter() {
+                if dep == &id {
+                    return Resp::err(
+                        "BOARD_TICKET_SELF_DEPENDENCY: a ticket cannot depend on itself",
+                    );
+                }
+                if !state.tasks.contains_key(dep) {
+                    return Resp::err_data(
+                        "BOARD_TICKET_DEPENDENCY_NOT_FOUND: dependency task does not exist",
+                        json!({"task_id": id, "depends_on": dep}),
+                    );
+                }
+            }
+            let explicit = match parse_work_policy(
+                work_kind,
+                prefer_role,
+                executor,
+                reviewer,
+                false,
+                false,
+                false,
+            ) {
+                Ok(policy) => policy,
+                Err(error) => return error,
             };
-            let work_policy=state.materialize_work_policy(explicit.work_kind.as_deref(),parent_task.as_deref(),&explicit);
+            let work_policy = state.materialize_work_policy(
+                explicit.work_kind.as_deref(),
+                parent_task.as_deref(),
+                &explicit,
+            );
             let public_visibility = !is_managed_subagent(&state, &actor);
             let now = now_ms();
             let task = TaskRec {
-                id: id.clone(), owner: actor.clone(), created_by: actor.clone(),
-                feature_id: None, worktree_path: None, branch: None, base_commit: None,
-                priority, status: "pending".into(), next_step: None, wait: None,
+                id: id.clone(),
+                owner: actor.clone(),
+                created_by: actor.clone(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority,
+                status: "pending".into(),
+                next_step: None,
+                wait: None,
                 isolation_mode: None,
-                created_ms: now, updated_ms: now,
+                created_ms: now,
+                updated_ms: now,
             };
             let details = BoardTaskDetails {
-                title, description, delivery_condition, test_condition, long_horizon,
-                parent_task_id:parent_task,work_policy,
-                revision: 1, public_visibility, admitted: public_visibility, ..BoardTaskDetails::default()
+                title,
+                description,
+                delivery_condition,
+                test_condition,
+                long_horizon,
+                parent_task_id: parent_task,
+                work_policy,
+                revision: 1,
+                public_visibility,
+                admitted: public_visibility,
+                ..BoardTaskDetails::default()
             };
             let mut events = vec![
                 Event::TaskCreated { task: task.clone() },
-                Event::BoardDetailsChanged { task_id: id.clone(), details: details.clone() },
+                Event::BoardDetailsChanged {
+                    task_id: id.clone(),
+                    details: details.clone(),
+                },
             ];
             if details.public_visibility {
                 match board_ticket_admission_events(server, &state, &task, &details, depends_on) {
@@ -1276,69 +1910,169 @@ fn handle_board_command(server: &Server, actor: String, token: String, command: 
                     Err(error) => return error,
                 }
             }
+            let auto_notice = match board_auto_notice_events(
+                server,
+                &state,
+                None,
+                &task,
+                &actor,
+                "task was published to the current board",
+            ) {
+                Ok(notice) => notice,
+                Err(error) => return error,
+            };
+            events.extend(auto_notice.events);
             if let Err(error) = server.commit_locked_checked(&mut state, &events) {
                 return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
             }
             let mut response = board_task_response(server, &state, &id, &actor);
             if let Some(object) = response.data.as_object_mut() {
                 object.insert("ticket".into(), ticket_projection(&state, &id));
+                if let Some(notice) = auto_notice.notice.as_ref() {
+                    object.insert("notification".into(), json!("auto-board-change"));
+                    object.insert("notification_message_id".into(), json!(notice.message_id));
+                }
             }
+            drop(state);
+            deliver_board_auto_notice(server, &response);
             response
-        },
-        BoardCommand::Claim { id, expected_revision } => board_claim(server, actor, token, id, expected_revision),
-        BoardCommand::Start { id, expected_revision, attempt } => board_start(server, actor, token, id, expected_revision, attempt),
-        BoardCommand::Update { id, expected_revision, status, next } => {
+        }
+        BoardCommand::Claim {
+            id,
+            expected_revision,
+        } => board_claim(server, actor, token, id, expected_revision),
+        BoardCommand::Start {
+            id,
+            expected_revision,
+            attempt,
+        } => board_start(server, actor, token, id, expected_revision, attempt),
+        BoardCommand::Update {
+            id,
+            expected_revision,
+            status,
+            next,
+        } => {
             let mut state = server.state.lock().unwrap();
-            if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-            if let Err(error) = board_check_revision(&state, &id, expected_revision) { return error; }
-            if status.is_none() && next.is_none() { return Resp::err("provide --status or --next"); }
-            let result = task_update_locked(server, &mut state, None, actor.clone(), token, id.clone(), status, next, None, None);
-            if !result.ok { return result; }
-            let block_request = result.data.get("block_request").cloned();
-            let mut response = board_task_response(server, &state, &id, &actor);
-            if let (Some(request), Some(object)) = (block_request, response.data.as_object_mut()) {
-                object.insert("block_request".into(), request);
+            if let Err(error) = board_check_actor(&state, &actor, &token) {
+                return error;
             }
-            response
-        },
-        BoardCommand::Describe { id, expected_revision, title, description, delivery_condition, test_condition, long_horizon } => {
-            let mut state = server.state.lock().unwrap();
-            if let Err(error) = board_check_actor(&state, &actor, &token) { return error; }
-            board_describe_locked(
+            if let Err(error) = board_check_revision(&state, &id, expected_revision) {
+                return error;
+            }
+            if status.is_none() && next.is_none() {
+                return Resp::err("provide --status or --next");
+            }
+            let result = task_update_locked(
                 server,
                 &mut state,
                 None,
-                actor,
+                actor.clone(),
                 token,
-                id,
-                expected_revision,
-                title,
-                description,
-                delivery_condition,
-                test_condition,
-                long_horizon,
-            )
-        },
-        BoardCommand::Invite { id, to, expected_revision } => board_invite(server, actor, token, id, to, expected_revision),
-        BoardCommand::Respond { id, accept, decline, expected_revision, reason } => {
-            if accept == decline { return Resp::err("choose exactly one of accept or decline"); }
+                id.clone(),
+                status,
+                next,
+                None,
+                None,
+            );
+            let response = board_update_response(server, &state, &id, &actor, result);
+            drop(state);
+            deliver_board_auto_notice(server, &response);
+            response
+        }
+        BoardCommand::Describe {
+            id,
+            expected_revision,
+            title,
+            description,
+            delivery_condition,
+            test_condition,
+            long_horizon,
+        } => {
+            let response = {
+                let mut state = server.state.lock().unwrap();
+                if let Err(error) = board_check_actor(&state, &actor, &token) {
+                    return error;
+                }
+                board_describe_locked(
+                    server,
+                    &mut state,
+                    None,
+                    actor,
+                    token,
+                    id,
+                    expected_revision,
+                    title,
+                    description,
+                    delivery_condition,
+                    test_condition,
+                    long_horizon,
+                )
+            };
+            deliver_board_auto_notice(server, &response);
+            response
+        }
+        BoardCommand::Invite {
+            id,
+            to,
+            expected_revision,
+        } => board_invite(server, actor, token, id, to, expected_revision),
+        BoardCommand::Respond {
+            id,
+            accept,
+            decline,
+            expected_revision,
+            reason,
+        } => {
+            if accept == decline {
+                return Resp::err("choose exactly one of accept or decline");
+            }
             board_respond(server, actor, token, id, expected_revision, accept, reason)
-        },
-        BoardCommand::DeclineAssigned { id, expected_revision, reason } => board_decline_assigned(server, actor, token, id, expected_revision, reason),
-        BoardCommand::Withdraw { id, expected_revision, reason } => board_withdraw(server, actor, token, id, expected_revision, reason),
-        BoardCommand::Dispatch {id,expected_revision,long_horizon} => board_dispatch_work(server,actor,token,id,expected_revision,long_horizon),
+        }
+        BoardCommand::DeclineAssigned {
+            id,
+            expected_revision,
+            reason,
+        } => board_decline_assigned(server, actor, token, id, expected_revision, reason),
+        BoardCommand::Withdraw {
+            id,
+            expected_revision,
+            reason,
+        } => board_withdraw(server, actor, token, id, expected_revision, reason),
+        BoardCommand::Dispatch {
+            id,
+            expected_revision,
+            long_horizon,
+        } => board_dispatch_work(server, actor, token, id, expected_revision, long_horizon),
         BoardCommand::BackfillExecute {
             id,
             expected_revision,
             admit_legacy,
+        } => board_backfill_execute(server, actor, token, id, expected_revision, admit_legacy),
+        BoardCommand::Policy {
+            scope,
+            id,
+            work_kind,
+            prefer_role,
+            executor,
+            reviewer,
+            clear_prefer_role,
+            clear_executor,
+            clear_reviewer,
+            expected_revision,
         } => {
-            board_backfill_execute(server, actor, token, id, expected_revision, admit_legacy)
-        },
-        BoardCommand::Policy {scope,id,work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer,expected_revision} => {
-            let patch=match parse_work_policy(work_kind,prefer_role,executor,reviewer,clear_prefer_role,clear_executor,clear_reviewer) {
-                Ok(policy)=>policy,Err(error)=>return error,
+            let patch = match parse_work_policy(
+                work_kind,
+                prefer_role,
+                executor,
+                reviewer,
+                clear_prefer_role,
+                clear_executor,
+                clear_reviewer,
+            ) {
+                Ok(policy) => policy,
+                Err(error) => return error,
             };
-            board_work_policy(server,actor,token,scope,id,patch,expected_revision)
-        },
+            board_work_policy(server, actor, token, scope, id, patch, expected_revision)
+        }
     }
 }

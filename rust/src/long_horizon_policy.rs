@@ -4,7 +4,14 @@ pub(crate) fn generate_long_horizon_goal_prompt(
     goal_path: &Path,
     interval_str: &str,
     role: ExecutionRole,
+    effective_peer_charter: Option<&str>,
 ) -> String {
+    let charter = effective_peer_charter.unwrap_or_else(|| match role {
+        ExecutionRole::Master => POLICY.master_charter(),
+        ExecutionRole::Worker => POLICY.worker_charter(),
+        ExecutionRole::ManagedSubagent => POLICY.managed_subagent_charter(),
+        ExecutionRole::Unknown => POLICY.unknown_charter(),
+    });
     format!(
         r#"# 本人长程目标编排提示词（Master / Peer）
 
@@ -13,7 +20,7 @@ pub(crate) fn generate_long_horizon_goal_prompt(
 **执行边界**: `/goal` 和实现文档都不得声明 token、时间、上下文或轮次预算；只以目标文档中的完成条件和证据判断是否结束。
 
 RUN: `appsdk longhorizon show`
-THEN: 在原目标或任务记录维护目标、执行计划、实际进度和行动项。逐项关联验收或缺口，并写明负责人、动作、产物和完成证据。每次唤醒复核前次未清项并执行可做工作。
+THEN: 在原目标或任务记录维护目标、执行计划、实际进度和行动项。每项目标都关联可观察的评估标准和至少一项行动。行动项写明负责人、动作、产物、通过条件和完成证据。每次唤醒复核前次未清项并执行可做工作。
 无进展时记录卡点和已试路径，安排下一项核实、解阻或执行。无可执行行动项时核对剩余验收，补齐漏项、记录等待对象及恢复信号，或凭验收证据收口。其他独立工作继续。
 巡检只是兜底唤醒，不是执行依赖。登记或续订后立即继续当前可执行工作；不得以“等下一次唤醒”结束尚能推进的任务。未来 deadline、未收到唤醒或巡检服务不可用，都不阻塞已有授权内的工作。
 
@@ -50,7 +57,7 @@ THEN: 在原目标或任务记录维护目标、执行计划、实际进度和�
 "#,
         goal_path.display(),
         interval_str,
-        POLICY.worker_charter().trim(),
+        charter.trim(),
         POLICY.fleet_rules().trim(),
         POLICY.notification_rules().trim(),
         project_patrol_brief(role),
@@ -60,14 +67,14 @@ THEN: 在原目标或任务记录维护目标、执行计划、实际进度和�
 
 pub(crate) fn project_patrol_brief(role: ExecutionRole) -> String {
     if role != ExecutionRole::Master {
-        return "## 4. 项目巡检与 CEO 汇报\n\n项目巡检和 CEO 汇总由本项目 master 负责。普通 peer 只维护本人目标，不 arm 项目巡检。".to_string();
+        return "## 4. 项目巡检与 CEO 汇报\n\n项目巡检和 CEO 汇总由本项目 master 负责。当前角色只维护本人职责内已授权的目标和巡检。".to_string();
     }
     r#"## 4. 项目巡检与 CEO 汇报
 
 （仅本项目 master / Jenny 适用；普通 peer 不 arm 项目巡检。）
 
 - **核对巡检回执**：`--event master-idle` 项目巡检沿已安装 Collab Skill 的 `project-patrol` 合同，复用有效订阅。以实际 `patrol_armed` 与 `patrol_subscription_id` 核对启动状态。
-- **每次巡检处理有证据的缺口**：核对 worker 状态、未关闭任务归属、订阅取消状态和上轮行动项结果。自动唤醒只针对满足条件的 idle 任务持有者。有任务阻塞或停滞时按上面的取证规则处理。把缺口绑定到原任务上的负责人、动作和复验条件，跟踪结果。
+- **每次巡检对照评估标准**：比较当前证据与上轮结果，逐项注明通过、缺口或无法核实。核对 worker 状态、未关闭任务归属、订阅取消状态和上轮行动项结果。自动唤醒只针对满足条件的 idle 任务持有者。有任务阻塞或停滞时按上面的取证规则处理。将缺口与待核实项关联到原任务的负责人、动作、复验标准或恢复信号。
 - **维护逐 peer 任务清单并按可用性派发**：在项目现有 goal/task notes 记录每个 peer 的 goal、当前工作、变化、证据源与时间、剩余缺口和下一动作；每轮被动更新，包括无任务 peer，不把它当 board 或 live 状态。把已授权长程目标交给确认可用且无任务的 peer，跟踪接受与执行；peer 不可达、未知或不可用时保留该长程目标，把 ready 一次性执行或观察派给独立 `codex exec --profile gcm` subworker。未知不是 idle；无 ready 工作不发明任务。
 - **不 rearm 已取消任务**：peer 可取消其本人任务的 board 巡检，取消只停该任务的巡检，保留任务、direct-message 和其他订阅。巡检不得重新 arm 已被 peer 取消的任务；本人明确恢复后才恢复。
 - **有 CEO 时回报实质进度**：`collab ceo reply --subject "<项目进度>" <正文>`，正文必须含目标、已验收结果、剩余工作、有证据的阻塞和下一动作，不写无证据心跳，不按正文关键词猜测紧急程度。
@@ -129,8 +136,8 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 
 const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
-1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将任务和缺陷交可承接的 architect，由 architect 完成计划、直接交执行 peer 并验收。其他工作先检查 idle、授权和容量，优先派给合适 peer。仅当无合适 peer 可承接时，派独立 `codex exec --profile gcm` 执行或观察 worker。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
-2. **Peer bounded subwork**：已接受目标的 peer 可将自己的目标拆成 non-overlapping bounded scopes，并直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker；这是 peer 自己执行的分拆，不是 manager 绕过可用 peer 容量。该 peer 核验证据并完成 assigned delivery。
+1. **Peer-first 管理派单**：先按 Collab Skill 处理 architect 进件。Jenny 将任务和缺陷交可承接的 architect，由 architect 完成计划、直接交执行 peer 并验收。其他工作先检查 idle、获授权且合适的 peer 与可用容量。仅当无合适 peer 可承接时，按 Codex 编排合同派独立执行或观察 worker。执行中只为必要设计决定、真实阻塞和约定交接直接联系，进度写原任务。不要用内置会话 Agent 或 managed subagent 作为生产并发路径。
+2. **已接受任务的子任务**：各角色可把职责内的工作拆成互不重叠的范围。先使用合适且已获授权的 peer；无可承接 peer 时按 Codex 编排合同使用独立子 worker。任务 owner 核验证据并完成交付。
 3. **兼容边界**：`collab subagent`、`appsdk subworker` 及其 managed records 只用于旧状态诊断、迁移和有证据的兼容操作，不授予新任务执行指导。任务结束后只回收自有 worker 和资源。
 4. **Standing patrol**：每次巡检只收敛本人目标范围。可恢复提取后移除不需要的自有 worktree；回收自有 stale resource；逐项处理本目标 open P0/P1 或用 owner、原因、解除条件明确停车；每个新生产问题先走项目 canonical issue intake。
 5. **PROTECTED_HOLD**：dirty、active、shared、unknown 资源必须保留并报告。不得删除其他 owner 的资源，不得批量终止进程，不得以 Collab/AppSDK 维护重启共享 daemon、tmux server 或宿主 pane。
@@ -144,15 +151,15 @@ pub(crate) const NOTIFY_RULES: &str = r#"通知处理准则（master 和 peer �
 
 每条通知都带 `P<n> ACTION: <一个动作>`。优先级：
 - P0 人类消息、blocker 上报；`goal:` / `deadline` 唤醒 → 跑 longhorizon show 后排程。
-- P1 `task-keepalive`（继续本人 goal，或记录真实 blocker 与具体方案）、`worker-idle`（按本人目标安排 ready 工作：本人已接受目标的 bounded subwork 可直接并发派独立 `codex exec --profile gcm` 子 worker；只有管理入口派发未分配 ready 工作，才先检查 idle、获授权且合适的 peer 与可用容量，有 ready 工作可承接时优先派给该 peer，仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`）、`worker-unresponsive`（读取现有事实后恢复或明确停车）、旧 managed 兼容状态（只做诊断/迁移，不启动新 managed 任务）、`release`（恢复等待该资源的任务）。
+- P1 `task-keepalive`（继续本人 goal，或记录真实 blocker 与具体方案）、`worker-idle`（处理职责内 ready 工作；需派发时先检查合适且获授权的 peer 和可用容量，仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`）、`worker-unresponsive`（读取现有事实后恢复或明确停车）、旧 managed 兼容状态（只做诊断/迁移，不启动新 managed 任务）、`release`（恢复等待该资源的任务）。
 - P2 回执类（delivery recorded、cleanup receipt）：记下就继续干，不要被打断，也不要当成新任务。
 
 高优先级是抢占，不是取消：处理完仍要回到原任务。不要用通知回复通知。"#;
 
-const WORKER_CHARTER: &str = r#"你负责本人已接受的目标。Master 和普通 peer 的编排职责相同，目标层级不同。普通 peer 不是执行 worker；合同指定为执行者的 peer 按详细设计直接执行和验证。
+const WORKER_CHARTER: &str = r#"普通 peer 按清晰合同执行、验证并交付已接受的任务。可自行分析和编排简单问题。复杂问题有可承接 architect 时，由 architect 设计，再由 peer 执行。
 
 1. 自行登记、读取、更新、续订和取消本人的 goal。名字与规范项目确定归属；sessionID 只承载当前执行。不得代理登记或改写他人的 goal。
-2. 本人承担编排的目标可拆成互不重叠的范围，并行派独立 `codex exec --profile gcm` 执行或观察子任务。管理入口处理未分配目标时沿 Collab 派单顺序。指定 peer 执行者按合同交付和验证，设计缺口直接交 architect。核验证据，完成自己负责的交付和资源清理。
+2. 职责内的子任务可拆成互不重叠的范围。无合适 peer 可承接时按 Codex 编排合同派独立子 worker。核验子任务证据，完成自己负责的交付和资源清理。
 3. 对 master 的合作请求按当前所有权和产能明确接受、协商或拒绝，不静默忽略。
 4. 你是受托范围的唯一交付负责人。调查并尝试授权内解法。真实阻塞需协调时，向直属负责人一次提交失败入口、原错、尝试结果、外部依赖、所需决定和恢复条件。由 architect 直接处理设计及执行范围内的事项，项目级决策交 Jenny。负责人核实后按权限处理等待，期间推进独立工作。
 5. 巡检只是兜底唤醒，不是执行依赖。登记或续订后立即继续 ready 工作，不等下一次唤醒。仅暂停确实依赖或不安全的动作；等待决定时继续其余工作，保留交付责任，除非明确改派。"#;
@@ -225,16 +232,21 @@ mod tests {
 
     #[test]
     fn generated_prompt_uses_the_canonical_role_policy() {
-        let prompt =
-            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Master);
+        let prompt = generate_long_horizon_goal_prompt(
+            Path::new("goal.md"),
+            "15m",
+            ExecutionRole::Master,
+            None,
+        );
 
-        assert!(prompt.contains("peer 不是执行 worker"));
+        assert!(prompt.contains("你是本项目的 master"));
         assert!(!prompt.contains("只有所有合适 peer 都忙"));
         assert!(!prompt.contains("Master 专属"));
         assert!(prompt.contains("Worker / subworker 处理规则"));
         assert!(prompt.contains("通知处理准则"));
         assert!(prompt.contains("项目巡检与 CEO 汇报"));
         assert!(prompt.contains("目标、执行计划、实际进度和行动项"));
+        assert!(prompt.contains("每项目标都关联可观察的评估标准和至少一项行动"));
         assert!(prompt.contains("无可执行行动项时核对剩余验收"));
         assert!(prompt.contains("worker snapshot <id> --capture --lines 80"));
         assert!(prompt.contains("直接交执行 peer 并验收"));
@@ -275,9 +287,13 @@ mod tests {
         assert!(unknown.contains("独立完成用户已授权的工作"));
         assert!(unknown.contains("codex exec --profile gcm"));
         assert!(!unknown.contains("只允许恢复绑定/注册"));
-        let worker_prompt =
-            generate_long_horizon_goal_prompt(Path::new("goal.md"), "15m", ExecutionRole::Worker);
+        let worker_prompt = generate_long_horizon_goal_prompt(
+            Path::new("goal.md"),
+            "15m",
+            ExecutionRole::Worker,
+            None,
+        );
         assert!(!worker_prompt.contains("默认 arm 已完成"));
-        assert!(worker_prompt.contains("普通 peer 只维护本人目标"));
+        assert!(worker_prompt.contains("当前角色只维护本人职责内已授权的目标和巡检"));
     }
 }

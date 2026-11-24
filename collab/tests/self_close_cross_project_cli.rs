@@ -559,8 +559,13 @@ fn self_close_clears_old_anchors_before_cross_project_context() {
         retired["target_sessions"][&explicit_id], source_session,
         "retirement must preserve the original target session before handoff"
     );
-    let replay = run_ok_at(&fixture, &source_root, &returned_pane, &receive_args, false);
-    assert_eq!(replay["messages"], received["messages"]);
+    let repeated = run_ok_at(&fixture, &source_root, &returned_pane, &receive_args, false);
+    assert!(
+        repeated["messages"].as_array().unwrap().iter().all(|message| {
+            message["id"] != msg_id && message["id"] != explicit_id
+        }),
+        "the same receive ID must not replay either consumed body: {repeated}"
+    );
     let after_receive = fixture.current_state_for(&source_root, &source_app_scope);
     assert_eq!(
         after_receive["msgs"][consumed_id],

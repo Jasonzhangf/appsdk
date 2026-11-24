@@ -59,9 +59,9 @@ fn test_server() -> (Arc<Server>, std::path::PathBuf) {
 }
 
 fn register(server: &Server, worker_id: &str) {
-    let response =
-        crate::server::peer_tests::register(server, worker_id, &format!("thread-{worker_id}"));
-    assert!(response.ok, "worker registration failed: {response:?}");
+    let transport =
+        crate::server::peer_tests::test_appserver_transport(&format!("thread-{worker_id}"));
+    crate::server::peer_tests::register_appserver_peer(server, worker_id, &transport);
 }
 
 fn subscription_messages<'a>(
@@ -663,6 +663,7 @@ fn restart_attempts_only_undelivered_pending() {
     server.commit(&[Event::Delivered {
         ids: vec![delivered.clone()],
     }]);
+    let appserver_thread_status = Arc::clone(&server.appserver_thread_status);
     drop(server);
 
     let state_path = root.join(".agent-collab/server/state.json");
@@ -679,7 +680,7 @@ fn restart_attempts_only_undelivered_pending() {
         appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
             Ok(serde_json::json!({"accepted": true}))
         }),
-        appserver_thread_status: super::super::default_appserver_thread_status(),
+        appserver_thread_status,
         appserver_thread_archive: super::super::default_appserver_thread_archive(),
         rex_monitor: Default::default(),
         mailbox_notify: tokio::sync::Notify::new(),

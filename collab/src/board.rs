@@ -350,6 +350,8 @@ pub struct BoardInvitation {
     #[serde(default)]
     pub original_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inviter_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automatic_source: Option<BoardInvitationSource>,
 }
 

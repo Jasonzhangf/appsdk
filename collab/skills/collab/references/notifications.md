@@ -191,9 +191,9 @@ Up to three active subscriptions exist per agent.
   reclassified as a P0 interrupt by subject text alone.
 - One safe preview contains notification ID, abbreviated subject, and one-line
   original body. Control characters are escaped. Explicit `collab sendmessage`
-  and daemon-generated wakeups use the already selected binding; transport
-  acceptance does not create a receive receipt. Only `collab recv` consumption
-  commits the durable receipt visible to the sender.
+  and daemon-generated wakeups use the already selected binding. Transport
+  acceptance is not delivery proof. Only `collab recv` consumes the current
+  unread batch, without creating replayable receive history.
 - Full subject/body remains in the mailbox without a matching subscription.
   This outcome is not a sender-selected `mailbox-only` mode.
 - A failed/lost/delayed/duplicate wake never rolls back mailbox truth or counts

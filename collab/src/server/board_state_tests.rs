@@ -145,10 +145,12 @@ fn task(id: &str, owner: &str) -> TaskRec {
 #[test]
 fn reviewer_rebind_keeps_delivered_task_stable_and_updates_next_step() {
     let (server, root) = test_server();
+    for worker in ["author", "master"] {
+        let response = crate::server::peer_tests::register_synthetic_peer(&server, worker, worker);
+        assert!(response.ok, "{response:?}");
+    }
     {
         let mut state = server.state.lock().unwrap();
-        register_worker(&mut state, "author");
-        register_worker(&mut state, "master");
         let mut delivered = task("reviewer-rebind", "author");
         delivered.created_by = "master".into();
         delivered.status = "delivered".into();
@@ -595,6 +597,7 @@ fn current_state_preserves_invitation_and_its_capacity_reservation() {
                     created_ms: now_ms(),
                     original_status: None,
                     original_owner: None,
+                    inviter_name: None,
                     automatic_source: None,
                 }),
                 ..crate::board::BoardTaskDetails::default()

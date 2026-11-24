@@ -650,15 +650,24 @@ fn peer_lifecycle_c9_restart_preserves_unknown_close_fence_and_query() {
 
     fixture.stop_daemon();
     fixture.restart_daemon();
+    for _ in 0..100 {
+        if fixture.current_state()["notification_delivery_evidence"]
+            .as_object()
+            .is_some_and(|evidence| !evidence.is_empty())
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let before_query = lifecycle_surfaces(&fixture, &master);
     let query = lifecycle_query(&fixture, &master, "peer-c9-close", "peer-c9-capability");
     assert_eq!(query["result"]["outcome"], "unknown", "{query}");
     assert_eq!(query["result"]["phase"], "unknown", "{query}");
-    assert_eq!(
-        before_query,
-        lifecycle_surfaces(&fixture, &master),
-        "query does not release or rewrite the fence"
-    );
+    let after_query = lifecycle_surfaces(&fixture, &master);
+    assert_eq!(before_query.0, after_query.0, "query must not rewrite identity map");
+    assert_eq!(before_query.1, after_query.1, "query must not rewrite current state");
+    assert_eq!(before_query.2, after_query.2, "query must not rewrite host routes");
+    assert_eq!(before_query.3, after_query.3, "query must not rewrite lease status");
     let read = lifecycle_read(&fixture, &master, Some(child_id));
     assert_eq!(read["result"]["outcome"], "unknown", "{read}");
     assert_eq!(

@@ -174,10 +174,9 @@ fn notification_action(
             None => NotificationAction::Start,
         }),
         "idle" => Ok(NotificationAction::Start),
-        // `thread/read` reports notLoaded for a persisted thread that is cold
-        // on this endpoint.  `turn/start` is the native load-and-start call,
-        // so an immediate notification loads it instead of refusing.
-        "notLoaded" => Ok(NotificationAction::Start),
+        "notLoaded" => Err(AdapterError::RouteUnavailable {
+            detail: "RECIPIENT_NOT_ONLINE: target AppServer thread is cold".into(),
+        }),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
@@ -197,7 +196,9 @@ fn queued_notification_action(
             None => NotificationAction::Start,
         }),
         "idle" => Ok(NotificationAction::Start),
-        "notLoaded" => Ok(NotificationAction::Start),
+        "notLoaded" => Err(AdapterError::RouteUnavailable {
+            detail: "RECIPIENT_NOT_ONLINE: target AppServer thread is cold".into(),
+        }),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(

@@ -391,7 +391,7 @@ fn ceo_status_reads_host_without_registration_and_reports_default_workspace() {
 }
 
 #[test]
-fn ceo_approval_and_reply_flags_fail_before_identity_or_state_writes() {
+fn ceo_approval_and_retired_reply_flag_fail_before_identity_or_state_writes() {
     let fixture = Fixture::without_tmux("ceo-args");
     let before = durable_surfaces(&fixture);
 
@@ -412,7 +412,6 @@ fn ceo_approval_and_reply_flags_fail_before_identity_or_state_writes() {
             "--subject",
             "x",
             "--reply-required",
-            "--reply-on-completion",
             "body",
         ],
         None,
@@ -420,8 +419,8 @@ fn ceo_approval_and_reply_flags_fail_before_identity_or_state_writes() {
     assert!(!conflict.status.success());
     let conflict_stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(
-        conflict_stderr.contains("cannot be used with"),
-        "reply flags must be mutually exclusive before identity lookup: {conflict_stderr}"
+        conflict_stderr.contains("unexpected argument"),
+        "retired reply flag must be rejected by the public parser: {conflict_stderr}"
     );
 
     assert_eq!(
@@ -542,7 +541,7 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
     let role_brief = &current["role_brief"];
     let role_task = role_brief["role_task"].as_str().unwrap_or_default();
     assert!(
-        role_task.contains("The wire role remains"),
+        role_task.starts_with("Execute your accepted task as an ordinary peer."),
         "base peer identity duty must stay ahead of the CEO text: {role_task}"
     );
     let serialized = current.to_string();
@@ -763,7 +762,6 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
             target_root.to_str().unwrap(),
             "--subject",
             "action",
-            "--reply-required",
             "please return an exact result",
         ],
         false,
@@ -902,7 +900,6 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
             "The targeted public test passes.",
             "--priority",
             "p1",
-            "--reply-on-completion",
         ],
         false,
     );
@@ -980,13 +977,10 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         ],
         false,
     );
-    assert!(
-        waiting["projects"][0]["pending_replies"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|o| o["message_id"] == task_message_id),
-        "ordinary progress cleared completion marker: {waiting}"
+    assert_eq!(
+        waiting["projects"][0]["pending_replies"],
+        serde_json::json!([]),
+        "ordinary progress must not create reply obligations: {waiting}"
     );
     fixture.restart_daemon();
     let replayed = run_ok_at(&fixture, &ceo_root, &ceo_pane, &["ceo", "status"], false);
@@ -1006,13 +1000,10 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
         ],
         false,
     );
-    assert!(
-        resumed["projects"][0]["pending_replies"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|o| o["message_id"] == task_message_id),
-        "replay lost completion marker: {resumed}"
+    assert_eq!(
+        resumed["projects"][0]["pending_replies"],
+        serde_json::json!([]),
+        "restart must not reconstruct reply obligations: {resumed}"
     );
 
     run_ok_at(

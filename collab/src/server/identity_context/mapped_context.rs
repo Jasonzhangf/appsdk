@@ -4,7 +4,6 @@ use crate::server::binding_slot::{
 };
 
 include!("anchor_rename.rs");
-include!("communication.rs");
 include!("retirement.rs");
 
 impl ProjectRuntimeManager {
@@ -281,24 +280,16 @@ impl ProjectRuntimeManager {
         let physical = name_result["physical_anchor"].clone();
         let physical_incomplete = physical["status"] == "incomplete";
         drop(_identity);
-        let communication = match self.mapped_communication(&runtime, &context,
-            &identity.worker_id, &identity.token,
-            request.invocation == "manual_communication_restore", false) {
-            Ok(communication) => communication,
-            Err(error) => return (runtime, Resp::err(error)),
-        };
         let mut snapshot =
             context_projection(&runtime, identity.worker_id.clone(), identity.token.clone());
         if !snapshot.ok {
             return (runtime, snapshot);
         }
         response.data["snapshot"] = snapshot.data;
-        if request.operation_id.is_empty() && communication.is_none() && !physical_incomplete {
+        if request.operation_id.is_empty() && !physical_incomplete {
             return (runtime, response);
         }
-        let outcome = if physical_incomplete { "incomplete" } else {
-            communication.as_ref().map(communication_operation_outcome).unwrap_or("completed")
-        };
+        let outcome = if physical_incomplete { "incomplete" } else { "completed" };
         let mut result =
             json!({"result":{
                 "operation_id":request.operation_id,"action":"context","invocation":request.invocation,
@@ -315,7 +306,6 @@ impl ProjectRuntimeManager {
         }
         let error = physical_incomplete.then(|| physical["error"].as_str()
             .unwrap_or("PHYSICAL_ANCHOR_INCOMPLETE").to_owned());
-        if let Some(communication) = communication { result["result"]["owner_readback"]["communication"] = communication; }
         (
             runtime,
             Resp { ok: outcome == "completed", error, data: result },
@@ -424,26 +414,19 @@ impl ProjectRuntimeManager {
                 Resp::err("IDENTITY_CONTEXT_READBACK_UNAVAILABLE: mapped owner is not loaded"),
             );
         };
-        let communication = match self.mapped_communication(&runtime, context,
-            &identity.worker_id, &identity.token, false, true) {
-            Ok(communication) => communication,
-            Err(error) => return (runtime, Resp::err(error)),
-        };
         let mut snapshot = context_projection(&runtime, identity.worker_id.clone(), identity.token);
         if !snapshot.ok {
             return (runtime, snapshot);
         }
-        let communication_outcome = communication.as_ref().map(communication_operation_outcome).unwrap_or("completed");
         let physical = snapshot.data["physical_anchor"].clone();
-        let outcome = if physical["status"] == "incomplete" { "incomplete" } else { communication_outcome };
+        let outcome = if physical["status"] == "incomplete" { "incomplete" } else { "completed" };
         let mut result = json!({"result":{"operation_id":request.operation_id,"action":"context","invocation":"query",
             "outcome":outcome,"phase":null,"committed_phases":[],"failed_phase":null,
             "requires":{"kind":null,"fields":[],"sources":{},"approval":null,"repair_invocation":null},"snapshot":snapshot.data,
             "owner_readback":{"physical_anchor":physical}}});
-        if let Some(communication) = communication { result["result"]["owner_readback"]["communication"] = communication; }
         (
             runtime,
-            Resp { ok: communication_outcome == "completed", error: None, data: result },
+            Resp { ok: true, error: None, data: result },
         )
     }
 

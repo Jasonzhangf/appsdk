@@ -122,7 +122,7 @@ async fn authenticated_send_uses_context_app_scope_and_rejects_forged_scope() {
     let request = |command| Req::Send {
         from: "sender".into(), worker_id: Some("sender".into()), token: Some("token-sender".into()), command: Some(command),
         to: "recipient".into(), mtype: "notify".into(), subject: Some("scope".into()), body: "exact wire payload".into(),
-        in_reply_to: None, reply_policy: None, target_session: None, delivery: "immediate".into(),
+        in_reply_to: None, target_session: None, delivery: "immediate".into(),
     };
     let accepted = dispatch_wire(server.clone(), Some(context_with_runtime(&root, app, &runtime)), request(command(app, "wire-send-ok"))).await;
     assert!(accepted.ok, "{accepted:?}");

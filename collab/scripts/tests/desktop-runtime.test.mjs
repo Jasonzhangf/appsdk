@@ -178,6 +178,8 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
     assert.deepEqual(enrollment.binding,{session,thread});
     assert.equal(enrollment.cwd,project);assert.equal(enrollment.host_pipe,env.CODEX_APP_TOOLS_PIPE_PATH);
     const identityMap=path.join(f.state,'identity-map.json'),before=await fs.readFile(identityMap);
+    const capability=capabilityPath(f.state,project,session,thread);
+    const capabilityBefore=await fs.readFile(capability);
     const {createInterface}=await import('node:readline');
     async function query(from,label,tool='collab_context',args={query:true}){
       const wrapper=spawn(process.execPath,[script],{cwd:from,env,stdio:['pipe','pipe','pipe']});
@@ -185,14 +187,22 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
       const timer=setTimeout(()=>wrapper.kill('SIGTERM'),15000);
       const lines=createInterface({input:wrapper.stdout})[Symbol.asyncIterator]();
       async function rpc(id,method,params){
-        wrapper.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');
+        const idToken=typeof id==='bigint'?id.toString():JSON.stringify(id);
+        wrapper.stdin.write(`{"jsonrpc":"2.0","id":${idToken},"method":${JSON.stringify(method)},"params":${JSON.stringify(params)}}\n`);
         for(;;){const line=await lines.next();assert.ok(!line.done,`${label}: wrapper closed before responding`);
+          if(typeof id==='bigint'){
+            const rawId=/"id"\s*:\s*("[^"]*"|-?\d+|null)\s*[,}]/.exec(line.value)?.[1];
+            if(rawId===undefined)continue;
+            assert.equal(rawId,idToken,`${label}: successful managed response must preserve the integer ID`);
+            return JSON.parse(line.value);
+          }
           const response=JSON.parse(line.value);if(response.id===id)return response;}
       }
       try{
         await rpc('init','initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'enrolled-query',version:'1'}});
         const start=f.calls.length;
-        const response=await rpc('query','tools/call',{name:tool,arguments:tool==='collab_context'?{query:true,project_scope:project,app_scope_id:'appserver-cli'}:{},_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
+        const queryId=tool==='collab_context'&&from===home?9007199254740993n:'query';
+        const response=await rpc(queryId,'tools/call',{name:tool,arguments:tool==='collab_context'?{query:true,project_scope:project,app_scope_id:'appserver-cli'}:{},_meta:{'openai/threadId':thread,'x-codex-turn-metadata':{thread_id:thread,turn_id:'request-turn'}}});
         const reads=f.calls.slice(start).filter(c=>c.params?.tool==='read_thread'&&c.params.threadId===thread&&c.params.arguments.threadId===thread);
         return {response,reads:reads.length};
       }finally{wrapper.stdin.end();await closed;clearTimeout(timer);}
@@ -202,6 +212,7 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
     const elsewhere=await query(home,'cwd outside the project');
     const inside=await query(project,'cwd at the project');
     assert.deepEqual(await fs.readFile(identityMap),before,'a query must not mutate the identity map');
+    assert.deepEqual(await fs.readFile(capability),capabilityBefore,'a query must not republish the capability');
     assert.ok(elsewhere.reads>0,`query from another cwd made ${elsewhere.reads} exact native read_thread calls: ${JSON.stringify(elsewhere.response)}`);
     assert.equal(elsewhere.response.result.isError,false,JSON.stringify(elsewhere.response));
     const result=JSON.parse(elsewhere.response.result.content[0].text).result.snapshot;

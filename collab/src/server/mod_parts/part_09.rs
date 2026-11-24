@@ -2688,7 +2688,6 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         Err(error) => return Resp::err(error),
     };
     let work_policies = st.project_work_policy.clone();
-    let pending_reply_obligations = st.reply_obligation_view(&worker_id);
     drop(st);
 
     // Normal Context records presence before this pure projection. A completed
@@ -2941,7 +2940,6 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         "role_brief": current_role_brief,
         "work_roles": work_roles_by_worker.get(&worker.id).cloned().unwrap_or_default(),
         "work_policies": work_policies,
-        "pending_reply_obligations": pending_reply_obligations,
         "liveness": {
             // `live` stays reserved for an endpoint that is resident now.
             // Durable identity presence is reported separately below.

@@ -11,7 +11,6 @@
 | Task conflict/wait | `task_conflicts`, `handle_task_wait`, timers | Bounded acyclic wait, exact resource owner and subscribed release. |
 | Named mailbox | `name_mailbox::handoff_events`, receive owner | Move unread messages by current scoped name, including a vacant predecessor. Preserve real consumed receipts and payloads. |
 | Native notification | `attempt_notification_with`, notification contract/adapters | Durable current message before external send; acceptance, actual receive and reply remain distinct. |
-| Manual communication | `identity_context/communication.rs::mapped_communication` | Ordinary authenticated self-Send, exact current binding, real receive and correlated self-reply; no fabricated consumption or blind retry. |
 | Context/query/status | Context projection and host adapters | Current identity and scoped work projection; query stays read-only, liveness remains an observation. |
 | Scoped route | `ProjectRuntimeManager`, route-resolution entry | Exact current native/tmux binding, scoped storage and explicit absence/ambiguity. Route indexes do not select an identity. |
 | Project reset/startup | Project reset owner, current runtime setup | Finish committed reset before restoration, retain foreign data, surface current-file errors; reset admission is independent of removed migration APIs. |

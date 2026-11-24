@@ -453,13 +453,17 @@ impl super::ProjectRuntimeManager {
                     &subscription_id,
                     now as i64,
                 );
-                if let super::NotificationAttempt::Rejected(error) = attempt {
-                    crate::server::presence::append_log(
-                        &target.log_path(),
-                        &format!(
-                            "CEO_REPORT_PATROL_WAKE_REJECTED: message={message_id} error={error}"
-                        ),
-                    );
+                if let super::NotificationAttempt::Rejected(error)
+                | super::NotificationAttempt::NotAttempted(error) = attempt
+                {
+                    if !error.starts_with("RECIPIENT_NOT_ONLINE:") {
+                        crate::server::presence::append_log(
+                            &target.log_path(),
+                            &format!(
+                                "CEO_REPORT_PATROL_WAKE_REJECTED: message={message_id} error={error}"
+                            ),
+                        );
+                    }
                 }
             }
         }

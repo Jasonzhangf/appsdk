@@ -769,11 +769,18 @@ pub fn notify(
     message_id: &str,
     text: &str,
 ) -> Result<serde_json::Value, String> {
-    match probe(endpoint)? {
-        PanePresence::Present => {}
-        PanePresence::Missing => return Err("TMUX_PANE_MISSING: target pane is gone".into()),
-        PanePresence::Unknown => return Err("TMUX_PANE_UNKNOWN: target pane is uncertain".into()),
-    }
+    notify_with_attachment(endpoint, message_id, text, || {
+        iterm2_panes_for_endpoint(endpoint).is_ok_and(|panes| !panes.is_empty())
+    })
+}
+
+fn notify_with_attachment(
+    endpoint: &TmuxEndpoint,
+    message_id: &str,
+    text: &str,
+    attached: impl Fn() -> bool,
+) -> Result<serde_json::Value, String> {
+    let can_submit = || attached() && agent_is_online(endpoint);
     let before = capture(endpoint)?;
     let buffer = buffer_name(message_id);
     let mut child = Command::new("tmux")
@@ -805,6 +812,10 @@ pub fn notify(
             String::from_utf8_lossy(&loaded.stderr).trim()
         ));
     }
+    if !can_submit() {
+        let _ = tmux_command(&endpoint.socket_path, &["delete-buffer", "-b", &buffer]);
+        return Err("RECIPIENT_NOT_ONLINE: target tmux agent or iTerm2 attachment unavailable before paste".into());
+    }
     tmux_command(
         &endpoint.socket_path,
         &[
@@ -819,6 +830,9 @@ pub fn notify(
     )
     .map_err(|error| format!("TMUX_TEXT_SUBMIT_FAILED: {error}"))?;
     let after_text = capture(endpoint)?;
+    if !can_submit() {
+        return Err("TMUX_ENTER_SUBMIT_FAILED: target agent or iTerm2 attachment unavailable after text submission".into());
+    }
     tmux_command(
         &endpoint.socket_path,
         &["send-keys", "-t", &endpoint.pane_id, "Enter"],
@@ -839,6 +853,16 @@ pub fn notify(
         "pane_output_changed_since_before": after_enter != before,
         "consumed": false
     }))
+}
+
+pub(crate) fn agent_is_online(endpoint: &TmuxEndpoint) -> bool {
+    observe_agent(endpoint)
+        .is_ok_and(|observation| {
+            observation.agent_presence == AgentPresence::Online
+                && !observation.background
+                && observation.foreground_command.as_deref()
+                    .is_some_and(codex_presence::is_codex_command)
+        })
 }
 
 /// Read-only observation directed at the current Codex TUI. Presence and
@@ -1734,6 +1758,14 @@ int main(int argc, char **argv) {
             )
         }
 
+        fn foreground_command(&self) -> String {
+            format!(
+                "{} {}",
+                shell_quote(&self.executable.to_string_lossy()),
+                shell_quote(&self.pid_file.to_string_lossy())
+            )
+        }
+
         fn pid(&self) -> Option<u32> {
             std::fs::read_to_string(&self.pid_file)
                 .ok()
@@ -1798,6 +1830,19 @@ int main(int argc, char **argv) {
 
     thread_local! {
         static TEST_TMUX_BINARY: RefCell<PathBuf> = RefCell::new(PathBuf::from("tmux"));
+        static DETACHED_TEST_SERVER: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn test_server_is_detached(server_pid: u32) -> bool {
+        DETACHED_TEST_SERVER.get() == Some(server_pid)
+    }
+
+    struct DetachedTestServer(Option<u32>);
+
+    impl Drop for DetachedTestServer {
+        fn drop(&mut self) {
+            DETACHED_TEST_SERVER.set(self.0);
+        }
     }
 
     pub(super) fn test_tmux_binary() -> PathBuf {
@@ -1828,10 +1873,15 @@ int main(int argc, char **argv) {
             ));
             std::fs::create_dir_all(&root).unwrap();
             let wrapper = root.join("tmux");
+            let matches = if command_name == "native-input" {
+                "paste-buffer|send-keys"
+            } else {
+                command_name
+            };
             std::fs::write(
                 &wrapper,
                 format!(
-                    "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"{command_name}\" ]; then\n    echo 'forced {command_name} failure' >&2\n    exit {exit_code}\n  fi\ndone\nexec '{real_tmux}' \"$@\"\n"
+                    "#!/bin/sh\nfor arg do\n  case \"$arg\" in\n    {matches}) printf '%s\\n' \"$arg\" >> \"$0.input\"; echo 'forced {command_name} failure' >&2; exit {exit_code};;\n  esac\ndone\nexec '{real_tmux}' \"$@\"\n"
                 ),
             )
             .unwrap();
@@ -2835,24 +2885,27 @@ int main(int argc, char **argv) {
     #[test]
     fn notify_pastes_text_then_sends_enter_and_never_claims_consumption() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let tmux = IsolatedTmux::start_with_command(Some("cat"));
+        let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
-        let receipt = notify(&endpoint, "message-1", "collab durable wake").unwrap();
+        let codex = tmux.fake_codex();
+        start_test_foreground_agent(&tmux, &codex);
+        let receipt = notify_with_attachment(&endpoint, "message-1", "collab durable wake", || true).unwrap();
         assert_eq!(receipt["text_submitted"], true);
         assert_eq!(receipt["enter_submitted"], true);
         assert_eq!(receipt["consumed"], false);
-        assert_eq!(receipt["pane_output_changed_after_enter"], true);
         assert!(capture(&endpoint).unwrap().contains("collab durable wake"));
     }
 
     #[test]
     fn failed_paste_is_explicit_and_does_not_report_submission() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let tmux = IsolatedTmux::start_with_command(Some("cat"));
+        let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        start_test_foreground_agent(&tmux, &codex);
         let _wrapper = TmuxFailureWrapper::fail_command("paste-buffer");
 
-        let error = notify(&endpoint, "message-paste-failure", "must not be consumed").unwrap_err();
+        let error = notify_with_attachment(&endpoint, "message-paste-failure", "must not be consumed", || true).unwrap_err();
         assert!(error.starts_with("TMUX_TEXT_SUBMIT_FAILED: forced paste-buffer failure"));
         assert!(!capture(&endpoint).unwrap().contains("must not be consumed"));
     }
@@ -2860,14 +2913,17 @@ int main(int argc, char **argv) {
     #[test]
     fn failed_enter_is_explicit_and_does_not_report_consumption() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let tmux = IsolatedTmux::start_with_command(Some("cat"));
+        let tmux = IsolatedTmux::start();
         let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        start_test_foreground_agent(&tmux, &codex);
         let _wrapper = TmuxFailureWrapper::fail_command("send-keys");
 
-        let error = notify(
+        let error = notify_with_attachment(
             &endpoint,
             "message-enter-failure",
             "paste happened, no receive",
+            || true,
         )
         .unwrap_err();
         assert!(error.starts_with("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure"));
@@ -2875,6 +2931,110 @@ int main(int argc, char **argv) {
             .unwrap()
             .contains("paste happened, no receive"));
         // A failed wake returns Err, never the transport result consumed=false/true object.
+    }
+
+    #[test]
+    fn notify_refuses_binding_only_tmux_pane() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let error = notify_with_attachment(&endpoint, "message-offline", "must never reach the shell", || true).unwrap_err();
+        assert!(error.starts_with("RECIPIENT_NOT_ONLINE:"));
+        assert!(!capture(&endpoint).unwrap().contains("must never reach the shell"));
+    }
+
+    #[test]
+    fn notify_refuses_shell_after_its_observed_agent_exits() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        start_test_foreground_agent(&tmux, &codex);
+        assert!(agent_is_online(&endpoint));
+        codex.terminate();
+        wait_for_view(&endpoint, Duration::from_secs(5), |view| {
+            view["agent_presence"] == "offline"
+        });
+        assert_eq!(probe(&endpoint).unwrap(), PanePresence::Present);
+        let error = notify_with_attachment(&endpoint, "message-exit", "input after exit", || true).unwrap_err();
+        assert!(error.starts_with("RECIPIENT_NOT_ONLINE:"));
+        assert!(!capture(&endpoint).unwrap().contains("input after exit"));
+    }
+
+    #[test]
+    fn notify_rechecks_tmux_attachment_at_paste_and_enter() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        start_test_foreground_agent(&tmux, &codex);
+        assert!(agent_is_online(&endpoint));
+        let no_attachment = notify_with_attachment(&endpoint, "no-attachment", "never paste", || false);
+        assert!(no_attachment.unwrap_err().starts_with("RECIPIENT_NOT_ONLINE:"));
+        assert!(!capture(&endpoint).unwrap().contains("never paste"));
+
+        let _wrapper = TmuxFailureWrapper::fail_command("send-keys");
+        let checks = std::cell::Cell::new(0);
+        let auto_detach = notify_with_attachment(&endpoint, "detach-after-paste", "queued text", || {
+            let count = checks.get();
+            checks.set(count + 1);
+            count == 0
+        });
+        assert!(auto_detach.unwrap_err().contains("attachment unavailable after text submission"));
+        assert!(capture(&endpoint).unwrap().contains("queued text"));
+    }
+
+    #[test]
+    fn notify_rechecks_tmux_foreground_after_attachment_observation() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        start_test_foreground_agent(&tmux, &codex);
+        let error = notify_with_attachment(&endpoint, "agent-exit-during-attach", "must not paste", || {
+            codex.terminate();
+            wait_for_view(&endpoint, Duration::from_secs(5), |view| {
+                view["agent_presence"] == "offline"
+            });
+            true
+        }).unwrap_err();
+        assert!(error.starts_with("RECIPIENT_NOT_ONLINE:"));
+        assert!(!capture(&endpoint).unwrap().contains("must not paste"));
+    }
+
+    fn start_test_foreground_agent(tmux: &IsolatedTmux, fixture: &CodexFixture) {
+        tmux.send_command(&fixture.foreground_command());
+        wait_for_view(&tmux.endpoint(), Duration::from_secs(5), |view| {
+            fixture.pid().is_some()
+                && view["agent_presence"] == "online"
+                && view["background"] == false
+        });
+        fixture.record_start_id(fixture.pid().unwrap());
+    }
+
+    pub(crate) fn foreground_agent_command(root: &Path) -> String {
+        let fixture = CodexFixture::compile(root);
+        format!(
+            "exec {} {}-$$",
+            shell_quote(&fixture.executable.to_string_lossy()),
+            shell_quote(&fixture.pid_file.to_string_lossy()),
+        )
+    }
+
+    pub(crate) fn with_detached_foreground_agent(test: impl FnOnce(TmuxEndpoint)) {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let tmux = IsolatedTmux::start();
+        let endpoint = tmux.endpoint();
+        let codex = tmux.fake_codex();
+        let _detached = DetachedTestServer(DETACHED_TEST_SERVER.replace(Some(endpoint.server_pid)));
+        start_test_foreground_agent(&tmux, &codex);
+        assert!(agent_is_online(&endpoint));
+        assert!(iterm2_panes_for_endpoint(&endpoint).unwrap().is_empty());
+        let before = capture(&endpoint).unwrap();
+        let wrapper = TmuxFailureWrapper::fail_command("native-input");
+        test(endpoint.clone());
+        assert!(!wrapper.root.join("tmux.input").exists(), "tmux input command attempted");
+        assert_eq!(capture(&endpoint).unwrap(), before, "the detached pane received input");
     }
 
     #[test]

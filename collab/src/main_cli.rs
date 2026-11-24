@@ -330,12 +330,6 @@ pub(crate) enum CeoCmd {
         subject: String,
         #[arg(long = "in-reply-to")]
         in_reply_to: Option<String>,
-        /// Track an obligation: the recipient must reply to this message.
-        #[arg(long, conflicts_with = "reply_on_completion")]
-        reply_required: bool,
-        /// Track an obligation: reply once the delegated work is complete.
-        #[arg(long, conflicts_with = "reply_required")]
-        reply_on_completion: bool,
         #[arg(required = true, trailing_var_arg = true)]
         body: Vec<String>,
     },
@@ -356,12 +350,6 @@ pub(crate) enum CeoCmd {
         /// Owner-local priority: p0 (highest) through p4
         #[arg(long, default_value = "p1")]
         priority: String,
-        /// Track an obligation: the recipient must reply to this request.
-        #[arg(long, conflicts_with = "reply_on_completion")]
-        reply_required: bool,
-        /// Track an obligation: reply once the delegated work is complete.
-        #[arg(long, conflicts_with = "reply_required")]
-        reply_on_completion: bool,
     },
     /// Reply as the current project master to the current host-wide CEO
     Reply {
@@ -440,8 +428,8 @@ pub(crate) enum RouteCmd {
 #[derive(Subcommand)]
 pub(crate) enum LiveClosureCmd {
     /// Send one challenge-bound message and observe target execution/consume.
-    /// The command fails closed unless the durable receive receipt binds to
-    /// the same challenge and message ID.
+    /// The command fails closed unless the current live transport accepts the
+    /// challenge-bound input. The mailbox remains the source for consumption.
     Probe {
         #[arg(long)]
         closure_id: String,
@@ -735,12 +723,6 @@ pub(crate) enum Cmd {
         /// keeps the external reply route out of the message body.
         #[arg(long, hide = true)]
         channel_envelope: Option<String>,
-        /// Track an obligation: the recipient must reply to this message.
-        #[arg(long, conflicts_with_all = ["reply_on_completion", "unknown_sender"])]
-        reply_required: bool,
-        /// Track an obligation: reply once the delegated work is complete.
-        #[arg(long, conflicts_with_all = ["reply_required", "unknown_sender"])]
-        reply_on_completion: bool,
         /// Legacy positional body. The new `<address> --content <正文>` form
         /// keeps the address here for the send owner to normalize.
         body: Vec<String>,
@@ -832,9 +814,6 @@ pub(crate) enum Cmd {
         provide: Option<String>,
         #[arg(long)]
         query: bool,
-        /// Restore/verify communication; DSH uses current host facts and loop enrollment.
-        #[arg(long, conflicts_with_all = ["query", "approve_identity", "approve_grant"])]
-        recover_communication: bool,
     },
     /// Mark messages as read
     Ack {

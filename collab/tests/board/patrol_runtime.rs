@@ -436,10 +436,8 @@ fn board_idle_patrol_runtime_cancel_before_due_keeps_direct_message() {
     );
     assert_eq!(received["count"], 1);
     assert_eq!(received["messages"][0]["id"], direct_id);
-    assert_eq!(
-        fixture.run_public(&["msg", direct_id], THREAD_A)["state"],
-        "read"
-    );
+    let direct_state = fixture.current_state();
+    assert_eq!(direct_state["msgs"][direct_id]["state"], "read");
 }
 
 #[test]
@@ -596,20 +594,7 @@ fn board_idle_patrol_runtime_unconsumed_notice_is_not_retried_and_next_due_is_ne
             "a later occurrence must preserve the first notice's current {field}"
         );
     }
-    assert!(
-        !current["receive_receipts"]
-            .as_object()
-            .unwrap()
-            .values()
-            .any(|receipt| {
-                receipt["message_ids"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|id| id == first_id.as_str())
-            }),
-        "the test must not consume the first notice"
-    );
+    assert_eq!(current["msgs"][&first_id]["state"], "pending");
     assert_eq!(
         notice_ids(&current)
             .difference(&second_baseline.notices)

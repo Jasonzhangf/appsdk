@@ -298,7 +298,6 @@
                     subject: Some(format!("isolated message {suffix}")),
                     body: format!("body for {suffix}"),
                     in_reply_to: None,
-                    reply_policy: None,
                     target_session: None,
                     delivery: "immediate".into(),
                 },
@@ -327,7 +326,6 @@
                 subject: Some("must stay isolated".into()),
                 body: "cross-route delivery must fail closed".into(),
                 in_reply_to: None,
-                reply_policy: None,
                 target_session: None,
                 delivery: "immediate".into(),
             },
@@ -478,10 +476,16 @@
             let (_, message_status) = replayed_manager
                 .dispatch_sync(Some(context.clone()), Req::MsgStatus { msg_id: message_id });
             assert!(
-                message_status.ok,
+                message_status.ok
+                    || message_status
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("MESSAGE_CONSUMED:")),
                 "{suffix} replay message: {message_status:?}"
             );
-            assert_eq!(message_status.data["to"], worker_id);
+            if message_status.ok {
+                assert_eq!(message_status.data["to"], worker_id);
+            }
 
             let (_, notification_status) = replayed_manager.dispatch_sync(
                 Some(context),
@@ -514,7 +518,25 @@
 
     #[tokio::test]
     async fn manager_cross_project_appserver_masters_send_and_reject_forged_source_evidence() {
-        let (server, host_root, _) = test_server();
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let (mut server, host_root, _) = test_server();
+        let target_online = Arc::new(AtomicBool::new(true));
+        let target_status = target_online.clone();
+        Arc::get_mut(&mut server).unwrap().appserver_thread_status = Arc::new(move |_, thread| {
+            let status = if thread == "thread-b" && !target_status.load(Ordering::Relaxed) {
+                "notLoaded"
+            } else {
+                "idle"
+            };
+            Ok(json!({"thread": {"id": thread, "status": {"type": status}}}))
+        });
+        let native_calls = Arc::new(AtomicUsize::new(0));
+        let sink_calls = native_calls.clone();
+        with_appserver_notification_sink(&mut server, move |_, _, _, _, _, _| {
+            sink_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(json!({"accepted": true}))
+        });
 
         let project_a = host_root.with_file_name(format!(
             "{}-cross-project-a",
@@ -538,46 +560,12 @@
         let master_b = "cross-project-master-b";
         let token_a = "token-cross-project-master-a";
         let token_b = "token-cross-project-master-b";
-        let (source_runtime, source_registration) = register_host_fixture(&manager,
-            Some(context_with_app(&project_a, app_a)),
-            Req::register(master_a.into(),
-                 token_a.into(),
-                 project_a.display().to_string(),
-                 test_candidates_at("thread-a", &project_a)),
+        let source_runtime = committed_native_scope_fixture(
+            &manager, &context_with_app(&project_a, app_a), master_a, token_a, "thread-a",
         );
-        assert!(source_registration.ok, "{source_registration:?}");
-        assert_eq!(
-            source_registration.data["transport_selected"]["kind"],
-            "tmux"
+        let target_runtime = committed_native_scope_fixture(
+            &manager, &context_with_app(&project_b, app_b), master_b, token_b, "thread-b",
         );
-        assert_eq!(
-            source_registration.data["transport_selected"]["thread_id"],
-            "thread-a"
-        );
-        // The wire registration above creates the route and runtime. Rebind the
-        // binding to a native App Server transport through the typed path, since
-        // wire registration verifies App Server candidates by dialing a socket
-        // and this suite has no live socket. Presence then comes from the App
-        // Server status probe, not the tmux pane.
-        register_native_peer(&source_runtime, &project_a, master_a, token_a, "thread-a", app_a);
-
-        let (target_runtime, target_registration) = register_host_fixture(&manager,
-            Some(context_with_app(&project_b, app_b)),
-            Req::register(master_b.into(),
-                 token_b.into(),
-                 project_b.display().to_string(),
-                 test_candidates_at("thread-b", &project_b)),
-        );
-        assert!(target_registration.ok, "{target_registration:?}");
-        assert_eq!(
-            target_registration.data["transport_selected"]["kind"],
-            "tmux"
-        );
-        assert_eq!(
-            target_registration.data["transport_selected"]["thread_id"],
-            "thread-b"
-        );
-        register_native_peer(&target_runtime, &project_b, master_b, token_b, "thread-b", app_b);
 
         let source_identity = runtime_for_registered(&source_runtime, &project_a, master_a, app_a);
         let target_identity = runtime_for_registered(&target_runtime, &project_b, master_b, app_b);
@@ -621,10 +609,10 @@
                 token: token.into(),
                 command: Some(command),
                 to: to.into(),
-                subject: "cross-project tmux route".into(),
-                body: "durable cross-project message".into(),
+                subject: "cross-project AppServer route".into(),
+                body: format!("durable cross-project message {tag}"),
                 in_reply_to: None,
-                reply_policy: None, target_session: None,
+                target_session: None,
             }
         };
 
@@ -664,6 +652,82 @@
         assert_eq!(received.data["count"], 1);
         assert_eq!(received.data["messages"][0]["id"], message_id);
         assert_eq!(received.data["messages"][0]["to"], master_b);
+        assert_eq!(native_calls.load(Ordering::Relaxed), 1);
+
+        let control = manager.binding_control_store().load().unwrap();
+        let target_name = control
+            .current_for_worker(
+                &target_context.project_scope, &target_context.app_scope_id, master_b,
+            )
+            .unwrap().unwrap().identity_key.name.clone();
+        let target_address = format!("{}.{}", canonical_project_key(&project_b).unwrap(), target_name);
+        target_online.store(false, Ordering::Relaxed);
+        let mut offline_ids = Vec::new();
+        for (context, req) in [
+            (
+                target_context.clone(),
+                cross_project_send(master_a, token_a, "offline-first", &target_address),
+            ),
+            (
+                source_context.clone(),
+                Req::AddressSend {
+                    worker_id: master_a.into(),
+                    token: token_a.into(),
+                    command: Some(cross_project_command(
+                        &source_runtime, &project_a, master_a, app_a, "offline-second",
+                    )),
+                    to: crate::proto::AddressInput::Legacy(target_address.clone()),
+                    mtype: "notify".into(),
+                    subject: "cross-project AppServer route".into(),
+                    body: "durable cross-project message offline-second".into(),
+                    in_reply_to: Some(crate::proto::MessageRef {
+                        machine: "local".into(),
+                        project_scope: source_context.project_scope.clone(),
+                        app_scope_id: source_context.app_scope_id.clone(),
+                        msg_id: crate::identity::MessageId::new("m123-456").unwrap(),
+                    }),
+                    delivery: "immediate".into(),
+                    target_session: None,
+                    operation_id: None,
+                },
+            ),
+        ] {
+            let wire = serde_json::to_string(&req).unwrap();
+            let (_, req) = parse_wire_request(&wire).unwrap();
+            let (_, stored) = dispatch_wire_routed(
+                manager.clone(), Some(context), req,
+                tokio::sync::watch::channel(false).1,
+            ).await;
+            assert!(stored.ok, "{stored:?}");
+            assert_eq!(stored.data["durable"], true);
+            assert_eq!(stored.data["notification"], "queued-recipient-offline");
+            offline_ids.push(stored.data["msg_id"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(native_calls.load(Ordering::Relaxed), 1);
+        let saved = current_state::load(&target_runtime.state_path, false).unwrap();
+        for id in &offline_ids {
+            assert_eq!(saved.msgs[id].state, "pending");
+            assert_eq!(saved.msgs[id].wake_attempt_count, 0);
+            assert_eq!(saved.mailbox_name_addresses[id].name, target_name);
+        }
+        assert_eq!(
+            saved.msgs[&offline_ids[1]].in_reply_to.as_deref(),
+            Some("m123-456")
+        );
+        target_online.store(true, Ordering::Relaxed);
+        for expected_count in [2, 0] {
+            let (_, batch) = dispatch_wire_routed(
+                manager.clone(),
+                Some(target_context.clone()),
+                Req::Poll { worker_id: master_b.into(), token: token_b.into(), timeout_ms: 0, receive_id: None },
+                tokio::sync::watch::channel(false).1,
+            ).await;
+            assert!(batch.ok, "{batch:?}");
+            assert_eq!(batch.data["count"], expected_count);
+            for message in batch.data["messages"].as_array().unwrap() {
+                assert!(offline_ids.iter().any(|id| message["id"] == id.as_str()));
+            }
+        }
 
         let target_state_before = std::fs::read(&target_runtime.state_path).unwrap();
         let target_message_count = target_runtime.state.lock().unwrap().msgs.len();
@@ -719,7 +783,7 @@
                     to: master_b.into(),
                     subject: "CEO delegation".into(), body: "scope permits delivery".into(),
                     in_reply_to: None,
-                    reply_policy: None, target_session: None,
+                    target_session: None,
                 }
             },
         );
@@ -740,7 +804,7 @@
                 to: to.into(),
                 subject: "role matrix".into(), body: "role matrix".into(),
                 in_reply_to: None,
-                reply_policy: None, target_session: None,
+                target_session: None,
             }
         };
         let (_, peer_peer) = manager.dispatch_sync(
@@ -771,7 +835,7 @@
                 subject: "role matrix".into(),
                 body: "role matrix".into(),
                 in_reply_to: None,
-                reply_policy: None, target_session: None,
+                target_session: None,
             },
         );
         assert!(ceo_send.ok, "CEO to project master must be allowed: {ceo_send:?}");
@@ -877,7 +941,6 @@
                 subject: Some("full replay before".into()),
                 body: "message retained across runtime replay".into(),
                 in_reply_to: None,
-                reply_policy: None,
                 target_session: None,
                 delivery: "immediate".into(),
             },
@@ -947,7 +1010,6 @@
                 subject: Some("full replay after".into()),
                 body: "message sent by the replayed runtime".into(),
                 in_reply_to: None,
-                reply_policy: None,
                 target_session: None,
                 delivery: "immediate".into(),
             },

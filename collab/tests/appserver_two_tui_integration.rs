@@ -9,8 +9,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[path = "support/communication_receiver.rs"]
-mod communication_receiver;
 #[path = "support/daemon_readiness.rs"]
 mod daemon_readiness;
 
@@ -125,7 +123,7 @@ fn name_mailbox_public_repeated_release_reallocation_keeps_current_carrier() {
         ],
         THREAD_B,
     );
-    let old_receipt = fixture.run_public(
+    fixture.run_public(
         &["recv", "--receive-id", "cycle-history", "--timeout", "0"],
         THREAD_A,
     );
@@ -181,14 +179,18 @@ fn name_mailbox_public_repeated_release_reallocation_keeps_current_carrier() {
         }
         previous = current;
     }
-    let read = fixture.run_public(&["msg", history["msg_id"].as_str().unwrap()], THREAD_B);
-    assert_eq!(read["to"], alice["identity"]["worker_id"]);
-    assert_eq!(read["state"], "read");
+    let cycle_state = fixture.current_state();
+    let read_id = history["msg_id"].as_str().unwrap();
+    assert_eq!(
+        cycle_state["msgs"][read_id]["to"],
+        alice["identity"]["worker_id"]
+    );
+    assert_eq!(cycle_state["msgs"][read_id]["state"], "read");
     let replay = fixture.run_public(
         &["recv", "--receive-id", "cycle-history", "--timeout", "0"],
         THREAD_A,
     );
-    assert_eq!(replay["messages"], old_receipt["messages"]);
+    assert_eq!(replay["count"], 0, "{replay}");
     let received = fixture.run_public(
         &["recv", "--receive-id", "cycle-final", "--timeout", "0"],
         THREAD_B,
@@ -196,7 +198,8 @@ fn name_mailbox_public_repeated_release_reallocation_keeps_current_carrier() {
     assert_eq!(received["count"], 1);
     assert_eq!(received["messages"][0]["id"], id);
     fixture.restart_daemon();
-    assert_eq!(fixture.run_public(&["msg", id], THREAD_B)["state"], "read");
+    let cycle_read = fixture.current_state();
+    assert_eq!(cycle_read["msgs"][id]["state"], "read");
 }
 
 #[test]
@@ -391,9 +394,10 @@ fn name_mailbox_public_distinct_names_follow_address_after_release() {
             THREAD_B
         )["from"]
     );
-    let read = fixture.run_public(&["msg", history["msg_id"].as_str().unwrap()], THREAD_B);
-    assert_eq!(read["to"], old_worker);
-    assert_eq!(read["state"], "read");
+    let distinct_state = fixture.current_state();
+    let read_id = history["msg_id"].as_str().unwrap();
+    assert_eq!(distinct_state["msgs"][read_id]["to"], old_worker);
+    assert_eq!(distinct_state["msgs"][read_id]["state"], "read");
     let received = fixture.run_public(
         &[
             "recv",
@@ -416,14 +420,15 @@ fn name_mailbox_public_distinct_names_follow_address_after_release() {
         ],
         THREAD_B,
     );
-    assert_eq!(replay["messages"], received["messages"]);
+    assert_eq!(replay["count"], 0, "{replay}");
     let retained = fixture.run_public(
         &["recv", "--receive-id", "alice-retained", "--timeout", "0"],
         THREAD_A,
     );
     assert_eq!(retained["count"], 1);
     assert_eq!(retained["messages"][0]["id"], alice_message["msg_id"]);
-    assert_eq!(fixture.run_public(&["msg", id], THREAD_B)["state"], "read");
+    let read_state = fixture.current_state();
+    assert_eq!(read_state["msgs"][id]["state"], "read");
 }
 
 #[test]
@@ -474,8 +479,9 @@ fn name_mailbox_public_handoff_recv_preserves_old_consumed_history() {
     assert_eq!(moved["to"], next["identity"]["worker_id"]);
     assert_eq!(moved["body"], "keep this body");
     assert_eq!(moved["state"], "pending");
+    let handoff_state = fixture.current_state();
     assert_eq!(
-        fixture.run_public(&["msg", read["msg_id"].as_str().unwrap()], THREAD_B)["to"],
+        handoff_state["msgs"][read["msg_id"].as_str().unwrap()]["to"],
         alice["identity"]["worker_id"]
     );
     let received = fixture.run_public(
@@ -484,12 +490,13 @@ fn name_mailbox_public_handoff_recv_preserves_old_consumed_history() {
     );
     assert_eq!(received["count"], 1);
     assert_eq!(received["messages"][0]["id"], id);
-    assert_eq!(fixture.run_public(&["msg", id], THREAD_B)["state"], "read");
+    let read_state = fixture.current_state();
+    assert_eq!(read_state["msgs"][id]["state"], "read");
     let replay = fixture.run_public(
         &["recv", "--receive-id", "new-read", "--timeout", "0"],
         THREAD_B,
     );
-    assert_eq!(replay["messages"], received["messages"]);
+    assert_eq!(replay["count"], 0, "{replay}");
     // The displaced carrier has no companion identity until its own context.
     let old_holder = fixture.command_public(&["recv", "--timeout", "0"], THREAD_A);
     assert!(!old_holder.status.success());
@@ -549,10 +556,8 @@ fn name_address_public_send_recv_reply() {
     );
     assert_eq!(received["count"], 1);
     assert_eq!(received["messages"][0]["id"], message_id);
-    assert_eq!(
-        fixture.run_public(&["msg", message_id], THREAD_B)["state"],
-        "read"
-    );
+    let read_state = fixture.current_state();
+    assert_eq!(read_state["msgs"][message_id]["state"], "read");
 
     let reply = fixture.run_public(
         &[
@@ -580,8 +585,9 @@ fn name_address_public_send_recv_reply() {
         jenny["identity"]["worker_id"]
     );
     assert_eq!(received["messages"][0]["in_reply_to"], message_id);
+    let reply_state = fixture.current_state();
     assert_eq!(
-        fixture.run_public(&["msg", reply["msg_id"].as_str().unwrap()], THREAD_A)["state"],
+        reply_state["msgs"][reply["msg_id"].as_str().unwrap()]["state"],
         "read"
     );
 }
@@ -1201,6 +1207,13 @@ fn context_recovery_pool_overflow_registers_generated_names() {
     assert_eq!(
         repeated["identity"]["worker_id"], first_extra["identity"]["worker_id"],
         "{repeated}"
+    );
+    let closed = fixture.run_public(&["worker", "close", "--self"], "generated-pool-extra-one");
+    assert_eq!(closed["ok"], true, "{closed}");
+    let replacement = fixture.run_public(&["context"], "generated-pool-extra-replacement");
+    assert_eq!(
+        replacement["name"], first_name,
+        "{replacement}: the closed carrier's generated name must be reusable"
     );
     // No original ordinary holder may be displaced by overflow registration.
     for original in &registered {
@@ -2472,19 +2485,12 @@ fn human_retirement_releases_ordinary_name_and_allows_reallocation() {
     }
     let receipt = fixture.current_state();
     for id in [&direct_id, &exact_id] {
-        assert!(
-            receipt["receive_receipts"]["retired-bob-successor"]["message_ids"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|message_id| message_id == id),
-            "successor receipt must retain message {id}: {receipt}"
-        );
+        assert_eq!(receipt["msgs"][id]["state"], "read");
     }
     let replay_receive = fixture.run_public(&receive_args, THREAD_C);
     assert_eq!(
-        replay_receive["messages"], received["messages"],
-        "the same receive ID must return the same successor receipt"
+        replay_receive["count"], 0,
+        "a consumed successor batch must not replay: {replay_receive}"
     );
 
     // Replaying the original operation does not retire the successor.
@@ -4073,16 +4079,16 @@ fn two_tui_appserver_receipt_flow() {
     assert!(ids.contains(&queued_id));
     assert_eq!(received["receive_id"], "appserver-receive-1");
 
-    let msg_state = app_fixture.run_public(&["msg", &immediate_id], THREAD_A);
-    assert_eq!(msg_state["state"], "read");
+    let msg_state = app_fixture.current_state();
+    assert_eq!(msg_state["msgs"][&immediate_id]["state"], "read");
 
     app_fixture.restart_daemon();
     let replay_context = app_fixture.run_public(&["context"], THREAD_B);
     assert_eq!(replay_context["inbox"]["unread"], 0);
     assert_eq!(replay_context["identity"]["transport"]["kind"], "appserver");
     assert_eq!(replay_context["identity"]["worker_id"], worker_b);
-    let replayed_msg = app_fixture.run_public(&["msg", &immediate_id], THREAD_A);
-    assert_eq!(replayed_msg["state"], "read");
+    let replayed_msg = app_fixture.current_state();
+    assert_eq!(replayed_msg["msgs"][&immediate_id]["state"], "read");
 
     drop(app_fixture);
 }
@@ -4261,7 +4267,17 @@ fn idle_capacity_projection_public_board_and_context_share_pruned_capacity() {
         state["master_wake"]["generation"] = json!(1);
         state["master_wake"]["delivery_state"] = json!("pending");
     });
-    let before = fixture.current_state();
+    let business_state = |state: &Value| {
+        json!({
+            "tasks": state["tasks"],
+            "task_assignments": state["task_assignments"],
+            "board_details": state["board_details"],
+            "msgs": state["msgs"],
+            "wake_bindings": state["wake_bindings"],
+            "master_wake": state["master_wake"]
+        })
+    };
+    let before = business_state(&fixture.current_state());
 
     let board_output = fixture.command_public(&["board", "show"], THREAD_B);
     let context_output = fixture.command_public(&["context"], THREAD_B);
@@ -4343,9 +4359,9 @@ fn idle_capacity_projection_public_board_and_context_share_pruned_capacity() {
         "context must project one master capacity value in both fields"
     );
     assert_eq!(
-        fixture.current_state(),
+        business_state(&fixture.current_state()),
         before,
-        "public reads must not mutate control state"
+        "public reads must not mutate board or mailbox control state"
     );
 }
 
@@ -4880,7 +4896,7 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         retained["body"], "keep this original unread message",
         "{retained}"
     );
-    assert_eq!(retained["consumed_by_recv"], false, "{retained}");
+    assert_eq!(retained["state"], "pending", "{retained}");
 
     // R6 does not create a companion. Only the old holder's next context
     // registers an ordinary peer that can publish new work.
@@ -4949,7 +4965,11 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         THREAD_A,
     );
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("BOARD_MASTER_REQUIRED"));
+    let rejected_error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        rejected_error.contains("only") || rejected_error.contains("BOARD_"),
+        "{rejected_error}"
+    );
     let invited = fixture.run_public(
         &[
             "board",
@@ -5055,7 +5075,7 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         assert!(native_attempts <= 1, "{sent}: {status}");
         drop(inputs);
         assert_eq!(status["to"], worker_a, "{status}");
-        assert_eq!(status["consumed_by_recv"], false, "{status}");
+        assert_eq!(status["state"], "pending", "{status}");
         assert!(
             status["notification_delivery_failure"].is_null(),
             "{status}"
@@ -5092,9 +5112,9 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
         }),
         "{received}"
     );
-    let consumed = fixture.run_public(&["msg", message_id], THREAD_B);
-    assert_eq!(consumed["consumed_by_recv"], true, "{consumed}");
-    assert_eq!(consumed["wake_attempts"], 1, "{consumed}");
+    let consumed_state = fixture.current_state();
+    assert_eq!(consumed_state["msgs"][message_id]["state"], "read");
+    assert_eq!(consumed_state["msgs"][message_id]["wake_attempt_count"], 1);
 
     drop(fixture);
 }

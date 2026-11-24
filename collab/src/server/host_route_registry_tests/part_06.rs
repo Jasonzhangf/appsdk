@@ -61,7 +61,6 @@ fn wire_poll_rechecks_current_owner_before_delivering_after_wait() {
     assert_eq!(message.state, "pending");
     assert_eq!(message.body, "must remain pending");
     assert_eq!(message.wake_attempt_count, 0);
-    assert!(!state.receive_receipts.contains_key("receive-poll-current"));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
     });
@@ -230,7 +229,6 @@ fn wire_poll_rechecks_current_map_before_delivering_after_wait() {
         {
             let state = server.state.lock().unwrap();
             assert_eq!(state.msgs[message_id].state, "pending");
-            assert!(!state.receive_receipts.contains_key("receive-poll-map-current"));
         }
 
         let previous = name_state::NameOccupancy {
@@ -593,9 +591,6 @@ fn waiting_poll_rechecks_same_principal_exact_binding_after_map_refresh() {
         assert_eq!(response.data["count"], 0, "{response:?}");
         let state = server.state.lock().unwrap();
         assert_eq!(state.msgs[message_id].state, "pending");
-        assert!(!state
-            .receive_receipts
-            .contains_key("receive-poll-exact-refreshed"));
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     });

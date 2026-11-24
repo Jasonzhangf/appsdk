@@ -300,10 +300,15 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     task.status = "working".into();
     task.updated_ms = now_ms();
     details.revision += 1;
+    let auto_notice = match board_auto_notice_events(server, &state, None, &task, &actor, "task was claimed") {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
     let mut events = vec![
         Event::TaskUpdated { task },
         Event::BoardDetailsChanged { task_id: id.clone(), details },
     ];
+    events.extend(auto_notice.events.clone());
     // Advance the admitted execute phase with the same claim. Legacy TaskRec
     // status stays "working" for old entry compatibility; the phase record is
     // the ticket-level claim fact consumed by queue projections.
@@ -355,7 +360,16 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         } });
     }
     if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, &control) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    board_task_response(server, &state, &id, &actor)
+    let mut response = board_task_response(server, &state, &id, &actor);
+    if let (Some(notice), Some(object)) =
+        (auto_notice.notice.as_ref(), response.data.as_object_mut())
+    {
+        object.insert("notification".into(), json!("auto-board-change"));
+        object.insert("notification_message_id".into(), json!(notice.message_id));
+    }
+    drop(state);
+    deliver_board_auto_notice(server, &response);
+    response
 }
 
 fn board_start(
@@ -366,8 +380,12 @@ fn board_start(
     expected_revision: u64,
     attempt: u64,
 ) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    board_start_locked(server, &mut state, None, actor, token, id, expected_revision, attempt)
+    let response = {
+        let mut state = server.state.lock().unwrap();
+        board_start_locked(server, &mut state, None, actor, token, id, expected_revision, attempt)
+    };
+    deliver_board_auto_notice(server, &response);
+    response
 }
 
 fn board_start_locked(
@@ -410,7 +428,7 @@ fn board_start_locked(
     if let Err(error) = board_check_revision(&state, &id, expected_revision) {
         return error;
     }
-    let Some(task) = state.tasks.get(&id).cloned() else {
+    let Some(_task) = state.tasks.get(&id).cloned() else {
         return Resp::err("task not found");
     };
     if let Err(error) =
@@ -474,7 +492,15 @@ fn board_start_locked(
     let mut running = phase.clone();
     running.status = crate::server::ticket_state::TicketPhaseStatus::Running;
     running.wait_reason = None;
-    let events = [Event::TicketPhaseRecorded { phase: running }];
+    let Some(task) = state.tasks.get(&id).cloned() else {
+        return Resp::err("task not found");
+    };
+    let auto_notice = match board_auto_notice_events(server, state, Some(control), &task, &actor, "execution attempt started") {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
+    let mut events = vec![Event::TicketPhaseRecorded { phase: running }];
+    events.extend(auto_notice.events.clone());
     let commit = server
         .commit_locked_checked_with_control(state, &events, control)
         .map(|_| ())
@@ -485,6 +511,10 @@ fn board_start_locked(
     let mut response = board_task_response(server, &state, &id, &actor);
     if let Some(object) = response.data.as_object_mut() {
         object.insert("ticket".into(), ticket_projection(&state, &id));
+        if let Some(notice) = auto_notice.notice.as_ref() {
+            object.insert("notification".into(), json!("auto-board-change"));
+            object.insert("notification_message_id".into(), json!(notice.message_id));
+        }
     }
     response
 }
@@ -634,17 +664,21 @@ fn board_ticket_result_event(
 
 fn board_decline_assigned(server: &Server, actor: String, token: String, id: String, expected_revision: u64, reason: String) -> Resp {
     if reason.trim().is_empty() { return Resp::err("decline requires a nonempty reason"); }
-    let mut state = server.state.lock().unwrap();
-    board_decline_assigned_locked(
-        server,
-        &mut state,
-        None,
-        actor,
-        token,
-        id,
-        expected_revision,
-        reason,
-    )
+    let response = {
+        let mut state = server.state.lock().unwrap();
+        board_decline_assigned_locked(
+            server,
+            &mut state,
+            None,
+            actor,
+            token,
+            id,
+            expected_revision,
+            reason,
+        )
+    };
+    deliver_board_auto_notice(server, &response);
+    response
 }
 
 fn board_decline_assigned_locked(
@@ -675,10 +709,15 @@ fn board_decline_assigned_locked(
     if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
     task.owner = task.created_by.clone(); task.status = "pending".into(); task.updated_ms = now_ms();
     details.revision += 1; details.last_response = Some(format!("legacy assignment declined by {actor}: {reason}"));
-    let events = [
+    let auto_notice = match board_auto_notice_events(server, state, control, &task, &actor, "legacy assignment was declined") {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
+    let mut events = vec![
         Event::TaskUpdated { task }, Event::BoardDetailsChanged { task_id: id.clone(), details },
         Event::Superseded { ids: vec![admission.message_id] },
     ];
+    events.extend(auto_notice.events.clone());
     let commit = match control {
         Some(control) => server
             .commit_locked_checked_with_control(state, &events, control)
@@ -690,5 +729,12 @@ fn board_decline_assigned_locked(
             .map_err(|error| error.to_string()),
     };
     if let Err(error) = commit { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    board_task_response(server, &state, &id, &actor)
+    let mut response = board_task_response(server, &state, &id, &actor);
+    if let (Some(notice), Some(object)) =
+        (auto_notice.notice.as_ref(), response.data.as_object_mut())
+    {
+        object.insert("notification".into(), json!("auto-board-change"));
+        object.insert("notification_message_id".into(), json!(notice.message_id));
+    }
+    response
 }

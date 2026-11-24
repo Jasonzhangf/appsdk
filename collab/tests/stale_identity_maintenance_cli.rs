@@ -440,8 +440,10 @@ fn isolated_daemon_maintenance_retires_missing_peer_and_retains_live_peer() {
         .unwrap()
         .iter()
         .any(|row| { row["id"] == received_id && row["body"] == "receive after maintenance" }));
-    let consumed = fixture.run_ok(&["msg", received_id], Some(&master));
-    assert_eq!(consumed["consumed_by_recv"], true);
+    assert_consumed_message_lookup(
+        &fixture.command(&["msg", received_id], Some(&master)),
+        received_id,
+    );
 
     let resumed_slot = active_identity_slot(&fixture, &dead_id);
     let first_operations = fixture.current_state_for(&project_root, &app_scope_id)

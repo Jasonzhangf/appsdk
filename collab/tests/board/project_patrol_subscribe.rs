@@ -849,8 +849,8 @@ fn direct_message_send_and_receive_survive_a_cancelled_project_patrol() {
         .find(|message| message["subject"] == "during-cancelled-patrol")
         .unwrap_or_else(|| panic!("the master must receive direct mail: {received}"));
     let message_id = message["id"].as_str().unwrap().to_owned();
-    let consumed = fixture.run_public(&["msg", &message_id], THREAD_A);
-    assert_eq!(consumed["state"], "read", "{consumed}");
+    let consumed_state = fixture.current_state();
+    assert_eq!(consumed_state["msgs"][&message_id]["state"], "read");
 }
 
 #[test]

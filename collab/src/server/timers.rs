@@ -568,8 +568,10 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                 .and_then(super::selected_transport_for_worker);
             transport.is_some_and(|transport| {
                 use crate::proto::TransportKind;
-                matches!(transport.kind, TransportKind::Tmux | TransportKind::AppServer | TransportKind::Dsh)
-                    && super::can_resume_notification(state, message)
+                matches!(
+                    transport.kind,
+                    TransportKind::Tmux | TransportKind::AppServer | TransportKind::Dsh
+                ) && super::can_resume_notification(state, message)
             })
         }
         Some("immediate" | super::mailbox::REGISTRATION_NOTIFICATION_MODE) => {

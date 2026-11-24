@@ -64,8 +64,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_sendmessage",
-            "Persist an explicit peer notification with a required short subject and original body preview. to accepts a stable local name, project-qualified local address, or machine.project.name; machine.project.name goes through this machine's local daemon. in_reply_to accepts a local message ID or a full collab-ref. operation_id is the caller-owned stable key for same-operation recovery. reply_required asks for an answer to this message; reply_on_completion asks for the completed result. The two reply flags are mutually exclusive and default to no obligation.",
-            json!({"to":{"type":"string","minLength":1},"subject":{"type":"string"},"body":{"type":"string"},"delivery":{"type":"string","enum":["immediate","queued"],"default":"immediate"},"in_reply_to":{"type":"string"},"operation_id":{"type":"string","minLength":1},"reply_required":{"type":"boolean"},"reply_on_completion":{"type":"boolean"}}),
+            "Persist an explicit peer notification with a required short subject and original body preview. to accepts a stable local name, project-qualified local address, or machine.project.name; machine.project.name goes through this machine's local daemon. in_reply_to accepts a local message ID or a full collab-ref and is correlation only. operation_id is the caller-owned stable key for same-operation recovery.",
+            json!({"to":{"type":"string","minLength":1},"subject":{"type":"string"},"body":{"type":"string"},"delivery":{"type":"string","enum":["immediate","queued"],"default":"immediate"},"in_reply_to":{"type":"string"},"operation_id":{"type":"string","minLength":1}}),
             &["to", "subject", "body"]
         ),
         tool(
@@ -648,17 +648,6 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             }
             optional_flag(&mut argv, args, "in_reply_to", "--in-reply-to")?;
             optional_flag(&mut argv, args, "operation_id", "--operation-id")?;
-            let reply_required =
-                optional_boolean_flag(&mut argv, args, "reply_required", "--reply-required")?;
-            let reply_on_completion = optional_boolean_flag(
-                &mut argv,
-                args,
-                "reply_on_completion",
-                "--reply-on-completion",
-            )?;
-            if reply_required && reply_on_completion {
-                return Err("reply_required and reply_on_completion are mutually exclusive".into());
-            }
             argv.push(required(args, "body")?);
         }
         "collab_notify_methods" => argv.extend(["notify".into(), "methods".into()]),
@@ -1006,23 +995,6 @@ fn optional_flag(
         ]);
     }
     Ok(())
-}
-
-fn optional_boolean_flag(
-    argv: &mut Vec<String>,
-    args: &Value,
-    key: &str,
-    flag: &str,
-) -> Result<bool, String> {
-    match args.get(key) {
-        None => Ok(false),
-        Some(Value::Bool(true)) => {
-            argv.push(flag.into());
-            Ok(true)
-        }
-        Some(Value::Bool(false)) => Ok(false),
-        Some(_) => Err(format!("{key} must be a boolean")),
-    }
 }
 
 fn optional_integer_flag(

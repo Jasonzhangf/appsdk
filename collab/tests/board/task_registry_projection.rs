@@ -6,9 +6,22 @@ fn takeover_preserves_terminal_task_history() {
     fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
     for status in ["closed", "cancelled"] {
-        fixture.run_public(&["task", "register", status, "--next", "original"], THREAD_B);
+        fixture.run_public(
+            &["task", "register", status, "--next", "original"],
+            THREAD_B,
+        );
         if status == "closed" {
-            fixture.run_public(&["task", "close", status, "--force", "--reason", "fixture cleanup"], THREAD_B);
+            fixture.run_public(
+                &[
+                    "task",
+                    "close",
+                    status,
+                    "--force",
+                    "--reason",
+                    "fixture cleanup",
+                ],
+                THREAD_B,
+            );
         } else {
             fixture.run_public(&["task", "update", status, "--status", status], THREAD_B);
         }
@@ -20,10 +33,14 @@ fn takeover_preserves_terminal_task_history() {
     for status in ["closed", "cancelled"] {
         let before = fixture.run_public(&["task", "status", status], THREAD_A);
         assert_eq!(before["status"], status);
-        let update = fixture.command_public(&["task", "update", status, "--next", "late edit"], THREAD_A);
+        let update =
+            fixture.command_public(&["task", "update", status, "--next", "late edit"], THREAD_A);
         assert!(!update.status.success());
         assert!(String::from_utf8_lossy(&update.stderr).contains("TASK_TERMINAL"));
-        assert_eq!(fixture.run_public(&["task", "status", status], THREAD_A), before);
+        assert_eq!(
+            fixture.run_public(&["task", "status", status], THREAD_A),
+            before
+        );
     }
 }
 

@@ -43,3 +43,34 @@ pub(crate) fn execution_role(context: &Value) -> ExecutionRole {
         _ => ExecutionRole::Unknown,
     }
 }
+
+pub(crate) fn effective_peer_charter(context: &Value) -> Option<String> {
+    if execution_role(context) != ExecutionRole::Worker {
+        return None;
+    }
+    let brief = &context["role_brief"];
+    let workflow = &brief["workflow_template"];
+    if workflow["identity"]["source"] != "master_override"
+        && !workflow["specialties"]
+            .as_array()
+            .is_some_and(|roles| !roles.is_empty())
+    {
+        return None;
+    }
+    let mut charter = brief["role_task"].as_str()?.to_owned();
+    for duty in brief["responsibilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        charter.push_str("\n- ");
+        charter.push_str(duty);
+    }
+    for (field, label) in [("next_action", "下一步"), ("completion_action", "完成交接")] {
+        if let Some(action) = brief[field].as_str() {
+            charter.push_str(&format!("\n\n{label}：{action}"));
+        }
+    }
+    Some(charter)
+}

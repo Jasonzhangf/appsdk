@@ -1068,7 +1068,6 @@ struct DefinitiveMissingCandidate {
     snapshot: state::ResponsibilitySnapshot,
     snapshot_captured_ms: Option<i64>,
     active_fences: Vec<String>,
-    pending_reply_obligations: Vec<String>,
     endpoint_target: super::CloseEndpointTarget,
 }
 
@@ -1102,16 +1101,6 @@ fn sample_candidate(
         .collect::<Vec<_>>();
     active_fences.sort();
     active_fences.dedup();
-    let mut pending_reply_obligations = state
-        .reply_obligations
-        .values()
-        .filter(|obligation| {
-            obligation.from_worker_id == worker.id || obligation.recipient_worker_id == worker.id
-        })
-        .map(|obligation| obligation.message_id.clone())
-        .collect::<Vec<_>>();
-    pending_reply_obligations.sort();
-    pending_reply_obligations.dedup();
     DefinitiveMissingCandidate {
         endpoint_target: close_endpoint_target(state, &worker.id),
         worker: worker.clone(),
@@ -1120,7 +1109,6 @@ fn sample_candidate(
         snapshot,
         snapshot_captured_ms,
         active_fences,
-        pending_reply_obligations,
     }
 }
 
@@ -1156,10 +1144,6 @@ fn responsibility_gained(
             &after.snapshot.unread_message_ids,
         )
         || gained(&before.active_fences, &after.active_fences)
-        || gained(
-            &before.pending_reply_obligations,
-            &after.pending_reply_obligations,
-        )
 }
 
 fn maintenance_retained(
@@ -1237,11 +1221,6 @@ fn admit_maintenance_close(
     if !fresh.active_fences.is_empty() {
         return Err(Retained(
             json!({"kind": "active_responsibility_fence", "operation_ids": fresh.active_fences}),
-        ));
-    }
-    if !fresh.pending_reply_obligations.is_empty() {
-        return Err(Retained(
-            json!({"kind": "pending_reply_obligation", "message_ids": fresh.pending_reply_obligations}),
         ));
     }
     let target = &fresh.target;

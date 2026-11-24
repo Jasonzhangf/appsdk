@@ -207,7 +207,7 @@ fn ceo_report_patrol_quiet_ordinary_stays_quiet_and_new_urgent_fires_once() {
         .manager
         .tick_ceo_report_patrol(quiet)
         .expect("urgent tick");
-    assert_eq!(fixture.probes.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.probes.load(Ordering::SeqCst), 2);
     let notices = notice_messages(&fixture.server);
     assert_eq!(notices.len(), 1);
     let notice = &notices[0];
@@ -342,7 +342,7 @@ fn ceo_report_patrol_recovery_clears_queued_and_rechecks_unqueued_policy_and_act
         },
     );
     unqueued_idle.manager.tick_ceo_report_patrol(day).unwrap();
-    assert_eq!(unqueued_idle.probes.load(Ordering::SeqCst), 1);
+    assert_eq!(unqueued_idle.probes.load(Ordering::SeqCst), 2);
     assert!(unqueued_idle
         .server
         .state

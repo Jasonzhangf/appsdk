@@ -29,10 +29,9 @@ owner 是 core 实现与项目 DAG。
   `collab who`，列出全部 live idle peer（包括没有当前任务的成员）及通道来源；
   第二，按当前优先级和[派单顺序](../SKILL.md#派单顺序与一-peer-一任务)派发 ready 的
   非重叠 P0/P1。适用 architect 的缺陷和任务先交 architect。不得
-  先做实现、debug、merge 或资源清理。Planner/Reviewer 缺位不是等待理由：独立
-  reviewer 先用独立 Codex OAuth/`codex-auto-review`，不可用则改派普通空闲 peer；
-  只有无 idle worker、subagent review 入口真实失效且无其他 peer 时，Jenny 才临时
-  代审并记录独立性缺口。随后核对非 live peer：cold、offline、unknown 不进入派发
+  先做实现、debug、merge 或资源清理。已有可用的独立 reviewer 优先承接。缺位时按
+  [Review 合同](../../codex-orchestrator/references/review.md)派独立只读 Codex worker，
+  记录实际审查者和证据。随后核对非 live peer：cold、offline、unknown 不进入派发
   容量；对未响应 peer 使用最长 15 分钟的有界等待，到期再核对状态。可用者进入派发
   队列；仍不可用者从当前派发队列排除，记录 owner 和恢复条件，继续其他可独立派发
   工作，不因这些 peer 未响应而停工。再检查未解决的 P0/P1、未完成任务或 ready 工作、自有
@@ -89,7 +88,7 @@ master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不�
 两个回执。同一异常在后续巡检复用已有回执，仅在状态或绑定出现新证据时重新判断。
 
 1. 主动核实：用 `collab worker status <id>` 查看该 peer 的状态、绑定和缺项。对 Rex
-   或 Codex TUI/tmux peer 运行 `collab worker snapshot <id> --lines 80`，检查实际
+   或 Codex TUI/tmux peer 运行 `collab worker snapshot <id> --capture --lines 80`，检查实际
    返回的状态及终端内容。Rex 使用现有绑定的 block，禁止 split、新开窗口或写入终端。
    若 capture 因 Rex server 不可达或实例变化被拒绝，保留原错，等原会话恢复后再核实。
    Capture 只提供观察证据，派发容量以核实后的当前状态为准。仍需 peer 补事实时，向该
@@ -246,8 +245,7 @@ Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒�
   唯一 typed 紧急入口，正文关键词、普通 P1 阻塞或 ACK 都不升级。
 - 不带 `--in-reply-to` 的普通进度走非紧急汇总：按项目与实质业务进展去重合并，
   普通心跳、重复文本、更新时间或仅 ACK 不产生用户报告。带 `--in-reply-to` 的
-  请求回复保留原消息的真实持久投递、关联去重和回复义务清除语义；进度只在回复本身
-  持久后附加。
+  请求回复只关联原消息；进度在回复本身持久后附加。
 - 非紧急汇报默认每小时至多一次，默认安静窗口为 `Asia/Shanghai`
   每日 00:00（含）至 08:00（不含）。该时区按固定 UTC+8 计算，无夏令时。
   窗口内仍接收、去重并积累，08:00 后合并为一次，不逐条补发。`--urgent` 可立即

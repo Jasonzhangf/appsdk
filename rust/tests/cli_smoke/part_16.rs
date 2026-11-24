@@ -86,9 +86,9 @@ esac
     assert!(text.contains("先检查 idle、获授权且合适的 peer 与可用容量"));
     assert!(text.contains("有 ready 工作可承接时优先派给该 peer"));
     assert!(text.contains("仅当无合适且获授权的 peer 可承接时，才派独立 `codex exec --profile gcm`"));
-    assert!(text.contains("Peer bounded subwork"));
-    assert!(text.contains("直接并发派独立 `codex exec --profile gcm` 执行或观察子 worker"));
-    assert!(text.contains("不是 manager 绕过可用 peer 容量"));
+    assert!(text.contains("各角色可把职责内的工作拆成互不重叠的范围"));
+    assert!(text.contains("无可承接 peer 时按 Codex 编排合同使用独立子 worker"));
+    assert!(text.contains("任务 owner 核验证据并完成交付"));
     assert!(!text.contains("一次性执行或观察直接派独立"));
     assert!(!text.contains("不以其他 peer 忙闲为前提"));
     assert!(!text.contains("一次性执行直接 GCM，不等待 peer 忙闲"));
@@ -521,7 +521,7 @@ esac
         .as_str()
         .unwrap()
         .contains("你是本项目的 master"));
-    assert!(payload["charter"].as_str().unwrap().contains("peer 不是执行 worker"));
+    assert!(payload["charter"].as_str().unwrap().contains("普通 peer 按清晰合同执行"));
 
     fs::write(
         &fake_collab,
@@ -683,11 +683,17 @@ case "$1 $2" in
       endpoint) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":false,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
       stale_identity) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","active_task":"stale-route-invite","endpoint_live":true,"identity_valid":false,"suspected_offline":false}],"tasks":[{"id":"stale-route-invite","status":"working","owner":"current-peer","next_step":"continue orchestration"}],"subagents":[]}' ;;
       offline) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":true,"identity_valid":true,"suspected_offline":true}],"tasks":[],"subagents":[]}' ;;
-      missing_worker) printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}' ;;
+      missing_worker|memory) printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}' ;;
     esac
     ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"other-master","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"worker","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ")
+    if [ "${STATUS_VARIANT:-}" = memory ]; then
+      printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"worker"},"role_brief":{"role_task":"Accept only memory summaries and memory patrol duties.","responsibilities":["Reuse the existing authorized schedule."],"next_action":"Validate memory evidence.","workflow_template":{"specialties":[{"target":"role:memory","source":"base"}]}}}'
+    else
+      printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","role":"worker","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
+    fi
+    ;;
   *) exit 64 ;;
 esac
 "#,
@@ -700,6 +706,7 @@ esac
         ("stale_identity", "peer"),
         ("offline", "peer"),
         ("missing_worker", "peer"),
+        ("memory", "peer"),
     ] {
         let result = Command::new(binary())
             .args(["longhorizon", "show", "--json"])
@@ -712,16 +719,18 @@ esac
         assert!(result.status.success(), "variant={variant}");
         let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(payload["role"], expected_role, "variant={variant}");
+        if variant == "memory" {
+            let charter = payload["charter"].as_str().unwrap();
+            assert!(charter.contains("Accept only memory summaries and memory patrol duties"));
+            assert!(charter.contains("Reuse the existing authorized schedule"));
+            assert!(!charter.contains("普通 peer 按清晰合同执行"));
+        }
         if variant == "stale_identity" {
             assert_eq!(payload["assigned"][0]["id"], "stale-route-invite");
             let peer_charter = payload["charter"].as_str().unwrap();
-            assert!(peer_charter.contains("peer 不是执行 worker"));
-            // The peer charter must not require peer-first for its own
-            // accepted-goal bounded subwork; that direct split is what the
-            // fleet rule restores, so the same output must not conflict.
-            assert!(peer_charter.contains("自己的目标可直接拆成 non-overlapping bounded scopes"));
-            assert!(peer_charter.contains("只有把未分配目标按管理入口派发时"));
-            assert!(!peer_charter.contains("拆解本人目标，先检查 idle"));
+            assert!(peer_charter.contains("普通 peer 按清晰合同执行"));
+            assert!(peer_charter.contains("复杂问题有可承接 architect 时，由 architect 设计"));
+            assert!(peer_charter.contains("无合适 peer 可承接时按 Codex 编排合同派独立子 worker"));
         }
     }
 
@@ -960,7 +969,8 @@ esac
     assert!(sub_json["goal_id"].as_str().unwrap().starts_with("sha256:"));
     let prompt = sub_json["goal_prompt"].as_str().unwrap();
     assert!(prompt.contains("Master / Peer"));
-    assert!(prompt.contains("peer 不是执行 worker"));
+    assert!(prompt.contains("你是本项目的 master"));
+    assert!(!prompt.contains("普通 peer 按清晰合同执行"));
     assert!(prompt.contains("目标、执行计划、实际进度和行动项"));
     assert!(prompt.contains("无可执行行动项时核对剩余验收"));
     assert!(prompt.contains("appsdk bug"));
@@ -2593,7 +2603,7 @@ esac
     let native_brief = run(&root, "Bob", &["longhorizon", "show", "--json"]);
     assert_eq!(native_brief["role"], "peer");
     assert_eq!(native_brief["goal"]["owner"], "Bob");
-    assert!(native_brief["charter"].as_str().unwrap().contains("peer 不是执行 worker"));
+    assert!(native_brief["charter"].as_str().unwrap().contains("普通 peer 按清晰合同执行"));
     let foreign_remote = command("Bob", &["goal", "status", "--json"])
         .env("REMOTE_OWNER", "Jenny").output().unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&foreign_remote.stdout).unwrap()["active"], false);

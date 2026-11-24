@@ -30,7 +30,6 @@ mod observation_epoch;
 mod peer_lifecycle;
 pub mod presence;
 mod project_reset;
-pub(crate) mod reply_obligation;
 pub(crate) mod rex_monitor;
 pub mod state;
 pub(crate) mod ticket_state;

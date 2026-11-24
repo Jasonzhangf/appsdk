@@ -449,8 +449,7 @@ fn settle_snapshot_background_notifications(
                 .unwrap()
                 .iter()
                 .any(|message| message["id"] == id));
-            let receipt = fixture.run_ok(&["msg", &id], Some(master));
-            assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+            assert_consumed_message_lookup(&fixture.command(&["msg", &id], Some(master)), &id);
         }
     }
     assert!(
@@ -933,8 +932,7 @@ fn peer_lifecycle_self_unregister_public_cli_rebuilds_and_keeps_pane() {
             .any(|message| message["id"] == msg_id),
         "the exact rebuild message must be consumed alongside any existing patrol notices: {received}"
     );
-    let receipt = fixture.run_ok(&["msg", msg_id], Some(&pane));
-    assert_eq!(receipt["consumed_by_recv"], true, "{receipt}");
+    assert_consumed_message_lookup(&fixture.command(&["msg", msg_id], Some(&pane)), msg_id);
 }
 
 #[test]
@@ -1487,12 +1485,8 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
     configure_runtime(&mut consumed_status);
     let consumed_status = consumed_status
         .output()
-        .expect("read consumed durable message");
-    let consumed_status: Value = serde_json::from_slice(&consumed_status.stdout).unwrap();
-    assert_eq!(
-        consumed_status["consumed_by_recv"], true,
-        "{consumed_status}"
-    );
+        .expect("query consumed durable message");
+    assert_consumed_message_lookup(&consumed_status, success_msg_id);
 
     board_call(&["subagent", "working", "managed-created-peer"], true);
     let assigned_task = format!("task-{success_msg_id}");
@@ -1694,12 +1688,7 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
     let failed_message_status = failed_message_status
         .output()
         .expect("read failed-send message status");
-    let failed_message_status: Value =
-        serde_json::from_slice(&failed_message_status.stdout).unwrap();
-    assert_eq!(
-        failed_message_status["consumed_by_recv"], true,
-        "{failed_message_status}"
-    );
+    assert_consumed_message_lookup(&failed_message_status, &failed_send_msg_id);
 
     // A removed subscription is a distinct, non-error repair terminal: the
     // durable message remains available and can still be consumed.

@@ -71,21 +71,39 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         let workflow = &snapshot["role_brief"]["workflow_template"];
         let brief = &snapshot["role_brief"];
         let responsibilities = brief["responsibilities"].as_array().unwrap();
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("execution plan, evidence-based progress, and action items")
-                && rule.contains("If progress stalls")
-                && rule.contains("If nothing is ready")
-                && rule.contains("owner and resume signal")
-        }), "{label}: task execution cycle is missing");
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("even if worker status is online or busy")
-                && rule.contains("collab worker snapshot <id> --capture --lines 80")
-        }), "{label}: blocked or stalled task requires terminal evidence");
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("Hand the complete contract directly to that peer")
-                && rule.contains("The peer claims it at the current board revision")
-                && rule.contains("Skip routine pings")
-        }), "{label}: direct architect handoff is missing");
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("execution plan, evidence-based progress, and action items")
+                        && rule.contains("If progress stalls")
+                        && rule.contains("If nothing is ready")
+                        && rule.contains("owner and resume signal")
+                }),
+            "{label}: task execution cycle is missing"
+        );
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("even if worker status is online or busy")
+                        && rule.contains("collab worker snapshot <id> --capture --lines 80")
+                }),
+            "{label}: blocked or stalled task requires terminal evidence"
+        );
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("Hand the complete contract directly to that peer")
+                        && rule.contains("The peer claims it at the current board revision")
+                        && rule.contains("Skip routine pings")
+                }),
+            "{label}: direct architect handoff is missing"
+        );
         let handoff_rules: Vec<_> = responsibilities
             .iter()
             .filter_map(Value::as_str)
@@ -96,35 +114,29 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
             .contains("Skip manual ACKs, progress reports, status chasing, idle requests"));
         assert!(handoff_rules[0].contains("an evidenced blocker requiring action"));
         assert!(handoff_rules[0].contains("once to the configured receiver"));
-        assert!(responsibilities.iter().filter_map(Value::as_str).any(|rule| {
-            rule.contains("task-linked wake every 10 minutes by default (600000 ms)")
-                && rule.contains("Use the cadence specified in the contract when it differs")
-                && rule.contains("On each wake, advance the task")
-        }), "{label}: execution wake guidance is missing");
+        assert!(
+            responsibilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("task-linked wake every 10 minutes by default (600000 ms)")
+                        && rule
+                            .contains("Use the cadence specified in the contract when it differs")
+                        && rule.contains("On each wake, advance the task")
+                }),
+            "{label}: execution wake guidance is missing"
+        );
         let context_instruction = brief["communication_recovery"]["steps"][0]
             .as_str()
             .expect("identity recovery instruction");
-        assert!(context_instruction.contains("In Rex, use the agent's existing block"));
-        assert!(context_instruction.contains("official Rex CLI"));
-        assert!(context_instruction.contains("Do not split or open a pane, tab, or window"));
-        assert!(context_instruction.contains("Run `pwd -P` and `collab context`"));
-        assert!(context_instruction.contains("Never invoke Computer Use, CUA, or GUI controls"));
-        for source in [
-            "rex whoami --json --autostart=false",
-            "CODEX_SESSION_ID",
-            "TMUX_PANE",
-            "iTerm2 attachment",
-            "DSH_SESSION_ID",
-            "CODEX_THREAD_ID",
-        ] {
-            assert!(context_instruction.contains(source), "{label}: {source}");
-        }
-        assert!(
-            brief["communication_recovery"]["steps"][1]
-                .as_str()
-                .unwrap()
-                .contains("Never guess or manually fill session_id, thread_id, endpoint or namespace")
-        );
+        assert!(context_instruction.contains("run `collab context` first in that session's shell"));
+        assert!(context_instruction.contains("recovery table for any exact missing facts"));
+        assert!(context_instruction.contains("Do not use Computer Use, CUA, GUI"));
+        assert!(context_instruction.contains("another agent session, or Rex layout commands"));
+        assert!(brief["communication_recovery"]["steps"][1]
+            .as_str()
+            .unwrap()
+            .contains("Never guess or manually fill session_id, thread_id, endpoint or namespace"));
         let role_text = brief.to_string();
         for retired_rule in [
             "report routinely",
@@ -835,18 +847,18 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
             "patrol",
             "patrol",
             [
-                "temporary development or scheduling dispatch",
+                "collect live runtime bugs",
                 "Jenny",
-                "project memory",
+                "actual execution",
             ],
         ),
         (
             "memory",
             "memory",
             [
-                "reusable facts",
+                "summarize verified project knowledge",
                 "deduplicate",
-                "take over product development",
+                "accept only memory summaries and memory patrol duties",
             ],
         ),
         (
@@ -855,7 +867,7 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
             [
                 "effective requirements",
                 "implementation owner for each scope",
-                "own both planning and review for the assigned task",
+                "lead overall debug design",
             ],
         ),
     ];
@@ -1002,9 +1014,9 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
     assert!(
         contains_ci(
             &peer_text,
-            "dispatch bounded execution or observation directly to independent `codex exec --profile gcm` subworkers"
-        ) && contains_ci(&peer_text, "not a manager bypass of eligible peer capacity"),
-        "peer role_brief must preserve direct GCM dispatch for its own bounded subwork without turning bounded work peer-first: {peer_text}"
+            "use a suitable authorized peer when available"
+        ) && contains_ci(&peer_text, "use Codex orchestration for a subagent when no eligible peer is available"),
+        "peer role_brief must include eligible-peer-first bounded delegation: {peer_text}"
     );
     assert!(
         contains_ci(
@@ -1015,7 +1027,10 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
     );
     assert!(
         contains_ci(&text, "including when the worker just registered")
-            && contains_ci(&text, "For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --lines 80`")
+            && contains_ci(
+                &text,
+                "For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --capture --lines 80`"
+            )
             && contains_ci(&text, "Keep other ready work moving during verification"),
         "master role_brief must inspect the bound terminal and keep unrelated work moving: {text}"
     );
@@ -1082,24 +1097,30 @@ fn master_role_brief_defaults_to_independent_review_with_three_condition_excepti
         "master role_brief must route both task intakes to the architect first: {text}"
     );
     assert!(
-        contains_ci(&text, "architect owns planning and acceptance")
+        contains_ci(
+            &text,
+            "architect owns planning, contract updates, direct peer dispatch, and acceptance within the entrusted scope",
+        )
             && contains_ci(&text, "hands implementation to one or more peer executors")
             && contains_ci(&text, "peers implement, verify and return evidence to the architect"),
         "master role_brief must distinguish architect acceptance from peer execution: {text}"
     );
     assert!(
-        contains_ci(&text, "complete written design and execution contract for each peer"),
+        contains_ci(
+            &text,
+            "complete written design and execution contract for each peer"
+        ),
         "master role_brief must require the architect's executable handoff: {text}"
     );
     assert!(
         contains_ci(
             &text,
-            "For tasks without an assigned architect reviewer, default to the task's own independent Codex OAuth reviewer using codex-auto-review."
+            "Otherwise prefer an available independent reviewer."
         ) && contains_ci(
             &text,
-            "Only when no idle worker exists, the subagent review entry has actually failed and no other peer can take the review may master temporarily stand in."
+            "If none is available, dispatch a separate read-only Codex review worker"
         ),
-        "master role_brief must carry the current independent-review default and three-condition exception: {text}"
+        "master role_brief must carry the current independent-review route: {text}"
     );
     assert!(
         contains_ci(
@@ -1133,18 +1154,14 @@ fn patrol_default_batch_preserves_explicit_user_count() {
     for (label, snapshot) in cases {
         let text = role_projection_text(&snapshot);
         assert!(
-            contains_ci(&text, "Periodic long-horizon batches default to100 deliveries")
-                && contains_ci(&text, "explicit counts taking priority"),
+            contains_ci(&text, "Periodic long-horizon subscriptions default to100 deliveries")
+                && contains_ci(&text, "unless a count is explicit"),
             "{label}: role_brief must let an explicit user count override the default 100-delivery patrol batch: {text}"
         );
         assert!(
-            contains_ci(&text, "Reuse a valid batch's legal period and remaining deliveries")
-                && contains_ci(&text, "Renew an exhausted batch only while its goal and authorization remain valid"),
-            "{label}: role_brief must preserve batch reuse and authorized whole-batch renewal: {text}"
-        );
-        assert!(
-            contains_ci(&text, "Explicit one-shot deadlines and old persisted one-shots retain their own lifecycle"),
-            "{label}: role_brief must not convert non-patrol one-shot schedules to 100 deliveries: {text}"
+            contains_ci(&text, "preserve remaining cycles and avoid duplicate timers")
+                && contains_ci(&text, "Existing explicit one-shot deadlines retain their lifecycle"),
+            "{label}: role_brief must preserve the current period batch and one-shot lifecycle: {text}"
         );
     }
 }
@@ -1163,7 +1180,10 @@ fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
         "patrol role_brief must name the non-live peer states: {text}"
     );
     assert!(
-        contains_ci(&text, "For Rex and Codex TUI/tmux, it requires `collab worker snapshot <id> --lines 80`"),
+        contains_ci(
+            &text,
+            "For Rex and Codex TUI/tmux, it requires `collab worker snapshot <id> --capture --lines 80`"
+        ),
         "patrol role_brief must check for Rex and tmux snapshot evidence: {text}"
     );
     assert!(
@@ -1181,26 +1201,25 @@ fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
 fn explicit_worker_peer_executes_directly_without_ordinary_peer_orchestration() {
     let fixture = master_fixture();
 
-    // A peer with no execution specialty keeps the ordinary long-horizon
-    // orchestration contract.
+    // An ordinary peer executes and may orchestrate within a written scope.
     let ordinary = fixture.run_public(&["context"], THREAD_B);
     let ordinary_text = role_projection_text(&ordinary);
     assert!(
         contains_ci(
             &ordinary_text,
-            "prefer assigning code implementation to subagents"
+            "execute your accepted task as an ordinary peer"
         ),
-        "ordinary peer must keep the orchestrator workflow: {ordinary_text}"
+        "ordinary peer must receive the execution workflow: {ordinary_text}"
     );
     assert!(
         contains_ci(
             &ordinary_text,
-            "split an accepted goal into non-overlapping bounded scopes"
+            "analyze and orchestrate straightforward work"
         ) && contains_ci(
             &ordinary_text,
-            "dispatch bounded execution or observation directly to independent `codex exec --profile gcm` subworkers"
+            "route design to that architect and execute the resulting plan"
         ),
-        "ordinary peer must keep its bounded-subwork dispatch duty: {ordinary_text}"
+        "ordinary peer must retain bounded orchestration and route complex design: {ordinary_text}"
     );
     assert!(
         contains_ci(&ordinary_text, "markdown log")
@@ -1266,10 +1285,10 @@ fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
         "patrol specialization boundaries are unrelated to this mix"
     );
     for phrase in [
-        "own both planning and review for the assigned task",
+        "lead overall debug design",
         "select one or more peer executors for disjoint scopes",
         "review and accept their work or return it for rework",
-        "make all detailed design decisions",
+        "resolve the design decisions",
         "produce a detailed architecture or plan file on disk",
         "ordered implementation steps",
         "required work and exclusions",

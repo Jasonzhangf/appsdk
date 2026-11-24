@@ -41,7 +41,6 @@ pub struct State {
     pub target_sessions: HashMap<String, String>,
     /// Reply obligations keyed by the original message id. This is the single
     /// daemon-owned control record; message bodies never carry it.
-    pub reply_obligations: HashMap<String, ReplyObligation>,
     pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
     pub mailbox_handoff_wakes: HashMap<String, u32>,
     /// Per-external-conversation default delivery target, keyed by
@@ -68,7 +67,6 @@ pub struct State {
     pub notification_delivery_evidence: HashMap<String, serde_json::Value>,
     pub(crate) notification_delivery_bindings:
         HashMap<String, super::notification_contract::SelectedDeliveryBinding>,
-    pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub board_details: HashMap<String, crate::board::BoardTaskDetails>,
     /// Current business block application per task, owned by the daemon.

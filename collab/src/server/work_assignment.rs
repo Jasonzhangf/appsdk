@@ -36,12 +36,7 @@ fn work_executor_gate_with_control(
     Ok(())
 }
 
-fn task_owner_gate(
-    server: &Server,
-    state: &State,
-    task_id: &str,
-    actor: &str,
-) -> Result<(), Resp> {
+fn task_owner_gate(server: &Server, state: &State, task_id: &str, actor: &str) -> Result<(), Resp> {
     task_owner_gate_maybe_with_control(server, state, None, task_id, actor)
 }
 
@@ -333,11 +328,7 @@ pub(crate) fn ticket_binding_recovery_events(
     };
 
     let Some(current_slot) = control
-        .current_for_name(
-            &route.project_scope_id,
-            &route.app_scope_id,
-            slot_name,
-        )
+        .current_for_name(&route.project_scope_id, &route.app_scope_id, slot_name)
         .map_err(Resp::err)?
     else {
         return Ok(Vec::new());
@@ -350,11 +341,8 @@ pub(crate) fn ticket_binding_recovery_events(
         return Ok(Vec::new());
     };
     let current_generation = current_slot.generation;
-    let stale = stale_binding_execute_phases(
-        state.ticket_phases.iter(),
-        slot_name,
-        current_generation,
-    );
+    let stale =
+        stale_binding_execute_phases(state.ticket_phases.iter(), slot_name, current_generation);
 
     let mut events = Vec::new();
     let mut recovered_tasks = std::collections::BTreeSet::new();
@@ -515,10 +503,7 @@ pub(crate) fn ticket_stale_active_claim_phase(
     let mut execute: Vec<_> = state
         .ticket_phases
         .iter()
-        .filter(|phase| {
-            phase.task_id == task_id
-                && phase.phase == TicketPhaseKind::Execute
-        })
+        .filter(|phase| phase.task_id == task_id && phase.phase == TicketPhaseKind::Execute)
         .collect();
     execute.sort_by_key(|phase| phase.batch);
     let newest = execute.last()?;
@@ -529,8 +514,9 @@ pub(crate) fn ticket_stale_active_claim_phase(
         return None;
     }
     let same_slot = newest.slot_name.as_deref() == Some(slot_name);
-    let stale_same_slot =
-        same_slot && newest.binding_generation > 0 && newest.binding_generation < current_generation;
+    let stale_same_slot = same_slot
+        && newest.binding_generation > 0
+        && newest.binding_generation < current_generation;
     let stale_cross_slot = !same_slot
         && newest.slot_name.is_some()
         && newest.binding_generation > 0
@@ -562,11 +548,9 @@ pub(crate) fn ticket_review_candidates(
         if master.as_deref() == Some(worker.id.as_str()) {
             continue;
         }
-        let Ok(Some(slot)) = control.current_for_worker(
-            &route.project_scope_id,
-            &route.app_scope_id,
-            &worker.id,
-        ) else {
+        let Ok(Some(slot)) =
+            control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
+        else {
             continue;
         };
         let name = slot.identity_key.name.clone();
@@ -693,18 +677,22 @@ fn board_work_policy(
     patch: crate::board::WorkPolicy,
     expected_revision: Option<u64>,
 ) -> Resp {
-    let mut state = server.state.lock().unwrap();
-    board_work_policy_locked(
-        server,
-        &mut state,
-        None,
-        actor,
-        token,
-        scope,
-        id,
-        patch,
-        expected_revision,
-    )
+    let response = {
+        let mut state = server.state.lock().unwrap();
+        board_work_policy_locked(
+            server,
+            &mut state,
+            None,
+            actor,
+            token,
+            scope,
+            id,
+            patch,
+            expected_revision,
+        )
+    };
+    deliver_board_auto_notice(server, &response);
+    response
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -801,7 +789,9 @@ fn board_work_policy_locked(
         overlay_work_policy(policy, &patch);
     } else {
         if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err() {
-            if let Err(error) = board_check_master_locked(server, &state, &actor) {
+            if let Err(error) =
+                board_check_master_or_task_architect_locked(server, state, control, &id, &actor)
+            {
                 return error;
             }
         }
@@ -845,6 +835,17 @@ fn board_work_policy_locked(
     details.revision += 1;
     task.updated_ms = now_ms();
     let resulting_status = task.status.clone();
+    let auto_notice = match board_auto_notice_events(
+        server,
+        state,
+        control,
+        &task,
+        &actor,
+        &format!("work policy revision is now {}", details.revision),
+    ) {
+        Ok(notice) => notice,
+        Err(error) => return error,
+    };
     events.extend([
         Event::TaskUpdated { task },
         Event::BoardDetailsChanged {
@@ -852,9 +853,13 @@ fn board_work_policy_locked(
             details,
         },
     ]);
+    events.extend(auto_notice.events.clone());
     // Only an executing state reopens a completed execute phase. A reviewer
     // rebind that keeps the task delivered must not restart execution.
-    if matches!(resulting_status.as_str(), "working" | "verifying" | "rework") {
+    if matches!(
+        resulting_status.as_str(),
+        "working" | "verifying" | "rework"
+    ) {
         if let Some(event) = ticket_rework_phase_event(server, &state, &id) {
             events.push(event);
         }
@@ -872,7 +877,14 @@ fn board_work_policy_locked(
     if let Err(error) = commit {
         return Resp::err(format!("WORK_POLICY_DURABILITY_FAILED: {error}"));
     }
-    board_task_response(server, &state, &id, &actor)
+    let mut response = board_task_response(server, &state, &id, &actor);
+    if let (Some(notice), Some(object)) =
+        (auto_notice.notice.as_ref(), response.data.as_object_mut())
+    {
+        object.insert("notification".into(), json!("auto-board-change"));
+        object.insert("notification_message_id".into(), json!(notice.message_id));
+    }
+    response
 }
 
 enum PreparedBoardDispatch {
@@ -895,15 +907,14 @@ fn prepare_board_dispatch_locked(
     now: i64,
 ) -> Result<PreparedBoardDispatch, Resp> {
     let mut details = board_check_revision(state, id, expected_revision)?;
-    details.long_horizon = match long_horizon.merge(details.long_horizon.as_ref()) {
-        Ok(Some(spec)) => Some(spec),
-        Ok(None) => {
-            return Err(Resp::err(
+    details.long_horizon =
+        match long_horizon.merge(details.long_horizon.as_ref()) {
+            Ok(Some(spec)) => Some(spec),
+            Ok(None) => return Err(Resp::err(
                 "BOARD_LONG_HORIZON_CONTENT_REQUIRED: supply long-horizon task content and cadence",
-            ))
-        }
-        Err(error) => return Err(Resp::err(error)),
-    };
+            )),
+            Err(error) => return Err(Resp::err(error)),
+        };
     let Some(task) = state.tasks.get(id) else {
         return Err(Resp::err("task not found"));
     };
@@ -918,8 +929,7 @@ fn prepare_board_dispatch_locked(
         return Err(Resp::err("task already has a pending invitation"));
     }
     let policy = details.work_policy.clone();
-    let eligible_ids =
-        dispatch_eligible_worker_ids(state, route, control, actor, &policy)?;
+    let eligible_ids = dispatch_eligible_worker_ids(state, route, control, actor, &policy)?;
     let selected = if let Some(name) = policy.executor_name.as_deref() {
         eligible_ids.first().map(|worker_id| {
             (
@@ -949,7 +959,9 @@ fn prepare_board_dispatch_locked(
             let unassigned = !state.tasks.values().any(|task| {
                 !matches!(task.status.as_str(), "closed" | "cancelled")
                     && (task.owner == *worker_id
-                        || state.board_details.get(&task.id)
+                        || state
+                            .board_details
+                            .get(&task.id)
                             .and_then(|details| details.invitation.as_ref())
                             .is_some_and(|invite| invite.peer_id == *worker_id))
             });
@@ -1027,14 +1039,15 @@ fn board_dispatch_work(
     expected_revision: u64,
     long_horizon: crate::board::LongHorizonArgs,
 ) -> Resp {
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control,
-        Err(error) => return Resp::err(error),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
     let mut state = server.state.lock().unwrap();
-    if let Err(error) = board_check_actor(&state, &actor, &token)
-        .and_then(|()| board_check_master_locked(server, &state, &actor))
-    {
+    if let Err(error) = board_check_actor(&state, &actor, &token).and_then(|()| {
+        board_check_master_or_task_architect_locked(server, &state, Some(&control), &id, &actor)
+    }) {
         return error;
     }
     let route = match server_route_scope(server, &state) {
@@ -1065,8 +1078,8 @@ fn board_dispatch_work(
             Resp::data(response)
         }
         PreparedBoardDispatch::Invite(prepared) => {
-            if let Err(error) = server
-                .commit_locked_checked_with_control(&mut state, &prepared.events, &control)
+            if let Err(error) =
+                server.commit_locked_checked_with_control(&mut state, &prepared.events, &control)
             {
                 return Resp::err(format!("WORK_DISPATCH_DURABILITY_FAILED: {error}"));
             }
@@ -1128,7 +1141,7 @@ fn board_dispatch_current_map(
 ) -> Resp {
     let outcome = manager.with_current_state_response(server, |control, state| {
         board_current_map_actor_gate(state, &actor, &token, &id)?;
-        board_check_master_locked(server, state, &actor)?;
+        board_check_master_or_task_architect_locked(server, state, Some(control), &id, &actor)?;
         let route = server_route_scope(server, state)
             .map_err(Resp::err)?
             .ok_or_else(|| Resp::err("project route is not ready"))?;
@@ -1144,12 +1157,31 @@ fn board_dispatch_current_map(
             now_ms(),
         )?;
         match prepared {
-            PreparedBoardDispatch::Waiting { events, response } => {
+            PreparedBoardDispatch::Waiting {
+                mut events,
+                mut response,
+            } => {
+                let Some(task) = state.tasks.get(&id) else {
+                    return Err(Resp::err("task not found"));
+                };
+                let notice = board_auto_notice_events_current(
+                    state,
+                    control,
+                    &route,
+                    task,
+                    &actor,
+                    "dispatch plan changed",
+                )?;
+                events.extend(notice.events);
                 server
                     .commit_locked_checked_with_control(state, &events, control)
                     .map_err(|error| {
                         Resp::err(format!("WORK_DISPATCH_DURABILITY_FAILED: {error}"))
                     })?;
+                if let Some(notice) = notice.notice {
+                    response["notification"] = json!("auto-board-change");
+                    response["notification_message_id"] = json!(notice.message_id);
+                }
                 Ok(BoardManagerOutcome::Reply(Resp::data(response)))
             }
             PreparedBoardDispatch::Invite(prepared) => {
@@ -1191,7 +1223,11 @@ fn board_dispatch_current_map(
         }
     });
     match outcome {
-        Ok(outcome) => outcome.finish(server),
+        Ok(outcome) => {
+            let response = outcome.finish(server);
+            deliver_board_auto_notice(server, &response);
+            response
+        }
         Err(response) => response,
     }
 }
@@ -1265,17 +1301,22 @@ pub(crate) fn board_ticket_admission_events(
         Ok(Some(route)) => route,
         _ => return Err(Resp::err("project route is not ready")),
     };
-    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-        Ok(control) => control,
-        Err(error) => return Err(Resp::err(error)),
-    };
+    let control =
+        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Err(Resp::err(error)),
+        };
 
     let first_phase = TicketPhaseKind::Execute;
     let candidates = ticket_slot_candidates(state, &control, &route, policy, first_phase)?;
 
     let group = ticket_phase_group(first_phase, policy.work_kind.as_deref());
     let cursor = state.ticket_rotation.get(&group).map(String::as_str);
-    let phases = state.ticket_phases.iter().map(|phase| phase).collect::<Vec<_>>();
+    let phases = state
+        .ticket_phases
+        .iter()
+        .map(|phase| phase)
+        .collect::<Vec<_>>();
     let enqueue_seq = state
         .ticket_phases
         .iter()
@@ -1283,7 +1324,11 @@ pub(crate) fn board_ticket_admission_events(
         .max()
         .unwrap_or(0)
         + 1;
-    let selected = select_shortest_queue(&candidates, |slot| slot_queue_len(phases.iter().copied(), slot), cursor);
+    let selected = select_shortest_queue(
+        &candidates,
+        |slot| slot_queue_len(phases.iter().copied(), slot),
+        cursor,
+    );
 
     let mut events = Vec::new();
     let (status, slot_name, wait_reason, selected_worker) = match selected {
@@ -1305,12 +1350,21 @@ pub(crate) fn board_ticket_admission_events(
                     "specified executor {} is unavailable",
                     policy.executor_name.as_deref().unwrap_or_default()
                 )
-            } else if policy.preferred_roles.as_ref().is_some_and(|roles| !roles.is_empty()) {
+            } else if policy
+                .preferred_roles
+                .as_ref()
+                .is_some_and(|roles| !roles.is_empty())
+            {
                 "no peer matches the preferred work roles".to_owned()
             } else {
                 "no eligible peer is available".to_owned()
             };
-            (TicketPhaseStatus::WaitingAssignment, None, Some(reason), None)
+            (
+                TicketPhaseStatus::WaitingAssignment,
+                None,
+                Some(reason),
+                None,
+            )
         }
     };
     let phase = TicketPhaseRecord {
@@ -1328,7 +1382,9 @@ pub(crate) fn board_ticket_admission_events(
         wait_reason,
         result: None,
     };
-    events.push(Event::TicketPhaseRecorded { phase: phase.clone() });
+    events.push(Event::TicketPhaseRecorded {
+        phase: phase.clone(),
+    });
     // A publish that lands on an already-idle slot continues in the same
     // transaction. The new phase is offered as a pending overlay because the
     // reducer has not applied it yet.
@@ -1366,7 +1422,14 @@ pub(crate) fn ticket_continuation_events(
     trusted_idle: bool,
 ) -> Vec<Event> {
     ticket_continuation_events_with_pending(
-        state, control, route, worker_id, pending, None, None, trusted_idle,
+        state,
+        control,
+        route,
+        worker_id,
+        pending,
+        None,
+        None,
+        trusted_idle,
     )
 }
 
@@ -1416,15 +1479,12 @@ pub(crate) fn ticket_rework_phase_event(
     reopened.result = None;
     reopened.wait_reason = None;
 
-    let current = reopened
-        .slot_name
-        .as_deref()
-        .and_then(|name| {
-            control
-                .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
-                .ok()
-                .flatten()
-        });
+    let current = reopened.slot_name.as_deref().and_then(|name| {
+        control
+            .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
+            .ok()
+            .flatten()
+    });
     if let Some(slot) = current.filter(|slot| slot.active_binding().is_some()) {
         reopened.slot_name = Some(slot.identity_key.name.clone());
         reopened.binding_generation = slot.generation;
@@ -1458,10 +1518,11 @@ pub(crate) fn ticket_continuation_events_with_pending(
     if current_master_worker_id(state, Some(route)).as_deref() == Some(worker_id) {
         return Vec::new();
     }
-    let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id) {
-        Ok(Some(slot)) => slot,
-        _ => return Vec::new(),
-    };
+    let slot =
+        match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id) {
+            Ok(Some(slot)) => slot,
+            _ => return Vec::new(),
+        };
     let Some(current) = slot.active_binding() else {
         return Vec::new();
     };
@@ -1477,13 +1538,11 @@ pub(crate) fn ticket_continuation_events_with_pending(
     } else {
         let mut overlay = state.ticket_phases.clone();
         for record in pending {
-            match overlay
-                .iter_mut()
-                .find(|existing| {
-                    existing.task_id == record.task_id
-                        && existing.phase == record.phase
-                        && existing.batch == record.batch
-                }) {
+            match overlay.iter_mut().find(|existing| {
+                existing.task_id == record.task_id
+                    && existing.phase == record.phase
+                    && existing.batch == record.batch
+            }) {
                 Some(existing) => *existing = record.clone(),
                 None => overlay.push(record.clone()),
             }
@@ -1656,7 +1715,8 @@ pub(crate) fn ticket_continuation_events_with_pending(
             name: slot_name.clone(),
         },
     });
-    if let Some(subscription) = state.matching_subscription(worker_id, "direct-message", None, now_ms())
+    if let Some(subscription) =
+        state.matching_subscription(worker_id, "direct-message", None, now_ms())
     {
         events.push(Event::WakeBound {
             message_id,
@@ -1786,7 +1846,8 @@ mod work_policy_state_tests {
                 },
             })
             .unwrap();
-        let mut replay: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let mut replay: State =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert_eq!(replay.effective_work_policy("child"), resolved);
         assert_eq!(
             replay

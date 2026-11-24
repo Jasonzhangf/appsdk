@@ -1,6 +1,5 @@
 //! Typed public requests for global CEO coordination. Authorization remains
 //! with the host runtime manager; these fields confer no actor authority.
-use crate::proto::ReplyPolicy;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +53,6 @@ pub enum CeoCommand {
         subject: String,
         body: String,
         in_reply_to: Option<String>,
-        reply_policy: Option<ReplyPolicy>,
     },
     AppendTask {
         project: String,
@@ -64,7 +62,6 @@ pub enum CeoCommand {
         delivery_condition: String,
         test_condition: String,
         priority: String,
-        reply_policy: Option<ReplyPolicy>,
     },
     Reply {
         subject: String,

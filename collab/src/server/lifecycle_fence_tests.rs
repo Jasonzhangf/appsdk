@@ -166,6 +166,7 @@ fn public_details() -> crate::board::BoardTaskDetails {
             created_ms: 3,
             original_status: None,
             original_owner: None,
+            inviter_name: None,
         automatic_source: None,
         }),
         last_response: Some("public-response".into()),
@@ -931,15 +932,9 @@ fn receive_committed_reactivating_retired_subscription_is_rejected_before_curren
     let error = assert_rejected_before_bytes(
         &server,
         &root,
-        &[Event::ReceiveCommitted {
-            receipt: state::ReceiveReceipt {
-                receive_id: "recv-1".into(),
-                worker_id: TARGET.into(),
-                route_scope: None,
-                message_ids: vec!["msg-retired".into()],
-                received_ms: 2,
-            },
+        &[Event::Acked {
             ids: vec!["msg-retired".into()],
+            consumed_ms: Some(2),
         }],
     );
     assert!(error.contains("target_closing"), "{error}");

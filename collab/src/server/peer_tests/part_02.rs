@@ -345,7 +345,6 @@ fn authenticated_send_rejects_missing_binding() {
             subject: Some("test".into()),
             body: "body".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -394,7 +393,6 @@ fn authenticated_send_rejects_ambiguous_binding() {
             subject: Some("test".into()),
             body: "body".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -426,7 +424,6 @@ fn authenticated_send_rejects_another_workers_binding() {
             subject: Some("test".into()),
             body: "body".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -459,7 +456,6 @@ fn authenticated_send_enforces_request_cooldown() {
             subject: Some("cooldown".into()),
             body: "first".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -477,7 +473,6 @@ fn authenticated_send_enforces_request_cooldown() {
             subject: Some("cooldown".into()),
             body: "second".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -492,7 +487,7 @@ fn authenticated_send_enforces_request_cooldown() {
 }
 
 #[test]
-fn authenticated_send_supersedes_earlier_reply() {
+fn authenticated_send_keeps_correlated_replies_unread() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "receiver", "%receiver");
@@ -511,7 +506,6 @@ fn authenticated_send_supersedes_earlier_reply() {
             subject: Some("supersede".into()),
             body: "ask".into(),
             in_reply_to: None,
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -530,7 +524,6 @@ fn authenticated_send_supersedes_earlier_reply() {
             subject: Some("supersede".into()),
             body: "first".into(),
             in_reply_to: Some(request_id.clone()),
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
@@ -549,17 +542,19 @@ fn authenticated_send_supersedes_earlier_reply() {
             subject: Some("supersede".into()),
             body: "second".into(),
             in_reply_to: Some(request_id.clone()),
-            reply_policy: None,
             target_session: None,
             delivery: "immediate".into(),
         },
     );
     assert!(second.ok, "{}", second.error.unwrap_or_default());
+    let second_id = second.data["msg_id"].as_str().unwrap().to_owned();
     let state = server_arc.state.lock().unwrap();
-    let first_msg = state.msgs.get(&first_id).unwrap();
-    assert_eq!(first_msg.state, "superseded");
+    let replies = [state.msgs[&first_id].state.clone(), state.msgs[&second_id].state.clone()];
+    let cooldown_active = state.recent_live_request("sender", "receiver", now_ms()).is_some();
     drop(state);
     std::fs::remove_dir_all(root).ok();
+    assert_eq!(replies, ["pending", "pending"]);
+    assert!(cooldown_active);
 }
 #[test]
 fn goal_reconcile_does_not_close_master_idle_or_direct_reception() {

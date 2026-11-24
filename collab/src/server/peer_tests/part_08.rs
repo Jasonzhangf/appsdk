@@ -152,13 +152,12 @@ fn seeded_receive_peer(server: &Server, root: &Path, id: &str, worker: &str) -> 
 }
 
 #[tokio::test]
-async fn receive_id_commits_the_batch_and_replays_it_after_a_lost_response() {
+async fn receive_id_commits_once_and_never_replays() {
     let (server, root) = test_server();
     seeded_receive_peer(&server, &root, "receive-loss-message", "peer");
     let server = Arc::new(server);
 
-    // First poll carries a caller-owned identity and commits the batch. The
-    // caller never sees this response: it simulates a lost socket reply.
+    // First poll carries a caller-owned identity and commits the batch.
     let first = handle_poll_async_with_context(
         server.clone(),
         "peer".into(),
@@ -170,7 +169,7 @@ async fn receive_id_commits_the_batch_and_replays_it_after_a_lost_response() {
     .await;
     assert!(first.ok, "{first:?}");
     assert_eq!(first.data["receive_id"], "receive-loss-1");
-    assert_eq!(first.data["replayed"], false);
+    assert!(first.data.get("replayed").is_none());
     assert_eq!(first.data["messages"][0]["id"], "receive-loss-message");
     assert_eq!(
         server.state.lock().unwrap().msgs["receive-loss-message"].state,
@@ -178,9 +177,8 @@ async fn receive_id_commits_the_batch_and_replays_it_after_a_lost_response() {
         "the receive identity commits the consumption in the same transaction"
     );
 
-    // The same identity must return the exact committed batch, not an empty
-    // inbox, so a lost response is recoverable by the same caller.
-    let replayed = handle_poll_async_with_context(
+    // The same identity is client trace only. A consumed batch is not replayed.
+    let second = handle_poll_async_with_context(
         server.clone(),
         "peer".into(),
         None,
@@ -189,50 +187,15 @@ async fn receive_id_commits_the_batch_and_replays_it_after_a_lost_response() {
         Some("receive-loss-1".into()),
     )
     .await;
-    assert!(replayed.ok, "{replayed:?}");
-    assert_eq!(replayed.data["replayed"], true);
-    assert_eq!(replayed.data["count"], 1);
-    assert_eq!(replayed.data["messages"][0]["id"], "receive-loss-message");
-    assert_eq!(
-        replayed.data["messages"][0]["body"],
-        "body-receive-loss-message"
-    );
+    assert!(second.ok, "{second:?}");
+    assert_eq!(second.data["count"], 0);
+    assert!(second.data["messages"].as_array().unwrap().is_empty());
+    assert!(second.data.get("replayed").is_none());
     std::fs::remove_dir_all(root).ok();
 }
 
 #[tokio::test]
-async fn receive_id_retry_survives_current_state_reload() {
-    let (server, root) = test_server();
-    seeded_receive_peer(&server, &root, "receive-restart-message", "peer");
-    let server = Arc::new(server);
-    let first = handle_poll_async_with_context(
-        server.clone(),
-        "peer".into(),
-        None,
-        0,
-        None,
-        Some("receive-restart-1".into()),
-    )
-    .await;
-    assert!(first.ok, "{first:?}");
-    assert_eq!(first.data["messages"][0]["id"], "receive-restart-message");
-    let restored = current_state::load(&server.state_path, false).unwrap();
-    drop(server);
-    let receipt = restored
-        .receive_receipts
-        .get("receive-restart-1")
-        .expect("receive receipt must be durable");
-    assert_eq!(receipt.worker_id, "peer");
-    assert_eq!(
-        receipt.message_ids,
-        vec!["receive-restart-message".to_owned()]
-    );
-    assert!(restored.msgs["receive-restart-message"].state == "read");
-    std::fs::remove_dir_all(root).ok();
-}
-
-#[tokio::test]
-async fn receive_id_rejects_another_actor_and_another_route() {
+async fn receive_id_does_not_grant_another_actor_the_consumed_batch() {
     let (server, root) = test_server();
     seeded_receive_peer(&server, &root, "receive-owner-message", "peer");
     register(&server, "other", "%other");
@@ -247,6 +210,7 @@ async fn receive_id_rejects_another_actor_and_another_route() {
     )
     .await;
     assert!(first.ok, "{first:?}");
+    assert_eq!(first.data["count"], 1);
 
     let foreign = handle_poll_async_with_context(
         server.clone(),
@@ -257,14 +221,9 @@ async fn receive_id_rejects_another_actor_and_another_route() {
         Some("receive-owner-1".into()),
     )
     .await;
-    assert!(!foreign.ok, "{foreign:?}");
-    assert!(
-        foreign
-            .error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("RECEIVE_IDENTITY_MISMATCH")),
-        "{foreign:?}"
-    );
+    assert!(foreign.ok, "{foreign:?}");
+    assert_eq!(foreign.data["count"], 0);
+    assert!(!foreign.data["messages"].to_string().contains("receive-owner-message"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -575,8 +534,9 @@ fn tmux_notification_requests_durable_receive() {
 #[tokio::test]
 async fn tmux_peer_send_then_collab_recv_commits_queryable_consumption() {
     let (mut server, root) = test_server();
-    let tmux = IsolatedTmux::start(&root);
+    let tmux = IsolatedTmux::start_online(&root);
     let endpoints = tmux.endpoints();
+    wait_for_online_fixture(&endpoints[1]);
     assert!(register_tmux(&server, "tmux-a", endpoints[0].clone()).ok);
     assert!(register_tmux(&server, "tmux-b", endpoints[1].clone()).ok);
     server.appserver_notification_sink = default_appserver_notification_sink();
@@ -641,10 +601,10 @@ async fn tmux_peer_send_then_collab_recv_commits_queryable_consumption() {
         },
     );
     assert!(before_recv.ok, "message status failed: {before_recv:?}");
-    assert_eq!(before_recv.data["consumed_by_recv"], false);
+    assert_eq!(before_recv.data["state"], "pending");
 
-    // Build the exact Poll request used by the production `collab recv`
-    // command; the server handler then commits consumption and its receipt.
+    // Build the exact Poll request used by the production collab recv
+    // command. The current unread batch becomes read after this one Poll.
     let request = crate::recv_request(
         "tmux-b".into(),
         "token-tmux-b".into(),
@@ -676,10 +636,10 @@ async fn tmux_peer_send_then_collab_recv_commits_queryable_consumption() {
     assert_eq!(received.data["messages"][0]["id"], message_id);
     assert_eq!(received.data["receive_id"], "tmux-b-recv-1");
 
-    let consumed = dispatch(&server, Req::MsgStatus { msg_id: message_id });
-    assert!(consumed.ok, "message status failed: {consumed:?}");
-    assert_eq!(consumed.data["consumed_by_recv"], true);
-    assert_eq!(consumed.data["state"], "read");
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[&message_id].state, "read");
+    }
 
     drop(server);
     drop(tmux);
@@ -1275,7 +1235,7 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
     let wrong_route = handle_send_with_task(
         &server,
         "agent".into(),
-        "other".into(),
+        "qqbot://different/session".into(),
         "notify".into(),
         Some("reply".into()),
         "wrong route".into(),
@@ -1290,6 +1250,26 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
         .as_deref()
         .unwrap_or_default()
         .contains("CHANNEL_REPLY_ROUTE_MISMATCH"));
+
+    let correlated = handle_send_with_task(
+        &server,
+        "agent".into(),
+        "other".into(),
+        "notify".into(),
+        Some("local correlation".into()),
+        "ordinary message linked to an inbound envelope".into(),
+        Some(inbound_id.clone()),
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(correlated.ok, "{correlated:?}");
+    let correlated_id = correlated.data["msg_id"].as_str().unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[correlated_id].in_reply_to.as_deref(), Some(inbound_id.as_str()));
+        assert!(!state.channel_reply_routes.contains_key(correlated_id));
+    }
 
     let third_party = handle_send_with_task(
         &server,
@@ -1316,7 +1296,7 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
 fn explicit_peer_notification_accepts_arbitrary_durable_body() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     let response = handle_send(
         &server,
         "sender".into(),
@@ -1386,7 +1366,7 @@ fn send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery() {
 fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
         Err("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure".into())
     });
@@ -1449,7 +1429,7 @@ fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
 fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_for_sink = Arc::clone(&attempts);
     server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
@@ -1531,7 +1511,7 @@ fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
 fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     let first = handle_send(
         &server,
         "sender".into(),
@@ -1579,7 +1559,7 @@ fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
 fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink =
         Arc::new(|_, _, _, _, _, _| Err("ADAPTER_TIMEOUT: turn/start timed out".into()));
     let first = handle_send(
@@ -1625,7 +1605,7 @@ fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
 fn explicit_retry_is_refused_for_a_decode_failure() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
-    register(&server, "recipient", "%recipient");
+    assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
         Err("ADAPTER_UNKNOWN: decode response: missing result payload".into())
     });
@@ -1675,7 +1655,7 @@ fn daemon_maintenance_replaces_a_stale_default_target_with_current_tmux_route() 
         Ok(serde_json::json!({"text_submitted":true,"enter_submitted":true,"consumed":false}))
     });
     let server = Arc::new(server);
-    assert!(register_public(&server, "peer", "%peer").ok);
+    assert!(register_public_with_presence(&server, "peer", "%peer", true).ok);
     {
         let mut state = server.state.lock().unwrap();
         let mut subscription = state.notification_subscriptions["sub-default-direct-message-peer"].clone();

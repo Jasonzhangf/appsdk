@@ -7,6 +7,10 @@ use std::collections::BTreeSet;
 /// A pane's terminal ID and the tmux pane ID belong to different namespaces.
 pub(crate) fn panes_for_endpoint(endpoint: &TmuxEndpoint) -> Result<BTreeSet<String>, String> {
     validate_endpoint(endpoint)?;
+    #[cfg(test)]
+    if super::tests::test_server_is_detached(endpoint.server_pid) {
+        return Ok(BTreeSet::new());
+    }
     #[cfg(feature = "lifecycle-test-hooks")]
     if std::env::var_os("COLLAB_TEST_ITERM2_ATTACHMENT").as_deref()
         == Some(std::ffi::OsStr::new("fixture"))

@@ -370,7 +370,7 @@
     }
 
     #[test]
-    fn immediate_notify_loads_not_loaded_thread_through_turn_start() {
+    fn immediate_notify_refuses_thread_that_is_cold_at_delivery() {
         let socket = temp_socket("notify-not-loaded-start");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -393,32 +393,22 @@
                     }
                 }),
             );
-            // A cold thread is loaded by the immediate notification itself:
-            // `turn/start` is the native load-and-start call.
-            let start = next_request(&mut stream);
-            assert_eq!(start["method"], "turn/start");
-            assert_eq!(start["params"]["threadId"], "thread-1");
-            respond(
-                &mut stream,
-                json!({
-                    "id": start["id"],
-                    "result": {
-                        "turn": {"id": "turn-loaded", "status": "inProgress", "items": []}
-                    }
-                }),
-            );
+            let mut byte = [0_u8; 1];
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            assert_eq!(stream.read(&mut byte).unwrap(), 0, "cold thread got input");
             stream.shutdown(Shutdown::Both).ok();
         });
 
-        immediate_notify(
+        let result = immediate_notify(
             &selected_transport(&socket),
             Some("sender-thread"),
             "notify body",
             "message-start",
-        )
-        .unwrap();
-        server.join().unwrap();
+        );
+        let server_result = server.join();
         std::fs::remove_file(socket).ok();
+        server_result.unwrap();
+        assert!(result.unwrap_err().to_string().contains("RECIPIENT_NOT_ONLINE"));
     }
 
     #[test]
@@ -514,7 +504,7 @@
         )
         .unwrap_err();
         assert!(
-            error.to_string().contains("still reports not loaded"),
+            error.to_string().contains("RECIPIENT_NOT_ONLINE"),
             "{error}"
         );
         server.join().unwrap();

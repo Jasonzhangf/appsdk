@@ -554,6 +554,7 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         false,
     );
     let peer_pane = create_session(&fixture, "goal-peer");
+    fixture.start_codex_pane_runner(&peer_pane);
     let peer = register_context(&fixture, &root, &peer_pane, "goal-peer", false);
     let (peer_id, _) = identity(&peer);
     let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
@@ -664,26 +665,9 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let reminder = reminder.unwrap();
     let message_id = reminder["id"].as_str().unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), || {
-            let captured = Command::new("tmux")
-                .args([
-                    "-S",
-                    fixture.tmux_socket.to_str().unwrap(),
-                    "capture-pane",
-                    "-p",
-                    "-t",
-                    &peer_pane.pane_id,
-                    "-S",
-                    "-4096",
-                ])
-                .output()
-                .unwrap();
-            let compact: String = String::from_utf8_lossy(&captured.stdout)
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            compact.contains(message_id)
-        }),
+        wait_until(Duration::from_secs(10), || pane_contains_message_id(
+            &fixture, &peer_pane, message_id
+        )),
         "exact reminder was not observed in the real target pane"
     );
     let received = run_ok_at(
@@ -1249,6 +1233,62 @@ fn message_status(
     run_ok_at(fixture, target_root, target_pane, &["msg", msg_id], false)
 }
 
+fn pane_contains_message_id(fixture: &Fixture, pane: &Pane, message_id: &str) -> bool {
+    let captured = tmux(
+        &fixture.tmux_socket,
+        &["capture-pane", "-p", "-t", &pane.pane_id, "-S", "-4096"],
+    );
+    assert!(captured.status.success(), "{captured:?}");
+    let compact: String = String::from_utf8_lossy(&captured.stdout)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact.contains(message_id)
+}
+
+fn trace_daemon_tmux_commands(fixture: &Fixture) -> (String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let real = Command::new("/bin/sh")
+        .args(["-c", "command -v tmux"])
+        .output()
+        .unwrap();
+    assert!(real.status.success());
+    let real = String::from_utf8(real.stdout).unwrap();
+    let bin = fixture.root.join("daemon-tmux-trace");
+    std::fs::create_dir(&bin).unwrap();
+    let trace = bin.join("commands");
+    let wrapper = bin.join("tmux");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = -S ]; then printf '%s\\n' \"${{3-}}\" >> {}; fi\nexec {} \"$@\"\n",
+            shell_quote(trace.to_str().unwrap()),
+            shell_quote(real.trim()),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    (path, trace)
+}
+
+fn assert_no_daemon_tmux_input(trace: &Path, prior_commands: usize) -> usize {
+    let commands = std::fs::read_to_string(trace).expect("daemon tmux trace is active");
+    assert!(
+        commands
+            .lines()
+            .skip(prior_commands)
+            .any(|command| matches!(command, "list-panes" | "display-message")),
+        "the private daemon must use the traced tmux entry: {commands}"
+    );
+    assert!(
+        !commands.lines().any(|command| matches!(command, "paste-buffer" | "send-keys")),
+        "offline delivery must submit neither text nor Enter: {commands}"
+    );
+    commands.lines().count()
+}
+
 fn assert_rejected_without_message(
     fixture: &Fixture,
     target_context: &Value,
@@ -1333,8 +1373,13 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     );
     assert_eq!(peer_sent["ok"], true, "{peer_sent}");
     assert_eq!(
+        peer_sent["notification"], "queued-recipient-offline",
+        "{peer_sent}"
+    );
+    assert_eq!(
         message_count(&fixture, &target_context, &target_id),
-        before + 1
+        before + 1,
+        "offline transport still commits the durable target message"
     );
 
     let promoted = run_ok_at(
@@ -1352,10 +1397,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(promoted["master"], target_id, "{promoted}");
 
     let before = message_count(&fixture, &target_context, &target_id);
-    for (field, value) in [
-        ("reply_policy", json!("required")),
-        ("target_session", json!("other-session")),
-    ] {
+    for (field, value) in [("target_session", json!("other-session"))] {
         let mut request = cross_project_request(
             &source_id,
             &source_root,
@@ -1399,6 +1441,8 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         before,
     );
 
+    let (traced_path, trace) = trace_daemon_tmux_commands(&fixture);
+    fixture.restart_daemon_with_env("PATH", &traced_path);
     let stale_workers = workers_at(&fixture, &target_context);
     let stale_target = worker_row(&stale_workers, &target_id);
     // The fixture supplies a registered session in a shell pane, not a live
@@ -1427,6 +1471,10 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     assert_eq!(delivered["sender"], source_id, "{delivered}");
     assert_eq!(delivered["recipient"], target_id, "{delivered}");
     assert_eq!(delivered["consumed"], false, "{delivered}");
+    assert_eq!(
+        delivered["notification"], "queued-recipient-offline",
+        "{delivered}"
+    );
     let msg_id = delivered["msg_id"]
         .as_str()
         .expect("durable message id")
@@ -1434,7 +1482,6 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
 
     let pending = message_status(&fixture, &target_root, &target_pane, &msg_id);
     assert_eq!(pending["state"], "pending", "{pending}");
-    assert_eq!(pending["consumed_by_recv"], false, "{pending}");
     assert_eq!(pending["to"], target_id, "{pending}");
     assert_eq!(
         pending["subject"], "Cross-project stale identity",
@@ -1444,16 +1491,24 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
         pending["body"], "durable message through a live tmux endpoint",
         "{pending}"
     );
+    assert!(
+        !pane_contains_message_id(&fixture, &target_pane, &msg_id),
+        "the existing offline pane must receive no input for {msg_id}"
+    );
+    let trace_checkpoint = assert_no_daemon_tmux_input(&trace, 0);
 
-    fixture.stop_daemon();
-    fixture.restart_daemon();
+    fixture.restart_daemon_with_env("PATH", &traced_path);
     let replayed = message_status(&fixture, &target_root, &target_pane, &msg_id);
     assert_eq!(replayed["id"], msg_id, "{replayed}");
     assert_eq!(replayed["state"], "pending", "{replayed}");
-    assert_eq!(replayed["consumed_by_recv"], false, "{replayed}");
     assert_eq!(replayed["to"], target_id, "{replayed}");
     assert_eq!(replayed["subject"], pending["subject"], "{replayed}");
     assert_eq!(replayed["body"], pending["body"], "{replayed}");
+    assert!(
+        !pane_contains_message_id(&fixture, &target_pane, &msg_id),
+        "daemon restart must not submit input to the offline pane for {msg_id}"
+    );
+    assert_no_daemon_tmux_input(&trace, trace_checkpoint);
 
     let dead_pane = create_session(&fixture, "dead-pane");
     let dead_context = register_context(&fixture, &dead_root, &dead_pane, "dead-context", true);
@@ -1508,7 +1563,7 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
     let dead_row = worker_row(&workers_at(&fixture, &dead_context), &dead_id);
     assert_eq!(dead_row["endpoint_live"], false, "{dead_row}");
 
-    let dead_rejected = wire_request(
+    let dead_queued = wire_request(
         &fixture.host_state.join("server.sock"),
         &cross_project_request(
             &source_id,
@@ -1516,18 +1571,22 @@ fn cross_project_route_projection_loss_preserves_binding_and_durable_enqueue() {
             &credentials,
             &dead_id,
             &dead_context,
-            "Reject dead endpoint",
-            "this message must not commit",
+            "Queue for disconnected endpoint",
+            "the registered name keeps this message unread",
             false,
         ),
     );
-    assert_rejected_without_message(
-        &fixture,
-        &dead_context,
-        &dead_id,
-        &dead_rejected,
-        "requires a reachable target binding",
-        before,
+    assert_eq!(dead_queued["ok"], true, "{dead_queued}");
+    assert_eq!(dead_queued["durable"], true, "{dead_queued}");
+    assert_eq!(
+        dead_queued["notification"], "queued-recipient-offline",
+        "{dead_queued}"
+    );
+    assert_eq!(dead_queued["consumed"], false, "{dead_queued}");
+    assert_eq!(
+        message_count(&fixture, &dead_context, &dead_id),
+        before + 1,
+        "a missing transport must retain unread mail for the registered name"
     );
 
     fixture.stop_daemon();
@@ -2358,7 +2417,7 @@ fn send_to_ceo_allows_registered_peers_and_correlated_replies() {
         false,
     );
     assert_eq!(replied["durable"], true, "{replied}");
-    let bad_reply = command_at(
+    let foreign_correlation = command_at(
         &fixture,
         &source_root,
         &source_pane,
@@ -2377,7 +2436,11 @@ fn send_to_ceo_allows_registered_peers_and_correlated_replies() {
     )
     .output()
     .unwrap();
-    assert!(!bad_reply.status.success());
+    assert!(
+        foreign_correlation.status.success(),
+        "correlation is data-only; another caller may send its own correlated message: {}",
+        String::from_utf8_lossy(&foreign_correlation.stderr)
+    );
     let inbox = run_ok_at(
         &fixture,
         &ceo_root,
@@ -2397,11 +2460,9 @@ fn send_to_ceo_allows_registered_peers_and_correlated_replies() {
         .any(|message| message["id"] == replied["msg_id"]
             && message["in_reply_to"] == request_id
             && message["body"] == "actual peer result"));
-    assert!(inbox["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|message| message["subject"] != "foreign-reply"));
+    assert!(inbox["messages"].as_array().unwrap().iter().any(|message| {
+        message["subject"] == "foreign-reply" && message["in_reply_to"] == request_id
+    }));
 
     drop(fixture);
     std::fs::remove_dir_all(ceo_root).expect("remove isolated ceo project");

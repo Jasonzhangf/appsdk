@@ -890,6 +890,17 @@ fn peer_lifecycle_r3_legacy_close_never_proves_full_terminal() {
     let seed = fixture.registered_context("peer-r3-child", &child_pane);
     let child = lifecycle_identity(&fixture, &seed);
     let child_id = child["worker_id"].as_str().unwrap();
+    // Consume the pending registration notice before taking purity snapshots.
+    // An offline pane can retain it indefinitely without a wake attempt.
+    let received = fixture.run_ok(&["recv"], Some(&pane));
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["subject"] == "peer-registered"),
+        "{received}"
+    );
     fixture.stop_daemon();
     let path = fixture.project_state();
     let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

@@ -12,7 +12,7 @@ fn scratch(name: &str) -> PathBuf {
 /// `respond` receives one parsed request and returns the single reply line, or
 /// `None` to accept the connection and stay silent. `None` is how a hanging
 /// gateway is modelled; the connection is held open until the client gives up.
-struct Gateway {
+pub(crate) struct Gateway {
     socket: PathBuf,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -67,7 +67,7 @@ impl Gateway {
         }
     }
 
-    fn endpoint(&self) -> String {
+    pub(crate) fn endpoint(&self) -> String {
         format!("unix://{}", self.socket.display())
     }
 }
@@ -149,7 +149,7 @@ fn is_wake_enqueue(request: &serde_json::Value) -> bool {
 /// A gateway that answers the real registration challenge and can also serve
 /// wake traffic. The challenge marker and participant identity come from the
 /// actual enqueue request; no private pending record is read.
-fn registration_gateway<W>(
+pub(crate) fn registration_gateway<W>(
     name: &str,
     root: &Path,
     seen: Option<Arc<Mutex<Vec<serde_json::Value>>>>,
@@ -167,6 +167,7 @@ where
         }
         match request["method"].as_str().unwrap_or_default() {
             "agent-facts" => Some(facts_reply(&request, &root)),
+            "agent-get" => Some(online_reply(&request)),
             "enqueue" => {
                 if let Some(challenge) = registration_challenge(&request) {
                     let message_id = request["params"]["messageId"].as_str()?.to_owned();
@@ -234,7 +235,23 @@ where
     })
 }
 
-fn wake_reply(request: &serde_json::Value) -> Option<String> {
+fn online_reply(request: &serde_json::Value) -> String {
+    serde_json::json!({
+        "ok": true,
+        "result": {
+            "ok": true,
+            "runtimeId": request["params"]["runtimeId"],
+            "result": {"agent": {
+                "agentId": request["params"]["agentId"],
+                "status": "running",
+                "live": true
+            }}
+        }
+    })
+    .to_string()
+}
+
+pub(crate) fn wake_reply(request: &serde_json::Value) -> Option<String> {
     Some(
         serde_json::json!({
             "ok": true,

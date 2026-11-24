@@ -2154,6 +2154,43 @@ fn pool_overflow_skips_occupied_peer_numbers_and_reuses_the_current_one() {
 }
 
 #[test]
+fn released_peer_names_are_reused_by_the_next_registration() {
+    let project = ProjectScopeId::new("/tmp/collab-binding-slot").unwrap();
+    let app = AppServerId::new("appserver-cli").unwrap();
+    let mut control = BindingControlSet::new();
+    for name in super::name_resolution::ORDINARY_NAME_POOL {
+        let key = IdentityBindingKey::new(project.clone(), app.clone(), name);
+        control
+            .commit(
+                &key,
+                value(
+                    &key,
+                    &format!("occupied-{name}"),
+                    &format!("runtime-{name}"),
+                    &format!("unix:///tmp/{name}.sock"),
+                ),
+                None,
+            )
+            .unwrap();
+    }
+    let peer = key("peer-1");
+    control
+        .commit(
+            &peer,
+            value(&peer, "agent-a", "runtime-a", "unix:///tmp/a.sock"),
+            None,
+        )
+        .unwrap();
+    control.unregister(&peer, None).unwrap();
+
+    assert_eq!(
+        control.ordinary_name(&project, &app, "agent-b").unwrap(),
+        "peer-1",
+        "an unregistered stable name is available to the next ordinary carrier"
+    );
+}
+
+#[test]
 fn generated_peer_slots_load_with_or_without_a_legacy_display_number() {
     let key = key("peer-1");
     let slot = IdentityBindingSlot::new(key.clone());

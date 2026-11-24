@@ -936,6 +936,80 @@ fn recv_style_ack_clears_master_goal_due() {
 }
 
 #[test]
+fn expired_periodic_goal_reads_only_an_occurrence_issued_for_its_trigger() {
+    fn seed(state: &mut State, message_id: &str, created_ms: i64) {
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-expired-goal".into(),
+                worker_id: "owner".into(),
+                event: "deadline".into(),
+                subject: Some("goal:expired".into()),
+                target: "thread-owner".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(100),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(100),
+                repeat_count: 2,
+                fired_count: 1,
+                expires_ms: 150,
+                status: "expired".into(),
+                created_ms: 1,
+                updated_ms: 100,
+                status_reason: None,
+                patrol_idle_since_ms: None,
+                patrol_last_push_ms: 0,
+                periodic_declared: true,
+                goal_content: None,
+            },
+        });
+        let mut message = msg(message_id, "owner", "notification");
+        message.from = "collab-server".into();
+        message.subject = Some("deadline:goal:expired".into());
+        message.created_ms = created_ms;
+        state.apply(&Event::Sent { msg: message });
+        state.apply(&Event::WakeBound {
+            message_id: message_id.into(),
+            subscription_id: "sub-expired-goal".into(),
+        });
+        state.apply(&Event::NotificationOccurrenceIssued {
+            message_id: message_id.into(),
+            subscription_id: "sub-expired-goal".into(),
+            trigger_ms: 100,
+        });
+        state.apply(&Event::Delivered {
+            ids: vec![message_id.into()],
+        });
+        state.apply(&Event::Acked {
+            ids: vec![message_id.into()],
+            consumed_ms: Some(120),
+        });
+    }
+
+    let mut issued = State::default();
+    seed(&mut issued, "issued-message", 100);
+    assert_eq!(
+        issued.notification_subscriptions["sub-expired-goal"].fired_count,
+        2
+    );
+    assert_eq!(
+        issued.notification_occurrences["issued-message"].consumed_ms,
+        Some(120)
+    );
+    assert_eq!(issued.msgs["issued-message"].state, "read");
+
+    let mut retained = State::default();
+    seed(&mut retained, "retained-message", 99);
+    assert_eq!(
+        retained.notification_subscriptions["sub-expired-goal"].fired_count,
+        1
+    );
+    assert!(retained.notification_occurrences["retained-message"]
+        .consumed_ms
+        .is_none());
+    assert_eq!(retained.msgs["retained-message"].state, "read");
+}
+
+#[test]
 fn delivering_a_master_goal_deadline_clears_goal_due_latch() {
     let mut state = State::default();
     state.master_worker_id = Some("master".into());
@@ -1221,7 +1295,7 @@ fn current_state_preserves_worktree_binding() {
         isolation_mode: None,
     };
     state.apply(&Event::WorktreeBound {
-            binding: binding.clone(),
+        binding: binding.clone(),
     });
     let replayed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(replayed.worktree_bindings["binding-task-1"], binding);

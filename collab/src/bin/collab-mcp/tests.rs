@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn sendmessage_places_reply_flags_before_the_trailing_body() {
+fn sendmessage_places_optional_flags_before_the_trailing_body() {
     assert_eq!(
         build_argv(
             "collab_sendmessage",
@@ -26,8 +26,7 @@ fn sendmessage_places_reply_flags_before_the_trailing_body() {
                 "to":"Bob",
                 "subject":"ask",
                 "body":"please handle",
-                "in_reply_to":"m-1",
-                "reply_required":true
+                "in_reply_to":"m-1"
             })
         )
         .unwrap(),
@@ -39,24 +38,7 @@ fn sendmessage_places_reply_flags_before_the_trailing_body() {
             "ask",
             "--in-reply-to",
             "m-1",
-            "--reply-required",
             "please handle",
-        ]
-    );
-    assert_eq!(
-        build_argv(
-            "collab_sendmessage",
-            &json!({"to":"Bob","subject":"done","body":"result","reply_on_completion":true})
-        )
-        .unwrap(),
-        [
-            "sendmessage",
-            "--to",
-            "Bob",
-            "--subject",
-            "done",
-            "--reply-on-completion",
-            "result",
         ]
     );
 }
@@ -120,6 +102,8 @@ fn federation_mcp_schema_exposes_only_the_shared_send_and_ref_fields() {
         "remote_socket",
         "allow_inbound",
         "allow_outbound",
+        "reply_required",
+        "reply_on_completion",
     ] {
         assert!(
             !properties.contains_key(forbidden),
@@ -129,42 +113,10 @@ fn federation_mcp_schema_exposes_only_the_shared_send_and_ref_fields() {
 }
 
 #[test]
-fn sendmessage_defaults_to_no_reply_obligation_and_rejects_non_boolean_flags() {
-    assert_eq!(
-        build_argv(
-            "collab_sendmessage",
-            &json!({
-                "to":"Bob",
-                "subject":"info",
-                "body":"fyi",
-                "reply_required":false,
-                "reply_on_completion":false
-            })
-        )
-        .unwrap(),
-        ["sendmessage", "--to", "Bob", "--subject", "info", "fyi"]
-    );
-    for key in ["reply_required", "reply_on_completion"] {
-        assert!(build_argv(
-            "collab_sendmessage",
-            &json!({"to":"Bob","subject":"bad","body":"x",(key):"true"})
-        )
-        .is_err());
-    }
+fn sendmessage_rejects_non_string_correlation() {
     assert!(build_argv(
         "collab_sendmessage",
         &json!({"to":"Bob","subject":"bad","body":"x","in_reply_to":7})
-    )
-    .is_err());
-    assert!(build_argv(
-        "collab_sendmessage",
-        &json!({
-            "to":"Bob",
-            "subject":"bad",
-            "body":"x",
-            "reply_required":true,
-            "reply_on_completion":true
-        })
     )
     .is_err());
 }

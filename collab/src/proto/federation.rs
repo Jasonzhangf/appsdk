@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{DirectoryTarget, ReplyPolicy};
+use super::DirectoryTarget;
 use crate::identity::{AppServerId, MessageId, OperationId};
 use crate::scope::ProjectScopeId;
 
@@ -196,8 +196,6 @@ pub struct FederationPut {
     pub in_reply_to: Option<MessageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_origin: Option<OriginMessageRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_policy: Option<ReplyPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<FederatedChannelRef>,
 }

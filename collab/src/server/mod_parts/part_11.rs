@@ -7,7 +7,6 @@ fn inbox_projection(state: &State, inbox: Vec<&Message>) -> Resp {
                 "subject": message.subject,
                 "state": message.state, "created_at": iso(message.created_ms),
                 "body": message.body,
-                "reply_obligation": state.reply_obligations.get(&message.id),
             })
         })
         .collect();
@@ -60,17 +59,7 @@ fn handle_ack_locked(
         }
     } else {
         for id in ids {
-            let in_mem = st.msgs.get(&id).cloned();
-            let msg = in_mem.or_else(|| {
-                let path = server
-                    .storage_root
-                    .join(".agent-collab")
-                    .join("mailbox")
-                    .join(format!("{}.json", id));
-                std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<Message>(&s).ok())
-            });
+            let msg = st.msgs.get(&id).cloned();
             match msg {
                 Some(m) => match message_allowed(&m) {
                     Ok(false) => not_found.push(id),
@@ -194,12 +183,12 @@ fn dispatch_with_route_context_bound(
     project_context: Option<ProjectContext>,
     register_binding: Option<&RegisterOuterBinding>,
     register_control_first: Option<
-        &mut dyn FnMut(
-            &PreparedRegisterEnvelope,
-        ) -> Result<Option<state::TypedOutcome>, String>,
+        &mut dyn FnMut(&PreparedRegisterEnvelope) -> Result<Option<state::TypedOutcome>, String>,
     >,
 ) -> Resp {
-    if mutation_blocked_during_project_reset(&req) && server.state.lock().unwrap().admission_frozen() {
+    if mutation_blocked_during_project_reset(&req)
+        && server.state.lock().unwrap().admission_frozen()
+    {
         return Resp::err(
             "PROJECT_RESET_PENDING: this scope is completing an already committed project reset",
         );
@@ -293,7 +282,6 @@ fn dispatch_with_route_context_bound(
             body,
             in_reply_to,
             delivery,
-            reply_policy,
             target_session,
         } => match (worker_id, token) {
             (Some(worker_id), Some(token)) => handle_authenticated_send_with_app_scope(
@@ -309,18 +297,12 @@ fn dispatch_with_route_context_bound(
                 in_reply_to,
                 delivery,
                 app_scope,
-                reply_policy,
                 target_session,
             ),
             (None, None) => {
                 if command.is_some() {
                     return Resp::err(
                         "ANONYMOUS_SEND_REJECTED: anonymous send cannot carry command envelope",
-                    );
-                }
-                if reply_policy.is_some() {
-                    return Resp::err(
-                        "ANONYMOUS_SEND_REJECTED: anonymous send cannot establish reply obligations",
                     );
                 }
                 handle_send_with_task_policy(
@@ -333,7 +315,6 @@ fn dispatch_with_route_context_bound(
                     in_reply_to,
                     delivery,
                     false,
-                    None,
                     None,
                     target_session,
                     None,
@@ -483,17 +464,7 @@ fn dispatch_with_route_context_bound(
                 }
             } else {
                 for id in ids {
-                    let in_mem = st.msgs.get(&id).cloned();
-                    let msg = in_mem.or_else(|| {
-                        let path = server
-                            .storage_root
-                            .join(".agent-collab")
-                            .join("mailbox")
-                            .join(format!("{}.json", id));
-                        std::fs::read_to_string(&path)
-                            .ok()
-                            .and_then(|s| serde_json::from_str::<Message>(&s).ok())
-                    });
+                    let msg = st.msgs.get(&id).cloned();
                     match msg {
                         Some(m) if st.message_receivable_by(&worker_id, &m) => {
                             if !st.msgs.contains_key(&id) {
@@ -1108,9 +1079,10 @@ fn msg_status_caller(state: &State, context: &ProjectContext) -> Result<WorkerRe
     context
         .validate()
         .map_err(|error| caller_identity_required(format!("invalid caller context: {error}")))?;
-    let runtime = context.runtime_context.as_ref().ok_or_else(|| {
-        caller_identity_required("caller context has no runtime identity")
-    })?;
+    let runtime = context
+        .runtime_context
+        .as_ref()
+        .ok_or_else(|| caller_identity_required("caller context has no runtime identity"))?;
     runtime
         .validate()
         .map_err(|error| caller_identity_required(format!("invalid caller runtime: {error}")))?;
@@ -1160,7 +1132,9 @@ fn msg_status_caller(state: &State, context: &ProjectContext) -> Result<WorkerRe
         .validate()
         .map_err(|error| caller_route_not_found(format!("invalid registered route: {error}")))?;
     crate::identity::validate_binding(&registered, runtime).map_err(|error| {
-        caller_route_not_found(format!("caller route no longer matches its binding: {error}"))
+        caller_route_not_found(format!(
+            "caller route no longer matches its binding: {error}"
+        ))
     })?;
     Ok(worker.clone())
 }
@@ -1182,18 +1156,8 @@ fn read_message_status_target(
     if let Some(message) = state.msgs.get(msg_id) {
         return Ok(Some(message.clone()));
     }
-    let path = server
-        .storage_root
-        .join(".agent-collab")
-        .join("mailbox")
-        .join(format!("{msg_id}.json"));
-    match std::fs::read_to_string(&path) {
-        Ok(serialized) => serde_json::from_str::<Message>(&serialized)
-            .map(Some)
-            .map_err(|error| format!("persisted target message is invalid: {error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("persisted target message could not be read: {error}")),
-    }
+    let _ = server;
+    Ok(None)
 }
 
 fn handle_msg_status(
@@ -1231,55 +1195,26 @@ fn handle_msg_status(
     };
     if let Some(caller) = caller {
         if msg.from != caller.id && msg.to != caller.id {
-            let context = project_context.expect("caller exists only with wire project context");
-            let obligation_match = match st.reply_obligations.get(&msg_id) {
-                Some(obligation)
-                    if obligation.message_id == msg_id
-                        && obligation.project == context.project_scope.as_str() =>
-                {
-                    let control = match binding_store::BindingControlStore::new(
-                        server.host_paths.state_root(),
-                    )
-                    .load()
-                    {
-                        Ok(control) => control,
-                        Err(error) => return Resp::err(error),
-                    };
-                    match reply_obligation::recipient_matches(
-                        &control,
-                        &context.app_scope_id,
-                        obligation,
-                        &caller.id,
-                    ) {
-                        Ok(is_recipient) => is_recipient,
-                        Err(error) => return Resp::err(error),
-                    }
-                }
-                _ => false,
-            };
-            if !obligation_match {
-                return Resp::err(format!(
-                    "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id} and is not the current recipient of its open reply obligation; next: query only messages sent by or addressed to this caller or required by this caller's open reply obligations"
-                ));
-            }
+            return Resp::err(format!(
+                "CALLER_NOT_PERMITTED: caller is authenticated but is neither the sender nor recipient of message {msg_id}; next: query only messages sent by or addressed to this caller"
+            ));
         }
     }
+    if msg.state == "read" {
+        return Resp::err(format!(
+            "MESSAGE_CONSUMED: target message {msg_id} was already received; consumed bodies are removed by periodic retention and are not queryable"
+        ));
+    }
     let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
-    let answered = st.answered(&msg_id);
-    let reply_obligation = st.reply_obligations.get(&msg_id).cloned();
-    let consumed = st.receive_receipts.values().any(|receipt| {
-        receipt.message_ids.iter().any(|received| received == &msg_id)
-    });
     let target_session = st.target_sessions.get(&msg_id).cloned();
     let delivery_failure = st.notification_delivery_failures.get(&msg_id).cloned();
     let mut data = json!({
         "id": msg.id, "from": msg.from, "to": msg.to, "type": msg.mtype,
         "subject": msg.subject, "body": msg.body,
         "state": msg.state, "wake_attempts": msg.wake_attempt_count,
-        "created_at": iso(msg.created_ms), "answered": answered,
+        "consumed_by_recv": msg.state == "read",
+        "created_at": iso(msg.created_ms), "in_reply_to": msg.in_reply_to,
         "wake_transport_evidence": transport_evidence,
-        "consumed_by_recv": consumed,
-        "reply_obligation": reply_obligation,
         "target_session": target_session,
         "notification_delivery_failure": delivery_failure,
     });
@@ -1292,10 +1227,7 @@ fn handle_msg_status(
 fn request_requires_project_context(req: &Req) -> bool {
     !matches!(
         req,
-        Req::Ping
-            | Req::DirectoryAll
-            | Req::RouteResolve { .. }
-            | Req::RouteResolveNative { .. }
+        Req::Ping | Req::DirectoryAll | Req::RouteResolve { .. } | Req::RouteResolveNative { .. }
     )
 }
 
@@ -1520,7 +1452,10 @@ fn password_allows_shutdown(
     }
 }
 
-fn handle_user_shutdown(server: &Server, password: Option<&crate::proto::MaintenancePassword>) -> Resp {
+fn handle_user_shutdown(
+    server: &Server,
+    password: Option<&crate::proto::MaintenancePassword>,
+) -> Resp {
     match crate::config::maintenance_password_opt() {
         Ok(expected) => handle_host_shutdown(&server.host_paths, expected.as_deref(), password),
         Err(_) => Resp::err("MAINTENANCE_AUTHENTICATION_FAILED"),

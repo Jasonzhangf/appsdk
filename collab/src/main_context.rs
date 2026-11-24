@@ -450,7 +450,6 @@ pub(crate) fn context_operation_with_intent(
     approve_grant: Option<&str>,
     provide: Option<&str>,
     query: bool,
-    recover_communication: bool,
 ) -> anyhow::Result<Value> {
     let approval = approve_identity
         .map(|raw| parse_approval_json("--approve-identity", raw))
@@ -584,9 +583,7 @@ pub(crate) fn context_operation_with_intent(
         crate::proto::IdentityContextRequest {
             operation_id: correlation.clone(),
             action: "context".into(),
-            invocation: if recover_communication {
-                "manual_communication_restore"
-            } else if approval.is_some() || grant_approval.is_some() {
+            invocation: if approval.is_some() || grant_approval.is_some() {
                 "approved_recovery"
             } else if provide.is_some() {
                 "supplement"

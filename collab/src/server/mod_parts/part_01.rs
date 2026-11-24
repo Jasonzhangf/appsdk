@@ -316,6 +316,11 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                         "DSH_ENDPOINT_REJECTED: selected dsh transport has no agent id".to_owned()
                     })?;
                     let (gateway_mode, internal_marker) = dsh_wake_mode(mode, message_id)?;
+                    if !crate::client::adapters::dsh::activity(endpoint, runtime_id, agent_id)
+                        .is_ok_and(|activity| activity.live)
+                    {
+                        return Err(RECIPIENT_NOT_ONLINE.into());
+                    }
                     let mut receipt = crate::client::adapters::dsh::notify(
                         endpoint,
                         runtime_id,

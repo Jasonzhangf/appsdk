@@ -3811,7 +3811,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
     let first_peer = fixture.run_public(&["context"], THREAD_B);
     let peer_keywords = [
         "subscription",
-        "execute your accepted task",
+        "execute the accepted task",
         "allowed and prohibited scope",
         "when no eligible peer is available",
         "observable evaluation criteria",
@@ -3887,6 +3887,34 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
     );
     let master_subscriptions_before =
         notification_subscription_count(&fixture, THREAD_B, "master before restoration");
+    let trigger = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() + 3_600_000)
+        .to_string();
+    let authorized_batch = fixture.run_public(
+        &[
+            "goal", "reconcile", "--goal-id", "role-patrol-regression",
+            "--owner", demoted_peer["name"].as_str().unwrap(), "--desired", "active",
+            "--at-ms", &trigger, "--every-ms", "1800000", "--repeat", "3",
+            "--ttl-seconds", "7200",
+        ],
+        THREAD_A,
+    );
+    let batch_id = authorized_batch["subscription"]["id"].as_str().unwrap();
+    let read_batch = |fixture: &AppFixture| {
+        let status = fixture.run_public(&["notify", "status"], THREAD_A);
+        let batch = status["subscriptions"].as_array().unwrap().iter()
+            .find(|row| row["id"].as_str() == Some(batch_id))
+            .expect("the authorized batch is still present");
+        json!([batch["id"], batch["status"], batch["interval_ms"],
+            batch["trigger_ms"], batch["repeat_count"], batch["fired_count"]])
+    };
+    let batch_before = read_batch(&fixture);
+    assert_eq!(batch_before[1], "armed");
+    assert_eq!(batch_before[2], 1800000);
+    assert_eq!(batch_before[4], 3);
+    assert_eq!(batch_before[5], 0);
     let peer_subscriptions_before =
         notification_subscription_count(&fixture, THREAD_A, "peer before restoration");
     let memory = fixture.run_public(&["context", "--work-roles", "memory"], THREAD_A);
@@ -3896,6 +3924,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         peer_subscriptions_before,
         "role selection does not arm a new goal subscription"
     );
+    assert_eq!(read_batch(&fixture), batch_before);
     fixture.run_public(&["context", "--work-roles", ""], THREAD_A);
 
     fixture.restart_daemon();
@@ -3924,6 +3953,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         peer_subscriptions_before,
         "context restoration must not create peer patrol subscriptions"
     );
+    assert_eq!(read_batch(&fixture), batch_before);
     let tasks_after = fixture.run_public(&["board", "show"], THREAD_A)["tasks"]
         .as_array()
         .expect("board show lists tasks")

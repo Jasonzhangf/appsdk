@@ -133,11 +133,11 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   分工按工作类别逐项继承项目默认、目标默认和任务明确字段，并物化到任务。
   角色是选择偏好，指定执行者是硬约束；指定 reviewer 通过当前交付的审查后，
   才可继续原有集成和验收。角色、规则、交付和通知回执各沿自己的唯一 owner。
-- Collab 的 master 与 peer 具有相同编排功能，区别是目标层级：master 管理项目大目标，
-  peer 管理受托子目标；两者都负责拆解、派发、资源管理、验收与交付，优先交子 agent
-  完成具体编码、执行和观察。普通 peer 是编排者；仅当明确 `worker`/`executor`
-  专长或任务合同指定直接执行时，才在合同边界内执行。`patrol` 是独立常驻检查，
-  不接临时开发派单；`memory` 提炼纠偏经验；`architect` 负责架构计划及代码准入。
+- Collab 的 manager 管项目派发、进度、验收与回收。普通 peer 按合同执行和验证，
+  可以编排职责内的简单工作。复杂设计有合适 architect 时先交 architect 设计和审查，
+  再由 peer 实施。各角色处理职责内有界子任务时，先选合适的授权 peer，无人可承接时
+  走 Codex 编排。`patrol` 核查 Jenny 的执行并收集 live runtime bug；
+  `memory` 只接记忆总结和记忆巡检。Review 缺位走独立 Codex review 合同。
   context 回显的有效职责由源码 workflow 模板和共享 `role_brief` 投影，角色标签不
   授权。注册和恢复须说明此职责，并推荐对自身目标、阻塞和资源配置定时巡检。
   master 与 peer 均可维护本人的 longhorizon goal。项目 master 派发任务单时填写

@@ -10,9 +10,9 @@ Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独�
 安装产物；宿主入口链接到该安装目录。流程模板属于本 Skill 的资源，不是另一个 Skill。
 
 标准流程唯一资源为 [workflow-templates.json](references/workflow-templates.json)，
-基础版本为 1；身份流程和默认专长均从该源码资产编译。普通 peer 管理受托子目标，
-优先将有界执行交给独立 worker；明确 `worker`/`executor` 专长或任务合同指定直接
-执行时，该 peer 在合同边界内执行。peer、reviewer 和设计师均按
+基础版本为 1；身份流程和默认专长均从该源码资产编译。普通 peer 按合同执行并可
+编排职责内的简单工作。复杂问题有合适 architect 可承接时，由 architect 设计。
+职责内的有界子任务先选合适的授权 peer，无可承接者再用 Codex 编排。peer、reviewer 和设计师均按
 [完整派单与交回](#完整派单与交回)交付给合同指定的接收人。
 
 执行以本次 `collab context` 的 `role_brief` 为准：有效流程正文只在 `role_task`、
@@ -266,9 +266,8 @@ peer 向原请求方答复具体请求，按合同向指定接收人交付任务
 工作角色是稳定名字的专长，例如 `designer`、`reviewer`。同一 peer 可有多个专长。
 它们不改变 master/peer 职责，也不增加项目权限。省略 `--work-roles` 保留原值，
 明确传空字符串清空。当前 master 可按用户指令为其他稳定名字设置角色。
-普通 peer 未带明确执行或固定专长时，保持受托目标编排职责。`worker`/`executor`
-只在已接受合同内执行；`patrol` 承担独立常驻检查，不接收 manager/master 的临时
-开发派单；`memory` 提炼事实和经验并修正失效结论；`architect` 按
+普通 peer 在已接受合同内执行；`patrol` 核查 Jenny 的执行并收集 live runtime bug；
+`memory` 只做记忆总结和记忆巡检；`architect` 按
 [文件交接合同](#设计规划与审查角色的文件交接合同)产出架构计划及代码准入文件。
 具体职责正文以当前 `collab context` 的 `role_brief` 为准。
 

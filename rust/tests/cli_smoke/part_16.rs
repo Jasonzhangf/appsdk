@@ -969,7 +969,8 @@ esac
     assert!(sub_json["goal_id"].as_str().unwrap().starts_with("sha256:"));
     let prompt = sub_json["goal_prompt"].as_str().unwrap();
     assert!(prompt.contains("Master / Peer"));
-    assert!(prompt.contains("普通 peer 按清晰合同执行"));
+    assert!(prompt.contains("你是本项目的 master"));
+    assert!(!prompt.contains("普通 peer 按清晰合同执行"));
     assert!(prompt.contains("目标、执行计划、实际进度和行动项"));
     assert!(prompt.contains("无可执行行动项时核对剩余验收"));
     assert!(prompt.contains("appsdk bug"));

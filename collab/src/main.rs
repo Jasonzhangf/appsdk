@@ -1937,6 +1937,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 interval_ms,
                 repeat_count,
                 goal_subject,
+                expected_subscription_id,
                 reason,
                 operation,
             } = cmd;
@@ -1957,6 +1958,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     interval_ms,
                     repeat_count,
                     goal_subject,
+                    expected_subscription_id,
                     reason,
                     operation,
                 },

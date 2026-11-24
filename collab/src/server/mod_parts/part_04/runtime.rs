@@ -1445,6 +1445,7 @@ impl ProjectRuntimeManager {
             interval_ms,
             repeat_count,
             goal_subject,
+            expected_subscription_id,
             reason,
             operation,
         } = &req
@@ -1469,6 +1470,7 @@ impl ProjectRuntimeManager {
                     interval_ms: *interval_ms,
                     repeat_count: *repeat_count,
                     goal_subject: goal_subject.clone(),
+                    expected_subscription_id: expected_subscription_id.clone(),
                     reason: reason.clone(),
                     content: content
                         .clone()

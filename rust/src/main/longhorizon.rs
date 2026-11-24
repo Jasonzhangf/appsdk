@@ -28,6 +28,7 @@ pub(super) struct GoalScope {
     pub owner: String,
     pub worker_id: String,
     pub project: PathBuf,
+    pub app_scope_id: String,
     pub invocation_root: PathBuf,
     pub session_id: Option<String>,
     pub role: ExecutionRole,
@@ -44,7 +45,15 @@ impl GoalScope {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        self.project.join(".appsdk-control/goals").join(encoded)
+        let control = self.project.join(".appsdk-control/goals");
+        if self.app_scope_id == "appserver-cli" {
+            control.join(encoded)
+        } else {
+            control
+                .join("apps")
+                .join(goal_record_component(&self.app_scope_id))
+                .join(encoded)
+        }
     }
 }
 
@@ -182,13 +191,16 @@ pub(super) fn goal_records_read(scope: &GoalScope) -> Result<Vec<Value>, String>
 
     // The previous owner-scoped singleton and project singleton are read-only
     // compatibility inputs. Current per-goal files win by stable goal ID.
-    let mut legacy_paths = vec![scope.control_dir().join("long-task-goal.json")];
-    legacy_paths.push(
-        scope
-            .invocation_root
-            .join(".appsdk-control/long-task-goal.json"),
-    );
-    legacy_paths.push(scope.project.join(".appsdk-control/long-task-goal.json"));
+    let mut legacy_paths = Vec::new();
+    if scope.app_scope_id == "appserver-cli" {
+        legacy_paths.push(scope.control_dir().join("long-task-goal.json"));
+        legacy_paths.push(
+            scope
+                .invocation_root
+                .join(".appsdk-control/long-task-goal.json"),
+        );
+        legacy_paths.push(scope.project.join(".appsdk-control/long-task-goal.json"));
+    }
     legacy_paths.sort();
     legacy_paths.dedup();
     for path in legacy_paths {
@@ -281,6 +293,7 @@ pub(super) fn goal_record_write(scope: &GoalScope, record: &Value) -> Result<(),
     let mut record = record.clone();
     record["record_source"] = Value::String("owner-scoped".into());
     record["project_scope"] = serde_json::json!(scope.project);
+    record["app_scope_id"] = serde_json::json!(scope.app_scope_id);
     record["session_id"] = serde_json::json!(scope.session_id);
     let goal_id = record["goal_id"]
         .as_str()
@@ -534,8 +547,19 @@ pub(super) fn resolve_goal_scope(root: &Path) -> Result<GoalScope, String> {
 }
 
 pub(super) fn goal_context(root: &Path) -> Result<Value, String> {
+    read_goal_context(root, false)
+}
+
+pub(super) fn resolve_goal_read_scope(root: &Path) -> Result<GoalScope, String> {
+    goal_scope_from_context(&read_goal_context(root, true)?, root)
+}
+
+fn read_goal_context(root: &Path, query_only: bool) -> Result<Value, String> {
     let mut context_command = Command::new("collab");
     context_command.args(["context"]).current_dir(root);
+    if query_only {
+        context_command.arg("--query");
+    }
     let context_output = run_goal_collab_command(context_command, GOAL_COLLAB_READ_TIMEOUT)
         .map_err(|error| format!("GOAL_OWNER_CONTEXT_UNAVAILABLE:{}", error))?;
     if !context_output.status.success() {
@@ -582,6 +606,12 @@ pub(super) fn goal_scope_from_context(context: &Value, root: &Path) -> Result<Go
         owner: owner.to_owned(),
         worker_id: worker_id.to_owned(),
         project,
+        app_scope_id: context["binding"]["app_scope_id"]
+            .as_str()
+            .or_else(|| context["app_scope_id"].as_str())
+            .filter(|scope| !scope.is_empty())
+            .unwrap_or("appserver-cli")
+            .to_owned(),
         invocation_root: root.to_path_buf(),
         session_id: context["session_id"]
             .as_str()
@@ -617,6 +647,7 @@ pub(super) fn goal_reconcile_active(
     interval_ms: Option<i64>,
     repeat_count: Option<u32>,
     content: &str,
+    rearm: bool,
 ) -> Result<(Value, String), String> {
     let mut command = Command::new("collab");
     command.args([
@@ -640,6 +671,9 @@ pub(super) fn goal_reconcile_active(
             "--repeat",
             &repeat_count.to_string(),
         ]);
+    }
+    if rearm {
+        command.args(["--operation", "rearm"]);
     }
     command.args(["--content", content]);
     command.current_dir(root);
@@ -683,6 +717,7 @@ pub(super) fn goal_reconcile_edit(
     root: &Path,
     goal_id: &str,
     goal_owner: &str,
+    expected_subscription_id: &str,
     ttl_seconds: Option<u64>,
     interval_ms: Option<i64>,
     repeat_count: Option<u32>,
@@ -700,6 +735,8 @@ pub(super) fn goal_reconcile_edit(
         "active",
         "--operation",
         "edit",
+        "--expected-subscription-id",
+        expected_subscription_id,
     ]);
     if let Some(ttl_seconds) = ttl_seconds {
         command.args(["--ttl-seconds", &ttl_seconds.to_string()]);
@@ -732,14 +769,35 @@ pub(super) fn goal_reconcile_edit(
             }
         ));
     }
-    parse_goal_reconcile_response(&out.stdout, goal_id, "active")
+    let receipt = parse_goal_reconcile_response(&out.stdout, goal_id, "active")?;
+    let subscription = &receipt["subscription"];
+    if receipt["goal_owner"] != goal_owner
+        || subscription["subject"] != format!("goal:{goal_id}")
+        || subscription["event"] != "deadline"
+        || subscription["id"] != expected_subscription_id
+        || !matches!(
+            receipt["status"].as_str(),
+            Some(
+                "armed"
+                    | "transport-lost"
+                    | "waiting-owner"
+                    | "consumed"
+                    | "expired"
+                    | "cancelled"
+                    | "suppressed"
+            )
+        )
+        || receipt["status"] != subscription["status"]
+    {
+        return Err("GOAL_RECONCILE_RESPONSE_SCOPE_MISMATCH".into());
+    }
+    Ok(receipt)
 }
 
 pub(super) fn goal_reconcile_ended(
     root: &Path,
     goal_id: &str,
     goal_owner: &str,
-    goal_subject: Option<&str>,
     reason: Option<&str>,
 ) -> Result<Value, String> {
     let mut command = Command::new("collab");
@@ -753,9 +811,6 @@ pub(super) fn goal_reconcile_ended(
         "--desired",
         "ended",
     ]);
-    if let Some(goal_subject) = goal_subject {
-        command.args(["--goal-subject", goal_subject]);
-    }
     if let Some(reason) = reason {
         command.args(["--reason", reason]);
     }
@@ -778,12 +833,32 @@ pub(super) fn goal_reconcile_ended(
             }
         ));
     }
-    parse_goal_reconcile_response(&out.stdout, goal_id, "ended")
+    let receipt = parse_goal_reconcile_response(&out.stdout, goal_id, "ended")?;
+    if receipt["status"] != "ended"
+        || receipt["goal_owner"]
+            .as_str()
+            .is_some_and(|owner| owner != goal_owner)
+    {
+        return Err("GOAL_RECONCILE_RESPONSE_END_SCOPE_MISMATCH".into());
+    }
+    let ended = &receipt["ended_subscription"];
+    if !ended.is_null()
+        && (ended["event"] != "deadline"
+            || ended["subject"] != format!("goal:{goal_id}")
+            || !ended["id"].as_str().is_some_and(|id| !id.trim().is_empty())
+            || !ended["status"]
+                .as_str()
+                .is_some_and(goal_subscription_is_terminal))
+    {
+        return Err("GOAL_RECONCILE_RESPONSE_END_SCOPE_MISMATCH".into());
+    }
+    Ok(receipt)
 }
 
 pub(super) fn goal_subscription_status(
     root: &Path,
     scope: &GoalScope,
+    record: &Value,
     subscription_id: &str,
 ) -> Result<(String, Value), String> {
     let mut command = Command::new("collab");
@@ -822,6 +897,12 @@ pub(super) fn goal_subscription_status(
         ));
     };
     goal_check_subscription_owner(scope, subscription)?;
+    let subject = format!("goal:{}", record["goal_id"].as_str().unwrap_or_default());
+    if subscription["event"] != "deadline"
+        || !goal_subject_matches(Some(record), &subject, subscription)
+    {
+        return Err("GOAL_STATUS_SUBSCRIPTION_SCOPE_MISMATCH".into());
+    }
     let remote_status = subscription
         .get("status")
         .and_then(Value::as_str)
@@ -830,82 +911,94 @@ pub(super) fn goal_subscription_status(
     Ok((remote_status.to_string(), subscription.clone()))
 }
 
-pub(super) fn goal_subscription_by_subject(
-    root: &Path,
+pub(super) fn goal_schedule_from_snapshot(
     scope: &GoalScope,
-    subject: &str,
-) -> Result<Option<(String, String, Value)>, String> {
-    let mut command = Command::new("collab");
-    command.args(["notify", "status"]).current_dir(root);
-    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
-        .map_err(|error| format!("GOAL_RECONCILE_COLLAB_UNAVAILABLE:{}", error))?;
-    if !out.status.success() {
-        return Err(format!(
-            "GOAL_RECONCILE_COLLAB_FAILED:exit={}",
-            out.status.code().unwrap_or(1)
-        ));
-    }
-    let response: Value = serde_json::from_slice(&out.stdout)
-        .map_err(|error| format!("GOAL_RECONCILE_RESPONSE_INVALID:{}", error))?;
-    let subscriptions = response
-        .get("subscriptions")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "GOAL_RECONCILE_RESPONSE_MISSING_SUBSCRIPTIONS".to_string())?;
-    let matches: Vec<(String, String, Value)> = subscriptions
-        .iter()
-        .filter(|subscription| goal_check_subscription_owner(scope, subscription).is_ok())
-        .filter_map(|subscription| {
-            let id = subscription
-                .get("id")
-                .and_then(Value::as_str)
-                .or_else(|| subscription.get("subscription_id").and_then(Value::as_str))
-                .filter(|id| !id.trim().is_empty())?;
-            let status = subscription.get("status").and_then(Value::as_str)?;
-            let event = subscription.get("event").and_then(Value::as_str)?;
-            let remote_subject = subscription.get("subject").and_then(Value::as_str)?;
-            (event == "deadline" && remote_subject == subject && status == "armed")
-                .then(|| (id.to_string(), status.to_string(), subscription.clone()))
-        })
-        .collect();
-    if matches.len() > 1 {
-        return Err(format!(
-            "GOAL_RECONCILE_SUBJECT_AMBIGUOUS:{} armed deadline subscriptions match",
-            matches.len()
-        ));
-    }
-    Ok(matches.into_iter().next())
-}
-
-pub(super) fn goal_subject_candidates(
+    subscriptions: &[Value],
     record: Option<&Value>,
     canonical_subject: &str,
-) -> Vec<String> {
-    let mut candidates = Vec::new();
-    let mut push_unique = |subject: String| {
-        if !subject.trim().is_empty() && !candidates.iter().any(|item| item == &subject) {
-            candidates.push(subject);
-        }
-    };
-    if let Some(record) = record {
-        if let Some(subject) = record["subject"]
-            .as_str()
-            .filter(|subject| !subject.trim().is_empty())
-        {
-            // The retained subject is the compatibility anchor. Query it first
-            // so a legacy basename subscription is never silently abandoned.
-            push_unique(subject.to_string());
-        }
-        if let Some(goal_path) = record["goal_path"].as_str() {
-            if let Some(basename) = Path::new(goal_path)
-                .file_name()
-                .and_then(|name| name.to_str())
+) -> Result<Option<Value>, String> {
+    let now = goal_now_ms();
+    let mut matching: Vec<_> = subscriptions
+        .iter()
+        .filter(|subscription| {
+            subscription["event"] == "deadline"
+                && goal_check_subscription_owner(scope, subscription).is_ok()
+                && goal_subject_matches(record, canonical_subject, subscription)
+        })
+        .cloned()
+        .collect();
+    for subscription in &mut matching {
+        if matches!(
+            subscription["status"].as_str(),
+            Some("armed" | "transport-lost" | "waiting-owner")
+        ) {
+            if subscription["expires_ms"]
+                .as_i64()
+                .is_some_and(|expiry| expiry <= now)
             {
-                push_unique(format!("goal:{}", basename));
+                subscription["status"] = Value::String("expired".into());
+            } else if subscription["fired_count"]
+                .as_u64()
+                .zip(subscription["repeat_count"].as_u64())
+                .is_some_and(|(fired, repeat)| fired >= repeat)
+            {
+                subscription["status"] = Value::String("consumed".into());
             }
         }
     }
-    push_unique(canonical_subject.to_string());
-    candidates
+    let mut current = matching.iter().filter(|subscription| {
+        matches!(
+            subscription["status"].as_str(),
+            Some("armed" | "transport-lost" | "waiting-owner")
+        )
+    });
+    if let Some(selected) = current.next() {
+        if current.next().is_some() {
+            return Err("GOAL_RECONCILE_SUBJECT_AMBIGUOUS: more than one current batch matches the exact goal".into());
+        }
+        return Ok(Some(selected.clone()));
+    }
+    Ok(matching.into_iter().max_by(|left, right| {
+        left["created_ms"]
+            .as_i64()
+            .cmp(&right["created_ms"].as_i64())
+            .then_with(|| right["id"].as_str().cmp(&left["id"].as_str()))
+    }))
+}
+
+pub(super) fn goal_record_from_snapshot(
+    scope: &GoalScope,
+    goal_id: &str,
+    subscriptions: &[Value],
+) -> Result<Option<Value>, String> {
+    let subject = format!("goal:{goal_id}");
+    Ok(
+        goal_schedule_from_snapshot(scope, subscriptions, None, &subject)?.map(|subscription| {
+            serde_json::json!({
+                "goal_id": goal_id,
+                "owner": scope.owner,
+                "subject": subject,
+                "subscription_id": subscription["id"],
+                "collab_subscription": subscription,
+                "record_source": "remote-only",
+                "desired": "unretained",
+            })
+        }),
+    )
+}
+
+pub(super) fn goal_subject_matches(
+    record: Option<&Value>,
+    canonical_subject: &str,
+    subscription: &Value,
+) -> bool {
+    let Some(subject) = subscription["subject"].as_str() else {
+        return false;
+    };
+    if subject == canonical_subject {
+        return true;
+    }
+    record.is_some_and(|record| record["subject"] == subject)
 }
 
 pub(super) fn goal_subscription_by_subject_candidates(
@@ -914,26 +1007,17 @@ pub(super) fn goal_subscription_by_subject_candidates(
     record: Option<&Value>,
     canonical_subject: &str,
 ) -> Result<Option<(String, String, Value, String)>, String> {
-    let mut matches: Vec<(String, String, Value, String)> = Vec::new();
-    for subject in goal_subject_candidates(record, canonical_subject) {
-        if let Some((id, status, remote_record)) =
-            goal_subscription_by_subject(root, scope, &subject)?
-        {
-            if !matches
-                .iter()
-                .any(|(matched_id, _, _, _)| matched_id == &id)
-            {
-                matches.push((id, status, remote_record, subject));
-            }
-        }
-    }
-    if matches.len() > 1 {
-        return Err(format!(
-            "GOAL_RECONCILE_SUBJECT_AMBIGUOUS:{} distinct armed deadline subscriptions match retained or canonical subjects",
-            matches.len()
-        ));
-    }
-    Ok(matches.into_iter().next())
+    let subscriptions = goal_notify_subscriptions(root)?;
+    let selected = goal_schedule_from_snapshot(scope, &subscriptions, record, canonical_subject)?;
+    Ok(selected.and_then(|subscription| {
+        let id = subscription["id"]
+            .as_str()
+            .or_else(|| subscription["subscription_id"].as_str())?
+            .to_owned();
+        let status = subscription["status"].as_str()?.to_owned();
+        let subject = subscription["subject"].as_str()?.to_owned();
+        (!goal_subscription_is_terminal(&status)).then_some((id, status, subscription, subject))
+    }))
 }
 
 pub(super) fn goal_check_subscription_owner(
@@ -987,7 +1071,7 @@ pub(super) fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, Strin
         ));
     }
     let response: Value = serde_json::from_slice(&out.stdout)
-        .map_err(|error| format!("GOAL_PATROL_STATUS_INVALID:{}", error))?;
+        .map_err(|error| format!("GOAL_RECONCILE_RESPONSE_INVALID:{}", error))?;
     response
         .get("subscriptions")
         .and_then(Value::as_array)
@@ -996,7 +1080,7 @@ pub(super) fn goal_notify_subscriptions(root: &Path) -> Result<Vec<Value>, Strin
 }
 
 pub(super) fn goal_subscription_is_terminal(status: &str) -> bool {
-    matches!(status, "consumed" | "expired" | "cancelled")
+    matches!(status, "consumed" | "expired" | "cancelled" | "suppressed")
 }
 
 fn goal_patrol_subscription_is_usable(

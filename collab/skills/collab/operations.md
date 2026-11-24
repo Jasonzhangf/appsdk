@@ -569,6 +569,25 @@ Read-only status does not modify another owner's records.
 A runtime that refuses an ordinary peer's own goal has an implementation defect;
 report its exact error, do not promote the peer or route registration through master.
 
+精确编辑使用 `collab goal reconcile --goal-id '<目标ID>' --owner '<稳定名>' --desired active --operation edit`，
+再带实际要改的 `--content`、`--every-ms`、`--repeat` 或 `--ttl-seconds`。
+`update` 是同一编辑操作的兼容值。目标 ID 和订阅 ID 分别取原任务/goal 记录和真实订阅
+回执，编辑要求目标已存在，不带 `--at-ms`。任务目标使用 `task:<任务ID>` 和任务单周期。
+已读取准确批次时可加 `--expected-subscription-id '<订阅ID>'`。当前批次变化时 daemon
+返回 `GOAL_SCHEDULE_SELECTION_CHANGED`，先重新读取再决定是否继续编辑。
+编辑保留订阅 ID 和已执行次数；已结束目标的编辑回执保持终态。
+
+结束用同一目标 ID、owner 及 `--desired ended`；可带 `--reason`。旧订阅以留存的
+真实 `goal:<ID>` subject 提供目标 ID。`--goal-subject` 若传入，必须与目标 ID 对应。
+新订阅或已获授权的续订使用无 `--operation` 的
+`--desired active`，填写实际周期或首次触发时间及 TTL。有效批次优先复用；新续订回执
+须有新订阅 ID、实际周期和 `armed` 状态。结果未知先读同一目标的回执，再决定是否重试。
+结束回执的 `ended_subscription` 给出提交时选定批次及实际终态，无匹配批次时为 null。
+已有周期批次仍兼容旧式不带 `--at-ms` 的字段更新，新调用显式使用 `--operation edit`。
+重新登记仍处于 armed 且触发时间已到的单次目标使用
+`--operation rearm --desired active --at-ms <未来 UTC 毫秒> --ttl-seconds <秒>`。
+它原子替换该批次并返回新订阅。重试保留已经登记的未来单次批次。结束后的续订沿显式启动入口。
+
 Close owned goal scheduling and patrol subscriptions after completion or when
 no new task and no actionable work remain. Retain direct-message reception;
 assess a new assignment before registering/rearming its goal schedule.

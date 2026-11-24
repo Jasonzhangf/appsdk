@@ -56,6 +56,7 @@ fn terminal_edit_change() -> GoalScheduleChange {
         trigger_ms: None,
         ttl_seconds: None,
         goal_subject: None,
+        expected_subscription_id: None,
         reason: None,
         interval_ms: Some(90_000),
         repeat_count: Some(4),
@@ -74,6 +75,7 @@ fn content_edit_change(content: &str) -> GoalScheduleChange {
         trigger_ms: None,
         ttl_seconds: None,
         goal_subject: None,
+        expected_subscription_id: None,
         reason: None,
         interval_ms: None,
         repeat_count: None,
@@ -170,6 +172,33 @@ fn goal_edit_current_batch_keeps_identity_progress_and_is_idempotent() {
         prepare_goal_schedule(&state, "edit-worker", &change, now).unwrap();
     assert!(repeated_events.is_empty(), "{repeated_events:?}");
     assert_eq!(repeated_response.data["deduplicated"], true);
+}
+
+#[test]
+fn goal_edit_does_not_rearm_a_lost_or_elapsed_batch() {
+    let now = now_ms();
+    for (created_ms, status) in [(now - 60_000, "transport-lost"), (now - 610_000, "expired")] {
+        let mut state = State::default();
+        edit_worker(&mut state, "edit-worker");
+        let current = edit_subscription("sub-current", "edit-worker", "transport-lost", created_ms);
+        state
+            .notification_subscriptions
+            .insert(current.id.clone(), current.clone());
+        let (events, response) = prepare_goal_schedule(
+            &state,
+            "edit-worker",
+            &content_edit_change("updated while unavailable"),
+            now,
+        )
+        .unwrap();
+        let edited = edited_subscription(&events, &current.id);
+        assert_eq!(edited.status, status);
+        assert_eq!(response.data["status"], status);
+        assert_eq!(edited.trigger_ms, current.trigger_ms);
+        assert_eq!(edited.expires_ms, current.expires_ms);
+        assert_eq!(edited.fired_count, current.fired_count);
+        assert_eq!(edited.target, current.target);
+    }
 }
 
 #[test]
@@ -300,6 +329,7 @@ fn goal_edit_task_details_and_schedule_commit_together() {
             trigger_ms: None,
             ttl_seconds: Some(600),
             goal_subject: None,
+            expected_subscription_id: None,
             reason: None,
             interval_ms: Some(60_000),
             repeat_count: Some(5),
@@ -328,6 +358,7 @@ fn goal_edit_task_details_and_schedule_commit_together() {
             trigger_ms: None,
             ttl_seconds: None,
             goal_subject: None,
+            expected_subscription_id: None,
             reason: None,
             interval_ms: Some(90_000),
             repeat_count: Some(4),
@@ -369,6 +400,7 @@ fn goal_edit_task_details_and_schedule_commit_together() {
             trigger_ms: None,
             ttl_seconds: None,
             goal_subject: None,
+            expected_subscription_id: None,
             reason: None,
             interval_ms: Some(0),
             repeat_count: Some(2),
@@ -379,6 +411,24 @@ fn goal_edit_task_details_and_schedule_commit_together() {
         },
     );
     assert!(!rejected.ok);
+    assert_eq!(
+        serde_json::to_value(&state.board_details["task-edit"]).unwrap(),
+        serde_json::to_value(&details_before_failure).unwrap()
+    );
+    assert_eq!(
+        state.notification_subscriptions[&subscription_id],
+        subscription_before_failure
+    );
+    state.tasks.get_mut("task-edit").unwrap().status = "closed".into();
+    let mut closed_edit = content_edit_change("must not change closed task");
+    closed_edit.goal_id = "task:task-edit".into();
+    closed_edit.goal_owner = "task-edit".into();
+    let closed = commit_goal_schedule(&server, &mut state, "task-edit", closed_edit);
+    assert!(closed
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("GOAL_SCHEDULE_TASK_TERMINAL"));
     assert_eq!(
         serde_json::to_value(&state.board_details["task-edit"]).unwrap(),
         serde_json::to_value(&details_before_failure).unwrap()
@@ -435,6 +485,22 @@ fn explicit_task_goal_renewal_creates_a_new_batch_and_preserves_terminal_history
         .notification_subscriptions
         .insert(terminal.id.clone(), terminal.clone());
 
+    let mut derived = terminal_edit_change();
+    derived.goal_id = "task:renew-me".into();
+    derived.operation = GoalScheduleOperation::Derived;
+    derived.content = terminal.goal_content.as_ref().unwrap().source.clone();
+    let mut elapsed = terminal.clone();
+    elapsed.status = "armed".into();
+    elapsed.expires_ms = now - 1;
+    state
+        .notification_subscriptions
+        .insert(elapsed.id.clone(), elapsed);
+    let (derived_events, _) = prepare_goal_schedule(&state, "edit-worker", &derived, now).unwrap();
+    assert!(derived_events.is_empty(), "{derived_events:?}");
+    state
+        .notification_subscriptions
+        .insert(terminal.id.clone(), terminal.clone());
+
     let (events, response) = prepare_goal_schedule(
         &state,
         "edit-worker",
@@ -445,6 +511,7 @@ fn explicit_task_goal_renewal_creates_a_new_batch_and_preserves_terminal_history
             trigger_ms: None,
             ttl_seconds: Some(600),
             goal_subject: None,
+            expected_subscription_id: None,
             reason: None,
             interval_ms: Some(60_000),
             repeat_count: Some(3),
@@ -475,4 +542,69 @@ fn explicit_task_goal_renewal_creates_a_new_batch_and_preserves_terminal_history
     }
     assert_eq!(state.notification_subscriptions[&terminal.id], terminal);
     assert_eq!(state.notification_subscriptions.len(), 2);
+}
+
+#[test]
+fn goal_rearm_commits_one_due_replacement_and_retry_is_read_only() {
+    let now = now_ms();
+    let mut state = State::default();
+    edit_worker(&mut state, "edit-worker");
+    let mut due = edit_subscription("sub-due", "edit-worker", "armed", now - 70_000);
+    due.periodic_declared = false;
+    due.interval_ms = None;
+    due.repeat_count = 1;
+    due.fired_count = 0;
+    state
+        .notification_subscriptions
+        .insert(due.id.clone(), due.clone());
+    let mut rearm = content_edit_change("rearm due goal");
+    rearm.operation = GoalScheduleOperation::Rearm;
+    rearm.trigger_ms = Some(now + 60_000);
+    rearm.ttl_seconds = Some(600);
+    let (events, result) = prepare_goal_schedule(&state, "edit-worker", &rearm, now).unwrap();
+    let replacement = result.data["subscription"]["id"].as_str().unwrap();
+    assert_ne!(replacement, due.id);
+    assert_eq!(result.data["one_shot"], true);
+    assert_eq!(
+        result.data["retired_subscription_ids"],
+        serde_json::json!([due.id])
+    );
+    for event in &events {
+        state.apply_checked(event).unwrap();
+    }
+    let (retry_events, retry) = prepare_goal_schedule(&state, "edit-worker", &rearm, now).unwrap();
+    assert!(retry_events.is_empty());
+    assert_eq!(retry.data["subscription"]["id"], replacement);
+}
+
+#[test]
+fn goal_legacy_one_shot_keeps_its_declared_shape_on_metadata_edit_and_future_rearm() {
+    let now = now_ms();
+    let mut state = State::default();
+    edit_worker(&mut state, "edit-worker");
+    let mut legacy = edit_subscription("sub-legacy", "edit-worker", "armed", now);
+    legacy.periodic_declared = false;
+    legacy.fired_count = 0;
+    state
+        .notification_subscriptions
+        .insert(legacy.id.clone(), legacy.clone());
+    let mut edit = content_edit_change("metadata-only edit");
+    edit.expected_subscription_id = Some(legacy.id.clone());
+    let (edited, receipt) = prepare_goal_schedule(&state, "edit-worker", &edit, now).unwrap();
+    assert_eq!(receipt.data["one_shot"], true);
+    assert_eq!(
+        receipt.data["subscription"]["interval_ms"],
+        legacy.interval_ms.unwrap()
+    );
+    for event in &edited {
+        state.apply_checked(event).unwrap();
+    }
+    let mut rearm = content_edit_change("ignored on future rearm");
+    rearm.operation = GoalScheduleOperation::Rearm;
+    rearm.trigger_ms = Some(now + 120_000);
+    rearm.ttl_seconds = Some(600);
+    let (unchanged, receipt) = prepare_goal_schedule(&state, "edit-worker", &rearm, now).unwrap();
+    assert!(unchanged.is_empty());
+    assert_eq!(receipt.data["one_shot"], true);
+    assert_eq!(receipt.data["subscription"]["id"], legacy.id);
 }

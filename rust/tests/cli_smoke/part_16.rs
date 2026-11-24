@@ -879,7 +879,8 @@ case "$1 $2" in
       *"--every-ms"*|*"--repeat-count"*) printf '%s\n' 'periodic goal deadline is invalid' >&2; exit 43 ;;
     esac
     if [ "$desired" = "ended" ]; then
-      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"ended\",\"status\":\"ended\",\"subscription\":null}"
+      printf 'cancelled' > goal-state
+      printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"ended\",\"status\":\"ended\",\"subscription\":null,\"retired_subscription_ids\":[\"goal-sub-1\"]}"
     else
       subject="goal:$goal_id"
       printf '%s' "$subject" > goal-subject
@@ -897,7 +898,8 @@ case "$1 $2" in
     elif [ "${DUPLICATE_SUBJECT:-}" = "1" ]; then
       printf '%s\n' "{\"subscriptions\":[{\"id\":\"goal-sub-1\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"},{\"id\":\"goal-sub-2\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
     else
-      printf '%s\n' "{\"subscriptions\":[{\"id\":\"goal-sub-1\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
+      status=$(/bin/cat goal-state 2>/dev/null || printf 'armed')
+      printf '%s\n' "{\"subscriptions\":[{\"id\":\"goal-sub-1\",\"status\":\"$status\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
     fi
     ;;
   "status --all")
@@ -1727,12 +1729,14 @@ case "$1 $2" in
     ;;
   "goal reconcile")
     reconcile_args="$*"
+    operation=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --goal-id) goal_id="$2"; shift ;;
         --owner) goal_owner="$2"; shift ;;
         --desired) desired="$2"; shift ;;
         --at-ms) at="$2"; shift ;;
+        --operation) operation="$2"; shift ;;
       esac
       shift
     done
@@ -1742,6 +1746,9 @@ case "$1 $2" in
       printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"ended\",\"status\":\"ended\",\"subscription\":null}"
     else
       printf '%s\n' "$reconcile_args" >> subscribe-calls
+      if [ "$operation" = "rearm" ]; then
+        : > cancelled.marker
+      fi
       count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
       printf '%s' "$count" > subscribe-count
       printf '%s\n' "{\"goal_id\":\"$goal_id\",\"goal_owner\":\"$goal_owner\",\"desired\":\"active\",\"status\":\"armed\",\"subscription\":{\"id\":\"sub-arm-$count\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"goal:$goal_id\",\"trigger_times_ms\":[$at],\"fired_count\":0}}"
@@ -1790,6 +1797,11 @@ esac
     );
     let first_payload: Value = serde_json::from_slice(&first.stdout).unwrap();
     assert_eq!(first_payload["subscription_id"], "sub-arm-1");
+    let record_path = goal_test_record_path(&root);
+    let mut historical: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    historical["subject"] = serde_json::json!("goal:long-task.md");
+    historical["subscription_id"] = serde_json::json!("sub-retained");
+    fs::write(&record_path, serde_json::to_vec(&historical).unwrap()).unwrap();
 
     // Condition 2: a one-shot deadline that is still in the future keeps the
     // existing idempotent retain behavior and does not reach Collab again.
@@ -1806,8 +1818,7 @@ esac
     assert_eq!(subscribe_calls, 1);
     assert!(!root.join("ended-calls").exists());
 
-    // Condition 1: once the retained one-shot deadline is due, the subscribe
-    // must cancel it and arm a fresh future trigger instead of returning it.
+    // A due one-shot is replaced by one atomic request for a future trigger.
     let started = goal_now_ms_for_test();
     let rearmed = subscribed(true);
     assert!(
@@ -1831,11 +1842,14 @@ esac
         "the re-armed trigger must be in the future: trigger={rearmed_trigger} started={started}"
     );
     assert!(
-        fs::read_to_string(root.join("ended-calls"))
+        fs::read_to_string(root.join("subscribe-calls"))
             .unwrap()
-            .contains("--desired ended"),
-        "the due retained goal occurrence must be ended before re-arming"
+            .contains("--operation rearm"),
+        "the daemon must replace the due occurrence atomically"
     );
+    assert!(!root.join("ended-calls").exists());
+    assert_eq!(rearmed_payload["periodic_declared"], false);
+    assert_eq!(rearmed_payload["subject"], "goal:long-task.md");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1997,7 +2011,7 @@ set -e
 state="$PROJECT/remote-goals"
 /bin/mkdir -p "$state"
 case "$1 $2" in
-  "context ")
+  "context "|"context --query")
     printf '{"name":"crud-owner","session_id":"crud-session","binding":{"project_scope":"%s"},"identity":{"worker_id":"crud-carrier","role":"peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-crud"}}}\n' "$PROJECT"
     ;;
   "goal reconcile")
@@ -2026,7 +2040,7 @@ case "$1 $2" in
     key=$(printf '%s' "$goal_id" | /usr/bin/tr -c 'A-Za-z0-9._-' '_')
     if [ "$desired" = "ended" ]; then
       printf 'cancelled' > "$state/$key.status"
-      printf '{"goal_id":"%s","goal_owner":"%s","desired":"ended","status":"ended","subscription":null}\n' "$goal_id" "$owner"
+      printf '{"goal_id":"%s","goal_owner":"%s","desired":"ended","status":"ended","subscription":null,"retired_subscription_ids":["%s"]}\n' "$goal_id" "$owner" "$(/bin/cat "$state/$key.id")"
       exit 0
     fi
     if [ ! -f "$state/$key.id" ]; then
@@ -2443,7 +2457,7 @@ fn goal_owner_scoped_peer_native_and_master_lifecycle() {
     let script = root.join("fake-bin/collab");
     fs::write(&script, r#"#!/bin/sh
 case "$1 $2" in
- "context ") printf '{"result":{"snapshot":{"binding":{"project_scope":"%s"},"name":"%s","session_id":"%s","identity":{"worker_id":"carrier-%s","role":"%s","kind":"peer","transport":{"kind":"appserver","thread_id":"native-thread"}},"role_brief":{"derivation":{"kind":"%s"}}}}}\n' "$PROJECT" "$OWNER" "${SESSION:-first}" "${CARRIER:-$OWNER}" "${ROLE:-peer}" "${DERIVATION:-peer}" ;;
+ "context "|"context --query") printf '{"result":{"snapshot":{"binding":{"project_scope":"%s"},"name":"%s","session_id":"%s","identity":{"worker_id":"carrier-%s","role":"%s","kind":"peer","transport":{"kind":"appserver","thread_id":"native-thread"}},"role_brief":{"derivation":{"kind":"%s"}}}}}\n' "$PROJECT" "$OWNER" "${SESSION:-first}" "${CARRIER:-$OWNER}" "${ROLE:-peer}" "${DERIVATION:-peer}" ;;
  "status --all") printf '{"workers":[{"id":"%s","role":"peer","endpoint_live":true,"suspected_offline":false}],"tasks":[]}' "$OWNER" ;;
  "master status") printf '{"master":{"worker_id":"Jenny","endpoint_live":true}}' ;;
  "goal reconcile")
@@ -2459,7 +2473,7 @@ case "$1 $2" in
    printf '%s' "$subject" > "$PROJECT/$OWNER.subject"
    if [ "$desired" = "ended" ]; then
      printf cancelled > "$PROJECT/$OWNER.state"
-     printf '{"goal_id":"%s","goal_owner":"%s","desired":"ended","status":"ended","subscription":null}' "$goal_id" "$goal_owner"
+     printf '{"goal_id":"%s","goal_owner":"%s","desired":"ended","status":"ended","subscription":null,"retired_subscription_ids":["%s-sub"]}' "$goal_id" "$goal_owner" "$OWNER"
    else
      printf 'armed' > "$PROJECT/$OWNER.state"
      printf '{"goal_id":"%s","goal_owner":"%s","desired":"active","status":"armed","subscription":{"id":"%s-sub","status":"armed","event":"deadline","subject":"%s"}}' "$goal_id" "$goal_owner" "$OWNER" "$subject"

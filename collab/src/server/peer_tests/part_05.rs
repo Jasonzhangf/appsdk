@@ -1463,7 +1463,7 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
         "a subscription ID must never be accepted as a goal subject"
     );
 
-    let ended = handle_goal_schedule_reconcile(
+    let unrelated = handle_goal_schedule_reconcile(
         &server,
         "peer".into(),
         "token-peer".into(),
@@ -1473,6 +1473,20 @@ fn goal_reconcile_retires_retained_basename_subject_without_arbitrary_ids() {
         None,
         None,
         Some("goal:long-task.md".into()),
+        Some("goal-finished".into()),
+    );
+    assert!(unrelated.error.as_deref().unwrap().contains("GOAL_SCHEDULE_SUBJECT_CONFLICT"));
+    assert_eq!(server.state.lock().unwrap().notification_subscriptions["sub-legacy-goal"].status, "armed");
+    let ended = handle_goal_schedule_reconcile(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "long-task.md".into(),
+        "Alice".into(),
+        "ended".into(),
+        None,
+        None,
+        None,
         Some("goal-finished".into()),
     );
     assert!(ended.ok, "{}", ended.error.unwrap_or_default());

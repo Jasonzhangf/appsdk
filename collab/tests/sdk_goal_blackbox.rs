@@ -137,6 +137,95 @@ fn run_appsdk_ok(
     serde_json::from_slice(&output.stdout).expect("appsdk CLI emits JSON")
 }
 
+fn relay_request(endpoint: &Path, request: &str) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let mut daemon = std::os::unix::net::UnixStream::connect(endpoint).unwrap();
+    daemon
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    daemon.write_all(request.as_bytes()).unwrap();
+    let mut reply = String::new();
+    BufReader::new(daemon).read_line(&mut reply).unwrap();
+    reply
+}
+
+fn intercept_goal_reply(
+    fixture: &Fixture,
+    pane: &Pane,
+    args: &[&str],
+    active_snapshot_id: Option<String>,
+    before: impl FnOnce(&Path, Value) -> bool + Send + 'static,
+) -> (Output, Value) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let endpoint = fixture.host_state.join("server.sock");
+    let daemon = fixture.host_state.join("edit.sock");
+    fs::rename(&endpoint, &daemon).unwrap();
+    let relay = UnixListener::bind(&endpoint).unwrap();
+    relay.set_nonblocking(true).unwrap();
+    let upstream = daemon.clone();
+    let proof = std::thread::spawn(move || -> Option<Value> {
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let mut observed_armed_batch = false;
+        while Instant::now() < deadline {
+            let (mut client, _) = match relay.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept edit test connection: {error}"),
+            };
+            client.set_nonblocking(false).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = String::new();
+            if BufReader::new(&client).read_line(&mut request).unwrap() == 0 {
+                continue;
+            }
+            if request.contains("\"GoalScheduleReconcile\"") {
+                assert!(active_snapshot_id.is_none() || observed_armed_batch);
+                let drop_reply = before(&upstream, serde_json::from_str(&request).unwrap());
+                let reply = relay_request(&upstream, &request);
+                if !drop_reply {
+                    client.write_all(reply.as_bytes()).unwrap();
+                }
+                return Some(serde_json::from_str(&reply).expect("daemon reply"));
+            }
+            let reply = relay_request(&upstream, &request);
+            if let Some(id) = active_snapshot_id
+                .as_deref()
+                .filter(|_| request.contains("\"NotificationStatus\""))
+            {
+                let snapshot: Value = serde_json::from_str(&reply).unwrap();
+                let selected = find_subscription(&snapshot, id);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                assert_eq!(selected["status"], "armed");
+                assert!(selected["expires_ms"].as_u64().unwrap() > now);
+                observed_armed_batch = true;
+            }
+            client.write_all(reply.as_bytes()).unwrap();
+        }
+        None
+    });
+    let output = run_appsdk(fixture, pane, args);
+    let proof = proof.join();
+    fs::remove_file(&endpoint).unwrap();
+    fs::rename(&daemon, &endpoint).unwrap();
+    (
+        output,
+        proof.unwrap().expect("intercepted the edit response"),
+    )
+}
+
 fn deadline_subject(goal_id: &str) -> String {
     format!("deadline:goal:{goal_id}")
 }
@@ -839,6 +928,305 @@ fn sdk_goal_crud_isolated_to_selected_goal_on_real_daemon() {
             "cancel must retain observable record {goal_id}: {final_list}"
         );
     }
+
+    let goal_c = &goal_ids[2];
+    let renewed = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_c,
+            "--owner",
+            &owner,
+            "--desired",
+            "active",
+            "--every-ms",
+            "120000",
+            "--repeat",
+            "3",
+            "--ttl-seconds",
+            "600",
+            "--content",
+            "Renew outside AppSDK",
+        ],
+        Some(&pane),
+    );
+    let renewed_id = renewed["subscription"]["id"].as_str().unwrap();
+    assert_ne!(renewed_id, subscription_ids[2]);
+    let ended = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "cancel", "--goal-id", goal_c, "--json"],
+        &evidence,
+        "cancel-externally-renewed-goal",
+    );
+    assert_eq!(ended["subscription_id"], renewed_id, "{ended}");
+    assert_eq!(ended["status"], "cancelled", "{ended}");
+
+    let last_batch = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal_c,
+            "--owner",
+            &owner,
+            "--desired",
+            "active",
+            "--every-ms",
+            "1000",
+            "--repeat",
+            "3",
+            "--ttl-seconds",
+            "10",
+            "--content",
+            "Expire without a local cancellation",
+        ],
+        Some(&pane),
+    );
+    let last_batch_id = last_batch["subscription"]["id"].as_str().unwrap();
+    let expires = last_batch["subscription"]["expires_ms"].as_u64().unwrap();
+    let (ended_output, end_receipt) = intercept_goal_reply(
+        &fixture,
+        &pane,
+        &["goal", "cancel", "--goal-id", goal_c, "--json"],
+        Some(last_batch_id.to_owned()),
+        move |_, request| {
+            assert_eq!(request["desired"], "ended");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            std::thread::sleep(Duration::from_millis(expires.saturating_sub(now) + 100));
+            false
+        },
+    );
+    assert!(ended_output.status.success(), "{ended_output:?}");
+    assert_eq!(end_receipt["ended_subscription"]["status"], "expired");
+    let ended_again: Value = serde_json::from_slice(&ended_output.stdout).unwrap();
+    write_json(
+        &evidence,
+        "observe-expiry-between-snapshot-and-end.json",
+        &ended_again,
+    );
+    assert_eq!(
+        ended_again["subscription_id"], last_batch_id,
+        "{ended_again}"
+    );
+    assert_eq!(ended_again["status"], "expired", "{ended_again}");
+
+    // Simulate a missing local projection with retained daemon history.
+    fs::remove_file(&record_paths[2]).unwrap();
+    let remote_only = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "status", "--goal-id", goal_c, "--json"],
+        &evidence,
+        "remote-only-exact-status",
+    );
+    assert_eq!(
+        remote_only["subscription_id"], last_batch_id,
+        "{remote_only}"
+    );
+    assert_eq!(remote_only["observed"], "expired", "{remote_only}");
+    assert_eq!(remote_only["error"], "GOAL_PERIODIC_BATCH_ENDED:expired");
+    let list = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "list", "--json"],
+        &evidence,
+        "list-remote-history",
+    );
+    assert_eq!(list["count"], 3, "{list}");
+    assert!(
+        !record_paths[2].exists(),
+        "read back must not recreate a local record"
+    );
+    let edited_remote = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &[
+            "goal",
+            "edit",
+            "--goal-id",
+            goal_c,
+            "--repeat",
+            "4",
+            "--json",
+        ],
+        &evidence,
+        "edit-remote-only-terminal-goal",
+    );
+    assert_eq!(
+        edited_remote["subscription_id"], last_batch_id,
+        "{edited_remote}"
+    );
+    assert_eq!(edited_remote["status"], "expired", "{edited_remote}");
+    let final_subscriptions = fixture.run_ok(&["notify", "status"], Some(&pane));
+    assert_eq!(
+        find_subscription(&final_subscriptions, &subscription_ids[1]),
+        find_subscription(&after_cancel, &subscription_ids[1])
+    );
+
+    let future = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 60_000)
+        .to_string();
+    let one_shot = fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "convert-once",
+            "--owner",
+            &owner,
+            "--desired",
+            "active",
+            "--at-ms",
+            &future,
+            "--ttl-seconds",
+            "600",
+        ],
+        Some(&pane),
+    );
+    assert_eq!(one_shot["one_shot"], true);
+    let converted = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &[
+            "goal",
+            "edit",
+            "--goal-id",
+            "convert-once",
+            "--interval",
+            "120s",
+            "--repeat",
+            "4",
+            "--json",
+        ],
+        &evidence,
+        "convert-one-shot-to-periodic-by-exact-edit",
+    );
+    assert_eq!(converted["subscription_id"], one_shot["subscription"]["id"]);
+    assert_eq!(converted["record"]["periodic_declared"], true);
+    assert_eq!(converted["record"]["schedule"], "periodic");
+
+    let new_document = fixture.root.join("goal-b-revised.md");
+    fs::write(
+        &new_document,
+        "# Revised Goal B\n\nConfirm a recovered edit.\n",
+    )
+    .unwrap();
+    let edit = [
+        "goal",
+        "edit",
+        "--goal-id",
+        &goal_ids[1],
+        "--goal",
+        new_document.to_str().unwrap(),
+        "--interval",
+        "240s",
+        "--json",
+    ];
+    let (lost, committed) = intercept_goal_reply(&fixture, &pane, &edit, None, |_, _| true);
+    assert_eq!(committed["ok"], true, "{committed}");
+    assert_eq!(lost.status.code(), Some(1));
+    let pending: Value = serde_json::from_slice(&lost.stdout).unwrap();
+    assert!(pending["edit_reconciliation"]["original_error"]
+        .as_str()
+        .unwrap()
+        .contains("DAEMON_UNKNOWN"));
+    let pending_bytes = fs::read(&record_paths[1]).unwrap();
+    let observed = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "status", "--goal-id", &goal_ids[1], "--json"],
+        &evidence,
+        "observe-committed-edit-without-reply",
+    );
+    assert_eq!(
+        observed["goal_path"],
+        new_document.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(observed["record"]["every_ms"], 240_000);
+    assert!(
+        observed["record"]["edit_reconciliation"].is_null(),
+        "{observed}"
+    );
+    assert_eq!(fs::read(&record_paths[1]).unwrap(), pending_bytes);
+    let retried = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &edit,
+        &evidence,
+        "retry-edit-without-reply",
+    );
+    assert_eq!(retried["receipt"]["deduplicated"], true, "{retried}");
+    assert_eq!(retried["subscription_id"], subscription_ids[1]);
+
+    let next_document = fixture.root.join("goal-b-stale-edit.md");
+    fs::write(&next_document, "# Must not edit a replacement batch\n").unwrap();
+    let competing = [
+        "goal",
+        "edit",
+        "--goal-id",
+        &goal_ids[1],
+        "--goal",
+        next_document.to_str().unwrap(),
+        "--interval",
+        "180s",
+        "--json",
+    ];
+    let (lost_after_renewal, rejected) =
+        intercept_goal_reply(&fixture, &pane, &competing, None, |upstream, edit| {
+            let mut end = edit.clone();
+            for field in [
+                "operation",
+                "expected_subscription_id",
+                "interval_ms",
+                "content",
+            ] {
+                end.as_object_mut().unwrap().remove(field);
+            }
+            end["desired"] = Value::String("ended".into());
+            let invoke = |request: &Value| -> Value {
+                let response = relay_request(upstream, &format!("{request}\n"));
+                serde_json::from_str(&response).unwrap()
+            };
+            assert_eq!(invoke(&end)["ok"], true);
+            end["desired"] = Value::String("active".into());
+            end["interval_ms"] = Value::from(120_000);
+            end["repeat_count"] = Value::from(3);
+            end["ttl_seconds"] = Value::from(600);
+            end["content"] = Value::String("A separately authorized replacement batch".into());
+            assert_eq!(invoke(&end)["ok"], true);
+            true
+        });
+    assert_eq!(lost_after_renewal.status.code(), Some(1));
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_SCHEDULE_SELECTION_CHANGED"));
+    let recovered = run_appsdk_ok(
+        &fixture,
+        &pane,
+        &["goal", "status", "--goal-id", &goal_ids[1], "--json"],
+        &evidence,
+        "no-edit-on-renewed-batch-after-lost-reply",
+    );
+    assert_ne!(recovered["subscription_id"], subscription_ids[1]);
+    assert_eq!(recovered["record"]["every_ms"], 120_000);
+    assert_eq!(
+        recovered["record"]["edit_reconciliation"]["status"],
+        "pending"
+    );
+    assert_eq!(
+        recovered["record"]["collab_subscription"]["goal_content"]["source"]["content"],
+        "A separately authorized replacement batch"
+    );
 
     write_bytes(
         &evidence,

@@ -95,6 +95,49 @@ flowchart LR
 不修改订阅、route 或 transport。mailbox 缺失订阅时仍保留完整 payload，但发送结果必须显式
 `repair_required`，不能伪装成成功通知。
 
+## 精确目标调度 DAG
+
+每次操作使用目标项目、应用范围、稳定名字和目标 ID 选择对应记录。任务目标的内容和
+周期来自任务单。订阅 ID 从对应回执读取，用于核对批次和进度。
+
+```mermaid
+flowchart TD
+  S([收到目标操作]):::boundary --> A[核对授权和精确目标]:::action
+  A -->|权限或目标冲突| N[保留原状态并返回原错]:::failure
+  A -->|选择完成| D{操作意图}:::decision
+  D -->|查询| Q[读取状态与当前批次]:::action
+  D -->|编辑| B{匹配的批次}:::decision
+  B -->|唯一有效| E[核对指定批次并更新允许字段]:::action
+  B -->|只有终态记录| T[编辑最近的终态记录并保持终态]:::action
+  B -->|缺失或歧义| N
+  D -->|显式启动或授权续订| R[复用有效批次或登记新批次]:::action
+  D -->|到期单次重新登记| U[同一提交中替换到期批次并保留单次形态]:::action
+  D -->|结束| C[结束指定计划并读取提交时的实际终态]:::action
+  D -->|任务派生| P[随任务提交适用计划并保留终态]:::action
+  E --> W[校验并持久提交]:::action
+  T --> W
+  R --> W
+  U --> W
+  C --> W
+  P --> W
+  W -->|拒绝或提交失败| N
+  W -->|提交成功或已达目标状态| O([输出统一结果与回执]):::boundary
+  Q --> O
+  N --> O
+
+  classDef boundary fill:#E9EEF5,stroke:#64748B,color:#0F172A,stroke-width:1.5px
+  classDef action fill:#E8F1FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px
+  classDef decision fill:#FFF4CC,stroke:#D97706,color:#0F172A,stroke-width:1.5px
+  classDef failure fill:#FDECEC,stroke:#DC2626,color:#0F172A,stroke-width:1.5px
+```
+
+图的单入口为 `goal_request`，单出口为 `goal_result`。
+一次操作内没有重试回边。客户端结果未知时，先读同一目标的当前回执再决定是否重试。
+AppSDK 编辑使用 daemon 订阅回执中的 ID 作为前置条件。若当前批次发生变化，daemon
+拒绝该编辑。结束回执带锁内确认的批次及终态，覆盖客户端读取与提交之间发生的到期。
+新批次的启动权限沿既有目标合同。任务派发、任务改动及其订阅事件在同一业务提交中发生。
+机器图见 [目标归属与调度](collab-goal-ownership.graph.json)。
+
 ## 实施映射
 
 | 语义节点 | owner | 当前状态 | 缺口 |

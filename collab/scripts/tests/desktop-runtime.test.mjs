@@ -178,6 +178,8 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
     assert.deepEqual(enrollment.binding,{session,thread});
     assert.equal(enrollment.cwd,project);assert.equal(enrollment.host_pipe,env.CODEX_APP_TOOLS_PIPE_PATH);
     const identityMap=path.join(f.state,'identity-map.json'),before=await fs.readFile(identityMap);
+    const capability=capabilityPath(f.state,project,session,thread);
+    const capabilityBefore=await fs.readFile(capability);
     const {createInterface}=await import('node:readline');
     async function query(from,label,tool='collab_context',args={query:true}){
       const wrapper=spawn(process.execPath,[script],{cwd:from,env,stdio:['pipe','pipe','pipe']});
@@ -202,6 +204,7 @@ test('managed wrapper verifies the request thread and queries its enrolled proje
     const elsewhere=await query(home,'cwd outside the project');
     const inside=await query(project,'cwd at the project');
     assert.deepEqual(await fs.readFile(identityMap),before,'a query must not mutate the identity map');
+    assert.deepEqual(await fs.readFile(capability),capabilityBefore,'a query must not republish the capability');
     assert.ok(elsewhere.reads>0,`query from another cwd made ${elsewhere.reads} exact native read_thread calls: ${JSON.stringify(elsewhere.response)}`);
     assert.equal(elsewhere.response.result.isError,false,JSON.stringify(elsewhere.response));
     const result=JSON.parse(elsewhere.response.result.content[0].text).result.snapshot;

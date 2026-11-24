@@ -1043,7 +1043,7 @@ pub(crate) fn register_online(server: &Server, id: &str, thread_id: &str) -> Res
     response
 }
 
-fn register_appserver_peer(server: &Server, id: &str, transport: &SelectedTransport) {
+pub(super) fn register_appserver_peer(server: &Server, id: &str, transport: &SelectedTransport) {
     let app = AppServerId::new("tui-default").unwrap();
     let cwd = server.root.display().to_string();
     let response = seed_committed_owner(

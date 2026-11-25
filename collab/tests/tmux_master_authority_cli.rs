@@ -626,10 +626,14 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    assert!(master_responsibilities.contains("own this project's worker patrol"));
-    assert!(master_responsibilities.contains("reusing a valid subscription"));
-    assert!(master_responsibilities.contains("sole accountable master"));
-    assert!(master_responsibilities.contains("manage dispatch, priorities and cross-task dependencies"));
+    let master_role_task = context["role_brief"]["role_task"]
+        .as_str()
+        .expect("master role task");
+    assert!(master_role_task.contains("Jenny is the sole Collab dispatcher"));
+    assert!(master_responsibilities.contains("unknown availability is not idle"));
+    assert!(master_responsibilities.contains("independent codex planner"));
+    assert!(master_responsibilities.contains("when there is no suitable peer"));
+    assert!(master_responsibilities.contains("resolve decisions requiring project authority"));
     assert!(!master_responsibilities.contains("saturate every live present peer first"));
     let next_action = context["role_brief"]["next_action"]
         .as_str()
@@ -640,32 +644,8 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         "idle master next_actions must be empty when no task next_step exists: {context}"
     );
     let next_action_lower = next_action.to_lowercase();
-    assert!(
-        next_action_lower.contains("invite suitable, available and authorized peers first"),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains("no suitable authorized peer can take the work"),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains("codex exec --profile gcm"),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains("project-canonical intake"),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains("protected_holds"),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains(
-            "reusing a valid patrol batch and renewing it only per the applicable duties"
-        ),
-        "{next_action}"
-    );
+    assert!(next_action_lower.contains("dispatch ready authorized work"), "{next_action}");
+    assert!(next_action_lower.contains("cancel idle patrol when there is no action"), "{next_action}");
     // The fixture runner provides a reachable pane, but no confirmed agent.
     assert_eq!(context["liveness"]["presence"], "unknown");
     assert_eq!(

@@ -1293,6 +1293,24 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         )
     };
     publish("managed-board-public", false);
+    let mut unassigned_claim = fixture.configured_command(
+        &[
+            "board",
+            "claim",
+            "managed-board-public",
+            "--expected-revision",
+            "1",
+        ],
+        None,
+    );
+    configure_child_runtime(&mut unassigned_claim);
+    let unassigned_claim = unassigned_claim.output().unwrap();
+    assert!(!unassigned_claim.status.success());
+    let claim_error = String::from_utf8_lossy(&unassigned_claim.stderr);
+    assert!(
+        claim_error.contains("BOARD_ASSIGNMENT_REQUIRED"),
+        "{claim_error}"
+    );
     let claimed = board_call(
         &[
             "board",
@@ -1301,11 +1319,11 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
             "--expected-revision",
             "1",
         ],
-        true,
+        false,
     );
     assert_eq!(claimed["task"]["status"], "working");
-    let actual = board_call(&["task", "status", "managed-board-public"], true);
-    assert_eq!(actual["owner"], "bind-created-peer");
+    let actual = board_call(&["task", "status", "managed-board-public"], false);
+    assert_eq!(actual["owner"], claimed["task"]["owner"]);
     publish("managed-board-private", true);
     let private_board = board_call(&["board", "show"], true);
     assert!(private_board["tasks"]
@@ -1331,7 +1349,7 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
             "--test-condition",
             "Public CLI assertions",
         ],
-        true,
+        false,
     );
     let parent_board = board_call(&["board", "show"], false);
     let public = parent_board["tasks"]
@@ -1342,9 +1360,9 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         .unwrap();
     assert_ne!(
         public["owner"], "bind-created-peer",
-        "public responsibility is the parent"
+        "the managed binding must not take over the public task"
     );
-    // A failed claim uses the same public projection instead of exposing child identity.
+    // A failed claim must preserve the public task and keep the child identity private.
     let public_revision = described["task"]["revision"].as_u64().unwrap().to_string();
     let mut competing = fixture.configured_command(
         &[
@@ -1356,7 +1374,7 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
         ],
         None,
     );
-    configure_runtime(&mut competing);
+    configure_child_runtime(&mut competing);
     let rejected = competing.output().unwrap();
     assert!(!rejected.status.success());
     assert!(!String::from_utf8_lossy(&rejected.stderr).contains("bind-created-peer"));
@@ -1371,9 +1389,9 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
             "--status",
             "blocked",
             "--next",
-            "Await authorized input; continue private queue",
+            "Await authorized input",
         ],
-        true,
+        false,
     );
     let private_claim = board_call(
         &[
@@ -1410,10 +1428,10 @@ fn verified_public_create_can_be_bound_and_read_back_as_managed() {
             "--status",
             "cancelled",
         ],
-        true,
+        false,
     );
 
-    // A parent remains authorized to dispatch after returning to ordinary peer.
+    // An ordinary parent can still exercise its legacy private managed transport.
     let mut clear = fixture.configured_command(
         &[
             "master",

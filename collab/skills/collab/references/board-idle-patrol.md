@@ -69,8 +69,9 @@ owner 是 core 实现与项目 DAG。
 ## 任务阻塞或停滞先取证
 
 未关闭任务出现阻塞，或证据显示执行者没有推进时，直属负责人当轮核实，即使
-`collab worker status <id>` 显示 online 或 busy。对有 Rex 或 tmux 绑定的执行者，运行
-`collab worker snapshot <id> --capture --lines 80` 读取原 block 或 pane。先看当前输出和任务证据，
+`collab worker status <id>` 显示 online 或 busy。ID 从 `collab who` 取当前 worker ID，
+使用该绑定的 transport。执行 `collab worker snapshot <id> --capture --lines 80` 时，
+Rex 只读当前 Rex block，tmux 只读当前 tmux pane。先看当前输出和任务证据，
 判断卡在什么动作、影响哪项验收，再推进、解阻、调整计划或交给有权处理的人。
 只读 capture，不写入终端、不拆分 pane、不调用 GUI。
 

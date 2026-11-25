@@ -206,7 +206,7 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 跨项目 | 同一个 `collab send`。任意两个已注册对象可直接收发，不受 master/peer/CEO 组合限制，不要求 master 代转。保留真实 sender、精确地址和持久回执 |
+| 跨项目 | 仅按用户或当前任务合同指定的目标项目和接收人，用同一个 `collab send` 发送。消费者项目的 SDK 报错先留在消费者项目，除非合同授权交给 SDK 项目。精确地址和持久回执记录在原任务 |
 
 ### 未注册脚本与固定 Session
 
@@ -2264,7 +2264,7 @@ DSH 即使运行于 Rex 或 tmux 内，也优先使用 DSH 的身份来源。
 
 Codex 宿主注入 `CODEX_SESSION_ID`。Rex 注入 `REX_SESSION` 和 `REX_BLOCK`，官方
 Rex CLI 的 JSON `endpoint` 给出当前 server。三个 Rex 字段共同定位投递 block。
-在当前 block 内执行：
+仅在 `collab context` 明确返回 Rex 位置缺项时，在原 block 执行：
 
 ```sh
 printf 'CODEX_SESSION_ID=%s\nREX_SESSION=%s\nREX_BLOCK=%s\n' \
@@ -2273,12 +2273,16 @@ if [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ]; then
   if command -v rex >/dev/null 2>&1; then
     rex whoami --json --autostart=false
   else
-    rex_bundle='Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex'
-    rex_cli="/Applications/$rex_bundle"
-    if [ ! -x "$rex_cli" ]; then
-      rex_cli="$HOME/Applications/$rex_bundle"
-    fi
-    if [ -x "$rex_cli" ]; then
+    rex_cli=''
+    for app in "/Applications/Rex.app" "$HOME/Applications/Rex.app" \
+               "/Applications/Rex Beta.app" "$HOME/Applications/Rex Beta.app"; do
+      helper="$app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+      if [ -x "$helper" ]; then
+        rex_cli="$helper"
+        break
+      fi
+    done
+    if [ -n "$rex_cli" ]; then
       "$rex_cli" whoami --json --autostart=false
     else
       printf '%s\n' 'Rex CLI unavailable in this shell' >&2
@@ -2289,11 +2293,12 @@ fi
 
 `collab context` 从同一环境自动读取这些值，daemon 核实 Rex server、session 和
 terminal block。Rex session/block 只用于投递。缺 `CODEX_SESSION_ID` 时由当前 Codex
-宿主补传。此路径无需 AppServer thread、endpoint 或 namespace。
+宿主补传。Rex 只核对当前 block。原环境中的 `TMUX_PANE` 保持原样；
+无需 `tmux` 命令、`rex session inspect`、AppServer thread、endpoint 或 namespace。
 
 ### iTerm2 中的 tmux / Codex TUI
 
-Codex 注入 `CODEX_SESSION_ID`。tmux 注入 `TMUX_PANE`。在现有 pane 中执行：
+已确认当前宿主为 tmux 且 Context 明确缺当前 pane 时，才在原 pane 执行：
 
 ```sh
 printf 'CODEX_SESSION_ID=%s\nTMUX_PANE=%s\n' "${CODEX_SESSION_ID:-}" "${TMUX_PANE:-}"
@@ -2380,10 +2385,10 @@ thread, even if it is reachable. If ownership of the exact endpoint and tuple
 cannot be established, fail registration rather than borrowing another
 runtime's identity.
 
-Registration derives the host namespace from the active runtime. The exact
+For an already verified direct AppServer runtime only, registration derives its
+namespace from that runtime. This is not a Rex troubleshooting path. The exact
 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` marker selects `codex_app`;
-`Codex CLI` or `Codex TUI` selects `codex_tui`, and `TMUX_PANE` selects
-`codex_tui` when no originator marker is present. An explicit
+`Codex CLI` or `Codex TUI` selects `codex_tui`. An explicit
 `COLLAB_APPSERVER_NAMESPACE` is reserved for nonstandard hosts and must be one
 of those two values. Unknown host markers never select an AppServer namespace.
 With an explicit AppServer socket they fail registration; without one, the

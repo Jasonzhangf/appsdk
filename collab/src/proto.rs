@@ -902,6 +902,8 @@ pub enum Req {
         worker_id: String,
         token: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_subject_revision: Option<u64>,
         accept: bool,
         rework: bool,
         evidence: String,

@@ -1301,6 +1301,8 @@ pub struct TaskLifecycleRecord {
     pub review_evidence: Option<String>,
     #[serde(default)]
     pub reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_recorded_by: Option<String>,
     #[serde(default)]
     pub reviewed_ms: Option<i64>,
     #[serde(default)]

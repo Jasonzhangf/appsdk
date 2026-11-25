@@ -121,7 +121,6 @@ fn legacy_task_owner_gate(state: &State, task_id: &str, actor: &str) -> Result<(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionCandidateIneligible {
     PinnedExecutorMismatch,
-    RequiredReviewer,
 }
 
 fn execution_candidate_eligibility(
@@ -134,9 +133,6 @@ fn execution_candidate_eligibility(
         .is_some_and(|executor| executor != candidate_name)
     {
         return Err(ExecutionCandidateIneligible::PinnedExecutorMismatch);
-    }
-    if policy.reviewer_name.as_deref() == Some(candidate_name) {
-        return Err(ExecutionCandidateIneligible::RequiredReviewer);
     }
     Ok(())
 }
@@ -155,15 +151,6 @@ fn execution_candidate_gate(
                 "task_id": task_id,
                 "candidate_name": candidate_name,
                 "executor_name": policy.executor_name,
-                "delivery_complete": false
-            }),
-        )),
-        Err(ExecutionCandidateIneligible::RequiredReviewer) => Err(Resp::err_data(
-            "WORK_REVIEWER_EXECUTION_CONFLICT: required reviewer cannot execute the same task",
-            json!({
-                "task_id": task_id,
-                "candidate_name": candidate_name,
-                "reviewer_name": policy.reviewer_name,
                 "delivery_complete": false
             }),
         )),
@@ -276,25 +263,6 @@ fn overlay_work_policy(base: &mut crate::board::WorkPolicy, patch: &crate::board
     }
 }
 
-/// Stable-name review capability used by the three-tier review route.
-pub(crate) fn ticket_review_group(
-    state: &State,
-    route: &RouteScope,
-    slot_name: &str,
-) -> Option<crate::server::ticket_state::ReviewRouteGroup> {
-    use crate::server::ticket_state::ReviewRouteGroup;
-    let roles = state.name_work_roles(route.project_scope_id.as_str(), slot_name);
-    if roles.iter().any(|role| role == "reviewer") {
-        return Some(ReviewRouteGroup::Reviewer);
-    }
-    if roles
-        .iter()
-        .any(|role| role == "architect" || role == "expert")
-    {
-        return Some(ReviewRouteGroup::ArchitectExpert);
-    }
-    Some(ReviewRouteGroup::IndependentPeer)
-}
 
 /// Phase-group queue key. Execute and plan use the work-kind group already
 /// persisted for rotation; reviews use one group per review subject.
@@ -526,61 +494,6 @@ pub(crate) fn ticket_stale_active_claim_phase(
     Some((*newest).clone())
 }
 
-/// Eligible review receivers for one admitted ticket phase. A participating
-/// actor or stable name is excluded by the route itself; the caller only has to
-/// supply every bound, project-authorized peer.
-pub(crate) fn ticket_review_candidates(
-    state: &State,
-    control: &binding_slot::BindingControlSet,
-    route: &RouteScope,
-    phases: &[crate::server::ticket_state::TicketPhaseRecord],
-) -> Vec<crate::server::ticket_state::ReviewCandidate> {
-    use crate::server::ticket_state::{ReviewCandidate, ReviewRouteGroup};
-    let master = current_master_worker_id(state, None);
-    let mut candidates = Vec::new();
-    for worker in state.workers.values() {
-        if is_managed_subagent(state, &worker.id)
-            || authoritative_send_binding(state, route, &worker.id).is_err()
-        {
-            continue;
-        }
-        if master.as_deref() == Some(worker.id.as_str()) {
-            continue;
-        }
-        let Ok(Some(slot)) =
-            control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
-        else {
-            continue;
-        };
-        let name = slot.identity_key.name.clone();
-        let Some(group) = ticket_review_group(state, route, &name) else {
-            continue;
-        };
-        let participated = phases.iter().any(|phase| {
-            phase.slot_name.as_deref() == Some(name.as_str())
-                && phase
-                    .result
-                    .as_ref()
-                    .is_some_and(|result| result.submitted_by == worker.id)
-        }) || phases.iter().any(|phase| {
-            phase.slot_name.as_deref() == Some(name.as_str())
-                && matches!(
-                    phase.status,
-                    crate::server::ticket_state::TicketPhaseStatus::Claimed
-                        | crate::server::ticket_state::TicketPhaseStatus::Running
-                )
-        });
-        candidates.push(ReviewCandidate {
-            slot_name: name,
-            worker_id: worker.id.clone(),
-            group,
-            participated,
-        });
-    }
-    candidates.sort_by(|left, right| left.slot_name.cmp(&right.slot_name));
-    candidates.dedup_by(|left, right| left.slot_name == right.slot_name);
-    candidates
-}
 
 /// Eligible non-master slots for a plan or execute phase. Plan requires a
 /// `plan` or `planner` specialty. Execute is the project default for every
@@ -746,11 +659,11 @@ fn board_work_policy_locked(
             json!({"outcome":"rules_updated","scope":"project","work_kind":kind,"policy":policy}),
         );
     }
-    if !matches!(scope.as_str(), "goal" | "task") {
-        return Resp::err("policy scope must be project, goal or task");
+    if scope != "task" {
+        return Resp::err("policy scope must be project or task");
     }
     let Some(id) = id else {
-        return Resp::err("goal/task policy requires --id");
+        return Resp::err("task policy requires --id");
     };
     let Some(revision) = expected_revision else {
         return Resp::err("goal/task policy requires --expected-revision");
@@ -772,64 +685,20 @@ fn board_work_policy_locked(
         return Resp::err("withdraw the invitation before changing its contract");
     }
     let mut events = Vec::new();
-    if scope == "goal" {
-        if let Err(error) = board_check_master_locked(server, &state, &actor) {
+    let changes_executor = patch.executor_name.is_some()
+        || patch.cleared_fields.iter().any(|field| field == "executor_name");
+    if changes_executor
+        || task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err()
+    {
+        if let Err(error) = board_check_master_locked(server, state, &actor) {
             return error;
         }
-        let Some(kind) = patch
-            .work_kind
-            .as_ref()
-            .or(details.work_policy.work_kind.as_ref())
-            .cloned()
-        else {
-            return Resp::err("goal policy requires --work-kind");
-        };
-        let policy = details.child_work_policies.entry(kind).or_default();
-        overlay_work_policy(policy, &patch);
-    } else {
-        if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err() {
-            if let Err(error) =
-                board_check_master_or_task_architect_locked(server, state, control, &id, &actor)
-            {
-                return error;
-            }
-        }
-        let previous = details.work_policy.clone();
-        overlay_work_policy(&mut details.work_policy, &patch);
-        if previous != details.work_policy {
-            details.dispatch_selection = None;
-            details.dispatch_reason = None;
-            // Only a changed review requirement invalidates current acceptance;
-            // executor reassignment and selection preferences preserve evidence.
-            if previous.reviewer_name != details.work_policy.reviewer_name {
-                let mut record = state.task_lifecycle.get(&id).cloned().unwrap_or_default();
-                events.extend(invalidate_work_review(
-                    &state,
-                    &task,
-                    &mut record,
-                    details.work_policy.reviewer_name.clone(),
-                ));
-                // A reviewer rebind invalidates the previous verdict, but it is
-                // not itself a typed rework decision. Keep a delivered (or
-                // accepted) task delivered so the new reviewer can decide, and
-                // point next_step at the current required reviewer.
-                if matches!(task.status.as_str(), "accepted" | "delivered") {
-                    task.status = "delivered".into();
-                    task.next_step = Some(match details.work_policy.reviewer_name.as_deref() {
-                        Some(name) => format!(
-                            "await review by {name}; use collab task review --accept or --rework"
-                        ),
-                        None => "task owner or live master reviews delivery with collab task review --accept or --rework".into(),
-                    });
-                }
-                if record.delivered_ms.is_some() {
-                    events.push(Event::TaskLifecycleUpdated {
-                        task_id: id.clone(),
-                        record,
-                    });
-                }
-            }
-        }
+    }
+    let previous = details.work_policy.clone();
+    overlay_work_policy(&mut details.work_policy, &patch);
+    if previous != details.work_policy {
+        details.dispatch_selection = None;
+        details.dispatch_reason = None;
     }
     details.revision += 1;
     task.updated_ms = now_ms();
@@ -853,8 +722,7 @@ fn board_work_policy_locked(
         },
     ]);
     events.extend(auto_notice.events.clone());
-    // Only an executing state reopens a completed execute phase. A reviewer
-    // rebind that keeps the task delivered must not restart execution.
+    // An executing task can reopen its completed execute phase.
     if matches!(
         resulting_status.as_str(),
         "working" | "verifying" | "rework"
@@ -1047,7 +915,7 @@ fn board_dispatch_work(
         };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token).and_then(|()| {
-        board_check_master_or_task_architect_locked(server, &state, Some(&control), &id, &actor)
+        board_check_master_locked(server, &state, &actor)
     }) {
         return error;
     }
@@ -1142,7 +1010,7 @@ fn board_dispatch_current_map(
 ) -> Resp {
     let outcome = manager.with_current_state_response(server, |control, state| {
         board_current_map_actor_gate(state, &actor, &token, &id)?;
-        board_check_master_or_task_architect_locked(server, state, Some(control), &id, &actor)?;
+        board_check_master_locked(server, state, &actor)?;
         let route = server_route_scope(server, state)
             .map_err(Resp::err)?
             .ok_or_else(|| Resp::err("project route is not ready"))?;
@@ -1292,6 +1160,7 @@ pub(crate) fn board_ticket_admission_events(
     task: &TaskRec,
     details: &crate::board::BoardTaskDetails,
     depends_on: Vec<String>,
+    is_scheduler: bool,
 ) -> Result<Vec<Event>, Resp> {
     use crate::server::ticket_state::{
         select_shortest_queue, slot_queue_len, TicketPhaseKind, TicketPhaseRecord,
@@ -1310,7 +1179,11 @@ pub(crate) fn board_ticket_admission_events(
         };
 
     let first_phase = TicketPhaseKind::Execute;
-    let candidates = ticket_slot_candidates(state, &control, &route, policy, first_phase)?;
+    let candidates = if is_scheduler && details.long_horizon.is_none() {
+        ticket_slot_candidates(state, &control, &route, policy, first_phase)?
+    } else {
+        Vec::new()
+    };
 
     let group = ticket_phase_group(first_phase, policy.work_kind.as_deref());
     let cursor = state.ticket_rotation.get(&group).map(String::as_str);
@@ -1347,7 +1220,11 @@ pub(crate) fn board_ticket_admission_events(
             )
         }
         None => {
-            let reason = if policy.executor_name.is_some() {
+            let reason = if details.long_horizon.is_some() {
+                "waiting for long-horizon dispatch with subscription".to_owned()
+            } else if !is_scheduler {
+                "waiting for the owner to claim after dependencies complete".to_owned()
+            } else if policy.executor_name.is_some() {
                 format!(
                     "specified executor {} is unavailable",
                     policy.executor_name.as_deref().unwrap_or_default()
@@ -1590,7 +1467,15 @@ pub(crate) fn ticket_continuation_events_with_pending(
                 && phase.status == TicketPhaseStatus::Completed
         })
     };
-    let Some(next) = next_queued_for_slot(phases, &slot_name, dependency_satisfied).cloned() else {
+    let ready_phases = phases.iter().filter(|phase| {
+        let task_id = &phase.task_id;
+        let publishing = pending_task.is_some_and(|task| task.id == *task_id);
+        let task = pending_task.filter(|_| publishing).or_else(|| state.tasks.get(task_id));
+        let details = pending_details.filter(|_| publishing).or_else(|| state.board_details.get(task_id));
+        !task.is_some_and(|task| task.status == "pending")
+            || !details.is_some_and(|details| details.long_horizon.is_some())
+    });
+    let Some(next) = next_queued_for_slot(ready_phases, &slot_name, dependency_satisfied).cloned() else {
         return Vec::new();
     };
     let pending_matches = pending_task.is_some_and(|task| task.id == next.task_id);
@@ -1800,67 +1685,25 @@ mod work_policy_state_tests {
                 .unwrap(),
             })
             .unwrap();
-        let goal = crate::board::BoardTaskDetails {
-            work_policy: crate::board::WorkPolicy {
-                work_kind: Some("frontend".into()),
-                ..Default::default()
-            },
-            child_work_policies: std::collections::BTreeMap::from([
-                (
-                    "frontend".into(),
-                    parse_work_policy(None, None, Some("Bob".into()), None, false, false, false)
-                        .unwrap(),
-                ),
-                (
-                    "backend".into(),
-                    parse_work_policy(None, None, Some("Carol".into()), None, false, false, false)
-                        .unwrap(),
-                ),
-            ]),
-            ..Default::default()
-        };
-        state
-            .apply_checked(&Event::BoardDetailsChanged {
-                task_id: "goal".into(),
-                details: goal,
-            })
-            .unwrap();
         let override_policy =
             parse_work_policy(None, None, Some("Alice".into()), None, true, false, false).unwrap();
-        let resolved = state.materialize_work_policy(None, Some("goal"), &override_policy);
+        let resolved = state.materialize_work_policy(Some("frontend"), &override_policy);
         assert_eq!(resolved.executor_name.as_deref(), Some("Alice"));
-        assert_eq!(resolved.reviewer_name.as_deref(), Some("Bob"));
+        assert!(resolved.reviewer_name.is_none());
         assert!(resolved.preferred_roles.is_none());
-        assert_eq!(
-            state
-                .materialize_work_policy(Some("backend"), Some("goal"), &Default::default())
-                .executor_name
-                .as_deref(),
-            Some("Carol")
-        );
-        state
-            .apply_checked(&Event::BoardDetailsChanged {
-                task_id: "child".into(),
-                details: crate::board::BoardTaskDetails {
-                    parent_task_id: Some("goal".into()),
-                    work_policy: resolved.clone(),
-                    ..Default::default()
-                },
-            })
-            .unwrap();
+        state.apply_checked(&Event::BoardDetailsChanged {
+            task_id: "task".into(),
+            details: crate::board::BoardTaskDetails {
+                work_policy: resolved.clone(),
+                ..Default::default()
+            },
+        }).unwrap();
         let mut replay: State =
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
-        assert_eq!(replay.effective_work_policy("child"), resolved);
-        assert_eq!(
-            replay
-                .materialize_work_policy(Some("frontend"), None, &Default::default())
-                .reviewer_name
-                .as_deref(),
-            Some("Bob")
-        );
+        assert_eq!(replay.effective_work_policy("task"), resolved);
         replay.project_work_policy.clear();
         assert_eq!(
-            replay.effective_work_policy("child"),
+            replay.effective_work_policy("task"),
             resolved,
             "saved tasks never re-resolve changed defaults"
         );

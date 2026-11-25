@@ -128,11 +128,35 @@ impl State {
         if message.to != worker_id {
             return false;
         }
+        if matches!(message.state.as_str(), "pending" | "delivered") {
+            let subject = message.subject.as_deref().unwrap_or_default();
+            let legacy_merge = message.from == "collab-server"
+                && subject.starts_with("merge-pending:")
+                && message.body.starts_with("MERGE_PENDING task=");
+            if legacy_merge || self.is_legacy_work_review_notice(message) {
+                return false;
+            }
+        }
         let Some(address) = self.mailbox_name_addresses.get(&message.id) else {
             return true;
         };
         self.name_occupancy(&address.project_scope, &address.name)
             .is_some_and(|holder| holder.worker_id == worker_id)
+    }
+
+    pub(super) fn is_legacy_work_review_notice(&self, message: &Message) -> bool {
+        message.mtype == "request"
+            && self.delivery_modes.get(&message.id).map(String::as_str)
+                == Some("explicit-notification")
+            && message
+                .subject
+                .as_deref()
+                .and_then(|subject| subject.strip_prefix("review-required:"))
+                .is_some_and(|task_id| {
+                    message.body.starts_with(&format!(
+                        "Task {task_id} is delivered and requires your review as "
+                    ))
+                })
     }
 
     pub(crate) fn apply_mailbox_handoff(&mut self, handoff: &MailboxHandoff) {

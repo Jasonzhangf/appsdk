@@ -225,7 +225,7 @@ fn commit_goal_schedule(
                     state,
                     task,
                     &mut record,
-                    details.work_policy.reviewer_name.clone(),
+                    None,
                 ));
                 events.push(Event::TaskLifecycleUpdated {
                     task_id: task_id.into(),

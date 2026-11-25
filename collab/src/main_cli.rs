@@ -189,6 +189,9 @@ pub(crate) enum TaskCmd {
     /// Accept a delivered task or return it for rework
     Review {
         id: String,
+        /// Subject revision from task status at the start of independent review.
+        #[arg(long)]
+        expected_subject_revision: Option<u64>,
         #[arg(long, conflicts_with = "rework", required_unless_present = "rework")]
         accept: bool,
         #[arg(long, conflicts_with = "accept", required_unless_present = "accept")]

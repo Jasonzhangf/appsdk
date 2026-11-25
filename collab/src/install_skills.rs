@@ -167,7 +167,7 @@ mod tests {
             &std::fs::read_to_string(target.join("references/workflow-templates.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(workflow["base_version"], 1);
+        assert_eq!(workflow["base_version"], 2);
         let identities = workflow["identity_templates"].as_object().unwrap();
         assert_eq!(identities.len(), 2);
         assert!(identities.contains_key("master") && identities.contains_key("peer"));

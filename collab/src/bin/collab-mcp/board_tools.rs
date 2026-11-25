@@ -5,24 +5,23 @@ pub fn tools() -> Vec<Value> {
     let revision = json!({"type":"integer","minimum":1});
     let mut tools = vec![
         tool("collab_board_show", "Read open public tasks and the caller's open own or managed-child private queue. Closed and cancelled tasks leave the board; task status retains their history. Private child work is visible only to the child and its parent. Does not register peers, start the daemon, or consume messages.", json!({}), &[]),
-        tool("collab_board_publish", "Any registered master, peer, or managed child publishes a pending task with delivery/test conditions. Ordinary actors publish publicly; managed children publish private queue work. This does not start execution or transfer ownership.", json!({"id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]}}), &["id","title","description","delivery_condition","test_condition"]),
-        tool("collab_board_claim", "Any registered actor atomically claims one pending task at the observed revision. Public tasks are claimable by registered actors; a private queue task is claimable only by its publisher. Success transfers TaskRec.owner and enters working without changing publisher.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]),
-        tool("collab_board_invite", "The live master, or an architect for its entrusted task scope, invites one idle ordinary peer. Invitation reserves public dispatch capacity, not task ownership. A peer may decline or independently register its own work.", json!({"id":{"type":"string"},"to":{"type":"string"},"expected_revision":revision}), &["id","to","expected_revision"]),
+        tool("collab_board_publish", "Jenny publishes schedulable tasks. A peer publishes pending work they own. Provide delivery and test conditions for an independent goal.", json!({"id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]}}), &["id","title","description","delivery_condition","test_condition"]),
+        tool("collab_board_claim", "Claim your own pending task or work queued to your slot by Jenny. Use the observed revision.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]),
+        tool("collab_board_invite", "Only Jenny, the current project master, invites an eligible peer. Ownership transfers on acceptance.", json!({"id":{"type":"string"},"to":{"type":"string"},"expected_revision":revision}), &["id","to","expected_revision"]),
         tool("collab_board_respond", "Only the invited peer accepts or declines an observed invitation. Accept rechecks other responsibilities and binding before transferring owner; decline requires reason and preserves publisher ownership.", json!({"id":{"type":"string"},"accept":{"type":"boolean"},"decline":{"type":"boolean"},"expected_revision":revision,"reason":{"type":"string"}}), &["id","expected_revision"]),
-        tool("collab_board_withdraw", "The live master, or an architect for its entrusted task scope, withdraws an unaccepted invitation with its observed revision and reason. Does not reclaim peer-owned execution.", json!({"id":{"type":"string"},"expected_revision":revision,"reason":{"type":"string"}}), &["id","expected_revision","reason"]),
-        tool("collab_board_update", "The current task owner, project manager, or entrusted architect updates current progress using a current revision. Old and terminal revisions fail explicitly. A successful change commits an automatic notice for the other current participant; delivery/review/integration/cleanup still use evidence-bearing task tools.", json!({"id":{"type":"string"},"expected_revision":revision,"status":{"type":"string"},"next":{"type":"string"}}), &["id","expected_revision"]),
-        tool("collab_board_describe", "The current task owner, project manager, or entrusted architect describes an existing independent task. Does not modify history or lifecycle. Withdraw invitations before changing their contract. A successful change commits an automatic notice for the other current participant.", json!({"id":{"type":"string"},"expected_revision":revision,"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"}}), &["id","expected_revision","title","description","delivery_condition","test_condition"]),
+        tool("collab_board_withdraw", "Jenny withdraws an unaccepted invitation using its observed revision and a reason.", json!({"id":{"type":"string"},"expected_revision":revision,"reason":{"type":"string"}}), &["id","expected_revision","reason"]),
+        tool("collab_board_update", "The owner or Jenny updates task progress using the current revision. Delivery, independent review evidence, integration and cleanup use their task commands.", json!({"id":{"type":"string"},"expected_revision":revision,"status":{"type":"string"},"next":{"type":"string"}}), &["id","expected_revision"]),
+        tool("collab_board_describe", "The owner or Jenny describes an existing independent task. Withdraw invitations before changing their contract.", json!({"id":{"type":"string"},"expected_revision":revision,"title":{"type":"string"},"description":{"type":"string"},"delivery_condition":{"type":"string"},"test_condition":{"type":"string"}}), &["id","expected_revision","title","description","delivery_condition","test_condition"]),
         tool("collab_task_decline", "Reject a board invitation, or an unstarted legacy assignment when legacy_assignment=true. Only the invited peer/legacy owner may act; reason and current revision are required.", json!({"id":{"type":"string"},"expected_revision":revision,"reason":{"type":"string"},"legacy_assignment":{"type":"boolean"}}), &["id","expected_revision","reason"]),
     ];
     let policy = json!({
-        "scope":{"type":"string","enum":["project","goal","task"]},
+        "scope":{"type":"string","enum":["project","task"]},
         "id":{"type":"string"},"work_kind":{"type":"string"},
         "prefer_role":{"type":"string"},"executor":{"type":"string"},
-        "reviewer":{"type":"string"},"clear_prefer_role":{"type":"boolean"},
-        "clear_executor":{"type":"boolean"},"clear_reviewer":{"type":"boolean"},
+        "clear_prefer_role":{"type":"boolean"},"clear_executor":{"type":"boolean"},
         "expected_revision":revision
     });
-    tools.push(tool("collab_board_policy", "Save typed project, goal or task work policy. Explicit task fields override inherited defaults. Named executors and reviewers remain requirements until explicitly changed.", policy, &["scope"]));
+    tools.push(tool("collab_board_policy", "Save eligible work specialties and executor requirements. The owner records independent Codex Review evidence separately.", policy, &["scope"]));
     tools.push(tool("collab_board_dispatch", "Select the pinned executor or prefer peers with matching work specialties, then use the existing invitation transaction. Waiting is not assignment or completion.", json!({"id":{"type":"string"},"expected_revision":revision}), &["id","expected_revision"]));
     let publish = tools
         .iter_mut()
@@ -30,10 +29,8 @@ pub fn tools() -> Vec<Value> {
         .unwrap();
     for field in [
         "work_kind",
-        "parent_task",
         "prefer_role",
         "executor",
-        "reviewer",
     ] {
         publish["inputSchema"]["properties"][field] = json!({"type":"string"});
     }

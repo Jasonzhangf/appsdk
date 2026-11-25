@@ -241,7 +241,7 @@ fn board_task_view_with_master(
         publisher,
         priority: task.priority.clone(),
         status: task.status.clone(),
-        next_step: task.next_step.clone(),
+        next_step: task_next_step(task).map(str::to_owned),
         work_kind: policy.work_kind,
         parent_task_id: details.parent_task_id.clone(),
         child_work_policies: details.child_work_policies.clone(),
@@ -1101,89 +1101,10 @@ fn board_check_master_locked(server: &Server, state: &State, actor: &str) -> Res
     let route = server_route_scope(server, state).map_err(Resp::err)?;
     if current_master_worker_id(state, route.as_ref()).as_deref() != Some(actor) {
         return Err(Resp::err(
-            "BOARD_MASTER_REQUIRED: only the current project master may invite or withdraw",
+            "BOARD_MASTER_REQUIRED: only the current project master may manage assignments",
         ));
     }
     Ok(())
-}
-
-fn board_check_task_architect_locked(
-    server: &Server,
-    state: &State,
-    control: Option<&binding_slot::BindingControlSet>,
-    task_id: &str,
-    actor: &str,
-) -> Result<(), Resp> {
-    let route = server_route_scope(server, state)
-        .map_err(Resp::err)?
-        .ok_or_else(|| Resp::err("project route is not ready"))?;
-    let loaded;
-    let control = match control {
-        Some(control) => control,
-        None => {
-            loaded = binding_store::BindingControlStore::new(server.host_paths.state_root())
-                .load()
-                .map_err(Resp::err)?;
-            &loaded
-        }
-    };
-    let Some(slot) = control
-        .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
-        .map_err(Resp::err)?
-    else {
-        return Err(Resp::err(
-            "BOARD_ARCHITECT_SCOPE_REQUIRED: the caller has no current project name",
-        ));
-    };
-    let architect_name = slot.identity_key.name.clone();
-    if !state
-        .name_work_roles(route.project_scope_id.as_str(), &architect_name)
-        .iter()
-        .any(|role| role == "architect")
-    {
-        return Err(Resp::err(
-            "BOARD_ARCHITECT_SCOPE_REQUIRED: the caller does not hold the architect role",
-        ));
-    }
-
-    let mut current_id = task_id.to_owned();
-    for _ in 0..=state.tasks.len() {
-        let Some(task) = state.tasks.get(&current_id) else {
-            break;
-        };
-        let details = state.board_details.get(&current_id);
-        let assignment_entrusted = state
-            .task_assignment(&current_id)
-            .is_some_and(|assignment| assignment.name == architect_name);
-        let policy_entrusted = details.is_some_and(|_| {
-            let policy = state.effective_work_policy(&current_id);
-            policy.executor_name.as_deref() == Some(architect_name.as_str())
-                || policy.reviewer_name.as_deref() == Some(architect_name.as_str())
-        });
-        if task.created_by == actor || assignment_entrusted || policy_entrusted {
-            return Ok(());
-        }
-        let Some(parent) = details.and_then(|details| details.parent_task_id.clone()) else {
-            break;
-        };
-        current_id = parent;
-    }
-    Err(Resp::err(
-        "BOARD_ARCHITECT_SCOPE_REQUIRED: architect authority is not entrusted for this task",
-    ))
-}
-
-fn board_check_master_or_task_architect_locked(
-    server: &Server,
-    state: &State,
-    control: Option<&binding_slot::BindingControlSet>,
-    task_id: &str,
-    actor: &str,
-) -> Result<(), Resp> {
-    if board_check_master_locked(server, state, actor).is_ok() {
-        return Ok(());
-    }
-    board_check_task_architect_locked(server, state, control, task_id, actor)
 }
 
 #[derive(Debug, Clone)]
@@ -1314,21 +1235,10 @@ fn board_auto_notice_events_current(
     };
     let owner_is_actor = owner_slot.active_binding()
         .is_some_and(|current| current.binding.agent_id.as_str() == actor);
-    let recipient = if owner_is_actor {
-        let Some(master) = current_master_worker_id(state, Some(route)).filter(|master| master != actor) else {
-            return Ok(BoardAutoNoticeEvents::default());
-        };
-        let Some(master_slot) = control
-            .current_for_worker(&route.project_scope_id, &route.app_scope_id, &master)
-            .map_err(Resp::err)?
-        else {
-            return Ok(BoardAutoNoticeEvents::default());
-        };
-        master_slot
-    } else {
-        owner_slot
-    };
-    board_auto_notice_events_for_recipient(state, task, actor, change, route, recipient)
+    if owner_is_actor {
+        return Ok(BoardAutoNoticeEvents::default());
+    }
+    board_auto_notice_events_for_recipient(state, task, actor, change, route, owner_slot)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1353,10 +1263,10 @@ fn board_describe_locked(
         return Resp::err("task not found");
     };
     if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err()
-        && board_check_master_or_task_architect_locked(server, state, control, &id, &actor).is_err()
+        && board_check_master_locked(server, state, &actor).is_err()
     {
         return Resp::err(
-            "only the current task owner, current master, or entrusted architect may describe it",
+            "only the current task owner or current master may describe it",
         );
     }
     let Some(mut details) = state.board_details.get(&id).cloned() else {
@@ -1408,7 +1318,7 @@ fn board_describe_locked(
                 state,
                 &task,
                 &mut record,
-                details.work_policy.reviewer_name.clone(),
+                None,
             ));
             events.push(Event::TaskLifecycleUpdated {
                 task_id: id.clone(),
@@ -1856,21 +1766,15 @@ fn handle_board_command(
             if state.tasks.contains_key(&id) {
                 return Resp::err("task id already exists");
             }
-            if long_horizon.is_some() {
-                if let Err(error) = board_check_master_locked(server, &state, &actor) {
+            let scheduler = board_check_master_locked(server, &state, &actor);
+            let is_scheduler = scheduler.is_ok();
+            if let Err(error) = scheduler {
+                if long_horizon.is_some() || executor.is_some() {
                     return error;
                 }
             }
-            if let Some(parent) = parent_task.as_deref() {
-                let Some(task) = state.tasks.get(parent) else {
-                    return Resp::err("WORK_PARENT_NOT_FOUND");
-                };
-                if !board_task_visible(&state, task, Some(&actor)) {
-                    return Resp::err("BOARD_PRIVATE_TASK");
-                }
-                if parent == id {
-                    return Resp::err("WORK_PARENT_CYCLE");
-                }
+            if parent_task.is_some() {
+                return Resp::err("BOARD_INDEPENDENT_TASK_REQUIRED: publish one independent task");
             }
             for dep in depends_on.iter() {
                 if dep == &id {
@@ -1897,11 +1801,13 @@ fn handle_board_command(
                 Ok(policy) => policy,
                 Err(error) => return error,
             };
-            let work_policy = state.materialize_work_policy(
+            let mut work_policy = state.materialize_work_policy(
                 explicit.work_kind.as_deref(),
-                parent_task.as_deref(),
                 &explicit,
             );
+            if !is_scheduler {
+                work_policy.executor_name = None;
+            }
             let public_visibility = !is_managed_subagent(&state, &actor);
             let now = now_ms();
             let task = TaskRec {
@@ -1930,7 +1836,7 @@ fn handle_board_command(
                 work_policy,
                 revision: 1,
                 public_visibility,
-                admitted: public_visibility,
+                admitted: public_visibility && (is_scheduler || !depends_on.is_empty()),
                 ..BoardTaskDetails::default()
             };
             let mut events = vec![
@@ -1940,8 +1846,10 @@ fn handle_board_command(
                     details: details.clone(),
                 },
             ];
-            if details.public_visibility {
-                match board_ticket_admission_events(server, &state, &task, &details, depends_on) {
+            if details.admitted {
+                match board_ticket_admission_events(
+                    server, &state, &task, &details, depends_on, is_scheduler,
+                ) {
                     Ok(admission) => events.extend(admission),
                     Err(error) => return error,
                 }

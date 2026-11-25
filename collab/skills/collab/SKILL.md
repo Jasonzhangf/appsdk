@@ -15,7 +15,7 @@ Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的
 禁止用 Computer Use、CUA 或 GUI 找工具、打开终端、读日志或代跑 CLI。
 `cua_repl` 的 JavaScript/Node 运行时同样属于 CUA；即使它可以调用 `child_process`，
 也不得用来执行 shell、`collab`、`rex`、文件检查、日志读取或其他 CLI 替代动作。
-原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿已有获授权通道向派单 architect
+原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿已有获授权通道向 Jenny
 或 Jenny 报告缺失入口及恢复条件，继续能独立完成的工作。
 
 压缩、恢复和工具参数解析失败时，继续使用当前宿主的原生 shell。也不要调用
@@ -202,33 +202,13 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-项目有适合本任务的 architect 时，Jenny 将 buglist 中已授权的缺陷和项目任务先派给
-architect。Architect 完成详细计划，在受托范围内修订任务并直接向一个或多个 eligible
-peer 派发执行合同。Peer 实现、
-验证并直接将结果交回 architect。执行中只为真实阻塞、必要设计决定或约定交接直接联系。
-Architect 按计划及真实行为证据验收，返工也由其交回
-原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。
-只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
-
-已注册 peer 在执行派单时先查原合同、证据和现有授权，自行处理范围内的常规决定。
-仍需答复时，技术、设计和验收问题发给派单 architect。代码问题可直接发给合同中的
-开发 owner。范围、优先级、资源、权限和跨任务协调发给本项目 Jenny。没有派单
-architect 或无法确认技术 owner 时，先发 Jenny。接收者取当前任务合同与 Board，用
-`collab list` 核对项目限定地址。以
-`collab send --to '<project.name>' --subject 'blocker:<task-id>' --content '<原错、影响、尝试、所需决定、恢复条件>'`
-发给该负责人，只暂停依赖答案的步骤。内部任务不调用
-`request_user_input`、`request_user_input_async`、`AskUserQuestion` 或同类用户询问工具。
-必须由用户决定时，由获授权的负责人沿既有链路汇总。用户明确指定 peer 直接沟通时，
-按指定范围执行。
-
-任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
-已有可用的独立 reviewer 优先承接。没有可用 reviewer 时，按 [Review 合同](../codex-orchestrator/references/review.md)
-派独立只读 Codex review worker。提供候选、验收证据和明确范围。
-发布时多个问题统一给 reviewer 做架构 review。master（Jenny）不是默认 review 对象，
-不承担常规评审。角色缺位时按[负责人承接规则](../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进)
-改派，并更新原 board 与合同。极端条件下的 master 临时代审、实际审查者与独立性
-缺口记录均由该规则和现有 Review 合同统一维护。角色缺位本身不得成为停工理由；
-负责人继续解阻、派发和推进其他可执行工作。
+Jenny 是项目唯一的 Collab 调度者。Architect、executor、reviewer、QA 和其他 peer
+的专长用于匹配任务。每个 owner 独立使用 [Codex 编排](../codex-orchestrator/SKILL.md)
+完成探索、Plan、执行、独立 Review、合并和清理。Codex 子角色只服务于原任务。
+恢复旧任务时保留目标、验收和证据，按当前职责处理旧合同中指定其他 peer 派发、代审或代合并的步骤。
+以原 Board 的状态和证据推进；保留必要权限升级。内部技术判断沿 Codex 编排解决，
+不调用 Ask。涉及实际资源占用冲突时才向另一 peer 发消息，注明资源、当前 owner、
+受影响任务和所需释放条件。Jenny 处理需项目权限的决定。
 
 为用户执行身份注册、恢复或角色确认后，从 `collab context` 回执反馈当前名字、
 身份和工作角色、基础职责、当前任务与下一步。读取 `result.snapshot.role_brief` 的
@@ -237,12 +217,10 @@ architect 或无法确认技术 owner 时，先发 Jenny。接收者取当前任
 
 | 角色 | 基础工作 |
 | --- | --- |
-| Manager（项目 master 为 Jenny） | 管优先级、依赖、派发、验收和回收。核对每项 ready 工作是否发给有能力、有授权且有容量的人，确认接单和实际推进。核对用过的 worktree、临时文件和运行资源是否已按 owner 回收或有明确保留原因。 |
-| Architect | 优先承接 debug 的总体设计、根因分析及 feature 的方案与计划。写清步骤、边界、依赖、验收和停止条件后派给 peer。审查并验收 peer 的结果。Architect 亲自实现时另派 reviewer。 |
-| 普通 peer | 执行已接受的任务。派单方提供可执行计划、范围、允许与禁止动作、产物、验收及回交人。Peer 可自行分析和编排范围清楚的简单问题。复杂问题有可承接 architect 时，交 architect 设计，再由 peer 实施。设计缺口或证据与计划冲突时交回 architect 或派单方。 |
-| Reviewer | 在达到 Review 准入时独立核验候选和证据。已有合适 reviewer 优先承担，缺位时按上面的 Codex review 路径派发。 |
+| Manager（项目 master 为 Jenny） | 管优先级、派发、可用容量和跨任务资源。用 Board 查接单和收口证据。 |
+| Architect、executor、reviewer、QA 和其他 peer | 按专长承接独立目标。用 Codex 编排完成本任务的规划、实施、独立审查、集成与清理，在原 Board 留存状态和证据。 |
 | 记忆 agent（`memory`） | 总结经核实的知识和决策，巡检记忆的准确性、归属与交接缺口。只接记忆总结和记忆巡检。 |
-| 巡检者（`patrol`） | 主要核查 Jenny 的实际执行、派发和回收。从活跃运行入口收集有原始证据的 live runtime bug，沿项目现有 bug 入口去重移交并跟踪。 |
+| 巡检者（`patrol`） | 验证自己巡检目标内的运行行为。记录可复现的 live runtime bug 和原始证据，沿该项目的既有缺陷入口去重登记。 |
 
 巡检者使用已授权的 30 分钟周期。记忆 agent 使用已授权的记忆巡检周期或记录变更触发，
 当前无统一默认间隔。两者的已授权周期批次默认 100 次，复用有效回执。
@@ -255,11 +233,8 @@ architect 或无法确认技术 owner 时，先发 Jenny。接收者取当前任
 记下本轮是通过、发现缺口、还是无法核实。缺口和待核实项各自有负责人、下一动作和
 复验标准或恢复信号。已有行动项就更新原记录，符合标准的例行检查仅留下必要证据。
 
-各角色都可用编排 Skill 处理职责内、已获授权的可拆分子任务，普通 peer 也可以。
-本轮没有合适、有授权且可承接的 peer 时，按 [Codex 编排](../codex-orchestrator/SKILL.md)
-调用子 agent 承担清楚限定的子任务。派发者明确范围、输入、产物、验收和停止条件，
-保留原任务责任并核验结果。记忆 agent 和巡检者只能拆各自职责内的工作，独立 Review
-仍走 Review 合同的独立只读入口。
+每个 owner 使用 Codex 编排处理本任务内的工作。明确子角色的范围、输入、产物、验收和
+停止条件。记忆与巡检任务保持自身职责范围。代码交付的独立 Review 走独立只读入口。
 
 默认职责正文由源码
 [workflow-templates.json](references/workflow-templates.json) 编译，`collab context`

@@ -122,7 +122,11 @@ fn effective_workflow_templates(
 ) -> EffectiveWorkflow {
     let identity_role = if base_role == "master" { "master" } else { "peer" };
     let configured = state.workflow_templates.get(project_scope);
-    let (identity, identity_card) = match configured.and_then(|targets| targets.get(identity_role)) {
+    let current_base_version = workflow_template_asset().base_version;
+    let (identity, identity_card) = match configured
+        .and_then(|targets| targets.get(identity_role))
+        .filter(|entry| entry.base_version == current_base_version)
+    {
         Some(entry) => (
             entry.spec.clone(),
             workflow_override_card(identity_role, entry),
@@ -145,7 +149,10 @@ fn effective_workflow_templates(
     let mut selected_defaults = std::collections::BTreeSet::new();
     for role in roles {
         let target = format!("role:{role}");
-        if let Some(entry) = configured.and_then(|targets| targets.get(&target)) {
+        if let Some(entry) = configured
+            .and_then(|targets| targets.get(&target))
+            .filter(|entry| entry.base_version == current_base_version)
+        {
             specialties.push(EffectiveSpecialty {
                 target: target.clone(),
                 spec: entry.spec.clone(),
@@ -265,7 +272,7 @@ fn plan_workflow_template_set(
         .normalized()
         .map_err(|error| format!("WORKFLOW_TEMPLATE_INVALID: {error}"))?;
     if let Some(existing) = existing {
-        if existing.spec == spec {
+        if existing.base_version == workflow_template_asset().base_version && existing.spec == spec {
             return Ok(WorkflowTemplatePlan {
                 target,
                 outcome: "unchanged",
@@ -400,10 +407,10 @@ mod workflow_template_state_tests {
         let mut state = State::default();
 
         let base = workflow_template_projection(&state, "/project", "peer", &[]);
-        assert_eq!(base["base_version"], json!(1));
+        assert_eq!(base["base_version"], json!(2));
         assert_eq!(base["identity"]["target"], json!("peer"));
         assert_eq!(base["identity"]["source"], json!("base"));
-        assert_eq!(base["identity"]["base_version"], json!(1));
+        assert_eq!(base["identity"]["base_version"], json!(2));
         assert_eq!(base["identity"]["revision"], json!(0));
         assert_eq!(base["specialties"], json!([]));
         assert!(base["identity"].get("template").is_none());

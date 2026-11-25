@@ -223,12 +223,12 @@ pub fn select_shortest_queue<'a>(
 /// satisfied, ordered by priority then FIFO enqueue sequence. Claimed, running
 /// and completed items are never re-selected.
 pub fn next_queued_for_slot<'a>(
-    phases: &'a [TicketPhaseRecord],
+    phases: impl IntoIterator<Item = &'a TicketPhaseRecord>,
     slot_name: &str,
     dependency_satisfied: impl Fn(&str) -> bool,
 ) -> Option<&'a TicketPhaseRecord> {
     phases
-        .iter()
+        .into_iter()
         .filter(|phase| {
             phase.status == TicketPhaseStatus::Queued
                 && phase.slot_name.as_deref() == Some(slot_name)

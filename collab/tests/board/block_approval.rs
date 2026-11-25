@@ -5,6 +5,13 @@ use std::io::Write;
 const THREAD_D: &str = "01a0d643-1d55-7c4d-9c53-3f4b8f610001";
 
 fn mcp_block_call(fixture: &AppFixture, thread: &str, tool: &str, arguments: Value) -> Value {
+    let result = mcp_public_call(fixture, thread, tool, arguments);
+    assert_eq!(result["isError"], false, "{result}");
+    serde_json::from_str(result["content"][0]["text"].as_str().expect("MCP result text"))
+        .expect("MCP result is structured JSON")
+}
+
+fn mcp_public_call(fixture: &AppFixture, thread: &str, tool: &str, arguments: Value) -> Value {
     let request = json!({
         "jsonrpc":"2.0",
         "id":1,
@@ -47,13 +54,50 @@ fn mcp_block_call(fixture: &AppFixture, thread: &str, tool: &str, arguments: Val
     );
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["id"], 1, "{response}");
-    assert_eq!(response["result"]["isError"], false, "{response}");
-    serde_json::from_str(
-        response["result"]["content"][0]["text"]
-            .as_str()
-            .expect("MCP result text"),
-    )
-    .expect("MCP result is structured JSON")
+    response["result"].clone()
+}
+
+#[test]
+fn mcp_review_records_only_the_observed_subject_including_legacy_redelivery() {
+    let (mut fixture, _, _, _) = setup_block();
+    for id in ["first-mcp-review", "legacy-reworked-mcp-review"] {
+        fixture.run_public(&["task", "register", id, "--next", "prepare read-only delivery"], THREAD_B);
+    }
+    fixture.run_public(
+        &["task", "deliver", "first-mcp-review", "--no-candidate", "--evidence", "first report"],
+        THREAD_B,
+    );
+    let first = mcp_block_call(&fixture, THREAD_B, "collab_task_review",
+        json!({"id":"first-mcp-review","accept":true,"evidence":"Independent first delivery review"}));
+    assert_eq!(first["status"], "accepted");
+
+    let id = "legacy-reworked-mcp-review";
+    fixture.update_current_state(|state| {
+        state["tasks"][id]["status"] = json!("rework");
+        state["task_lifecycle"][id] = json!({
+            "delivery_kind": "read_only",
+            "delivery_evidence": "legacy report",
+            "delivered_ms": 1,
+            "review_subject_revision": 0
+        });
+    });
+    fixture.run_public(&["task", "deliver", id, "--no-candidate", "--evidence", "replacement report"], THREAD_B);
+    let status = fixture.run_public(&["task", "status", id], THREAD_B);
+    let current = status["review"]["subject_revision"].as_u64().unwrap();
+    assert!(current > 1);
+    for (args, expected) in [
+        (json!({"id":id,"accept":true,"evidence":"Unbound delayed review"}), "TASK_REVIEW_SUBJECT_REVISION_REQUIRED"),
+        (json!({"id":id,"accept":true,"evidence":"Stale legacy review","expected_subject_revision":0}), "TASK_REVIEW_SUBJECT_STALE"),
+    ] {
+        let result = mcp_public_call(&fixture, THREAD_B, "collab_task_review", args);
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(result.to_string().contains(expected), "{result}");
+        assert_eq!(fixture.run_public(&["task", "status", id], THREAD_B)["status"], "delivered");
+    }
+    let accepted = mcp_block_call(&fixture, THREAD_B, "collab_task_review",
+        json!({"id":id,"accept":true,"evidence":"Independent replacement review","expected_subject_revision":current}));
+    assert_eq!(accepted["status"], "accepted");
+    assert_eq!(accepted["subject_revision"], current);
 }
 
 fn setup_block() -> (AppFixture, String, String, String) {

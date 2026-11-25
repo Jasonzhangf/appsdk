@@ -719,7 +719,7 @@ fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
 }
 
 #[test]
-fn live_master_closes_merged_task_with_verified_cleanup() {
+fn delivery_owner_closes_merged_task_with_verified_cleanup() {
     let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -802,8 +802,8 @@ fn live_master_closes_merged_task_with_verified_cleanup() {
     assert!(
         handle_task_integrated(
             &server,
-            "master".into(),
-            "token-master".into(),
+            "owner".into(),
+            "token-owner".into(),
             "master-cleanup".into(),
             main_commit,
             "main verified".into(),
@@ -813,8 +813,8 @@ fn live_master_closes_merged_task_with_verified_cleanup() {
 
     let closed = handle_task_close(
         &server,
-        "master".into(),
-        "token-master".into(),
+        "owner".into(),
+        "token-owner".into(),
         "master-cleanup".into(),
         false,
         None,

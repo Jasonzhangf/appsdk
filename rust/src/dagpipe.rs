@@ -591,7 +591,7 @@ fn design_graph_ids() -> [&'static str; 47] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 282] {
+fn design_graph_operator_names() -> [&'static str; 281] {
     [
         "appsdk.collab_master_dispatch.read_scope_facts",
         "appsdk.collab_master_dispatch.classify_undispatched_work",
@@ -703,7 +703,6 @@ fn design_graph_operator_names() -> [&'static str; 282] {
         "collab.required_review.read",
         "collab.required_review.check",
         "collab.required_review.commit",
-        "collab.required_review.notify",
         "collab.required_review.emit",
         "collab.ceo.authenticate",
         "collab.ceo.resolve",

@@ -1472,7 +1472,7 @@ use super::*;
         );
         assert!(state.msgs[message_id]
             .body
-            .contains("Do not rearm this finite master-idle schedule"));
+            .contains("collab notify cancel --event master-idle"));
         assert!(
             !state.msgs[message_id].body.contains("notify unsubscribe"),
             "idle timer must not ask the agent to close base reception: {}",
@@ -1486,7 +1486,7 @@ use super::*;
         assert!(
             state.msgs[message_id]
                 .body
-                .contains("Direct-message reception is daemon-owned"),
+                .contains("Retain direct-message reception"),
             "idle timer must keep daemon reception explicit: {}",
             state.msgs[message_id].body
         );

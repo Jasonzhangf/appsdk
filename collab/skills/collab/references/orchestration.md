@@ -62,8 +62,8 @@ Collab 日常注册、恢复和通信使用 Collab Skill。tm-iterm 仅在用户
 动作顺序为并发派发 > 阻塞任务解决 > 推进当前任务 > 资源回收 > scope 内巡视。派发所需的 idle、owner、权限和容量核对属于第一级。先选最高优先级 ready 工作，完成本次派发所需的最小同步后实际派出。必要 Plan/Review 容量一并保留。
 
 CEO 按授权管理项目 master。Master 按 [Collab 派单顺序](../SKILL.md#派单顺序与一-peer-一任务)
-处理 buglist 和项目任务。有合适 architect 时先交其计划、交接 peer 实现并验收。其他任务按
-已有 peer 和独立 worker 路由推进。巡检或记忆 peer 从所有任务派发候选和可承接容量中排除。
+处理 buglist 和项目任务。Jenny 分配独立目标，peer 在本人任务内使用 Codex 编排。
+巡检或记忆专长只承接本职责的任务。
 
 每轮派发先列出全部 live idle peer，包括没有当前任务的成员。遇到 `unknown` 等异常，
 按 [主动核实流程](board-idle-patrol.md#非-live-peer-的主动核实流程) 当轮查看状态。Rex
@@ -72,8 +72,8 @@ CEO 按授权管理项目 master。Master 按 [Collab 派单顺序](../SKILL.md#
 master 选择承接任务的 peer 时，按 Collab Skill
 [派单顺序与一 peer 一任务](../SKILL.md#派单顺序与一-peer-一任务) 维护的当前提示词优先级和容量边界执行；本文件不复制该排序细节。
 
-master 是项目唯一负责人，peer 缺位不转移这项责任。reviewer、planner、裁判等角色缺位时的承接、独立 reviewer 后备、极端条件下的 master 临时代审、实际审查者与独立性缺口记录，统一由
-[负责人承接规则](../../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进) 及其引用的 Review 合同维护；本文件不复制该角色政策。
+Jenny 处理调度和项目授权。任务 owner 负责 Plan、执行、独立 Codex Review、
+合并和清理。各 peer 只在实际资源冲突时直接协调。
 
 每轮产生实际派发、解阻、推进/验收、资源收口或有依据的等待。邀请入队、接收、执行和完成分别记录。完成动作、解阻或释放容量后，对新变化重新检查并发机会。board 维护和文档更新服务本轮实际推进。
 

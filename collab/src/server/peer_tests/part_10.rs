@@ -146,25 +146,8 @@ fn idle_master_keeps_static_guidance_in_role_brief_without_fake_task_actions() {
     let next_action = context.data["role_brief"]["next_action"]
         .as_str()
         .expect("master next action");
-    let next_action_lower = next_action.to_ascii_lowercase();
     assert!(
-        next_action_lower.contains("invite suitable, available and authorized peers first"),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains("no suitable authorized peer can take the work"),
-        "{next_action}"
-    );
-    assert!(
-        !next_action_lower.contains("regardless of whether other peers are busy"),
-        "peer-busy-before-GCM guidance must be removed: {next_action}"
-    );
-    assert!(
-        next_action_lower.contains("protected_holds"),
-        "{next_action}"
-    );
-    assert!(
-        next_action_lower.contains("reusing a valid patrol batch"),
+        next_action.contains("cancel idle patrol when there is no action"),
         "{next_action}"
     );
     let operations = context.data["operations"].as_array().expect("operations");
@@ -186,14 +169,10 @@ fn idle_master_keeps_static_guidance_in_role_brief_without_fake_task_actions() {
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.")));
-    assert!(context.data["role_brief"]["responsibilities"]
-        .as_array()
-        .unwrap()
         .iter()
         .any(|line| {
             line.as_str().is_some_and(|line| {
-                line.contains("converges owned worktrees") && line.contains("PROTECTED_HOLD")
+                line.contains("Use board receipts to verify ownership and closure")
             })
         }));
     assert!(!context
@@ -204,7 +183,7 @@ fn idle_master_keeps_static_guidance_in_role_brief_without_fake_task_actions() {
 }
 
 #[test]
-fn master_context_routes_work_by_task_kind() {
+fn master_context_routes_ready_independent_work() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
     promote_master(&server, "master", "user-approved");
@@ -222,16 +201,11 @@ fn master_context_routes_work_by_task_kind() {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    assert!(responsibilities.contains("route work through the public board"));
-    assert!(
-        responsibilities.contains("master routes both buglist items and project tasks to that architect first")
-    );
-    assert!(responsibilities.contains("for work outside architect assignments"));
-    assert!(responsibilities.contains("check idle, suitable authorized peers"));
-    assert!(responsibilities.contains("no suitable authorized peer can take the work"));
-    assert!(!responsibilities.contains("regardless of whether other peers are busy"));
-    assert!(responsibilities.contains("codex exec --profile gcm"));
-    assert!(!responsibilities.contains("saturate every live present peer first"));
+    assert!(responsibilities.contains("dispatch complete independent task contracts"));
+    assert!(responsibilities.contains("unknown availability is not idle"));
+    assert!(responsibilities.contains("independent codex planner"));
+    assert!(responsibilities.contains("when there is no suitable peer"));
+    assert!(!responsibilities.contains("to that architect first"));
     assert!(!context
         .data
         .to_string()
@@ -349,7 +323,7 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
         accepted_context.data["role_brief"]["next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("Execute the accepted task"),
+            .contains("Resume your own authorized task"),
         "{}",
         accepted_context.data["role_brief"]
     );
@@ -2123,15 +2097,9 @@ fn worker_freed_transitions_notify_live_master() {
     assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
     assert!(alert.body.contains("live_idle=subagent:managed-worker"));
     assert!(alert.body.contains("Long-horizon orchestration"));
-    assert!(alert
-        .body
-        .contains("check idle, suitable, authorized peers and available capacity first"));
-    assert!(alert
-        .body
-        .contains("Only when no suitable authorized peer can take the work"));
-    assert!(alert.body.contains("worker assignments"));
-    assert!(alert.body.contains("codex exec --profile gcm"));
-    assert!(alert.body.contains("authorized peers"));
+    assert!(alert.body.contains("verified idle capacity"));
+    assert!(alert.body.contains("one complete independent contract per task"));
+    assert!(alert.body.contains("Each owner handles their own Codex"));
     assert!(!alert
         .body
         .contains("regardless of whether other peers are busy"));

@@ -701,7 +701,7 @@ fn attempt_tmux_notification_with_at(
         Option<&str>,
         &str,
         &str,
-        bool,
+        NotificationDispatchContext,
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
@@ -783,6 +783,29 @@ fn notification_method_for_worker(state: &State, worker_id: &str) -> &'static st
         .and_then(selected_transport_for_worker)
         .map(|transport| notification_transport_method(&transport))
         .unwrap_or("tmux")
+}
+
+fn invitation_matches_selected_binding(
+    invitation: &crate::board::BoardInvitation,
+    selected: Option<&notification_contract::SelectedDeliveryBinding>,
+) -> bool {
+    selected.is_some_and(|selected| {
+        selected.binding.binding_id.as_str() == invitation.binding_id
+            && (!invitation.one_shot
+                || selected.binding_generation == invitation.binding_generation)
+    })
+}
+
+fn stale_one_shot_invitation(
+    state: &State,
+    message: &crate::server::state::Message,
+    selected: Option<&notification_contract::SelectedDeliveryBinding>,
+) -> bool {
+    board_invitation_for_message(state, message).is_some_and(|invitation| {
+        invitation.one_shot
+            && (invitation.peer_id != message.to
+                || !invitation_matches_selected_binding(invitation, selected))
+    })
 }
 
 fn select_current_rex_delivery_binding(
@@ -882,7 +905,7 @@ fn attempt_tmux_notification_with_retry(
         Option<&str>,
         &str,
         &str,
-        bool,
+        NotificationDispatchContext,
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
@@ -1086,6 +1109,61 @@ fn attempt_tmux_notification_with_retry(
     {
         return NotificationAttempt::Consumed;
     }
+    let selected_binding = if transport.kind == TransportKind::Rex {
+        let route = match server_route_scope(server, &state) {
+            Ok(route) => route,
+            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+        };
+        let control =
+            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => control,
+                Err(error) => return NotificationAttempt::NotAttempted(error),
+            };
+        match select_current_rex_delivery_binding(&control, route.as_ref(), recipient, transport) {
+            Ok(binding) => Some(binding),
+            Err(error) => return NotificationAttempt::NotAttempted(error),
+        }
+    } else {
+        let selected = (|| -> Result<_, NotificationAttempt> {
+            let Some(route) = server_route_scope(server, &state)
+                .map_err(|error| NotificationAttempt::Rejected(error.into()))?
+            else {
+                return Ok(None);
+            };
+            let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .map_err(NotificationAttempt::Rejected)?;
+            let slot = control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
+                .map_err(NotificationAttempt::Rejected)?;
+            match slot.and_then(|slot| slot.active_binding()).map(|current| current.transport.as_ref()) {
+                Some(None) => return Err(NotificationAttempt::NotAttempted(
+                    "IDENTITY_TRANSPORT_MISSING: current identity has no delivery transport".into(),
+                )),
+                Some(Some(current)) if current != transport => return Err(NotificationAttempt::NotAttempted(
+                    "IDENTITY_TRANSPORT_CHANGED: current identity no longer owns the selected delivery transport".into(),
+                )),
+                _ => {}
+            }
+            Ok(slot.and_then(notification_contract::SelectedDeliveryBinding::from_slot))
+        })();
+        match selected {
+            Ok(binding) => binding,
+            Err(attempt) => return attempt,
+        }
+    };
+    // The board-only timer path still requires its original periodic binding.
+    // A stable-name handoff enters the generic path with the current holder.
+    if stale_one_shot_invitation(&state, seed, selected_binding.as_ref())
+        || board_invitation.is_some_and(|invitation| {
+            !invitation.one_shot
+                && !invitation_matches_selected_binding(invitation, selected_binding.as_ref())
+        })
+    {
+        return NotificationAttempt::NotAttempted(
+            "board invitation no longer targets the current binding".into(),
+        );
+    }
     let delivery_mode = state
         .delivery_modes
         .get(&seed_id)
@@ -1096,6 +1174,9 @@ fn attempt_tmux_notification_with_retry(
         .values()
         .filter_map(|message| {
             if board_invitation.is_some() && message.id != seed_id {
+                return None;
+            }
+            if stale_one_shot_invitation(&state, message, selected_binding.as_ref()) {
                 return None;
             }
             let binding = state.wake_bindings.get(&message.id)?;
@@ -1163,6 +1244,10 @@ fn attempt_tmux_notification_with_retry(
     let Some(first) = batch.first() else {
         return NotificationAttempt::NotAttempted("notification batch is empty".into());
     };
+    let batch_has_one_shot_invitation = batch.iter().any(|(_, message_id, ..)| {
+        board_invitation_for_message(&state, &state.msgs[message_id])
+            .is_some_and(|invitation| invitation.one_shot)
+    });
     let queued_tmux = transport.kind == TransportKind::Tmux && delivery_mode == "queued";
     let last_attempt = state
         .msgs
@@ -1199,58 +1284,6 @@ fn attempt_tmux_notification_with_retry(
             "notification delivery window has not elapsed".into(),
         );
     }
-    let selected_binding = if transport.kind == TransportKind::Rex {
-        let route = match server_route_scope(server, &state) {
-            Ok(route) => route,
-            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
-        };
-        let control =
-            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                Ok(control) => control,
-                Err(error) => return NotificationAttempt::NotAttempted(error),
-            };
-        match select_current_rex_delivery_binding(&control, route.as_ref(), recipient, transport) {
-            Ok(binding) => Some(binding),
-            Err(error) => return NotificationAttempt::NotAttempted(error),
-        }
-    } else {
-        let selected = (|| -> Result<_, NotificationAttempt> {
-            let Some(route) = server_route_scope(server, &state)
-                .map_err(|error| NotificationAttempt::Rejected(error.into()))?
-            else {
-                return Ok(None);
-            };
-            let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
-                .load()
-                .map_err(NotificationAttempt::Rejected)?;
-            let slot = control
-                .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
-                .map_err(NotificationAttempt::Rejected)?;
-            match slot.and_then(|slot| slot.active_binding()).map(|current| current.transport.as_ref()) {
-                Some(None) => return Err(NotificationAttempt::NotAttempted(
-                    "IDENTITY_TRANSPORT_MISSING: current identity has no delivery transport".into(),
-                )),
-                Some(Some(current)) if current != transport => return Err(NotificationAttempt::NotAttempted(
-                    "IDENTITY_TRANSPORT_CHANGED: current identity no longer owns the selected delivery transport".into(),
-                )),
-                _ => {}
-            }
-            Ok(slot.and_then(notification_contract::SelectedDeliveryBinding::from_slot))
-        })();
-        match selected {
-            Ok(binding) => binding,
-            Err(attempt) => return attempt,
-        }
-    };
-    if board_invitation.is_some_and(|invitation| {
-        selected_binding
-            .as_ref()
-            .is_none_or(|selected| selected.binding.binding_id.as_str() != invitation.binding_id)
-    }) {
-        return NotificationAttempt::NotAttempted(
-            "board invitation no longer targets the current binding".into(),
-        );
-    }
     if retry {
         if let Some(reason) = explicit_retry_refusal(&state, message_id) {
             return NotificationAttempt::NotAttempted(reason.into());
@@ -1280,7 +1313,7 @@ fn attempt_tmux_notification_with_retry(
     // These adapters submit to the terminal directly. Keep the current
     // publication stable until the input result is committed. In tmux, even
     // finishing the same holder's physical rename can advance its slot.
-    if !hold_registration {
+    if !hold_registration && !batch_has_one_shot_invitation {
         drop(register_guard.take());
     }
 
@@ -1326,7 +1359,10 @@ fn attempt_tmux_notification_with_retry(
         source_thread_id,
         &text,
         &first.1,
-        explicit,
+        NotificationDispatchContext {
+            explicit,
+            guarded_one_shot: batch_has_one_shot_invitation,
+        },
         if queued_tmux {
             DAEMON_LIVE_CLOSURE_MODE
         } else if delivery_mode == mailbox::REGISTRATION_NOTIFICATION_MODE {
@@ -1674,13 +1710,13 @@ fn attempt_notification_detailed_with_mode_at_inner(
         false,
         explicit_retry,
         board_invitation_only,
-        &|transport, source_thread_id, text, message_id, explicit, mode| {
+        &|transport, source_thread_id, text, message_id, context, mode| {
             (notification_sink(server))(
                 transport,
                 source_thread_id,
                 text,
                 message_id,
-                explicit,
+                context,
                 mode,
             )
         },
@@ -2308,13 +2344,13 @@ fn attempt_scheduler_notification(
         true,
         false,
         false,
-        &|transport, source_thread_id, text, message_id, explicit, mode| {
+        &|transport, source_thread_id, text, message_id, context, mode| {
             (notification_sink(server))(
                 transport,
                 source_thread_id,
                 text,
                 message_id,
-                explicit,
+                context,
                 mode,
             )
         },
@@ -2488,7 +2524,7 @@ pub(crate) fn attempt_notification_with_default(
         explicit,
         now_ms(),
         false,
-        &|transport, source_thread_id, text, message_id, explicit, _mode| {
+        &|transport, source_thread_id, text, message_id, context, _mode| {
             let target = transport.thread_id.as_deref().unwrap_or("appserver");
             if !can_receive(target) {
                 return Err("test can_receive returned false".into());
@@ -2498,7 +2534,7 @@ pub(crate) fn attempt_notification_with_default(
                     "accepted": true,
                     "sourceThreadId": source_thread_id,
                     "messageId": message_id,
-                    "explicit": explicit,
+                    "explicit": context.explicit,
                 }))
             } else {
                 Err("test deliver returned false".into())

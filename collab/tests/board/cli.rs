@@ -165,6 +165,73 @@ fn publish(fixture: &AppFixture, id: &str) -> Value {
     )
 }
 
+fn publish_one_shot(fixture: &AppFixture, id: &str) {
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            id,
+            "--title",
+            "One shot invitation",
+            "--description",
+            "Ordinary publisher-owned work",
+            "--delivery-condition",
+            "Acceptance transfers ownership once",
+            "--test-condition",
+            "Public one-shot behavior passes",
+        ],
+        THREAD_A,
+    );
+}
+
+fn activate_peer(fixture: &AppFixture, peer: &str) -> String {
+    let session = fixture.current_state()["workers"][peer]["transport"]["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    {
+        let mut native = fixture.state.lock().unwrap();
+        let thread = native.get_mut(&session).unwrap();
+        thread.reject_as_missing = false;
+        thread.reject_input = false;
+        thread.status = "idle".into();
+        thread.turns.clear();
+    }
+    fixture.run_public(&["worker", "snapshot", peer], THREAD_A);
+    session
+}
+
+fn goal_subscriptions(state: &Value) -> Value {
+    json!(state["notification_subscriptions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, subscription)| {
+            subscription["subject"]
+                .as_str()
+                .is_some_and(|subject| subject.starts_with("goal:"))
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<String, Value>>())
+}
+
+fn bump_binding_generation(fixture: &mut AppFixture, worker: &str) -> u64 {
+    fixture.stop_daemon();
+    let path = fixture.host_state.join("identity-map.json");
+    let mut mapping: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let slot = mapping["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| slot["current"]["binding"]["agent_id"] == worker)
+        .expect("worker has a current binding slot");
+    let generation = slot["generation"].as_u64().unwrap() + 1;
+    slot["generation"] = json!(generation);
+    std::fs::write(&path, serde_json::to_vec(&mapping).unwrap()).unwrap();
+    fixture.start_daemon();
+    generation
+}
+
 fn public_command(fixture: &AppFixture, args: &[&str], thread: &str) -> Command {
     let mut command = Command::new(binary());
     command
@@ -3142,6 +3209,8 @@ fn board_invitation_transfers_owner_only_after_peer_acceptance() {
     assert_eq!(invited["task"]["status"], "invited");
     assert_eq!(invited["task"]["revision"], 2);
     assert_eq!(invited["consumed"], false);
+    assert_eq!(invited["goal_schedule"]["armed"], true);
+    assert!(!invited["goal_schedule"]["subscription"].is_null());
     let outsider = fixture.command_public(
         &[
             "board",
@@ -3196,6 +3265,873 @@ fn board_invitation_transfers_owner_only_after_peer_acceptance() {
     assert_eq!(accepted["task"]["owner"], peer);
     assert_eq!(accepted["task"]["status"], "working");
     assert_eq!(accepted["task"]["revision"], 5);
+}
+
+#[test]
+fn one_shot_invitation_has_no_goal_schedule_and_transfers_on_acceptance() {
+    let (fixture, master, peer) = setup();
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "one-shot-invitation",
+            "--title",
+            "One shot invitation",
+            "--description",
+            "Ordinary publisher-owned work",
+            "--delivery-condition",
+            "Acceptance transfers ownership once",
+            "--test-condition",
+            "Public one-shot behavior passes",
+        ],
+        THREAD_A,
+    );
+    let before = fixture.current_state();
+    let peer_session = before["workers"][&peer]["transport"]["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let goal_subscriptions_before = goal_subscriptions(&before);
+    let input_count_before = fixture
+        .state
+        .lock()
+        .unwrap()
+        .get(&peer_session)
+        .map_or(0, |thread| thread.inputs.len());
+
+    let missing_presence = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-invitation",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    );
+    assert!(!missing_presence.status.success());
+    assert!(String::from_utf8_lossy(&missing_presence.stderr).contains("BOARD_TARGET_NOT_ONLINE"));
+    let after_rejection = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after_rejection[field], before[field],
+            "{field} changed before the online target gate"
+        );
+    }
+    assert_eq!(
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .get(&peer_session)
+            .map_or(0, |thread| thread.inputs.len()),
+        input_count_before,
+        "rejected one-shot invitation must not reach native input"
+    );
+
+    {
+        let mut native = fixture.state.lock().unwrap();
+        let thread = native.get_mut(&peer_session).unwrap();
+        thread.reject_as_missing = false;
+        thread.status = "idle".into();
+        thread.turns.clear();
+    }
+    fixture.run_public(&["worker", "snapshot", &peer], THREAD_A);
+    let project_scope = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        fixture.current_state()["agent_presence"][&project_scope][&peer]["presence"],
+        "online",
+        "the current target probe must commit online presence"
+    );
+
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-invitation",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["invitation_kind"], "one-shot");
+    assert_eq!(invited["durable"], true);
+    assert_eq!(invited["task"]["owner"], master);
+    assert_eq!(invited["task"]["status"], "invited");
+    assert_eq!(invited["goal_schedule"]["armed"], false);
+    assert!(invited["goal_schedule"]["subscription"].is_null());
+    let after_invite = fixture.current_state();
+    assert_eq!(
+        goal_subscriptions(&after_invite),
+        goal_subscriptions_before,
+        "one-shot admission must not create or alter a goal subscription"
+    );
+
+    let received = fixture.run_public(&["recv", "--timeout", "1"], THREAD_B);
+    let invitation = received["messages"]
+        .as_array()
+        .expect("recv lists durable messages")
+        .iter()
+        .find(|message| message["subject"] == "task-invitation:one-shot-invitation")
+        .expect("recipient receives the one-shot invitation");
+    assert_eq!(invitation["id"], invited["msg_id"]);
+
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "one-shot-invitation",
+            "--accept",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(accepted["task"]["owner"], peer);
+    assert_eq!(accepted["task"]["status"], "working");
+    assert_eq!(accepted["task"]["revision"], 3);
+    assert_eq!(accepted["goal_schedule"]["armed"], false);
+    assert!(accepted["goal_schedule"]["subscription"].is_null());
+    let after_accept = fixture.current_state();
+    assert_eq!(
+        goal_subscriptions(&after_accept),
+        goal_subscriptions_before,
+        "one-shot acceptance must not create or alter a goal subscription"
+    );
+}
+
+#[test]
+fn one_shot_invitation_rejects_invalid_revision_resources_and_binding() {
+    let (mut fixture, master, peer) = setup();
+    for id in [
+        "one-shot-wrong-revision",
+        "one-shot-resource",
+        "one-shot-claimed",
+        "one-shot-stale-binding",
+    ] {
+        publish_one_shot(&fixture, id);
+    }
+    activate_peer(&fixture, &peer);
+
+    let before = fixture.current_state();
+    let (success, wrong_revision) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-wrong-revision",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "2",
+            "--one-shot",
+        ],
+        THREAD_A,
+    ));
+    assert!(!success);
+    assert!(wrong_revision["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_STALE_REVISION"));
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "{field} changed on stale revision"
+        );
+    }
+
+    fixture.update_current_state(|state| {
+        state["tasks"]["one-shot-resource"]["worktree_path"] = json!("/tmp/one-shot-resource");
+    });
+    let before = fixture.current_state();
+    let (success, resource) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-resource",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    ));
+    assert!(!success);
+    assert!(resource["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_RESOURCE_OWNER_CONFLICT"));
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "{field} changed on resource rejection"
+        );
+    }
+
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "claim",
+            "one-shot-claimed",
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["owner"], peer);
+    assert_eq!(claimed["task"]["status"], "working");
+    let before = fixture.current_state();
+    let (success, assigned) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-claimed",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "2",
+            "--one-shot",
+        ],
+        THREAD_A,
+    ));
+    assert!(!success);
+    assert!(assigned["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_ONE_SHOT_TASK_REQUIRED"));
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "{field} changed on assigned rejection"
+        );
+    }
+
+    let project_scope = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fixture.update_current_state(|state| {
+        let bindings = state["global"]["projects"][&project_scope]["runtime_bindings"]
+            .as_object_mut()
+            .unwrap();
+        let (binding_key, binding) = bindings
+            .iter()
+            .find(|(_, binding)| binding["agent_id"] == peer)
+            .unwrap();
+        let binding_key = binding_key.clone();
+        let mut binding = binding.clone();
+        bindings.remove(&binding_key);
+        binding["binding_id"] = json!("binding-stale-one-shot");
+        bindings.insert("binding-stale-one-shot".into(), binding);
+    });
+    let before = fixture.current_state();
+    let (success, stale) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-stale-binding",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    ));
+    assert!(!success);
+    assert!(stale["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_STALE_BINDING"));
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "{field} changed on stale binding"
+        );
+    }
+    assert_eq!(after["tasks"]["one-shot-stale-binding"]["owner"], master);
+}
+
+#[test]
+fn one_shot_decline_stale_and_duplicate_accept_preserve_single_transfer() {
+    let (fixture, master, peer) = setup();
+    publish_one_shot(&fixture, "one-shot-response");
+    activate_peer(&fixture, &peer);
+    let goals_before = goal_subscriptions(&fixture.current_state());
+
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-response",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["task"]["owner"], master);
+    let declined = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "one-shot-response",
+            "--decline",
+            "--expected-revision",
+            "2",
+            "--reason",
+            "ordinary one-shot decline",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(declined["task"]["owner"], master);
+    assert_eq!(declined["task"]["status"], "pending");
+    assert_eq!(declined["task"]["revision"], 3);
+
+    fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-response",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "3",
+            "--one-shot",
+        ],
+        THREAD_A,
+    );
+    let before_stale = fixture.current_state();
+    let (success, stale) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "respond",
+            "one-shot-response",
+            "--accept",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_B,
+    ));
+    assert!(!success);
+    assert!(stale["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_STALE_REVISION"));
+    assert_eq!(fixture.current_state()["tasks"], before_stale["tasks"]);
+
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "one-shot-response",
+            "--accept",
+            "--expected-revision",
+            "4",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(accepted["task"]["owner"], peer);
+    assert_eq!(accepted["task"]["status"], "working");
+    assert_eq!(accepted["task"]["revision"], 5);
+    let before_duplicate = fixture.current_state();
+    let (success, duplicate) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "respond",
+            "one-shot-response",
+            "--accept",
+            "--expected-revision",
+            "5",
+        ],
+        THREAD_B,
+    ));
+    assert!(!success);
+    assert!(duplicate["error"]
+        .as_str()
+        .unwrap()
+        .contains("task has no pending invitation"));
+    let after_duplicate = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after_duplicate[field], before_duplicate[field],
+            "{field} changed on duplicate acceptance"
+        );
+    }
+    assert_eq!(goal_subscriptions(&after_duplicate), goals_before);
+}
+
+#[test]
+fn one_shot_native_wake_failure_keeps_durable_invitation_and_ownership() {
+    let (fixture, master, peer) = setup();
+    publish_one_shot(&fixture, "one-shot-native-failure");
+    let peer_session = activate_peer(&fixture, &peer);
+    let goals_before = goal_subscriptions(&fixture.current_state());
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .get_mut(&peer_session)
+        .unwrap()
+        .reject_input = true;
+
+    let (success, failed) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-native-failure",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    ));
+    assert!(!success);
+    assert!(failed["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("APPSERVER_NOTIFICATION_REJECTED:"));
+    assert_eq!(failed["durable"], true);
+    assert_eq!(failed["notification"], "subscribed-not-sent");
+    assert_eq!(failed["failure"], "notification_delivery_failed");
+    assert_eq!(failed["repair_required"], true);
+    assert_eq!(failed["invitation_kind"], "one-shot");
+    assert_eq!(failed["task"]["owner"], master);
+    assert_eq!(failed["task"]["status"], "invited");
+    assert_eq!(failed["goal_schedule"]["armed"], false);
+    assert!(failed["goal_schedule"]["subscription"].is_null());
+
+    let message_id = failed["msg_id"].as_str().unwrap();
+    let state = fixture.current_state();
+    assert_eq!(state["msgs"][message_id]["state"], "pending");
+    assert!(state["notification_delivery_failures"][message_id].is_object());
+    assert!(state["notification_delivery_accepted"][message_id].is_null());
+    assert_eq!(goal_subscriptions(&state), goals_before);
+    let received = fixture.run_public(&["recv", "--timeout", "1"], THREAD_B);
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == message_id));
+}
+
+#[test]
+fn one_shot_rejects_preexisting_linked_schedule_without_side_effects() {
+    let (mut fixture, master, peer) = setup();
+    let id = "one-shot-existing-goal";
+    publish_one_shot(&fixture, id);
+    fixture.update_current_state(|state| {
+        state["notification_subscriptions"]["pre-existing-task-goal"] = json!({
+            "id": "pre-existing-task-goal",
+            "worker_id": peer,
+            "event": "deadline",
+            "subject": format!("goal:task:{id}"),
+            "target": THREAD_B,
+            "method": "appserver",
+            "trigger_ms": 1_800_000_000_000_i64,
+            "trigger_times_ms": [1_800_000_000_000_i64],
+            "interval_ms": 3_600_000,
+            "repeat_count": 3,
+            "fired_count": 1,
+            "expires_ms": 1_900_000_000_000_i64,
+            "status": "armed",
+            "created_ms": 1_799_000_000_000_i64,
+            "updated_ms": 1_799_000_000_000_i64
+        });
+    });
+    let peer_session = activate_peer(&fixture, &peer);
+    let before = fixture.current_state();
+    let input_count_before = fixture
+        .state
+        .lock()
+        .unwrap()
+        .get(&peer_session)
+        .map_or(0, |thread| thread.inputs.len());
+    let (success, rejected) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    ));
+    assert!(!success);
+    assert_eq!(
+        rejected["error"],
+        "BOARD_ONE_SHOT_LINKED_SCHEDULE_CONFLICT: an existing task goal subscription cannot be replaced or reused by a one-shot invitation"
+    );
+    assert_eq!(rejected["subscription_id"], "pre-existing-task-goal");
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "{field} changed on linked schedule rejection"
+        );
+    }
+    assert_eq!(after["tasks"][id]["owner"], master);
+    assert_eq!(after["tasks"][id]["status"], "pending");
+    assert_eq!(
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .get(&peer_session)
+            .map_or(0, |thread| thread.inputs.len()),
+        input_count_before,
+        "rejected one-shot invitation must not reach native input"
+    );
+}
+
+#[test]
+fn invite_modes_require_explicit_nonmixed_declarations() {
+    let (fixture, _master, peer) = setup();
+    for id in [
+        "ordinary-no-mode",
+        "one-shot-mixed",
+        "ordinary-inline-schedule",
+    ] {
+        fixture.run_public(
+            &[
+                "board",
+                "publish",
+                id,
+                "--title",
+                "Invitation mode test",
+                "--description",
+                "Public request mode coverage",
+                "--delivery-condition",
+                "Mode rejection preserves state",
+                "--test-condition",
+                "Public CLI rejects invalid mode",
+            ],
+            THREAD_A,
+        );
+    }
+    let before = fixture.current_state();
+    let missing = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "ordinary-no-mode",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("BOARD_LONG_HORIZON_CONTENT_REQUIRED")
+    );
+
+    let mixed = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-mixed",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_A,
+    );
+    assert!(!mixed.status.success());
+    assert!(String::from_utf8_lossy(&mixed.stderr).contains("BOARD_INVITATION_MODE_CONFLICT"));
+
+    let inline = fixture.command_public(
+        &[
+            "board",
+            "invite",
+            "ordinary-inline-schedule",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--long-horizon-content",
+            "This inline declaration must not enter default invitation",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_A,
+    );
+    assert!(!inline.status.success());
+    assert!(String::from_utf8_lossy(&inline.stderr)
+        .contains("BOARD_INVITATION_INLINE_SCHEDULE_UNSUPPORTED"));
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "board_details",
+        "msgs",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(after[field], before[field], "{field} changed on rejection");
+    }
+}
+
+#[test]
+fn dispatch_preserves_inline_long_horizon_schedule() {
+    let (fixture, master, peer) = setup();
+    publish_one_shot(&fixture, "dispatch-inline-schedule");
+    activate_peer(&fixture, &peer);
+    let goals_before = goal_subscriptions(&fixture.current_state());
+
+    let dispatched = fixture.run_public(
+        &[
+            "board",
+            "dispatch",
+            "dispatch-inline-schedule",
+            "--expected-revision",
+            "1",
+            "--long-horizon-content",
+            "Continue the dispatched task under its periodic contract",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_A,
+    );
+
+    assert_eq!(dispatched["task"]["owner"], master);
+    assert_eq!(dispatched["task"]["status"], "invited");
+    assert_eq!(dispatched["goal_schedule"]["armed"], true);
+    assert_eq!(
+        dispatched["goal_schedule"]["subscription"]["worker_id"],
+        peer
+    );
+    let goals_after = goal_subscriptions(&fixture.current_state());
+    assert_eq!(
+        goals_after.as_object().unwrap().len(),
+        goals_before.as_object().unwrap().len() + 1
+    );
+}
+
+#[test]
+fn pending_one_shot_invitation_rejects_schedule_edit_and_declines_schedule_free() {
+    let (fixture, master, peer) = setup();
+    publish_one_shot(&fixture, "one-shot-pending-edit");
+    activate_peer(&fixture, &peer);
+    let goals_before = goal_subscriptions(&fixture.current_state());
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-pending-edit",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["goal_schedule"]["armed"], false);
+    assert!(invited["goal_schedule"]["subscription"].is_null());
+    let before = fixture.current_state();
+    let (success, rejected) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "describe",
+            "one-shot-pending-edit",
+            "--title",
+            "One shot invitation",
+            "--description",
+            "Ordinary publisher-owned work",
+            "--delivery-condition",
+            "Acceptance transfers ownership once",
+            "--test-condition",
+            "Public one-shot behavior passes",
+            "--long-horizon-content",
+            "Pending edit must not arm a schedule",
+            "--long-horizon-every-ms",
+            "3600000",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_A,
+    ));
+    assert!(!success);
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_ONE_SHOT_NO_SCHEDULE_EDIT"));
+    let after_rejection = fixture.current_state();
+    for field in [
+        "tasks",
+        "task_assignments",
+        "board_details",
+        "msgs",
+        "wake_bindings",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after_rejection[field], before[field],
+            "{field} changed on pending one-shot schedule edit"
+        );
+    }
+
+    let declined = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "one-shot-pending-edit",
+            "--decline",
+            "--expected-revision",
+            "2",
+            "--reason",
+            "schedule edit was rejected",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(declined["task"]["owner"], master);
+    assert_eq!(declined["task"]["status"], "pending");
+    assert_eq!(declined["goal_schedule"]["armed"], false);
+    assert!(declined["goal_schedule"]["subscription"].is_null());
+    assert_eq!(goal_subscriptions(&fixture.current_state()), goals_before);
+}
+
+#[test]
+fn one_shot_rejects_same_id_binding_generation_refresh_before_acceptance() {
+    let (mut fixture, master, peer) = setup();
+    publish_one_shot(&fixture, "one-shot-generation-refresh");
+    let peer_session = activate_peer(&fixture, &peer);
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "one-shot-generation-refresh",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+            "--one-shot",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["invitation_kind"], "one-shot");
+    let invitation = fixture.current_state()["board_details"]["one-shot-generation-refresh"]
+        ["invitation"]
+        .clone();
+    assert_eq!(invitation["peer_id"], peer);
+    assert_eq!(invitation["one_shot"], true);
+    let generation = invitation["binding_generation"].as_u64().unwrap();
+    assert!(generation > 0);
+    assert_eq!(bump_binding_generation(&mut fixture, &peer), generation + 1);
+    let before_accept = fixture.current_state();
+    let input_count = fixture
+        .state
+        .lock()
+        .unwrap()
+        .get(&peer_session)
+        .map_or(0, |thread| thread.inputs.len());
+    let (success, rejected) = parse_public_response(fixture.command_public(
+        &[
+            "board",
+            "respond",
+            "one-shot-generation-refresh",
+            "--accept",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_B,
+    ));
+    assert!(!success);
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap()
+        .contains("BOARD_STALE_INVITATION"));
+    let after = fixture.current_state();
+    for field in [
+        "tasks",
+        "task_assignments",
+        "board_details",
+        "msgs",
+        "wake_bindings",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(
+            after[field], before_accept[field],
+            "{field} changed on same-ID binding generation refresh"
+        );
+    }
+    assert_eq!(
+        after["tasks"]["one-shot-generation-refresh"]["owner"],
+        master
+    );
+    assert_eq!(
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .get(&peer_session)
+            .map_or(0, |thread| thread.inputs.len()),
+        input_count,
+        "stale generation must not receive another native input"
+    );
 }
 
 #[test]

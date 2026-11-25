@@ -212,8 +212,10 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
         .invitation = Some(crate::board::BoardInvitation {
         peer_id: "current".into(),
         binding_id: binding.binding_id.as_str().into(),
+        binding_generation: 0,
         message_id: "reassign-invite".into(),
         created_ms: 3,
+        one_shot: false,
         original_status: Some(status.into()),
         original_owner: Some("old".into()),
         inviter_name: None,
@@ -1225,8 +1227,10 @@ fn pending_reassignment_invitation_does_not_move_the_task_subscription() {
     details.invitation = Some(crate::board::BoardInvitation {
         peer_id: "current".into(),
         binding_id: binding.binding_id.as_str().into(),
+        binding_generation: 1,
         message_id: "pending-task-invitation".into(),
         created_ms: now,
+        one_shot: false,
         original_status: Some("working".into()),
         original_owner: Some("old".into()),
         inviter_name: None,
@@ -2232,6 +2236,8 @@ fn master_can_reassign_ownerless_task_and_preserve_status_and_evidence() {
         "named-work".into(),
         "current".into(),
         1,
+        false,
+        Default::default(),
     );
     assert!(invited.ok, "{:?}", invited.error);
     assert_eq!(invited.data["task"]["owner"], "");
@@ -2296,6 +2302,8 @@ async fn architect_receives_invitation_response_after_mailbox_retention() {
                 id: "named-work".into(),
                 to: "current".into(),
                 expected_revision: 1,
+                one_shot: false,
+                long_horizon: Default::default(),
             },
         },
     );

@@ -301,8 +301,37 @@ fn socket_candidate() -> Option<PathBuf> {
 
 struct Client {
     stream: UnixStream,
-    timeout: Duration,
+    deadline: Option<OperationDeadline>,
     next_id: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OperationDeadline {
+    expires_at: Instant,
+}
+
+impl OperationDeadline {
+    /// One absolute deadline covers connect, handshake, RPC writes, and every
+    /// response frame. Arriving unrelated frames consume this budget.
+    fn after(timeout: Duration) -> Result<Self, AdapterError> {
+        let expires_at =
+            Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| AdapterError::Unknown {
+                    operation: "detect",
+                    detail: "App Server timeout exceeds the supported duration".into(),
+                })?;
+        Ok(Self { expires_at })
+    }
+
+    fn remaining(&self, operation: &'static str) -> Result<Duration, AdapterError> {
+        let remaining = self.expires_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            Err(AdapterError::Timeout { operation })
+        } else {
+            Ok(remaining)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -313,24 +342,7 @@ struct RpcError {
 
 impl Client {
     fn connect(path: &Path, timeout: Duration) -> Result<Self, AdapterError> {
-        let stream = UnixStream::connect(path).map_err(|error| {
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-            ) {
-                AdapterError::RouteUnavailable {
-                    detail: format!("{}: {error}", path.display()),
-                }
-            } else {
-                AdapterError::Unknown {
-                    operation: "connect",
-                    detail: format!("{}: {error}", path.display()),
-                }
-            }
-        })?;
+        let stream = UnixStream::connect(path).map_err(|error| connect_error(path, error))?;
         stream
             .set_read_timeout(Some(timeout))
             .map_err(|error| AdapterError::Unknown {
@@ -345,7 +357,23 @@ impl Client {
             })?;
         let mut client = Self {
             stream,
-            timeout,
+            deadline: None,
+            next_id: 1,
+        };
+        client.handshake()?;
+        Ok(client)
+    }
+
+    fn connect_until(
+        path: &Path,
+        timeout: Duration,
+        operation: &'static str,
+    ) -> Result<Self, AdapterError> {
+        let deadline = OperationDeadline::after(timeout)?;
+        let stream = connect_unix(path, &deadline, operation)?;
+        let mut client = Self {
+            stream,
+            deadline: Some(deadline),
             next_id: 1,
         };
         client.handshake()?;
@@ -357,32 +385,62 @@ impl Client {
         let request = format!(
             "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
-        self.stream
-            .write_all(request.as_bytes())
-            .map_err(|error| transport("websocket handshake write", error))?;
-        let mut reader = BufReader::new(
+        if self.deadline.is_none() {
             self.stream
-                .try_clone()
-                .map_err(|error| transport("websocket handshake clone", error))?,
-        );
-        let mut status = String::new();
-        reader
-            .read_line(&mut status)
-            .map_err(|error| transport("websocket handshake status", error))?;
+                .write_all(request.as_bytes())
+                .map_err(|error| transport("websocket handshake write", error))?;
+            let mut reader = BufReader::new(
+                self.stream
+                    .try_clone()
+                    .map_err(|error| transport("websocket handshake clone", error))?,
+            );
+            let mut status = String::new();
+            reader
+                .read_line(&mut status)
+                .map_err(|error| transport("websocket handshake status", error))?;
+            if !status.starts_with("HTTP/1.1 101") && !status.starts_with("HTTP/1.0 101") {
+                return Err(AdapterError::Unknown {
+                    operation: "websocket handshake",
+                    detail: format!("upgrade rejected: {}", status.trim()),
+                });
+            }
+            loop {
+                let mut header = String::new();
+                reader
+                    .read_line(&mut header)
+                    .map_err(|error| transport("websocket handshake header", error))?;
+                if header == "\r\n" || header == "\n" || header.is_empty() {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+        self.write_all_bounded(request.as_bytes(), "websocket handshake write")?;
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") && !response.ends_with(b"\n\n") {
+            let mut byte = [0_u8; 1];
+            self.read_exact_bounded(&mut byte, "websocket handshake")?;
+            response.push(byte[0]);
+            if response.len() > 16 * 1024 {
+                return Err(AdapterError::Unknown {
+                    operation: "websocket handshake",
+                    detail: "response headers exceed maximum size".into(),
+                });
+            }
+        }
+        let status = response
+            .split(|byte| *byte == b'\n')
+            .next()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .ok_or_else(|| AdapterError::Unknown {
+                operation: "websocket handshake",
+                detail: "upgrade response is not valid UTF-8".into(),
+            })?;
         if !status.starts_with("HTTP/1.1 101") && !status.starts_with("HTTP/1.0 101") {
             return Err(AdapterError::Unknown {
                 operation: "websocket handshake",
                 detail: format!("upgrade rejected: {}", status.trim()),
             });
-        }
-        loop {
-            let mut header = String::new();
-            reader
-                .read_line(&mut header)
-                .map_err(|error| transport("websocket handshake header", error))?;
-            if header == "\r\n" || header == "\n" || header.is_empty() {
-                break;
-            }
         }
         Ok(())
     }
@@ -427,6 +485,9 @@ impl Client {
         method: &str,
         params: Value,
     ) -> Result<Result<Value, RpcError>, AdapterError> {
+        if let Some(deadline) = self.deadline {
+            deadline.remaining("rpc")?;
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.write_json(&json!({"method": method, "id": id, "params": params}))?;
@@ -469,12 +530,8 @@ impl Client {
                 detail: "native frame exceeds maximum size".into(),
             });
         }
-        self.stream
-            .write_all(&encode_frame(0x1, &payload))
-            .map_err(|error| transport("websocket write", error))?;
-        self.stream
-            .flush()
-            .map_err(|error| transport("websocket flush", error))
+        self.write_all_bounded(&encode_frame(0x1, &payload), "websocket write")?;
+        Ok(())
     }
 
     fn read_json(&mut self) -> Result<Value, AdapterError> {
@@ -492,64 +549,270 @@ impl Client {
     }
 
     fn read_frame(&mut self) -> Result<Vec<u8>, AdapterError> {
-        let mut header = [0_u8; 2];
-        self.stream
-            .read_exact(&mut header)
-            .map_err(|error| transport("websocket header", error))?;
-        let opcode = header[0] & 0x0f;
-        let masked = header[1] & 0x80 != 0;
-        let mut length = (header[1] & 0x7f) as u64;
-        if length == 126 {
-            let mut bytes = [0_u8; 2];
-            self.stream
-                .read_exact(&mut bytes)
-                .map_err(|error| transport("websocket length", error))?;
-            length = u16::from_be_bytes(bytes) as u64;
-        } else if length == 127 {
-            let mut bytes = [0_u8; 8];
-            self.stream
-                .read_exact(&mut bytes)
-                .map_err(|error| transport("websocket length", error))?;
-            length = u64::from_be_bytes(bytes);
-        }
-        if length > MAX_INCOMING_FRAME_BYTES as u64 {
-            return Err(AdapterError::Unknown {
+        loop {
+            let mut header = [0_u8; 2];
+            self.read_exact_bounded(&mut header, "websocket header")?;
+            let opcode = header[0] & 0x0f;
+            let masked = header[1] & 0x80 != 0;
+            let mut length = (header[1] & 0x7f) as u64;
+            if length == 126 {
+                let mut bytes = [0_u8; 2];
+                self.read_exact_bounded(&mut bytes, "websocket length")?;
+                length = u16::from_be_bytes(bytes) as u64;
+            } else if length == 127 {
+                let mut bytes = [0_u8; 8];
+                self.read_exact_bounded(&mut bytes, "websocket length")?;
+                length = u64::from_be_bytes(bytes);
+            }
+            if length > MAX_INCOMING_FRAME_BYTES as u64 {
+                return Err(AdapterError::Unknown {
+                    operation: "websocket frame",
+                    detail: "native frame exceeds maximum size".into(),
+                });
+            }
+            let length = usize::try_from(length).map_err(|_| AdapterError::Unknown {
                 operation: "websocket frame",
                 detail: "native frame exceeds maximum size".into(),
+            })?;
+            let mut mask = [0_u8; 4];
+            if masked {
+                self.read_exact_bounded(&mut mask, "websocket mask")?;
+            }
+            let mut payload = vec![0_u8; length];
+            self.read_exact_bounded(&mut payload, "websocket payload")?;
+            if masked {
+                for (index, byte) in payload.iter_mut().enumerate() {
+                    *byte ^= mask[index % 4];
+                }
+            }
+            match opcode {
+                0x1 => return Ok(payload),
+                0x8 => {
+                    return Err(AdapterError::Unknown {
+                        operation: "websocket",
+                        detail: "native App Server closed the connection".into(),
+                    })
+                }
+                0x9 => self.write_all_bounded(&encode_frame(0xA, &payload), "websocket pong")?,
+                _ => {}
+            }
+        }
+    }
+
+    fn read_exact_bounded(
+        &mut self,
+        mut bytes: &mut [u8],
+        operation: &'static str,
+    ) -> Result<(), AdapterError> {
+        if self.deadline.is_none() {
+            return self
+                .stream
+                .read_exact(bytes)
+                .map_err(|error| transport(operation, error));
+        }
+        while !bytes.is_empty() {
+            self.wait_ready(libc::POLLIN, operation)?;
+            match self.stream.read(bytes) {
+                Ok(0) => {
+                    return Err(AdapterError::Unknown {
+                        operation,
+                        detail: "native App Server closed the connection".into(),
+                    })
+                }
+                Ok(read) => bytes = &mut bytes[read..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(transport(operation, error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_all_bounded(
+        &mut self,
+        mut bytes: &[u8],
+        operation: &'static str,
+    ) -> Result<(), AdapterError> {
+        if self.deadline.is_none() {
+            self.stream
+                .write_all(bytes)
+                .map_err(|error| transport(operation, error))?;
+            return self
+                .stream
+                .flush()
+                .map_err(|error| transport(operation, error));
+        }
+        while !bytes.is_empty() {
+            self.wait_ready(libc::POLLOUT, operation)?;
+            match self.stream.write(bytes) {
+                Ok(0) => {
+                    return Err(AdapterError::Unknown {
+                        operation,
+                        detail: "native App Server accepted no bytes".into(),
+                    })
+                }
+                Ok(written) => bytes = &bytes[written..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(transport(operation, error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_ready(
+        &self,
+        events: libc::c_short,
+        operation: &'static str,
+    ) -> Result<(), AdapterError> {
+        let deadline = self
+            .deadline
+            .as_ref()
+            .ok_or_else(|| AdapterError::Unknown {
+                operation,
+                detail: "guarded socket wait has no operation deadline".into(),
+            })?;
+        wait_socket(self.stream.as_raw_fd(), events, deadline, operation)
+    }
+}
+
+fn connect_unix(
+    path: &Path,
+    deadline: &OperationDeadline,
+    operation: &'static str,
+) -> Result<UnixStream, AdapterError> {
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(AdapterError::Unknown {
+            operation: "connect",
+            detail: std::io::Error::last_os_error().to_string(),
+        });
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    unsafe {
+        let set_cloexec = libc::fcntl(owned.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+        let flags = libc::fcntl(owned.as_raw_fd(), libc::F_GETFL);
+        if set_cloexec < 0
+            || flags < 0
+            || libc::fcntl(owned.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
+        {
+            return Err(AdapterError::Unknown {
+                operation: "connect",
+                detail: std::io::Error::last_os_error().to_string(),
             });
         }
-        let length = usize::try_from(length).map_err(|_| AdapterError::Unknown {
-            operation: "websocket frame",
-            detail: "native frame exceeds maximum size".into(),
-        })?;
-        let mut mask = [0_u8; 4];
-        if masked {
-            self.stream
-                .read_exact(&mut mask)
-                .map_err(|error| transport("websocket mask", error))?;
+    }
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(AdapterError::InvalidBinding {
+            detail: format!("App Server socket path is invalid: {}", path.display()),
+        });
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr() as *const libc::c_char,
+            address.sun_path.as_mut_ptr(),
+            bytes.len(),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+    }
+    let result = unsafe {
+        libc::connect(
+            owned.as_raw_fd(),
+            &address as *const libc::sockaddr_un as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let in_progress = matches!(
+            error.raw_os_error(),
+            Some(libc::EINPROGRESS) | Some(libc::EWOULDBLOCK)
+        );
+        if !in_progress {
+            return Err(connect_error(path, error));
         }
-        let mut payload = vec![0_u8; length];
-        self.stream
-            .read_exact(&mut payload)
-            .map_err(|error| transport("websocket payload", error))?;
-        if masked {
-            for (index, byte) in payload.iter_mut().enumerate() {
-                *byte ^= mask[index % 4];
-            }
+        wait_socket(owned.as_raw_fd(), libc::POLLOUT, deadline, operation)?;
+        let mut socket_error = 0;
+        let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                owned.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut socket_error as *mut libc::c_int as *mut libc::c_void,
+                &mut length,
+            )
+        };
+        if result != 0 {
+            return Err(AdapterError::Unknown {
+                operation: "connect",
+                detail: std::io::Error::last_os_error().to_string(),
+            });
         }
-        match opcode {
-            0x1 => Ok(payload),
-            0x8 => Err(AdapterError::Unknown {
-                operation: "websocket",
-                detail: "native App Server closed the connection".into(),
-            }),
-            0x9 => {
-                self.stream
-                    .write_all(&encode_frame(0xA, &payload))
-                    .map_err(|error| transport("websocket pong", error))?;
-                self.read_frame()
-            }
-            _ => self.read_frame(),
+        if socket_error != 0 {
+            return Err(connect_error(
+                path,
+                std::io::Error::from_raw_os_error(socket_error),
+            ));
+        }
+    }
+    Ok(UnixStream::from(owned))
+}
+
+fn connect_error(path: &Path, error: std::io::Error) -> AdapterError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    ) {
+        AdapterError::RouteUnavailable {
+            detail: format!("{}: {error}", path.display()),
+        }
+    } else {
+        AdapterError::Unknown {
+            operation: "connect",
+            detail: format!("{}: {error}", path.display()),
+        }
+    }
+}
+
+fn wait_socket(
+    fd: libc::c_int,
+    events: libc::c_short,
+    deadline: &OperationDeadline,
+    operation: &'static str,
+) -> Result<(), AdapterError> {
+    loop {
+        let remaining = deadline.remaining(operation)?;
+        let timeout_ms = remaining.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms.max(1)) };
+        if ready > 0 {
+            return if poll_fd.revents & events != 0 {
+                Ok(())
+            } else {
+                Err(AdapterError::Unknown {
+                    operation,
+                    detail: format!("socket readiness failed with revents {}", poll_fd.revents),
+                })
+            };
+        }
+        if ready == 0 {
+            return Err(AdapterError::Timeout { operation });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(transport(operation, error));
         }
     }
 }

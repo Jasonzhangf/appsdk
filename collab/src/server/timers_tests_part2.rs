@@ -762,8 +762,11 @@ use super::*;
             let delivered = Arc::clone(&delivered);
             Arc::get_mut(&mut server)
                 .expect("unique test server")
-                .appserver_notification_sink = Arc::new(move |_, _, text, _, explicit, _mode| {
-                delivered.lock().unwrap().push((explicit, text.to_string()));
+                .appserver_notification_sink = Arc::new(move |_, _, text, _, context, _mode| {
+                delivered
+                    .lock()
+                    .unwrap()
+                    .push((context.explicit, text.to_string()));
                 Ok(serde_json::json!({"accepted": true}))
             });
         }
@@ -773,7 +776,10 @@ use super::*;
         let deliveries = delivered.lock().unwrap();
         // Stewardship uses explicit notifications. This timer's automatic
         // delivery is independent of that name-adjudication traffic.
-        let delivered: Vec<_> = deliveries.iter().filter(|(explicit, _)| !explicit).collect();
+        let delivered: Vec<_> = deliveries
+            .iter()
+            .filter(|(explicit, _)| !*explicit)
+            .collect();
         assert_eq!(delivered.len(), 1);
         assert!(
             !delivered[0].0,

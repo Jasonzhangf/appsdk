@@ -30,14 +30,17 @@
 //! must not make.
 
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A challenge must not stall a registration indefinitely. The gateway answers
 /// from its in-memory registry, so two seconds is already generous.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+const GUARDED_REPLY_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// Gateway placement only. Identity and runtime facts still come from the
 /// live scoped resolve-agent response, never this declaration.
@@ -274,22 +277,35 @@ fn round_trip(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, ControlError> {
-    let mut stream = UnixStream::connect(socket).map_err(|error| ControlError::Unreachable {
-        detail: format!(
-            "gateway control socket {} is unreachable: {error}",
-            socket.display()
-        ),
-    })?;
-    stream
-        .set_read_timeout(Some(CONTROL_TIMEOUT))
-        .map_err(|error| ControlError::Unusable {
-            detail: format!("cannot bound {method} read: {error}"),
+    round_trip_with_deadline(socket, method, params, None)
+}
+
+fn round_trip_with_deadline(
+    socket: &Path,
+    method: &str,
+    params: serde_json::Value,
+    deadline: Option<Instant>,
+) -> Result<serde_json::Value, ControlError> {
+    let stream =
+        connect_with_deadline(socket, deadline).map_err(|error| ControlError::Unreachable {
+            detail: format!(
+                "gateway control socket {} is unreachable: {error}",
+                socket.display()
+            ),
         })?;
-    stream
-        .set_write_timeout(Some(CONTROL_TIMEOUT))
-        .map_err(|error| ControlError::Unusable {
-            detail: format!("cannot bound {method} write: {error}"),
-        })?;
+    if deadline.is_none() {
+        stream
+            .set_read_timeout(Some(CONTROL_TIMEOUT))
+            .map_err(|error| ControlError::Unusable {
+                detail: format!("cannot bound {method} read: {error}"),
+            })?;
+        stream
+            .set_write_timeout(Some(CONTROL_TIMEOUT))
+            .map_err(|error| ControlError::Unusable {
+                detail: format!("cannot bound {method} write: {error}"),
+            })?;
+    }
+    let mut stream = DeadlineStream::new(stream, deadline);
     let line = serde_json::to_string(&serde_json::json!({
         "method": method,
         "params": params,
@@ -307,38 +323,58 @@ fn round_trip(
                 socket.display()
             ),
         })?;
-    let mut reader = BufReader::new(stream);
     let mut buf = String::new();
-    let read = reader
-        .read_line(&mut buf)
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
-                ControlError::Unusable {
-                    detail: format!(
-                        "gateway did not answer {method} within {}s",
-                        CONTROL_TIMEOUT.as_secs()
-                    ),
-                }
-            }
-            _ => ControlError::Unusable {
-                detail: format!("reading {method} reply: {error}"),
+    let mut reader = BufReader::new(stream);
+    let read = if deadline.is_some() {
+        reader.take(GUARDED_REPLY_LIMIT + 1).read_line(&mut buf)
+    } else {
+        reader.read_line(&mut buf)
+    }
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => ControlError::Unusable {
+            detail: if deadline.is_some() {
+                format!("gateway did not answer {method} within the operation deadline")
+            } else {
+                format!(
+                    "gateway did not answer {method} within {}s",
+                    CONTROL_TIMEOUT.as_secs()
+                )
             },
-        })?;
+        },
+        _ => ControlError::Unusable {
+            detail: format!("reading {method} reply: {error}"),
+        },
+    })?;
     if read == 0 {
         return Err(ControlError::Unusable {
             detail: format!("gateway closed the control socket before answering {method}"),
+        });
+    }
+    if deadline.is_some() && (read as u64 > GUARDED_REPLY_LIMIT || !buf.ends_with('\n')) {
+        return Err(ControlError::Unusable {
+            detail: format!("incomplete or oversized {method} reply"),
         });
     }
     let parsed: serde_json::Value =
         serde_json::from_str(buf.trim()).map_err(|error| ControlError::Unusable {
             detail: format!("malformed {method} reply: {error}"),
         })?;
-    if parsed.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+    if deadline.is_some_and(|until| Instant::now() >= until) {
+        return Err(ControlError::Unusable {
+            detail: format!("gateway {method} operation deadline expired"),
+        });
+    }
+    let ok = parsed.get("ok").and_then(serde_json::Value::as_bool);
+    if ok != Some(true) {
         let code = parsed
             .pointer("/error/code")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown-error")
-            .to_owned();
+            .and_then(serde_json::Value::as_str);
+        if deadline.is_some() && (ok != Some(false) || code.is_none_or(str::is_empty)) {
+            return Err(ControlError::Unusable {
+                detail: format!("{method} reply does not carry a valid outcome"),
+            });
+        }
+        let code = code.unwrap_or("unknown-error").to_owned();
         let message = parsed
             .pointer("/error/message")
             .and_then(serde_json::Value::as_str)
@@ -354,6 +390,139 @@ fn round_trip(
         .ok_or_else(|| ControlError::Unusable {
             detail: format!("{method} reply carries no result"),
         })
+}
+
+pub(super) fn remaining_time(until: Instant) -> std::io::Result<Duration> {
+    let remaining = until.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "operation deadline expired",
+        ));
+    }
+    Ok(remaining)
+}
+
+pub(super) fn connect_with_deadline(
+    path: &Path,
+    deadline: Option<Instant>,
+) -> std::io::Result<UnixStream> {
+    let Some(until) = deadline else {
+        return UnixStream::connect(path);
+    };
+    remaining_time(until)?;
+    let path = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path.is_empty() || path.len() >= address.sun_path.len() || path.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid Unix socket path",
+        ));
+    }
+    let address_length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    address.sun_family = libc::AF_UNIX as _;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        address.sun_len = address_length as u8;
+    }
+    for (target, source) in address.sun_path.iter_mut().zip(path.iter().copied()) {
+        *target = source as libc::c_char;
+    }
+
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Own the descriptor before any fallible setup and before returning it.
+    let stream = UnixStream::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    stream.set_nonblocking(true)?;
+    remaining_time(until)?;
+    let connected = unsafe {
+        libc::connect(
+            raw,
+            (&address as *const libc::sockaddr_un).cast(),
+            address_length as libc::socklen_t,
+        )
+    };
+    if connected < 0 {
+        let error = std::io::Error::last_os_error();
+        // A full Unix listen queue can return EAGAIN without initiating a
+        // connection. Only EINPROGRESS can complete by waiting for readiness.
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(error);
+        }
+        loop {
+            let remaining = remaining_time(until)?;
+            let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+            let mut poll = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            match unsafe { libc::poll(&mut poll, 1, timeout_ms) } {
+                0 => continue,
+                result if result < 0 => {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                _ => break,
+            }
+        }
+        if let Some(error) = stream.take_error()? {
+            return Err(error);
+        }
+    }
+    remaining_time(until)?;
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+/// Reset the kernel timeout to the remaining budget before each actual I/O.
+/// Buffered and exact reads can then handle short reads without renewing it.
+pub(super) struct DeadlineStream {
+    stream: UnixStream,
+    deadline: Option<Instant>,
+}
+
+impl DeadlineStream {
+    pub(super) fn new(stream: UnixStream, deadline: Option<Instant>) -> Self {
+        Self { stream, deadline }
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(until) = self.deadline {
+            self.stream.set_read_timeout(Some(remaining_time(until)?))?;
+        }
+        self.stream.read(bytes)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(until) = self.deadline {
+            self.stream
+                .set_write_timeout(Some(remaining_time(until)?))?;
+        }
+        self.stream.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
 }
 
 fn rejected(detail: String) -> ControlError {
@@ -424,10 +593,20 @@ pub fn activity(
     runtime_id: &str,
     agent_id: &str,
 ) -> Result<AgentActivityFacts, ControlError> {
-    let outer = round_trip(
+    activity_with_deadline(endpoint, runtime_id, agent_id, None)
+}
+
+fn activity_with_deadline(
+    endpoint: &str,
+    runtime_id: &str,
+    agent_id: &str,
+    deadline: Option<Instant>,
+) -> Result<AgentActivityFacts, ControlError> {
+    let outer = round_trip_with_deadline(
         &control_socket(endpoint)?,
         "agent-get",
         serde_json::json!({"runtimeId": runtime_id, "agentId": agent_id}),
+        deadline,
     )?;
     let echoed_runtime = outer
         .get("runtimeId")
@@ -732,8 +911,23 @@ pub fn notify_with_message_id(
     text: &str,
     message_id: &str,
 ) -> Result<serde_json::Value, ControlError> {
+    notify_with_deadline(
+        endpoint, runtime_id, agent_id, mode, sender_id, text, message_id, None,
+    )
+}
+
+fn notify_with_deadline(
+    endpoint: &str,
+    runtime_id: &str,
+    agent_id: &str,
+    mode: &str,
+    sender_id: &str,
+    text: &str,
+    message_id: &str,
+    deadline: Option<Instant>,
+) -> Result<serde_json::Value, ControlError> {
     let socket = control_socket(endpoint)?;
-    let result = round_trip(
+    let result = round_trip_with_deadline(
         &socket,
         "enqueue",
         serde_json::json!({
@@ -744,6 +938,7 @@ pub fn notify_with_message_id(
             "sender": {"runtimeId": "collab", "id": sender_id, "name": "collab"},
             "messageId": message_id,
         }),
+        deadline,
     )?;
     if result["messageId"].as_str() != Some(message_id)
         || result["runtimeId"].as_str() != Some(runtime_id)
@@ -756,6 +951,11 @@ pub fn notify_with_message_id(
                 .into(),
         });
     }
+    if deadline.is_some_and(|until| Instant::now() >= until) {
+        return Err(ControlError::Unusable {
+            detail: "enqueue operation deadline expired".into(),
+        });
+    }
     Ok(serde_json::json!({
         "transport": "dsh",
         "message_id": message_id,
@@ -764,6 +964,36 @@ pub fn notify_with_message_id(
         "queued": true,
         "consumed": false
     }))
+}
+
+pub fn guarded_notify(
+    endpoint: &str,
+    runtime_id: &str,
+    agent_id: &str,
+    mode: &str,
+    sender_id: &str,
+    text: &str,
+    msg_id: &str,
+    deadline: Duration,
+) -> Result<serde_json::Value, ControlError> {
+    let until = Instant::now() + deadline;
+    let activity = activity_with_deadline(endpoint, runtime_id, agent_id, Some(until))?;
+    if !activity.live {
+        return Err(ControlError::Rejected {
+            code: "recipient-not-online".into(),
+            detail: "recipient is not live".into(),
+        });
+    }
+    notify_with_deadline(
+        endpoint,
+        runtime_id,
+        agent_id,
+        mode,
+        sender_id,
+        text,
+        &wake_message_id(msg_id)?,
+        Some(until),
+    )
 }
 
 #[cfg(test)]
@@ -854,7 +1084,7 @@ mod enrollment_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
@@ -932,6 +1162,87 @@ mod tests {
         }
     }
 
+    pub(crate) struct TrickleWire {
+        dir: PathBuf,
+        socket: PathBuf,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TrickleWire {
+        pub(crate) fn serve() -> Self {
+            let id = SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("collab-dsh-trickle-{}-{id}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create fixture directory");
+            let socket = dir.join("control.sock");
+            let listener = UnixListener::bind(&socket).expect("bind control socket");
+            let handle = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        return;
+                    };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let request: serde_json::Value =
+                        serde_json::from_str(line.trim()).expect("control request is JSON");
+                    if request["method"] == "agent-get" {
+                        std::thread::sleep(Duration::from_millis(250));
+                        let reply = agent_get_reply("rt-1", "agent-1", "running", true);
+                        if stream.write_all(reply.to_string().as_bytes()).is_err()
+                            || stream.write_all(b"\n").is_err()
+                        {
+                            return;
+                        }
+                    } else {
+                        let reply = json!({
+                            "ok": true,
+                            "result": {
+                                "messageId": request["params"]["messageId"],
+                                "runtimeId": "rt-1",
+                                "agentId": "agent-1",
+                                "status": "wake-signalled",
+                                "inboundOwner": "poll"
+                            }
+                        });
+                        let line = format!("{reply}\n");
+                        let (prefix, rest) = line.as_bytes().split_at(11);
+                        for byte in prefix {
+                            if stream.write_all(&[*byte]).is_err() {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(65));
+                        }
+                        let _ = stream.write_all(rest);
+                    }
+                }
+            });
+            Self {
+                dir,
+                socket,
+                handle: Some(handle),
+            }
+        }
+
+        pub(crate) fn endpoint(&self) -> String {
+            format!("unix://{}", self.socket.display())
+        }
+    }
+
+    impl Drop for TrickleWire {
+        fn drop(&mut self) {
+            if self.handle.is_some() {
+                let _ = UnixStream::connect(&self.socket);
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     fn agent_get_reply(
         runtime_id: &str,
         agent_id: &str,
@@ -975,6 +1286,78 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn guarded_enqueue_malformed_reply_keeps_delivery_unknown() {
+        for (reply, known_undelivered) in [
+            (json!({"result": null}), false),
+            (json!({"ok": false}), false),
+            (json!({"ok": false, "error": {"code": "not-ready"}}), true),
+        ] {
+            let mut wire = Wire::serve(reply);
+            let error = notify_with_deadline(
+                &wire.endpoint(),
+                "rt-1",
+                "agent-1",
+                "followup",
+                "sender",
+                "wake",
+                "collab:test:m1759420000000-17",
+                Some(Instant::now() + Duration::from_secs(1)),
+            )
+            .expect_err("the reply does not confirm delivery");
+            assert_eq!(wire.requests()[0]["method"], "enqueue");
+            assert_eq!(
+                error.is_definitely_undelivered(),
+                known_undelivered,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_notify_accepts_a_complete_trickled_reply() {
+        let wire = TrickleWire::serve();
+        assert!(activity(&wire.endpoint(), "rt-1", "agent-1").unwrap().live);
+        let receipt = notify_with_message_id(
+            &wire.endpoint(),
+            "rt-1",
+            "agent-1",
+            "followup",
+            "sender",
+            "wake",
+            "collab:test:m1759420000000-17",
+        )
+        .unwrap();
+        assert_eq!(receipt["stage"], "wake-signalled");
+        assert_eq!(receipt["consumed"], false);
+    }
+
+    #[test]
+    fn guarded_notify_uses_one_budget_for_activity_and_partial_enqueue() {
+        let wire = TrickleWire::serve();
+        let started = Instant::now();
+        let error = guarded_notify(
+            &wire.endpoint(),
+            "rt-1",
+            "agent-1",
+            "followup",
+            "sender",
+            "wake",
+            "collab:test:m1759420000000-17",
+            Duration::from_millis(500),
+        )
+        .expect_err("partial enqueue response must time out");
+        assert!(
+            matches!(&error, ControlError::Unusable { detail } if detail.contains("enqueue") && detail.contains("deadline")),
+            "timeout must retain unknown delivery: {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(680),
+            "continuous partial response extended the operation: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

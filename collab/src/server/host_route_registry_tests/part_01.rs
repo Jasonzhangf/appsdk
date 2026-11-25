@@ -61,7 +61,7 @@ fn with_appserver_notification_sink(
             Option<&str>,
             &str,
             &str,
-            bool,
+            NotificationDispatchContext,
             &str,
         ) -> Result<serde_json::Value, String>
         + Send
@@ -1212,7 +1212,7 @@ fn live_closure_daemon_send_uses_daemon_identity_without_explicit_source_thread(
     // dsh forwards this value to the gateway, which strips only
     // `collab:<digest>:` before looking it up in the mailbox.
     assert_eq!(calls[0].2, message_id);
-    assert!(!calls[0].3, "daemon live-closure is not explicit");
+    assert!(!calls[0].3.explicit, "daemon live-closure is not explicit");
     drop(calls);
 
     let state = server.state.lock().unwrap();
@@ -1348,9 +1348,9 @@ fn live_closure_daemon_to_master_rejects_non_master_target() {
 fn live_closure_restart_replay_records_pending_contract_mode() {
     let (mut server, root, _) = test_server();
     with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
-    with_appserver_notification_sink(&mut server, |_, source_thread_id, _, _, explicit, _mode| {
+    with_appserver_notification_sink(&mut server, |_, source_thread_id, _, _, context, _mode| {
         assert!(source_thread_id.is_none());
-        assert!(!explicit);
+        assert!(!context.explicit);
         Ok(json!({"accepted": true}))
     });
     let app_scope = AppServerId::new("restart-replay-app").unwrap();

@@ -856,8 +856,10 @@
                     invitation: Some(crate::board::BoardInvitation {
                         peer_id: "invitee".into(),
                         binding_id: "fixture-binding".into(),
+                        binding_generation: 0,
                         message_id: "offer-message".into(),
                         created_ms: now_ms(),
+                        one_shot: false,
                         original_status: None,
                         original_owner: None,
                         inviter_name: None,

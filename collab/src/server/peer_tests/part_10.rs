@@ -319,6 +319,8 @@ fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale
             id: "stale-route-invite".into(),
             to: "peer".into(),
             expected_revision: 1,
+            one_shot: false,
+            long_horizon: Default::default(),
         },
     );
     assert!(invited.ok, "{:?}", invited.error);

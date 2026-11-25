@@ -1024,7 +1024,9 @@ fn prepare_board_dispatch_locked(
         expected_revision,
         Some((name.clone(), reason)),
         details.long_horizon,
+        false,
         None,
+        Default::default(),
         now,
     )?;
     let _ = peer;

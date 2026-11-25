@@ -473,12 +473,13 @@ pub(crate) fn ticket_recovery_claim_phase(
 /// this slot while the newest execute attempt is still on another slot with no
 /// submitted result. `rework` is included because a reopened rework attempt
 /// can be left at an older generation with no other recovery path.
+/// The caller resolves the current binding. The stable assignment and session
+/// establish ownership even if the task still stores a retired worker ID.
 pub(crate) fn ticket_stale_active_claim_phase(
     state: &State,
     slot_name: &str,
     current_session: &str,
     task_id: &str,
-    current_worker_id: &str,
     current_generation: u64,
 ) -> Option<crate::server::ticket_state::TicketPhaseRecord> {
     use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
@@ -491,9 +492,7 @@ pub(crate) fn ticket_stale_active_claim_phase(
         return None;
     }
     let task = state.tasks.get(task_id)?;
-    if !matches!(task.status.as_str(), "working" | "blocked" | "rework")
-        || task.owner != current_worker_id
-    {
+    if !matches!(task.status.as_str(), "working" | "blocked" | "rework") {
         return None;
     }
     let assignment = state.task_assignment(task_id)?;

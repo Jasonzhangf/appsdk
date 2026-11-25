@@ -1246,10 +1246,11 @@ pub(super) fn dispatch_eligible_worker_ids(
     let available = |worker: &WorkerRec| {
         worker.id != actor
             && !is_managed_subagent(state, &worker.id)
-            && authoritative_send_binding(state, route, &worker.id).is_ok()
-            && !state
-                .agent_presence(route.project_scope_id.as_str(), &worker.id)
-                .is_some_and(|presence| presence.presence == name_state::AgentPresence::Offline)
+            && authoritative_send_binding(state, route, &worker.id).is_ok_and(|binding| {
+                binding.session_id.as_ref().is_some_and(|session| {
+                    board_target_online(state, route, &worker.id, session.as_str())
+                })
+            })
     };
     if let Some(name) = policy.executor_name.as_deref() {
         if execution_candidate_eligibility(policy, name).is_err() {

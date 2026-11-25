@@ -92,7 +92,7 @@ fn one_shot_task_ok(state: &State, task: &TaskRec) -> Result<(), Resp> {
     Ok(())
 }
 
-fn one_shot_target_present(state: &State, route: &RouteScope, worker: &str, session: &str) -> bool {
+fn board_target_online(state: &State, route: &RouteScope, worker: &str, session: &str) -> bool {
     state
         .agent_presence(route.project_scope_id.as_str(), worker)
         .is_some_and(|presence| {
@@ -314,7 +314,7 @@ pub(super) fn prepare_board_invitation_locked(
         let Some(session) = current.binding.session_id.as_ref() else {
             return Err(Resp::err("BOARD_TARGET_SESSION_REQUIRED"));
         };
-        if !one_shot_target_present(state, route, &to, session.as_str()) {
+        if !board_target_online(state, route, &to, session.as_str()) {
             return Err(Resp::err(
                 "BOARD_TARGET_NOT_ONLINE: one-shot invitation requires a current online target",
             ));

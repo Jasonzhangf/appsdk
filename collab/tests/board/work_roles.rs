@@ -122,12 +122,55 @@ fn notices(fixture: &AppFixture, thread: &str, subject: &str) -> Vec<Value> {
 }
 
 #[test]
+fn board_dispatch_waits_for_current_online_target() {
+    let fixture = relationship_fixture();
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let worker = peer["identity"]["worker_id"].as_str().unwrap();
+    let name = peer["identity"]["display_name"].as_str().unwrap();
+    fixture.observe_native_agent(worker, "unknown", "unknown");
+    let id = "dispatch-current-presence";
+    publish(
+        &fixture,
+        id,
+        &[
+            "--executor",
+            name,
+            "--long-horizon-content",
+            "Complete the task after a current target is available.",
+            "--long-horizon-every-ms",
+            "600000",
+        ],
+    );
+    let dispatch = ["board", "dispatch", id, "--expected-revision", "1"];
+    let response = fixture.run_public(&dispatch, THREAD_A);
+    assert_eq!(response["outcome"], "waiting", "{response}");
+    let state = fixture.current_state();
+    assert_eq!(state["tasks"][id]["status"], "pending");
+    assert!(state["board_details"][id]["invitation"].is_null());
+    assert!(f7_goal_subscriptions(&state, id).is_empty());
+    assert!(f7_messages(&state, "task-invitation:dispatch-current-presence").is_empty());
+
+    fixture.observe_native_agent(worker, "online", "idle");
+    let response = fixture.run_public(
+        &["board", "dispatch", id, "--expected-revision", "2"],
+        THREAD_A,
+    );
+    assert_eq!(response["task"]["invited_peer"], worker, "{response}");
+}
+
+#[test]
 fn minimal_dispatch_prefers_unassigned_over_owned_or_invited_peer() {
     for owned in [false, true] {
         let fixture = relationship_fixture();
         let alice = fixture.run_public(&["context"], THREAD_B);
         let bob = fixture.run_public(&["context"], THREAD_C);
         assert_eq!(alice["work_roles"], json!([]));
+        fixture.observe_native_agent(
+            alice["identity"]["worker_id"].as_str().unwrap(),
+            "online",
+            "busy",
+        );
+        fixture.observe_native_agent(bob["identity"]["worker_id"].as_str().unwrap(), "online", "busy");
         publish(
             &fixture,
             "first",
@@ -686,6 +729,7 @@ fn f7_execution_admission_dispatch_uses_disjoint_executor() {
     let published_owner = published["task"]["owner"].clone();
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     let bob_worker = slot_worker_id(&board, "Bob");
+    fixture.observe_native_agent(&bob_worker, "online", "busy");
 
     let dispatched = fixture.run_public(
         &[
@@ -1854,6 +1898,8 @@ fn role_preference_goal_override_and_missing_pinned_executor_stay_explicit() {
     let board = fixture.run_public(&["board", "show"], THREAD_A);
     assert_eq!(task(&board, "role-child")["executor_name"], "Alice");
     assert_eq!(task(&board, "role-child")["reviewer_name"], "Bob");
+    let alice = slot_worker_id(&board, "Alice");
+    fixture.observe_native_agent(&alice, "online", "busy");
     publish(
         &fixture,
         "role-preferred",

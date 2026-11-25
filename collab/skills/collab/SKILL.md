@@ -108,9 +108,9 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 | 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
 | 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
 | 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
-| 跨项目通信 | 任意两个已注册对象可直接收发，不按 master/peer/CEO 级别限制，也不要求 master 转发。保留真实 sender、精确注册地址与回执。`master send` 只是兼容入口 |
+| 跨项目通信 | 仅在用户或当前任务合同明确指定目标项目与接收人时发送。无跨项目指令时，`Jenny` 指本项目的 Jenny。AppSDK CLI 或 SDK 错误不会自动把消费者项目的任务交给 `appsdk.Jenny`。只用目录核实已有授权目标，保留原发送和接收证据 |
 | 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
-| 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
+| 只读查消息 | `collab context` 只给未读数量。使用同一项目、同一会话的 `collab msg <真实消息ID>` 或 `collab inbox` 查看消息；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 
@@ -338,8 +338,10 @@ board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断�
 不补发漏掉周期。
 
 任务阻塞或执行者没有推进时，直属负责人[当轮先取证](references/board-idle-patrol.md#任务阻塞或停滞先取证)。
-有 Rex/tmux 绑定时运行 `collab worker snapshot <id> --capture --lines 80` 查看原 block/pane，
-即使状态显示 online 或 busy。按实际情况安排解阻、改计划或带恢复条件的等待。
+用 `collab who` 取目标 worker ID 和当前 transport。Rex 绑定只查原 Rex block，
+tmux 绑定只查原 tmux pane。需要实际终端证据时执行
+`collab worker snapshot <id> --capture --lines 80`，由 daemon 按当前绑定选适配器。
+身份恢复走原会话 `collab context`。
 
 没有可执行项时，peer 取消本人对应的 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
 持久保存；新任务不恢复旧任务取消，同稳定名字换会话保留取消。恢复使用明确入口。

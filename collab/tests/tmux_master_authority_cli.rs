@@ -811,8 +811,10 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
         fixture.current_state_for(&fixture.root, &app_scope_id)["tasks"]["authority-clear-task"],
         task_before
     );
+    assert!(context["inbox"].get("messages").is_none(), "{context}");
+    let inbox = fixture.run_ok(&["inbox"], Some(&pane));
     assert!(
-        context["inbox"]["messages"]
+        inbox["messages"]
             .as_array()
             .expect("context lists inbox messages")
             .iter()
@@ -873,8 +875,10 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
         fixture.current_state_for(&fixture.root, &app_scope_id)["tasks"]["authority-clear-task"],
         task_before
     );
+    assert!(restarted_context["inbox"].get("messages").is_none(), "{restarted_context}");
+    let inbox = fixture.run_ok(&["inbox"], Some(&pane));
     assert!(
-        restarted_context["inbox"]["messages"]
+        inbox["messages"]
             .as_array()
             .expect("restarted context lists inbox messages")
             .iter()

@@ -70,11 +70,8 @@ fn context_is_read_only_and_does_not_consume_notifications() {
     assert_eq!(context.data["authority"]["must_obey_master"], false);
     assert_eq!(context.data["authority"]["may_decline_master_invite"], true);
     assert_eq!(context.data["inbox"]["unread"], 1);
-    assert_eq!(context.data["inbox"]["messages"][0]["id"], message_id);
-    assert_eq!(
-        context.data["inbox"]["messages"][0]["body"],
-        "RESOURCE_RELEASED task=task"
-    );
+    assert!(context.data["inbox"].get("messages").is_none());
+    assert_eq!(server.state.lock().unwrap().msgs[&message_id].state, "pending");
     assert_eq!(context.data["identity"]["role"], "worker");
     let operations = context.data["operations"].as_array().expect("operations");
     assert!(

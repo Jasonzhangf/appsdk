@@ -5,6 +5,10 @@ description: "Collab peer/Jenny 身份、任务交付和协作。原 agent 会�
 
 # Collab
 
+项目目录只用于解析 canonical project。首次 `collab context` 可建立空
+`.agent-collab` 标记。daemon 的身份、路由、消息、任务和订阅由全局
+`~/.collab/` 管理，运行策略从 `~/.appsdk/config.toml` 读取。
+
 Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的 shell 中执行。
 收到唤醒或上下文压缩后同样适用。已验证绑定可直接复用。用户要求恢复、当前身份未知
 或明确绑定异常时，在实际项目运行 `collab context`。授权接替时只按恢复表补参数。

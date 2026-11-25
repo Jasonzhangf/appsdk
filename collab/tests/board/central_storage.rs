@@ -160,7 +160,33 @@ fn retired_local_subscription_history_does_not_override_current_central_runtime(
 #[test]
 fn central_storage_survives_restart_and_stays_under_private_host() {
     let mut fixture = AppFixture::new();
+    std::fs::remove_dir(fixture.project.join(".agent-collab")).unwrap();
+    let global_config = fixture.root.join("home/.appsdk/config.toml");
+    let repository_config = fixture.project.join(".appsdk/config.toml");
+    let global_policy = "[notifications]\nenabled = false\n";
+    let repository_policy = "[notifications]\nenabled = true\n";
+    for (path, policy) in [
+        (&global_config, global_policy),
+        (&repository_config, repository_policy),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, policy).unwrap();
+    }
+    fixture.restart_daemon();
+    let repo_entries = || {
+        std::fs::read_dir(&fixture.project)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let mut expected_entries = repo_entries();
     let first = fixture.run_public(&["context"], THREAD_A);
+    expected_entries.insert(".agent-collab".into());
+    assert_eq!(repo_entries(), expected_entries);
+    assert!(std::fs::read_dir(fixture.project.join(".agent-collab"))
+        .unwrap()
+        .next()
+        .is_none());
     let second = fixture.run_public(&["context"], THREAD_B);
     let first_id = first["identity"]["worker_id"].as_str().unwrap().to_owned();
     let second_id = second["identity"]["worker_id"].as_str().unwrap().to_owned();
@@ -191,7 +217,7 @@ fn central_storage_survives_restart_and_stays_under_private_host() {
         ],
         THREAD_A,
     );
-    fixture.run_public(
+    let sent = fixture.command_public(
         &[
             "sendmessage",
             "--to",
@@ -202,6 +228,13 @@ fn central_storage_survives_restart_and_stays_under_private_host() {
         ],
         THREAD_B,
     );
+    let notification = String::from_utf8_lossy(&sent.stderr);
+    assert!(!sent.status.success(), "{sent:?}");
+    assert!(
+        notification.contains("notifications are disabled"),
+        "{notification}"
+    );
+    assert!(notification.contains("\"durable\":true"), "{notification}");
     fixture.run_public(
         &[
             "notify",
@@ -231,6 +264,11 @@ fn central_storage_survives_restart_and_stays_under_private_host() {
             .join(".agent-collab/server/state.json")
             .exists(),
         "the project marker must not own current runtime state"
+    );
+    assert_eq!(repo_entries(), expected_entries);
+    assert_eq!(
+        std::fs::read_to_string(&repository_config).unwrap(),
+        repository_policy
     );
 
     fixture.restart_daemon();

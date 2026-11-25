@@ -19,9 +19,12 @@ fn collab_test_binary() -> PathBuf {
 fn official_rex_cli() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        return PathBuf::from(
-            "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
-        );
+        let helper = "Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
+        let stable = Path::new("/Applications/Rex.app").join(helper);
+        if stable.is_file() {
+            return stable;
+        }
+        return Path::new("/Applications/Rex Beta.app").join(helper);
     }
     #[cfg(target_os = "linux")]
     {

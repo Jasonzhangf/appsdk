@@ -604,6 +604,11 @@ fn workflow_template_update_preserves_active_task_pins() {
     let master_name = master["name"].as_str().expect("master name").to_owned();
     let peer_name = peer["name"].as_str().expect("peer name").to_owned();
     fixture.run_public(&["context", "--work-roles", "designer"], THREAD_B);
+    fixture.observe_native_agent(
+        peer["identity"]["worker_id"].as_str().unwrap(),
+        "online",
+        "busy",
+    );
     fixture.run_public(
         &[
             "board",

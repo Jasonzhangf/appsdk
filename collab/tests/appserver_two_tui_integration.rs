@@ -3217,7 +3217,7 @@ impl AppFixture {
             assert_eq!(restored["identity"]["worker_id"], worker);
         }
         let state = self.current_state();
-        let mut targets = std::collections::BTreeSet::new();
+        let mut targets = std::collections::BTreeSet::from([worker.to_owned()]);
         let mut observer_thread = THREAD_A.to_owned();
         for peers in state["agent_presence"].as_object().unwrap().values() {
             targets.extend(peers.as_object().unwrap().keys().cloned());

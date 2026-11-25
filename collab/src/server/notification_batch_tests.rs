@@ -926,6 +926,44 @@ fn queue_message_with_body(
     ]);
 }
 
+fn seed_board_invitation(
+    server: &Server,
+    task_id: &str,
+    message_id: &str,
+    recipient: &str,
+    binding_id: &str,
+    binding_generation: u64,
+    one_shot: bool,
+) {
+    let now = now_ms();
+    let mut details = crate::board::BoardTaskDetails::legacy(task_id, true);
+    details.invitation = Some(crate::board::BoardInvitation {
+        peer_id: recipient.into(),
+        binding_id: binding_id.into(),
+        binding_generation,
+        message_id: message_id.into(),
+        created_ms: now,
+        one_shot,
+        original_status: Some("pending".into()),
+        original_owner: Some("sender".into()),
+        inviter_name: None,
+        automatic_source: None,
+    });
+    server.commit(&[
+        Event::TaskCreated {
+            task: serde_json::from_value(serde_json::json!({
+                "id": task_id, "owner": "sender", "created_by": "sender",
+                "status": "invited", "created_ms": now, "updated_ms": now,
+            }))
+            .unwrap(),
+        },
+        Event::BoardDetailsChanged {
+            task_id: task_id.into(),
+            details,
+        },
+    ]);
+}
+
 #[test]
 fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
     let (mut server, root) = test_server();
@@ -1353,7 +1391,7 @@ fn dsh_known_non_submission_resumes_once_and_keeps_the_original_message() {
     let observed = calls.clone();
     Arc::get_mut(&mut server)
         .unwrap()
-        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _, _| {
+        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _context, _| {
         let mut calls = observed.lock().unwrap();
         calls.push(message_id.to_owned());
         if calls.len() == 1 {
@@ -1782,9 +1820,16 @@ fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
 
     let invitation = "current-invitation";
     let stale = "old-binding-invitation";
+    let refreshed_generation = "refreshed-generation-invitation";
     let ordinary = "unrelated-explicit";
     let unconfirmed = "unconfirmed-invitation";
-    for id in [invitation, stale, ordinary, unconfirmed] {
+    for id in [
+        invitation,
+        stale,
+        refreshed_generation,
+        ordinary,
+        unconfirmed,
+    ] {
         queue_message(&server, "a", &subscription, id, now);
         server.commit(&[Event::DeliveryMode {
             msg_id: id.into(),
@@ -1792,17 +1837,26 @@ fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
             source_thread_id: None,
         }]);
     }
-    for (task_id, message_id, binding_id) in [
-        ("current-task", invitation, "binding-Alice"),
-        ("stale-task", stale, "previous-binding"),
-        ("unconfirmed-task", unconfirmed, "binding-Alice"),
+    for (task_id, message_id, binding_id, one_shot, binding_generation) in [
+        ("current-task", invitation, "binding-Alice", false, 0),
+        ("stale-task", stale, "previous-binding", false, 0),
+        (
+            "refreshed-generation-task",
+            refreshed_generation,
+            "binding-Alice",
+            true,
+            0,
+        ),
+        ("unconfirmed-task", unconfirmed, "binding-Alice", false, 0),
     ] {
         let mut details = crate::board::BoardTaskDetails::legacy(task_id, true);
         details.invitation = Some(crate::board::BoardInvitation {
             peer_id: "a".into(),
             binding_id: binding_id.into(),
+            binding_generation,
             message_id: message_id.into(),
             created_ms: now,
+            one_shot,
             original_status: Some("pending".into()),
             original_owner: Some("sender".into()),
             inviter_name: None,
@@ -1843,12 +1897,649 @@ fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
     assert_eq!(state.msgs[invitation].wake_attempt_count, 1);
     assert_eq!(state.msgs[ordinary].wake_attempt_count, 0);
     assert_eq!(state.msgs[stale].wake_attempt_count, 0);
+    assert_eq!(state.msgs[refreshed_generation].wake_attempt_count, 0);
     assert_eq!(state.msgs[unconfirmed].wake_attempt_count, 1);
     assert!(!state
         .notification_delivery_accepted
         .contains_key(unconfirmed));
     assert_eq!(state.tasks["current-task"].status, "invited");
+    assert_eq!(state.tasks["refreshed-generation-task"].status, "invited");
     drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn immediate_one_shot_invitation_refuses_same_id_refreshed_generation() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let subscription = register_and_subscribe(&server, "recipient");
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    mark_agent_online(
+        &server,
+        "recipient",
+        transport.session_id.as_deref().unwrap(),
+    );
+    seed_current_rex_bindings(&server, &route, &[("Alice", "recipient", &transport)]);
+
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let old_slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "recipient")
+        .unwrap()
+        .unwrap();
+    let binding_id = old_slot
+        .active_binding()
+        .unwrap()
+        .binding
+        .binding_id
+        .as_str();
+    let old_generation = old_slot.generation();
+
+    let now = now_ms();
+    queue_message(
+        &server,
+        "recipient",
+        &subscription,
+        "refreshed-one-shot",
+        now,
+    );
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "refreshed-one-shot".into(),
+        mode: "immediate".into(),
+        source_thread_id: None,
+    }]);
+    seed_board_invitation(
+        &server,
+        "refreshed-one-shot-task",
+        "refreshed-one-shot",
+        "recipient",
+        binding_id,
+        old_generation,
+        true,
+    );
+
+    let mut refreshed = old_slot.active_binding().unwrap().clone();
+    refreshed.binding.runtime_id =
+        crate::identity::RuntimeId::new("runtime-Alice-refreshed").unwrap();
+    store
+        .commit(binding_store::ControlChange::Commit {
+            key: old_slot.identity_key.clone(),
+            value: refreshed,
+            expected_generation: Some(old_generation),
+        })
+        .unwrap();
+
+    let calls = install_capture_sink(&mut server);
+    let attempt =
+        attempt_notification_detailed_with_at(&server, "refreshed-one-shot", &subscription, now);
+    assert!(
+        matches!(attempt, NotificationAttempt::NotAttempted(_)),
+        "stale one-shot seed must not deliver: {attempt:?}"
+    );
+    assert!(calls.lock().unwrap().is_empty());
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["refreshed-one-shot"].state, "pending");
+    assert_eq!(state.msgs["refreshed-one-shot"].wake_attempt_count, 0);
+    assert!(!state
+        .notification_delivery_bindings
+        .contains_key("refreshed-one-shot"));
+    assert!(!state
+        .notification_delivery_accepted
+        .contains_key("refreshed-one-shot"));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn generic_batch_excludes_stale_one_shot_invitation_and_delivers_valid_seed() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let subscription = register_and_subscribe(&server, "recipient");
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    mark_agent_online(
+        &server,
+        "recipient",
+        transport.session_id.as_deref().unwrap(),
+    );
+    seed_current_rex_bindings(&server, &route, &[("Alice", "recipient", &transport)]);
+
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let old_slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "recipient")
+        .unwrap()
+        .unwrap();
+    let binding_id = old_slot
+        .active_binding()
+        .unwrap()
+        .binding
+        .binding_id
+        .as_str();
+    let old_generation = old_slot.generation();
+
+    let now = now_ms();
+    for id in ["valid-generic", "stale-one-shot"] {
+        queue_message(&server, "recipient", &subscription, id, now);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: id.into(),
+            mode: "immediate".into(),
+            source_thread_id: None,
+        }]);
+    }
+    seed_board_invitation(
+        &server,
+        "stale-one-shot-task",
+        "stale-one-shot",
+        "recipient",
+        binding_id,
+        old_generation,
+        true,
+    );
+
+    let mut refreshed = old_slot.active_binding().unwrap().clone();
+    refreshed.binding.runtime_id =
+        crate::identity::RuntimeId::new("runtime-Alice-refreshed").unwrap();
+    store
+        .commit(binding_store::ControlChange::Commit {
+            key: old_slot.identity_key.clone(),
+            value: refreshed,
+            expected_generation: Some(old_generation),
+        })
+        .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let observed = calls.clone();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = Arc::new(move |_, _, text, message_id, _, _| {
+        observed
+            .lock()
+            .unwrap()
+            .push((message_id.into(), text.into()));
+        Ok(json!({"accepted": true}))
+    });
+
+    let attempt =
+        attempt_notification_detailed_with_at(&server, "valid-generic", &subscription, now);
+    assert!(attempt.accepted(), "{attempt:?}");
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "one native submission: {calls:?}");
+    assert_eq!(calls[0].0, "valid-generic");
+    assert!(
+        !calls[0].1.contains("DETAIL-stale-one-shot"),
+        "stale invitation leaked into native payload: {}",
+        calls[0].1
+    );
+    drop(calls);
+
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["valid-generic"].wake_attempt_count, 1);
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("valid-generic"));
+    assert_eq!(state.msgs["stale-one-shot"].state, "pending");
+    assert_eq!(state.msgs["stale-one-shot"].wake_attempt_count, 0);
+    assert!(!state
+        .notification_delivery_bindings
+        .contains_key("stale-one-shot"));
+    assert!(!state
+        .notification_delivery_accepted
+        .contains_key("stale-one-shot"));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stable_name_handoff_preserves_periodic_and_ordinary_but_not_one_shot() {
+    assert_stable_name_handoff("handoff-ordinary");
+    assert_stable_name_handoff("handoff-periodic");
+}
+
+fn assert_stable_name_handoff(seed: &str) {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let old_subscription = register_and_subscribe(&server, "old");
+    let new_subscription = register_and_subscribe(&server, "new");
+    let old_transport = server.state.lock().unwrap().workers["old"]
+        .transport
+        .clone()
+        .unwrap();
+    let new_transport = server.state.lock().unwrap().workers["new"]
+        .transport
+        .clone()
+        .unwrap();
+    mark_agent_online(&server, "old", old_transport.session_id.as_deref().unwrap());
+    mark_agent_online(&server, "new", new_transport.session_id.as_deref().unwrap());
+    seed_current_rex_bindings(
+        &server,
+        &route,
+        &[
+            ("Alice", "old", &old_transport),
+            ("Bob", "new", &new_transport),
+        ],
+    );
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let old_slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "old")
+        .unwrap()
+        .unwrap();
+    let binding_id = old_slot
+        .active_binding()
+        .unwrap()
+        .binding
+        .binding_id
+        .as_str();
+    let binding_generation = old_slot.generation();
+
+    let now = now_ms();
+    queue_message(&server, "old", &old_subscription, "handoff-invitation", now);
+    queue_message(
+        &server,
+        "old",
+        &old_subscription,
+        "handoff-periodic",
+        now - i64::from(seed == "handoff-periodic"),
+    );
+    queue_message(&server, "old", &old_subscription, "handoff-ordinary", now);
+    let mode = if seed == "handoff-periodic" {
+        "explicit-notification"
+    } else {
+        "immediate"
+    };
+    for id in ["handoff-invitation", "handoff-periodic", "handoff-ordinary"] {
+        server.commit(&[
+            Event::MailboxNameAddressed {
+                message_id: id.into(),
+                address: super::name_mailbox::MailboxNameAddress {
+                    project_scope: route.project_scope_id.as_str().to_owned(),
+                    name: "Alice".into(),
+                },
+            },
+            Event::DeliveryMode {
+                msg_id: id.into(),
+                mode: mode.into(),
+                source_thread_id: None,
+            },
+        ]);
+    }
+    seed_board_invitation(
+        &server,
+        "handoff-task",
+        "handoff-invitation",
+        "old",
+        binding_id,
+        binding_generation,
+        true,
+    );
+    seed_board_invitation(
+        &server,
+        "handoff-periodic-task",
+        "handoff-periodic",
+        "old",
+        binding_id,
+        binding_generation,
+        false,
+    );
+    let previous = super::name_state::NameOccupancy {
+        name: "Alice".into(),
+        worker_id: "old".into(),
+        session_id: old_transport.session_id.unwrap(),
+        occupancy_revision: 1,
+        updated_ms: now,
+        pane_anchor: None,
+    };
+    server.commit(&[Event::NameResolutionCommitted {
+        project_scope: route.project_scope_id.as_str().to_owned(),
+        occupancy: previous.clone(),
+        assignments: Vec::new(),
+    }]);
+    let next = super::name_state::NameOccupancy {
+        worker_id: "new".into(),
+        session_id: new_transport.session_id.clone().unwrap(),
+        occupancy_revision: 2,
+        ..previous.clone()
+    };
+    let successor = rex_binding_value(&route, "Bob", "new", new_transport);
+    server.commit(&[Event::GlobalRuntimeBound {
+        binding: successor.binding.clone(),
+    }]);
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: old_slot.identity_key.clone(),
+            value: successor,
+            source_names: vec!["Bob".into()],
+            expected_generation: Some(binding_generation),
+        })
+        .unwrap();
+    let mut handoff = {
+        let state = server.state.lock().unwrap();
+        super::name_mailbox::handoff_events(
+            &state,
+            route.project_scope_id.as_str(),
+            &next,
+            &[],
+            Some(&previous),
+        )
+    };
+    assert_eq!(handoff.len(), 3);
+    handoff.push(Event::NameResolutionCommitted {
+        project_scope: route.project_scope_id.as_str().to_owned(),
+        occupancy: next,
+        assignments: Vec::new(),
+    });
+    server.commit_checked(&handoff).unwrap();
+
+    let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let observed = calls.clone();
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink =
+        Arc::new(move |transport, _, text, message_id, context, _| {
+            assert!(!context.guarded_one_shot);
+            assert_eq!(transport.session_id.as_deref(), Some("session-new"));
+            observed
+                .lock()
+                .unwrap()
+                .push((message_id.into(), text.into()));
+            Ok(json!({"accepted": true}))
+        });
+
+    let stale = attempt_notification_detailed_with_at(
+        &server,
+        "handoff-invitation",
+        &new_subscription,
+        now + 1,
+    );
+    assert!(
+        matches!(&stale, NotificationAttempt::NotAttempted(reason) if reason.contains("current binding")),
+        "{stale:?}"
+    );
+    assert!(calls.lock().unwrap().is_empty());
+
+    let attempt = attempt_notification_detailed_with_at(&server, seed, &new_subscription, now + 2);
+    assert!(attempt.accepted(), "{attempt:?}");
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "one native submission: {calls:?}");
+    assert_eq!(calls[0].0, seed);
+    assert!(
+        !calls[0].1.contains("DETAIL-handoff-invitation"),
+        "handed-off one-shot invitation leaked into native input: {}",
+        calls[0].1
+    );
+    assert!(
+        calls[0].1.contains("DETAIL-handoff-periodic"),
+        "periodic handoff did not reach native input: {}",
+        calls[0].1
+    );
+    drop(calls);
+
+    if seed == "handoff-periodic" {
+        let ordinary = attempt_notification_detailed_with_at(
+            &server,
+            "handoff-ordinary",
+            &new_subscription,
+            now + 3,
+        );
+        assert!(ordinary.accepted(), "{ordinary:?}");
+    }
+
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs["handoff-invitation"].to, "new");
+    assert_eq!(state.msgs["handoff-invitation"].state, "pending");
+    assert_eq!(state.msgs["handoff-invitation"].wake_attempt_count, 0);
+    assert!(!state
+        .notification_delivery_bindings
+        .contains_key("handoff-invitation"));
+    assert!(!state
+        .notification_delivery_accepted
+        .contains_key("handoff-invitation"));
+    assert_eq!(state.tasks["handoff-task"].owner, "sender");
+    assert_eq!(state.msgs["handoff-periodic"].to, "new");
+    assert_eq!(state.msgs["handoff-periodic"].wake_attempt_count, 1);
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("handoff-periodic"));
+    assert_eq!(state.msgs["handoff-ordinary"].to, "new");
+    assert_eq!(state.msgs["handoff-ordinary"].wake_attempt_count, 1);
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("handoff-ordinary"));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn appserver_one_shot_invitation_holds_publication_through_native_submission() {
+    assert_guarded_native_publication(|_| Ok(json!({"accepted": true})), true);
+}
+
+#[test]
+fn guarded_dsh_and_desktop_timeouts_release_publication() {
+    use crate::client::adapters::{desktop_bridge, dsh};
+
+    let bridge = desktop_bridge::tests::TrickleBridge::serve();
+    let transport = bridge.transport();
+    assert_guarded_native_publication(
+        move |text| desktop_bridge::guarded_send(&transport, text, Duration::from_millis(150)),
+        false,
+    );
+
+    let gateway = dsh::tests::TrickleWire::serve();
+    let endpoint = gateway.endpoint();
+    assert_guarded_native_publication(
+        move |text| {
+            dsh::guarded_notify(
+                &endpoint,
+                "rt-1",
+                "agent-1",
+                "followup",
+                "collab",
+                text,
+                "submission-one-shot",
+                Duration::from_millis(500),
+            )
+            .map_err(|error| error.to_string())
+        },
+        false,
+    );
+}
+
+fn assert_guarded_native_publication(
+    submit: impl Fn(&str) -> Result<Value, String> + Send + Sync + 'static,
+    expects_acceptance: bool,
+) {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let subscription = register_and_subscribe(&server, "recipient");
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    mark_agent_online(
+        &server,
+        "recipient",
+        transport.session_id.as_deref().unwrap(),
+    );
+    seed_current_rex_bindings(&server, &route, &[("Alice", "recipient", &transport)]);
+
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "recipient")
+        .unwrap()
+        .unwrap();
+    let binding_id = slot.active_binding().unwrap().binding.binding_id.as_str();
+    let generation = slot.generation();
+    let key = slot.identity_key.clone();
+    let mut refreshed = slot.active_binding().unwrap().clone();
+    refreshed.binding.runtime_id =
+        crate::identity::RuntimeId::new("runtime-recipient-refreshed").unwrap();
+
+    let now = now_ms();
+    queue_message(
+        &server,
+        "recipient",
+        &subscription,
+        "submission-one-shot",
+        now,
+    );
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "submission-one-shot".into(),
+        mode: "immediate".into(),
+        source_thread_id: None,
+    }]);
+    seed_board_invitation(
+        &server,
+        "submission-one-shot-task",
+        "submission-one-shot",
+        "recipient",
+        binding_id,
+        generation,
+        true,
+    );
+
+    let refresh_landed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let native_calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let guard = Arc::clone(&server.register_gate);
+    let binding_root = server.host_paths.state_root().to_path_buf();
+    let project = route.project_scope_id.clone();
+    let app = route.app_scope_id.clone();
+    let sink_binding_root = binding_root.clone();
+    let sink_key = key.clone();
+    let sink_refreshed = refreshed.clone();
+    let observed_refresh = refresh_landed.clone();
+    let observed_calls = native_calls.clone();
+    let (submission_started, wait_for_submission) = sync_channel(0);
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink = Arc::new(move |_, _, text, message_id, context, _| {
+        if message_id == "unrelated-publication-wake" {
+            assert!(!context.guarded_one_shot);
+            return Ok(json!({"accepted": true}));
+        }
+        assert!(context.guarded_one_shot);
+        observed_calls.lock().unwrap().push(message_id.into());
+        match guard.try_lock() {
+            Ok(_publication) => {
+                let store = binding_store::BindingControlStore::new(&sink_binding_root);
+                store
+                    .commit(binding_store::ControlChange::Commit {
+                        key: sink_key.clone(),
+                        value: sink_refreshed.clone(),
+                        expected_generation: Some(generation),
+                    })
+                    .unwrap();
+                observed_refresh.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                panic!("register gate poisoned: {error}")
+            }
+        }
+        assert_eq!(
+            binding_store::BindingControlStore::new(&sink_binding_root)
+                .load()
+                .unwrap()
+                .current_for_worker(&project, &app, "recipient")
+                .unwrap()
+                .unwrap()
+                .generation(),
+            generation
+        );
+        if !expects_acceptance {
+            submission_started.send(()).unwrap();
+        }
+        let outcome = submit(text);
+        assert!(matches!(
+            guard.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        outcome
+    });
+
+    let publish_refresh = || {
+        let _publication = server.register_gate.lock().unwrap();
+        store
+            .commit(binding_store::ControlChange::Commit {
+                key: key.clone(),
+                value: refreshed.clone(),
+                expected_generation: Some(generation),
+            })
+            .unwrap();
+    };
+    let attempt = thread::scope(|scope| {
+        let refresh = (!expects_acceptance).then(|| {
+            scope.spawn(move || {
+                wait_for_submission
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                publish_refresh();
+            })
+        });
+        let attempt = attempt_notification_detailed_with_at(
+            &server,
+            "submission-one-shot",
+            &subscription,
+            now,
+        );
+        if let Some(refresh) = refresh {
+            refresh.join().unwrap();
+        }
+        attempt
+    });
+    if expects_acceptance {
+        assert!(attempt.accepted(), "{attempt:?}");
+    } else {
+        assert!(
+            matches!(attempt, NotificationAttempt::Rejected(_)),
+            "{attempt:?}"
+        );
+        let state = server.state.lock().unwrap();
+        let failure = &state.notification_delivery_failures["submission-one-shot"];
+        assert!(!failure.retryable, "{failure:?}");
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key("submission-one-shot"));
+    }
+    assert_eq!(
+        native_calls.lock().unwrap().as_slice(),
+        ["submission-one-shot".to_owned()]
+    );
+    assert!(
+        !refresh_landed.load(std::sync::atomic::Ordering::SeqCst),
+        "same-ID publication changed before native input completed"
+    );
+    assert_eq!(
+        binding_store::BindingControlStore::new(&binding_root)
+            .load()
+            .unwrap()
+            .current_for_worker(&route.project_scope_id, &route.app_scope_id, "recipient")
+            .unwrap()
+            .unwrap()
+            .generation(),
+        generation + u64::from(!expects_acceptance)
+    );
+    if expects_acceptance {
+        publish_refresh();
+    }
+    if !expects_acceptance {
+        let ordinary = "unrelated-publication-wake";
+        queue_message(&server, "recipient", &subscription, ordinary, now + 1);
+        server.commit(&[Event::DeliveryMode {
+            msg_id: ordinary.into(),
+            mode: "immediate".into(),
+            source_thread_id: None,
+        }]);
+        let attempt =
+            attempt_notification_detailed_with_at(&server, ordinary, &subscription, now + 2);
+        assert!(attempt.accepted(), "{attempt:?}");
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2643,7 +3334,10 @@ fn rex_sink_uses_only_the_selected_rex_arm() {
         None,
         "body",
         "message-id",
-        false,
+        NotificationDispatchContext {
+            explicit: false,
+            guarded_one_shot: false,
+        },
         "immediate",
     )
     .unwrap_err();
@@ -2884,8 +3578,9 @@ fn explicit_notification_uses_sender_native_thread_for_delegation() {
         let observed = Arc::clone(&observed);
         Arc::get_mut(&mut server)
             .expect("unique test server")
-            .appserver_notification_sink = Arc::new(move |_, source, _, _, explicit, _mode| {
-            *observed.lock().unwrap() = Some((source.map(str::to_owned), explicit));
+            .appserver_notification_sink = Arc::new(move |_, source, _, _, context, _mode| {
+            assert!(!context.guarded_one_shot);
+            *observed.lock().unwrap() = Some((source.map(str::to_owned), context.explicit));
             Ok(json!({"accepted": true}))
         });
     }
@@ -2920,8 +3615,9 @@ fn automatic_notification_uses_immediate_without_sender_thread() {
         let observed = Arc::clone(&observed);
         Arc::get_mut(&mut server)
             .expect("unique test server")
-            .appserver_notification_sink = Arc::new(move |_, source, _, _, explicit, _mode| {
-            *observed.lock().unwrap() = Some((source.map(str::to_owned), explicit));
+            .appserver_notification_sink = Arc::new(move |_, source, _, _, context, _mode| {
+            assert!(!context.guarded_one_shot);
+            *observed.lock().unwrap() = Some((source.map(str::to_owned), context.explicit));
             Ok(json!({"accepted": true}))
         });
     }
@@ -3214,7 +3910,10 @@ fn default_appserver_sink_does_not_fallback_to_tmux() {
         None,
         "explicit",
         "message-explicit",
-        true,
+        NotificationDispatchContext {
+            explicit: true,
+            guarded_one_shot: false,
+        },
         "immediate",
     )
     .unwrap_err();
@@ -3367,8 +4066,11 @@ fn explicit_notice_is_immediate_and_isolated_from_automatic_batching() {
         let delivered = Arc::clone(&delivered);
         Arc::get_mut(&mut server)
             .expect("unique test server")
-            .appserver_notification_sink = Arc::new(move |_, _, text, _, explicit, _mode| {
-            delivered.lock().unwrap().push((explicit, text.to_string()));
+            .appserver_notification_sink = Arc::new(move |_, _, text, _, context, _mode| {
+            delivered
+                .lock()
+                .unwrap()
+                .push((context.explicit, text.to_string()));
             Ok(serde_json::json!({"accepted": true}))
         });
     }

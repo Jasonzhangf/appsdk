@@ -210,7 +210,9 @@ pub(super) fn scheduling_events(
                 details.revision,
                 Some((selected_name.clone(), reason)),
                 details.long_horizon.clone(),
+                false,
                 Some(source),
+                Default::default(),
                 now,
             )
             .map_err(|error| {

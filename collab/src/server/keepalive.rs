@@ -3786,8 +3786,10 @@ mod tests {
             Some(crate::board::BoardInvitation {
                 peer_id: "peer".into(),
                 binding_id: "binding-peer".into(),
+                binding_generation: 0,
                 message_id: "invite-message".into(),
                 created_ms: 1,
+                one_shot: false,
                 original_status: None,
                 original_owner: None,
                 inviter_name: None,

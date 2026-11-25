@@ -916,6 +916,467 @@
         std::fs::remove_file(socket).ok();
     }
 
+    #[test]
+    fn immediate_notify_deadline_survives_continuous_unrelated_frames() {
+        let _guard = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _timeout = AppServerTimeoutEnvGuard::set("250");
+        let socket = TestOwnedSocket::new("notify-unrelated-frames");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle", "activeFlags": []}
+                        }
+                    }
+                }),
+            );
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            let unrelated = encode_frame(
+                0x1,
+                br#"{"method":"thread/updated","params":{"threadId":"thread-1"}}"#,
+            );
+            let write_until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < write_until && stream.write_all(&unrelated).is_ok() {}
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let started = Instant::now();
+        let error = guarded_immediate_notify(
+            &selected_transport(&socket),
+            Some("sender-thread"),
+            "notify body",
+            "message-deadline",
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(error, AdapterError::Timeout { .. }),
+            "expected an uncertain notification timeout, got {error:?}"
+        );
+        assert_eq!(
+            error.notification_delivery_class(),
+            crate::client::adapters::NotificationDeliveryClass::Unknown
+        );
+        assert!(elapsed >= Duration::from_millis(200), "elapsed={elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "elapsed={elapsed:?}");
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn ordinary_notify_ignores_invalid_guarded_timeout_config() {
+        let _guard = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _timeout = AppServerTimeoutEnvGuard::set("not-a-duration");
+        let socket = TestOwnedSocket::new("notify-ordinary-invalid-config");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        listener.set_nonblocking(true).unwrap();
+        let server_socket = socket.to_path_buf();
+        let server = thread::spawn(move || {
+            let accept_until = Instant::now() + Duration::from_secs(1);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        handshake(&mut stream);
+                        initialize(&mut stream);
+                        prepare_recipient_thread(&mut stream, "ok");
+                        let read_id = next_request_id(&mut stream);
+                        respond(
+                            &mut stream,
+                            json!({
+                                "id": read_id,
+                                "result": {
+                                    "thread": {
+                                        "id": "thread-1",
+                                        "status": {"type": "idle", "activeFlags": []}
+                                    }
+                                }
+                            }),
+                        );
+                        let start = next_request(&mut stream);
+                        assert_eq!(start["method"], "turn/start");
+                        respond(
+                            &mut stream,
+                            json!({
+                                "id": start["id"],
+                                "result": {
+                                    "turn": {
+                                        "id": "turn-ordinary-invalid-config",
+                                        "status": "inProgress",
+                                        "items": []
+                                    }
+                                }
+                            }),
+                        );
+                        stream.shutdown(Shutdown::Both).ok();
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= accept_until {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept {}: {error}", server_socket.display()),
+                }
+            }
+        });
+
+        let result = immediate_notify(
+            &selected_transport(&socket),
+            None,
+            "notify body",
+            "message-ordinary-invalid-config",
+        );
+        let server_result = server.join();
+        assert!(
+            server_result.is_ok(),
+            "ordinary fixture failed: {server_result:?}"
+        );
+        assert!(
+            result.is_ok(),
+            "ordinary notification must ignore the guarded timeout config: {result:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_notify_allows_cumulative_io_beyond_the_guarded_deadline() {
+        let _guard = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _timeout = AppServerTimeoutEnvGuard::set("180");
+        let socket = TestOwnedSocket::new("notify-ordinary-cumulative");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(60));
+            handshake(&mut stream);
+            thread::sleep(Duration::from_millis(60));
+            initialize(&mut stream);
+            thread::sleep(Duration::from_millis(60));
+            prepare_recipient_thread(&mut stream, "ok");
+            thread::sleep(Duration::from_millis(60));
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle", "activeFlags": []}
+                        }
+                    }
+                }),
+            );
+            thread::sleep(Duration::from_millis(60));
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            let _ = try_respond(
+                &mut stream,
+                json!({
+                    "id": start["id"],
+                    "result": {
+                        "turn": {
+                            "id": "turn-ordinary-cumulative",
+                            "status": "inProgress",
+                            "items": []
+                        }
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let result = immediate_notify(
+            &selected_transport(&socket),
+            None,
+            "notify body",
+            "message-ordinary-cumulative",
+        );
+        let server_result = server.join();
+        assert!(
+            server_result.is_ok(),
+            "ordinary immediate fixture failed: {server_result:?}"
+        );
+        assert!(
+            result.is_ok(),
+            "ordinary notification changed from per-I/O timeout to a total deadline: result={result:?} server={server_result:?}"
+        );
+        let queued_socket = TestOwnedSocket::new("notify-ordinary-queued-cumulative");
+        let Some(queued_listener) = bind_test_socket(&queued_socket) else {
+            return;
+        };
+        let queued_server = thread::spawn(move || {
+            let (mut stream, _) = queued_listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(60));
+            handshake(&mut stream);
+            thread::sleep(Duration::from_millis(60));
+            initialize(&mut stream);
+            thread::sleep(Duration::from_millis(60));
+            prepare_recipient_thread(&mut stream, "ok");
+            thread::sleep(Duration::from_millis(60));
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle", "activeFlags": []}
+                        }
+                    }
+                }),
+            );
+            thread::sleep(Duration::from_millis(60));
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            let _ = try_respond(
+                &mut stream,
+                json!({
+                    "id": start["id"],
+                    "result": {
+                        "turn": {
+                            "id": "turn-ordinary-queued-cumulative",
+                            "status": "inProgress",
+                            "items": []
+                        }
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+        let queued_result = queued_notify(
+            &selected_transport(&queued_socket),
+            None,
+            "notify body",
+            "message-ordinary-queued-cumulative",
+        );
+        let queued_server_result = queued_server.join();
+        assert!(
+            queued_server_result.is_ok(),
+            "ordinary queued fixture failed: {queued_server_result:?}"
+        );
+        assert!(
+            queued_result.is_ok(),
+            "ordinary queued notification changed from per-I/O timeout to a total deadline: result={queued_result:?} server={queued_server_result:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_notify_uses_one_total_deadline_across_responsive_rpcs() {
+        let _guard = crate::scope::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _timeout = AppServerTimeoutEnvGuard::set("300");
+        let socket = TestOwnedSocket::new("notify-guarded-cumulative");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(20));
+            handshake(&mut stream);
+            thread::sleep(Duration::from_millis(20));
+            initialize(&mut stream);
+            thread::sleep(Duration::from_millis(20));
+            prepare_recipient_thread(&mut stream, "ok");
+            thread::sleep(Duration::from_millis(20));
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle", "activeFlags": []}
+                        }
+                    }
+                }),
+            );
+            thread::sleep(Duration::from_millis(250));
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            let _ = try_respond(
+                &mut stream,
+                json!({
+                    "id": start["id"],
+                    "result": {
+                        "turn": {
+                            "id": "turn-guarded-cumulative",
+                            "status": "inProgress",
+                            "items": []
+                        }
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let started = Instant::now();
+        let error = guarded_immediate_notify(
+            &selected_transport(&socket),
+            None,
+            "notify body",
+            "message-guarded-cumulative",
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        let server_result = server.join();
+        assert!(
+            server_result.is_ok(),
+            "guarded fixture failed: {server_result:?}"
+        );
+        assert!(
+            matches!(error, AdapterError::Timeout { .. }),
+            "guarded notification must use one total deadline: error={error:?} server={server_result:?}"
+        );
+        assert_eq!(
+            error.notification_delivery_class(),
+            crate::client::adapters::NotificationDeliveryClass::Unknown
+        );
+        assert!(elapsed >= Duration::from_millis(250), "elapsed={elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "elapsed={elapsed:?}");
+    }
+
+    #[test]
+    fn guarded_notify_control_frames_timeout_in_an_isolated_process() {
+        const CHILD_ENV: &str = "COLLAB_GUARDED_CONTROL_FRAME_CHILD";
+        const SOCKET_ENV: &str = "COLLAB_GUARDED_CONTROL_FRAME_SOCKET";
+        let socket = TestOwnedSocket::new("notify-control-frames");
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let socket =
+                TestOwnedSocket::from_path(PathBuf::from(std::env::var(SOCKET_ENV).unwrap()));
+            let Some(listener) = bind_test_socket(&socket) else {
+                return;
+            };
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                handshake(&mut stream);
+                initialize(&mut stream);
+                prepare_recipient_thread(&mut stream, "ok");
+                let read_id = next_request_id(&mut stream);
+                respond(
+                    &mut stream,
+                    json!({
+                        "id": read_id,
+                        "result": {
+                            "thread": {
+                                "id": "thread-1",
+                                "status": {"type": "idle", "activeFlags": []}
+                            }
+                        }
+                    }),
+                );
+                let start = next_request(&mut stream);
+                assert_eq!(start["method"], "turn/start");
+                let mut pong_reader = stream.try_clone().unwrap();
+                pong_reader
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let pong_drain = thread::spawn(move || {
+                    let mut buffer = [0_u8; 4096];
+                    while pong_reader.read(&mut buffer).is_ok_and(|read| read > 0) {}
+                });
+                let ping = encode_frame(0x9, b"guarded-control-frame");
+                let write_until = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < write_until && stream.write_all(&ping).is_ok() {}
+                stream.shutdown(Shutdown::Both).ok();
+                let _ = pong_drain.join();
+            });
+
+            let started = Instant::now();
+            let error = guarded_immediate_notify(
+                &selected_transport(&socket),
+                None,
+                "notify body",
+                "message-control-frames",
+            )
+            .unwrap_err();
+            let elapsed = started.elapsed();
+            server.join().unwrap();
+            assert!(
+                matches!(error, AdapterError::Timeout { .. }),
+                "expected control-frame timeout, got {error:?}"
+            );
+            assert_eq!(
+                error.notification_delivery_class(),
+                crate::client::adapters::NotificationDeliveryClass::Unknown
+            );
+            assert!(elapsed < Duration::from_secs(2), "elapsed={elapsed:?}");
+            return;
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+                "--exact",
+                "client::adapters::codex_app_server::tests::guarded_notify_control_frames_timeout_in_an_isolated_process",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+        command
+            .env(CHILD_ENV, "1")
+            .env(SOCKET_ENV, socket.to_path_buf())
+            .env(APPSERVER_TIMEOUT_MS_ENV, "250")
+            .env("RUST_MIN_STACK", "262144")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = TestChild(command.spawn().unwrap());
+        let wait_until = Instant::now() + Duration::from_secs(8);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= wait_until {
+                panic!("isolated control-frame test did not exit");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        child
+            .0
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        child
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated control-frame process failed: status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+
     fn selected_transport(socket: &Path) -> SelectedTransport {
         SelectedTransport {
             kind: TransportKind::AppServer,
@@ -939,6 +1400,71 @@
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    struct TestOwnedSocket(PathBuf);
+
+    impl TestOwnedSocket {
+        fn new(tag: &str) -> Self {
+            Self(temp_socket(tag))
+        }
+
+        fn from_path(path: PathBuf) -> Self {
+            Self(path)
+        }
+    }
+
+    impl std::ops::Deref for TestOwnedSocket {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for TestOwnedSocket {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.0).ok();
+        }
+    }
+
+    struct AppServerTimeoutEnvGuard(Option<std::ffi::OsString>);
+
+    impl AppServerTimeoutEnvGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os(APPSERVER_TIMEOUT_MS_ENV);
+            std::env::set_var(APPSERVER_TIMEOUT_MS_ENV, value);
+            Self(previous)
+        }
+    }
+
+    impl Drop for AppServerTimeoutEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var(APPSERVER_TIMEOUT_MS_ENV, value),
+                None => std::env::remove_var(APPSERVER_TIMEOUT_MS_ENV),
+            }
+        }
+    }
+
+    struct TestChild(std::process::Child);
+
+    impl TestChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.0.try_wait()
+        }
+    }
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            match self.0.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    self.0.kill().ok();
+                    self.0.wait().ok();
+                }
+            }
+        }
     }
 
     fn bind_test_socket(socket: &Path) -> Option<UnixListener> {
@@ -1023,9 +1549,13 @@
     }
 
     fn respond(stream: &mut UnixStream, value: Value) {
+        try_respond(stream, value).unwrap();
+    }
+
+    fn try_respond(stream: &mut UnixStream, value: Value) -> std::io::Result<()> {
         stream
             .write_all(&encode_frame(0x1, &serde_json::to_vec(&value).unwrap()))
-            .unwrap();
+            .map(|_| ())
     }
 
     fn read_client_frame(stream: &mut UnixStream) -> Vec<u8> {
@@ -1055,3 +1585,4 @@
         }
         Ok(payload)
     }
+    use std::process::{Command, Stdio};

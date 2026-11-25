@@ -1383,6 +1383,16 @@ fn board_describe_locked(
     {
         return Resp::err("withdraw the invitation before changing its contract");
     }
+    if details
+        .invitation
+        .as_ref()
+        .is_some_and(|invitation| invitation.one_shot)
+        && long_horizon != details.long_horizon
+    {
+        return Resp::err(
+            "BOARD_ONE_SHOT_NO_SCHEDULE_EDIT: withdraw the one-shot invitation before adding long-horizon content",
+        );
+    }
     if matches!(task.status.as_str(), "merged" | "closed" | "cancelled") {
         return Resp::err("WORK_CONTRACT_TERMINAL: create a follow-up task");
     }
@@ -1517,6 +1527,8 @@ fn dispatch_board_command_current_map(
             id,
             to,
             expected_revision,
+            one_shot,
+            long_horizon,
         } => board_invite_current_map(
             manager,
             server,
@@ -1525,6 +1537,8 @@ fn dispatch_board_command_current_map(
             id.clone(),
             to.clone(),
             *expected_revision,
+            *one_shot,
+            long_horizon.clone(),
         ),
         BoardCommand::Respond {
             id,
@@ -2037,7 +2051,18 @@ fn handle_board_command(
             id,
             to,
             expected_revision,
-        } => board_invite(server, actor, token, id, to, expected_revision),
+            one_shot,
+            long_horizon,
+        } => board_invite(
+            server,
+            actor,
+            token,
+            id,
+            to,
+            expected_revision,
+            one_shot,
+            long_horizon,
+        ),
         BoardCommand::Respond {
             id,
             accept,

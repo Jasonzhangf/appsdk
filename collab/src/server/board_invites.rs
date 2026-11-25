@@ -1,17 +1,26 @@
-fn current_board_invitation_for_message<'a>(
+use crate::board::LongHorizonArgs;
+
+fn board_invitation_for_message<'a>(
     state: &'a State,
     message: &Message,
 ) -> Option<&'a crate::board::BoardInvitation> {
     state.board_details.iter().find_map(|(task_id, details)| {
         let invitation = details.invitation.as_ref()?;
         (invitation.message_id == message.id
-            && invitation.peer_id == message.to
             && state
                 .tasks
                 .get(task_id)
                 .is_some_and(|task| !matches!(task.status.as_str(), "closed" | "cancelled")))
         .then_some(invitation)
     })
+}
+
+fn current_board_invitation_for_message<'a>(
+    state: &'a State,
+    message: &Message,
+) -> Option<&'a crate::board::BoardInvitation> {
+    board_invitation_for_message(state, message)
+        .filter(|invitation| invitation.peer_id == message.to)
 }
 
 fn board_unstarted_resources(state: &State, task: &TaskRec) -> Result<(), Resp> {
@@ -32,15 +41,88 @@ fn board_unstarted_resources(state: &State, task: &TaskRec) -> Result<(), Resp> 
     Ok(())
 }
 
-fn board_invite(
+pub(super) fn board_invite(
     server: &Server,
     actor: String,
     token: String,
     id: String,
     to: String,
     expected_revision: u64,
+    one_shot: bool,
+    long_horizon: LongHorizonArgs,
 ) -> Resp {
-    board_invite_with_selection(server, actor, token, id, to, expected_revision, None, None)
+    board_invite_with_selection(
+        server,
+        actor,
+        token,
+        id,
+        to,
+        expected_revision,
+        None,
+        None,
+        one_shot,
+        long_horizon,
+    )
+}
+
+fn invitation_mode_ok(
+    one_shot: bool,
+    args: &LongHorizonArgs,
+    long_horizon: Option<&crate::board::LongHorizonTaskSpec>,
+) -> Result<(), Resp> {
+    if one_shot && (args.has_values() || long_horizon.is_some()) {
+        return Err(Resp::err(
+            "BOARD_INVITATION_MODE_CONFLICT: --one-shot cannot include long-horizon content",
+        ));
+    }
+    if !one_shot && args.has_values() {
+        return Err(Resp::err(
+            "BOARD_INVITATION_INLINE_SCHEDULE_UNSUPPORTED: board invite requires the task's stored long-horizon declaration",
+        ));
+    }
+    Ok(())
+}
+
+fn one_shot_task_ok(state: &State, task: &TaskRec) -> Result<(), Resp> {
+    let mut invalid = task.status != "pending" || task.owner != task.created_by;
+    invalid |= state.task_assignment(&task.id).is_some();
+    if invalid {
+        return Err(Resp::err("BOARD_ONE_SHOT_TASK_REQUIRED"));
+    }
+    Ok(())
+}
+
+fn one_shot_target_present(state: &State, route: &RouteScope, worker: &str, session: &str) -> bool {
+    state
+        .agent_presence(route.project_scope_id.as_str(), worker)
+        .is_some_and(|presence| {
+            presence.presence == name_state::AgentPresence::Online && presence.session_id == session
+        })
+}
+
+fn one_shot_has_no_linked_schedule(state: &State, task_id: &str) -> Result<(), Resp> {
+    let subject = format!("goal:task:{task_id}");
+    if let Some(subscription) = state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| subscription.subject.as_deref() == Some(subject.as_str()))
+        .max_by_key(|subscription| subscription.created_ms)
+    {
+        return Err(Resp::err_data(
+            "BOARD_ONE_SHOT_LINKED_SCHEDULE_CONFLICT: an existing task goal subscription cannot be replaced or reused by a one-shot invitation",
+            json!({"task_id": task_id, "subscription_id": subscription.id}),
+        ));
+    }
+    Ok(())
+}
+
+fn with_invitation_kind(mut data: serde_json::Value, one_shot: bool) -> serde_json::Value {
+    if one_shot {
+        data.as_object_mut()
+            .expect("board invitation response is an object")
+            .insert("invitation_kind".into(), json!("one-shot"));
+    }
+    data
 }
 
 pub(super) struct PreparedBoardInvitation {
@@ -48,6 +130,7 @@ pub(super) struct PreparedBoardInvitation {
     pub(super) message_id: String,
     pub(super) subscription: Option<NotificationSubscription>,
     pub(super) method: &'static str,
+    pub(super) one_shot: bool,
 }
 
 pub(super) struct BoardManagerNotification {
@@ -143,17 +226,21 @@ pub(super) fn prepare_board_invitation_locked(
     expected_revision: u64,
     selection: Option<(String, String)>,
     long_horizon: Option<crate::board::LongHorizonTaskSpec>,
+    one_shot: bool,
     automatic_source: Option<crate::board::BoardInvitationSource>,
+    mode_args: LongHorizonArgs,
     now: i64,
 ) -> Result<PreparedBoardInvitation, Resp> {
     let mut details = match board_check_revision(state, id, expected_revision) {
         Ok(details) => details,
         Err(error) => return Err(error),
     };
+    invitation_mode_ok(one_shot, &mode_args, details.long_horizon.as_ref())?;
     details.long_horizon = long_horizon.or(details.long_horizon);
     details.long_horizon =
-        match crate::board::LongHorizonArgs::default().merge(details.long_horizon.as_ref()) {
+        match mode_args.merge(details.long_horizon.as_ref()) {
             Ok(Some(spec)) => Some(spec),
+            Ok(None) if one_shot => None,
             Ok(None) => {
                 return Err(Resp::err(
                     "BOARD_LONG_HORIZON_CONTENT_REQUIRED: fill the task long-horizon declaration before inviting",
@@ -169,6 +256,9 @@ pub(super) fn prepare_board_invitation_locked(
     let Some(mut task) = state.tasks.get(id).cloned() else {
         return Err(Resp::err("task not found"));
     };
+    if one_shot {
+        one_shot_task_ok(state, &task)?;
+    }
     if matches!(task.status.as_str(), "closed" | "cancelled") {
         return Err(Resp::err(
             "BOARD_TASK_CLOSED: closed tasks cannot be reassigned",
@@ -220,12 +310,29 @@ pub(super) fn prepare_board_invitation_locked(
             "BOARD_STALE_BINDING: recipient runtime binding is not current",
         ));
     }
+    if one_shot {
+        let Some(session) = current.binding.session_id.as_ref() else {
+            return Err(Resp::err("BOARD_TARGET_SESSION_REQUIRED"));
+        };
+        if !one_shot_target_present(state, route, &to, session.as_str()) {
+            return Err(Resp::err(
+                "BOARD_TARGET_NOT_ONLINE: one-shot invitation requires a current online target",
+            ));
+        }
+        one_shot_has_no_linked_schedule(state, id)?;
+    }
     let inviter_name = if let Some(actor) = initiator {
-        Some(control
-            .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
-            .map_err(Resp::err)?
-            .ok_or_else(|| Resp::err("BOARD_INVITER_NAME_REQUIRED: inviter has no current name"))?
-            .identity_key.name.clone())
+        Some(
+            control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, actor)
+                .map_err(Resp::err)?
+                .ok_or_else(|| {
+                    Resp::err("BOARD_INVITER_NAME_REQUIRED: inviter has no current name")
+                })?
+                .identity_key
+                .name
+                .clone(),
+        )
     } else {
         None
     };
@@ -233,8 +340,10 @@ pub(super) fn prepare_board_invitation_locked(
     details.invitation = Some(crate::board::BoardInvitation {
         peer_id: to.clone(),
         binding_id: binding.binding_id.as_str().into(),
+        binding_generation: slot.generation(),
         message_id: message_id.clone(),
         created_ms: now,
+        one_shot,
         original_status: Some(task.status.clone()),
         original_owner: Some(task.owner.clone()),
         inviter_name,
@@ -311,6 +420,7 @@ pub(super) fn prepare_board_invitation_locked(
         message_id,
         subscription,
         method,
+        one_shot,
     })
 }
 
@@ -419,6 +529,8 @@ fn board_invite_with_selection(
     expected_revision: u64,
     selection: Option<(String, String)>,
     long_horizon: Option<crate::board::LongHorizonTaskSpec>,
+    one_shot: bool,
+    long_horizon_args: LongHorizonArgs,
 ) -> Resp {
     // Resolve the name, binding and task revision under the same reducer lock.
     // Notification delivery happens after the durable invitation is committed.
@@ -449,7 +561,9 @@ fn board_invite_with_selection(
         expected_revision,
         selection,
         long_horizon,
+        one_shot,
         None,
+        long_horizon_args,
         now,
     ) {
         Ok(prepared) => prepared,
@@ -480,6 +594,7 @@ fn board_invite_with_selection(
         Err(error) => return Resp::err(error),
     };
     let data = json!({ "task": task, "msg_id": prepared.message_id, "consumed": false, "goal_schedule": task_goal_receipt(&state, &id) });
+    let data = with_invitation_kind(data, prepared.one_shot);
     drop(state);
     let attempt = match &prepared.subscription {
         Some(subscription) => attempt_notification_detailed_with_at(
@@ -507,6 +622,8 @@ fn board_invite_current_map(
     id: String,
     to: String,
     expected_revision: u64,
+    one_shot: bool,
+    long_horizon: LongHorizonArgs,
 ) -> Resp {
     let outcome = manager.with_current_state_response(server, |control, state| {
         board_current_map_actor_gate(state, &actor, &token, &id)?;
@@ -526,7 +643,9 @@ fn board_invite_current_map(
             expected_revision,
             None,
             None,
+            one_shot,
             None,
+            long_horizon,
             now,
         )?;
         server
@@ -555,6 +674,7 @@ fn board_invite_current_map(
             "consumed": false,
             "goal_schedule": task_goal_receipt(state, &id),
         });
+        let data = with_invitation_kind(data, prepared.one_shot);
         Ok(BoardManagerOutcome::Notify(BoardManagerNotification {
             data,
             message_id: prepared.message_id,
@@ -621,14 +741,10 @@ fn board_respond(
         return response;
     }
     let mut response = board_task_response(server, &state, &id, &actor);
-    if let (Some(notice), Some(object)) =
-        (prepared.notice.as_ref(), response.data.as_object_mut())
+    if let (Some(notice), Some(object)) = (prepared.notice.as_ref(), response.data.as_object_mut())
     {
         object.insert("notification".into(), json!("auto-board-change"));
-        object.insert(
-            "notification_message_id".into(),
-            json!(notice.message_id),
-        );
+        object.insert("notification_message_id".into(), json!(notice.message_id));
     }
     drop(state);
     deliver_board_auto_notice(server, &response);
@@ -671,10 +787,7 @@ fn board_respond_current_map(
             (prepared.notice.as_ref(), response.data.as_object_mut())
         {
             object.insert("notification".into(), json!("auto-board-change"));
-            object.insert(
-                "notification_message_id".into(),
-                json!(notice.message_id),
-            );
+            object.insert("notification_message_id".into(), json!(notice.message_id));
         }
         Ok(BoardManagerOutcome::Reply(response))
     });
@@ -815,6 +928,11 @@ fn prepare_board_response_locked(
             || binding.binding_id.as_str() != invite.binding_id
         {
             return Err(Resp::err("BOARD_STALE_INVITATION: recipient rebound; master must withdraw and issue a new invitation"));
+        }
+        if invite.one_shot && current_slot.generation() != invite.binding_generation {
+            return Err(Resp::err(
+                "BOARD_STALE_INVITATION: recipient binding generation changed; master must withdraw and issue a new invitation",
+            ));
         }
         if let Some(executor_name) = policy.executor_name.as_deref() {
             if current_slot.identity_key.name != executor_name {
@@ -957,14 +1075,23 @@ fn prepare_board_response_locked(
     let recipient = match invite.inviter_name.as_deref() {
         Some(name) => control.current_for_name(&route.project_scope_id, &route.app_scope_id, name),
         None => match current_master_worker_id(state, Some(route)) {
-            Some(master) => control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &master),
+            Some(master) => {
+                control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &master)
+            }
             None => Ok(None),
         },
     }
     .map_err(Resp::err)?
-    .filter(|slot| slot.active_binding().is_some_and(|current| current.binding.agent_id.as_str() != actor));
+    .filter(|slot| {
+        slot.active_binding()
+            .is_some_and(|current| current.binding.agent_id.as_str() != actor)
+    });
     let notice = if let Some(slot) = recipient {
-        let change = if accept { "invitation was accepted" } else { "invitation was declined" };
+        let change = if accept {
+            "invitation was accepted"
+        } else {
+            "invitation was declined"
+        };
         board_auto_notice_events_for_recipient(state, &task, actor, change, route, slot)?
     } else {
         BoardAutoNoticeEvents::default()
@@ -1051,14 +1178,9 @@ fn board_withdraw(
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
     let mut response = board_task_response(server, &state, &id, &actor);
-    if let (Some(notice), Some(object)) =
-        (notice.notice.as_ref(), response.data.as_object_mut())
-    {
+    if let (Some(notice), Some(object)) = (notice.notice.as_ref(), response.data.as_object_mut()) {
         object.insert("notification".into(), json!("auto-board-change"));
-        object.insert(
-            "notification_message_id".into(),
-            json!(notice.message_id),
-        );
+        object.insert("notification_message_id".into(), json!(notice.message_id));
     }
     drop(state);
     deliver_board_auto_notice(server, &response);

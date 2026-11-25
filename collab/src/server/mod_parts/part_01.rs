@@ -194,12 +194,19 @@ const RESTART_REPLAY_PENDING_MODE: &str = "restart-replay-pending";
 
 type AppServerCandidateCheck =
     dyn Fn(&crate::proto::AppServerCandidate) -> Result<SelectedTransport, String> + Send + Sync;
+const GUARDED_NATIVE_OPERATION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NotificationDispatchContext {
+    pub explicit: bool,
+    pub guarded_one_shot: bool,
+}
 type TmuxNotificationSink = dyn Fn(
         &SelectedTransport,
         Option<&str>,
         &str,
         &str,
-        bool,
+        NotificationDispatchContext,
         &str,
     ) -> Result<serde_json::Value, String>
     + Send
@@ -217,11 +224,11 @@ fn default_appserver_candidate_check() -> Arc<AppServerCandidateCheck> {
 
 fn default_tmux_notification_sink() -> Arc<TmuxNotificationSink> {
     Arc::new(
-        |transport, source_thread_id, body, message_id, explicit, mode| {
+        |transport, source_thread_id, body, message_id, context, mode| {
             if transport.kind != TransportKind::Tmux {
                 return Err("TRANSPORT_UNSUPPORTED: Collab notifications require tmux".into());
             }
-            let _ = (source_thread_id, explicit);
+            let _ = (source_thread_id, context);
             match mode {
                 "immediate" | "explicit-notification" => {}
                 "queued" => {
@@ -264,12 +271,22 @@ pub(crate) fn appserver_client_message_id(message_id: &str) -> String {
 pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink> {
     let tmux = default_tmux_notification_sink();
     Arc::new(
-        move |transport, source_thread_id, body, message_id, explicit, mode| {
+        move |transport, source_thread_id, body, message_id, context, mode| {
             // Exhaustive on purpose. This used to be `if kind != AppServer`,
             // which sent any new kind into the tmux sink and failed with
             // "Collab notifications require tmux".
             match transport.kind {
-                TransportKind::DesktopBridge => crate::client::adapters::desktop_bridge::send(transport, body),
+                TransportKind::DesktopBridge => {
+                    if context.guarded_one_shot {
+                        crate::client::adapters::desktop_bridge::guarded_send(
+                            transport,
+                            body,
+                            GUARDED_NATIVE_OPERATION_TIMEOUT,
+                        )
+                    } else {
+                        crate::client::adapters::desktop_bridge::send(transport, body)
+                    }
+                }
                 TransportKind::AppServer => {
                     // `message_id` is the mailbox id. An App Server client id
                     // shares its namespace with the user's own messages, so a
@@ -278,31 +295,44 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                     // the mailbox id.
                     let client_message_id = appserver_client_message_id(message_id);
                     if mode == "queued" {
-                        crate::client::adapters::codex_app_server::queued_notify(
-                            transport,
-                            source_thread_id,
-                            body,
-                            &client_message_id,
-                        )
+                        if context.guarded_one_shot {
+                            crate::client::adapters::codex_app_server::guarded_queued_notify(
+                                transport,
+                                source_thread_id,
+                                body,
+                                &client_message_id,
+                            )
+                        } else {
+                            crate::client::adapters::codex_app_server::queued_notify(
+                                transport,
+                                source_thread_id,
+                                body,
+                                &client_message_id,
+                            )
+                        }
                         .map_err(|error| error.to_string())
                     } else {
-                        crate::client::adapters::codex_app_server::immediate_notify(
-                            transport,
-                            source_thread_id,
-                            body,
-                            &client_message_id,
-                        )
+                        if context.guarded_one_shot {
+                            crate::client::adapters::codex_app_server::guarded_immediate_notify(
+                                transport,
+                                source_thread_id,
+                                body,
+                                &client_message_id,
+                            )
+                        } else {
+                            crate::client::adapters::codex_app_server::immediate_notify(
+                                transport,
+                                source_thread_id,
+                                body,
+                                &client_message_id,
+                            )
+                        }
                         .map_err(|error| error.to_string())
                     }
                 }
-                TransportKind::Tmux => tmux(
-                    transport,
-                    source_thread_id,
-                    body,
-                    message_id,
-                    explicit,
-                    mode,
-                ),
+                TransportKind::Tmux => {
+                    tmux(transport, source_thread_id, body, message_id, context, mode)
+                }
                 TransportKind::Dsh => {
                     let endpoint = transport.endpoint.as_deref().ok_or_else(|| {
                         "DSH_ENDPOINT_REJECTED: selected dsh transport has no control socket"
@@ -316,20 +346,33 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                         "DSH_ENDPOINT_REJECTED: selected dsh transport has no agent id".to_owned()
                     })?;
                     let (gateway_mode, internal_marker) = dsh_wake_mode(mode, message_id)?;
-                    if !crate::client::adapters::dsh::activity(endpoint, runtime_id, agent_id)
-                        .is_ok_and(|activity| activity.live)
-                    {
-                        return Err(RECIPIENT_NOT_ONLINE.into());
+                    let mut receipt = if context.guarded_one_shot {
+                        crate::client::adapters::dsh::guarded_notify(
+                            endpoint,
+                            runtime_id,
+                            agent_id,
+                            gateway_mode,
+                            source_thread_id.unwrap_or("collab"),
+                            body,
+                            message_id,
+                            GUARDED_NATIVE_OPERATION_TIMEOUT,
+                        )
+                    } else {
+                        if !crate::client::adapters::dsh::activity(endpoint, runtime_id, agent_id)
+                            .is_ok_and(|activity| activity.live)
+                        {
+                            return Err(RECIPIENT_NOT_ONLINE.into());
+                        }
+                        crate::client::adapters::dsh::notify(
+                            endpoint,
+                            runtime_id,
+                            agent_id,
+                            gateway_mode,
+                            source_thread_id.unwrap_or("collab"),
+                            body,
+                            message_id,
+                        )
                     }
-                    let mut receipt = crate::client::adapters::dsh::notify(
-                        endpoint,
-                        runtime_id,
-                        agent_id,
-                        gateway_mode,
-                        source_thread_id.unwrap_or("collab"),
-                        body,
-                        message_id,
-                    )
                     .map_err(|error| error.to_string())?;
                     if let Some(object) = receipt.as_object_mut() {
                         object.insert(

@@ -3,9 +3,11 @@ use crate::identity::NativeThreadId;
 use crate::proto::{AppServerCandidate, IdentityFacts, SelectedTransport, TransportKind};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const APPSERVER_SOCKET_ENV: &str = "COLLAB_APPSERVER_SOCKET";
 pub const APPSERVER_NAMESPACE_ENV: &str = "COLLAB_APPSERVER_NAMESPACE";
@@ -70,6 +72,31 @@ fn selected_namespace(transport: &SelectedTransport) -> Result<&str, AdapterErro
             detail: "selected App Server transport has no supported namespace".into(),
         })?;
     Ok(namespace)
+}
+
+fn appserver_timeout_from_env() -> Result<Duration, AdapterError> {
+    let timeout = match std::env::var(APPSERVER_TIMEOUT_MS_ENV) {
+        Ok(value) => Duration::from_millis(value.trim().parse::<u64>().map_err(|error| {
+            AdapterError::Unknown {
+                operation: "detect",
+                detail: format!("{APPSERVER_TIMEOUT_MS_ENV} must be a positive integer: {error}"),
+            }
+        })?),
+        Err(std::env::VarError::NotPresent) => Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        Err(error) => {
+            return Err(AdapterError::Unknown {
+                operation: "detect",
+                detail: format!("cannot read {APPSERVER_TIMEOUT_MS_ENV}: {error}"),
+            })
+        }
+    };
+    if timeout.is_zero() {
+        return Err(AdapterError::Unknown {
+            operation: "detect",
+            detail: format!("{APPSERVER_TIMEOUT_MS_ENV} must be greater than zero"),
+        });
+    }
+    Ok(timeout)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,29 +182,7 @@ impl LiveAppServer {
         if !socket_path.is_absolute() || !socket_path.exists() {
             return Ok(None);
         }
-        let timeout = match std::env::var(APPSERVER_TIMEOUT_MS_ENV) {
-            Ok(value) => Duration::from_millis(value.trim().parse::<u64>().map_err(|error| {
-                AdapterError::Unknown {
-                    operation: "detect",
-                    detail: format!(
-                        "{APPSERVER_TIMEOUT_MS_ENV} must be a positive integer: {error}"
-                    ),
-                }
-            })?),
-            Err(std::env::VarError::NotPresent) => Duration::from_millis(DEFAULT_TIMEOUT_MS),
-            Err(error) => {
-                return Err(AdapterError::Unknown {
-                    operation: "detect",
-                    detail: format!("cannot read {APPSERVER_TIMEOUT_MS_ENV}: {error}"),
-                })
-            }
-        };
-        if timeout.is_zero() {
-            return Err(AdapterError::Unknown {
-                operation: "detect",
-                detail: format!("{APPSERVER_TIMEOUT_MS_ENV} must be greater than zero"),
-            });
-        }
+        let timeout = appserver_timeout_from_env()?;
         let mut client = Client::connect(&socket_path, timeout)?;
         client.initialize()?;
         let response = client.call("thread/read", json!({"threadId": thread_id.as_str()}))?;
@@ -604,6 +609,37 @@ pub fn immediate_notify(
     body: &str,
     client_user_message_id: &str,
 ) -> Result<Value, AdapterError> {
+    immediate_notify_with_policy(
+        transport,
+        source_thread_id,
+        body,
+        client_user_message_id,
+        false,
+    )
+}
+
+pub fn guarded_immediate_notify(
+    transport: &SelectedTransport,
+    source_thread_id: Option<&str>,
+    body: &str,
+    client_user_message_id: &str,
+) -> Result<Value, AdapterError> {
+    immediate_notify_with_policy(
+        transport,
+        source_thread_id,
+        body,
+        client_user_message_id,
+        true,
+    )
+}
+
+fn immediate_notify_with_policy(
+    transport: &SelectedTransport,
+    source_thread_id: Option<&str>,
+    body: &str,
+    client_user_message_id: &str,
+    guarded: bool,
+) -> Result<Value, AdapterError> {
     if transport.kind != TransportKind::AppServer {
         return Err(AdapterError::CapabilityUnavailable {
             endpoint: EndpointKind::Tui,
@@ -629,7 +665,11 @@ pub fn immediate_notify(
             detail: format!("selected App Server thread_id is invalid: {error}"),
         }
     })?;
-    let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
+    let mut client = if guarded {
+        Client::connect_until(&socket_path, appserver_timeout_from_env()?, "notification")?
+    } else {
+        Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?
+    };
     client.initialize()?;
     // Thread residency is per-connection: a thread created or resumed on one
     // WebSocket is not loaded for a different connection, and `turn/start`
@@ -644,13 +684,9 @@ pub fn immediate_notify(
             return Err(AdapterError::RouteUnavailable { detail })
         }
         Err(AdapterError::Unknown { operation, detail })
-            if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
-        {
-        }
+            if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) => {}
         Err(AdapterError::Unknown { operation, detail })
-            if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) =>
-        {
-        }
+            if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) => {}
         // `thread/resume` is not universal across App Server builds; a method
         // that does not exist leaves the existing status-based path intact.
         Err(AdapterError::CapabilityUnavailable { .. }) => {}
@@ -726,6 +762,37 @@ pub fn queued_notify(
     body: &str,
     client_user_message_id: &str,
 ) -> Result<Value, AdapterError> {
+    queued_notify_with_policy(
+        transport,
+        source_thread_id,
+        body,
+        client_user_message_id,
+        false,
+    )
+}
+
+pub fn guarded_queued_notify(
+    transport: &SelectedTransport,
+    source_thread_id: Option<&str>,
+    body: &str,
+    client_user_message_id: &str,
+) -> Result<Value, AdapterError> {
+    queued_notify_with_policy(
+        transport,
+        source_thread_id,
+        body,
+        client_user_message_id,
+        true,
+    )
+}
+
+fn queued_notify_with_policy(
+    transport: &SelectedTransport,
+    source_thread_id: Option<&str>,
+    body: &str,
+    client_user_message_id: &str,
+    guarded: bool,
+) -> Result<Value, AdapterError> {
     if transport.kind != TransportKind::AppServer {
         return Err(AdapterError::CapabilityUnavailable {
             endpoint: EndpointKind::Tui,
@@ -751,7 +818,11 @@ pub fn queued_notify(
             detail: format!("selected App Server thread_id is invalid: {error}"),
         }
     })?;
-    let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
+    let mut client = if guarded {
+        Client::connect_until(&socket_path, appserver_timeout_from_env()?, "notification")?
+    } else {
+        Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?
+    };
     client.initialize()?;
     match client.call("thread/resume", json!({"threadId": thread_id.as_str()})) {
         Ok(_) => {}
@@ -761,13 +832,9 @@ pub fn queued_notify(
             return Err(AdapterError::RouteUnavailable { detail })
         }
         Err(AdapterError::Unknown { operation, detail })
-            if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
-        {
-        }
+            if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) => {}
         Err(AdapterError::Unknown { operation, detail })
-            if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) =>
-        {
-        }
+            if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) => {}
         Err(AdapterError::CapabilityUnavailable { .. }) => {}
         Err(error) => return Err(error),
     };

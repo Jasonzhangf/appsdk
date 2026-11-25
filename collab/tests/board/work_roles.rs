@@ -3570,6 +3570,94 @@ fn running_binding_handoff_reclaims_slot_after_transport_refresh() {
 }
 
 #[test]
+fn stale_claim_with_retired_worker_id_reclaims_for_current_stable_owner() {
+    let mut fixture = AppFixture::new();
+    fixture.run_public(&["context"], THREAD_A);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["context"], THREAD_C);
+    fixture.run_public(
+        &["master", "promote", "--approval", "stale carrier fixture"],
+        THREAD_A,
+    );
+
+    let id = "stale-claim-retired-worker";
+    let published = publish(&fixture, id, &[]);
+    let slot = published["ticket"]["phases"][0]["slot"].as_str().unwrap();
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let worker = slot_worker_id(&board, slot);
+    let owner_thread = ticket_thread(&fixture, &worker);
+    fixture.run_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        owner_thread,
+    );
+
+    let old_generation = slot_generation(&fixture, &worker);
+    set_slot_generation(&fixture, &worker, old_generation + 2);
+    // Model a persisted claim and worker ID left behind by an older binding.
+    // The task assignment keeps the current carrier's stable name and session.
+    fixture.update_current_state(|state| {
+        state["tasks"][id]["owner"] = json!("retired-worker");
+    });
+    let other_thread = [THREAD_B, THREAD_C]
+        .into_iter()
+        .find(|thread| *thread != owner_thread)
+        .unwrap();
+    let claim = ["board", "claim", id, "--expected-revision", "2"];
+    let refusal = rejected(&fixture, &claim, other_thread);
+    assert!(refusal.contains("BOARD_TASK_NOT_PENDING"), "{refusal}");
+
+    let recovered = fixture.run_public(&claim, owner_thread);
+    assert_eq!(recovered["task"]["revision"], 3);
+    assert_eq!(recovered["task"]["execute"]["attempt_generation"], 2);
+    let state = fixture.current_state();
+    assert_eq!(state["tasks"][id]["owner"], worker);
+    let phases: Vec<_> = state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == id)
+        .collect();
+    assert_eq!(phases.len(), 2, "{phases:?}");
+    assert_eq!(phases[0]["status"], "revoked");
+    assert_eq!(phases[0]["attempt_generation"], 1);
+    assert_eq!(phases[1]["status"], "claimed");
+    assert_eq!(phases[1]["binding_generation"], old_generation + 2);
+    let duplicate = rejected(
+        &fixture,
+        &["board", "claim", id, "--expected-revision", "3"],
+        owner_thread,
+    );
+    assert!(duplicate.contains("BOARD_TASK_NOT_PENDING"), "{duplicate}");
+
+    fixture.run_public(
+        &[
+            "board",
+            "start",
+            id,
+            "--expected-revision",
+            "3",
+            "--attempt",
+            "2",
+        ],
+        owner_thread,
+    );
+    let delivered = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            id,
+            "--evidence",
+            "recovered claim",
+            "--attempt",
+            "2",
+            "--no-candidate",
+        ],
+        owner_thread,
+    );
+    assert_eq!(delivered["status"], "delivered");
+}
+
+#[test]
 fn pre_recovery_stale_running_attempt_reclaims_from_public_claim() {
     let fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);

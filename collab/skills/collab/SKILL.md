@@ -9,8 +9,23 @@ Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的
 收到唤醒或上下文压缩后同样适用。已验证绑定可直接复用。用户要求恢复、当前身份未知
 或明确绑定异常时，在实际项目运行 `collab context`。授权接替时只按恢复表补参数。
 禁止用 Computer Use、CUA 或 GUI 找工具、打开终端、读日志或代跑 CLI。
+`cua_repl` 的 JavaScript/Node 运行时同样属于 CUA；即使它可以调用 `child_process`，
+也不得用来执行 shell、`collab`、`rex`、文件检查、日志读取或其他 CLI 替代动作。
 原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿已有获授权通道向派单 architect
 或 Jenny 报告缺失入口及恢复条件，继续能独立完成的工作。
+
+压缩、恢复和工具参数解析失败时，继续使用当前宿主的原生 shell。也不要调用
+`cua_repl` 的 `getState`、`reset`、截图或 AX 观察。若宿主提供
+`functions.exec`，给它传原始 JavaScript 源码。以下示例只在当前原项目收到未消费的
+`COLLAB_NOTIFY` 时执行：
+
+```javascript
+const result = await tools.exec_command({cmd: "collab recv --timeout 0", max_output_tokens: 1200});
+text(result.output);
+```
+
+参数解析失败时按该工具的声明修正参数并重试。如果原生入口仍失败，沿任务合同报告
+原错、已试入口、受影响步骤和恢复条件。
 
 本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
 不整篇加载；手册与本入口属于同一个 Skill。
@@ -192,14 +207,15 @@ Architect 按计划及真实行为证据验收，返工也由其交回
 只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
 
 已注册 peer 在执行派单时先查原合同、证据和现有授权，自行处理范围内的常规决定。
-仍需答复时，技术、设计和验收问题发给派单 architect。Jenny 直接派单、没有派单
-architect，或问题需要项目授权和跨任务协调时，发给本项目 Jenny。接收者取当前任务
-合同与 Board，用 `collab list` 核对项目限定地址。以
+仍需答复时，技术、设计和验收问题发给派单 architect。代码问题可直接发给合同中的
+开发 owner。范围、优先级、资源、权限和跨任务协调发给本项目 Jenny。没有派单
+architect 或无法确认技术 owner 时，先发 Jenny。接收者取当前任务合同与 Board，用
+`collab list` 核对项目限定地址。以
 `collab send --to '<project.name>' --subject 'blocker:<task-id>' --content '<原错、影响、尝试、所需决定、恢复条件>'`
 发给该负责人，只暂停依赖答案的步骤。内部任务不调用
-`request_user_input`、`AskUserQuestion` 或同类用户询问工具。必须由用户决定时，
-由派单 architect 转 Jenny，再由获授权的负责人按既有链路向用户汇总。用户明确指定
-peer 直接沟通时按指定范围执行。
+`request_user_input`、`request_user_input_async`、`AskUserQuestion` 或同类用户询问工具。
+必须由用户决定时，由获授权的负责人沿既有链路汇总。用户明确指定 peer 直接沟通时，
+按指定范围执行。
 
 任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
 已有可用的独立 reviewer 优先承接。没有可用 reviewer 时，按 [Review 合同](../codex-orchestrator/references/review.md)

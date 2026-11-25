@@ -2,6 +2,39 @@ include!("support/context_operation_fixture.rs");
 
 use std::fs;
 
+#[test]
+fn notify_methods_advertises_board_idle_without_generic_scheduling() {
+    let (fixture, host, _) = lifecycle_native_fixture("notify-methods");
+    let run = |args: &[&str]| {
+        fixture
+            .configured_command(args, None)
+            .env(
+                "CODEX_APP_SERVER_SOCKET",
+                host.endpoint().strip_prefix("unix://").unwrap(),
+            )
+            .env("CODEX_SESSION_ID", "lifecycle-session")
+            .env("CODEX_THREAD_ID", "lifecycle-thread")
+            .output()
+            .unwrap()
+    };
+    let methods = run(&["notify", "methods"]);
+    assert!(methods.status.success(), "{methods:?}");
+    let methods: Value = serde_json::from_slice(&methods.stdout).unwrap();
+    assert_eq!(
+        methods["events"],
+        json!(["direct-message", "resource-released", "deadline", "master-idle", "board-idle"]),
+        "{methods}"
+    );
+
+    let rejected = run(&["notify", "subscribe", "--event", "board-idle", "--every-ms", "900000"]);
+    assert!(!rejected.status.success(), "{rejected:?}");
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("board-idle rearm does not accept subject or schedule options"),
+        "{rejected:?}"
+    );
+}
+
 fn lifecycle_identity(fixture: &Fixture, snapshot: &Value) -> Value {
     let id = snapshot["result"]["snapshot"]["identity"]["worker_id"]
         .as_str()

@@ -281,7 +281,6 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
                 &slot_name,
                 session.as_str(),
                 &id,
-                &actor,
                 binding_generation,
             )
         }) else {

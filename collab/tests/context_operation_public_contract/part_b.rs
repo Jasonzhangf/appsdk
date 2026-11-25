@@ -1829,8 +1829,8 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
     let saved = fs::read_to_string(&state_path).unwrap();
     assert!(!saved.contains("superseded-board-description"));
     assert!(
-        saved.contains("superseded-board-progress"),
-        "the prior board update must remain in its unread automatic notice until retention"
+        !saved.contains("superseded-board-progress"),
+        "ordinary progress belongs in the current Board view without an automatic notice"
     );
     drop(native);
 

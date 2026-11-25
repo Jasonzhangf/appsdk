@@ -578,10 +578,10 @@ fn master_authority_tmux_unknown_holder_keeps_control_and_projection() {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    assert!(ordinary_role_task.contains("Execute your accepted task as an ordinary peer"));
-    assert!(ordinary_responsibilities.contains("orchestrate straightforward work"));
-    assert!(ordinary_responsibilities.contains("route design to that architect"));
-    assert!(ordinary_responsibilities.contains("verify the result and retain ownership"));
+    assert!(ordinary_role_task.contains("Own and complete your assigned independent Collab task."));
+    assert!(ordinary_responsibilities.contains("independent review within your own task"));
+    assert!(ordinary_responsibilities.contains("only jenny dispatches collab tasks"));
+    assert!(ordinary_responsibilities.contains("no dispatch or review authority over other tasks"));
     assert_eq!(registered["role_brief"]["goal_level"], "delegated_goal");
     assert_eq!(registered["identity"]["role"], "worker");
     assert!(!ordinary_responsibilities.contains("saturate every live present peer first"));
@@ -919,14 +919,10 @@ fn master_authority_clear_removes_grant_and_preserves_business_state() {
     );
     assert!(
         !rejected.status.success(),
-        "a cleared holder without the architect role must lose invitation authority"
+        "a cleared holder must lose invitation authority"
     );
     let error = String::from_utf8_lossy(&rejected.stderr);
-    assert!(
-        error.contains("BOARD_ARCHITECT_SCOPE_REQUIRED")
-            && error.contains("does not hold the architect role"),
-        "{error}"
-    );
+    assert!(error.contains("BOARD_MASTER_REQUIRED"), "{error}");
 }
 
 /// B04: a blank approval is not authorization. Both promote and clear must

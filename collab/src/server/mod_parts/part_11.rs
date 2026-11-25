@@ -355,7 +355,7 @@ fn dispatch_with_route_context_bound(
         Req::NotificationMethods => Resp::data(json!({
             "methods": ["appserver"],
             "priority": ["appserver"],
-            "events": NOTIFICATION_EVENTS,
+            "events": NOTIFICATION_EVENTS.into_iter().chain(["board-idle"]).collect::<Vec<_>>(),
             "one_shot": false,
             "max_lifetime_attempts": MAX_WAKE_ATTEMPTS,
             "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,

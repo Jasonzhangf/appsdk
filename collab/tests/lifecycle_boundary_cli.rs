@@ -832,6 +832,9 @@ fn activation_public_up(fail_bootstrap: bool) {
         assert_eq!(code, 0, "{text}");
         assert!(text.contains("\"supervised\": true"), "{text}");
         fixture.wait_until_alive();
+        let running = ping(&fixture.socket()).expect("query the supervised daemon");
+        let version = running["daemon_version"].as_str().expect("running daemon version");
+        assert!(text.contains(&format!("\"daemon_version\": \"{version}\"")), "{text}");
     }
     let calls = std::fs::read_to_string(log).unwrap();
     assert!(!calls.contains("unexpected-tmux"), "{calls}");
@@ -1937,6 +1940,9 @@ fn up_keeps_a_healthy_daemon() {
     let text = output_text(&output);
     assert!(output.status.success(), "{text}");
     assert!(text.contains("\"replaced\": null"), "{text}");
+    let running = ping(&fixture.socket()).expect("query the existing daemon");
+    let version = running["daemon_version"].as_str().expect("running daemon version");
+    assert!(text.contains(&format!("\"daemon_version\": \"{version}\"")), "{text}");
     assert!(fixture
         .child
         .as_mut()

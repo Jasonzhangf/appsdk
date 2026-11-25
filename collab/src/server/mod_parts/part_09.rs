@@ -2696,26 +2696,10 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     // The idle-capacity projection is one pure snapshot shared by the
     // master-only top-level ledger and the nested `master.master_wake` field,
     // so both read entry points report the same filtered capacity.
-    let (projected_master_wake, master_wake, message_count, unread_count, inbox_messages) = {
+    let (projected_master_wake, master_wake, message_count, unread_count) = {
         let st = server.state.lock().unwrap();
         let projected_master_wake = project_master_wake_idle_capacity(server, &st);
-        let unread: Vec<&Message> = st.inbox_of(&worker_id);
-        let messages: Vec<serde_json::Value> = unread
-            .iter()
-            .rev()
-            .take(20)
-            .map(|message| {
-                json!({
-                    "id": message.id,
-                    "from": message.from,
-                    "type": message.mtype,
-                    "subject": message.subject,
-                    "state": message.state,
-                    "created_at": iso(message.created_ms),
-                    "body": message.body,
-                })
-            })
-            .collect();
+        let unread_count = st.inbox_of(&worker_id).len();
         let (master_wake, message_count) = if role == "master" {
             (json!(projected_master_wake.clone()), st.msgs.len())
         } else {
@@ -2735,8 +2719,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             projected_master_wake,
             master_wake,
             message_count,
-            unread.len(),
-            messages,
+            unread_count,
         )
     };
 
@@ -2979,7 +2962,6 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         },
         "inbox": {
             "unread": unread_count,
-            "messages": inbox_messages,
         },
         "daemon": daemon_context_view(server),
         "next_actions": next_actions,

@@ -34,24 +34,35 @@ fn public_master_commands_discover_send_consume_and_reply_across_projects() {
         false,
     );
     assert_eq!(status["master"]["worker_id"], target_id, "{status}");
+    let listed = run_ok_at(&fixture, &source_root, &source_pane, &["list"], false);
+    let target_address = address_for(&listed, &target_id);
     let sent = run_ok_at(
         &fixture,
         &source_root,
         &source_pane,
         &[
-            "master",
             "send",
-            "--project",
-            target_root.to_str().unwrap(),
             "--to",
-            &target_id,
+            &target_address,
             "--subject",
             "action",
+            "--content",
             "return the result",
         ],
         false,
     );
     assert_eq!(sent["durable"], true, "{sent}");
+    let context = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["context", "--query"],
+        false,
+    );
+    let inbox = &context["result"]["snapshot"]["inbox"];
+    assert!(inbox["unread"].as_u64().unwrap() > 0, "{context}");
+    assert!(inbox.get("messages").is_none(), "{context}");
+    assert!(!context.to_string().contains("return the result"), "{context}");
     let received = run_ok_at(
         &fixture,
         &target_root,

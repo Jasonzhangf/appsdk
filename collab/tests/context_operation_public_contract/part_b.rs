@@ -3238,13 +3238,9 @@ fn session_recovery_no_target_peer_intent_uses_current_carrier() {
     let task_after = fixture.run_ok(&["task", "status", "peer-intent-task"], Some(&pane));
     assert_eq!(task_after["owner"], task_before["owner"]);
     assert_eq!(task_after["status"], task_before["status"]);
-    let unread = payload["result"]["snapshot"]["inbox"]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["id"] == message["id"])
-        .expect("Bob retains unread mail");
-    assert_eq!(unread["body"], message["body"]);
+    let inbox = &payload["result"]["snapshot"]["inbox"];
+    assert!(inbox["unread"].as_u64().unwrap() > 0);
+    assert!(inbox.get("messages").is_none());
     let receipt = fixture.run_ok(&["msg", message["id"].as_str().unwrap()], Some(&pane));
     assert_eq!(receipt["state"], "pending");
     assert_eq!(receipt["body"], message["body"]);

@@ -5024,13 +5024,15 @@ fn master_authority_appserver_explicit_replacement_keeps_holder_control() {
             .any(|task| task["id"] == "a-preserved-task"),
         "ordinary context must show the new peer's task: {context_a}"
     );
+    assert!(context_a["inbox"].get("messages").is_none());
+    let inbox_a = fixture.run_public(&["inbox"], THREAD_A);
     assert!(
-        context_a["inbox"]["messages"]
+        inbox_a["messages"]
             .as_array()
             .expect("context lists inbox messages")
             .iter()
             .any(|message| message["id"].as_str() == Some(preserved_message.as_str())),
-        "ordinary context must show the new peer's mailbox: {context_a}"
+        "ordinary recovery must preserve the new peer's mailbox: {inbox_a}"
     );
 
     // The AppServer delivery path still works after the authority change.

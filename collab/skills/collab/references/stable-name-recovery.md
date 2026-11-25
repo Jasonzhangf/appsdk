@@ -57,7 +57,7 @@ Rex 和 tmux 使用各自的宿主证据。Rex 会话保留原环境，直接运
 
 | 已有证据 | 允许的只读检查和处理 |
 | --- | --- |
-| 当前确认为 Rex，且 context 缺 Rex server、session 或 block | 在原 block 执行 `rex whoami --json --autostart=false`。若 `rex` 不在 PATH，用[已安装的 Rex CLI 路径](../operations.md#rex-中的-codex)。从 `endpoint` 和当前宿主的 `REX_SESSION`、`REX_BLOCK` 核对位置。命令不可用、缺 `CODEX_SESSION_ID` 或收到 `REX_EXECUTION_CALLER_MISMATCH` 时保留原错并交当前宿主修复。无需 `rex session inspect` 或终端截图。 |
+| 当前确认为 Rex，且 Context 缺位置，或仅有 `REX_BLOCK` 时回执请求 AppServer `endpoint` | 在原 block 按 [Rex 恢复命令](../operations.md#rex-中的-codex) 用官方 `whoami --json --autostart=false` 读当前位置。核对已有值，从 `session_id`、`block_id` 补齐当前 shell 的 Rex 环境并重试。缺字段、位置冲突或收到 `REX_EXECUTION_CALLER_MISMATCH` 时保留原错并交当前宿主修复。 |
 | 当前确认为 tmux，context 缺当前 pane 事实 | 仅在 `TMUX_PANE` 已由本会话注入时执行 `tmux display-message -p -t "$TMUX_PANE" '#{session_id} #{pane_id} #{pane_tty}'`。遇到 `TMUX_OBSERVATION_CAPABILITY_MISSING` 或 `TMUX_ITERM2_PANE_REQUIRED`，交宿主维护者；由 daemon 验证现有接入。 |
 | Desktop 回报 `DESKTOP_BRIDGE_SESSION_REQUIRED`、`DESKTOP_BRIDGE_THREAD_REQUIRED` 或其他 bridge 缺项 | 在当前 Desktop shell 核对 `CODEX_SESSION_ID`、`CODEX_THREAD_ID` 是否由宿主提供。缺值或能力交 Desktop 宿主补齐。标准 Desktop 由 `collab context` 自动取得 bridge 能力。 |
 | DSH context 返回 session 或 gateway 缺项 | 在原 DSH shell 核对 `DSH_SESSION_ID`。由 gateway 核实当前会话和项目，缺控制能力交 DSH 宿主。 |

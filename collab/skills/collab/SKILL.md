@@ -110,7 +110,7 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 | 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
 | 跨项目通信 | 仅在用户或当前任务合同明确指定目标项目与接收人时发送。无跨项目指令时，`Jenny` 指本项目的 Jenny。AppSDK CLI 或 SDK 错误不会自动把消费者项目的任务交给 `appsdk.Jenny`。只用目录核实已有授权目标，保留原发送和接收证据 |
 | 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
-| 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
+| 只读查消息 | `collab context` 只给未读数量。使用同一项目、同一会话的 `collab msg <真实消息ID>` 或 `collab inbox` 查看消息；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 

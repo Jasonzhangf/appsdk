@@ -535,6 +535,16 @@ fn register_context(
     context
 }
 
+fn wait_for_dispatch_target(fixture: &Fixture, root: &Path, peer_id: &str) {
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            let state = fixture.current_state_for(root, "appserver-cli");
+            state["agent_presence"][root.to_str().unwrap()][peer_id]["presence"] == "online"
+        }),
+        "tmux monitor did not observe dispatch target {peer_id} online"
+    );
+}
+
 #[test]
 fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
@@ -557,6 +567,7 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     fixture.start_codex_pane_runner(&peer_pane);
     let peer = register_context(&fixture, &root, &peer_pane, "goal-peer", false);
     let (peer_id, _) = identity(&peer);
+    wait_for_dispatch_target(&fixture, &root, &peer_id);
     let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
     let published = run_ok_at(
         &fixture,
@@ -925,7 +936,9 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         false,
     );
     let peer_pane = create_session(&fixture, "capacity-peer");
+    fixture.start_codex_pane_runner(&peer_pane);
     let peer = register_context(&fixture, &root, &peer_pane, "capacity-peer", false);
+    wait_for_dispatch_target(&fixture, &root, &identity(&peer).0);
     let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
     let intruder_pane = create_session(&fixture, "capacity-other");
     register_context(&fixture, &root, &intruder_pane, "capacity-other", false);

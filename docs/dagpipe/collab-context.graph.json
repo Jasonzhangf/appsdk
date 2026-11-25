@@ -3,6 +3,7 @@
   "registration_notice": {
     "完成该范围必需的跨文件交接": "首次普通 peer 与加入通知同事务保存。已持久的通知由现有 timer 在绑定发布锁释放后尝试提交，沿当前订阅与原消息 ID 归属，拒绝或未尝试不阻断注册。"
   },
+  "storage_boundary": "首次 Context 可建立空项目标记。身份、消息、订阅和任务保存在全局 Collab 目录下，配置读取全局 AppSDK 文件。Context 不执行项目初始化或写入项目宿主配置。",
   "tmux_current_pane_admission": {
     "requirement": "req-collab-tmux-current-pane-binding",
     "解析项目与控制范围": "固定入口只收当前调用真实宿主事实。daemon 的 tmux 观察明确失败时保留原错误，进入唯一失败回执；不进入通用 AppServer 缺项或写入身份。无 tmux 观察时仍可判断有证据的其他承载。",

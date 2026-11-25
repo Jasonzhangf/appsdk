@@ -1042,6 +1042,10 @@ fn macos_cli_discovery_uses_official_user_application_installation() {
     fs::create_dir_all(system_cli.parent().unwrap()).unwrap();
     fs::write(&system_cli, b"fixture").unwrap();
     assert_eq!(installed_macos_cli(&system, Some(&home)), system_cli);
+    let stable_cli = system.join("Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex");
+    fs::create_dir_all(stable_cli.parent().unwrap()).unwrap();
+    fs::write(&stable_cli, b"fixture").unwrap();
+    assert_eq!(installed_macos_cli(&system, Some(&home)), stable_cli);
     fs::remove_dir_all(&root).unwrap();
     assert_eq!(observed, user_cli);
 }

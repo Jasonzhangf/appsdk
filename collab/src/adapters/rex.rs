@@ -55,18 +55,18 @@ pub fn is_refreshable_service_change(error: &str) -> bool {
 
 #[cfg(any(target_os = "macos", test))]
 fn installed_macos_cli(system_applications: &Path, user_home: Option<&Path>) -> PathBuf {
-    let relative = "Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
-    let system_cli = system_applications.join(relative);
-    if system_cli.is_file() {
-        return system_cli;
-    }
-    if let Some(home) = user_home {
-        let user_cli = home.join("Applications").join(relative);
-        if user_cli.is_file() {
-            return user_cli;
+    let helper = "Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
+    let user_applications = user_home.map(|home| home.join("Applications"));
+    for bundle in ["Rex.app", "Rex Beta.app"] {
+        for applications in std::iter::once(system_applications).chain(user_applications.as_deref())
+        {
+            let cli = applications.join(bundle).join(helper);
+            if cli.is_file() {
+                return cli;
+            }
         }
     }
-    system_cli
+    system_applications.join("Rex.app").join(helper)
 }
 
 fn official_cli_path() -> String {

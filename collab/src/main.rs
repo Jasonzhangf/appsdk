@@ -1162,9 +1162,16 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 }
             };
             let supervised = autostart.is_ok();
+            let ping: serde_json::Value = client::call_with_deadline(
+                &sock,
+                &Req::Ping,
+                None,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )?;
             out(&json!({
                 "ok": true,
                 "server": sock,
+                "daemon_version": ping.get("daemon_version").and_then(serde_json::Value::as_str),
                 "started": started,
                 "supervised": supervised,
                 "replaced": replaced.map(|daemon| json!({

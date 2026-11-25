@@ -1212,9 +1212,6 @@ fn board_auto_notice_events_for_recipient(
         Resp::err("BOARD_NOTICE_RECIPIENT_UNRESOLVED: name has no current holder")
     })?;
     let to = current.binding.agent_id.as_str();
-    if !state.workers.contains_key(to) {
-        return Err(Resp::err("BOARD_NOTICE_RECIPIENT_UNRESOLVED: current holder is not registered"));
-    }
     let now = now_ms();
     let message_id = format!("board-change-{}-{}", task.id, gen_msg_id());
     let message = Message {
@@ -1234,9 +1231,6 @@ fn board_auto_notice_events_for_recipient(
         last_wake_attempt_ms: 0,
         retry_attempted: false,
     };
-    let subscription = state
-        .matching_subscription(to, "direct-message", None, now)
-        .cloned();
     let mut events = vec![
         Event::Sent { msg: message },
         Event::MailboxNameAddressed {
@@ -1252,7 +1246,13 @@ fn board_auto_notice_events_for_recipient(
             source_thread_id: None,
         },
     ];
-    if let Some(subscription) = &subscription {
+    // The active name owns the durable notice even after its worker row is
+    // reclaimed. Only a registered worker may supply a current wake target.
+    if let Some(subscription) = state
+        .workers
+        .get(to)
+        .and_then(|_| state.matching_subscription(to, "direct-message", None, now))
+    {
         events.push(Event::WakeBound {
             message_id: message_id.clone(),
             subscription_id: subscription.id.clone(),

@@ -2892,6 +2892,9 @@ fn board_auto_notice_to_offline_manager_stays_unread_without_input() {
         .unwrap()
         .to_owned();
     fixture.update_current_state(|state| {
+        // Preserve the current stable-name slot and grant while simulating
+        // AppServer absence cleanup of the no-longer-live worker row.
+        state["workers"].as_object_mut().unwrap().remove(&master);
         state["agent_presence"][&project][master.as_str()] = json!({
             "project_scope": project,
             "worker_id": master,
@@ -2961,6 +2964,25 @@ fn board_auto_notice_to_offline_manager_stays_unread_without_input() {
         .as_object()
         .unwrap()
         .contains_key(&notice_id));
+    assert!(updated_state["wake_bindings"][&notice_id].is_null());
+    assert_eq!(
+        updated_state["mailbox_name_addresses"][&notice_id]["name"],
+        "Jenny"
+    );
+
+    fixture.observe_native_agent(&master, "online", "idle");
+    let received = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == notice_id));
+    let next = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
+    assert!(next["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["id"] != notice_id));
 }
 
 #[test]

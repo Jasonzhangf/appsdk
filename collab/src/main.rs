@@ -2335,6 +2335,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 },
                 TaskCmd::Review {
                     id,
+                    expected_subject_revision,
                     accept,
                     rework,
                     evidence,
@@ -2342,6 +2343,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     worker_id: worker_id.clone(),
                     token: token.clone(),
                     task_id: id,
+                    expected_subject_revision,
                     accept,
                     rework,
                     evidence,

@@ -641,10 +641,13 @@ fn dispatch_with_route_context_bound(
             worker_id,
             token,
             task_id,
+            expected_subject_revision,
             accept,
             rework,
             evidence,
-        } => handle_task_review(server, worker_id, token, task_id, accept, rework, evidence),
+        } => handle_task_review_for_subject(
+            server, worker_id, token, task_id, expected_subject_revision, accept, rework, evidence,
+        ),
         Req::TaskIntegrated {
             worker_id,
             token,

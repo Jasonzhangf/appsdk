@@ -545,7 +545,7 @@ fn board_invite_with_selection(
         _ => return Resp::err("project route is not ready"),
     };
     if let Err(error) = board_check_actor(&state, &actor, &token).and_then(|()| {
-        board_check_master_or_task_architect_locked(server, &state, Some(&control), &id, &actor)
+        board_check_master_locked(server, &state, &actor)
     }) {
         return error;
     }
@@ -627,7 +627,7 @@ fn board_invite_current_map(
 ) -> Resp {
     let outcome = manager.with_current_state_response(server, |control, state| {
         board_current_map_actor_gate(state, &actor, &token, &id)?;
-        board_check_master_or_task_architect_locked(server, state, Some(control), &id, &actor)?;
+        board_check_master_locked(server, state, &actor)?;
         let route = server_route_scope(server, state)
             .map_err(Resp::err)?
             .ok_or_else(|| Resp::err("project route is not ready"))?;
@@ -817,11 +817,16 @@ fn board_reassignment_ready(
             ));
         }
     }
+    board_dependency_gate(state, &task.id)?;
+    board_resume_gate(state, &task.owner, &task.id)
+}
+
+fn board_dependency_gate(state: &State, task_id: &str) -> Result<(), Resp> {
     if let Some(phase) = state
         .ticket_phases
         .iter()
         .filter(|phase| {
-            phase.task_id == task.id
+            phase.task_id == task_id
                 && phase.phase == crate::server::ticket_state::TicketPhaseKind::Execute
                 && phase.status != crate::server::ticket_state::TicketPhaseStatus::Revoked
         })
@@ -849,7 +854,7 @@ fn board_reassignment_ready(
             ));
         }
     }
-    board_resume_gate(state, &task.owner, &task.id)
+    Ok(())
 }
 
 fn prepare_board_response_locked(
@@ -1129,7 +1134,7 @@ fn board_withdraw(
     }
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token).and_then(|()| {
-        board_check_master_or_task_architect_locked(server, &state, None, &id, &actor)
+        board_check_master_locked(server, &state, &actor)
     }) {
         return error;
     }

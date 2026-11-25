@@ -47,7 +47,9 @@ A task, board issue, or bug may move to `closed` only through the normal
 
 1. The owner recorded an exact delivery with `collab task deliver`: a code
    candidate commit, or explicit `--no-candidate` read-only evidence.
-2. A review accepted the delivered revision with `collab task review --accept`.
+2. The owner recorded the independent review acceptance with
+   `collab task review --accept --expected-subject-revision`. The value comes
+   from `review.subject_revision` at the start of review.
    Self-reported completion, an ACK, a notification receipt, a healthy daemon,
    or a passing local build is not verification.
 3. For code, the exact delivered candidate is reachable from `refs/heads/main`
@@ -134,9 +136,8 @@ Git metadata or a local worktree when the project uses LayerFS.
   worktree.
 - Historical task records with a normal path keep their original Git-worktree
   interpretation. No reset, state clear or project rebuild is required.
-- Only the owner may update, deliver, cancel, or normally close. A named
-  reviewer must perform the required review; author/master cannot substitute.
-  Other review and integration admission follow the current task contract.
+- The owner updates, delivers, records independent Codex review evidence,
+  integrates and normally closes their task. Jenny controls assignment.
 - Force close exceptions are explicit and audited: the current master may close
   any task; with no current master the owner may self-close, or a registered peer
   may close a task whose owner registered transport identity is lost.
@@ -188,41 +189,13 @@ Delivery, review, and applicable integration are separate durable milestones.
 uses `--worktree`; the exact delivered candidate must resolve before
 integration. Explicit read-only work uses `--no-candidate`; a missing or
 unresolved code candidate never becomes read-only by inference. The task owner
-or current master uses `task review --accept|--rework` under the applicable
-reviewer contract; a named reviewer remains mandatory. Accepted read-only work reaches the typed `no_merge_required`
-disposition and has no integration milestone. For code delivery, `task
-integrated` accepts a commit reachable from `refs/heads/main` and records
-mainline evidence, but the exact delivered candidate must also be reachable
-there. Direct status updates cannot bypass review or integration for current
-lifecycle records. A persisted pre-review `accepted` task with no lifecycle
-evidence retains an owner-local `accepted→merged` compatibility path; it
-records task state only and does not create review or integration evidence.
-
-For accepted code delivery, `task review --accept` also registers the
-applicable daemon-owned pending merge keyed by task id and notifies the current
-master. That registration, not a chat message, is the single source for the
-merge obligation: the master stays busy, changes session, or restarts, and the
-obligation survives. Explicit read-only acceptance creates no pending merge and
-no merge wake. While an applicable pending merge exists:
-
-- `collab context` for the current master lists a `merge_pending` operation.
-- `appsdk longhorizon show` prints a `待合并` section and includes
-  `pending_merges` in `--json`.
-- master idle wake text and the idle batch body include `pending_merges`.
-
-The master resolves an applicable code obligation only by moving the accepted candidate onto
-`refs/heads/main` and recording `collab task integrated --commit <sha>
---evidence "<main gates>"`. That resolves the pending merge in the same
-transaction. `accepted -> rework`, cancellation, or an authorized force close
-also resolves it. `collab task close` on a still-pending code merge fails with
-`TASK_MERGE_PENDING`; the master cannot lose the merge by staying busy, and the
-task cannot close before the merge is recorded.
-
-While the pending merge exists, only the current master may record `task
-integrated`; an owner that tries to self-integrate gets `TASK_MERGE_PENDING`.
-The obligation is registered only when a current master exists, so a master-less
-project keeps the plain owner self-integration lifecycle while still requiring
-the exact delivered candidate to be reachable from main.
+records their independent Codex review result through `task review --accept|--rework`.
+Accepted read-only work has the `no_merge_required` disposition. For code,
+the owner completes Git integration and records it with `task integrated`.
+The daemon checks that the supplied commit is on main and contains the delivered
+work. Direct state updates do not replace lifecycle evidence. Older records
+without lifecycle evidence retain their existing owner-local compatibility path.
+The owner's verified integration also resolves any historical merge obligation.
 
 `task integrated` on explicit read-only work returns
 `TASK_NO_MERGE_REQUIRED`. A code delivery whose candidate cannot be resolved

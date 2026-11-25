@@ -936,6 +936,7 @@ impl ProjectRuntimeManager {
                 worker_id,
                 token,
                 task_id,
+                expected_subject_revision,
                 accept,
                 rework,
                 evidence,
@@ -952,6 +953,7 @@ impl ProjectRuntimeManager {
                         worker_id.clone(),
                         token.clone(),
                         task_id.clone(),
+                        *expected_subject_revision,
                         *accept,
                         *rework,
                         evidence.clone(),
@@ -1194,14 +1196,13 @@ impl ProjectRuntimeManager {
         worktree: Option<String>,
         no_candidate: bool,
     ) -> Result<Resp, Resp> {
-        let (response, pending_notice) = self.with_current_task_state_response(
+        self.with_current_task_state_response(
             runtime,
             context,
             &worker_id,
             &token,
             |control, state, _| {
-                let mut pending_notice = None;
-                let response = handle_task_deliver_with_intent_locked(
+                Ok(handle_task_deliver_with_intent_locked(
                     runtime,
                     state,
                     Some(control),
@@ -1212,16 +1213,9 @@ impl ProjectRuntimeManager {
                     attempt,
                     worktree.clone(),
                     no_candidate,
-                    &mut pending_notice,
-                );
-                Ok((response, pending_notice))
+                ))
             },
-        )?;
-        Ok(finish_task_deliver_notification(
-            runtime,
-            response,
-            pending_notice,
-        ))
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1232,37 +1226,31 @@ impl ProjectRuntimeManager {
         worker_id: String,
         token: String,
         task_id: String,
+        expected_subject_revision: Option<u64>,
         accept: bool,
         rework: bool,
         evidence: String,
     ) -> Result<Resp, Resp> {
-        let (response, pending_wake) = self.with_current_task_state_response(
+        self.with_current_task_state_response(
             runtime,
             context,
             &worker_id,
             &token,
             |control, state, _| {
-                let mut pending_wake = None;
-                let response = handle_task_review_locked(
+                Ok(handle_task_review_locked(
                     runtime,
                     state,
                     Some(control),
                     worker_id.clone(),
                     token.clone(),
                     task_id.clone(),
+                    expected_subject_revision,
                     accept,
                     rework,
                     evidence.clone(),
-                    &mut pending_wake,
-                );
-                Ok((response, pending_wake))
+                ))
             },
-        )?;
-        Ok(finish_task_review_notification(
-            runtime,
-            response,
-            pending_wake,
-        ))
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

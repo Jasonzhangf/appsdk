@@ -411,7 +411,7 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
     .unwrap();
     fs::write(&manifest_path, &manifest).unwrap();
 
-    fixture.registered_context("role-name-master-register", &pane);
+    fixture.context(Some("role-name-master-register"), Some(&pane));
     let bob = fixture.run_ok(
         &[
             "context",
@@ -427,6 +427,20 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
         .to_owned();
     assert_eq!(bob_snapshot["name"], "Bob", "{bob}");
 
+    // A peer-owned task with a dependency has a tracked Execute phase.
+    let prerequisite = "role-name-master-promote-input";
+    fixture.run_ok(&["task", "register", prerequisite], Some(&pane));
+    fixture.run_ok(
+        &[
+            "task",
+            "deliver",
+            prerequisite,
+            "--no-candidate",
+            "--evidence",
+            "input ready",
+        ],
+        Some(&pane),
+    );
     let task_id = "role-name-master-promote-bob-ticket";
     fixture.run_ok(
         &[
@@ -441,6 +455,8 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
             "retain the Bob assignment and claim",
             "--test-condition",
             "public board receipts",
+            "--depends-on",
+            prerequisite,
         ],
         Some(&pane),
     );
@@ -462,7 +478,7 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
         ],
         Some(&pane),
     );
-    let promoted = fixture.registered_context("role-name-master-promoted", &pane);
+    let promoted = fixture.context(Some("role-name-master-promoted"), Some(&pane));
     let promoted_snapshot = &promoted["result"]["snapshot"];
     assert_eq!(promoted_snapshot["name"], "Jenny", "{promoted}");
     assert_eq!(
@@ -1829,8 +1845,8 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
     let saved = fs::read_to_string(&state_path).unwrap();
     assert!(!saved.contains("superseded-board-description"));
     assert!(
-        saved.contains("superseded-board-progress"),
-        "the prior board update must remain in its unread automatic notice until retention"
+        !saved.contains("superseded-board-progress"),
+        "ordinary progress belongs in the current Board view without an automatic notice"
     );
     drop(native);
 

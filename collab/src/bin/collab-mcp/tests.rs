@@ -154,7 +154,7 @@ fn policy_and_dispatch_adapter_preserve_work_constraints() {
         build_argv(
             "collab_board_policy",
             &json!({
-                "scope":"task","id":"frontend","executor":"Alice","reviewer":"Bob",
+                "scope":"task","id":"frontend","executor":"Alice",
                 "clear_prefer_role":true,"expected_revision":7
             })
         )
@@ -168,13 +168,16 @@ fn policy_and_dispatch_adapter_preserve_work_constraints() {
             "frontend",
             "--executor",
             "Alice",
-            "--reviewer",
-            "Bob",
             "--clear-prefer-role",
             "--expected-revision",
             "7"
         ]
     );
+    assert!(build_argv(
+        "collab_board_policy",
+        &json!({"scope":"task","id":"frontend","reviewer":"Bob","expected_revision":7})
+    )
+    .is_err());
     assert_eq!(
         build_argv(
             "collab_board_dispatch",
@@ -769,6 +772,10 @@ fn lifecycle_review_is_exposed_without_git_integration() {
         .find(|tool| tool["name"] == "collab_task_review")
         .unwrap();
     assert_eq!(review["inputSchema"]["required"], json!(["id", "evidence"]));
+    assert_eq!(
+        review["inputSchema"]["properties"]["expected_subject_revision"],
+        json!({"type":"integer","minimum":0})
+    );
     assert!(!definitions
         .iter()
         .any(|tool| tool["name"] == "collab_task_integrated"));

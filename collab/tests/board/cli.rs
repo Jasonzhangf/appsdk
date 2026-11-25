@@ -602,9 +602,9 @@ fn prepare_held_git_integration() -> HeldGitIntegration {
             "--evidence",
             "integration liveness review accepted",
         ],
-        THREAD_A,
+        THREAD_B,
     );
-    assert_eq!(reviewed["merge_pending"], json!(true));
+    assert_eq!(reviewed["merge_pending"], json!(false));
 
     let seam = fixture.project.join(".agent-collab");
     let hold = seam.join("held-integration-resolution");
@@ -745,7 +745,7 @@ fn run_held_git_integration(
                 "held integration proof".to_owned(),
             ];
             let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-            let output = fixture.command_public(&refs, THREAD_A);
+            let output = fixture.command_public(&refs, THREAD_B);
             tx.send(output).unwrap();
         });
         wait_for_path(&probe.entered, Duration::from_secs(5));
@@ -777,7 +777,7 @@ fn task_integration_held_git_cannot_freeze_context() {
                 "held integration proof".to_owned(),
             ];
             let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-            let output = fixture.command_public(&refs, THREAD_A);
+            let output = fixture.command_public(&refs, THREAD_B);
             tx_integration
                 .send(("integration", json_from_output(output)))
                 .unwrap();
@@ -832,40 +832,27 @@ fn task_integration_held_git_cannot_freeze_context() {
 }
 
 #[test]
-fn task_integration_held_git_rechecks_current_master_authority() {
+fn task_integration_held_git_rechecks_current_owner() {
     let probe = prepare_held_git_integration();
     let output = run_held_git_integration(&probe, |fixture| {
-        fixture.run_public(
-            &[
-                "master",
-                "clear",
-                "--approval",
-                "old master releases during held integration proof",
-            ],
-            THREAD_A,
-        );
-        fixture.run_public(
-            &[
-                "master",
-                "promote",
-                "--approval",
-                "new master takes over during held integration proof",
-            ],
-            THREAD_B,
-        );
+        let owner = fixture.run_public(&["context"], THREAD_B);
+        let grant = json!({
+            "action": "restore_name",
+            "requested_name": owner["name"],
+            "authorization": "fixture user replaces the old carrier during held integration",
+            "replace_confirmed": true,
+        }).to_string();
+        fixture.run_public(&["context", "--approve-grant", &grant], THREAD_C);
     });
     let (success, result) = parse_public_response(output);
     assert!(!success, "{result}");
-    assert_eq!(
-        result["error"],
-        "task integrated requires task owner or live master authority"
+    assert!(
+        result["error"].as_str().unwrap().starts_with("TASK_CURRENT_BINDING_REQUIRED"),
+        "{result}"
     );
     let state = probe.fixture.current_state();
     assert_eq!(state["tasks"]["integration-liveness"]["status"], "accepted");
-    assert!(
-        state["pending_merges"]["integration-liveness"].is_object(),
-        "the pending merge must survive the stale old-master request"
-    );
+    assert!(state["pending_merges"]["integration-liveness"].is_null());
 }
 
 #[test]
@@ -903,18 +890,22 @@ fn task_integration_held_git_rejects_changed_review_subject() {
             ],
             THREAD_B,
         );
+        let current = fixture.run_public(&["task", "status", "integration-liveness"], THREAD_B);
+        let review_revision = current["review"]["subject_revision"].as_u64().unwrap().to_string();
         let reviewed = fixture.run_public(
             &[
                 "task",
                 "review",
                 "integration-liveness",
                 "--accept",
+                "--expected-subject-revision",
+                &review_revision,
                 "--evidence",
                 "reaccepted changed review subject",
             ],
-            THREAD_A,
+            THREAD_B,
         );
-        assert_eq!(reviewed["merge_pending"], json!(true));
+        assert_eq!(reviewed["merge_pending"], json!(false));
     });
     let (success, result) = parse_public_response(output);
     assert!(!success, "{result}");
@@ -929,10 +920,7 @@ fn task_integration_held_git_rejects_changed_review_subject() {
         state["task_lifecycle"]["integration-liveness"]["review_evidence"],
         "reaccepted changed review subject"
     );
-    assert!(
-        state["pending_merges"]["integration-liveness"].is_object(),
-        "the new review must leave its pending merge intact"
-    );
+    assert!(state["pending_merges"]["integration-liveness"].is_null());
 }
 
 #[test]
@@ -1041,9 +1029,9 @@ fn layerfs_task_register_status_and_close_use_the_generic_layerfs_entry_only() {
             "layerfs-task",
             "--accept",
             "--evidence",
-            "reviewed by another registered peer",
+            "the owner records independent evidence from the LayerFS check",
         ],
-        THREAD_C,
+        THREAD_B,
     );
     fixture.run_public(&["task", "close", "layerfs-task"], THREAD_B);
 
@@ -1316,7 +1304,7 @@ esac
                 "--evidence",
                 "LayerFS review no longer needs a candidate",
             ],
-            THREAD_C,
+            THREAD_B,
         );
         assert_eq!(reviewed["status"], "accepted");
         let status = fixture.run_public(&["task", "status", "layerfs-task"], THREAD_B);
@@ -1342,7 +1330,7 @@ esac
 #[test]
 fn unclosed_task_with_retired_owner_is_visible_without_an_assignee() {
     let (mut fixture, master, peer) = setup();
-    publish(&fixture, "orphaned-open-task");
+    publish_one_shot(&fixture, "orphaned-open-task");
     let claimed = fixture.run_public(
         &[
             "board",
@@ -1581,7 +1569,7 @@ fn context_name_restore_persists_and_preserves_task_and_message_identity() {
         fixture.run_public(&["board", "show"], THREAD_A)["master"]["display_name"],
         "Jenny"
     );
-    publish(&fixture, "named-work");
+    publish_one_shot(&fixture, "named-work");
     let claimed = fixture.run_public(
         &["board", "claim", "named-work", "--expected-revision", "1"],
         THREAD_B,
@@ -1702,229 +1690,58 @@ fn board_publish_is_shared_but_does_not_start_execution() {
 }
 
 #[test]
-fn architect_and_executor_can_handoff_without_master() {
-    let fixture = AppFixture::new();
-    let architect = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_A);
-    let executor = fixture.run_public(&["context", "--work-roles", "executor"], THREAD_B);
-    let architect_name = architect["name"].as_str().unwrap();
-    let executor_name = executor["name"].as_str().unwrap();
-    fixture.run_public(
-        &[
-            "board",
-            "publish",
-            "architect-parent",
-            "--title",
-            "Authorized design",
-            "--description",
-            "Design delivery",
-            "--delivery-condition",
-            "Design available",
-            "--test-condition",
-            "Accepted design evidence",
-        ],
-        THREAD_A,
-    );
+fn architect_cannot_dispatch_and_jenny_can_assign() {
+    let (fixture, _, _) = setup();
+    let peer_context = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_B);
+    let peer = peer_context["name"].as_str().unwrap();
+    fixture.run_public(&["context"], THREAD_C);
     let published = fixture.run_public(
         &[
-            "board",
-            "publish",
-            "architect-child",
-            "--parent-task",
-            "architect-parent",
-            "--title",
-            "Implement design",
-            "--description",
-            "Approved execution contract",
-            "--delivery-condition",
-            "Implementation complete",
-            "--test-condition",
-            "Public behavior verified",
-            "--executor",
-            executor_name,
-            "--reviewer",
-            architect_name,
+            "board", "publish", "peer-owned-task", "--title", "Independent work",
+            "--description", "One owner", "--delivery-condition", "Result available",
+            "--test-condition", "Observable result",
         ],
-        THREAD_A,
+        THREAD_C,
     );
     let revision = published["task"]["revision"].to_string();
-    let claimed = fixture.run_public(
-        &[
-            "board",
-            "claim",
-            "architect-child",
-            "--expected-revision",
-            &revision,
-        ],
+    let before = fixture.current_state();
+    let rejected = fixture.command_public(
+        &["board", "invite", "peer-owned-task", "--to", peer,
+          "--expected-revision", &revision],
         THREAD_B,
     );
-    assert_eq!(
-        claimed["task"]["publisher"],
-        architect["identity"]["worker_id"]
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("BOARD_MASTER_REQUIRED"));
+    let unassigned = fixture.command_public(
+        &["board", "claim", "peer-owned-task", "--expected-revision", &revision],
+        THREAD_B,
     );
-    assert_eq!(claimed["task"]["owner"], executor["identity"]["worker_id"]);
-    assert_eq!(claimed["task"]["reviewer_name"], architect_name);
-    assert_eq!(claimed["task"]["status"], "working");
-}
-
-#[test]
-fn architect_board_authority_is_limited_to_entrusted_scope() {
-    let fixture = AppFixture::new();
-    let architect = fixture.run_public(&["context", "--work-roles", "architect"], THREAD_A);
-    let executor = fixture.run_public(&["context", "--work-roles", "executor"], THREAD_B);
-    let _outsider = fixture.run_public(&["context"], THREAD_C);
-    let architect_name = architect["name"].as_str().unwrap();
-    let executor_name = executor["name"].as_str().unwrap();
-
-    fixture.run_public(
+    assert!(!unassigned.status.success());
+    assert_eq!(fixture.current_state()["tasks"], before["tasks"]);
+    let assigned = fixture.run_public(
         &[
-            "board",
-            "publish",
-            "architect-scope-parent",
-            "--title",
-            "Entrusted design",
-            "--description",
-            "Parent design scope",
-            "--delivery-condition",
-            "Scope defined",
-            "--test-condition",
-            "Scope observable",
+            "board", "publish", "jenny-task", "--title", "Scheduled work",
+            "--description", "One owner", "--delivery-condition", "Result available",
+            "--test-condition", "Observable result", "--executor", peer,
+            "--long-horizon-content", "Complete the independent task",
+            "--long-horizon-every-ms", "600000",
         ],
         THREAD_A,
     );
-    fixture.run_public(
-        &[
-            "board",
-            "publish",
-            "architect-scope-child",
-            "--parent-task",
-            "architect-scope-parent",
-            "--title",
-            "Implement entrusted design",
-            "--description",
-            "Initial execution contract",
-            "--delivery-condition",
-            "Implementation complete",
-            "--test-condition",
-            "Public behavior verified",
-            "--executor",
-            executor_name,
-            "--reviewer",
-            architect_name,
-        ],
-        THREAD_C,
-    );
-
-    let revised = fixture.run_public(
-        &[
-            "board",
-            "describe",
-            "architect-scope-child",
-            "--expected-revision",
-            "1",
-            "--title",
-            "Implement revised design",
-            "--description",
-            "Revised execution contract",
-            "--delivery-condition",
-            "Implementation complete",
-            "--test-condition",
-            "Public behavior verified",
-            "--long-horizon-content",
-            "Complete the entrusted implementation and return its public verification evidence",
-            "--long-horizon-every-ms",
-            "3600000",
-        ],
+    let revision = assigned["task"]["revision"].to_string();
+    let invitation = fixture.run_public(
+        &["board", "invite", "jenny-task", "--to", peer,
+          "--expected-revision", &revision],
         THREAD_A,
     );
-    assert_eq!(revised["task"]["revision"], 2);
-    let invited = fixture.run_public(
-        &[
-            "board",
-            "invite",
-            "architect-scope-child",
-            "--to",
-            executor_name,
-            "--expected-revision",
-            "2",
-        ],
-        THREAD_A,
+    let revision = invitation["task"]["revision"].to_string();
+    let accepted = fixture.run_public(
+        &["board", "respond", "jenny-task", "--accept",
+          "--expected-revision", &revision],
+        THREAD_B,
     );
-    assert_eq!(invited["task"]["status"], "invited");
-
-    fixture.run_public(
-        &[
-            "board",
-            "publish",
-            "unrelated-owner-task",
-            "--title",
-            "Unrelated work",
-            "--description",
-            "Outside architect scope",
-            "--delivery-condition",
-            "Independent delivery",
-            "--test-condition",
-            "Independent verification",
-        ],
-        THREAD_C,
-    );
-    let forbidden_describe = fixture.command_public(
-        &[
-            "board",
-            "describe",
-            "unrelated-owner-task",
-            "--expected-revision",
-            "1",
-            "--title",
-            "Unauthorized plan",
-            "--description",
-            "Outside architect scope",
-            "--delivery-condition",
-            "Independent delivery",
-            "--test-condition",
-            "Independent verification",
-        ],
-        THREAD_A,
-    );
-    assert!(!forbidden_describe.status.success());
-    let forbidden_invite = fixture.command_public(
-        &[
-            "board",
-            "invite",
-            "unrelated-owner-task",
-            "--to",
-            executor_name,
-            "--expected-revision",
-            "1",
-        ],
-        THREAD_A,
-    );
-    assert!(!forbidden_invite.status.success());
-    assert!(
-        String::from_utf8_lossy(&forbidden_invite.stderr)
-            .contains("BOARD_ARCHITECT_SCOPE_REQUIRED"),
-        "{forbidden_invite:?}"
-    );
-
-    let owner_without_architect_role = fixture.command_public(
-        &[
-            "board",
-            "invite",
-            "unrelated-owner-task",
-            "--to",
-            executor_name,
-            "--expected-revision",
-            "1",
-        ],
-        THREAD_C,
-    );
-    assert!(!owner_without_architect_role.status.success());
-    assert!(
-        String::from_utf8_lossy(&owner_without_architect_role.stderr)
-            .contains("BOARD_MASTER_REQUIRED")
-            || String::from_utf8_lossy(&owner_without_architect_role.stderr)
-                .contains("BOARD_ARCHITECT_SCOPE_REQUIRED"),
-        "{owner_without_architect_role:?}"
-    );
+    assert_eq!(accepted["task"]["status"], "working");
+    assert_eq!(accepted["task"]["owner_name"], peer);
 }
 
 #[test]
@@ -2015,7 +1832,7 @@ fn peer_publication_can_be_claimed_by_self_or_master() {
 fn admitted_ticket_reviewer_change_keeps_delivered_then_rework_reopens_execute_phase() {
     let (fixture, _, peer) = setup();
     let id = "reviewer-change-rework";
-    publish(&fixture, id);
+    publish_one_shot(&fixture, id);
     let claimed = fixture.run_public(
         &["board", "claim", id, "--expected-revision", "1"],
         THREAD_B,
@@ -2072,15 +1889,9 @@ fn admitted_ticket_reviewer_change_keeps_delivered_then_rework_reopens_execute_p
         ],
         THREAD_A,
     );
-    // A reviewer rebind is a routing change, not a typed rework decision. The
-    // delivered task stays delivered and points at the new reviewer.
     assert_eq!(policy["task"]["status"], "delivered");
-    assert_eq!(
-        policy["task"]["next_step"],
-        "await review by ReviewerX; use collab task review --accept or --rework"
-    );
-    // A typed rework decision, not the reviewer rebind, is what reopens the
-    // execute phase so the owner can redo the work.
+    assert!(policy["task"]["reviewer_name"].is_null());
+    assert!(policy["task"]["next_step"].as_str().unwrap().contains("independent Codex review"));
     let rework = fixture.run_public(&["task", "update", id, "--status", "rework"], THREAD_B);
     assert_eq!(rework["status"], "rework");
     let rework_board = fixture.run_public(&["board", "show"], THREAD_B);
@@ -2126,7 +1937,7 @@ fn admitted_ticket_reviewer_change_keeps_delivered_then_rework_reopens_execute_p
 fn reviewer_rebind_keeps_delivered_task_in_delivered_with_updated_next_step() {
     let (fixture, _, peer) = setup();
     let id = "reviewer-rebind-delivered";
-    publish(&fixture, id);
+    publish_one_shot(&fixture, id);
     fixture.run_public(
         &["board", "claim", id, "--expected-revision", "1"],
         THREAD_B,
@@ -2184,9 +1995,9 @@ fn reviewer_rebind_keeps_delivered_task_in_delivered_with_updated_next_step() {
     assert_eq!(rebind["task"]["status"], "delivered");
     assert_eq!(
         rebind["task"]["next_step"],
-        "await review by ReviewerX; use collab task review --accept or --rework"
+        "capture review.subject_revision from collab task status before independent Codex review, then record evidence with collab task review --accept or --rework and --expected-subject-revision set to that value"
     );
-    assert_eq!(rebind["task"]["reviewer_name"], "ReviewerX");
+    assert!(rebind["task"]["reviewer_name"].is_null());
     assert_eq!(
         peer,
         fixture.run_public(&["board", "show"], THREAD_B)["tasks"]
@@ -2205,7 +2016,7 @@ fn master_can_set_ownerless_task_into_typed_wait_and_non_master_cannot() {
     // responsible actor.
     fixture.run_public(&["context"], THREAD_C);
     let blocker = "blocking-resource";
-    publish(&fixture, blocker);
+    publish_one_shot(&fixture, blocker);
     fixture.run_public(
         &["board", "claim", blocker, "--expected-revision", "1"],
         THREAD_C,
@@ -2224,7 +2035,7 @@ fn master_can_set_ownerless_task_into_typed_wait_and_non_master_cannot() {
     );
 
     let id = "ownerless-wait";
-    publish(&fixture, id);
+    publish_one_shot(&fixture, id);
     fixture.run_public(
         &["board", "claim", id, "--expected-revision", "1"],
         THREAD_B,
@@ -2318,7 +2129,7 @@ fn ownerless_wait_release_notifies_the_durable_waiter_after_blocker_cleanup() {
     // responsible actor.
     fixture.run_public(&["context"], THREAD_C);
     let blocker = "ownerless-release-blocker";
-    publish(&fixture, blocker);
+    publish_one_shot(&fixture, blocker);
     fixture.run_public(
         &["board", "claim", blocker, "--expected-revision", "1"],
         THREAD_C,
@@ -2337,7 +2148,7 @@ fn ownerless_wait_release_notifies_the_durable_waiter_after_blocker_cleanup() {
     );
 
     let id = "ownerless-release-waiter";
-    publish(&fixture, id);
+    publish_one_shot(&fixture, id);
     fixture.run_public(
         &["board", "claim", id, "--expected-revision", "1"],
         THREAD_B,
@@ -2476,7 +2287,11 @@ fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
     let id = "owner-rework-cycle";
     publish(&fixture, id);
     fixture.run_public(
-        &["board", "claim", id, "--expected-revision", "1"],
+        &["board", "invite", id, "--to", &peer, "--expected-revision", "1"],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &["board", "respond", id, "--accept", "--expected-revision", "2"],
         THREAD_B,
     );
     fixture.run_public(
@@ -2485,7 +2300,7 @@ fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
             "start",
             id,
             "--expected-revision",
-            "2",
+            "3",
             "--attempt",
             "1",
         ],
@@ -2505,6 +2320,8 @@ fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
         THREAD_B,
     );
     assert_eq!(delivered["status"], "delivered");
+    let first = fixture.run_public(&["task", "status", id], THREAD_B);
+    let reviewed_revision = first["review"]["subject_revision"].as_u64().unwrap().to_string();
     let reworked = fixture.run_public(&["task", "update", id, "--status", "rework"], THREAD_B);
     assert_eq!(reworked["status"], "rework");
     let board = fixture.run_public(&["board", "show"], THREAD_B);
@@ -2546,6 +2363,28 @@ fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
     assert_eq!(redelivered["evidence"], "redelivery after owner rework");
     let status = fixture.run_public(&["task", "status", id], THREAD_B);
     assert_eq!(status["status"], "delivered");
+    let current_revision = status["review"]["subject_revision"].as_u64().unwrap().to_string();
+    assert_ne!(current_revision, reviewed_revision);
+    let unbound = fixture.command_public(
+        &["task", "review", id, "--accept", "--evidence", "unbound review for first delivery"],
+        THREAD_B,
+    );
+    assert!(!unbound.status.success(), "{unbound:?}");
+    assert!(String::from_utf8_lossy(&unbound.stderr).contains("TASK_REVIEW_SUBJECT_REVISION_REQUIRED"));
+    let stale = fixture.command_public(
+        &["task", "review", id, "--accept", "--expected-subject-revision",
+            &reviewed_revision, "--evidence", "delayed independent result for first delivery"],
+        THREAD_B,
+    );
+    assert!(!stale.status.success(), "{stale:?}");
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("TASK_REVIEW_SUBJECT_STALE"));
+    assert_eq!(fixture.run_public(&["task", "status", id], THREAD_B)["status"], "delivered");
+    let accepted = fixture.run_public(
+        &["task", "review", id, "--accept", "--expected-subject-revision",
+            &current_revision, "--evidence", "independent result for the current delivery"],
+        THREAD_B,
+    );
+    assert_eq!(accepted["status"], "accepted");
 }
 
 #[test]
@@ -2606,7 +2445,7 @@ fn concurrent_claims_admit_exactly_one_and_stale_claim_preserves_state() {
 #[test]
 fn blocked_task_keeps_responsibility_but_does_not_block_next_work_or_resume() {
     let (fixture, _, peer) = setup();
-    publish(&fixture, "blocked-first");
+    publish_one_shot(&fixture, "blocked-first");
     fixture.run_public(
         &[
             "board",
@@ -2716,7 +2555,7 @@ fn blocked_task_keeps_responsibility_but_does_not_block_next_work_or_resume() {
 #[test]
 fn claimed_and_queued_tasks_survive_daemon_replay() {
     let (mut fixture, _, peer) = setup();
-    publish(&fixture, "replay-active");
+    publish_one_shot(&fixture, "replay-active");
     fixture.run_public(
         &[
             "board",
@@ -2805,8 +2644,8 @@ fn board_owner_update_is_versioned_and_peer_tasks_remain_independent() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["subject"] == "board-changed:peer-own"),
-        "peer board update must auto-notify master: {master_notice}"
+            .all(|message| message["subject"] != "board-changed:peer-own"),
+        "ordinary owner updates stay on the board: {master_notice}"
     );
     let stale = fixture.command_public(
         &[
@@ -2858,7 +2697,63 @@ fn board_owner_update_is_versioned_and_peer_tasks_remain_independent() {
 }
 
 #[test]
-fn board_auto_notice_to_offline_manager_stays_unread_without_input() {
+fn ordinary_request_with_historical_review_text_remains_receivable() {
+    let (fixture, _, peer) = setup();
+    let body = "Task quoted is delivered and requires your review as an example.";
+    let sent = fixture.run_public(
+        &["send", "--to", &peer, "--type", "request",
+            "--subject", "review-required:quoted", "--content", body],
+        THREAD_A,
+    );
+    assert_eq!(sent["durable"], true);
+    let received = fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+    let quoted = received["messages"].as_array().unwrap().iter()
+        .find(|message| message["id"] == sent["msg_id"])
+        .expect("ordinary request remains in the receiver's inbox");
+    assert_eq!(quoted["body"], body);
+}
+
+#[test]
+fn peer_owned_publication_preserves_dependencies_and_current_name_on_claim() {
+    let (fixture, _, original) = setup();
+    fixture.run_public(&["task", "register", "claim-prerequisite", "--next", "produce input"], THREAD_A);
+    let id = "dependent-peer-owned";
+    let published = fixture.run_public(
+        &["board", "publish", id, "--title", "Dependent owner task",
+            "--description", "Use the completed input", "--delivery-condition", "Deliver output",
+            "--test-condition", "Check output", "--depends-on", "claim-prerequisite"],
+        THREAD_B,
+    );
+    assert_eq!(published["task"]["owner"], original);
+    let blocked = fixture.command_public(&["board", "claim", id, "--expected-revision", "1"], THREAD_B);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("BOARD_DEPENDENCY_UNSATISFIED"));
+    for status in ["verifying", "reviewed"] {
+        fixture.run_public(&["task", "update", "claim-prerequisite", "--status", status], THREAD_A);
+    }
+    fixture.run_public(
+        &["task", "deliver", "claim-prerequisite", "--no-candidate", "--evidence", "input produced"],
+        THREAD_A,
+    );
+    let successor = fixture.run_public(
+        &["context", "--approve-grant",
+            r#"{"action":"restore_name","requested_name":"Bob","authorization":"fixture user continues the same independent task","replace_confirmed":true}"#],
+        THREAD_C,
+    );
+    let board = fixture.run_public(&["board", "show"], THREAD_C);
+    let pending = board["tasks"].as_array().unwrap().iter()
+        .find(|task| task["id"] == id).unwrap();
+    let revision = pending["revision"].as_u64().unwrap().to_string();
+    assert_eq!(pending["owner"], successor["identity"]["worker_id"]);
+    assert!(!fixture.command_public(&["board", "claim", id, "--expected-revision", &revision], THREAD_B).status.success());
+    let claimed = fixture.run_public(&["board", "claim", id, "--expected-revision", &revision], THREAD_C);
+    assert_eq!(claimed["task"]["owner"], successor["identity"]["worker_id"]);
+    assert_eq!(claimed["task"]["publisher"], original);
+    assert_eq!(claimed["task"]["status"], "working");
+}
+
+#[test]
+fn owner_update_does_not_queue_an_offline_manager_report() {
     let (mut fixture, master, _peer) = setup();
     fixture.run_public(
         &[
@@ -2933,17 +2828,9 @@ fn board_auto_notice_to_offline_manager_stays_unread_without_input() {
         THREAD_B,
     );
     let updated_state = fixture.current_state();
-    let notice_id = updated_state["msgs"]
-        .as_object()
-        .unwrap()
-        .values()
-        .find(|message| {
-            message["subject"] == "board-changed:offline-board-change"
-                && message["to"] == master.as_str()
-        })
-        .and_then(|message| message["id"].as_str())
-        .expect("offline board change creates an unread name-addressed notice")
-        .to_owned();
+    assert!(updated_state["msgs"].as_object().unwrap().values().all(|message| {
+        message["subject"] != "board-changed:offline-board-change"
+    }));
     let after_inputs = fixture
         .state
         .lock()
@@ -2955,34 +2842,6 @@ fn board_auto_notice_to_offline_manager_stays_unread_without_input() {
         after_inputs, input_count,
         "offline manager must receive zero native input"
     );
-    assert_eq!(updated_state["msgs"][&notice_id]["state"], "pending");
-    assert!(!updated_state["notification_delivery_accepted"]
-        .as_object()
-        .unwrap()
-        .contains_key(&notice_id));
-    assert!(!updated_state["notification_delivery_failures"]
-        .as_object()
-        .unwrap()
-        .contains_key(&notice_id));
-    assert!(updated_state["wake_bindings"][&notice_id].is_null());
-    assert_eq!(
-        updated_state["mailbox_name_addresses"][&notice_id]["name"],
-        "Jenny"
-    );
-
-    fixture.observe_native_agent(&master, "online", "idle");
-    let received = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
-    assert!(received["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|message| message["id"] == notice_id));
-    let next = fixture.run_public(&["recv", "--timeout", "0"], THREAD_A);
-    assert!(next["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|message| message["id"] != notice_id));
 }
 
 #[test]
@@ -3993,6 +3852,81 @@ fn dispatch_preserves_inline_long_horizon_schedule() {
 }
 
 #[test]
+fn publishing_long_horizon_with_idle_peer_waits_for_dispatch_subscription() {
+    let (mut fixture, master, peer) = setup();
+    activate_peer(&fixture, &peer);
+    let before = goal_subscriptions(&fixture.current_state());
+    let published = fixture.run_public(
+        &["board", "publish", "scheduled-after-publish",
+            "--title", "Long-horizon goal", "--description", "Own an independent goal",
+            "--delivery-condition", "Deliver the result", "--test-condition", "Verify the result",
+            "--long-horizon-content", "Continue under the periodic contract",
+            "--long-horizon-every-ms", "3600000"],
+        THREAD_A,
+    );
+    assert_eq!(published["task"]["owner"], master);
+    assert_eq!(published["task"]["status"], "pending");
+    assert_eq!(goal_subscriptions(&fixture.current_state()), before);
+    let start_current = |fixture: &AppFixture, task_id: &str| {
+        let board = fixture.run_public(&["board", "show"], THREAD_B);
+        let task = board["tasks"].as_array().unwrap().iter()
+            .find(|task| task["id"] == task_id).expect("public current task");
+        assert_eq!(task["owner"], peer);
+        assert_eq!(task["execute"]["status"], "claimed");
+        let revision = task["revision"].as_u64().unwrap().to_string();
+        let attempt = task["execute"]["attempt_generation"].as_u64().unwrap().to_string();
+        fixture.run_public(
+            &["board", "start", task_id, "--expected-revision", &revision, "--attempt", &attempt],
+            THREAD_B,
+        );
+        attempt
+    };
+    let blocker = "ordinary-continuation-blocker";
+    let ordinary_next = "ordinary-continuation-next";
+    publish_one_shot(&fixture, blocker);
+    let blocker_attempt = start_current(&fixture, blocker);
+    publish_one_shot(&fixture, ordinary_next);
+    let id = "scheduled-after-publish";
+    fixture.update_current_state(|state| {
+        let phase = state["ticket_phases"].as_array_mut().unwrap().iter_mut()
+            .find(|phase| phase["task_id"] == id).expect("persisted execute phase");
+        phase["status"] = json!("queued");
+        phase["slot_name"] = json!("Bob");
+        phase["wait_reason"] = Value::Null;
+    });
+    fixture.observe_native_agent(&peer, "online", "idle");
+    let retained = fixture.run_public(&["task", "status", id], THREAD_A);
+    assert_eq!(retained["owner"], master);
+    assert_eq!(retained["status"], "pending");
+    let claim = fixture.command_public(&["board", "claim", id, "--expected-revision", "1"], THREAD_B);
+    assert!(!claim.status.success());
+    assert!(String::from_utf8_lossy(&claim.stderr).contains("BOARD_LONG_HORIZON_DISPATCH_REQUIRED"));
+    assert_eq!(goal_subscriptions(&fixture.current_state()), before);
+    fixture.run_public(
+        &["task", "deliver", blocker, "--no-candidate", "--evidence", "release occupied execute slot",
+            "--attempt", &blocker_attempt],
+        THREAD_B,
+    );
+    let after_continuation = fixture.run_public(&["task", "status", id], THREAD_A);
+    assert_eq!(after_continuation["owner"], master);
+    assert_eq!(after_continuation["status"], "pending");
+    assert_eq!(goal_subscriptions(&fixture.current_state()), before);
+    let ordinary_attempt = start_current(&fixture, ordinary_next);
+    fixture.run_public(
+        &["task", "deliver", ordinary_next, "--no-candidate", "--evidence", "ordinary slot released",
+            "--attempt", &ordinary_attempt],
+        THREAD_B,
+    );
+    let dispatched = fixture.run_public(
+        &["board", "dispatch", "scheduled-after-publish", "--expected-revision", "1"],
+        THREAD_A,
+    );
+    assert_eq!(dispatched["task"]["status"], "invited");
+    assert_eq!(dispatched["goal_schedule"]["armed"], true);
+    assert_eq!(dispatched["goal_schedule"]["subscription"]["worker_id"], peer);
+}
+
+#[test]
 fn pending_one_shot_invitation_rejects_schedule_edit_and_declines_schedule_free() {
     let (fixture, master, peer) = setup();
     publish_one_shot(&fixture, "one-shot-pending-edit");
@@ -4159,7 +4093,7 @@ fn one_shot_rejects_same_id_binding_generation_refresh_before_acceptance() {
 #[test]
 fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status() {
     let (fixture, master, peer) = setup();
-    publish(&fixture, "working-reassign");
+    publish_one_shot(&fixture, "working-reassign");
     let claimed = fixture.run_public(
         &[
             "board",
@@ -4179,6 +4113,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
         .to_owned();
     assert_ne!(carol, master);
 
+    let revision = fixture.set_task_schedule_for_reassignment("working-reassign");
     let invited = fixture.run_public(
         &[
             "board",
@@ -4187,13 +4122,14 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "--to",
             &carol,
             "--expected-revision",
-            "2",
+            &revision,
         ],
         THREAD_A,
     );
     assert_eq!(invited["task"]["owner"], peer);
     assert_eq!(invited["task"]["status"], "working");
     assert_eq!(invited["task"]["invited_peer"], carol);
+    let invitation_revision = invited["task"]["revision"].as_u64().unwrap();
     let duplicate = fixture.command_public(
         &[
             "board",
@@ -4202,7 +4138,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "--to",
             &carol,
             "--expected-revision",
-            "3",
+            &invitation_revision.to_string(),
         ],
         THREAD_A,
     );
@@ -4217,7 +4153,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "working-reassign",
             "--accept",
             "--expected-revision",
-            "2",
+            &revision,
         ],
         THREAD_C,
     );
@@ -4231,7 +4167,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "working-reassign",
             "--decline",
             "--expected-revision",
-            "3",
+            &invitation_revision.to_string(),
             "--reason",
             "not this round",
         ],
@@ -4239,7 +4175,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
     );
     assert_eq!(declined["task"]["owner"], peer);
     assert_eq!(declined["task"]["status"], "working");
-    assert_eq!(declined["task"]["revision"], 4);
+    assert_eq!(declined["task"]["revision"], invitation_revision + 1);
 
     let reinvited = fixture.run_public(
         &[
@@ -4249,7 +4185,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "--to",
             &carol,
             "--expected-revision",
-            "4",
+            &(invitation_revision + 1).to_string(),
         ],
         THREAD_A,
     );
@@ -4260,7 +4196,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "withdraw",
             "working-reassign",
             "--expected-revision",
-            "5",
+            &(invitation_revision + 2).to_string(),
             "--reason",
             "keep current owner",
         ],
@@ -4268,7 +4204,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
     );
     assert_eq!(withdrawn["task"]["owner"], peer);
     assert_eq!(withdrawn["task"]["status"], "working");
-    assert_eq!(withdrawn["task"]["revision"], 6);
+    assert_eq!(withdrawn["task"]["revision"], invitation_revision + 3);
 
     let durable = fixture.run_public(&["task", "status", "working-reassign"], THREAD_A);
     assert_eq!(durable["owner"], peer);
@@ -4287,7 +4223,7 @@ fn working_resource_reassignment_allows_new_owner_to_resume() {
 
 fn resource_reassignment_consumer(status: &str) {
     let (mut fixture, master, peer) = setup();
-    publish(&fixture, "reassign-work");
+    publish_one_shot(&fixture, "reassign-work");
     fixture.run_public(
         &[
             "board",
@@ -4312,6 +4248,12 @@ fn resource_reassignment_consumer(status: &str) {
     assert_eq!(named["identity"]["worker_id"], carol);
     let worktree = "/tmp/collab-t5-reassign-worktree";
     fixture.update_current_state(|state| {
+        state["board_details"]["reassign-work"]["long_horizon"] = json!({
+            "content": "Continue historic work with its existing evidence",
+            "interval_ms": 3_600_000,
+            "repeat_count": 100,
+            "ttl_seconds": 604_800
+        });
         state["tasks"]["reassign-work"] = json!({
                 "id": "reassign-work",
                 "owner": peer,
@@ -4769,11 +4711,11 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
     let first_peer = fixture.run_public(&["context"], THREAD_B);
     let peer_keywords = [
         "subscription",
-        "execute the accepted task",
-        "allowed and prohibited scope",
-        "when no eligible peer is available",
+        "resume your own authorized task",
+        "scope and acceptance conditions",
+        "independent review",
         "observable evaluation criteria",
-        "stop conditions",
+        "resume condition",
     ];
     assert_role_patrol_mentions("first peer context", &first_peer, "worker", &peer_keywords);
 
@@ -4806,7 +4748,7 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
         "only its own project",
         "canonical issue intake",
         "currently supported monitored events",
-        "non-overlapping",
+        "complete independent task contracts",
         "close-before-open/sese",
         "canonical intake and deduplication",
         "owning project contract",
@@ -5429,9 +5371,9 @@ fn layerfs_live_task_branch_workspace_black_box() {
             "layerfs-live-accept",
             "--accept",
             "--evidence",
-            "reviewed by another registered peer",
+            "the owner records independent evidence from the live LayerFS check",
         ],
-        THREAD_C,
+        THREAD_B,
     );
     fixture.run_public(&["task", "close", "layerfs-live-accept"], THREAD_B);
 
@@ -5669,10 +5611,10 @@ fn assert_public_task_integration_landing(squash: bool) {
             "--evidence",
             "public F8 candidate reviewed",
         ],
-        THREAD_B,
+        THREAD_A,
     );
     assert_eq!(reviewed["status"], "accepted");
-    assert_eq!(reviewed["merge_pending"], true);
+    assert_eq!(reviewed["merge_pending"], false);
     let mismatched = fixture.command_public(
         &[
             "task",
@@ -5683,7 +5625,7 @@ fn assert_public_task_integration_landing(squash: bool) {
             "--evidence",
             "unrelated main-reachable integration receipt",
         ],
-        THREAD_B,
+        THREAD_A,
     );
     let (success, mismatch) = parse_public_response(mismatched);
     assert!(!success, "{mismatch}");
@@ -5692,7 +5634,7 @@ fn assert_public_task_integration_landing(squash: bool) {
         fixture.current_state()["tasks"][task_id]["status"],
         "accepted"
     );
-    assert!(fixture.current_state()["pending_merges"][task_id].is_object());
+    assert!(fixture.current_state()["pending_merges"][task_id].is_null());
     assert!(fixture_branch_exists(&project, branch));
     assert!(worktree.exists());
 
@@ -5721,11 +5663,11 @@ fn assert_public_task_integration_landing(squash: bool) {
                         "--evidence",
                         "invalid branch declaration",
                     ],
-                    THREAD_B,
+                    THREAD_A,
                 ));
                 assert!(!success, "{invalid_branch}");
                 assert_eq!(invalid_branch["error"], "TASK_INTEGRATION_COMMIT_MISMATCH");
-                assert!(fixture.current_state()["pending_merges"][task_id].is_object());
+                assert!(fixture.current_state()["pending_merges"][task_id].is_null());
             }
         }
     }
@@ -5772,11 +5714,10 @@ fn assert_public_task_integration_landing(squash: bool) {
         "--evidence",
         "merged task branch onto main",
     ];
-    let (success, refusal) = parse_public_response(fixture.command_public(&integration_args, THREAD_A));
+    let (success, refusal) = parse_public_response(fixture.command_public(&integration_args, THREAD_B));
     assert!(!success, "{refusal}");
-    assert_eq!(refusal["error"], "TASK_MERGE_PENDING");
-    assert!(fixture.current_state()["pending_merges"][task_id].is_object());
-    let integrated = fixture.run_public(&integration_args, THREAD_B);
+    assert!(refusal["error"].as_str().unwrap().starts_with("TASK_OWNER_REQUIRED"));
+    let integrated = fixture.run_public(&integration_args, THREAD_A);
     assert_eq!(integrated["status"], "merged");
     assert!(fixture.current_state()["pending_merges"][task_id].is_null());
     assert_eq!(

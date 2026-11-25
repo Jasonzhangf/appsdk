@@ -637,7 +637,7 @@ fn delivery_review_and_exact_main_integration_are_durable() {
         lifecycle.delivery_evidence.as_deref(),
         Some("candidate commit and gates passed")
     );
-    assert_eq!(lifecycle.reviewer.as_deref(), Some("owner"));
+    assert_eq!(lifecycle.reviewer, None);
     assert_eq!(
         lifecycle.integration_evidence.as_deref(),
         Some("main integration verified")
@@ -796,6 +796,7 @@ fn task_lifecycle_public_read_only_delivery_reaches_no_merge_and_owner_close() {
             worker_id: "owner".into(),
             token: "token-owner".into(),
             task_id: "read-only-task".into(),
+            expected_subject_revision: None,
             accept: true,
             rework: false,
             evidence: "review accepted".into(),
@@ -962,6 +963,7 @@ fn task_lifecycle_public_code_delivery_requires_integration_before_close() {
             worker_id: "owner".into(),
             token: "token-owner".into(),
             task_id: "unresolved-task".into(),
+            expected_subject_revision: None,
             accept: true,
             rework: false,
             evidence: "review accepted".into(),
@@ -1046,15 +1048,14 @@ fn old_format_candidate_fields_load_without_losing_business_state() {
     assert!(delivered.ok, "{delivered:?}");
     let reviewed = handle_task_review(
         &server,
-        "master".into(),
-        "token-master".into(),
+        "owner".into(),
+        "token-owner".into(),
         "legacy-task".into(),
         true,
         false,
         "legacy review accepted".into(),
     );
     assert!(reviewed.ok, "{reviewed:?}");
-    assert_eq!(reviewed.data["merge_pending"], json!(true));
     server.commit(&[Event::Sent {
         msg: Message {
             id: "legacy-msg".into(),
@@ -1078,8 +1079,14 @@ fn old_format_candidate_fields_load_without_losing_business_state() {
     let mut document: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     document["state"]["task_lifecycle"]["legacy-task"]["delivery_commit"] =
         json!("legacy-candidate");
-    document["state"]["pending_merges"]["legacy-task"]["candidate_commit"] =
-        json!("legacy-candidate");
+    document["state"]["task_lifecycle"]["legacy-task"]["reviewer"] = json!("master");
+    document["state"]["pending_merges"]["legacy-task"] = json!({
+        "task_id": "legacy-task",
+        "owner": "owner",
+        "requested_by": "master",
+        "requested_ms": now_ms(),
+        "candidate_commit": "legacy-candidate"
+    });
     std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
     let replayed = current_state::load(&path, false).unwrap();
 
@@ -1229,7 +1236,7 @@ fn publisher_claims_pending_task_and_non_publisher_cannot_reclaim() {
     assert!(!non_publisher.ok, "{non_publisher:?}");
     assert_eq!(
         non_publisher.error.as_deref(),
-        Some("BOARD_TASK_NOT_PENDING: only pending publisher-owned work may be claimed")
+        Some("BOARD_TASK_NOT_PENDING: only pending owned or scheduled work may be claimed")
     );
     std::fs::remove_dir_all(root).ok();
 }

@@ -1439,7 +1439,7 @@ fn context_names_takeover_keeps_source_name_work_and_continues_target_name_work(
         ),
         (
             "close",
-            "task close requires task owner or current master authority",
+            "TASK_OWNER_REQUIRED",
             vec!["task", "close", "source-alice-work"],
         ),
     ] {
@@ -2866,10 +2866,6 @@ fn manager_can_invite_during_identity_return_wait_before_deadline() {
             "public board regression",
             "--priority",
             "p1",
-            "--long-horizon-content",
-            "Continue the task after the manager invitation is accepted",
-            "--long-horizon-every-ms",
-            "3600000",
         ],
         THREAD_A,
     );
@@ -2933,7 +2929,6 @@ fn manager_can_invite_during_identity_return_wait_before_deadline() {
         .iter()
         .find(|task| task["id"] == "manager-before-timeout")
         .unwrap();
-    let revision = task["revision"].as_u64().unwrap();
     assert_eq!(task["needs_reassignment"], true, "{task}");
     assert_eq!(task["owner_name"], owner_name, "{task}");
     assert!(task["invited_peer"].is_null(), "{task}");
@@ -2941,6 +2936,7 @@ fn manager_can_invite_during_identity_return_wait_before_deadline() {
     let durable_owner = fixture.run_public(&["task", "status", "manager-before-timeout"], THREAD_A);
     assert_eq!(durable_owner["owner"], owner_worker, "{durable_owner}");
 
+    let revision = fixture.set_task_schedule_for_reassignment("manager-before-timeout");
     let invited = fixture.run_public(
         &[
             "board",
@@ -2949,7 +2945,7 @@ fn manager_can_invite_during_identity_return_wait_before_deadline() {
             "--to",
             &recipient_worker,
             "--expected-revision",
-            &revision.to_string(),
+            &revision,
         ],
         THREAD_A,
     );
@@ -3571,6 +3567,25 @@ impl AppFixture {
             .env("CODEX_HOME", self.root.join("home"))
             .output()
             .expect("run collab CLI without native facts")
+    }
+
+    fn set_task_schedule_for_reassignment(&self, id: &str) -> String {
+        let board = self.run_public(&["board", "show"], THREAD_A);
+        let task = board["tasks"].as_array().unwrap().iter()
+            .find(|task| task["id"] == id)
+            .expect("task to reassign");
+        let revision = task["revision"].as_u64().unwrap().to_string();
+        let result = self.run_public(
+            &["board", "describe", id, "--title", task["title"].as_str().unwrap(),
+                "--description", task["description"].as_str().unwrap(),
+                "--delivery-condition", task["delivery_condition"].as_str().unwrap(),
+                "--test-condition", task["test_condition"].as_str().unwrap(),
+                "--expected-revision", &revision,
+                "--long-horizon-content", "Continue the current task with its existing evidence",
+                "--long-horizon-every-ms", "3600000"],
+            THREAD_A,
+        );
+        result["task"]["revision"].as_u64().unwrap().to_string()
     }
 
     fn run_public(&self, args: &[&str], thread: &str) -> Value {

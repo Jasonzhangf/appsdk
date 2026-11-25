@@ -128,18 +128,12 @@ Playground/Active/Protected/generated 是消费者治理分区。不能据此把
   T2-M 与 E3 已批准。T2-M 只约束 daemon 自动重派等待十五分钟。manager 可按现有
   合法入口提前邀请。接受并提交后才转任务归属。E3 释放 Jenny 当前绑定和该 holder
   的 master grant。Jenny 保留 master 专用名和恢复入口。E3 执行验收尚未交回。
-- 工作角色（如 designer、reviewer）按项目和稳定名字持久化，可多选；它们不改变
-  master/peer 职责或授权。用户可在注册时声明，也可让当前 master 指派。
-  分工按工作类别逐项继承项目默认、目标默认和任务明确字段，并物化到任务。
-  角色是选择偏好，指定执行者是硬约束；指定 reviewer 通过当前交付的审查后，
-  才可继续原有集成和验收。角色、规则、交付和通知回执各沿自己的唯一 owner。
-- Collab 的 manager 管项目派发、进度、验收与回收。普通 peer 按合同执行和验证，
-  可以编排职责内的简单工作。复杂设计有合适 architect 时先交 architect 设计和审查，
-  再由 peer 实施。各角色处理职责内有界子任务时，先选合适的授权 peer，无人可承接时
-  走 Codex 编排。`patrol` 核查 Jenny 的执行并收集 live runtime bug；
-  `memory` 只接记忆总结和记忆巡检。Review 缺位走独立 Codex review 合同。
-  context 回显的有效职责由源码 workflow 模板和共享 `role_brief` 投影，角色标签不
-  授权。注册和恢复须说明此职责，并推荐对自身目标、阻塞和资源配置定时巡检。
+- 工作角色按项目和稳定名字持久化，用于任务匹配。Jenny 单独分配 Collab
+  任务。Architect、executor、reviewer、QA 和其他 peer 各自负责独立任务。
+  Owner 使用 Codex 编排完成探索、Plan、执行、独立 Review、验证、合并和
+  清理，并在原 Board 留存证据。实际资源占用冲突可由受影响的 owner 直接协调。
+  巡检者核对自己目标内的运行行为，记忆 agent 只做记忆总结和记忆巡检。
+  Context 按当前模板和任务状态回显职责。
   master 与 peer 均可维护本人的 longhorizon goal。项目 master 派发任务单时填写
   长程任务内容和明确周期，并自动开启目标 peer 的订阅。当前 typed CEO 可修改
   任意项目成员的长程订阅，目标稳定名字保持归属。新周期长程订阅默认100次，

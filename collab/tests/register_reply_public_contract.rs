@@ -55,16 +55,18 @@ fn initial_tmux_registers_once_without_participant_return() {
     let response = fixture.context(Some("gate-no-return"), Some(&pane));
     assert_eq!(response["result"]["outcome"], "completed", "{response}");
     let resumes_owned_work = |snapshot: &Value| {
-        snapshot["role_brief"]["responsibilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|rule| {
-                rule.contains("resume and drive your own authorized work immediately")
-                    && rule.contains("no authorized next action remains")
-                    && rule.contains("direct-message reception without idle-looping")
-            })
+        let brief = &snapshot["role_brief"];
+        let next_action = brief["next_action"].as_str().unwrap();
+        next_action.contains("Resume your own authorized task")
+            && next_action.contains("With no executable action, record the resume condition or close")
+            && brief["responsibilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|rule| {
+                    rule.contains("cancel unactionable owned patrols and retain direct reception")
+                })
     };
     let evaluates_goals = |snapshot: &Value| {
         snapshot["role_brief"]["responsibilities"]

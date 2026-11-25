@@ -52,7 +52,7 @@ fn assert_no_static_workflow_operations(context: &Value) {
 }
 
 /// Both standard identity baselines expose the default workflow template at
-/// base_version 1 before any master-configured override exists.
+/// base_version 2 before any master-configured override exists.
 #[test]
 fn context_workflow_template_default_base_version_for_master_and_peer() {
     let fixture = AppFixture::new();
@@ -93,39 +93,11 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
                 }),
             "{label}: blocked or stalled task requires terminal evidence"
         );
-        assert!(
-            responsibilities
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|rule| {
-                    rule.contains("Hand the complete contract directly to that peer")
-                        && rule.contains("The peer claims it at the current board revision")
-                        && rule.contains("Skip routine pings")
-                }),
-            "{label}: direct architect handoff is missing"
-        );
-        let handoff_rules: Vec<_> = responsibilities
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|rule| rule.contains("dispatch one complete board contract"))
-            .collect();
-        assert_eq!(handoff_rules.len(), 1, "{label}: {handoff_rules:?}");
-        assert!(handoff_rules[0]
-            .contains("Skip manual ACKs, progress reports, status chasing, idle requests"));
-        assert!(handoff_rules[0].contains("an evidenced blocker requiring action"));
-        assert!(handoff_rules[0].contains("once to the configured receiver"));
-        assert!(
-            responsibilities
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|rule| {
-                    rule.contains("task-linked wake every 10 minutes by default (600000 ms)")
-                        && rule
-                            .contains("Use the cadence specified in the contract when it differs")
-                        && rule.contains("On each wake, advance the task")
-                }),
-            "{label}: execution wake guidance is missing"
-        );
+        let role_text = brief.to_string();
+        assert!(role_text.contains("actual occupancy conflict"), "{role_text}");
+        assert!(role_text.contains("independent review"), "{role_text}");
+        assert!(role_text.contains("600000 ms"), "{role_text}");
+        assert!(!role_text.contains("dispatching architect"), "{role_text}");
         let context_instruction = brief["communication_recovery"]["steps"][0]
             .as_str()
             .expect("identity recovery instruction");
@@ -137,40 +109,7 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
             .as_str()
             .unwrap()
             .contains("Never guess or manually fill session_id, thread_id, endpoint or namespace"));
-        let role_text = brief.to_string();
-        for retired_rule in [
-            "report routinely",
-            "explicit idle approval",
-            "to the current master for the record",
-        ] {
-            assert!(!role_text.contains(retired_rule), "{label}: {retired_rule}");
-        }
-        for route in [
-            "Make ordinary technical decisions autonomously",
-            "technical, design and acceptance questions to the dispatching architect",
-            "project Jenny for direct Jenny assignments, absent architect",
-            "Do not call request_user_input, AskUserQuestion or equivalent for internal work",
-            "Only the authorized reporting owner escalates",
-            "Reuse existing authorization",
-            "Never use Computer Use, CUA or GUI for Collab",
-            "OAuth gpt-6.2-sol medium Planner",
-        ] {
-            assert!(
-                responsibilities
-                    .iter()
-                    .any(|item| item.as_str().is_some_and(|text| text.contains(route))),
-                "{label}: missing clarification route {route}: {brief}"
-            );
-        }
-        assert!(!brief["next_action"]
-            .as_str()
-            .unwrap()
-            .contains("ask the current master first with evidence when blocked"));
-        assert_eq!(
-            workflow["base_version"],
-            json!(1),
-            "{label}: standard identity must expose workflow_template.base_version 1: {snapshot}"
-        );
+        assert_eq!(workflow["base_version"], json!(2), "{label}: {snapshot}");
         assert_eq!(
             workflow["specialties"],
             json!([]),
@@ -179,7 +118,7 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         let identity = &workflow["identity"];
         assert_eq!(identity["target"], json!(target), "{label}: {identity}");
         assert_eq!(identity["source"], json!("base"), "{label}: {identity}");
-        assert_eq!(identity["base_version"], json!(1), "{label}: {identity}");
+        assert_eq!(identity["base_version"], json!(2), "{label}: {identity}");
         assert_eq!(identity["revision"], json!(0), "{label}: {identity}");
         assert!(
             identity.get("template").is_none(),
@@ -215,6 +154,32 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
             }
         }
     }
+}
+
+#[test]
+fn context_recovers_without_reactivating_v1_architect_override() {
+    let mut fixture = master_fixture();
+    fixture.run_public(&["context", "--work-roles", "architect"], THREAD_B);
+    fixture.run_public(
+        &[
+            "context", "--workflow-target", "role:architect", "--workflow-template",
+            r#"{"role_task":"Assign implementation to another peer","responsibilities":["Approve the other peer's results"],"next_action":"Dispatch the child task","completion_action":"Return the verdict to Jenny"}"#,
+        ],
+        THREAD_A,
+    );
+    fixture.update_current_state(|state| {
+        let templates = state["workflow_templates"].as_object_mut().unwrap();
+        let entry = templates.values_mut()
+            .find_map(|project| project.get_mut("role:architect"))
+            .unwrap();
+        entry["base_version"] = json!(1);
+    });
+    let recovered = fixture.run_public(&["context"], THREAD_B);
+    let brief = &recovered["role_brief"];
+    assert_eq!(brief["workflow_template"]["specialties"][0]["source"], "builtin_default");
+    let text = brief.to_string();
+    assert!(text.contains("within your assigned task"), "{text}");
+    assert!(!text.contains("Dispatch the child task"), "{text}");
 }
 
 #[test]
@@ -302,7 +267,7 @@ fn context_workflow_template_flags_update_reaches_next_context() {
 
     let next = fixture.run_public(&["context"], THREAD_B);
     let workflow = &next["role_brief"]["workflow_template"];
-    assert_eq!(workflow["base_version"], json!(1), "{next}");
+    assert_eq!(workflow["base_version"], json!(2), "{next}");
     assert_eq!(workflow["identity"]["target"], json!("peer"), "{next}");
     assert_eq!(workflow["identity"]["source"], json!("base"), "{next}");
     let specialties = workflow["specialties"].as_array().expect("specialty cards");
@@ -310,7 +275,7 @@ fn context_workflow_template_flags_update_reaches_next_context() {
     let designer = &specialties[0];
     assert_eq!(designer["target"], json!("role:designer"), "{designer}");
     assert_eq!(designer["source"], json!("master_override"), "{designer}");
-    assert_eq!(designer["base_version"], json!(1), "{designer}");
+    assert_eq!(designer["base_version"], json!(2), "{designer}");
     assert_eq!(designer["revision"], json!(1), "{designer}");
     assert!(
         designer.get("template").is_none(),
@@ -681,7 +646,7 @@ fn workflow_template_update_preserves_active_task_pins() {
     assert_eq!(before_task["status"], "working", "must test an active task");
     assert_eq!(before_task["owner"], peer["identity"]["worker_id"]);
     assert_eq!(before_task["executor_name"], json!(peer_name));
-    assert_eq!(before_task["reviewer_name"], json!(master_name));
+    assert!(before_task["reviewer_name"].is_null());
 
     let template = workflow_spec(
         "Draft the design proposal",
@@ -706,11 +671,7 @@ fn workflow_template_update_preserves_active_task_pins() {
         json!(peer_name),
         "{after_task}"
     );
-    assert_eq!(
-        after_task["reviewer_name"],
-        json!(master_name),
-        "{after_task}"
-    );
+    assert!(after_task["reviewer_name"].is_null(), "{after_task}");
     assert_eq!(after_task["revision"], before_task["revision"]);
     assert_eq!(after_task["status"], before_task["status"]);
     assert_eq!(after_task["owner"], before_task["owner"]);
@@ -848,15 +809,15 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
         (
             "worker",
             "worker",
-            ["task contract", "execute the actual work", "expand scope"],
+            ["own assigned task", "Codex orchestration", "verification results"],
         ),
         (
             "patrol",
             "patrol",
             [
-                "collect live runtime bugs",
-                "Jenny",
-                "actual execution",
+                "record live defects",
+                "assigned patrol objective",
+                "no executable action remains",
             ],
         ),
         (
@@ -872,9 +833,9 @@ fn builtin_specialty_roles_project_on_registration_and_repeated_context() {
             "architect",
             "architect",
             [
-                "effective requirements",
-                "implementation owner for each scope",
-                "lead overall debug design",
+                "applicable requirements",
+                "independent Codex Planner",
+                "architectural goals",
             ],
         ),
     ];
@@ -979,170 +940,12 @@ fn master_role_brief_routes_through_peers_before_independent_workers() {
     let peer = fixture.run_public(&["context"], THREAD_B);
     let peer_text = role_projection_text(&peer);
 
-    // The old fixed master text unconditionally bypassed suitable peers for
-    // one-shot work and asked the reader to retire a peer-first policy. The
-    // effective master brief must drop both and lead with peer selection.
-    assert!(
-        !contains_ci(&text, "regardless of whether other peers are busy"),
-        "master role_brief must not bypass suitable peers: {text}"
-    );
-    assert!(
-        !contains_ci(&text, "one-shot execution or observation directly"),
-        "master role_brief must not route one-shot work directly past peers: {text}"
-    );
-    assert!(
-        !contains_ci(&text, "all-peers-busy-before-gcm"),
-        "master role_brief must not carry the retired peer-bypass instruction: {text}"
-    );
-    assert!(
-        !contains_ci(&text, "retire master-only goal"),
-        "master role_brief must not carry the retired master-only-goal instruction: {text}"
-    );
-
-    assert!(
-        contains_ci(&text, "invite suitable, available and authorized peers"),
-        "master role_brief must invite suitable peers first: {text}"
-    );
-    assert!(
-        contains_ci(&text, "only after"),
-        "master role_brief must fall back to independent workers only after peers: {text}"
-    );
-    assert!(
-        contains_ci(&text, "codex exec --profile gcm"),
-        "master role_brief must preserve the independent GCM fallback route: {text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "direct-dispatch independent `codex exec --profile gcm` workers only when no suitable authorized peer can take the work"
-        ),
-        "master role_brief must gate direct GCM dispatch on eligible peer capacity: {text}"
-    );
-    assert!(
-        contains_ci(
-            &peer_text,
-            "use a suitable authorized peer when available"
-        ) && contains_ci(&peer_text, "use Codex orchestration for a subagent when no eligible peer is available"),
-        "peer role_brief must include eligible-peer-first bounded delegation: {peer_text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "actively verify identity-mismatch, cold, offline, unknown or missing workers"
-        ),
-        "master role_brief must require active non-live peer verification: {text}"
-    );
-    assert!(
-        contains_ci(&text, "including when the worker just registered")
-            && contains_ci(
-                &text,
-                "For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --capture --lines 80`"
-            )
-            && contains_ci(&text, "Keep other ready work moving during verification"),
-        "master role_brief must inspect the bound terminal and keep unrelated work moving: {text}"
-    );
-    assert!(
-        contains_ci(&text, "wait at most 15 minutes"),
-        "master role_brief must bound non-live peer verification: {text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "remove the still-unavailable from the dispatch queue and enqueue the available"
-        ),
-        "master role_brief must resolve non-live peers into unavailable or dispatchable state: {text}"
-    );
-
-    // The current installed wording requires a complete idle-peer inventory
-    // with explicit host channels and eligible capacity, then a customizable
-    // prompt priority. Assert the actual public role_task field, not an asset
-    // copy.
-    let role_task = master["role_brief"]["role_task"]
-        .as_str()
-        .expect("master role_brief.role_task is a string");
-    assert!(
-        contains_ci(role_task, "complete project idle-peer inventory"),
-        "master role_task must inspect the complete project idle-peer inventory: {role_task}"
-    );
-    assert!(
-        contains_ci(role_task, "explicit host channels")
-            && contains_ci(role_task, "eligible capacity"),
-        "master role_task must carry explicit host channels and eligible capacity: {role_task}"
-    );
-    assert!(
-        contains_ci(role_task, "customizable priority"),
-        "master role_task must allow a customizable prompt priority: {role_task}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "without waiting for Jenny's routine approval or merge"
-        ),
-        "master role_brief must preserve authorized peer integration: {text}"
-    );
-    let peer = fixture.run_public(&["context"], THREAD_B);
-    let peer_next = peer["role_brief"]["next_action"]
-        .as_str()
-        .expect("peer role_brief.next_action is a string");
-    assert!(
-        contains_ci(peer_next, "without waiting for Jenny's routine approval"),
-        "peer role_brief must preserve authorized independent delivery: {peer_next}"
-    );
-}
-
-#[test]
-fn master_role_brief_defaults_to_independent_review_with_three_condition_exception() {
-    let fixture = master_fixture();
-    let master = fixture.run_public(&["context"], THREAD_A);
-    let text = role_projection_text(&master);
-
-    assert!(
-        contains_ci(
-            &text,
-            "master routes both buglist items and project tasks to that architect first"
-        ),
-        "master role_brief must route both task intakes to the architect first: {text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "architect owns planning, contract updates, direct peer dispatch, and acceptance within the entrusted scope",
-        )
-            && contains_ci(&text, "hands implementation to one or more peer executors")
-            && contains_ci(&text, "peers implement, verify and return evidence to the architect"),
-        "master role_brief must distinguish architect acceptance from peer execution: {text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "complete written design and execution contract for each peer"
-        ),
-        "master role_brief must require the architect's executable handoff: {text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "Otherwise prefer an available independent reviewer."
-        ) && contains_ci(
-            &text,
-            "If none is available, dispatch a separate read-only Codex review worker"
-        ),
-        "master role_brief must carry the current independent-review route: {text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "Use the independent-review default and three-condition exceptional master-review rule defined by the master review responsibility"
-        ),
-        "master role_brief must reference the single reviewer policy owner: {text}"
-    );
-    assert!(
-        !contains_ci(
-            &text,
-            "Only when no idle worker exists and the subagent review entry has actually failed"
-        ),
-        "master role_brief must not retain the obsolete two-condition reviewer exception: {text}"
-    );
+    assert!(contains_ci(&text, "sole Collab dispatcher"), "{text}");
+    assert!(contains_ci(&text, "when no suitable peer"), "{text}");
+    assert!(contains_ci(&text, "Unknown availability is not idle"), "{text}");
+    assert!(contains_ci(&peer_text, "no dispatch or review authority over other tasks"), "{peer_text}");
+    assert!(contains_ci(&peer_text, "independent review"), "{peer_text}");
+    assert!(contains_ci(&peer_text, "record integration and clean your own resources"), "{peer_text}");
 }
 
 #[test]
@@ -1174,150 +977,39 @@ fn patrol_default_batch_preserves_explicit_user_count() {
 }
 
 #[test]
-fn patrol_specialty_verifies_non_live_workers_with_snapshot_and_bound() {
-    let fixture = AppFixture::new();
+fn patrol_specialty_checks_its_own_runtime_objective() {
+    let fixture = master_fixture();
     let patrol = fixture.run_public(&["context", "--work-roles", "patrol"], THREAD_B);
     let text = role_projection_text(&patrol);
-
-    assert!(
-        contains_ci(
-            &text,
-            "identity-mismatch, cold, offline, unknown or missing peers"
-        ),
-        "patrol role_brief must name the non-live peer states: {text}"
-    );
-    assert!(
-        contains_ci(
-            &text,
-            "For Rex and Codex TUI/tmux, it requires `collab worker snapshot <id> --capture --lines 80`"
-        ),
-        "patrol role_brief must check for Rex and tmux snapshot evidence: {text}"
-    );
-    assert!(
-        contains_ci(&text, "wait at most 15 minutes"),
-        "patrol role_brief must bound non-live peer verification: {text}"
-    );
-    assert!(
-        contains_ci(&text, "remove the still-unavailable from the dispatch queue")
-            && contains_ci(&text, "enqueue the available"),
-        "patrol role_brief must resolve non-live peers into unavailable or dispatchable state: {text}"
-    );
+    assert!(contains_ci(&text, "within your assigned patrol objective"), "{text}");
+    assert!(contains_ci(&text, "Record live defects"), "{text}");
+    assert!(contains_ci(&text, "Cancel the patrol when no executable action remains"), "{text}");
+    assert!(!contains_ci(&text, "audit Jenny"), "{text}");
 }
 
 #[test]
-fn explicit_worker_peer_executes_directly_without_ordinary_peer_orchestration() {
+fn explicit_worker_peer_retains_own_task_orchestration() {
     let fixture = master_fixture();
-
-    // An ordinary peer executes and may orchestrate within a written scope.
     let ordinary = fixture.run_public(&["context"], THREAD_B);
-    let ordinary_text = role_projection_text(&ordinary);
-    assert!(
-        contains_ci(
-            &ordinary_text,
-            "execute your accepted task as an ordinary peer"
-        ),
-        "ordinary peer must receive the execution workflow: {ordinary_text}"
-    );
-    assert!(
-        contains_ci(
-            &ordinary_text,
-            "analyze and orchestrate straightforward work"
-        ) && contains_ci(
-            &ordinary_text,
-            "route design to that architect and execute the resulting plan"
-        ),
-        "ordinary peer must retain bounded orchestration and route complex design: {ordinary_text}"
-    );
-    assert!(
-        contains_ci(&ordinary_text, "markdown log")
-            && contains_ci(&ordinary_text, "long-horizon task"),
-        "ordinary peer must carry the long-horizon Markdown log duty: {ordinary_text}"
-    );
-
-    // The same peer with an explicit worker specialty performs the bounded work
-    // directly and must not inherit the unconditional dispatch instruction.
     let worker = fixture.run_public(&["context", "--work-roles", "worker"], THREAD_B);
-    let worker_text = role_projection_text(&worker);
-    assert!(
-        !contains_ci(
-            &worker_text,
-            "split an accepted goal into non-overlapping bounded scopes"
-        ),
-        "worker specialty must not be told to dispatch subworkers first: {worker_text}"
-    );
-    assert!(
-        !contains_ci(&worker_text, "prefer assigning code implementation to subagents"),
-        "worker specialty must not inherit the ordinary peer's delegation-first identity: {worker_text}"
-    );
-    assert!(
-        contains_ci(&worker_text, "execute the actual work"),
-        "worker specialty must keep the direct execution duty: {worker_text}"
-    );
-    // The work specialty does not change identity, authority or goal level.
+    let text = role_projection_text(&worker);
+    assert!(contains_ci(&text, "Execute your own assigned task"), "{text}");
+    assert!(contains_ci(&text, "Use Codex orchestration for bounded pieces"), "{text}");
     for field in ["role", "authority", "derivation", "goal_level"] {
-        assert_eq!(
-            worker["role_brief"][field], ordinary["role_brief"][field],
-            "worker specialty must not change role_brief.{field}: {worker}"
-        );
+        assert_eq!(worker["role_brief"][field], ordinary["role_brief"][field]);
     }
 }
 
 #[test]
-fn fixed_and_design_specialties_drop_orchestration_and_preserve_separation() {
+fn mixed_specialties_do_not_gain_peer_dispatch_or_review() {
     let fixture = master_fixture();
-
-    // Fixed-duty and design specialties must not inherit the ordinary peer's
-    // unconditional dispatch and delegation-first instruction.
-    for role in ["patrol", "memory", "architect"] {
-        let snapshot = fixture.run_public(&["context", "--work-roles", role], THREAD_B);
-        let text = role_projection_text(&snapshot);
-        assert!(
-            !contains_ci(
-                &text,
-                "split the accepted goal into non-overlapping bounded scopes"
-            ),
-            "{role}: fixed or design specialty must not inherit dispatch duty: {text}"
-        );
-        assert!(
-            !contains_ci(&text, "prefer assigning code implementation to subagents"),
-            "{role}: fixed or design specialty must not inherit delegation-first identity: {text}"
-        );
-    }
-
-    // Combined specialties preserve the architect's explicit execution boundary.
     let mixed = fixture.run_public(&["context", "--work-roles", "architect,worker"], THREAD_B);
-    let mixed_text = role_projection_text(&mixed);
-    assert!(
-        !contains_ci(&mixed_text, "temporary development or scheduling dispatch"),
-        "patrol specialization boundaries are unrelated to this mix"
-    );
-    for phrase in [
-        "lead overall debug design",
-        "select one or more peer executors for disjoint scopes",
-        "review and accept their work or return it for rework",
-        "resolve the design decisions",
-        "produce a detailed architecture or plan file on disk",
-        "ordered implementation steps",
-        "required work and exclusions",
-        "reproducible acceptance checks and pass conditions",
-        "without guessing",
-        "update the original design before that step resumes",
-        "only implement when the user explicitly asks you to",
-        "keep a separate reviewer for any work you implement",
-        "execute the actual work",
-    ] {
-        assert!(
-            contains_ci(&mixed_text, phrase),
-            "mixed architect/worker must keep {phrase:?}: {mixed_text}"
-        );
-    }
-    assert!(
-        !contains_ci(
-            &mixed_text,
-            "split the accepted goal into non-overlapping bounded scopes"
-        ),
-        "mixed specialty roles must not restore the ordinary peer dispatch duty: {mixed_text}"
-    );
+    let text = role_projection_text(&mixed);
+    assert!(contains_ci(&text, "architectural goals"), "{text}");
+    assert!(contains_ci(&text, "Execute your own assigned task"), "{text}");
+    assert!(contains_ci(&text, "Use Codex orchestration"), "{text}");
+    assert!(!contains_ci(&text, "select one or more peer executors"), "{text}");
+    assert!(!contains_ci(&text, "accept their work or return it for rework"), "{text}");
 }
 
 #[test]

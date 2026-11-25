@@ -836,9 +836,63 @@
         "version": 4
       },
       "version": 31
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "除了 Jenny，其他所有的 architect 和 peer 都是平等的，不互相派发任务，也不互相进行审计或做相关的事情。他们每个人都单独使用 Codex 的编排技能进行 plan 执行、review 提交、合并清理等。他们彼此之间只在资源有冲突的时候，可以发消息进行资源占用的协作，其他工作都独立完成。另外，在我们现在的合同派发、任务的 next step 等 collab 治理过程中，要把彼此 review、派发等限制全部消融掉。",
+          "role": "user",
+          "source": "Codex chat 01a20bbd-96d7-7070-8ad0-18575d09882c, 2026-11-25"
+        },
+        "base_version": 2,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-independent-board-20261125",
+        "requirement_id": "req-collab-architect-board-authority",
+        "text": "Jenny 是本项目唯一 Collab 任务调度者。Jenny 可在项目授权内发布、指派、邀请和撤回；任务 owner 修改自身任务，另一 peer 的专长及历史父任务、reviewer pin 不产生权限。发布和指派各自使用当前任务及可用容量，unknown 不作 idle。保留现有 scope、真实 revision、邀请接收、执行准入、同名换绑、状态、证据和资源归属；历史已关闭或取消事实不得改写。任务 owner 通过 Codex 编排完成自身交付、适用独立 Review、集成与清理并在原任务登记。正常完成无需其它 peer 或 Jenny 代审或代合入。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "除了 Jenny，其他所有的 architect 和 peer 都是平等的，不互相派发任务，也不互相进行审计或做相关的事情。他们每个人都单独使用 Codex 的编排技能进行 plan 执行、review 提交、合并清理等。他们彼此之间只在资源有冲突的时候，可以发消息进行资源占用的协作，其他工作都独立完成。另外，在我们现在的合同派发、任务的 next step 等 collab 治理过程中，要把彼此 review、派发等限制全部消融掉。",
+          "role": "user",
+          "source": "Codex chat 01a20bbd-96d7-7070-8ad0-18575d09882c, 2026-11-25"
+        },
+        "requirement_id": "req-collab-architect-board-authority",
+        "status": "active",
+        "text": "Jenny 是本项目唯一 Collab 任务调度者。Jenny 可在项目授权内发布、指派、邀请和撤回；任务 owner 修改自身任务，另一 peer 的专长及历史父任务、reviewer pin 不产生权限。发布和指派各自使用当前任务及可用容量，unknown 不作 idle。保留现有 scope、真实 revision、邀请接收、执行准入、同名换绑、状态、证据和资源归属；历史已关闭或取消事实不得改写。任务 owner 通过 Codex 编排完成自身交付、适用独立 Review、集成与清理并在原任务登记。正常完成无需其它 peer 或 Jenny 代审或代合入。",
+        "version": 3
+      },
+      "version": 32
+    },
+    {
+      "request": {
+        "authorization": {
+          "original_text": "除了 Jenny，其他所有的 architect 和 peer 都是平等的，不互相派发任务，也不互相进行审计或做相关的事情。他们每个人都单独使用 Codex 的编排技能进行 plan 执行、review 提交、合并清理等。他们彼此之间只在资源有冲突的时候，可以发消息进行资源占用的协作，其他工作都独立完成。另外，在我们现在的合同派发、任务的 next step 等 collab 治理过程中，要把彼此 review、派发等限制全部消融掉。",
+          "role": "user",
+          "source": "Codex chat 01a20bbd-96d7-7070-8ad0-18575d09882c, 2026-11-25"
+        },
+        "base_version": 4,
+        "operation": "replace",
+        "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
+        "request_id": "request-collab-independent-orchestration-20261125",
+        "requirement_id": "req-collab-globalized-orchestration-patrol",
+        "text": "Jenny 负责项目优先级、向实际有容量且获授权的 peer 分配独立目标以及项目级资源冲突和授权裁决。Architect、executor、reviewer、QA 及其他 peer 平级，各自使用独立 Codex 编排完成所拥有任务的探索、Plan、执行、独立 Review、提交、合并和清理。一次性 Codex 子角色服务原任务，不成为新的 Collab peer 或 Board 子任务，不混用宿主编排入口。结果、状态、证据写在原任务及其 Board，不相互派发、审查、验收或例行汇报。实际资源占用冲突由涉及的 owner 直接协调。记忆只处理记忆总结及记忆巡检，巡检执行者按其自身目标取运行证据和登记缺陷。每个任务目标有可观察验收与有 owner、动作、产物和证据的行动项；每轮按上轮证据核对发现、恢复条件和下一动作，无可执行行动取消限期巡检并保留直接收件。任务属稳定名字并由当前 session 执行。Jenny 的长程派发填写完整内容和周期，在同一持久事务登记任务及目标订阅，回执区分派发和订阅。保留默认 100 次、显式次数、有效批次复用、存量 one-shot、取消语义及按当前名字恢复而不重复登记。项目 master 可配置本项目已授权目标订阅，typed CEO 的原跨项目订阅权限保留。保留已有项目权限裁决、资源归属检查、受保护资源和用户管理的 daemon 生命周期。"
+      },
+      "result": {
+        "authorization": {
+          "original_text": "除了 Jenny，其他所有的 architect 和 peer 都是平等的，不互相派发任务，也不互相进行审计或做相关的事情。他们每个人都单独使用 Codex 的编排技能进行 plan 执行、review 提交、合并清理等。他们彼此之间只在资源有冲突的时候，可以发消息进行资源占用的协作，其他工作都独立完成。另外，在我们现在的合同派发、任务的 next step 等 collab 治理过程中，要把彼此 review、派发等限制全部消融掉。",
+          "role": "user",
+          "source": "Codex chat 01a20bbd-96d7-7070-8ad0-18575d09882c, 2026-11-25"
+        },
+        "requirement_id": "req-collab-globalized-orchestration-patrol",
+        "status": "active",
+        "text": "Jenny 负责项目优先级、向实际有容量且获授权的 peer 分配独立目标以及项目级资源冲突和授权裁决。Architect、executor、reviewer、QA 及其他 peer 平级，各自使用独立 Codex 编排完成所拥有任务的探索、Plan、执行、独立 Review、提交、合并和清理。一次性 Codex 子角色服务原任务，不成为新的 Collab peer 或 Board 子任务，不混用宿主编排入口。结果、状态、证据写在原任务及其 Board，不相互派发、审查、验收或例行汇报。实际资源占用冲突由涉及的 owner 直接协调。记忆只处理记忆总结及记忆巡检，巡检执行者按其自身目标取运行证据和登记缺陷。每个任务目标有可观察验收与有 owner、动作、产物和证据的行动项；每轮按上轮证据核对发现、恢复条件和下一动作，无可执行行动取消限期巡检并保留直接收件。任务属稳定名字并由当前 session 执行。Jenny 的长程派发填写完整内容和周期，在同一持久事务登记任务及目标订阅，回执区分派发和订阅。保留默认 100 次、显式次数、有效批次复用、存量 one-shot、取消语义及按当前名字恢复而不重复登记。项目 master 可配置本项目已授权目标订阅，typed CEO 的原跨项目订阅权限保留。保留已有项目权限裁决、资源归属检查、受保护资源和用户管理的 daemon 生命周期。",
+        "version": 5
+      },
+      "version": 33
     }
   ],
   "project_id": "project-9e83931ad62661a74c9b7f538ad6603c066665b3487dfb3abe377b10146c0ca9",
   "schema_version": 1,
-  "version": 31
+  "version": 33
 }

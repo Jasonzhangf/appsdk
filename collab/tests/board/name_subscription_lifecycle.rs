@@ -380,9 +380,9 @@ fn public_retirement_waits_task_subscription_then_resumes_for_current_bob() {
             TASK_ID,
             "--accept",
             "--evidence",
-            "another registered peer accepted the resumed task subscription evidence",
+            "the owner records independent verification of the resumed subscription",
         ],
-        THREAD_A,
+        SUCCESSOR_THREAD,
     );
     assert_eq!(reviewed["merge_pending"], false, "{reviewed}");
     assert_eq!(reviewed["disposition"], "no_merge_required", "{reviewed}");

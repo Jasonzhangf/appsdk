@@ -752,8 +752,6 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         return;
     }
     let blocked = state.master_wake.blocked_or_timed_out_tasks.clone();
-    let mut pending_merges: Vec<_> = state.pending_merges.keys().cloned().collect();
-    pending_merges.sort();
     let subject = if newly_idle.len() == 1 && newly_idle[0].starts_with("subagent:") {
         "subagent-status".to_string()
     } else if newly_idle.len() == 1 {
@@ -762,11 +760,10 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Long-horizon orchestration: route buglist items and project tasks to the architect first when applicable. The architect plans, hands implementation to peers and accepts their results. For the current phase, check idle, suitable, authorized peers and available capacity first. Only when no suitable authorized peer can take the work outside architect assignments, use bounded independent `codex exec --profile gcm` worker assignments. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Master finite patrol: inspect open P0/P1 work, task and delivery exceptions, owned worktrees and runtime resources, project-canonical issue intake, and required rearm. {} Subscription presence does not gate identity. Remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. AppSDK/Collab and tmux lifecycles remain independent; never stop or restart a tmux server or terminate host panes during patrol or cleanup. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, finish the patrol and keep the reusable direct-message subscription for new assignments; cancel only finite timed patrol or deadline subscriptions. If the goal is complete, report the evidence to the user.",
+        "newly_idle={} live_idle={} blocked={} goal_due={}. Long-horizon orchestration: Jenny assigns ready authorized work using current Board and verified idle capacity. Provide one complete independent contract per task. Each owner handles their own Codex planning, execution, independent review, merge and cleanup. {} Keep the reusable direct-message subscription. Cancel finite timed patrol when no actionable work remains. AppSDK/Collab and tmux lifecycles are independent.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
-        pending_merges.join(","),
         state.master_wake.goal_due,
         NON_LIVE_PEER_DISPATCH_RULE
     );
@@ -2636,15 +2633,10 @@ mod tests {
         assert!(body.contains("newly_idle=subagent:managed"), "{body}");
         assert!(body.contains("live_idle=subagent:managed"), "{body}");
         assert!(
-            body.contains("route buglist items and project tasks to the architect first")
-                && body.contains("hands implementation to peers and accepts their results"),
+            body.contains("Jenny assigns ready authorized work")
+                && body.contains("Each owner handles their own Codex planning"),
             "{body}"
         );
-        assert!(
-            body.contains("check idle, suitable, authorized peers and available capacity first"),
-            "{body}"
-        );
-        assert!(body.contains("codex exec --profile gcm"), "{body}");
         assert!(
             body.contains("collab worker snapshot <id> --capture --lines 80"),
             "{body}"
@@ -2666,8 +2658,7 @@ mod tests {
             !body.contains("regardless of whether other peers are busy"),
             "{body}"
         );
-        assert!(body.contains("protected holds"), "{body}");
-        assert!(body.contains("one-shot goal or deadline wake"), "{body}");
+        assert!(body.contains("Cancel finite timed patrol when no actionable work remains"), "{body}");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2686,7 +2677,7 @@ mod tests {
     }
 
     #[test]
-    fn master_idle_batch_surfaces_pending_merges() {
+    fn master_idle_batch_does_not_assign_historical_merges() {
         let (server, root) = test_server();
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
@@ -2740,14 +2731,14 @@ mod tests {
             })
             .expect("master idle batch");
         assert!(
-            batch.body.contains("pending_merges=task-merge"),
+            !batch.body.contains("task-merge"),
             "{}",
             batch.body
         );
         assert!(
             batch
                 .body
-                .contains("keep the reusable direct-message subscription"),
+                .contains("Keep the reusable direct-message subscription"),
             "{}",
             batch.body
         );

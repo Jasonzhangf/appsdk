@@ -1,9 +1,4 @@
-struct PendingTaskReviewWake {
-    message_id: String,
-    subscription_id: String,
-    now: i64,
-}
-
+#[cfg(test)]
 fn handle_task_review(
     server: &Server,
     worker_id: String,
@@ -13,23 +8,24 @@ fn handle_task_review(
     rework: bool,
     evidence: String,
 ) -> Resp {
-    let mut pending_wake = None;
-    let response = {
-        let mut st = server.state.lock().unwrap();
-        handle_task_review_locked(
-            server,
-            &mut st,
-            None,
-            worker_id,
-            token,
-            task_id,
-            accept,
-            rework,
-            evidence,
-            &mut pending_wake,
-        )
-    };
-    finish_task_review_notification(server, response, pending_wake)
+    handle_task_review_for_subject(server, worker_id, token, task_id, None, accept, rework, evidence)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_task_review_for_subject(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    expected_subject_revision: Option<u64>,
+    accept: bool,
+    rework: bool,
+    evidence: String,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    handle_task_review_locked(
+        server, &mut st, None, worker_id, token, task_id, expected_subject_revision, accept, rework, evidence,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -40,10 +36,10 @@ fn handle_task_review_locked(
     worker_id: String,
     token: String,
     task_id: String,
+    expected_subject_revision: Option<u64>,
     accept: bool,
     rework: bool,
     evidence: String,
-    pending_wake: &mut Option<PendingTaskReviewWake>,
 ) -> Resp {
     if let Err(error) = verify(&st, &worker_id, &token) {
         return error;
@@ -64,10 +60,14 @@ fn handle_task_review_locked(
             task_id, task.status
         ));
     }
-    let required_reviewer = required_work_reviewer(&st, &task_id);
+    if let Err(error) =
+        task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
+    {
+        return error;
+    }
     let route = match server_route_scope(server, &st) {
         Ok(Some(route)) => route,
-        Ok(None) => return Resp::err("reviewer project route is not ready"),
+        Ok(None) => return Resp::err("task owner project route is not ready"),
         Err(error) => return Resp::err(error),
     };
     let loaded;
@@ -81,37 +81,28 @@ fn handle_task_review_locked(
             &loaded
         }
     };
-    let reviewer_name = if let Some(name) = required_reviewer.as_deref() {
-        let holder =
-            match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
-                Ok(holder) => holder,
-                Err(error) => return Resp::err(error),
-            };
-        if holder
-            .and_then(|slot| slot.active_binding())
-            .is_none_or(|current| current.binding.agent_id.as_str() != worker_id)
-        {
-            return Resp::err("TASK_REQUIRED_REVIEWER: only the named reviewer's current holder may review this task");
-        }
-        Some(name.to_owned())
-    } else {
-        if !task_integration_authorized_with_control(
-            server,
-            st,
-            Some(control),
-            &task,
-            &worker_id,
-        ) {
-            return Resp::err("task review requires task owner or live master authority");
-        }
-        match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker_id) {
-            Ok(slot) => slot.map(|slot| slot.identity_key.name.clone()),
-            Err(error) => return Resp::err(error),
-        }
+    let recorder_name = match control.current_for_worker(
+        &route.project_scope_id, &route.app_scope_id, &worker_id,
+    ) {
+        Ok(slot) => slot.map(|slot| slot.identity_key.name.clone()),
+        Err(error) => return Resp::err(error),
     };
     let now = now_ms();
     let mut reviewed = task;
     let mut lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    let current_subject_revision = lifecycle.review_subject_revision;
+    let revision_error = match expected_subject_revision {
+        Some(expected) if expected != current_subject_revision => Some("TASK_REVIEW_SUBJECT_STALE"),
+        None if current_subject_revision > 1 => Some("TASK_REVIEW_SUBJECT_REVISION_REQUIRED"),
+        _ => None,
+    };
+    if let Some(error) = revision_error {
+        return Resp::err_data(error, json!({
+            "task_id": task_id,
+            "expected_subject_revision": expected_subject_revision,
+            "current_subject_revision": current_subject_revision,
+        }));
+    }
     let read_only = lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly;
     reviewed.status = if accept { "accepted" } else { "rework" }.into();
     reviewed.next_step = Some(if accept {
@@ -126,11 +117,15 @@ fn handle_task_review_locked(
     });
     reviewed.updated_ms = now;
     lifecycle.review_evidence = Some(evidence.to_owned());
-    lifecycle.reviewer = Some(worker_id.clone());
+    lifecycle.reviewer = None;
+    lifecycle.review_recorded_by = Some(worker_id.clone());
     lifecycle.reviewed_ms = Some(now);
-    lifecycle.required_reviewer_name = required_reviewer;
-    lifecycle.reviewer_name = reviewer_name;
+    lifecycle.required_reviewer_name = None;
+    lifecycle.reviewer_name = None;
     lifecycle.reviewed_subject_revision = accept.then_some(lifecycle.review_subject_revision);
+    if rework {
+        lifecycle.review_subject_revision = current_subject_revision.saturating_add(1);
+    }
     let mut events = vec![
         Event::TaskUpdated {
             task: reviewed.clone(),
@@ -151,149 +146,25 @@ fn handle_task_review_locked(
             ids: review_notices,
         });
     }
-    let mut pending_notification = None;
-    let mut notification_missing = false;
-    let mut merge_pending_registered = false;
-    if accept && !read_only {
-        // A merge obligation exists only when a master owns the merge. In
-        // a master-less project the owner keeps the plain self-integration
-        // lifecycle; registering a pending merge there would deadlock close.
-        // The master is the current grant holder; transport reachability never
-        // decides whether the obligation exists.
-        let master_id = match current_master_holder(server, &st) {
-            Ok(master_id) => master_id,
-            Err(error) => return Resp::err(error),
-        };
-        if let Some(master_id) = master_id {
-            let request = state::PendingMerge {
-                task_id: task_id.clone(),
-                owner: reviewed.owner.clone(),
-                requested_by: worker_id.clone(),
-                requested_ms: now,
-                candidate_commit: None,
-            };
-            events.push(Event::MergeRequested { request });
-            merge_pending_registered = true;
-            if master_id != worker_id {
-                let message_id = gen_msg_id();
-                events.push(Event::Sent {
-                    msg: Message {
-                        id: message_id.clone(),
-                        from: "collab-server".into(),
-                        to: master_id.clone(),
-                        mtype: "notify".into(),
-                        subject: Some(format!("merge-pending:{}", task_id)),
-                        body: format!(
-                            "MERGE_PENDING task={} owner={} requested_by={}. Master must integrate the accepted candidate on refs/heads/main and record `collab task integrated --commit <sha> --evidence \"<text>\"` before the task can close.",
-                            task_id, reviewed.owner, worker_id
-                        ),
-                        in_reply_to: None,
-                        created_ms: now,
-                        state: "pending".into(),
-                        wake_attempt_count: 0,
-                        last_wake_attempt_ms: 0,
-                        retry_attempted: false,
-                    },
-                });
-                // A pending merge is the master's blocking obligation: wake it
-                // immediately instead of waiting for the batched window, while
-                // pending_merges stays the durable fallback.
-                events.push(Event::DeliveryMode {
-                    msg_id: message_id.clone(),
-                    mode: "immediate".into(),
-                    source_thread_id: None,
-                });
-                if let Some(subscription) =
-                    st.matching_subscription(&master_id, "direct-message", None, now)
-                {
-                    events.push(Event::WakeBound {
-                        message_id: message_id.clone(),
-                        subscription_id: subscription.id.clone(),
-                    });
-                    pending_notification = Some((message_id, subscription.id.clone()));
-                } else {
-                    // The obligation is durable, but a missing direct-message
-                    // subscription leaves the master mailbox-only with no wake.
-                    // Surface the explicit repair terminal instead of success.
-                    notification_missing = true;
-                }
-            }
-        }
-    }
     if let Err(error) = server.commit_locked_checked_with_control(st, &events, control) {
         return Resp::err(format!("TASK_REVIEW_DURABILITY_FAILED: {error}"));
     }
-    if let Some((message_id, subscription_id)) = pending_notification {
-        *pending_wake = Some(PendingTaskReviewWake {
-            message_id,
-            subscription_id,
-            now,
-        });
-    }
-    let mut review_data = json!({
+    Resp::data(json!({
         "task": task_id,
         "status": reviewed.status,
         "delivery_complete": false,
-        "reviewer": worker_id,
+        "recorded_by": worker_id,
+        "recorded_by_name": recorder_name,
+        "subject_revision": current_subject_revision,
         "evidence": evidence,
-        "merge_pending": merge_pending_registered,
+        "merge_pending": false,
         "disposition": if accept {
             if read_only { "no_merge_required" } else { "integration_required" }
         } else {
             "rework_required"
         },
         "next_action": reviewed.next_step,
-    });
-    if notification_missing {
-        apply_mailbox_only_repair_fields(&mut review_data);
-        review_data["notification"] = json!("mailbox-only-no-subscription");
-    }
-    Resp::data(review_data)
-}
-
-fn finish_task_review_notification(
-    server: &Server,
-    mut response: Resp,
-    pending_wake: Option<PendingTaskReviewWake>,
-) -> Resp {
-    let Some(wake) = pending_wake else {
-        return response;
-    };
-    let failure = match attempt_notification_detailed_with_at(
-        server,
-        &wake.message_id,
-        &wake.subscription_id,
-        wake.now,
-    ) {
-        NotificationAttempt::Accepted
-        | NotificationAttempt::Consumed
-        | NotificationAttempt::Deferred(_) => None,
-        NotificationAttempt::ReceiptUnconfirmed(error) => {
-            response.data["durable"] = json!(true);
-            response.data["notification"] = json!("submitted-receipt-unconfirmed");
-            response.data["notification_error"] = json!(error);
-            return response;
-        }
-        NotificationAttempt::StaleAccepted => {
-            response.data["durable"] = json!(true);
-            response.data["notification"] = json!("stale-attempt-accepted");
-            return response;
-        }
-        NotificationAttempt::Rejected(error) | NotificationAttempt::NotAttempted(error) => {
-            Some(error)
-        }
-    };
-    if let Some(error) = failure {
-        response.data["durable"] = json!(true);
-        response.data["notification"] = json!("subscribed-not-sent");
-        response.data["notification_error"] = json!(error);
-        response.data["failure"] = json!("notification_delivery_failed");
-        response.data["repair_required"] = json!(true);
-        response.data["escalation"] = json!(
-            "the merge obligation is durable but this wake was not delivered; do not retry this wake, have the master run `collab recv` and rebind the selected wake transport"
-        );
-    }
-    response
+    }))
 }
 
 struct ValidatedTaskIntegration {
@@ -383,11 +254,7 @@ fn validate_task_integration(
             task_id, task.status
         )));
     }
-    if !task_integration_authorized_with_control(server, state, control, &task, worker_id) {
-        return Err(Resp::err(
-            "task integrated requires task owner or live master authority",
-        ));
-    }
+    task_owner_gate_maybe_with_control(server, state, control, task_id, worker_id)?;
     if let Err(error) = work_review_gate(state, task_id) {
         return Err(error);
     }
@@ -406,23 +273,6 @@ fn validate_task_integration(
                 "rule": "this accepted delivery is explicitly read-only; clean owned resources and close without recording integration",
             }),
         ));
-    }
-    if state.pending_merges.contains_key(task_id) {
-        let is_master_holder = current_master_holder(server, state)
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some(worker_id);
-        if !is_master_holder {
-            return Err(Resp::err_data(
-                "TASK_MERGE_PENDING",
-                json!({
-                    "task_id": task_id,
-                    "status": task.status,
-                    "rule": "an accepted task with a daemon pending merge must be integrated by the current master after the merge lands on refs/heads/main; the owner records evidence after that and closes only after master integrated",
-                }),
-            ));
-        }
     }
     Ok(ValidatedTaskIntegration {
         task,
@@ -851,23 +701,11 @@ fn prepare_task_close_locked(
             force_reason: Some(reason),
         });
     }
-    if task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id).is_err() {
-        let master_holder = current_master_holder(server, st).map_err(Resp::err)?;
-        if master_holder.as_deref() != Some(worker_id) {
-            return Err(Resp::err(
-                "task close requires task owner or current master authority",
-            ));
-        }
-    }
+    task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id)?;
     let lifecycle = st.task_lifecycle.get(task_id).cloned().unwrap_or_default();
     let read_only_accepted = task.status == "accepted"
         && lifecycle.delivery_kind == state::TaskDeliveryKind::ReadOnly
-        && lifecycle
-            .review_evidence
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        && lifecycle.reviewer.is_some()
-        && lifecycle.reviewed_ms.is_some();
+        && work_review_valid(st, task_id);
     work_review_gate(st, task_id)?;
     if task.status != "merged" && !read_only_accepted {
         if let Some(request) = st.pending_merges.get(task_id) {
@@ -877,7 +715,7 @@ fn prepare_task_close_locked(
                     "task_id": task_id,
                     "status": task.status,
                     "requested_by": request.requested_by,
-                    "rule": "master must merge the accepted candidate onto refs/heads/main and record `collab task integrated --commit <sha> --evidence \"<text>\"` before close",
+                    "rule": "the task owner must record integration on refs/heads/main with collab task integrated before close",
                 }),
             ));
         }
@@ -892,15 +730,7 @@ fn prepare_task_close_locked(
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
             && record.delivered_ms.is_some()
-            && record
-                .review_evidence
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            && record
-                .reviewer
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            && record.reviewed_ms.is_some()
+            && work_review_valid(st, task_id)
             && if record.delivery_kind == state::TaskDeliveryKind::ReadOnly {
                 true
             } else {
@@ -1130,14 +960,7 @@ fn commit_task_close_locked(
             "TASK_CLOSE_TARGET_CHANGED: task, lifecycle or receipt changed during cleanup",
         ));
     }
-    if task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id).is_err() {
-        let master_holder = current_master_holder(server, st).map_err(Resp::err)?;
-        if master_holder.as_deref() != Some(worker_id) {
-            return Err(Resp::err(
-                "task close requires task owner or current master authority",
-            ));
-        }
-    }
+    task_owner_gate_maybe_with_control(server, st, control, task_id, worker_id)?;
     work_review_gate(st, task_id)?;
     let mut closed = task;
     closed.status = "closed".to_string();
@@ -2092,25 +1915,20 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         if let Some(reviewer) = &record.reviewer {
             review.insert("reviewer".into(), json!(reviewer));
         }
+        if let Some(recorder) = &record.review_recorded_by {
+            review.insert("recorded_by".into(), json!(recorder));
+        }
         if let Some(reviewed_ms) = record.reviewed_ms {
             review.insert("at".into(), json!(iso(reviewed_ms)));
-        }
-        if let Some(required_reviewer_name) = required_work_reviewer(state, &task.id) {
-            review.insert(
-                "required_reviewer_name".into(),
-                json!(required_reviewer_name),
-            );
         }
         if let Some(reviewer_name) = &record.reviewer_name {
             review.insert("reviewer_name".into(), json!(reviewer_name));
         }
         review.insert("valid".into(), json!(work_review_valid(state, &task.id)));
-        if record.review_subject_revision > 0 {
-            review.insert(
-                "subject_revision".into(),
-                json!(record.review_subject_revision),
-            );
-        }
+        review.insert(
+            "subject_revision".into(),
+            json!(record.review_subject_revision),
+        );
         if let Some(reviewed_subject_revision) = record.reviewed_subject_revision {
             review.insert(
                 "reviewed_subject_revision".into(),
@@ -2135,12 +1953,6 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         if !integration.is_empty() {
             sections.insert("integration".into(), json!(integration));
         }
-    } else if let Some(required_reviewer_name) = required_work_reviewer(state, &task.id) {
-        // A pinned reviewer is a next-step fact before any delivery exists.
-        sections.insert(
-            "review".into(),
-            json!({"required_reviewer_name": required_reviewer_name, "valid": false}),
-        );
     }
     if let Some(request) = state.pending_merges.get(&task.id) {
         sections.insert(
@@ -2168,7 +1980,7 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         "base_commit": task.base_commit,
         "priority": task.priority,
         "status": task.status,
-        "next_step": task.next_step,
+        "next_step": task_next_step(task),
         "wait": task.wait,
         "work_policy": policy,
         "child_work_policies": state.board_details.get(&task.id).map(|details|&details.child_work_policies),
@@ -2847,13 +2659,6 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             .get("worker_id")
             .and_then(serde_json::Value::as_str)
             .is_some();
-        if role == "master" && !applicable_pending_merges.is_empty() {
-            operations.push(json!({
-                "kind": "merge_pending",
-                "action": "for each pending merge, merge the accepted candidate on refs/heads/main, then record collab task integrated before close",
-                "pending_merges_ref": "pending_merges",
-            }));
-        }
         if master.get("worker_id").and_then(serde_json::Value::as_str) == Some(worker_id.as_str()) {
             operations.push(json!({
                 "kind": "peer_lifecycle",

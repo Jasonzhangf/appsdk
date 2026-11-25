@@ -12,6 +12,24 @@ fn message(id: &str, status: &str) -> Message {
         state: status.into(), wake_attempt_count: 9, last_wake_attempt_ms: 1, retry_attempted: true }
 }
 
+#[test]
+fn only_persisted_legacy_review_notice_mode_hides_quoted_review_text() {
+    let mut state = State::default();
+    let mut ordinary = message("ordinary", "pending");
+    ordinary.mtype = "request".into();
+    ordinary.subject = Some("review-required:task".into());
+    ordinary.body = "Task task is delivered and requires your review as Bob.".into();
+    let mut legacy = ordinary.clone();
+    legacy.id = "legacy".into();
+    state.delivery_modes.insert(ordinary.id.clone(), "immediate".into());
+    state.delivery_modes.insert(legacy.id.clone(), "explicit-notification".into());
+    state.msgs.insert(ordinary.id.clone(), ordinary.clone());
+    state.msgs.insert(legacy.id.clone(), legacy.clone());
+    assert!(state.message_receivable_by("old", &ordinary));
+    assert!(!state.message_receivable_by("old", &legacy));
+    assert_eq!(work_review_notice_ids(&state, "task"), vec![legacy.id]);
+}
+
 // Publish the current carrier first, then apply the existing name effects.
 // Previous identity comes from the map even when business occupancy was released.
 pub(super) fn publish_holder(server: &Server, name: &str, worker: &str) {

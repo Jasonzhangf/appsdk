@@ -440,10 +440,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                             }
                         }),
                         body: if subscription.event == "master-idle" {
-                            let mut pending_merges: Vec<_> =
-                                state.pending_merges.keys().cloned().collect();
-                            pending_merges.sort();
-                            format!("MASTER_IDLE_WAKE pending_merges={}. Inspect actionable tasks, pending merges, and authorized open bugs. Merge accepted candidates by recording collab task integrated after moving the commit onto refs/heads/main. Do not rearm this finite master-idle schedule unless actionable work remains. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, end the owning goal or task-owned finite schedule through its lifecycle (`appsdk goal cancel` for a goal, task closure for a task schedule) and let this schedule exhaust. Direct-message reception is daemon-owned and must never be closed.", pending_merges.join(","))
+                            "MASTER_IDLE_WAKE: Assign ready authorized tasks from the current board. Each delivery owner integrates their own candidate. When no actionable work remains, use collab notify cancel --event master-idle with the evaluated reason and observable resume condition. Cancel a separate finished goal through appsdk goal cancel. Retain direct-message reception.".to_owned()
                         } else if let Some(content) = &goal_body {
                             format!("DEADLINE_REACHED\n{content}\nCycle {}/{}; interval_ms={:?}; expires_ms={}\n{}",
                                 subscription.fired_count + 1, subscription.repeat_count, subscription.interval_ms, subscription.expires_ms,

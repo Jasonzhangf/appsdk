@@ -1,6 +1,6 @@
 use crate::server::state::{
-    goal_deadline_key, is_goal_deadline, now_ms, Event, Message, NotificationSubscription,
-    MAX_WAKE_ATTEMPTS,
+    goal_deadline_key, is_goal_deadline, now_ms, Event, GoalIdleWakeState, GoalStatusNotice, Message,
+    NotificationSubscription, MAX_WAKE_ATTEMPTS,
 };
 use crate::server::Server;
 use std::collections::{HashMap, HashSet};
@@ -259,19 +259,43 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     {
         let mut state = server.state.lock().unwrap();
         let mut idle_gate_records = HashMap::new();
+        let mut goal_idle_updates = HashMap::new();
+        let unread_periodic_goals: HashSet<_> = state.notification_occurrences.iter()
+            .filter(|(id, occurrence)| {
+                occurrence.consumed_ms.is_none() && state.msgs.get(*id).is_some_and(|message| {
+                    matches!(message.state.as_str(), "pending" | "delivered")
+                })
+            })
+            .map(|(_, occurrence)| occurrence.subscription_id.as_str())
+            .collect();
+        let goal_idle_scope = state
+            .notification_subscriptions
+            .values()
+            .any(|sub| owned_periodic_goal(sub) && sub.status == "armed" && goal_can_resume(&state, sub))
+            .then(|| {
+                let route = super::server_route_scope(server, &state).ok().flatten()?;
+                let control = super::binding_store::BindingControlStore::new(
+                    server.host_paths.state_root(),
+                )
+                .load().ok()?;
+                Some((route, control))
+            })
+            .flatten();
         let mut goal_deadline_keys = state
             .wake_bindings
             .iter()
             .filter_map(|(message_id, subscription_id)| {
                 let message = state.msgs.get(message_id)?;
-                if message.state != "pending" {
-                    return None;
-                }
+                let subscription_id = state.notification_occurrences.get(message_id)
+                    .filter(|occurrence| occurrence.consumed_ms.is_none())
+                    .map_or(subscription_id, |occurrence| &occurrence.subscription_id);
                 let subscription = state.notification_subscriptions.get(subscription_id)?;
-                let Some(key) = goal_deadline_key(subscription) else {
-                    return None;
-                };
-                (key.2 <= now).then_some(key)
+                let key = goal_deadline_key(subscription)?;
+                match message.state.as_str() {
+                    "pending" if key.2 <= now || owned_periodic_goal(subscription) => Some(key),
+                    "delivered" if owned_periodic_goal(subscription) => Some(key),
+                    _ => None,
+                }
             })
             .collect::<HashSet<_>>();
         let master_holder = match super::current_master_holder(server, &state) {
@@ -347,13 +371,72 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 || !master_idle_ready
                 || !master_idle_gate_open
                 || (subscription.event == "master-idle" && master_wake_hold_active)
-                || next_trigger.is_none_or(|trigger| trigger > now)
+            {
+                continue;
+            }
+            let Some(trigger) = next_trigger else { continue };
+            let mut eligible_idle = false;
+            let mut goal_address = None;
+            if owned_periodic_goal(subscription) && goal_can_resume(&state, subscription) {
+                if let Some((route, control)) = &goal_idle_scope {
+                    if let Some((slot, status)) =
+                        goal_idle_status(server, &state, route, control, &subscription.worker_id)
+                    {
+                        let current = slot.active_binding().expect("current slot");
+                        let binding_id = current.binding.binding_id.to_string();
+                        let gate = goal_idle_updates.entry(subscription.worker_id.clone())
+                            .or_insert_with(|| state.goal_idle_wake
+                                .get(&subscription.worker_id).cloned().unwrap_or_default());
+                        if gate.binding_id != binding_id || gate.generation != slot.generation() {
+                            clear_goal_status_notice(&state, gate, &mut due_events);
+                            *gate = GoalIdleWakeState {
+                                binding_id,
+                                generation: slot.generation(),
+                                ..GoalIdleWakeState::default()
+                            };
+                        }
+                        match status {
+                            GoalIdleStatus::Idle => {
+                                clear_goal_status_notice(&state, gate, &mut due_events);
+                                // An occurrence issued at its normal deadline may have
+                                // waited in the mailbox for this first eligible idle.
+                                if unread_periodic_goals.contains(subscription.id.as_str()) {
+                                    gate.issued.insert(subscription.id.clone());
+                                }
+                                eligible_idle = !gate.issued.contains(&subscription.id);
+                                goal_address = Some(super::name_mailbox::MailboxNameAddress {
+                                    project_scope: route.project_scope_id.as_str().into(),
+                                    name: slot.identity_key.name.clone(),
+                                });
+                            }
+                            GoalIdleStatus::Unknown { reason, missing }
+                                if gate.unknown_notice.as_ref().is_none_or(|notice| notice.missing != missing) =>
+                            {
+                                clear_goal_status_notice(&state, gate, &mut due_events);
+                                if let Some(master) = master_holder.as_deref() {
+                                    gate.unknown_notice = goal_status_notice(
+                                        &state, route, master, slot, &reason, &missing,
+                                        now, &mut due_events,
+                                    );
+                                }
+                            }
+                            GoalIdleStatus::Inactive => {
+                                gate.issued.clear();
+                                clear_goal_status_notice(&state, gate, &mut due_events);
+                            }
+                            GoalIdleStatus::Unknown { .. } | GoalIdleStatus::NoSample => {}
+                        }
+                    }
+                }
+            }
+            let idle_triggered = trigger > now && eligible_idle;
+            if (trigger > now && !idle_triggered)
+                || unread_periodic_goals.contains(subscription.id.as_str())
                 || state.wake_bindings.iter().any(|(message_id, bound)| {
-                    bound == &subscription.id
-                        && state
-                            .msgs
-                            .get(message_id)
-                            .is_some_and(|message| message.state == "pending")
+                    bound == &subscription.id && state.msgs.get(message_id).is_some_and(|message| {
+                        message.state == "pending"
+                            || (owned_periodic_goal(subscription) && message.state == "delivered")
+                    })
                 })
             {
                 continue;
@@ -413,6 +496,11 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 }
                 None => None,
             };
+            if goal_address.is_some() {
+                goal_idle_updates.get_mut(&subscription.worker_id)
+                    .expect("idle status initialized the gate")
+                    .issued.insert(subscription.id.clone());
+            }
             let message_id = super::gen_msg_id();
             if subscription.event == "master-idle" {
                 let record = idle_gate_records
@@ -440,9 +528,19 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                             }
                         }),
                         body: if subscription.event == "master-idle" {
-                            "MASTER_IDLE_WAKE: Assign ready authorized tasks from the current board. Each delivery owner integrates their own candidate. When no actionable work remains, use collab notify cancel --event master-idle with the evaluated reason and observable resume condition. Cancel a separate finished goal through appsdk goal cancel. Retain direct-message reception.".to_owned()
+                            format!("MASTER_IDLE_WAKE: {GOAL_PATROL_RULE} Assign ready authorized tasks from the current board. Each delivery owner integrates their own candidate. When no actionable work remains, use collab notify cancel --event master-idle with the evaluated reason and observable resume condition. Cancel a separate finished goal through appsdk goal cancel. Retain direct-message reception.")
                         } else if let Some(content) = &goal_body {
-                            format!("DEADLINE_REACHED\n{content}\nCycle {}/{}; interval_ms={:?}; expires_ms={}\n{}",
+                            let trigger_label = if idle_triggered {
+                                "GOAL_READY_ON_IDLE"
+                            } else {
+                                "DEADLINE_REACHED"
+                            };
+                            let instruction = if owned_periodic_goal(subscription) {
+                                goal_owner_instruction(subscription)
+                            } else {
+                                ""
+                            };
+                            format!("{trigger_label}\n{instruction}{content}\nCycle {}/{}; interval_ms={:?}; expires_ms={}\n{}",
                                 subscription.fired_count + 1, subscription.repeat_count, subscription.interval_ms, subscription.expires_ms,
                                 super::workflow_template_rule("execution_cycle_rule"))
                         } else {
@@ -462,13 +560,25 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 },
             ]);
             if is_goal_deadline(subscription) && subscription.periodic_declared {
+                if idle_triggered {
+                    due_events.push(Event::MailboxNameAddressed {
+                        message_id: message_id.clone(),
+                        address: goal_address.expect("idle wake has a current goal owner"),
+                    });
+                }
                 due_events.push(Event::NotificationOccurrenceIssued {
                     message_id,
                     subscription_id: subscription.id.clone(),
-                    trigger_ms: next_trigger.expect("due subscription has a trigger"),
+                    trigger_ms: trigger,
+                    idle_triggered,
                 });
             }
         }
+        due_events.extend(goal_idle_updates.into_iter().filter_map(|(worker_id, mut value)| {
+            value.issued.retain(|id| state.notification_subscriptions.get(id).is_some_and(|sub| sub.status == "armed"));
+            (state.goal_idle_wake.get(&worker_id) != Some(&value))
+                .then_some(Event::GoalIdleWakeUpdated { worker_id, value })
+        }));
         // A due batch must land in the same guard that derived it. Goal
         // reconciliation takes this same lock, so an ended or replaced
         // occurrence is either already retired when the batch is derived, or
@@ -647,14 +757,17 @@ fn same_standing_project_patrol(
         && current.created_ms == snapshot.created_ms
 }
 
+const GOAL_PATROL_RULE: &str = "For every goal, verify a nonempty Action Items field and check its items against the current acceptance criteria. Flag missing, empty, or stale items for the goal owner. Check that goal changes update Action Items in the same revision.";
+
 fn project_patrol_body() -> String {
-    String::from(
+    format!(
         "MASTER_IDLE_WAKE. Your current activity is idle. \
          Audit four items before acting: (1) unresolved P0/P1 items; (2) unfinished or ready work; \
          (3) owned worktree and resource release; (4) peer/worker idle facts and whether each idle \
          reason is reasonable. Check current workers, unclosed board ownership and unclosed tasks, current bindings, \
          per-task board patrol cancellations with `collab notify status` (project_board_patrol view; \
          use `collab board show` for tasks), and real blockers. \
+         {GOAL_PATROL_RULE} \
          Wake only peer-owned eligible uncancelled tasks; never rearm cancelled tasks. \
          The daemon board dispatcher performs the actual eligible peer wake from fresh board facts, \
          so do not duplicate it with a blind manual wake. \
@@ -858,6 +971,301 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             );
         }
     }
+}
+
+fn owned_periodic_goal(subscription: &NotificationSubscription) -> bool {
+    is_goal_deadline(subscription) && subscription.periodic_declared
+        && subscription.goal_content.as_ref().and_then(|binding| binding.source.as_ref()).is_some()
+}
+
+fn goal_can_resume(state: &super::State, subscription: &NotificationSubscription) -> bool {
+    use super::state::GoalScheduleContent;
+    match subscription.goal_content.as_ref().and_then(|binding| binding.source.as_ref()) {
+        Some(GoalScheduleContent::Inline { content }) => !content.trim().is_empty(),
+        Some(GoalScheduleContent::BoardTask { task_id }) => {
+            state.tasks.get(task_id).is_some_and(|task| {
+                !matches!(task.status.as_str(), "pending" | "invited" | "closed" | "cancelled" | "merged")
+            }) && state.board_details.get(task_id)
+                .and_then(|details| details.long_horizon.as_ref())
+                .is_some_and(|goal| !goal.content.trim().is_empty())
+        }
+        None => false,
+    }
+}
+
+fn worker_has_resumable_goal(state: &super::State, worker: &str, now: i64) -> bool {
+    state.notification_subscriptions.values().any(|subscription| {
+        subscription.worker_id == worker
+            && subscription.status == "armed"
+            && subscription.expires_ms > now
+            && subscription.fired_count < subscription.repeat_count
+            && owned_periodic_goal(subscription)
+            && goal_can_resume(state, subscription)
+    })
+}
+
+enum GoalIdleStatus {
+    Idle,
+    Inactive,
+    Unknown {
+        reason: String,
+        missing: Vec<crate::proto::WorkerStatusField>,
+    },
+    NoSample,
+}
+
+fn goal_idle_status<'a>(
+    server: &Server,
+    state: &super::State,
+    route: &crate::scope::RouteScope,
+    control: &'a super::binding_slot::BindingControlSet,
+    worker_id: &str,
+) -> Option<(&'a super::binding_slot::IdentityBindingSlot, GoalIdleStatus)> {
+    use crate::proto::TransportKind;
+    let worker = state.workers.get(worker_id)?;
+    let transport = super::selected_transport_for_worker(worker)?;
+    if !matches!(transport.kind, TransportKind::Tmux | TransportKind::Rex) {
+        return None;
+    }
+    let slot = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)
+        .ok().flatten()?;
+    let current = slot.active_binding()?;
+    let binding_session = current.binding.session_id.as_ref()?;
+    if current.transport.as_ref() != Some(&transport)
+        || transport.session_id.as_deref() != Some(binding_session.as_str())
+    {
+        return None;
+    }
+    Some((slot, current_goal_activity(server, state, worker, &transport)))
+}
+
+fn current_goal_activity(
+    server: &Server,
+    state: &super::State,
+    worker: &super::state::WorkerRec,
+    transport: &crate::proto::SelectedTransport,
+) -> GoalIdleStatus {
+    use super::name_state::{AgentActivity, AgentPresence};
+    if transport.kind == crate::proto::TransportKind::Rex
+        && !server.rex_monitor.has_current_sample(state, &worker.id)
+    {
+        return GoalIdleStatus::NoSample;
+    }
+    let (presence, activity) = super::worker_agent_facts(server, state, worker);
+    let unknown = |reason: &str| GoalIdleStatus::Unknown {
+        reason: reason.into(),
+        missing: super::name_monitor::missing_status_fields(presence, activity),
+    };
+    match (presence, activity) {
+        (Some(presence), _) if presence.presence == AgentPresence::Offline => GoalIdleStatus::Inactive,
+        (Some(presence), Some(activity)) if presence.presence == AgentPresence::Online => {
+            match activity.activity {
+                AgentActivity::Idle if !activity.background => GoalIdleStatus::Idle,
+                AgentActivity::Unknown => unknown(&activity.reason),
+                _ => GoalIdleStatus::Inactive,
+            }
+        }
+        (None, None) => GoalIdleStatus::NoSample,
+        (Some(presence), _) => unknown(&presence.reason),
+        (_, Some(activity)) => unknown(&activity.reason),
+    }
+}
+
+fn goal_owner_instruction(subscription: &NotificationSubscription) -> &'static str {
+    use super::state::GoalScheduleContent;
+    match subscription.goal_content.as_ref().and_then(|binding| binding.source.as_ref()) {
+        Some(GoalScheduleContent::BoardTask { .. }) =>
+            "First check whether this goal is still correct, has changed, or is complete. For an authorized change, read the current Board revision and use `collab board describe <task-id> --expected-revision <revision> --title <title> --description <description> --delivery-condition <condition> --test-condition <condition> --long-horizon-content <goal>`. If complete, record acceptance and close the task through its lifecycle. Otherwise continue the current authorized work.\n",
+        _ =>
+            "First check whether this goal is still correct, has changed, or is complete. Use `appsdk goal list --json` to identify this goal and its document. If changed, update the document then run `appsdk goal update --goal-id <id> --goal <path.md> --json`. If complete, record acceptance and use `appsdk goal cancel --goal-id <id>`. Otherwise continue the current authorized work.\n",
+    }
+}
+
+fn goal_status_notice(
+    state: &super::State,
+    route: &crate::scope::RouteScope,
+    master: &str,
+    slot: &super::binding_slot::IdentityBindingSlot,
+    reason: &str,
+    missing: &[crate::proto::WorkerStatusField],
+    now: i64,
+    events: &mut Vec<Event>,
+) -> Option<GoalStatusNotice> {
+    let holder = state.name_occupancy(route.project_scope_id.as_str(), "Jenny")?;
+    if holder.worker_id != master {
+        return None;
+    }
+    let binding = &slot.active_binding()?.binding;
+    let worker = binding.agent_id.as_str();
+    let session = binding.session_id.as_ref()?.as_str();
+    let name = &slot.identity_key.name;
+    let generation = slot.generation();
+    let subject = format!(
+        "goal-status-unknown:{worker}:{name}:{}:{generation}:{session}:{missing:?}",
+        binding.binding_id.as_str()
+    );
+    if let Some(message) = state.msgs.values().find(|message| {
+        message.from == "collab-server"
+            && message.subject.as_deref() == Some(subject.as_str())
+            && matches!(message.state.as_str(), "pending" | "delivered")
+            && state.message_receivable_by(master, message)
+    }) {
+        return Some(GoalStatusNotice { message_id: message.id.clone(), missing: missing.to_vec() });
+    }
+    let message_id = super::gen_msg_id();
+    events.extend([
+        Event::Sent { msg: Message {
+            id: message_id.clone(),
+            from: "collab-server".into(),
+            to: master.into(),
+            mtype: "notification".into(),
+            subject: Some(subject),
+            body: format!("Goal owner {name}, binding {} generation {generation}, session {session}. Missing status fields: {missing:?}. Host evidence: {reason}. Goal delivery stays pending. Run `collab worker snapshot {worker} --capture`. If it still describes this binding and shows evidence for a missing field, run `collab worker judge --capture '<judgment_capture JSON>' --basis '<visible evidence>'` with the verified `--presence` or `--activity` values for those fields.", binding.binding_id.as_str()),
+            in_reply_to: None,
+            created_ms: now,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        }},
+        Event::MailboxNameAddressed {
+            message_id: message_id.clone(),
+            address: super::name_mailbox::MailboxNameAddress {
+                project_scope: route.project_scope_id.as_str().into(),
+                name: "Jenny".into(),
+            },
+        },
+    ]);
+    if let Some(subscription) = state.matching_subscription(master, "direct-message", None, now) {
+        events.push(Event::WakeBound { message_id: message_id.clone(), subscription_id: subscription.id.clone() });
+    }
+    Some(GoalStatusNotice { message_id, missing: missing.to_vec() })
+}
+
+fn clear_goal_status_notice(
+    state: &super::State,
+    gate: &mut GoalIdleWakeState,
+    events: &mut Vec<Event>,
+) {
+    if let Some(notice) = gate.unknown_notice.take() {
+        if super::notification_provably_unsubmitted(state, &notice.message_id) {
+            events.push(Event::Superseded { ids: vec![notice.message_id] });
+        }
+    }
+}
+
+pub(super) fn reconcile_goal_status_judgment(
+    state: &super::State,
+    route: &crate::scope::RouteScope,
+    master: &str,
+    slot: &super::binding_slot::IdentityBindingSlot,
+    capture: &crate::proto::WorkerStatusCapture,
+    now: i64,
+    events: &mut Vec<Event>,
+) {
+    let Some(gate) = state.goal_idle_wake.get(&capture.worker_id) else { return };
+    let Some(prior) = gate.unknown_notice.as_ref() else { return };
+    if gate.binding_id != capture.binding.binding_id.as_str() || gate.generation != slot.generation() {
+        return;
+    }
+    let mut presence = capture.presence.as_ref();
+    let mut activity = capture.activity.as_ref();
+    for event in events.iter() {
+        match event {
+            Event::AgentPresenceObserved { presence: observed } => presence = Some(observed),
+            Event::AgentActivityObserved { activity: observed } => activity = Some(observed),
+            _ => {}
+        }
+    }
+    let missing = super::name_monitor::missing_status_fields(presence, activity);
+    let goal_is_active = worker_has_resumable_goal(state, &capture.worker_id, now);
+    if goal_is_active && missing == prior.missing {
+        return;
+    }
+    let mut gate = gate.clone();
+    clear_goal_status_notice(state, &mut gate, events);
+    if goal_is_active && !missing.is_empty() {
+        gate.unknown_notice = goal_status_notice(
+            state, route, master, slot, "the current master verified part of the status",
+            &missing, now, events,
+        );
+    }
+    events.push(Event::GoalIdleWakeUpdated { worker_id: capture.worker_id.clone(), value: gate });
+}
+
+pub(super) fn goal_status_notice_current(server: &Server, state: &super::State, message: &Message) -> bool {
+    if message.from != "collab-server"
+        || !message.subject.as_deref().is_some_and(|subject| subject.starts_with("goal-status-unknown:"))
+    {
+        return true;
+    }
+    let Some((worker, gate, notice)) = state.goal_idle_wake.iter().find_map(|(worker, gate)| {
+        let notice = gate.unknown_notice.as_ref()?;
+        (notice.message_id == message.id).then_some((worker, gate, notice))
+    }) else { return false };
+    if !worker_has_resumable_goal(state, worker, now_ms()) {
+        return false;
+    }
+    let Some(route) = super::server_route_scope(server, state).ok().flatten() else { return false };
+    let Ok(control) = super::binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+    else { return false };
+    let Some((slot, GoalIdleStatus::Unknown { missing, .. })) =
+        goal_idle_status(server, state, &route, &control, worker)
+    else { return false };
+    slot.active_binding().is_some_and(|current| {
+        current.binding.binding_id.as_str() == gate.binding_id
+            && slot.generation() == gate.generation
+            && missing == notice.missing
+    })
+}
+
+/// Recheck goal authority and status inside the existing delivery reservation.
+pub(super) fn goal_wake_delivery_allowed(
+    server: &Server,
+    state: &super::State,
+    message: &Message,
+    subscription: &NotificationSubscription,
+    transport: &crate::proto::SelectedTransport,
+    now: i64,
+) -> bool {
+    if !requires_goal_idle(state, message, subscription, transport) {
+        return true;
+    }
+    let goal = occurrence_goal(state, message, subscription);
+    if goal.status != "armed"
+        || goal.worker_id != message.to
+        || goal.expires_ms <= now
+        || !goal_can_resume(state, goal)
+    {
+        return false;
+    }
+    let Some(worker) = state.workers.get(&message.to) else { return false };
+    matches!(transport.kind, crate::proto::TransportKind::Tmux | crate::proto::TransportKind::Rex)
+        && matches!(current_goal_activity(server, state, worker, transport), GoalIdleStatus::Idle)
+}
+
+fn occurrence_goal<'a>(
+    state: &'a super::State,
+    message: &Message,
+    lease: &'a NotificationSubscription,
+) -> &'a NotificationSubscription {
+    // Name handoff can replace the transport lease while retaining the goal.
+    state.notification_occurrences.get(&message.id)
+        .and_then(|occurrence| state.notification_subscriptions.get(&occurrence.subscription_id))
+        .unwrap_or(lease)
+}
+
+pub(super) fn requires_goal_idle(
+    state: &super::State,
+    message: &Message,
+    lease: &NotificationSubscription,
+    transport: &crate::proto::SelectedTransport,
+) -> bool {
+    use crate::proto::TransportKind;
+    state.notification_occurrences.get(&message.id)
+        .is_some_and(|occurrence| occurrence.idle_triggered)
+        || (matches!(transport.kind, TransportKind::Tmux | TransportKind::Rex)
+            && owned_periodic_goal(occurrence_goal(state, message, lease)))
 }
 
 fn next_subscription_trigger(

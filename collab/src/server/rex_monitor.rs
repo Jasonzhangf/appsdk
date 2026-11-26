@@ -14,6 +14,7 @@ use crate::client::adapters::rex::{
 use crate::proto::{RexEndpoint, TransportKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -63,6 +64,7 @@ pub(crate) struct ObservedRexExecution {
 
 struct RexTask {
     target: MonitorTarget,
+    sampled: Arc<AtomicBool>,
     cancel: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -76,6 +78,15 @@ impl RexMonitor {
 
     pub(crate) fn runtime_handle(&self) -> Option<tokio::runtime::Handle> {
         self.inner.lock().unwrap().handle.clone()
+    }
+
+    pub(super) fn has_current_sample(&self, state: &super::State, worker_id: &str) -> bool {
+        let Some(target) = current_target(state, worker_id) else {
+            return false;
+        };
+        self.inner.lock().unwrap().tasks.get(worker_id).is_some_and(|task| {
+            task.target == target && task.sampled.load(Ordering::Acquire)
+        })
     }
 
     /// Stop each owned stream. Cancellation is sent to the adapter watch;
@@ -164,11 +175,14 @@ fn spawn_task(
     let stream = handle.block_on(async move { spawn_events(endpoint, events_tx) });
     let task_target = target.clone();
     let server = Arc::clone(server);
+    let sampled = Arc::new(AtomicBool::new(false));
+    let stream_sampled = Arc::clone(&sampled);
     let task = handle.spawn(async move {
-        run_stream(server, worker_id, task_target, events_rx, stream.task).await;
+        run_stream(server, worker_id, task_target, events_rx, stream.task, stream_sampled).await;
     });
     RexTask {
         target,
+        sampled,
         cancel: stream.cancel,
         task,
     }
@@ -180,30 +194,37 @@ async fn run_stream(
     target: MonitorTarget,
     mut events: mpsc::Receiver<RexEvent>,
     mut stream: JoinHandle<RexEventBatch>,
+    sampled: Arc<AtomicBool>,
 ) {
-    let mut execution = server
-        .state
-        .lock()
-        .unwrap()
-        .rex_executions
-        .get(&worker_id)
-        .filter(|record| {
-            record.endpoint == target.endpoint && record.agent_session_id == target.agent_session_id
-        })
-        .map(|record| record.owner.clone());
-    refresh_snapshot(&server, &worker_id, &target, &mut execution).await;
+    let mut execution = {
+        let server = Arc::clone(&server);
+        let worker_id = worker_id.clone();
+        let target = target.clone();
+        let Ok(previous) = tokio::task::spawn_blocking(move || {
+            server.state.lock().unwrap().rex_executions.get(&worker_id)
+                .filter(|record| record.endpoint == target.endpoint
+                    && record.agent_session_id == target.agent_session_id)
+                .map(|record| record.owner.clone())
+        }).await else { return };
+        previous
+    };
+    if refresh_snapshot(&server, &worker_id, &target, &mut execution).await {
+        sampled.store(true, Ordering::Release);
+    }
     loop {
         tokio::select! {
             event = events.recv() => match event {
                 Some(event) if event_matches_target(&event, &target) => {
-                    refresh_snapshot(&server, &worker_id, &target, &mut execution).await;
+                    if refresh_snapshot(&server, &worker_id, &target, &mut execution).await {
+                        sampled.store(true, Ordering::Release);
+                    }
                 }
                 Some(_) => {}
                 None => break,
             },
             finished = &mut stream => {
                 if let Some(projection) = project_stream_join(finished) {
-                    submit_activity(&server, &worker_id, &target, projection);
+                    publish_projection(&server, &worker_id, &target, projection, None).await;
                 }
                 return;
             }
@@ -211,7 +232,7 @@ async fn run_stream(
     }
     if let Ok(batch) = stream.await {
         if let Some(projection) = project_stream_end(&batch) {
-            submit_activity(&server, &worker_id, &target, projection);
+            publish_projection(&server, &worker_id, &target, projection, None).await;
         }
     }
 }
@@ -221,7 +242,7 @@ async fn refresh_snapshot(
     worker_id: &str,
     target: &MonitorTarget,
     execution: &mut Option<RexProgramStatusOwner>,
-) {
+) -> bool {
     let projection = match observe_current(&target.endpoint).await {
         Ok(observation) => project_observation_with_execution(&observation, execution, &|pid| {
             current_process_exists(&target.endpoint, pid)
@@ -232,7 +253,24 @@ async fn refresh_snapshot(
             reason: format!("rex.osc7501 observe failed: {error}"),
         },
     };
-    submit_activity_with_execution(server, worker_id, target, projection, execution.as_ref());
+    publish_projection(server, worker_id, target, projection, execution.clone()).await
+}
+
+async fn publish_projection(
+    server: &Arc<Server>,
+    worker_id: &str,
+    target: &MonitorTarget,
+    projection: RexProjection,
+    execution: Option<RexProgramStatusOwner>,
+) -> bool {
+    // Native submission may hold the state lock while Rex I/O needs the
+    // runtime's workers. A contending monitor must stay off those workers.
+    let server = Arc::clone(server);
+    let worker_id = worker_id.to_owned();
+    let target = target.clone();
+    tokio::task::spawn_blocking(move || {
+        submit_activity_with_execution(&server, &worker_id, &target, projection, execution.as_ref())
+    }).await.unwrap_or(false)
 }
 
 /// A local PID probe belongs only to the Rex server that owns that PID.
@@ -491,6 +529,7 @@ fn current_target(state: &super::state::State, worker_id: &str) -> Option<Monito
     })
 }
 
+#[cfg(test)]
 fn submit_activity(
     server: &Server,
     worker_id: &str,
@@ -506,7 +545,7 @@ fn submit_activity_with_execution(
     target: &MonitorTarget,
     projection: RexProjection,
     execution: Option<&RexProgramStatusOwner>,
-) {
+) -> bool {
     let RexProjection {
         presence,
         activity,
@@ -517,12 +556,12 @@ fn submit_activity_with_execution(
             &server.log_path(),
             &format!("REX_MONITOR_SCOPE_UNKNOWN: {worker_id}"),
         );
-        return;
+        return false;
     };
     let observed_ms = now_ms();
     let mut state = server.state.lock().unwrap();
     if current_target(&state, worker_id).as_ref() != Some(target) {
-        return;
+        return false;
     }
     let presence = AgentPresenceRecord {
         project_scope: scope.as_str().into(),
@@ -584,8 +623,12 @@ fn submit_activity_with_execution(
         events.push(Event::AgentActivityObserved { activity });
     }
     if !events.is_empty() {
-        server.commit_locked_reporting(&mut state, &events);
+        if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+            server.report_state_error(&error);
+            return false;
+        }
     }
+    true
 }
 
 fn retire(handle: &tokio::runtime::Handle, task: RexTask) {

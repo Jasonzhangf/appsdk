@@ -81,6 +81,8 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             assert!(!responsibilities.is_empty());
             assert!(responsibilities.contains("observable evaluation criteria"));
             assert!(responsibilities.contains("at least one linked action item"));
+            assert!(responsibilities.contains("nonempty action items field"));
+            assert!(responsibilities.contains("update action items in the same revision"));
             let workflow = &context.data["role_brief"]["workflow_template"];
             assert_eq!(workflow["base_version"], serde_json::json!(2), "{workflow}");
             assert_eq!(

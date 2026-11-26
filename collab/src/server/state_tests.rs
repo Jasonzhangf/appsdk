@@ -975,6 +975,7 @@ fn expired_periodic_goal_reads_only_an_occurrence_issued_for_its_trigger() {
             message_id: message_id.into(),
             subscription_id: "sub-expired-goal".into(),
             trigger_ms: 100,
+            idle_triggered: false,
         });
         state.apply(&Event::Delivered {
             ids: vec![message_id.into()],

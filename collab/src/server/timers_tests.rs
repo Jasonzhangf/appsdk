@@ -1560,6 +1560,7 @@ fn master_wake_hold_suppresses_standing_project_patrol_until_expiry_or_release()
         let messages = subscription_messages(&state, &subscription_id);
         assert_eq!(messages.len(), 1, "an expired hold must resume the patrol");
         assert!(messages[0].body.contains("MASTER_IDLE_WAKE"));
+        assert!(messages[0].body.contains("verify a nonempty Action Items field"));
     }
 
     let held = crate::server::handle_master_wake_hold(

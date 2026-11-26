@@ -677,7 +677,9 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
                 .unwrap()
                 .values()
                 .find(|message| {
-                    message["to"] == peer_id && message["subject"] == "deadline:goal:task:goal-task"
+                    message["to"] == peer_id
+                        && message["subject"] == "deadline:goal:task:goal-task"
+                        && matches!(message["state"].as_str(), Some("pending" | "delivered"))
                 })
                 .cloned();
             reminder.is_some()
@@ -687,10 +689,16 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let reminder = reminder.unwrap();
     let message_id = reminder["id"].as_str().unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), || pane_contains_message_id(
+        !pane_contains_message_id(&fixture, &peer_pane, message_id),
+        "an online target without confirmed idle keeps its goal in the mailbox"
+    );
+    fixture.show_codex_idle_prompt(&peer_pane);
+    assert!(
+        wait_until(Duration::from_secs(30), || pane_contains_message_id(
             &fixture, &peer_pane, message_id
         )),
-        "exact reminder was not observed in the real target pane"
+        "exact reminder {message_id} was not observed in the real target pane: activity={}",
+        fixture.current_state_for(&root, "appserver-cli")["agent_activity"][root.to_str().unwrap()][&peer_id],
     );
     let received = run_ok_at(
         &fixture,

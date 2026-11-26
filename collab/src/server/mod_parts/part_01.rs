@@ -115,6 +115,8 @@ impl HostRouteRegistry {
         // v1 resident process.  A registered project without a resident
         // reducer remains visible as a route, but cannot be sent to this
         // project's State until a separate runtime owner is available.
+        #[cfg(test)]
+        record_routed_poll_contention(server);
         let st = server.state.lock().unwrap();
         let resident_app_scope = st
             .global
@@ -200,6 +202,7 @@ const GUARDED_NATIVE_OPERATION_TIMEOUT: std::time::Duration =
 pub(crate) struct NotificationDispatchContext {
     pub explicit: bool,
     pub guarded_one_shot: bool,
+    pub guarded_goal: bool,
 }
 type TmuxNotificationSink = dyn Fn(
         &SelectedTransport,
@@ -389,20 +392,20 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                     Ok(receipt)
                 }
                 TransportKind::Rex => {
-                    // The notification sink is synchronous while the Rex
-                    // primitive owns async process I/O. daemon callers enter
-                    // this sink from the Tokio blocking pool, so block on the
-                    // current runtime handle instead of starting a second one.
-                    let handle = tokio::runtime::Handle::try_current().map_err(|error| {
-                        format!("REX_UNKNOWN: Tokio runtime unavailable for Rex sink: {error}")
-                    })?;
-                    let receipt = handle
-                        .block_on(crate::client::adapters::rex::notify(
-                            transport,
-                            body,
-                            Some(mode),
-                        ))
-                        .map_err(|error| error.to_string())?;
+                    let notification = crate::client::adapters::rex::notify(transport, body, Some(mode));
+                    let result = if context.guarded_goal {
+                        // This one bounded submission holds project state.
+                        // Drive its CLI I/O on the calling blocking thread so
+                        // it never depends on daemon workers waiting for state.
+                        tokio::runtime::Builder::new_current_thread().enable_all().build()
+                            .map_err(|error| format!("REX_UNKNOWN: cannot drive guarded Rex input: {error}"))?
+                            .block_on(notification)
+                    } else {
+                        tokio::runtime::Handle::try_current()
+                            .map_err(|error| format!("REX_UNKNOWN: Tokio runtime unavailable for Rex sink: {error}"))?
+                            .block_on(notification)
+                    };
+                    let receipt = result.map_err(|error| error.to_string())?;
                     serde_json::from_str::<serde_json::Value>(&receipt)
                         .map_err(|error| error.to_string())
                 }

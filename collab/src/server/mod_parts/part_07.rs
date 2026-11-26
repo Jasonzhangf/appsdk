@@ -2420,6 +2420,7 @@ fn handle_worker_status_judgment(
     }
 
     if !events.is_empty() {
+        timers::reconcile_goal_status_judgment(state, &route, worker_id, slot, capture, now, &mut events);
         if let Err(error) = server.commit_locked_checked_with_control(state, &events, control) {
             return Resp::err(format!("WORKER_STATUS_JUDGMENT_DURABILITY_FAILED: {error}"));
         }

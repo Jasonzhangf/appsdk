@@ -289,6 +289,22 @@ async fn dispatch_wire_routed(
     (server, response)
 }
 
+#[cfg(test)]
+static ROUTED_POLL_CONTENTION: Mutex<Option<(PathBuf, std::sync::mpsc::Sender<()>)>> =
+    Mutex::new(None);
+
+#[cfg(test)]
+fn record_routed_poll_contention(server: &Server) {
+    let mut probe = ROUTED_POLL_CONTENTION.lock().unwrap();
+    if probe.as_ref().is_some_and(|(root, _)| root == &server.root)
+        && matches!(server.state.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    {
+        if let Some((_, observed)) = probe.take() {
+            let _ = observed.send(());
+        }
+    }
+}
+
 async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, mut writer) = stream.into_split();

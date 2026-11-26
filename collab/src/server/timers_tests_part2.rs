@@ -1653,6 +1653,9 @@ use super::*;
             .unwrap();
         assert_eq!(state.msgs[message_id].to, "master");
         assert!(state.msgs[message_id].body.contains("MASTER_IDLE_WAKE"));
+        assert!(state.msgs[message_id]
+            .body
+            .contains("goal changes update Action Items in the same revision"));
         assert!(
             !state.msgs[message_id].body.contains("subject="),
             "finite master-idle body must not repeat the envelope subject: {}",

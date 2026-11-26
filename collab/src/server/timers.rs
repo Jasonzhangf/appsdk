@@ -528,7 +528,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                             }
                         }),
                         body: if subscription.event == "master-idle" {
-                            "MASTER_IDLE_WAKE: Assign ready authorized tasks from the current board. Each delivery owner integrates their own candidate. When no actionable work remains, use collab notify cancel --event master-idle with the evaluated reason and observable resume condition. Cancel a separate finished goal through appsdk goal cancel. Retain direct-message reception.".to_owned()
+                            format!("MASTER_IDLE_WAKE: {GOAL_PATROL_RULE} Assign ready authorized tasks from the current board. Each delivery owner integrates their own candidate. When no actionable work remains, use collab notify cancel --event master-idle with the evaluated reason and observable resume condition. Cancel a separate finished goal through appsdk goal cancel. Retain direct-message reception.")
                         } else if let Some(content) = &goal_body {
                             let trigger_label = if idle_triggered {
                                 "GOAL_READY_ON_IDLE"
@@ -757,15 +757,17 @@ fn same_standing_project_patrol(
         && current.created_ms == snapshot.created_ms
 }
 
+const GOAL_PATROL_RULE: &str = "For every goal, verify a nonempty Action Items field and check its items against the current acceptance criteria. Flag missing, empty, or stale items for the goal owner. Check that goal changes update Action Items in the same revision.";
+
 fn project_patrol_body() -> String {
-    String::from(
+    format!(
         "MASTER_IDLE_WAKE. Your current activity is idle. \
          Audit four items before acting: (1) unresolved P0/P1 items; (2) unfinished or ready work; \
          (3) owned worktree and resource release; (4) peer/worker idle facts and whether each idle \
          reason is reasonable. Check current workers, unclosed board ownership and unclosed tasks, current bindings, \
          per-task board patrol cancellations with `collab notify status` (project_board_patrol view; \
          use `collab board show` for tasks), and real blockers. \
-         For every goal, verify a nonempty Action Items field in the current goal record +         and flag missing or stale items for the owner. Check that each changed goal updated its action items. \
+         {GOAL_PATROL_RULE} \
          Wake only peer-owned eligible uncancelled tasks; never rearm cancelled tasks. \
          The daemon board dispatcher performs the actual eligible peer wake from fresh board facts, \
          so do not duplicate it with a blind manual wake. \

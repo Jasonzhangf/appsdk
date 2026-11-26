@@ -355,14 +355,7 @@ fn periodic_goal_delivers_once_to_live_tmux_idle_before_deadline() {
     let notice_again = fixture.run_ok(&["recv", "--timeout", "0"], Some(&caller));
     assert!(!notice_again.to_string().contains(&unknown_notice), "{notice_again}");
     fixture.start_codex_pane_runner(&pane);
-    let show_idle = || {
-        let output = tmux(
-            &fixture.tmux_socket,
-            &["send-keys", "-t", &pane.pane_id, "-l", "> fixture idle\n"],
-        );
-        assert!(output.status.success());
-    };
-    show_idle();
+    fixture.show_codex_idle_prompt(&pane);
     assert!(wait_until(Duration::from_secs(20), || {
         let status = peer_status(&fixture, &caller, &worker_id);
         status["transport_view"]["agent_presence"] == "online"
@@ -387,11 +380,7 @@ fn periodic_goal_delivers_once_to_live_tmux_idle_before_deadline() {
     assert!(received.contains("Update Action Items in the same revision"), "{received}");
     assert_eq!(fired_count(&fixture), 1);
     fixture.restart_daemon();
-    let output = tmux(
-        &fixture.tmux_socket,
-        &["send-keys", "-t", &pane.pane_id, "-l", "> fixture idle\n"],
-    );
-    assert!(output.status.success());
+    fixture.show_codex_idle_prompt(&pane);
     std::thread::sleep(Duration::from_secs(4));
     let repeated = fixture.run_ok(&["recv", "--timeout", "0"], Some(&pane)).to_string();
     assert!(!repeated.contains("GOAL_READY_ON_IDLE"), "{repeated}");

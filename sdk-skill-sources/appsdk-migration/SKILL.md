@@ -7,7 +7,18 @@ description: "AppSDK/Collab 控制面迁移、context 身份与通信恢复、�
 
 ## Scope and mandatory boundary
 
-Use this Skill for requested control-plane migration, version installation, identity recovery or scoped reset. Ordinary feature development and rule editing do not require runtime migration.
+Use this Skill when a user asks to move existing project governance, refresh
+installed resources, recover a Collab binding, or discard an exact project
+scope. Select one path from the current observed state.
+
+| Current state | Action and owner | Verification |
+| --- | --- | --- |
+| Existing governed project has `.appsdk/project.json` and needs current managed resources | Project owner runs `appsdk init` and `appsdk verify` from that project root | Managed resources refreshed, existing project contract and records retained; confirm the affected consumer entry |
+| Existing project is adopting AppSDK for the first time or changing its governance root | Project owner runs `appsdk prepare` in the intended project root, reads `.appsdk-prepare.json`, applies the approved scope, then runs `appsdk init` and `appsdk verify` | Use the [prepare contract](../appsdk-project-governance/references/bootstrap-migration.md#new-project) for fields. `PREPARATION_NOT_CONFIRMED` means resolve the draft before init |
+| Project only needs old governance rules or checks retired | Project owner follows [governance ablation](../appsdk-project-governance/references/bootstrap-migration.md#existing-project-governance-ablation) against the live AGENTS, Skills and calls | Exercise the affected project command and check the retained behavior |
+| Collab name, session or route requires recovery | Original affected host session uses `collab context` from its actual project root | Follow the [recovery table](../collab/references/stable-name-recovery.md#正常恢复) and check current name, binding and work ownership |
+| Global Collab upgrade or restart after installation | Use [install and activate](../collab/references/migration-daemon.md#install-and-activate-separately) | Record the CLI version, daemon version and affected behavior separately |
+| Explicit control-state discard | Select the named owner and project in the reset table below | Retain the actual reset receipt and verify the agreed scope |
 
 - **No pre-release SHA or snapshot ceremony**: Follow [`AGENTS.md`](../../AGENTS.md) L2 and [`coding-principals/references/workflow.md`](../coding-principals/references/workflow.md#消融与校验取舍). Use normal command receipts, `--version`, daemon PID/socket liveness, and behavior replay. Do not add manual SHA/checksum manifests or multi-phase JSONL ceremony wrappers.
 - **Strict owner separation**:
@@ -22,7 +33,7 @@ binding, route, name/session and receive state. The agent never inventories
 duplicate credentials, chooses a historical worker, closes old peers as a
 prerequisite, or hand-edits the control plane. New identity semantics and the
 user's explicit current recovery intent take precedence over old records.
-Use the exact [recovery commands and receipt contract](../collab/references/stable-name-recovery.md#恢复操作context-自己迁移agent-不做历史清理).
+Use the exact [recovery commands and receipt contract](../collab/references/stable-name-recovery.md#正常恢复).
 Do not reverse-engineer approval fields or run a separate migration ceremony.
 
 For ordinary peer or master recovery, use the existing user-managed daemon.
@@ -35,7 +46,7 @@ parameter contract here or supply an AppServer endpoint for Desktop.
 
 - Context restores the stable name's work and current communication binding under the [Collab name contract](../collab/references/stable-name-recovery.md). An existing master does not block ordinary peer recovery. Recovery does not grant master authority or transfer another owner's goal.
 - Explicit communication repairs and communication-feature delivery require real send, receive and reply evidence. Ordinary identity recovery adds no communication round trip. Do not reset a project or operate daemon lifecycle for identity recovery.
-- After recovery, reconcile finite owned goal/task schedules and preserve direct-message reception. The current master's standing project patrol and per-task board-idle cancellation follow [board-idle patrol](../collab/references/board-idle-patrol.md); ending a goal does not cancel standing patrol or restore cancelled tasks.
+- After recovery, reuse valid owned goal/task schedules. Use [goal status and operations](../collab/operations.md#目标入口与参数) only when a specific schedule needs inspection, editing, ending, or authorized renewal. The current master's standing project patrol and per-task board-idle cancellation follow [board-idle patrol](../collab/references/board-idle-patrol.md).
 - Do not hand-edit `routes.jsonl`, `identities/`, or `.agent-collab/` files.
 
 ## 2. Collab version upgrade & daemon maintenance

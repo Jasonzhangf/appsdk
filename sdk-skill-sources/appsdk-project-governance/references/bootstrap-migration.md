@@ -315,16 +315,17 @@ Active/Protected, local control state, claims, and worktrees. Choose one route:
 
 ### Preserve and migrate
 
-Use when historical evidence remains valuable and the current version has a
-supported canonical migration.
+Use the existing governed root identified by `.appsdk/project.json`. For a
+supported managed-resource upgrade, run `appsdk init` from that root. It
+refreshes the managed bundle through the current SDK. Run `appsdk verify`,
+then exercise the affected project entry and check the retained records
+identified before migration. If the change is only to effective rules or
+CI/hooks, use [governance ablation](#existing-project-governance-ablation).
 
-```text
-snapshot immutable truth
--> reconcile ownership/conflicts
--> run canonical migration once
--> verify one retained truth
--> compile Harness rules
-```
+If the current SDK rejects the project version, records, or pin, retain the
+exact error and affected paths for the SDK owner. Continue after an explicit
+supported migration for that version pair is available and verified. Use
+confirmed preparation for a relocated root or first adoption.
 
 ### Reset and reinitialize
 
@@ -729,8 +730,8 @@ start from the current SDK baseline, the preferred single entry is:
 ```bash
 cd /abs/path/project
 git worktree add -b codex/governance-reset-<slug> \
-  /Volumes/Intel/playground/<project-key>/<task-slug> origin/main
-cd /Volumes/Intel/playground/<project-key>/<task-slug>
+  /Volumes/extension/playground/<project-key>/<task-slug>-<yyyymmdd> origin/main
+cd /Volumes/extension/playground/<project-key>/<task-slug>-<yyyymmdd>
 appsdk init "$PWD" --fresh --discard-legacy
 appsdk guide init --task governance-reset --mode bootstrap --module <module-id>
 appsdk guide compile

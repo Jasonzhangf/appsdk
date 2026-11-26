@@ -1,5 +1,20 @@
 # Current Identity and User-Managed Daemon Boundary
 
+## Choose the migration owner
+
+| Trigger | Operator, command and working directory | Completion evidence |
+| --- | --- | --- |
+| Current Collab session or transport changed, or the name has an explicit recovery request | Affected agent runs `collab context` from its actual project in the original host session. Read the [recovery table](stable-name-recovery.md#正常恢复) before supplying fields | Same stable name and applicable role, current verified binding, existing work and unread messages still owned by that name |
+| Current Collab binary or daemon is behind the delivered version | Authorized installer operator uses the reviewed AppSDK checkout; the user activates from the actual project as described below | Installed CLI and running daemon both report the intended version; verify affected behavior separately |
+| Current AppSDK project needs its managed governance resources refreshed | Project owner runs `appsdk init` from an existing governed root with `.appsdk/project.json`, then `appsdk verify`. For first adoption or relocation use the confirmed `appsdk prepare` path in the AppSDK governance Skill | Existing project and business records stay in place; verify the affected entry in the consumer |
+| User explicitly requests discarding one project's Collab state | Current project master runs `collab reset --project` from that exact project after confirming the discard scope | Read the reset receipt for that project. Use the identity recovery path separately if the current session needs to bind |
+
+For a healthy registered session with an active goal, continue the existing
+schedule across an ordinary version upgrade. Use goal and notification status
+if a concrete fact is missing. Archived project-local Collab data has no
+manual import path. When a request depends on data found only in retired
+storage, report the specific missing current record and preserve the source.
+
 ## Context uses the current identity map
 
 Use `collab context` in the current project. Identity selection reads only
@@ -63,13 +78,21 @@ Use the formal installer from the reviewed current source:
 scripts/install-global-collab.sh
 ```
 
-Obtain the user's approval for this installation before writing global runtime
-artifacts. Earlier approvals do not cover another installation. After approval,
-check for and handle the installer's blocking confirmation window. Do not leave
-it waiting unattended or bypass a denied action. Installation approval does not
-authorize an agent to activate or replace the running daemon.
+Use the authorization already granted for the target installation. If the
+installer returns `outcome=pending_user_activation` and `required_action=daemon_version_differs`,
+read `~/.cargo/bin/collab --version` and `~/.cargo/bin/collab status` to confirm
+the installed CLI and current `daemon_version`. Other installer failures use
+the original error, failed phase and rollback receipt.
 
-It builds and installs Collab and refreshes the embedded Skill. It does not
+When activation is needed, the user runs `~/.cargo/bin/collab up` in a normal
+terminal from the actual project root. The project path comes from that
+project's current registration. The agent reads `~/.cargo/bin/collab status`
+and checks that `daemon_version` matches the intended installed version.
+`USER_MAINTENANCE_REQUIRED` is the boundary for this operation. Give the user
+the exact directory, command and target version, and resume live checks when
+the version matches. Send an authorized release notice only after that check.
+
+The installer builds and installs Collab and refreshes the embedded Skill. It does not
 activate the new global daemon or discard durable state. Verify the installed
 version and affected public behavior. Report installed and live versions
 separately; installation alone does not prove live identity or communication

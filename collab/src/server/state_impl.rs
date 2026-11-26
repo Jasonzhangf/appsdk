@@ -598,6 +598,7 @@ impl State {
             }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
+                self.goal_idle_wake.remove(worker_id);
                 self.master_wake.idle_workers.retain(|id| id != worker_id);
                 self.master_wake
                     .newly_idle_workers
@@ -1038,15 +1039,20 @@ impl State {
                 message_id,
                 subscription_id,
                 trigger_ms,
+                idle_triggered,
             } => {
                 self.notification_occurrences.insert(
                     message_id.clone(),
                     NotificationOccurrence {
                         subscription_id: subscription_id.clone(),
                         trigger_ms: *trigger_ms,
+                        idle_triggered: *idle_triggered,
                         consumed_ms: None,
                     },
                 );
+            }
+            Event::GoalIdleWakeUpdated { worker_id, value } => {
+                self.goal_idle_wake.insert(worker_id.clone(), value.clone());
             }
             Event::WakeBound {
                 message_id,
@@ -1092,7 +1098,11 @@ impl State {
                         m.state = "read".into();
                     }
                     'subscription: {
-                        let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
+                        let Some(subscription_id) = self.notification_occurrences.get(id)
+                            .map(|occurrence| &occurrence.subscription_id)
+                            .or_else(|| self.wake_bindings.get(id))
+                            .cloned()
+                        else {
                             break 'subscription;
                         };
                         let Some(subscription) =
@@ -1161,6 +1171,11 @@ impl State {
                 for id in ids {
                     if let Some(m) = self.msgs.get_mut(id) {
                         m.state = "superseded".into();
+                        if let Some(occurrence) = self.notification_occurrences.get(id) {
+                            if let Some(gate) = self.goal_idle_wake.get_mut(&m.to) {
+                                gate.issued.remove(&occurrence.subscription_id);
+                            }
+                        }
                     }
                 }
             }

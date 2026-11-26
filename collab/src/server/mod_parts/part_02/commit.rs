@@ -124,6 +124,12 @@ impl Server {
         {
             candidate.apply_checked(&change).map_err(MutationError::InvalidState)?;
         }
+        let ids = edited_board_goal_reminders(state, &candidate, changes);
+        if !ids.is_empty() {
+            candidate
+                .apply_checked(&Event::Superseded { ids })
+                .map_err(MutationError::InvalidState)?;
+        }
         candidate
             .advance_version()
             .map_err(MutationError::InvalidState)?;

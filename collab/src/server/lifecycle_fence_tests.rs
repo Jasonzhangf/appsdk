@@ -1132,6 +1132,7 @@ fn ack_marked_occurrence_below_retained_read_count_cannot_reactivate_retired_sub
                 message_id: "msg-unread".into(),
                 subscription_id: "sub-retired".into(),
                 trigger_ms,
+                idle_triggered: false,
             },
             Event::Sent {
                 msg: delivery_message(TARGET, "msg-unread", "delivered"),

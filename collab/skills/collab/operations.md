@@ -140,6 +140,23 @@ daemon 已为真实角色和模板变化通知相关 peer，不再要求 master 
 额外任务交接仍走已有派单通道，不新建定时轮询。context 派发流程不等于 daemon
 自动生成任务或替 agent 执行。
 
+## 功能与入口选择
+
+Collab 提供稳定身份、持久消息、任务板和订阅。项目由实际工作目录选定，
+名字承载任务和未读消息，当前 sessionID 承载执行，daemon 管理全局状态。
+在原 agent 会话的项目根目录运行 CLI。压缩后继续沿用已核实的绑定和任务。
+
+| 当前事实 | 操作人和入口 | 判断结果 |
+| --- | --- | --- |
+| 用户要求首次注册、明确恢复，或当前绑定确有异常 | 本会话运行 `collab context`；只按返回的缺失字段和[恢复表](references/stable-name-recovery.md#正常恢复)补当前宿主事实 | 看 `registered`、稳定名和当前绑定；待确认或缺字段时按该回执继续 |
+| 只查现有身份；没有发起恢复或注册 | 本会话运行 `collab context --query` | 返回当前已登记事实或原始错误；查询没有注册、换绑或消费副作用 |
+| 要给已知项目成员发送消息 | 本会话从 `collab list` 取精确地址，再按[通信入口](#通信入口与项目目录)发送 | 分别记录消息 ID、宿主投递和消费 |
+| 收到当前会话的未消费 `COLLAB_NOTIFY` | 原收件会话运行 `collab recv --timeout 0`；DSH 原生回合按[通信入口](#通信入口与项目目录)处理 | 以正文和实际消费回执决定下一步 |
+| 要派发 Board 上的任务 | Jenny 从 `collab board show` 取任务 ID、当前 revision 和受托者，按[长程登记](#register-the-long-horizon-goal-before-dispatch)填写合同并派发 | 检查任务状态和 `goal_schedule`；执行者从本人任务记录推进 |
+| 要处理已有任务、排查派发容量或查状态 | 任务 owner 读 `collab board show`；Jenny 用 `collab worker status <worker-id>` 核对选定执行者 | 任务 ID 来自 Board，worker ID 来自当前项目成员回执；未知容量交 Jenny 核实 |
+| 只需要随目标推进唤醒、停止巡检或调整周期 | 目标 owner 用[目标入口](#目标入口与参数)，巡检者用[巡检订阅](references/board-idle-patrol.md) | 核对具体目标或巡检的订阅 ID、状态、已执行次数 |
+| 二进制旧、宿主换绑、旧项目治理资源要升级或要重置 | 按[迁移选择表](references/migration-daemon.md#choose-the-migration-owner)选对应 owner | 用该路径的公开回执确认结果 |
+
 ## 通信入口与项目目录
 
 普通消息默认走公开 CLI。使用成功注册时的项目根目录；未注册调用者或后台脚本亦可在项目根目录下运行 `collab directory` 与 `collab sendmessage --unknown-sender`，无需先注册 peer 身份。业务代码可以在独占
@@ -451,6 +468,23 @@ content or cadence, stale revision, authority failure or schedule admission erro
 returns an explicit failure before any partial dispatch. A saved task sheet alone
 does not prove a subscription is armed.
 
+Jenny reads the task ID, current revision and selected executor from
+`collab board show`. If its stored declaration is incomplete, dispatch with
+the authorized goal text and interval in milliseconds:
+
+```sh
+collab board dispatch '<task-id>' --expected-revision '<revision>' \
+  --long-horizon-content '<full goal, acceptance criteria and Action Items>' \
+  --long-horizon-every-ms 1800000
+```
+
+Here `1800000` represents an explicitly agreed 30-minute interval. Use the
+actual contract interval. On success verify `goal_schedule.armed` and its
+subscription ID. The invited peer uses the latest revision to run
+`collab board respond '<task-id>' --accept --expected-revision '<revision>'`.
+If dispatch fails, read the current task and fix the documented missing input or
+capacity condition before retrying.
+
 The AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`;
 a periodic long-horizon goal defaults to one 100-delivery batch;
 when the user specifies another count, use that count. Reuse the valid batch while deliveries remain; do not re-register, reset
@@ -468,6 +502,13 @@ Other peers retain self-management. `--every-ms` without `--repeat` uses 100 tot
 cycles. `--content` supplies an independent goal's full instructions. Task-linked
 content remains on the authoritative task form. SessionID is the execution
 carrier. A worktree or transport change retains the target's ownership and progress.
+Each goal must have a nonempty `Action Items` field. Use the Markdown heading
+`## Action Items` in the goal document or Board long-horizon content.
+Every item names its owner, concrete action,
+expected output, pass condition, and completion evidence. Update this field in
+the same document or Board revision as any goal change. On wake, compare every
+goal and its items against the current acceptance criteria and record missing,
+empty, or stale items as gaps for the goal owner to correct.
 Read-only status does not modify another owner's records.
 A runtime that refuses an ordinary peer's own goal has an implementation defect;
 report its exact error, do not promote the peer or route registration through master.
@@ -494,6 +535,37 @@ report its exact error, do not promote the peer or route registration through ma
 Close owned goal scheduling and patrol subscriptions after completion or when
 no new task and no actionable work remain. Retain direct-message reception;
 assess a new assignment before registering/rearming its goal schedule.
+
+### 目标入口与参数
+
+| 触发条件 | 从项目根目录运行 | 参数来源和验收 |
+| --- | --- | --- |
+| 本人有获授权的独立目标，需要开始周期唤醒 | `appsdk goal subscribe --goal '<目标文档路径>' --interval '<获授权周期>'` | 路径取当前目标文档，周期取合同，例 `30m`。默认 100 次；仅按授权加 `--repeat`。记录真实目标 ID 和 armed 批次 |
+| 不确定当前目标 ID、周期或剩余次数 | `appsdk goal list --json`，再用 `appsdk goal status --goal-id '<目标ID>' --json`；Collab 批次用 `collab notify status` | 目标 ID 取列表，订阅 ID 取批次回执。有效批次直接复用，换绑后也沿用 |
+| 独立目标内容或验收变化 | 修改同一 Markdown 文档，再运行 `appsdk goal update --goal-id '<目标ID>' --goal '<目标文档路径>' --json` | 同次更新 `## Action Items` 与受影响验收标准；回读目标及原批次计数 |
+| Board 目标内容或验收变化 | 按当前任务回执运行 `collab board describe <任务ID> --expected-revision <revision> --title <标题> --description <描述> --delivery-condition <交付条件> --test-condition <验收方式> --long-horizon-content <完整目标正文>` | 任务字段取当前 Board 和获授权变更；正文含 `## Action Items`；版本冲突时重读再编辑 |
+| 周期批次耗尽，且原职责仍有效并获授权续做 | 目标 owner 用原文档和已授权周期续订；Board 目标按[精确订阅控制](#register-the-long-horizon-goal-before-dispatch)处理 | 新批次回执须有实际周期、armed 状态和订阅 ID |
+| 目标完成或获授权结束，或巡检无可执行项 | 先核对验收，独立目标用 `appsdk goal cancel --goal-id '<目标ID>' --json`；Board 任务沿其生命周期收口；单独的巡检按[取消条件](references/board-idle-patrol.md)操作 | 回读对应终态。遇真实外部依赖，先记 owner、剩余行动项和恢复条件；保留基本收件 |
+
+### 空闲唤醒与状态核实
+
+这些分支适用于有内容的 tmux/Rex 周期目标。daemon 使用当前绑定的状态和订阅记录，
+评估目标含义、验收和下一项工作由 agent 执行。
+
+| 状态或事件 | 下一步 |
+| --- | --- |
+| 当前绑定同时确认在线和 idle，目标有当前有效周期 | daemon 可提前投递；同一空闲阶段按批次去重。收到 `GOAL_READY_ON_IDLE` 后用 `collab recv --timeout 0` 消费，目标 owner 核对原目标、Action Items 和当前缺口，然后继续、更新或结束 |
+| 在线但 busy、waiting_user 或 error | daemon 等待新的可用状态；有明确错误时，目标 owner 只处理受影响工作 |
+| 确认 offline | daemon 不向宿主提交，保留待办 |
+| presence 或 activity 仍 unknown | daemon 保留目标待办，对当前项目 Jenny 发 `goal-status-unknown:` 通知。Jenny 在原项目消费，按下方流程核实 |
+| 批次结束、取消或已耗尽 | 无自动唤醒。仅在原职责有效且获授权时办理续订 |
+
+Jenny 从通知正文取 worker ID、binding、generation、session 与缺失字段，运行
+`collab worker snapshot <worker-id> --capture`。仅在回执仍属该绑定且确有可见证据时，
+把原 `judgment_capture` JSON 对象完整传给
+`collab worker judge --capture '<judgment_capture JSON>' --basis '<本次快照证据>'`，
+只增加有证据的 `--presence` 或 `--activity`。快照已换绑时重新核实当前绑定；
+证据不足时保留 unknown。普通消息、一次性 deadline 和独立巡检按各自订阅生命周期处理。
 
 ### Registered patrol duties
 

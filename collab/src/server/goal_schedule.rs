@@ -588,6 +588,16 @@ fn prepare_goal_schedule(
         });
         let changed = existing != Some(&subscription);
         if changed {
+            if existing.is_some_and(|old| old.periodic_declared
+                && (old.trigger_ms != subscription.trigger_ms
+                    || old.interval_ms != subscription.interval_ms
+                    || old.repeat_count != subscription.repeat_count
+                    || old.expires_ms != subscription.expires_ms
+                    || old.goal_content.as_ref().and_then(|binding| binding.source.as_ref())
+                        != subscription.goal_content.as_ref().and_then(|binding| binding.source.as_ref())))
+            {
+                superseded.extend(retractable_messages_for_subscription(state, &subscription.id));
+            }
             subscription.updated_ms = now;
             events.push(Event::NotificationSubscribed {
                 subscription: subscription.clone(),
@@ -997,6 +1007,29 @@ fn task_goal_transition_events(
         events.extend(goal_events);
     }
     Ok(events)
+}
+
+fn edited_board_goal_reminders(before: &State, after: &State, changes: &[Event]) -> Vec<String> {
+    let changed_tasks: std::collections::HashSet<_> = changes.iter().filter_map(|change| {
+        let Event::BoardDetailsChanged { task_id, details } = change else { return None };
+        let old = before.board_details.get(task_id)?;
+        let old_goal = old.long_horizon.as_ref()?;
+        let current_goal = details.long_horizon.as_ref()?;
+        (old_goal != current_goal
+            || old.title != details.title
+            || old.delivery_condition != details.delivery_condition
+            || old.test_condition != details.test_condition
+            || old.invitation.is_some() != details.invitation.is_some()).then_some(task_id)
+    }).collect();
+    if changed_tasks.is_empty() {
+        return Vec::new();
+    }
+    after.notification_subscriptions.values().filter_map(|sub| {
+        let Some(GoalScheduleContent::BoardTask { task_id }) =
+            sub.goal_content.as_ref().and_then(|binding| binding.source.as_ref())
+        else { return None };
+        (sub.periodic_declared && changed_tasks.contains(task_id)).then_some(sub)
+    }).flat_map(|sub| retractable_messages_for_subscription(after, &sub.id)).collect()
 }
 
 impl ProjectRuntimeManager {

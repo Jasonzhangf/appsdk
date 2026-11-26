@@ -685,7 +685,7 @@ fn board_patrol_subscription(
 
 fn board_patrol_body(tasks: &[String]) -> String {
     format!(
-        "You are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`, then continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
+        "You are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`. Verify a nonempty Action Items field for each goal and update it in the same revision when the goal changes. Continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
         tasks.join(", ")
     )
 }

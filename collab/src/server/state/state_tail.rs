@@ -99,6 +99,7 @@ pub struct State {
     /// Keyed by message id so ACK and retention can decide exact-once
     /// consumption without relying on retained message history.
     pub notification_occurrences: HashMap<String, NotificationOccurrence>,
+    pub goal_idle_wake: HashMap<String, GoalIdleWakeState>,
     /// Project-mirrored global CEO grant. `CeoGrantSet` is the only writer;
     /// `None` revokes the grant and never touches bootstrap history.
     pub ceo_grant: Option<crate::ceo::CeoGrant>,

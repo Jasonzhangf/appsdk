@@ -440,6 +440,45 @@ fn goal_edit_current_batch_keeps_identity_progress_and_is_idempotent() {
 }
 
 #[test]
+fn repeat_only_edit_retracts_unsubmitted_reminder_and_preserves_other_receipts() {
+    let now = now_ms();
+    let mut state = State::default();
+    edit_worker(&mut state, "edit-worker");
+    let before = edit_subscription("sub-edit-repeat", "edit-worker", "armed", now);
+    state.notification_subscriptions.insert(before.id.clone(), before.clone());
+    for (id, attempts) in [("unsent", 0), ("uncertain", 1), ("accepted", 1)] {
+        state.apply(&Event::Sent { msg: Message {
+            id: id.into(), from: "collab-server".into(), to: "edit-worker".into(),
+            mtype: "notification".into(), subject: Some("deadline:goal:goal-edit".into()),
+            body: "Cycle 3/5".into(), in_reply_to: None, created_ms: now,
+            state: "pending".into(), wake_attempt_count: attempts,
+            last_wake_attempt_ms: now, retry_attempted: false,
+        }});
+        state.apply(&Event::WakeBound { message_id: id.into(), subscription_id: before.id.clone() });
+        state.apply(&Event::NotificationOccurrenceIssued {
+            message_id: id.into(), subscription_id: before.id.clone(),
+            trigger_ms: before.trigger_ms.unwrap(), idle_triggered: true,
+        });
+    }
+    state.notification_delivery_accepted.insert("accepted".into(), now);
+    let mut change = content_edit_change("old content");
+    change.content = None;
+    change.repeat_count = Some(7);
+    let (events, response) = prepare_goal_schedule(&state, "edit-worker", &change, now + 1).unwrap();
+    assert_eq!(response.data["superseded_message_ids"], json!(["unsent"]));
+    for event in &events {
+        state.apply(event);
+    }
+    let after = &state.notification_subscriptions[&before.id];
+    assert_eq!(after.repeat_count, 7);
+    assert_eq!(after.fired_count, before.fired_count);
+    assert_eq!(after.trigger_ms, before.trigger_ms);
+    assert_eq!(state.msgs["unsent"].state, "superseded");
+    assert_eq!(state.msgs["uncertain"].state, "pending");
+    assert_eq!(state.msgs["accepted"].state, "pending");
+}
+
+#[test]
 fn goal_edit_does_not_rearm_a_lost_or_elapsed_batch() {
     let now = now_ms();
     for (created_ms, status) in [(now - 60_000, "transport-lost"), (now - 610_000, "expired")] {
@@ -707,6 +746,34 @@ fn goal_edit_task_details_and_schedule_commit_together() {
         state.notification_subscriptions[&subscription_id],
         subscription_before_failure
     );
+    let pending_id = "pending-task-edit";
+    server.commit_locked_checked(&mut state, &[
+        Event::Sent { msg: Message {
+            id: pending_id.into(), from: "collab-server".into(), to: "task-edit".into(),
+            mtype: "notification".into(), subject: Some("deadline:goal:task:task-edit".into()),
+            body: "edited task goal".into(), in_reply_to: None, created_ms: now_ms(),
+            state: "pending".into(), wake_attempt_count: 0, last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        }},
+        Event::WakeBound { message_id: pending_id.into(), subscription_id: subscription_id.clone() },
+        Event::NotificationOccurrenceIssued {
+            message_id: pending_id.into(), subscription_id: subscription_id.clone(),
+            trigger_ms: subscription_before_failure.trigger_ms.unwrap(), idle_triggered: true,
+        },
+    ]).unwrap();
+    let mut described = details_before_failure.clone();
+    described.revision += 1;
+    described.delivery_condition = "Verify the revised acceptance condition.".into();
+    assert!(state.notification_subscriptions[&subscription_id].periodic_declared);
+    assert!(notification_provably_unsubmitted(&state, pending_id));
+    assert_eq!(retractable_messages_for_subscription(&state, &subscription_id), vec![pending_id]);
+    server.commit_locked_checked(&mut state, &[Event::BoardDetailsChanged {
+        task_id: "task-edit".into(), details: described.clone(),
+    }]).unwrap();
+    assert_eq!(state.msgs[pending_id].state, "superseded");
+    assert_eq!(state.board_details["task-edit"].delivery_condition, described.delivery_condition);
+    assert_eq!(state.notification_subscriptions[&subscription_id], subscription_before_failure);
+    let details_before_failure = described;
     state.tasks.get_mut("task-edit").unwrap().status = "closed".into();
     let mut closed_edit = content_edit_change("must not change closed task");
     closed_edit.goal_id = "task:task-edit".into();

@@ -345,6 +345,194 @@ use super::*;
     }
 
     #[test]
+    fn registered_periodic_goal_wakes_once_before_deadline_on_known_idle() {
+        use crate::server::name_state::{AgentActivity, AgentActivityRecord, AgentPresence, AgentPresenceRecord};
+        let (server, root) = test_server();
+        seed_ledger_owner(&server, "goal-owner");
+        let now = now_ms();
+        let id = subscribe(&server, "goal-owner", "deadline", Some("goal:resume"), Some(now + 60_000));
+        {
+            let mut state = server.state.lock().unwrap();
+            let sub = state.notification_subscriptions.get_mut(&id).unwrap();
+            sub.periodic_declared = true;
+            sub.interval_ms = Some(60_000);
+            sub.repeat_count = 3;
+            sub.expires_ms = now + 600_000;
+            sub.goal_content = Some(crate::server::state::GoalScheduleBinding {
+                source: Some(crate::server::state::GoalScheduleContent::Inline { content: "Continue the recorded goal".into() }),
+                ttl_seconds: 600,
+            });
+        }
+        let project_scope = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        server.commit(&[Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: project_scope.clone(),
+                worker_id: "goal-owner".into(),
+                session_id: "session-goal-owner".into(),
+                presence: AgentPresence::Offline,
+                reason: "test exact execution exited".into(),
+                observed_ms: now - 1,
+            },
+        }]);
+        tick_with_deadline_wake_at(&server, now - 1);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(subscription_messages(&state, &id).is_empty());
+            assert_eq!(state.notification_subscriptions[&id].status, "armed");
+            assert!(!state.msgs.values().any(|message| message.subject.as_deref()
+                == Some("goal-status-unknown:goal-owner")));
+        }
+        server.commit(&[
+            Event::AgentPresenceObserved { presence: AgentPresenceRecord {
+                project_scope: project_scope.clone(), worker_id: "goal-owner".into(),
+                session_id: "session-goal-owner".into(), presence: AgentPresence::Online,
+                reason: "test current foreground".into(), observed_ms: now,
+            }},
+            Event::AgentActivityObserved { activity: AgentActivityRecord {
+                project_scope, worker_id: "goal-owner".into(), session_id: "session-goal-owner".into(),
+                activity: AgentActivity::Idle, background: false, reason: "test input ready".into(),
+                observed_ms: now, idle_since_ms: Some(now),
+            }},
+        ]);
+        tick_with_deadline_wake_at(&server, now);
+        let old_message = {
+            let mut state = server.state.lock().unwrap();
+            let messages = subscription_messages(&state, &id);
+            assert_eq!(messages.len(), 1, "idle must wake the goal before its deadline");
+            assert!(messages[0].body.contains("Continue the recorded goal"));
+            assert!(messages[0].body.contains("appsdk goal update"));
+            assert_eq!(state.notification_subscriptions[&id].fired_count, 0);
+            let message_id = messages[0].id.clone();
+            let edited = super::super::commit_goal_schedule(
+                &server, &mut state, "goal-owner", super::super::GoalScheduleChange {
+                    goal_id: "resume".into(), goal_owner: "goal-owner".into(),
+                    desired: "active".into(), trigger_ms: None, ttl_seconds: None,
+                    interval_ms: None, repeat_count: None, goal_subject: None,
+                    expected_subscription_id: None, reason: None,
+                    content: Some(crate::server::state::GoalScheduleContent::Inline {
+                        content: "Revised goal\n\nAction Items\n- Verify the replacement.".into(),
+                    }),
+                    operation: super::super::GoalScheduleOperation::Edit,
+                },
+            );
+            assert!(edited.ok, "{edited:?}");
+            assert_eq!(state.msgs[&message_id].state, "superseded");
+            assert_eq!(state.notification_subscriptions[&id].fired_count, 0);
+            message_id
+        };
+        tick_with_deadline_wake_at(&server, now + 1);
+        let message_id = {
+            let state = server.state.lock().unwrap();
+            let replacement = subscription_messages(&state, &id).into_iter()
+                .find(|message| message.id != old_message).expect("updated idle reminder");
+            assert!(replacement.body.contains("Verify the replacement."));
+            replacement.id.clone()
+        };
+        let lease = crate::server::mailbox::default_direct_message_id("goal-owner");
+        {
+            let state = server.state.lock().unwrap();
+            let mut rebound = state.clone();
+            rebound.notification_occurrences.get_mut(&message_id).unwrap().idle_triggered = false;
+            let (_, observed) = super::super::worker_agent_facts(
+                &server, &state, &state.workers["goal-owner"],
+            );
+            let mut busy = observed.unwrap().clone();
+            busy.activity = AgentActivity::Busy;
+            busy.idle_since_ms = None;
+            busy.observed_ms += 1;
+            rebound.apply(&Event::AgentActivityObserved { activity: busy });
+            let transport = rebound.workers["goal-owner"].transport.as_ref().unwrap();
+            assert!(!goal_wake_delivery_allowed(
+                &server, &rebound, &rebound.msgs[&message_id],
+                &rebound.notification_subscriptions[&lease], transport, now + 1,
+            ), "a nominal occurrence must not bypass idle through the direct lease");
+        }
+        server.commit(&[
+            Event::WakeBound { message_id: message_id.clone(), subscription_id: lease },
+            Event::Acked { ids: vec![message_id.clone()], consumed_ms: Some(now + 1) },
+        ]);
+        tick_with_deadline_wake_at(&server, now + 2);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.notification_occurrences[&message_id].consumed_ms, Some(now + 1));
+        assert_eq!(subscription_messages(&state, &id).len(), 1);
+        assert_eq!(state.notification_subscriptions[&id].fired_count, 1);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn goal_verification_notice_requires_current_missing_fields() {
+        use crate::proto::WorkerStatusField::{Activity, Presence};
+        use crate::server::name_state::{AgentActivity, AgentActivityRecord, AgentPresence, AgentPresenceRecord};
+        let (server, root) = test_server();
+        let worker = "verification-owner";
+        seed_ledger_owner(&server, worker);
+        let now = now_ms();
+        let subscription = subscribe(&server, worker, "deadline", Some("goal:verification"), Some(now + 30_000));
+        let scope = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let session = format!("session-{worker}");
+        let notice = Message {
+            id: "goal-status-fixture".into(), from: "collab-server".into(), to: "Jenny".into(),
+            mtype: "notification".into(), subject: Some("goal-status-unknown:verification-owner".into()),
+            body: String::new(), in_reply_to: None, created_ms: now, state: "pending".into(),
+            wake_attempt_count: 0, last_wake_attempt_ms: 0, retry_attempted: false,
+        };
+        let notice_id = notice.id.clone();
+        let mut state = server.state.lock().unwrap();
+        let goal = state.notification_subscriptions.get_mut(&subscription).unwrap();
+        goal.periodic_declared = true;
+        goal.goal_content = Some(crate::server::state::GoalScheduleBinding {
+            source: Some(crate::server::state::GoalScheduleContent::Inline {
+                content: "Verify the current goal".into(),
+            }),
+            ttl_seconds: 60,
+        });
+        state.apply(&Event::Sent { msg: notice.clone() });
+        let route = super::super::server_route_scope(&server, &state).unwrap().unwrap();
+        let control = super::super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load().unwrap();
+        let slot = control.current_for_worker(&route.project_scope_id, &route.app_scope_id, worker)
+            .unwrap().unwrap();
+        let binding_id = slot.active_binding().unwrap().binding.binding_id.to_string();
+        let activity = AgentActivityRecord {
+            project_scope: scope.clone(), worker_id: worker.into(), session_id: session.clone(),
+            activity: AgentActivity::Unknown, background: false, reason: "unknown".into(),
+            observed_ms: now, idle_since_ms: None,
+        };
+        state.apply(&Event::AgentActivityObserved { activity: activity.clone() });
+        state.apply(&Event::GoalIdleWakeUpdated {
+            worker_id: worker.into(),
+            value: GoalIdleWakeState {
+                binding_id, generation: slot.generation(),
+                unknown_notice: Some(GoalStatusNotice { message_id: notice_id, missing: vec![Presence, Activity] }),
+                ..GoalIdleWakeState::default()
+            },
+        });
+        assert!(goal_status_notice_current(&server, &state, &notice));
+        state.apply(&Event::AgentPresenceObserved {
+            presence: AgentPresenceRecord {
+                project_scope: scope, worker_id: worker.into(), session_id: session,
+                presence: AgentPresence::Online, reason: "verified".into(), observed_ms: now,
+            },
+        });
+        assert!(!goal_status_notice_current(&server, &state, &notice));
+        assert!(super::super::poll_messages_with_state(
+            &server, &mut state, None, "Jenny", None, None, None,
+        ).is_none(), "recv must hide the obsolete unsubmitted notice");
+        state.goal_idle_wake.get_mut(worker).unwrap().unknown_notice.as_mut().unwrap().missing = vec![Activity];
+        assert!(goal_status_notice_current(&server, &state, &notice));
+        assert_eq!(super::super::poll_messages_with_state(
+            &server, &mut state, None, "Jenny", None, None, None,
+        ).unwrap().data["count"], 1);
+        state.apply(&Event::AgentActivityObserved {
+            activity: AgentActivityRecord { activity: AgentActivity::Idle, observed_ms: now + 1, ..activity },
+        });
+        assert!(!goal_status_notice_current(&server, &state, &notice));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn goal_deadline_stays_armed_and_enters_the_mailbox_without_a_transport() {
         let (server, root) = test_server();
         register(&server, "owner");
@@ -1465,6 +1653,9 @@ use super::*;
             .unwrap();
         assert_eq!(state.msgs[message_id].to, "master");
         assert!(state.msgs[message_id].body.contains("MASTER_IDLE_WAKE"));
+        assert!(state.msgs[message_id]
+            .body
+            .contains("goal changes update Action Items in the same revision"));
         assert!(
             !state.msgs[message_id].body.contains("subject="),
             "finite master-idle body must not repeat the envelope subject: {}",

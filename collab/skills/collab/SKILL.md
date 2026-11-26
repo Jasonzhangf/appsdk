@@ -64,7 +64,8 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 当前在线时才可写入 shell、pane、Rex block 或原生 thread。在线只认当前 adapter
 明确返回的 Present。cold、unknown、offline、缺失或只有持久化绑定时，daemon
 保持消息未读并产生零终端输入。入队、订阅接受和唤醒接受都不是投递成功。
-普通未读消息在目标上线后沿当前绑定投递；周期唤醒离线静默且不补发。
+普通未读消息在目标上线后沿当前绑定投递。tmux/Rex 的长程目标提醒在离线时
+保留待办，等当前绑定确认在线且空闲后再判断能否投递。
 board 修改仍先提交，自动通知在目标离线时保持未读。
 
 ### 身份恢复
@@ -228,9 +229,11 @@ Jenny 是项目唯一的 Collab 调度者。Architect、executor、reviewer、QA
 内容和周期的 Board 派发提交中，按[长程登记](operations.md#register-the-long-horizon-goal-before-dispatch)
 核对派发和订阅的实际回执。
 
-每个目标都在原记录中写明可核对的评估标准，并至少关联一项行动。行动项写清负责人、
+每个目标的正文必须有非空的 `Action Items` 字段，并至少列出一项直接对应此目标的行动。
+更新目标时，在同一次更新中同步更新该字段和受影响的评估标准。行动项写清负责人、
 具体动作、产物、通过条件和完成证据。巡检把每项检查关联到目标标准和上轮证据，
-记下本轮是通过、发现缺口、还是无法核实。缺口和待核实项各自有负责人、下一动作和
+记下本轮是通过、发现缺口、还是无法核实。字段缺失、为空或行动与当前目标不符时，
+记为缺口，由目标 owner 在原记录修正。缺口和待核实项各自有负责人、下一动作和
 复验标准或恢复信号。已有行动项就更新原记录，符合标准的例行检查仅留下必要证据。
 
 每个 owner 使用 Codex 编排处理本任务内的工作。明确子角色的范围、输入、产物、验收和
@@ -398,13 +401,16 @@ v2 实验状态。
 
 | 当前动作 | 只读对应内容 |
 |---|---|
+| 首次使用、恢复身份或换宿主 | [功能与入口选择](operations.md#功能与入口选择)、[身份恢复](references/stable-name-recovery.md#正常恢复) |
+| 投递、查回执或收到通知 | [通信入口与项目目录](operations.md#通信入口与项目目录) |
+| 新建、编辑、续订或结束 Longhorizon | [目标入口与参数](operations.md#目标入口与参数)、[空闲唤醒与状态核实](operations.md#空闲唤醒与状态核实) |
 | 修改角色或工作流程模板 | [角色分工](operations.md#工作角色与用户指定分工)、[流程模板](operations.md#唯一-skill-与当前工作流程) |
 | 任务板发布、认领、交付及队列接续 | [任务板与 dashboard](operations.md#public-task-board-and-read-only-dashboard) |
 | 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[当前身份与用户维护边界](references/migration-daemon.md) |
 | CEO、跨项目 master 操作 | [CEO](operations.md#全局-ceo-与项目-master)、[跨项目通信](operations.md#cross-project-master-communication) |
 | board idle 巡检、取消与 CEO 回报 | [board idle 巡检](references/board-idle-patrol.md) |
 | 宿主注册、AppServer 或 thread 路由 | [宿主注册](operations.md#宿主注册所需信息)、[AppServer](operations.md#appserver-runtime-registration) |
-| 安装及受影响 runtime 验收 | [构建安装](operations.md#current-version-baseline)、[验证细节](references/verification.md) |
+| 版本升级、项目迁移或显式 reset | [迁移、安装与激活](references/migration-daemon.md#choose-the-migration-owner)、[验证细节](references/verification.md) |
 | 通知、订阅、路径问题 | [通知](references/notifications.md)、[状态路径](references/state-paths.md) |
 
 源包更新可能重写本机 Skill；本次正文变更不代表 AppSDK 分发源或运行二进制已经更新。

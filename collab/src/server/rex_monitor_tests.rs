@@ -393,6 +393,42 @@ fn r1_current_codex_working_submission_is_online_and_busy() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rex_native_io_can_finish_while_monitor_waits_for_state() {
+    let target = target();
+    let (server, root) = rex_server(&target);
+    let (locked, lock_ready) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let state_owner = {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            let _guard = server.state.lock().unwrap();
+            locked.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10))
+        })
+    };
+    lock_ready.await.unwrap();
+    let (started, monitor_started) = tokio::sync::oneshot::channel();
+    let monitor = tokio::spawn(async move {
+        started.send(()).unwrap();
+        publish_projection(
+            &server, "worker", &target,
+            project_observation(&observation(vec![record("working", None)])),
+            None,
+        ).await
+    });
+    monitor_started.await.unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::spawn(async { tokio::process::Command::new("printf").arg("input").output().await }),
+    ).await;
+    let released_while_locked = release.send(()).is_ok();
+    assert!(state_owner.join().unwrap().is_ok() && released_while_locked);
+    assert_eq!(output.unwrap().unwrap().unwrap().stdout, b"input");
+    assert!(monitor.await.unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn r1_unrecognized_current_codex_state_submits_online_unknown() {
     let (server, root) = rex_server(&target());
@@ -624,6 +660,7 @@ async fn reconcile_replaces_old_binding_and_reaps_removed_binding() {
     let (cancel_b, _) = tokio::sync::watch::channel(false);
     let task_a = RexTask {
         target: target(),
+        sampled: Arc::default(),
         cancel: cancel_a,
         task: tokio::spawn(async {}),
     };
@@ -631,6 +668,7 @@ async fn reconcile_replaces_old_binding_and_reaps_removed_binding() {
     other.agent_session_id = "other-session".into();
     let task_b = RexTask {
         target: other,
+        sampled: Arc::default(),
         cancel: cancel_b,
         task: tokio::spawn(async {}),
     };
@@ -647,6 +685,7 @@ async fn reconcile_replaces_old_binding_and_reaps_removed_binding() {
         let (cancel, _) = tokio::sync::watch::channel(false);
         RexTask {
             target: target(),
+            sampled: Arc::default(),
             cancel,
             task: tokio::spawn(async {}),
         }
@@ -678,6 +717,7 @@ async fn reconcile_reconnects_a_finished_current_task() {
     }
     let task_a = RexTask {
         target: target(),
+        sampled: Arc::default(),
         cancel: cancel_a,
         task: finished,
     };
@@ -691,6 +731,7 @@ async fn reconcile_reconnects_a_finished_current_task() {
         let (cancel, _) = tokio::sync::watch::channel(false);
         RexTask {
             target: target(),
+            sampled: Arc::default(),
             cancel,
             task: tokio::spawn(async {}),
         }

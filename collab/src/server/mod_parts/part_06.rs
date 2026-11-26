@@ -832,7 +832,9 @@ fn pending_messages_for_subscription(state: &State, subscription_id: &str) -> Ve
         .wake_bindings
         .iter()
         .filter_map(|(message_id, bound_subscription)| {
-            (bound_subscription == subscription_id
+            let owner = state.notification_occurrences.get(message_id)
+                .map_or(bound_subscription, |occurrence| &occurrence.subscription_id);
+            (owner == subscription_id
                 && state
                     .msgs
                     .get(message_id)
@@ -845,15 +847,19 @@ fn pending_messages_for_subscription(state: &State, subscription_id: &str) -> Ve
 fn retractable_messages_for_subscription(state: &State, subscription_id: &str) -> Vec<String> {
     pending_messages_for_subscription(state, subscription_id)
         .into_iter()
-        .filter(|id| {
-            let message = &state.msgs[id];
-            !state.notification_delivery_accepted.contains_key(id)
-                && (message.wake_attempt_count == 0
-                    || state.notification_delivery_failures.get(id).is_some_and(|failure| {
-                        failure.retryable && failure.failed_ms == message.last_wake_attempt_ms
-                    }))
-        })
+        .filter(|id| notification_provably_unsubmitted(state, id))
         .collect()
+}
+
+fn notification_provably_unsubmitted(state: &State, id: &str) -> bool {
+    state.msgs.get(id).is_some_and(|message| {
+        message.state == "pending"
+            && !state.notification_delivery_accepted.contains_key(id)
+            && (message.wake_attempt_count == 0
+                || state.notification_delivery_failures.get(id).is_some_and(|failure| {
+                    failure.retryable && failure.failed_ms == message.last_wake_attempt_ms
+                }))
+    })
 }
 
 /// Reconcile the master goal-due accumulator against the committed outcome of

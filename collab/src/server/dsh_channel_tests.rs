@@ -962,6 +962,7 @@ fn dsh_delivery_sink_uses_current_liveness_before_enqueue() {
             NotificationDispatchContext {
                 explicit: false,
                 guarded_one_shot: false,
+                guarded_goal: false,
             },
             "immediate",
         );
@@ -1144,6 +1145,7 @@ fn a_dsh_wake_never_reaches_the_tmux_sink() {
         NotificationDispatchContext {
             explicit: true,
             guarded_one_shot: false,
+            guarded_goal: false,
         },
         "immediate",
     )
@@ -1183,6 +1185,7 @@ fn a_dsh_wake_forwards_the_sink_mode_it_was_given() {
         NotificationDispatchContext {
             explicit: false,
             guarded_one_shot: false,
+            guarded_goal: false,
         },
         "explicit-notification",
     )

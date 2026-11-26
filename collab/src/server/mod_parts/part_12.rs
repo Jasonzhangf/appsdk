@@ -51,19 +51,34 @@ async fn dispatch_wire(
                 timeout_ms,
                 receive_id: receive_id.clone(),
             };
-            let admission = tokio::task::spawn_blocking({
-                let server = server.clone();
-                let context = project_context.clone();
-                let worker_id = worker_id.clone();
-                let token = token.clone();
-                move || poll_admission(&server, context.as_ref(), &poll_req, &worker_id, &token)
-            }).await;
+            if let Err(error) =
+                validate_request_context(&server, &poll_req, project_context.as_ref())
+            {
+                return Resp::err(error);
+            }
+            let admission = {
+                let check = server.state.lock().unwrap();
+                if let Err(error) = verify(&check, &worker_id, &token) {
+                    Some(error)
+                } else if check.admission_frozen() {
+                    Some(Resp::err("PROJECT_RESET_PENDING: this scope is completing an already committed project reset"))
+                } else {
+                    None
+                }
+            };
             match admission {
-                Ok(Err(response)) => response,
-                Err(error) => Resp::err(format!("poll admission join error: {error}")),
-                Ok(Ok(())) => handle_poll_async_with_context(
-                    server, worker_id, Some(token), timeout_ms, project_context, receive_id,
-                ).await,
+                Some(response) => response,
+                None => {
+                    handle_poll_async_with_context(
+                        server,
+                        worker_id,
+                        Some(token),
+                        timeout_ms,
+                        project_context,
+                        receive_id,
+                    )
+                    .await
+                }
             }
         }
         req => tokio::task::spawn_blocking(move || {
@@ -186,33 +201,44 @@ async fn dispatch_wire_routed(
                 timeout_ms,
                 receive_id: receive_id.clone(),
             };
-            let admission = tokio::task::spawn_blocking({
-                let manager = manager.clone();
-                let context = context.clone();
-                let worker_id = worker_id.clone();
-                let token = token.clone();
-                move || {
-                    let server = manager.select_runtime(&context)
-                        .map_err(|error| (manager.host.clone(), Resp::err(error)))?;
-                    manager.recover_pending_effects_for_scope(&context)
-                        .map_err(|error| (server.clone(), Resp::err(error)))?;
-                    poll_admission(&server, Some(&context), &poll_req, &worker_id, &token)
-                        .map_err(|response| (server.clone(), response))?;
-                    Ok(server)
-                }
-            }).await;
-            let server = match admission {
-                Ok(Ok(server)) => server,
-                Ok(Err(failure)) => return failure,
-                Err(error) => return (manager.host.clone(), Resp::err(format!("poll admission join error: {error}"))),
+            let server = match manager.select_runtime(&context) {
+                Ok(server) => server,
+                Err(error) => return (manager.host.clone(), Resp::err(error)),
             };
-            let poll = handle_poll_async_with_manager_context(
-                manager.clone(), server.clone(), worker_id, Some(token), timeout_ms, Some(context), receive_id,
-            );
-            tokio::pin!(poll);
-            let response = tokio::select! {
-                response = poll.as_mut() => response,
-                _ = shutdown.changed() => Resp::err("DAEMON_SHUTTING_DOWN"),
+            if let Err(error) = manager.recover_pending_effects_for_scope(&context) {
+                return (server, Resp::err(error));
+            }
+            if let Err(error) = validate_request_context(&server, &poll_req, Some(&context)) {
+                return (server, Resp::err(error));
+            }
+            let admission = {
+                let check = server.state.lock().unwrap();
+                if let Err(error) = verify(&check, &worker_id, &token) {
+                    Some(error)
+                } else if check.admission_frozen() {
+                    Some(Resp::err("PROJECT_RESET_PENDING: this scope is completing an already committed project reset"))
+                } else {
+                    None
+                }
+            };
+            let response = match admission {
+                Some(response) => response,
+                None => {
+                    let poll = handle_poll_async_with_manager_context(
+                        manager.clone(),
+                        server.clone(),
+                        worker_id,
+                        Some(token),
+                        timeout_ms,
+                        Some(context),
+                        receive_id,
+                    );
+                    tokio::pin!(poll);
+                    tokio::select! {
+                        response = poll.as_mut() => response,
+                        _ = shutdown.changed() => Resp::err("DAEMON_SHUTTING_DOWN"),
+                    }
+                }
             };
             (server, response)
         }
@@ -263,20 +289,20 @@ async fn dispatch_wire_routed(
     (server, response)
 }
 
-fn poll_admission(
-    server: &Server,
-    context: Option<&ProjectContext>,
-    request: &Req,
-    worker_id: &str,
-    token: &str,
-) -> Result<(), Resp> {
-    validate_request_context(server, request, context).map_err(Resp::err)?;
-    let state = server.state.lock().unwrap();
-    verify(&state, worker_id, token)?;
-    if state.admission_frozen() {
-        return Err(Resp::err("PROJECT_RESET_PENDING: this scope is completing an already committed project reset"));
+#[cfg(test)]
+static ROUTED_POLL_CONTENTION: Mutex<Option<(PathBuf, std::sync::mpsc::Sender<()>)>> =
+    Mutex::new(None);
+
+#[cfg(test)]
+fn record_routed_poll_contention(server: &Server) {
+    let mut probe = ROUTED_POLL_CONTENTION.lock().unwrap();
+    if probe.as_ref().is_some_and(|(root, _)| root == &server.root)
+        && matches!(server.state.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    {
+        if let Some((_, observed)) = probe.take() {
+            let _ = observed.send(());
+        }
     }
-    Ok(())
 }
 
 async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {

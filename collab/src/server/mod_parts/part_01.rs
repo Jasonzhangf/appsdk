@@ -115,6 +115,8 @@ impl HostRouteRegistry {
         // v1 resident process.  A registered project without a resident
         // reducer remains visible as a route, but cannot be sent to this
         // project's State until a separate runtime owner is available.
+        #[cfg(test)]
+        record_routed_poll_contention(server);
         let st = server.state.lock().unwrap();
         let resident_app_scope = st
             .global

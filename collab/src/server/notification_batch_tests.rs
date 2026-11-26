@@ -3312,6 +3312,79 @@ fn rex_input_receipt_names_the_actual_transport_without_consuming_mail() {
 }
 
 #[test]
+fn guarded_rex_submission_and_routed_recv_finish_with_one_daemon_worker() {
+    let _environment = crate::scope::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1).enable_all().build().unwrap();
+    runtime.block_on(async {
+        let _rex = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
+        let (server, root) = test_server();
+        let fixture = RexCliFixture::new(&root, "normal").with_codex_foreground();
+        let barrier = fixture.dir.join("barrier");
+        std::fs::create_dir(&barrier).unwrap();
+        std::fs::write(barrier.join("pause-method"), "com.superlogical.terminal.write").unwrap();
+        let previous = std::env::var_os("REXPRIMITIVE_BARRIER_DIR");
+        std::env::set_var("REXPRIMITIVE_BARRIER_DIR", &barrier);
+
+        let peer = "guarded-recv-peer";
+        assert!(peer_tests::register_synthetic_peer(&server, peer, "guarded-recv-thread").ok);
+        let binding = server.state.lock().unwrap().global.current_thread_routes.values()
+            .find(|binding| binding.agent_id.as_str() == peer).unwrap().clone();
+        let identity = crate::identity::RuntimeIdentity {
+            agent_id: binding.agent_id, runtime_id: binding.runtime_id,
+            appserver_id: binding.app_scope_id, binding_id: binding.binding_id,
+            session_id: binding.session_id, native_thread_id: binding.native_thread_id,
+        };
+        let context = ProjectContext::for_registered_route(&root, &identity).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        manager.install_runtime(
+            &(context.app_scope_id.as_str().into(), context.project_scope.as_str().into()),
+            server.clone(), None,
+        );
+        let native = tokio::task::spawn_blocking(move || {
+            let _state = server.state.lock().unwrap();
+            let transport = rex_transport("agent-session", "unix:///tmp/rex-fixture.sock", "test", "block-a");
+            default_appserver_notification_sink()(
+                &transport, None, "body", "guarded-rex-input",
+                NotificationDispatchContext {
+                    explicit: false, guarded_one_shot: false, guarded_goal: true,
+                },
+                "immediate",
+            )
+        });
+        let entered = tokio::time::timeout(Duration::from_secs(10), async {
+            while !barrier.join("method-entered").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+        let (contended, waiting) = std::sync::mpsc::channel();
+        *ROUTED_POLL_CONTENTION.lock().unwrap() = Some((root.clone(), contended));
+        let receive = tokio::spawn(async move {
+            dispatch_wire_routed(manager, Some(context), Req::Poll {
+                worker_id: peer.into(), token: format!("token-{peer}"),
+                timeout_ms: 0, receive_id: None,
+            }, shutdown).await.1
+        });
+        let contended = waiting.recv_timeout(Duration::from_secs(5));
+        std::fs::write(barrier.join("method-release"), "").unwrap();
+        let receipt = native.await.unwrap();
+        let response = receive.await.unwrap();
+        ROUTED_POLL_CONTENTION.lock().unwrap().take();
+        match previous {
+            Some(value) => std::env::set_var("REXPRIMITIVE_BARRIER_DIR", value),
+            None => std::env::remove_var("REXPRIMITIVE_BARRIER_DIR"),
+        }
+        assert!(entered.is_ok() && contended.is_ok(), "{entered:?} {contended:?}");
+        assert_eq!(receipt.unwrap()["enter_accepted"], true);
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data["count"], 0);
+        drop(fixture);
+        std::fs::remove_dir_all(root).unwrap();
+    });
+}
+
+#[test]
 fn rex_sink_uses_only_the_selected_rex_arm() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

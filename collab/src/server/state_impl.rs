@@ -183,15 +183,8 @@ impl State {
                 .cleanup_receipts
                 .get(&task.id)
                 .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified);
-        let patrol_status = matches!(
-            task.status.as_str(),
-            "pending" | "invited" | "queued" | "waiting"
-        );
         if task_status_is_terminal(&task.status) {
             return cleanup && owner();
-        }
-        if !patrol_status {
-            return owner();
         }
         if let Some(wait) = task.wait.as_ref().filter(|wait| {
             !wait.responsible_actor.is_empty()
@@ -261,20 +254,17 @@ impl State {
                 ready && phase.slot_name.as_deref().map_or(actor.is_none(), matches)
             });
         }
-        if let Some(lifecycle) = state.task_lifecycle.get(&task.id) {
-            if lifecycle.delivered_ms.is_some() {
-                if !crate::server::work_review_valid(state, &task.id) {
-                    return lifecycle
-                        .required_reviewer_name
-                        .as_deref()
-                        .or(lifecycle.reviewer_name.as_deref())
-                        .or(lifecycle.reviewer.as_deref())
-                        .map_or(actor.is_none(), matches);
-                }
-                // After review the task/resource owner owns integration and close.
-                return owner();
+        if task.status == "delivered" {
+            if let Some(reviewer) = state
+                .task_lifecycle
+                .get(&task.id)
+                .and_then(|record| record.required_reviewer_name.as_deref())
+            {
+                return matches(reviewer);
             }
         }
+        // The current owner records review evidence when there is no typed
+        // reviewer assignment, and owns integration and cleanup by default.
         owner()
     }
 }

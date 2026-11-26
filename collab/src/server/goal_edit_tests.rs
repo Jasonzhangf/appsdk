@@ -252,7 +252,7 @@ fn timer_state_running_transition_arms_once_and_clears_execution_residue() {
         );
         if terminal == "revoke" {
             phase.batch += 1;
-            let restarted = server
+            let mut restarted = server
                 .checked_candidate_with_goal(
                     &ended,
                     &[Event::TicketPhaseRecorded {
@@ -261,6 +261,14 @@ fn timer_state_running_transition_arms_once_and_clears_execution_residue() {
                     Some(&control),
                 )
                 .unwrap();
+            // A typed restart can create the next batch within the same
+            // millisecond. The receipt must select the live batch on a tie.
+            let retired_created_ms = restarted.notification_subscriptions[id].created_ms;
+            for subscription in restarted.notification_subscriptions.values_mut().filter(|sub| {
+                sub.subject.as_deref() == Some("goal:task:timer-lifecycle") && sub.status == "armed"
+            }) {
+                subscription.created_ms = retired_created_ms;
+            }
             assert_eq!(task_goal_receipt(&restarted, &task.id)["armed"], true);
             assert_eq!(
                 restarted

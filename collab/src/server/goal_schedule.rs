@@ -854,7 +854,7 @@ fn task_goal_receipt(state: &State, task_id: &str) -> serde_json::Value {
         .notification_subscriptions
         .values()
         .filter(|subscription| subscription.subject.as_deref() == Some(subject.as_str()))
-        .max_by_key(|subscription| subscription.created_ms);
+        .max_by_key(|subscription| (subscription.created_ms, subscription.status == "armed"));
     json!({ "armed": subscription.is_some_and(|subscription| subscription.status == "armed"), "subscription": subscription })
 }
 

@@ -1694,6 +1694,8 @@ use super::*;
             server.state.lock().unwrap().notification_subscriptions[&subscription_id].created_ms;
         let mut record = server.state.lock().unwrap().keepalives["master"].clone();
         record.idle_since_ms = created_ms + 1;
+        register(&server, "peer");
+        working_task(&server, "peer");
         server.commit(&[Event::KeepaliveUpdated {
             worker_id: "master".into(),
             record,

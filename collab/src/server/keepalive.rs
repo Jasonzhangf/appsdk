@@ -3197,6 +3197,7 @@ mod tests {
             ready(&state, &work, "alice"),
             "prose and pending are not a dependency"
         );
+        work.status = "waiting".into();
         work.wait = Some(WaitSpec {
             waiter: "alice".into(),
             waiting_for: "holder".into(),
@@ -3220,6 +3221,7 @@ mod tests {
         );
         assert!(state.task_actionable_for(&work, None));
         work.wait = None;
+        work.status = "pending".into();
         state.ticket_phases.push(TicketPhaseRecord {
             task_id: "work".into(),
             phase: TicketPhaseKind::Execute,
@@ -3258,17 +3260,30 @@ mod tests {
             "ready unassigned work blocks master cancellation"
         );
         assert!(!ready(&state, &work, "alice"));
+        work.status = "delivered".into();
         state.ticket_phases.clear();
         state.task_lifecycle.insert(
             "work".into(),
             TaskLifecycleRecord {
                 delivered_ms: Some(1),
-                required_reviewer_name: Some("bob".into()),
                 ..Default::default()
             },
         );
+        assert!(
+            ready(&state, &work, "alice"),
+            "current owner records independent review evidence"
+        );
+        let lifecycle = state.task_lifecycle.get_mut("work").unwrap();
+        lifecycle.required_reviewer_name = Some("bob".into());
         assert!(!ready(&state, &work, "alice"));
         assert!(ready(&state, &work, "bob"));
+        work.status = "accepted".into();
+        let lifecycle = state.task_lifecycle.get_mut("work").unwrap();
+        lifecycle.required_reviewer_name = None;
+        lifecycle.review_recorded_by = Some("alice".into());
+        lifecycle.reviewed_ms = Some(2);
+        lifecycle.review_evidence = Some("independent review passed".into());
+        state.tasks.insert(work.id.clone(), work.clone());
         state.pending_merges.insert(
             "work".into(),
             PendingMerge {

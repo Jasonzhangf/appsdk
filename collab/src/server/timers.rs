@@ -378,10 +378,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                         .get(&subscription.worker_id)
                         .is_some_and(|record| record.observed == "idle" && record.idle_since_ms > 0)
                     && !state.tasks.values().any(|task| {
-                        state.task_actionable_for(
-                            task,
-                            Some((&subscription.worker_id, task.owner.as_str())),
-                        )
+                        state.task_actionable_for(task, Some((&subscription.worker_id, "Jenny")))
                     })
             } else {
                 true

@@ -1,5 +1,78 @@
 use super::*;
 
+#[test]
+fn timer_state_execution_schedule_requires_typed_running_phase() {
+    use ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+    let mut state = State::default();
+    let task: TaskRec = serde_json::from_value(json!({
+        "id":"timer-start", "owner":"owner", "created_by":"master",
+        "status":"invited", "created_ms":1, "updated_ms":1
+    }))
+    .unwrap();
+    let mut details = crate::board::BoardTaskDetails::legacy(&task.id, true);
+    details.invitation = Some(
+        serde_json::from_value(json!({
+            "peer_id":"invitee", "binding_id":"binding", "message_id":"invite",
+            "created_ms":1
+        }))
+        .unwrap(),
+    );
+    assert!(
+        task_schedule_selection(&state, &task, &details).is_none(),
+        "a pending invitation must not select an Execute timer owner"
+    );
+    let mut task = task;
+    task.status = "working".into();
+    details.invitation = None;
+    let mut phase = TicketPhaseRecord {
+        task_id: task.id.clone(),
+        phase: TicketPhaseKind::Execute,
+        batch: 1,
+        priority: "p2".into(),
+        status: TicketPhaseStatus::Claimed,
+        slot_name: Some("Alice".into()),
+        binding_generation: 1,
+        enqueue_seq: 1,
+        attempt_generation: 2,
+        depends_on: vec![],
+        route_group: None,
+        wait_reason: None,
+        result: None,
+    };
+    state.ticket_phases.push(phase.clone());
+    assert!(
+        task_schedule_selection(&state, &task, &details).is_none(),
+        "acceptance and claim are not typed start"
+    );
+    phase.status = TicketPhaseStatus::Running;
+    state.ticket_phases[0] = phase;
+    assert!(matches!(task_schedule_selection(&state, &task, &details),
+        Some(TaskScheduleSelection::Name(name)) if name == "Alice"));
+    for status in [
+        TicketPhaseStatus::WaitingAssignment,
+        TicketPhaseStatus::Queued,
+        TicketPhaseStatus::Completed,
+        TicketPhaseStatus::Rework,
+        TicketPhaseStatus::Revoked,
+    ] {
+        state.ticket_phases[0].status = status;
+        assert!(task_schedule_selection(&state, &task, &details).is_none());
+    }
+    let mut older = state.ticket_phases[0].clone();
+    older.batch = 0;
+    older.status = TicketPhaseStatus::Running;
+    state.ticket_phases.push(older);
+    assert!(
+        task_schedule_selection(&state, &task, &details).is_none(),
+        "a revoked latest batch must not expose an older Running phase"
+    );
+    state.ticket_phases.clear();
+    assert!(
+        task_schedule_selection(&state, &task, &details).is_none(),
+        "legacy working status alone must not start execution cadence"
+    );
+}
+
 fn edit_worker(state: &mut State, id: &str) {
     state.workers.insert(
         id.into(),
@@ -11,6 +84,198 @@ fn edit_worker(state: &mut State, id: &str) {
             transport: Some(peer_tests::test_appserver_transport(id)),
         },
     );
+}
+
+#[test]
+fn timer_state_running_transition_arms_once_and_clears_execution_residue() {
+    use ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+    let (server, root) = peer_tests::test_server();
+    let registered = peer_tests::register_synthetic_peer(&server, "timer-owner", "timer-owner");
+    assert!(registered.ok, "{registered:?}");
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let mut before = server.state.lock().unwrap().clone();
+    let route = server_route_scope(&server, &before).unwrap().unwrap();
+    let slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "timer-owner")
+        .unwrap()
+        .unwrap();
+    let task: TaskRec = serde_json::from_value(json!({
+        "id":"timer-lifecycle", "owner":"timer-owner", "created_by":"timer-owner",
+        "status":"working", "created_ms":1, "updated_ms":1
+    }))
+    .unwrap();
+    before
+        .apply_checked(&Event::TaskCreated { task: task.clone() })
+        .unwrap();
+    let mut details = before.board_details[&task.id].clone();
+    details.long_horizon = Some(crate::board::LongHorizonTaskSpec {
+        content: "Run the current attempt".into(),
+        interval_ms: 60_000,
+        repeat_count: 5,
+        ttl_seconds: 600,
+    });
+    before
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: task.id.clone(),
+            details: details.clone(),
+        })
+        .unwrap();
+    let mut phase = TicketPhaseRecord {
+        task_id: task.id.clone(),
+        phase: TicketPhaseKind::Execute,
+        batch: 1,
+        priority: "p2".into(),
+        status: TicketPhaseStatus::Claimed,
+        slot_name: Some(slot.identity_key.name.clone()),
+        binding_generation: slot.generation,
+        enqueue_seq: 1,
+        attempt_generation: 2,
+        depends_on: vec![],
+        route_group: None,
+        wait_reason: None,
+        result: None,
+    };
+    before
+        .apply_checked(&Event::TicketPhaseRecorded {
+            phase: phase.clone(),
+        })
+        .unwrap();
+    let true_schedule = edit_subscription("true-goal", "timer-owner", "armed", now_ms());
+    before
+        .notification_subscriptions
+        .insert(true_schedule.id.clone(), true_schedule.clone());
+    let unaffected = before.notification_subscriptions.clone();
+    let claimed = server
+        .checked_candidate_with_goal(
+            &before,
+            &[Event::TicketPhaseRecorded {
+                phase: phase.clone(),
+            }],
+            Some(&control),
+        )
+        .unwrap();
+    assert_eq!(claimed.notification_subscriptions, unaffected);
+    phase.status = TicketPhaseStatus::Running;
+    let running = server
+        .checked_candidate_with_goal(
+            &claimed,
+            &[Event::TicketPhaseRecorded {
+                phase: phase.clone(),
+            }],
+            Some(&control),
+        )
+        .unwrap();
+    let receipt = task_goal_receipt(&running, &task.id);
+    assert_eq!(receipt["armed"], true);
+    let id = receipt["subscription"]["id"].as_str().unwrap();
+    let repeated = server
+        .checked_candidate_with_goal(
+            &running,
+            &[Event::TicketPhaseRecorded {
+                phase: phase.clone(),
+            }],
+            Some(&control),
+        )
+        .unwrap();
+    assert_eq!(
+        repeated.notification_subscriptions,
+        running.notification_subscriptions
+    );
+    assert_eq!(repeated.ticket_phases, running.ticket_phases);
+
+    let mut with_residue = running.clone();
+    let message: Message = serde_json::from_value(json!({
+        "id":"execution-residue", "from":"daemon", "to":"timer-owner", "type":"notify",
+        "subject":"deadline:goal:task:timer-lifecycle", "body":"old execution notice",
+        "created_ms":1, "state":"pending"
+    }))
+    .unwrap();
+    with_residue
+        .apply_checked(&Event::Sent { msg: message })
+        .unwrap();
+    with_residue
+        .apply_checked(&Event::WakeBound {
+            message_id: "execution-residue".into(),
+            subscription_id: id.into(),
+        })
+        .unwrap();
+    for terminal in ["decline", "withdraw", "revoke", "closed", "cancelled"] {
+        let mut task = task.clone();
+        let mut changes = Vec::new();
+        match terminal {
+            "decline" | "withdraw" => {
+                task.status = "pending".into();
+                changes.push(Event::TaskUpdated { task: task.clone() });
+                changes.push(Event::BoardDetailsChanged {
+                    task_id: task.id.clone(),
+                    details: details.clone(),
+                });
+            }
+            "revoke" => {
+                let mut revoked = phase.clone();
+                revoked.status = TicketPhaseStatus::Revoked;
+                changes.push(Event::TicketPhaseRecorded { phase: revoked });
+            }
+            status => {
+                task.status = status.into();
+                changes.push(Event::TaskUpdated { task: task.clone() });
+            }
+        }
+        let ended = server
+            .checked_candidate_with_goal(&with_residue, &changes, Some(&control))
+            .unwrap();
+        assert_eq!(
+            ended.notification_subscriptions[id].status, "cancelled",
+            "{terminal}"
+        );
+        assert!(
+            ended
+                .msgs
+                .get("execution-residue")
+                .is_none_or(|msg| msg.state != "pending"),
+            "{terminal}"
+        );
+        for (id, original) in &unaffected {
+            assert_eq!(
+                &ended.notification_subscriptions[id], original,
+                "{terminal}: {id}"
+            );
+        }
+        let retry = server
+            .checked_candidate_with_goal(&ended, &changes, Some(&control))
+            .unwrap();
+        assert_eq!(
+            retry.notification_subscriptions, ended.notification_subscriptions,
+            "{terminal}"
+        );
+        if terminal == "revoke" {
+            phase.batch += 1;
+            let restarted = server
+                .checked_candidate_with_goal(
+                    &ended,
+                    &[Event::TicketPhaseRecorded {
+                        phase: phase.clone(),
+                    }],
+                    Some(&control),
+                )
+                .unwrap();
+            assert_eq!(task_goal_receipt(&restarted, &task.id)["armed"], true);
+            assert_eq!(
+                restarted
+                    .notification_subscriptions
+                    .values()
+                    .filter(
+                        |sub| sub.subject.as_deref() == Some("goal:task:timer-lifecycle")
+                            && sub.status == "armed"
+                    )
+                    .count(),
+                1
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn edit_subscription(
@@ -305,6 +570,29 @@ fn goal_edit_task_details_and_schedule_commit_together() {
         updated_ms: now_ms(),
     };
     state.apply_checked(&Event::TaskCreated { task }).unwrap();
+    let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .unwrap();
+    let route = server_route_scope(&server, &state).unwrap().unwrap();
+    let slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "task-edit")
+        .unwrap()
+        .unwrap();
+    state.ticket_phases.push(ticket_state::TicketPhaseRecord {
+        task_id: "task-edit".into(),
+        phase: ticket_state::TicketPhaseKind::Execute,
+        batch: 1,
+        priority: "p2".into(),
+        status: ticket_state::TicketPhaseStatus::Running,
+        slot_name: Some(slot.identity_key.name.clone()),
+        binding_generation: slot.generation,
+        enqueue_seq: 1,
+        attempt_generation: 1,
+        depends_on: vec![],
+        route_group: None,
+        wait_reason: None,
+        result: None,
+    });
     let mut details = state.board_details["task-edit"].clone();
     details.long_horizon = Some(LongHorizonTaskSpec {
         content: "original task goal".into(),

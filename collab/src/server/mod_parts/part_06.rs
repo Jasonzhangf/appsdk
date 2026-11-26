@@ -69,17 +69,27 @@ fn project_patrol_eligibility(
         .project_scope_id
         .as_str()
         .to_owned();
-    let task_ids = project_task_ids(state, &project);
+    let mut task_ids = project_task_ids(state, &project);
+    // Unassigned ready work still belongs to its publishing project.
+    let known_ids: std::collections::HashSet<_> = task_ids.iter().cloned().collect();
+    task_ids.extend(
+        state
+            .tasks
+            .values()
+            .filter(|task| {
+                !known_ids.contains(&task.id)
+                    && canonical_worker_project(state, &task.created_by).as_deref()
+                        == Some(&project)
+            })
+            .map(|task| task.id.clone()),
+    );
     let mut waiting = Vec::new();
     let mut blocked = Vec::new();
     for task_id in &task_ids {
         let Some(task) = state.tasks.get(task_id) else {
             continue;
         };
-        if matches!(task.status.as_str(), "closed" | "cancelled") {
-            continue;
-        }
-        if task.status == "waiting" && task.wait.is_some() {
+        if !state.task_actionable_for(task, None) {
             waiting.push(task.id.clone());
         } else {
             blocked.push(json!({
@@ -684,6 +694,18 @@ fn handle_notification_cancel(
         Ok(cancelled) => cancelled,
         Err(error) => return Resp::err(error),
     };
+    let actionable: Vec<_> = state
+        .tasks
+        .values()
+        .filter(|task| state.task_actionable_for(task, Some((&worker_id, &owner_key))))
+        .map(|task| task.id.clone())
+        .collect();
+    if !actionable.is_empty() {
+        return Resp::err_data(
+            "BOARD_PATROL_CANCEL_NOT_ELIGIBLE: actor has ready work",
+            json!({"actionable_task_ids": actionable}),
+        );
+    }
     let events: Vec<Event> = cancelled
         .iter()
         .filter_map(|task_id| {

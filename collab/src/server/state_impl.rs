@@ -150,12 +150,133 @@ pub(crate) fn board_patrol_eligible_task_ids(
     let Some(owner_key) = board_patrol_current_owner_key(state, control, route, worker_id)? else {
         return Ok(None);
     };
-    let owned = board_patrol_owned_unclosed_task_ids(state, worker_id, &owner_key);
+    let mut owned: Vec<_> = state
+        .tasks
+        .values()
+        .filter(|task| state.task_actionable_for(task, Some((worker_id, &owner_key))))
+        .map(|task| task.id.clone())
+        .collect();
+    owned.sort();
     Ok(Some(crate::board_patrol_policy::eligible_patrol_task_ids(
         &owned,
         &owner_key,
         &state.cancelled_board_patrol_tasks,
     )))
+}
+
+/// Project and peer patrol share the same typed next-action projection. None
+/// asks whether any local actor (including an unassigned slot) has ready work.
+/// Status/prose alone never establishes an external dependency.
+impl State {
+    pub(crate) fn task_actionable_for(&self, task: &TaskRec, actor: Option<(&str, &str)>) -> bool {
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+        let state = self;
+        let matches = |id: &str| actor.is_none_or(|(worker, name)| id == worker || id == name);
+        let owner = || {
+            state.task_assignments.get(&task.id).map_or_else(
+                || matches(&task.owner),
+                |assignment| matches(&assignment.name),
+            )
+        };
+        let cleanup = task.has_owned_resources()
+            && !state
+                .cleanup_receipts
+                .get(&task.id)
+                .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified);
+        let patrol_status = matches!(
+            task.status.as_str(),
+            "pending" | "invited" | "queued" | "waiting"
+        );
+        if task_status_is_terminal(&task.status) {
+            return cleanup && owner();
+        }
+        if !patrol_status {
+            return owner();
+        }
+        if let Some(wait) = task.wait.as_ref().filter(|wait| {
+            !wait.responsible_actor.is_empty()
+                && !wait.waiting_for.is_empty()
+                && !wait.resume_on.is_empty()
+        }) {
+            // A real holder can release its resource. An external signal with
+            // no local holder leaves the waiter quiet until the typed release.
+            return state.tasks.get(&wait.waiting_for).is_some_and(|holder| {
+                (task_resource_active(&holder.status)
+                    || (holder.has_owned_resources()
+                        && !state
+                            .cleanup_receipts
+                            .get(&holder.id)
+                            .is_some_and(|receipt| {
+                                receipt.verification == CleanupVerification::Verified
+                            })))
+                    && matches(&wait.responsible_actor)
+            });
+        }
+        if let Some(merge) = state.pending_merges.get(&task.id) {
+            return matches(&merge.owner);
+        }
+        let latest: Vec<_> = state
+            .ticket_phases
+            .iter()
+            .filter(|phase| {
+                phase.task_id == task.id
+                    && !state.ticket_phases.iter().any(|other| {
+                        other.task_id == task.id
+                            && other.phase == phase.phase
+                            && other.batch > phase.batch
+                    })
+            })
+            .collect();
+        let live: Vec<_> = latest
+            .iter()
+            .copied()
+            .filter(|phase| {
+                !matches!(
+                    phase.status,
+                    TicketPhaseStatus::Completed | TicketPhaseStatus::Revoked
+                )
+            })
+            .collect();
+        if !live.is_empty() {
+            return live.into_iter().any(|phase| {
+                let ready = phase.depends_on.iter().all(|dependency| {
+                    state.tasks.get(dependency).is_some_and(|task| {
+                        matches!(
+                            task.status.as_str(),
+                            "delivered" | "accepted" | "merged" | "closed"
+                        )
+                    }) || state.ticket_phases.iter().any(|candidate| {
+                        candidate.task_id == *dependency
+                            && candidate.phase == TicketPhaseKind::Execute
+                            && candidate.status == TicketPhaseStatus::Completed
+                            && !state.ticket_phases.iter().any(|newer| {
+                                newer.task_id == *dependency
+                                    && newer.phase == candidate.phase
+                                    && newer.batch > candidate.batch
+                            })
+                    })
+                }) && latest.iter().all(|prior| {
+                    prior.phase >= phase.phase || prior.status == TicketPhaseStatus::Completed
+                });
+                ready && phase.slot_name.as_deref().map_or(actor.is_none(), matches)
+            });
+        }
+        if let Some(lifecycle) = state.task_lifecycle.get(&task.id) {
+            if lifecycle.delivered_ms.is_some() {
+                if !crate::server::work_review_valid(state, &task.id) {
+                    return lifecycle
+                        .required_reviewer_name
+                        .as_deref()
+                        .or(lifecycle.reviewer_name.as_deref())
+                        .or(lifecycle.reviewer.as_deref())
+                        .map_or(actor.is_none(), matches);
+                }
+                // After review the task/resource owner owns integration and close.
+                return owner();
+            }
+        }
+        owner()
+    }
 }
 
 impl State {
@@ -318,7 +439,6 @@ impl State {
             subscription.updated_ms = consumed_ms;
         }
     }
-
 
     #[cfg(test)]
     pub fn apply(&mut self, ev: &Event) {
@@ -1563,7 +1683,8 @@ impl State {
     /// Task contract has already been materialized; read it without resolving
     /// broader defaults again.
     pub fn effective_work_policy(&self, task_id: &str) -> crate::board::WorkPolicy {
-        let mut policy = self.board_details
+        let mut policy = self
+            .board_details
             .get(task_id)
             .map(|details| details.work_policy.clone())
             .unwrap_or_default();

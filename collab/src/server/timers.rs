@@ -302,6 +302,25 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             if is_standing_project_patrol(subscription) {
                 continue;
             }
+            // Quiet only task-owned execution reminders while their actor is
+            // waiting. Keep the occurrence and schedule progress for release;
+            // independent explicit deadlines retain their declared delivery.
+            if let Some(super::state::GoalScheduleContent::BoardTask { task_id }) = subscription
+                .goal_content
+                .as_ref()
+                .and_then(|binding| binding.source.as_ref())
+            {
+                if let Some(task) = state.tasks.get(task_id) {
+                    let name = state
+                        .task_assignments
+                        .get(task_id)
+                        .map(|assignment| assignment.name.as_str())
+                        .unwrap_or(&subscription.worker_id);
+                    if !state.task_actionable_for(task, Some((&subscription.worker_id, name))) {
+                        continue;
+                    }
+                }
+            }
             let next_trigger = next_subscription_trigger(subscription);
             let master_idle_gate_open = if subscription.event == "master-idle" {
                 match state.keepalives.get(&subscription.worker_id) {
@@ -335,8 +354,10 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                         .get(&subscription.worker_id)
                         .is_some_and(|record| record.observed == "idle" && record.idle_since_ms > 0)
                     && !state.tasks.values().any(|task| {
-                        task.owner == subscription.worker_id
-                            && super::keepalive::actionable(&task.status)
+                        state.task_actionable_for(
+                            task,
+                            Some((&subscription.worker_id, task.owner.as_str())),
+                        )
                     })
             } else {
                 true

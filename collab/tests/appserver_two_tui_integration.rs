@@ -3571,18 +3571,33 @@ impl AppFixture {
 
     fn set_task_schedule_for_reassignment(&self, id: &str) -> String {
         let board = self.run_public(&["board", "show"], THREAD_A);
-        let task = board["tasks"].as_array().unwrap().iter()
+        let task = board["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|task| task["id"] == id)
             .expect("task to reassign");
         let revision = task["revision"].as_u64().unwrap().to_string();
         let result = self.run_public(
-            &["board", "describe", id, "--title", task["title"].as_str().unwrap(),
-                "--description", task["description"].as_str().unwrap(),
-                "--delivery-condition", task["delivery_condition"].as_str().unwrap(),
-                "--test-condition", task["test_condition"].as_str().unwrap(),
-                "--expected-revision", &revision,
-                "--long-horizon-content", "Continue the current task with its existing evidence",
-                "--long-horizon-every-ms", "3600000"],
+            &[
+                "board",
+                "describe",
+                id,
+                "--title",
+                task["title"].as_str().unwrap(),
+                "--description",
+                task["description"].as_str().unwrap(),
+                "--delivery-condition",
+                task["delivery_condition"].as_str().unwrap(),
+                "--test-condition",
+                task["test_condition"].as_str().unwrap(),
+                "--expected-revision",
+                &revision,
+                "--long-horizon-content",
+                "Continue the current task with its existing evidence",
+                "--long-horizon-every-ms",
+                "3600000",
+            ],
             THREAD_A,
         );
         result["task"]["revision"].as_u64().unwrap().to_string()
@@ -3634,6 +3649,11 @@ impl AppFixture {
 
     fn stop_daemon(&mut self) {
         if let Some(mut daemon) = self.daemon.take() {
+            eprintln!(
+                "OWNED_FIXTURE stop daemon_pid={} root={}",
+                daemon.id(),
+                self.root.display()
+            );
             let _ = daemon.kill();
             let _ = daemon.wait();
         }
@@ -3671,6 +3691,13 @@ impl AppFixture {
             .stdout(daemon_log.try_clone().expect("clone serve log"))
             .stderr(daemon_log);
         self.daemon = Some(command.spawn().expect("spawn owned serve child"));
+        eprintln!(
+            "OWNED_FIXTURE start test_pid={} daemon_pid={} root={} socket={}",
+            std::process::id(),
+            self.daemon.as_ref().unwrap().id(),
+            self.root.display(),
+            self.host_state.join("server.sock").display()
+        );
         daemon_readiness::wait_for_ping(
             self.daemon.as_mut().unwrap(),
             &self.host_state.join("server.sock"),

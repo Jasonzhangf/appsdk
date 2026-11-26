@@ -3148,6 +3148,151 @@ mod tests {
     }
 
     #[test]
+    fn timer_state_typed_external_wait_is_quiet_across_two_patrol_windows() {
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        add_board_patrol_task(&server, "waiting-task", "alice", "Alice", "thread-alice", 1);
+        let now = super::super::state::now_ms();
+        {
+            let mut state = server.state.lock().unwrap();
+            let task = state.tasks.get_mut("waiting-task").unwrap();
+            task.status = "waiting".into();
+            task.wait = Some(super::super::state::WaitSpec {
+                waiter: "alice".into(),
+                waiting_for: "resource-holder".into(),
+                responsible_actor: "bob".into(),
+                reason: "shared resource".into(),
+                deadline_ms: now + 86_400_000,
+                resume_on: vec!["RESOURCE_RELEASED".into()],
+                escalation: "master".into(),
+            });
+        }
+        install_appserver_statuses(&mut server, vec![("thread-alice".into(), "idle".into())]);
+        seed_board_patrol_trusted_gate(&server, "alice", "Alice", &["waiting-task"], now);
+        tick_at(&server, now);
+        tick_at(
+            &server,
+            now + 2 * crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS,
+        );
+        let notices = server.state.lock().unwrap().board_patrol_notice_ids.len();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            notices, 0,
+            "typed external wait must not wake the waiting actor"
+        );
+    }
+
+    #[test]
+    fn timer_state_actor_actionability_tracks_typed_next_owners() {
+        use crate::server::state::{PendingMerge, State, TaskLifecycleRecord, WaitSpec};
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+        let mut state = State::default();
+        let mut work = task("work", "alice", "pending", 1);
+        work.next_step = Some("waiting for external review".into());
+        let ready = |state: &State, work: &crate::server::state::TaskRec, id: &str| {
+            state.task_actionable_for(work, Some((id, id)))
+        };
+        assert!(
+            ready(&state, &work, "alice"),
+            "prose and pending are not a dependency"
+        );
+        work.wait = Some(WaitSpec {
+            waiter: "alice".into(),
+            waiting_for: "holder".into(),
+            responsible_actor: "bob".into(),
+            reason: "resource".into(),
+            deadline_ms: i64::MAX,
+            resume_on: vec!["resource_released".into()],
+            escalation: "master".into(),
+        });
+        assert!(!ready(&state, &work, "alice"));
+        assert!(
+            !state.task_actionable_for(&work, None),
+            "external resource has no local action"
+        );
+        state
+            .tasks
+            .insert("holder".into(), task("holder", "bob", "working", 1));
+        assert!(
+            ready(&state, &work, "bob"),
+            "typed resource owner remains actionable"
+        );
+        assert!(state.task_actionable_for(&work, None));
+        work.wait = None;
+        state.ticket_phases.push(TicketPhaseRecord {
+            task_id: "work".into(),
+            phase: TicketPhaseKind::Execute,
+            batch: 1,
+            priority: "p2".into(),
+            status: TicketPhaseStatus::Completed,
+            slot_name: Some("alice".into()),
+            binding_generation: 1,
+            enqueue_seq: 1,
+            attempt_generation: 2,
+            depends_on: vec![],
+            route_group: None,
+            wait_reason: None,
+            result: None,
+        });
+        let mut review = state.ticket_phases[0].clone();
+        review.phase = TicketPhaseKind::FinalReview;
+        review.status = TicketPhaseStatus::Queued;
+        review.slot_name = Some("bob".into());
+        state.ticket_phases.push(review);
+        assert!(!ready(&state, &work, "alice"));
+        assert!(
+            ready(&state, &work, "bob"),
+            "ready review is independent of author ownership"
+        );
+        state.ticket_phases[1].depends_on = vec!["dependency".into()];
+        assert!(!ready(&state, &work, "bob"));
+        state.tasks.insert(
+            "dependency".into(),
+            task("dependency", "carol", "closed", 1),
+        );
+        assert!(ready(&state, &work, "bob"));
+        state.ticket_phases[1].slot_name = None;
+        assert!(
+            state.task_actionable_for(&work, None),
+            "ready unassigned work blocks master cancellation"
+        );
+        assert!(!ready(&state, &work, "alice"));
+        state.ticket_phases.clear();
+        state.task_lifecycle.insert(
+            "work".into(),
+            TaskLifecycleRecord {
+                delivered_ms: Some(1),
+                required_reviewer_name: Some("bob".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!ready(&state, &work, "alice"));
+        assert!(ready(&state, &work, "bob"));
+        state.pending_merges.insert(
+            "work".into(),
+            PendingMerge {
+                task_id: "work".into(),
+                owner: "carol".into(),
+                requested_by: "alice".into(),
+                requested_ms: 1,
+                candidate_commit: None,
+            },
+        );
+        assert!(!ready(&state, &work, "alice"));
+        assert!(ready(&state, &work, "carol"));
+        state.pending_merges.clear();
+        work.status = "closed".into();
+        work.branch = Some("retained-cleanup".into());
+        assert!(
+            ready(&state, &work, "alice"),
+            "unreleased resource still needs cleanup"
+        );
+        work.branch = None;
+        assert!(!ready(&state, &work, "alice"));
+    }
+
+    #[test]
     fn board_idle_patrol_first_poll_after_restart_starts_a_fresh_episode() {
         let (mut server, root) = test_server();
         let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");

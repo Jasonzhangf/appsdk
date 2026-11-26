@@ -319,6 +319,50 @@ fn tmux_restart_preserves_suspended_execution_and_prefers_same_pane_new_executio
 }
 
 #[test]
+fn tmux_same_pane_replacement_refreshes_public_idle_start_without_restart() {
+    let _fixture_lock = fixture_lock();
+    let (fixture, caller) = Fixture::isolated("tmux-idle-replacement");
+    register_peer(&fixture, "idle-replacement-caller", &caller);
+    let peer = new_peer_pane(&fixture, &caller, "idle-replacement-peer", "sleep 600");
+    let (_, peer_id) = register_peer(&fixture, "idle-replacement-register", &peer);
+    let codex = native_codex_fixture(&fixture.root);
+    let command = format!(
+        "printf '%s\\n' '> fixture idle'; exec {} idle",
+        shell_quote(&codex.to_string_lossy())
+    );
+    let respawn = || {
+        let output = tmux(
+            &fixture.tmux_socket,
+            &["respawn-pane", "-k", "-t", &peer.pane_id, &command],
+        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    let idle_start = || {
+        peer_status(&fixture, &caller, &peer_id)["transport_view"]
+            ["activity_observation"]["idle_since_ms"]
+            .as_i64()
+    };
+    respawn();
+    assert!(wait_until(Duration::from_secs(20), || idle_start().is_some()));
+    let first = idle_start().unwrap();
+    let first_pid = fixture.current_state()["tmux_executions"][&peer_id]["execution"]["pid"]
+        .as_u64()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(idle_start(), Some(first));
+
+    respawn();
+    assert!(wait_until(Duration::from_secs(20), || {
+        fixture.current_state()["tmux_executions"][&peer_id]["execution"]["pid"]
+            .as_u64()
+            .is_some_and(|pid| pid != first_pid)
+            && idle_start().is_some()
+    }));
+    let replacement = idle_start().unwrap();
+    assert!(replacement > first, "first={first}, replacement={replacement}");
+}
+
+#[test]
 fn master_can_classify_unknown_presence_offline_and_finish_status_judgment() {
     let _fixture_lock = fixture_lock();
     let (fixture, master) = quiet_judgment_fixture("worker-judgment-offline");

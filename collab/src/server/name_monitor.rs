@@ -253,6 +253,10 @@ fn tick_internal(
         };
         let positive_online_idle =
             presence.presence == AgentPresence::Online && activity_kind == AgentActivity::Idle;
+        let same_execution = previous == execution.as_ref()
+            && baseline
+                .as_ref()
+                .is_none_or(|record| Some(&record.target) == target.as_ref());
         let idle_since_ms = if positive_online_idle {
             // A trusted interval must not survive the observation boundary
             // after a daemon restart: the first live sample starts a fresh one.
@@ -261,6 +265,7 @@ fn tick_internal(
             match old_activity.as_ref() {
                 Some(old)
                     if !is_first
+                        && same_execution
                         && old.session_id == presence.session_id
                         && old.activity == AgentActivity::Idle
                         && old.observed_ms <= now

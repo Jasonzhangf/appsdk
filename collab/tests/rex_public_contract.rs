@@ -537,6 +537,65 @@ fn rex_public_block_binding_directs_delivery_to_the_current_owner_only() {
 
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
+fn rex_public_activity_preserves_error_and_unknown() {
+    let mut fixture = RexLiveFixture::new("activity");
+    let receiver = fixture.create_receiver_session("receiver");
+    fixture.wait_receiver_ready(&receiver, Duration::from_secs(20));
+    fixture.start_daemon();
+    fixture.context_provide(&receiver);
+
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=working:id=collab-live:app=codex",
+    );
+    let busy = fixture.wait_agent_state(&receiver, "working");
+    assert_eq!(busy["activity"], "busy");
+    assert_eq!(busy["agent_presence"], "online");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=blocked:kind=question:id=collab-live:app=codex",
+    );
+    let question = fixture.wait_agent_state(&receiver, "waiting_user");
+    assert_eq!(question["activity"], "waiting_user");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=done:id=collab-live:app=codex",
+    );
+    // A valid done record for the current foreground owner is not working.
+    // Under the fixed projection it reports idle instead of the old unknown.
+    let done = fixture.wait_agent_state(&receiver, "idle");
+    assert_eq!(done["activity"], "idle");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=error:id=collab-live:app=codex",
+    );
+    let error_state = fixture.wait_agent_state(&receiver, "error");
+    assert_eq!(error_state["activity"], "error");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=clear:id=collab-live:app=codex",
+    );
+    let cleared_state = fixture.wait_agent_state(&receiver, "unknown");
+    assert_eq!(cleared_state["activity"], "unknown");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=idle:id=collab-live:app=codex",
+    );
+    let ready_again = fixture.wait_agent_state(&receiver, "idle");
+    assert_eq!(ready_again["activity"], "idle");
+
+    let errors = fixture.finish();
+    assert!(errors.is_empty(), "owned Rex session cleanup failed: {errors:?}");
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
     let mut fixture = RexLiveFixture::new("contract");
     let receiver = fixture.create_receiver_session("receiver");
@@ -625,41 +684,9 @@ fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
     fixture.write_frame_and_enter(
         &receiver,
         "osc-status",
-        "state=working:id=collab-live:app=codex",
+        "state=idle:id=collab-live:app=codex",
     );
-    let busy = fixture.wait_agent_state(&receiver, "working");
-    assert_eq!(busy["activity"], "busy");
-    assert_eq!(busy["agent_presence"], "online");
-    fixture.write_frame_and_enter(
-        &receiver,
-        "osc-status",
-        "state=blocked:kind=question:id=collab-live:app=codex",
-    );
-    let question = fixture.wait_agent_state(&receiver, "waiting_user");
-    assert_eq!(question["activity"], "waiting_user");
-    fixture.write_frame_and_enter(
-        &receiver,
-        "osc-status",
-        "state=done:id=collab-live:app=codex",
-    );
-    // A valid done record for the current foreground owner is not working.
-    // Under the fixed projection it reports idle instead of the old unknown.
-    let done = fixture.wait_agent_state(&receiver, "idle");
-    assert_eq!(done["activity"], "idle");
-    fixture.write_frame_and_enter(
-        &receiver,
-        "osc-status",
-        "state=error:id=collab-live:app=codex",
-    );
-    let error_state = fixture.wait_agent_state(&receiver, "idle");
-    assert_eq!(error_state["activity"], "idle");
-    fixture.write_frame_and_enter(
-        &receiver,
-        "osc-status",
-        "state=future_state:id=collab-live:app=codex",
-    );
-    let future_state = fixture.wait_agent_state(&receiver, "idle");
-    assert_eq!(future_state["activity"], "idle");
+    fixture.wait_agent_state(&receiver, "idle");
 
     let notify_status = fixture.run_ok(&["notify", "status"], Some(&receiver.agent_session_id));
     let lease = direct_subscription(&notify_status, &receiver_id);

@@ -147,6 +147,26 @@ fn exact_execution_and_presence_share_durable_candidate_and_activation_preserves
 }
 
 #[test]
+fn replacement_execution_starts_a_new_idle_interval_in_the_same_pane() {
+    let server = execution_server();
+    tick_internal(None, &server, 100, &|_, _| Ok(execution_result(700)));
+    tick_internal(None, &server, 150, &|_, _| Ok(execution_result(700)));
+    assert_eq!(
+        server.state.lock().unwrap().agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(100)
+    );
+    tick_internal(None, &server, 200, &|_, _| Ok(execution_result(701)));
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tmux_executions["worker"].execution.pid, 701);
+    assert_eq!(
+        state.agent_activity[&scope(&server)]["worker"].idle_since_ms,
+        Some(200)
+    );
+    drop(state);
+    std::fs::remove_dir_all(&server.root).unwrap();
+}
+
+#[test]
 fn late_exit_cannot_overwrite_new_execution_in_same_pane() {
     let server = execution_server();
     tick_internal(None, &server, 100, &|_, _| Ok(execution_result(700)));

@@ -687,6 +687,15 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let reminder = reminder.unwrap();
     let message_id = reminder["id"].as_str().unwrap();
     assert!(
+        !pane_contains_message_id(&fixture, &peer_pane, message_id),
+        "an online target without confirmed idle keeps its goal in the mailbox"
+    );
+    let idle_prompt = tmux(
+        &fixture.tmux_socket,
+        &["send-keys", "-t", &peer_pane.pane_id, "-l", "> fixture idle\n"],
+    );
+    assert!(idle_prompt.status.success(), "{}", String::from_utf8_lossy(&idle_prompt.stderr));
+    assert!(
         wait_until(Duration::from_secs(10), || pane_contains_message_id(
             &fixture, &peer_pane, message_id
         )),

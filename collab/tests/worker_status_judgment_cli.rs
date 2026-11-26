@@ -319,6 +319,86 @@ fn tmux_restart_preserves_suspended_execution_and_prefers_same_pane_new_executio
 }
 
 #[test]
+fn periodic_goal_delivers_once_to_live_tmux_idle_before_deadline() {
+    let _fixture_lock = fixture_lock();
+    let (mut fixture, caller) = Fixture::isolated("goal-live-idle");
+    register_peer(&fixture, "goal-live-caller", &caller);
+    promote_master(&fixture, &caller, "isolated periodic goal observation");
+    let pane = new_peer_pane(&fixture, &caller, "goal-live-peer", "sleep 600");
+    let (registered, worker_id) = register_peer(&fixture, "goal-live-register", &pane);
+    let name = registered["result"]["snapshot"]["name"]
+        .as_str()
+        .expect("registered stable name");
+    let goal = "goal-live-idle";
+    let trigger = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() + 90_000).to_string();
+    let armed = fixture.run_ok(
+        &[
+            "goal", "reconcile", "--goal-id", goal, "--owner", name, "--desired", "active",
+            "--content", "Validate the current goal at wake\n\nAction Items\n- Recheck the current goal.",
+            "--at-ms", &trigger,
+            "--every-ms", "90000", "--repeat", "3", "--ttl-seconds", "300",
+        ],
+        Some(&pane),
+    );
+    let subscription_id = armed["subscription"]["id"].as_str().unwrap();
+    let unknown_notice = format!("goal-status-unknown:{worker_id}");
+    assert!(wait_until(Duration::from_secs(20), || {
+        fixture.run_ok(&["recv", "--timeout", "0"], Some(&caller))
+            .to_string().contains(&unknown_notice)
+    }), "only Jenny should receive the unresolved owner status");
+    let not_woken = fixture.run_ok(&["recv", "--timeout", "0"], Some(&pane));
+    assert!(!not_woken.to_string().contains("deadline:goal:goal-live-idle"), "{not_woken}");
+    std::thread::sleep(Duration::from_secs(2));
+    let notice_again = fixture.run_ok(&["recv", "--timeout", "0"], Some(&caller));
+    assert!(!notice_again.to_string().contains(&unknown_notice), "{notice_again}");
+    fixture.start_codex_pane_runner(&pane);
+    let show_idle = || {
+        let output = tmux(
+            &fixture.tmux_socket,
+            &["send-keys", "-t", &pane.pane_id, "-l", "> fixture idle\n"],
+        );
+        assert!(output.status.success());
+    };
+    show_idle();
+    assert!(wait_until(Duration::from_secs(20), || {
+        let status = peer_status(&fixture, &caller, &worker_id);
+        status["transport_view"]["agent_presence"] == "online"
+            && status["transport_view"]["activity"] == "idle"
+    }));
+    assert!(wait_until(Duration::from_secs(20), || {
+        let capture = tmux(&fixture.tmux_socket, &["capture-pane", "-p", "-t", &pane.pane_id]);
+        String::from_utf8_lossy(&capture.stdout)
+            .split_whitespace().collect::<String>().contains("deadline:goal:goal-live-idle")
+    }), "the actual tmux pane should receive the early wake");
+    let fired_count = |fixture: &Fixture| {
+        let status = fixture.run_ok(&["notify", "status"], Some(&pane));
+        status["subscriptions"].as_array().unwrap().iter()
+            .find(|subscription| subscription["id"] == subscription_id)
+            .unwrap()["fired_count"].as_u64().unwrap()
+    };
+    assert_eq!(fired_count(&fixture), 0);
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&pane)).to_string();
+    assert!(received.contains("GOAL_READY_ON_IDLE"), "{received}");
+    assert!(received.contains("Validate the current goal at wake"), "{received}");
+    assert!(received.contains("appsdk goal update"), "{received}");
+    assert!(received.contains("Update Action Items in the same revision"), "{received}");
+    assert_eq!(fired_count(&fixture), 1);
+    fixture.restart_daemon();
+    let output = tmux(
+        &fixture.tmux_socket,
+        &["send-keys", "-t", &pane.pane_id, "-l", "> fixture idle\n"],
+    );
+    assert!(output.status.success());
+    std::thread::sleep(Duration::from_secs(4));
+    let repeated = fixture.run_ok(&["recv", "--timeout", "0"], Some(&pane)).to_string();
+    assert!(!repeated.contains("GOAL_READY_ON_IDLE"), "{repeated}");
+    assert_eq!(fired_count(&fixture), 1);
+}
+
+#[test]
 fn tmux_same_pane_replacement_refreshes_public_idle_start_without_restart() {
     let _fixture_lock = fixture_lock();
     let (fixture, caller) = Fixture::isolated("tmux-idle-replacement");
@@ -413,6 +493,75 @@ fn master_can_classify_unknown_presence_offline_and_finish_status_judgment() {
         status["transport_view"]["agent_presence"], "offline",
         "{status}"
     );
+}
+
+#[test]
+fn partial_judgment_replaces_unread_goal_verification_in_public_receive() {
+    verify_partial_goal_judgment(false);
+}
+
+#[test]
+fn ending_goal_prevents_replacing_unread_verification_after_a_judgment() {
+    verify_partial_goal_judgment(true);
+}
+
+fn verify_partial_goal_judgment(end_goal: bool) {
+    let _fixture_lock = fixture_lock();
+    let (mut fixture, master) = quiet_judgment_fixture("goal-verification-replacement");
+    register_peer(&fixture, "goal-verification-master", &master);
+    promote_master(&fixture, &master, "isolated goal verification");
+    let peer = new_peer_pane(&fixture, &master, "goal-verification-peer", "sleep 600");
+    let (registered, peer_id) = register_peer(&fixture, "goal-verification-peer", &peer);
+    let name = registered["result"]["snapshot"]["name"].as_str().unwrap();
+    let trigger = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 120_000).to_string();
+    fixture.run_ok(&[
+        "goal", "reconcile", "--goal-id", "verify-pending-goal", "--owner", name,
+        "--desired", "active", "--content", "Verify the pending goal",
+        "--at-ms", &trigger, "--every-ms", "120000", "--repeat", "2", "--ttl-seconds", "300",
+    ], Some(&peer));
+    // The startup tick emits the first request. The configured next tick is far
+    // enough away for judgment and recv to prove their own ordering.
+    fixture.restart_daemon();
+    let subject = format!("goal-status-unknown:{peer_id}:");
+    let notices = || -> Vec<Value> {
+        fixture.current_state()["msgs"].as_object().unwrap().values()
+            .filter(|message| message["subject"].as_str().is_some_and(|value| value.starts_with(&subject)))
+            .cloned().collect()
+    };
+    assert!(wait_until(Duration::from_secs(20), || !notices().is_empty()));
+    let first = &notices()[0];
+    let first_id = first["id"].as_str().unwrap();
+    assert_eq!(first["state"], "pending");
+    assert_eq!(first["wake_attempt_count"], 0);
+    assert!(first["body"].as_str().unwrap().contains("Missing status fields: [Presence, Activity]"));
+    let snapshot = snapshot_capture(&fixture, &master, &peer_id);
+    if end_goal {
+        fixture.run_ok(&[
+            "goal", "reconcile", "--goal-id", "verify-pending-goal", "--owner", name,
+            "--desired", "ended",
+        ], Some(&peer));
+    }
+    let partial = judge(
+        &fixture, &master, &snapshot["judgment_capture"], Some("online"), None,
+        "verified the foreground carrier without determining activity",
+    );
+    assert_eq!(partial["applied_fields"], json!(["presence"]), "{partial}");
+    let received = fixture.run_ok(&["recv", "--timeout", "0"], Some(&master));
+    let messages = received["messages"].as_array().unwrap();
+    assert!(!messages.iter().any(|message| message["id"] == first_id), "{received}");
+    let current = messages.iter().filter(|message| {
+        message["subject"].as_str().is_some_and(|value| value.starts_with(&subject))
+    }).collect::<Vec<_>>();
+    if end_goal {
+        assert!(current.is_empty(), "{received}");
+        assert_eq!(notices().len(), 1, "ending the goal must prevent a new notice");
+    } else {
+        assert_eq!(current.len(), 1, "{received}");
+        assert_ne!(current[0]["id"], first_id);
+        assert!(current[0]["body"].as_str().unwrap().contains("Missing status fields: [Activity]"));
+    }
+    assert_eq!(fixture.current_state()["msgs"][first_id]["state"], "superseded");
 }
 
 #[test]

@@ -7,6 +7,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[path = "codex_pane_interpreter.rs"]
+mod codex_pane_interpreter;
+
 const REX_PARENT_TIMEOUT: Duration = Duration::from_secs(30);
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -402,20 +405,31 @@ impl RexLiveFixture {
     }
 
     pub fn create_receiver_session(&mut self, role: &str) -> OwnedRexSession {
+        self.create_receiver_with_command(role, vec![self.python.to_string_lossy().into_owned()])
+    }
+
+    pub fn create_codex_receiver_session(&mut self, role: &str) -> OwnedRexSession {
+        let command = codex_pane_interpreter::command(&self.root);
+        self.create_receiver_with_command(
+            role,
+            vec!["/bin/sh".into(), "-c".into(), format!("exec {command} \"$@\""), "codex".into()],
+        )
+    }
+
+    fn create_receiver_with_command(&mut self, role: &str, mut command: Vec<String>) -> OwnedRexSession {
         let token = self.unique_token();
         let run_id = format!("rex-live-{role}-{token}");
         let label = format!("rex-api-foundations-20261108-live-{role}-{token}");
         let agent_session_id = format!("rex-live-agent-{role}-{token}");
         let ack_file = self.root.join(format!("receiver-{role}-{token}.jsonl"));
-        let command = vec![
-            self.python.to_string_lossy().into_owned(),
+        command.extend([
             "-u".to_owned(),
             self.receiver_script.to_string_lossy().into_owned(),
             "--run-id".to_owned(),
             run_id.clone(),
             "--ack-file".to_owned(),
             ack_file.to_string_lossy().into_owned(),
-        ];
+        ]);
         let request = json!({
             "label": label,
             "initial_windows": [{

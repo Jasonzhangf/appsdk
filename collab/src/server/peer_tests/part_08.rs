@@ -59,6 +59,52 @@ fn long_polls_do_not_starve_ping_on_the_blocking_pool() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn routed_receive_can_wait_for_goal_submission_without_blocking_native_io() {
+    let (server, root) = test_server();
+    let server = Arc::new(server);
+    assert!(register_synthetic_peer(&server, "receive-peer", "thread-receive-peer").ok);
+    let binding = registered_binding(&server, "receive-peer");
+    let identity = crate::identity::RuntimeIdentity {
+        agent_id: binding.agent_id, runtime_id: binding.runtime_id,
+        appserver_id: binding.app_scope_id, binding_id: binding.binding_id,
+        session_id: binding.session_id, native_thread_id: binding.native_thread_id,
+    };
+    let context = ProjectContext::for_registered_route(&root, &identity).unwrap();
+    let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+    manager.install_runtime(
+        &(context.app_scope_id.as_str().into(), context.project_scope.as_str().into()),
+        server.clone(), None,
+    );
+    let (locked, lock_ready) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let submission = std::thread::spawn(move || {
+        let _guard = server.state.lock().unwrap();
+        locked.send(()).unwrap();
+        released.recv_timeout(std::time::Duration::from_secs(10))
+    });
+    lock_ready.await.unwrap();
+    let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let receive = tokio::spawn(async move {
+        started.send(()).unwrap();
+        dispatch_wire_routed(manager, Some(context), Req::Poll {
+            worker_id: "receive-peer".into(), token: "token-receive-peer".into(),
+            timeout_ms: 0, receive_id: None,
+        }, shutdown).await.1
+    });
+    waiting.await.unwrap();
+    let io = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::spawn(async {
+        tokio::process::Command::new("printf").arg("native").output().await
+    })).await;
+    let released_while_locked = release.send(()).is_ok();
+    assert!(submission.join().unwrap().is_ok() && released_while_locked);
+    assert_eq!(io.unwrap().unwrap().unwrap().stdout, b"native");
+    let response = receive.await.unwrap();
+    assert!(response.ok, "{response:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn poll_wakes_when_a_message_is_committed() {
     let (server, root) = test_server();

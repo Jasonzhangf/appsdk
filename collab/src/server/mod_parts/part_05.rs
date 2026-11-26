@@ -1190,6 +1190,8 @@ fn attempt_tmux_notification_with_retry(
             };
             (state.message_receivable_by(recipient, message)
                 && map_allows
+                && timers::goal_status_notice_current(server, &state, message)
+                && timers::goal_wake_delivery_allowed(server, &state, message, sub, transport, now)
                 && state.scheduler_message_deliverable(&message.id)
                 && (!state.board_patrol_notice_ids.contains(&message.id) || patrol_current)
                 && message_explicit == explicit
@@ -1309,7 +1311,19 @@ fn attempt_tmux_notification_with_retry(
         .iter()
         .map(|entry| (entry, state.msgs[&entry.1].wake_attempt_count))
         .collect::<Vec<_>>();
-    drop(state);
+    // For native goal wakes, the final eligibility check, durable reservation
+    // and submission share the state lock with goal edits and status writes.
+    // The native sinks do not access project state. Other mail keeps the
+    // existing unlocked submission path.
+    let goal_submission_guard = if batch.iter().any(|entry| {
+        timers::requires_goal_idle(&state, &state.msgs[&entry.1],
+            &state.notification_subscriptions[&entry.2], transport)
+    }) {
+        Some(state)
+    } else {
+        drop(state);
+        None
+    };
     // These adapters submit to the terminal directly. Keep the current
     // publication stable until the input result is committed. In tmux, even
     // finishing the same holder's physical rename can advance its slot.
@@ -1362,6 +1376,7 @@ fn attempt_tmux_notification_with_retry(
         NotificationDispatchContext {
             explicit,
             guarded_one_shot: batch_has_one_shot_invitation,
+            guarded_goal: goal_submission_guard.is_some(),
         },
         if queued_tmux {
             DAEMON_LIVE_CLOSURE_MODE
@@ -1371,6 +1386,7 @@ fn attempt_tmux_notification_with_retry(
             &delivery_mode
         },
     );
+    drop(goal_submission_guard);
     if register_guard.is_none() {
         register_guard = match server.register_gate.lock() {
             Ok(guard) => Some(guard),

@@ -596,6 +596,42 @@ fn rex_public_activity_preserves_error_and_unknown() {
 
 #[test]
 #[ignore = "requires an explicitly selected Rex server"]
+fn rex_periodic_goal_wakes_only_after_current_idle() {
+    let mut fixture = RexLiveFixture::new("goal-idle");
+    let receiver = fixture.create_codex_receiver_session("goal-owner");
+    fixture.wait_receiver_ready(&receiver, Duration::from_secs(20));
+    fixture.start_daemon();
+    let registered = fixture.context_provide(&receiver);
+    let name = snapshot(&registered)["name"].as_str().unwrap();
+    let actor = Some(receiver.agent_session_id.as_str());
+    fixture.write_frame_and_enter(&receiver, "osc-status", "state=working:id=collab-live:app=codex");
+    fixture.wait_agent_state(&receiver, "working");
+    let trigger = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 90_000).to_string();
+    let goal = "rex-positive-idle";
+    fixture.run_ok(&[
+        "goal", "reconcile", "--goal-id", goal, "--owner", name, "--desired", "active",
+        "--content", "Resume the Rex goal", "--at-ms", &trigger, "--every-ms", "90000",
+        "--repeat", "2", "--ttl-seconds", "300",
+    ], actor);
+    let subject = format!("deadline:goal:{goal}");
+    let before = fixture.run_ok(&["recv", "--timeout", "0"], actor);
+    assert!(!before.to_string().contains(&subject), "{before}");
+    fixture.write_frame_and_enter(&receiver, "osc-status", "state=idle:id=collab-live:app=codex");
+    fixture.wait_agent_state(&receiver, "idle");
+    let input = fixture.wait_receiver_document(&receiver, Duration::from_secs(20), |value| {
+        value["kind"] == "test_receiver_raw_input"
+            && value["received"].as_str().is_some_and(|received| received.contains(&subject))
+    });
+    let receipt = fixture.run_ok(&["recv", "--timeout", "0"], actor);
+    assert!(receipt.to_string().contains("GOAL_READY_ON_IDLE"), "{receipt}");
+    fixture.evidence("rex_goal_idle_input_and_consume", json!({"input": input, "receipt": receipt}));
+    let errors = fixture.finish();
+    assert!(errors.is_empty(), "owned Rex session cleanup failed: {errors:?}");
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
 fn rex_public_context_send_recv_reply_restart_and_body_fidelity() {
     let mut fixture = RexLiveFixture::new("contract");
     let receiver = fixture.create_receiver_session("receiver");

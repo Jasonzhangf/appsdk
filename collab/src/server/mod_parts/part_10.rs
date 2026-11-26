@@ -83,6 +83,11 @@ fn poll_messages_with_state(
     }
     let mut ids = Vec::new();
     for message in st.inbox_of(worker_id) {
+        if !timers::goal_status_notice_current(server, st, message)
+            && notification_provably_unsubmitted(st, &message.id)
+        {
+            continue;
+        }
         if let (Some(control), Some(authorized_binding), Some(route_scope)) = (
             current_control,
             authorized_binding.as_ref(),

@@ -468,6 +468,13 @@ Other peers retain self-management. `--every-ms` without `--repeat` uses 100 tot
 cycles. `--content` supplies an independent goal's full instructions. Task-linked
 content remains on the authoritative task form. SessionID is the execution
 carrier. A worktree or transport change retains the target's ownership and progress.
+Each goal must have a nonempty `Action Items` field. Use the Markdown heading
+`## Action Items` in the goal document or Board long-horizon content.
+Every item names its owner, concrete action,
+expected output, pass condition, and completion evidence. Update this field in
+the same document or Board revision as any goal change. On wake, compare every
+goal and its items against the current acceptance criteria and record missing,
+empty, or stale items as gaps for the goal owner to correct.
 Read-only status does not modify another owner's records.
 A runtime that refuses an ordinary peer's own goal has an implementation defect;
 report its exact error, do not promote the peer or route registration through master.

@@ -3337,6 +3337,7 @@ fn rex_sink_uses_only_the_selected_rex_arm() {
         NotificationDispatchContext {
             explicit: false,
             guarded_one_shot: false,
+            guarded_goal: false,
         },
         "immediate",
     )
@@ -3913,6 +3914,7 @@ fn default_appserver_sink_does_not_fallback_to_tmux() {
         NotificationDispatchContext {
             explicit: true,
             guarded_one_shot: false,
+            guarded_goal: false,
         },
         "immediate",
     )
